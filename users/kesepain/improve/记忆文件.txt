@@ -1,0 +1,5 @@
+存放记忆的地方
+临时重要记忆文件存放在users\kesepain\memory_temporary_important.md
+内部由文件夹进行划分：seven_days、one_month、half_year、permanent(七天、单月、永久)
+一份合格记忆进化成永久记忆语言217天，进化成临时重要记忆最长需要n6小时
+除了永久记忆外，没分临时记忆文件夹内都有一份data.json用于记录权重和升级截止日期

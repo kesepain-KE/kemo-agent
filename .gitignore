@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Node (web)
+node_modules/
+web/node_modules/
+
+# User data (if needed to exclude later)
+# users/*/avatar/*
+# users/*/download/*
+# users/*/history/*
+# users/*/file_upload/*

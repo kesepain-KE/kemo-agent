@@ -1,0 +1,12 @@
+{临时重要记忆处理}
+每隔n6小时，读取数据(临时记忆、临时重要记忆、永久记忆)
+读取临时记忆，发现重要记忆碎片(例如：伴侣|学校|亲人|性格|情感)
+根据记忆碎片更新users\kesepain\memory_temporary_important.md，读取永久记忆
+检查是否有与永久记忆相关的记忆碎片
+|-有相关的记忆碎片，删除users\kesepain\memory_temporary_important.md内相关记忆碎片
+
+{临时重要记忆整理}
+每天的n7时间点
+读取users\kesepain\memory_temporary_important.md记忆数据(字符数量、记忆碎片)
+检查字数数量，超出字符数量，进行记忆压缩
+检查记忆碎片，试图进行压缩
