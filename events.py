@@ -1,4 +1,4 @@
-"""Unified runtime event protocol shared by Provider, Run and transports."""
+"""提供者、运行和传输共享的统一运行时事件协议。"""
 
 from __future__ import annotations
 

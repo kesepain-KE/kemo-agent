@@ -1,4 +1,4 @@
-"""Long-running host for CronScheduler and external message transports."""
+"""用于 CronScheduler 和外部消息传输的长时间运行主机。"""
 
 from __future__ import annotations
 
@@ -272,9 +272,9 @@ class RuntimeHost:
                 self._handle_error("result_callback", exc)
 
     def _handle_error(self, component: str, exc: BaseException) -> None:
-        # Only explicit lifecycle failures update component health.  A single
-        # routed message or Cron task may fail without meaning the transport or
-        # scheduler process itself has stopped.
+                # 只有显式的生命周期故障才会更新组件的运行状况。  单个
+                # 路由消息或 Cron 任务可能会失败，而不意味着传输或
+                # 调度程序进程本身已停止。
         if component in self._components:
             self._set_component(component, "failed", exc)
         if self.on_error is not None:

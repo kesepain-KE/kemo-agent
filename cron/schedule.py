@@ -1,9 +1,8 @@
-"""Deterministic schedule time calculation for cron tasks.
+"""cron 任务的确定性计划时间计算。
 
-All times are stored as UTC ISO strings.  Daily tasks use a user-specified
-timezone to determine the next local execution point, then convert back to UTC.
-No LLM is involved in time calculation.
-"""
+所有时间均存储为 UTC ISO 字符串。  日常任务使用用户指定的
+timezone 来确定下一个本地执行点，然后转换回 UTC。
+LLM不涉及时间计算。"""
 
 from __future__ import annotations
 
@@ -79,16 +78,20 @@ def compute_next_run(
         tz = _get_timezone(tz_name)
         hour, minute = (int(x) for x in time_str.split(":"))
 
-        # Convert reference time to user's local time
+        # 将参考时间转换为用户当地时间
         local_now = after.astimezone(tz)
-        # Build today's target time
-        target_today = local_now.replace(
-            hour=hour, minute=minute, second=0, microsecond=0
-        )
-        # If today's time has passed, schedule for tomorrow
+        # 用「午夜 + timedelta」构建目标时间，避免 DST 跳变时 replace() 抛错
+        try:
+            midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            # 极端情况：当地午夜不存在（某些时区 DST 在 00:00 切换）
+            midnight_utc = after.replace(hour=0, minute=0, second=0, microsecond=0)
+            midnight = midnight_utc.astimezone(tz)
+        target_today = midnight + timedelta(hours=hour, minutes=minute)
+        # 如果今天的时间已经过去，安排明天的时间
         if target_today <= local_now:
             target_today = target_today + timedelta(days=1)
-        # Convert back to UTC
+        # 转换回 UTC
         return _to_utc_iso(target_today)
 
     if stype == "recurring":

@@ -1,4 +1,4 @@
-"""Independent sub-agent execution over explicit input only."""
+"""仅通过显式输入独立执行子代理。"""
 
 from __future__ import annotations
 

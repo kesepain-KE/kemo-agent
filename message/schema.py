@@ -1,4 +1,4 @@
-"""Platform-neutral inbound and outbound message contracts."""
+"""平台中立的入站和出站消息合同。"""
 
 from __future__ import annotations
 

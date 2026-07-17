@@ -1,4 +1,4 @@
-"""Provider-neutral request and response contracts."""
+"""提供者中立的请求和响应合同。"""
 
 from __future__ import annotations
 

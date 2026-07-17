@@ -1,4 +1,4 @@
-"""Tiered user-memory storage, review, retrieval and usage weighting."""
+"""分层用户内存存储、查看、检索和使用权重。"""
 
 from __future__ import annotations
 
@@ -131,8 +131,8 @@ def _tokens(text: str) -> set[str]:
     normal = unicodedata.normalize("NFKC", text).casefold()
     words = _WORD_RE.findall(normal)
     result = set(words)
-    # Chinese character bigrams improve deterministic retrieval without an
-    # embedding dependency.
+        # 汉字二元组改进了确定性检索，而无需
+        # 嵌入依赖。
     chinese = "".join(item for item in words if len(item) == 1 and "\u4e00" <= item <= "\u9fff")
     result.update(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
     return {item for item in result if item}
@@ -217,8 +217,8 @@ class MemoryStore:
         path = self.path(tier)
         try:
             text = path.read_text("utf-8")
-            # A zero-byte tier file is the common result of an interrupted
-            # first-run bootstrap and is semantically equivalent to no items.
+                        # 零字节层文件是中断的常见结果
+                        # 首次运行引导程序，在语义上等同于没有项目。
             if not text.strip():
                 return []
             raw = json.loads(text)
@@ -232,7 +232,7 @@ class MemoryStore:
         current = now or utc_now()
         seen: set[str] = set()
         result = []
-        # Higher tier wins if a crash left the same ID in two files.
+                # 如果崩溃在两个文件中留下相同的 ID，则较高层获胜。
         for tier in reversed(TIERS):
             for item in self.load_tier(tier, now=current):
                 if item["id"] not in seen:

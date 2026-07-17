@@ -1,4 +1,4 @@
-"""Background memory extraction submitted only after a committed round."""
+"""后台内存提取仅在提交一轮后提交。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Provider package public API."""
+"""提供者包公共API。"""
 
 from provider.factory import create_provider
 from provider.schema import (

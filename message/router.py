@@ -1,4 +1,4 @@
-"""Platform-neutral external message routing into the Run event engine."""
+"""与平台无关的外部消息路由到运行事件引擎。"""
 
 from __future__ import annotations
 

@@ -26,9 +26,9 @@ from run.users import ensure_user, list_users
 
 VERSION = "0.1.0-dev"
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------------
+# 帮手
+# ------------------------------------------------------------------------------------------
 
 
 def _can_bind(host: str, port: int) -> tuple[bool, str]:
@@ -50,7 +50,7 @@ def _check_users(root: Path) -> bool:
     then prompt interactively.  Returns True when ready."""
     users = list_users(root)
     if users:
-        # Ensure all existing users have complete directory skeletons.
+                # 确保所有现有用户都有完整的目录框架。
         for name in users:
             try:
                 ensure_user(name, root)
@@ -58,13 +58,13 @@ def _check_users(root: Path) -> bool:
                 print(f"警告: 补齐用户 {name} 目录骨架失败: {exc}")
         return True
 
-    # No users at all → try to bootstrap from _template with a default name.
+        # 根本没有用户 → 尝试使用默认名称从 _template 引导。
     print("\n" + "=" * 50)
     print("  欢迎使用 kemo-agent！")
     print("  检测到没有用户。")
     print("=" * 50)
 
-    # If _template exists, ask for a username and bootstrap.
+        # 如果 _template 存在，则请求用户名和引导程序。
     template = root / "users" / "_template"
     if template.is_dir():
         try:
@@ -88,9 +88,9 @@ def _check_users(root: Path) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------------
+# 主要的
+# ------------------------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,14 +125,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = project_root().resolve()
 
-    # 1. load .env
+        # 1.加载.env
     load_dotenv(root / ".env")
 
-    # 2. check users
+        # 2.检查用户
     if not _check_users(root):
         return 1
 
-    # 3. port polling: 1357 + 0..9 (max 10 tries)
+        # 3. 端口轮询：1357 + 0..9（最多 10 次尝试）
     base_port = args.port
     max_tries = 10
     chosen_port: int | None = None
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # 4. start RuntimeHost (unless --no-host)
+        # 4.启动RuntimeHost（除非--no-host）
     host = None
     if not args.no_host:
         host = build_host(root)
@@ -167,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RuntimeHost 启动失败: {exc}", file=sys.stderr)
             return 1
 
-    # 5. start uvicorn
+        # 5.启动uvicorn
     try:
         import uvicorn
     except ImportError:
@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = create_app(root=root)
 
-    # Graceful shutdown: stop RuntimeHost when process exits.
+        # 优雅关闭：进程退出时停止 RuntimeHost。
     def _shutdown() -> None:
         if host is not None:
             host.stop()

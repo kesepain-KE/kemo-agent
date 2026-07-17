@@ -1,4 +1,4 @@
-"""Persistent per-user processed-message state for inbound idempotency."""
+"""入站幂等性的持久每用户处理消息状态。"""
 
 from __future__ import annotations
 

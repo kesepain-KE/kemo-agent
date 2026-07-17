@@ -1,4 +1,4 @@
-"""User-isolated task plan storage with atomic writes and version checks."""
+"""用户隔离的任务计划存储，具有原子写入和版本检查。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ PLAN_STATUSes = frozenset({
 STEP_STATUSes = frozenset({
     "pending", "running", "completed", "failed", "skipped", "cancelled",
 })
-# Task-plan management tool names that must never appear as execution steps.
+# 任务计划管理工具名称绝不能显示为执行步骤。
 _BLOCKED_TOOL_PREFIXES = ("task_plan_",)
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
@@ -124,7 +124,7 @@ def _check_cycle(steps: list[dict[str, Any]]) -> None:
                 raise PlanValidationError(
                     f"步骤 {step['step_id']} 依赖不存在的步骤：{dep!r}"
                 )
-    # DFS cycle detection
+        # DFS循环检测
     color: dict[str, str] = {sid: "white" for sid in step_ids}
     def dfs(sid: str) -> None:
         color[sid] = "gray"

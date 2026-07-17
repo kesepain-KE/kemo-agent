@@ -1,4 +1,4 @@
-"""Single-worker background scheduler for sub-agents with write side effects."""
+"""用于具有写入副作用的子代理的单工作后台调度程序。"""
 
 from __future__ import annotations
 
@@ -238,8 +238,8 @@ class AgentScheduler:
                     task.status = "running"
                     task.started_at = datetime.now(timezone.utc).isoformat()
                 try:
-                    # All background write agents share one process-wide lane,
-                    # even though schedulers remain isolated per user.
+                                        # 所有后台写入代理共享一个进程范围的通道，
+                                        # 即使调度程序对每个用户仍然是隔离的。
                     with _BACKGROUND_SERIAL_LOCK:
                         if task.cancel_event.is_set():
                             raise AgentCancelledError("子代理任务已取消")

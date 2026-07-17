@@ -1,8 +1,7 @@
-"""CLI-to-run bridge.
+"""CLI 运行桥。
 
-This module is intentionally small so cron and message adapters can later call
-the same run engine with their own source/session identifiers.
-"""
+这个模块故意很小，以便 cron 和消息适配器可以稍后调用
+具有自己的源/会话标识符的相同运行引擎。"""
 
 from __future__ import annotations
 

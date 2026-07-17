@@ -1,4 +1,4 @@
-"""Sub-agent manifest discovery and validation."""
+"""子代理清单发现和验证。"""
 
 from __future__ import annotations
 

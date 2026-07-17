@@ -1,9 +1,8 @@
 
-"""Configuration loading for kemo-agent.
+"""kemo-agent 的配置加载。
 
-Global defaults are merged with one user's overrides.  Secret values are
-resolved at runtime from environment variables and are never written back.
-"""
+全局默认值与一个用户的覆盖值合并。  秘密值是
+在运行时从环境变量解析并且永远不会写回。"""
 
 from __future__ import annotations
 

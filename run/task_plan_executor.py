@@ -1,10 +1,9 @@
-"""Entry-agnostic task plan execution core.
+"""与条目无关的任务计划执行核心。
 
-Reads the latest plan from disk, selects the next runnable step based on
-dependencies, executes it through the existing ToolRunner, and persists
-status changes atomically.  Disk is the single source of truth — no
-in-memory state competes with it.
-"""
+从磁盘读取最新的计划，根据选择下一个可运行的步骤
+依赖项，通过现有的 ToolRunner 执行它，并持久化
+状态以原子方式改变。  磁盘是唯一的事实来源——不
+内存状态与之竞争。"""
 
 from __future__ import annotations
 
@@ -100,7 +99,7 @@ def execute_plan(
         )
         return
 
-    # Transition to running if still approved
+        # 如果仍然获得批准，则过渡到运行
     if plan["status"] == "approved":
         try:
             plan = store.update(plan_id, lambda p: {**p, "status": "running"})
@@ -112,7 +111,7 @@ def execute_plan(
         if cancel_event is not None and cancel_event.is_set():
             return
 
-        # Re-read from disk each iteration to pick up external edits
+                # 每次迭代从磁盘重新读取以获取外部编辑
         try:
             plan = store.read(plan_id)
         except (PlanNotFoundError, PlanError) as exc:
@@ -120,7 +119,7 @@ def execute_plan(
             return
 
         if plan["status"] != "running":
-            # Plan was paused or cancelled externally
+                        # 计划被外部暂停或取消
             yield RunEvent(
                 type="done",
                 metadata={
@@ -133,7 +132,7 @@ def execute_plan(
 
         step = _next_step(plan)
         if step is None:
-            # Check if all steps are in a terminal state
+                        # 检查所有步骤是否处于终止状态
             terminal = {"completed", "failed", "skipped", "cancelled"}
             all_done = all(s["status"] in terminal for s in plan["steps"])
             if all_done:
@@ -154,8 +153,8 @@ def execute_plan(
                     },
                 )
                 return
-            # There are still pending steps but none are runnable (all blocked by
-            # failed deps) — mark plan as failed
+                        # 仍有待处理的步骤，但没有一个可运行（全部被阻止
+                        # failed deps) — 将计划标记为失败
             try:
                 plan = store.update(plan_id, lambda p: {**p, "status": "failed"})
             except (PlanError, PlanValidationError) as exc:
@@ -175,7 +174,7 @@ def execute_plan(
         tool_name = step.get("tool_name")
         tool_arguments = step.get("tool_arguments") or {}
 
-        # Persist running status
+                # 保持运行状态
         def _mark_running(p: dict) -> dict:
             for s in p["steps"]:
                 if s["step_id"] == step_id:
@@ -202,7 +201,7 @@ def execute_plan(
         if cancel_event is not None and cancel_event.is_set():
             return
 
-        # Execute the tool
+                # 执行工具
         status: str
         result_payload: Any
         error_payload: dict[str, Any] | None = None
@@ -256,7 +255,7 @@ def execute_plan(
             },
         )
 
-        # Persist step result
+                # 保留步骤结果
         def _mark_step_result(p: dict) -> dict:
             for s in p["steps"]:
                 if s["step_id"] == step_id:
@@ -276,7 +275,7 @@ def execute_plan(
         if status == "failed":
             critical = step.get("critical", True)
             if critical:
-                # Pause the plan
+                                # 暂停计划
                 try:
                     plan = store.update(plan_id, lambda p: {**p, "status": "paused"})
                 except (PlanError, PlanValidationError) as exc:
@@ -292,7 +291,7 @@ def execute_plan(
                     },
                 )
                 return
-            # Non-critical: continue to next step
+                        # 非关键：继续下一步
         if cancel_event is not None and cancel_event.is_set():
             return
 

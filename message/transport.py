@@ -1,4 +1,4 @@
-"""Transport protocol, registry and deterministic mock transport."""
+"""传输协议、注册表和确定性模拟传输。"""
 
 from __future__ import annotations
 

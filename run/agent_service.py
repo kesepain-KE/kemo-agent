@@ -1,4 +1,4 @@
-"""Process-local scheduler registry for background sub-agent jobs."""
+"""用于后台子代理作业的进程本地调度程序注册表。"""
 
 from __future__ import annotations
 

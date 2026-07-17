@@ -1,4 +1,4 @@
-"""User-isolated cron task storage with atomic writes and version checks."""
+"""用户隔离的 cron 任务存储，具有原子写入和版本检查。"""
 
 from __future__ import annotations
 

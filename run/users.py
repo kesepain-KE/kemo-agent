@@ -1,4 +1,4 @@
-"""User-directory discovery, validation and bootstrap helpers."""
+"""用户目录发现、验证和引导帮助程序。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""FastAPI application factory for the kemo-agent Web backend."""
+"""用于 kemo-agent Web 后端的 FastAPI 应用程序工厂。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from events import RunEvent, TERMINAL_EVENTS
@@ -37,6 +37,17 @@ def _safe_internal_message(_: BaseException) -> str:
     return "Web 服务处理请求失败"
 
 
+def _frontend_media_type(path: Path) -> str | None:
+    return {
+        ".css": "text/css",
+        ".js": "text/javascript",
+        ".json": "application/json",
+        ".mjs": "text/javascript",
+        ".svg": "image/svg+xml",
+        ".wasm": "application/wasm",
+    }.get(path.suffix.lower())
+
+
 def create_app(
     *,
     root: Path | None = None,
@@ -44,6 +55,7 @@ def create_app(
 ) -> FastAPI:
     base = (root or project_root()).resolve()
     backend = service or WebRunService(base)
+    frontend_dist = (base / "web" / "frontend" / "dist").resolve()
     app = FastAPI(title="kemo-agent Web API", version="2")
     app.state.web_service = backend
 
@@ -197,5 +209,33 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse(
+                status_code=404,
+                content=_error_body("not_found", "接口不存在", 404),
+            )
+
+        index = frontend_dist / "index.html"
+        if not index.is_file():
+            return JSONResponse(
+                status_code=503,
+                content=_error_body(
+                    "ui_not_built",
+                    "前端尚未构建，请在 web/frontend 执行 npm.cmd run build",
+                    503,
+                ),
+            )
+
+        candidate = (frontend_dist / full_path).resolve()
+        try:
+            candidate.relative_to(frontend_dist)
+        except ValueError:
+            candidate = index
+        if full_path and candidate.is_file():
+            return FileResponse(candidate, media_type=_frontend_media_type(candidate))
+        return FileResponse(index)
 
     return app

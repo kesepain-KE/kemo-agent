@@ -1,4 +1,4 @@
-"""Public surface for the platform-neutral message subsystem."""
+"""平台中立消息子系统的公共表面。"""
 
 from message.identity import IdentityBinding, IdentityError, IdentityResolver
 from message.schema import MessageContractError, MessageEnvelope, OutboundMessage

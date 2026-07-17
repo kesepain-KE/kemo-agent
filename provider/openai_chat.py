@@ -1,9 +1,8 @@
-"""OpenAI Chat Completions compatible HTTP transport.
+"""OpenAI 聊天完成兼容 HTTP 传输。
 
-The same transport serves direct OpenAI-compatible APIs and Kemo gateway mode.
-Kemo mode trusts gateway-provided usage as exact; direct mode marks fallback
-usage estimates explicitly when upstream omits usage.
-"""
+相同的传输服务直接与 OpenAI 兼容的 API 和 Kemo 网关模式。
+Kemo 模式信任网关提供的准确使用；直接模式标记回退
+当上游省略使用时明确使用估计。"""
 
 from __future__ import annotations
 
@@ -71,8 +70,8 @@ def _parse_arguments(value: Any) -> dict[str, Any]:
 def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    # Conservative dependency-free estimate: CJK tends toward one token per
-    # character while Latin text tends toward one token per ~4 characters.
+        # 保守的无依赖性估计：CJK 倾向于每个代币一个代币
+        # 字符，而拉丁文本倾向于每 4 个字符 1 个标记。
     cjk = sum(1 for char in text if "\u3400" <= char <= "\u9fff")
     remaining = len(text) - cjk
     return cjk + math.ceil(remaining / 4)

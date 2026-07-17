@@ -1,4 +1,4 @@
-"""Fixed-order system prompt assembly."""
+"""固定订单系统提示组装。"""
 
 from __future__ import annotations
 

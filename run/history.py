@@ -1,10 +1,9 @@
 
-"""Conversation-window storage contract.
+"""会话窗口存储合约。
 
-A window is a timestamped directory containing text.json, think.json,
-tool.json and data.json.  data.json is committed last with ``complete=true``;
-readers never treat a partially written four-file set as complete.
-"""
+窗口是一个带时间戳的目录，包含text.json、think.json、
+工具.json 和数据.json。  data.json 最后以``complete=true`` 提交；
+读者永远不会将部分编写的四文件集视为完整的。"""
 
 from __future__ import annotations
 

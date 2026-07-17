@@ -1,9 +1,8 @@
-"""Context-window budgeting and whole-round selection.
+"""上下文窗口预算和全面选择。
 
-This module only builds a Provider-facing view.  It never mutates the source
-history window.  The caller may prepend a cached summary for rounds omitted
-from that view.
-"""
+该模块仅构建面向提供者的视图。  它永远不会改变源
+历史窗口。  调用者可以为省略的回合预先添加缓存的摘要
+从这个角度来看。"""
 
 from __future__ import annotations
 
@@ -113,8 +112,8 @@ def _stable_json(value: Any) -> str:
 def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
     total = 0
     for message in messages:
-        # Account for role/field framing in Chat Completions in addition to the
-        # serialized values.  Exact usage remains Provider-specific.
+                # 除了聊天完成之外，还要考虑聊天完成中的角色/字段框架
+                # 序列化值。  确切的用法仍然是特定于提供商的。
         total += 4 + estimate_text_tokens(_stable_json(message))
     return total
 
@@ -154,7 +153,7 @@ def _text_rounds(messages: Any) -> list[list[dict[str, Any]]]:
         elif current:
             current.append(message)
         else:
-            # Malformed leading history is retained as one indivisible group.
+                        # 畸形的领导历史被作为一个不可分割的整体保留下来。
             current = [message]
     if current:
         groups.append(current)

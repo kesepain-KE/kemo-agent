@@ -1,4 +1,4 @@
-"""External identity bindings and transport-level tool permissions."""
+"""外部身份绑定和传输级工具权限。"""
 
 from __future__ import annotations
 

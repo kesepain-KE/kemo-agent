@@ -1,9 +1,8 @@
-"""Cron-to-Run direct execution adapter.
+"""Cron-to-Run 直接执行适配器。
 
-Executes a cron task by calling the Run core (handle_request) directly,
-collects results and errors, and writes them back to the CronStore.
-Never routes through cli.py.
-"""
+通过直接调用Run核心(handle_request)来执行cron任务，
+收集结果和错误，并将它们写回 CronStore。
+从不通过 cli.py 进行路由。"""
 
 from __future__ import annotations
 
@@ -44,7 +43,7 @@ def execute_cron_task(
     cfg = config or load_config(user, root)
     store = CronStore(root, user)
 
-    # 1. Atomic claim: enabled → running
+        # 1. 原子声明：启用→运行
     def _claim(t: dict) -> dict:
         if t["status"] not in ("enabled", "failed"):
             raise CronError(
@@ -63,7 +62,7 @@ def execute_cron_task(
     source = task.get("source", "cron")
     session_id = task.get("session_id", "cron")
 
-    # 2. Execute via Run core
+        # 2.通过Run core执行
     request = {
         "user": user,
         "prompt": prompt,
@@ -75,7 +74,7 @@ def execute_cron_task(
     error_payload: dict[str, Any] | None = None
 
     if cancel_event is not None and cancel_event.is_set():
-        # Cancelled before execution — revert to enabled
+                # 执行前取消 — 恢复为启用
         def _revert(t: dict) -> dict:
             t["status"] = "enabled"
             return t
@@ -105,7 +104,7 @@ def execute_cron_task(
             "phase": "run",
         }
 
-    # 3. Persist result and update schedule
+        # 3. 保存结果并更新时间表
     run_count = int(task.get("run_count", 0)) + 1
     schedule = task.get("schedule") or {}
     stype = schedule.get("type", "recurring")
@@ -130,7 +129,7 @@ def execute_cron_task(
             t["next_run_at"] = ""
         else:
             t["status"] = "enabled"
-            # Compute next run from now
+                        # 从现在开始计算下一次运行
             from cron.schedule import compute_next_run
             now = datetime.now(timezone.utc)
             try:

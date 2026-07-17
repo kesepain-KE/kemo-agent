@@ -78,6 +78,50 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
 
+    def test_frontend_dist_and_spa_routes_are_served(self) -> None:
+        _, root = self.make_root()
+        dist = root / "web" / "frontend" / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text(
+            "<!doctype html><html><body><div id='root'>kemo UI</div></body></html>",
+            "utf-8",
+        )
+        (dist / "assets" / "app.js").write_text("window.KEMO = true", "utf-8")
+        (dist / "kemo-agent.jpg").write_bytes(b"kemo-image")
+        app = create_app(root=root, service=FakeService())
+
+        home = self.request(app, "GET", "/")
+        self.assertEqual(home.status_code, 200)
+        self.assertIn("text/html", home.headers["content-type"])
+        self.assertIn("kemo UI", home.text)
+
+        tasks = self.request(app, "GET", "/tasks?user=alice")
+        self.assertEqual(tasks.status_code, 200)
+        self.assertIn("kemo UI", tasks.text)
+
+        asset = self.request(app, "GET", "/assets/app.js")
+        self.assertEqual(asset.status_code, 200)
+        self.assertIn("text/javascript", asset.headers["content-type"])
+        self.assertEqual(asset.text, "window.KEMO = true")
+        image = self.request(app, "GET", "/kemo-agent.jpg")
+        self.assertEqual(image.status_code, 200)
+        self.assertEqual(image.content, b"kemo-image")
+
+        missing_api = self.request(app, "GET", "/api/does-not-exist")
+        self.assertEqual(missing_api.status_code, 404)
+        self.assertEqual(missing_api.headers["content-type"], "application/json")
+        self.assertEqual(missing_api.json()["error"]["code"], "not_found")
+
+    def test_frontend_reports_when_build_is_missing(self) -> None:
+        _, root = self.make_root()
+        response = self.request(
+            create_app(root=root, service=FakeService()),
+            "GET",
+            "/",
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "ui_not_built")
+
     def test_users_sessions_and_history_use_real_service(self) -> None:
         _, root = self.make_root()
         window = empty_window("alice", "web", "s1")

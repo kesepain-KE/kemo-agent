@@ -1,4 +1,4 @@
-"""Background cron scheduler: scans user tasks, claims and executes due tasks."""
+"""后台cron调度程序：扫描用户任务，声明并执行到期任务。"""
 
 from __future__ import annotations
 
@@ -105,15 +105,15 @@ class CronScheduler:
             if status not in ("enabled", "failed"):
                 continue
 
-            # failed tasks are retried on next scan (not just when due)
+                        # 失败的任务将在下次扫描时重试（不仅仅是在到期时重试）
             check_time = now
             if status == "failed":
-                check_time = now  # failed tasks get retried immediately
+                check_time = now                                    # 失败的任务立即重试
             else:
                 if not is_due(next_run, now=now):
                     continue
 
-            # Attempt to claim and execute
+                        # 尝试主张并执行
             try:
                 result = execute_cron_task(
                     root=self.root,

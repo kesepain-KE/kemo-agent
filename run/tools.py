@@ -1,4 +1,4 @@
-"""Tool discovery, manifest validation and execution."""
+"""工具发现、清单验证和执行。"""
 
 from __future__ import annotations
 

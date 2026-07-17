@@ -1,4 +1,4 @@
-"""Event-driven kemo-agent conversation engine."""
+"""事件驱动的 kemo-agent 对话引擎。"""
 
 from __future__ import annotations
 
@@ -224,9 +224,9 @@ def iter_request_events(
                 "failed": False,
                 "covered_rounds": [],
             }
-            # A summary consumes input tokens too.  Re-select until the set of
-            # removed whole rounds is stable, so no round can be displaced by
-            # the summary without also being included in that summary.
+                        # 摘要也消耗输入标记。  重新选择，直至设置完毕
+                        # 移除的整轮是稳定的，因此没有一轮可以被取代
+                        # 摘要，但也未包含在该摘要中。
             max_summary_passes = len(context_selection.all_rounds) + 1
             for _ in range(max_summary_passes):
                 removed_before = [item.number for item in context_selection.removed_rounds]
@@ -497,9 +497,9 @@ def iter_request_events(
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
             commit_window(window_path, window)
 
-            # Weight only memories that were selected and actually sent to the
-            # successful main-model run.  A cancelled/failed round never gets
-            # here, and mere retrieval candidates are intentionally excluded.
+                        # 仅对选择并实际发送到的记忆进行加权
+                        # 主模型运行成功。  取消/失败的回合永远不会得到
+                        # 在这里，仅仅检索候选者被有意排除。
             memory_weighted_ids: list[str] = []
             memory_weight_error = None
             try:
@@ -529,9 +529,9 @@ def iter_request_events(
                         provider_factory=provider_factory,
                     )
                 except Exception as exc:
-                    # Memory is an asynchronous derived side effect.  The main
-                    # four-file history transaction has already committed and
-                    # must not be rolled back by a queue/sub-agent failure.
+                                        # 内存是异步衍生的副作用。  主要
+                                        # 四文件历史事务已提交并且
+                                        # 不得因队列/子代理故障而回滚。
                     memory_error = {
                         "message": str(exc),
                         "exception_type": type(exc).__name__,

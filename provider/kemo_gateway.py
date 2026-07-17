@@ -1,9 +1,8 @@
-"""Kemo gateway chat provider.
+"""Kemo 网关聊天提供商。
 
-Kemo exposes the OpenAI Chat Completions wire format.  This subclass keeps the
-runtime type explicit and is the extension point for future Kemo-only token,
-capability and routing endpoints.
-"""
+Kemo 公开了 OpenAI 聊天完成有线格式。  这个子类保留了
+运行时类型显式，是未来仅 Kemo 令牌的扩展点，
+能力和路由端点。"""
 
 from __future__ import annotations
 

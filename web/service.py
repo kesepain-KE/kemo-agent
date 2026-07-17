@@ -1,4 +1,4 @@
-"""Web-facing service adapter over existing Run, history and user APIs."""
+"""基于现有运行、历史记录和用户 API 的面向 Web 的服务适配器。"""
 
 from __future__ import annotations
 
@@ -473,9 +473,9 @@ class WebRunService:
             "prompt": normalized_prompt,
             "stream": True,
         }
-        # The Run generator owns thread-affine RLocks.  Its next()/close()
-        # calls must therefore stay on one dedicated worker thread instead
-        # of hopping between asyncio.to_thread workers.
+                # Run 生成器拥有线程仿射 RLock。  它的 next()/close()
+                # 因此，调用必须保留在一个专用工作线程上
+                # 在 asyncio.to_thread 工作线程之间跳转。
         output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
 
         def put(value: RunEvent | BaseException | object) -> bool:

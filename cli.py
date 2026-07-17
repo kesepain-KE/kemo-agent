@@ -1,9 +1,8 @@
-"""kemo-agent command line entry point.
+"""kemo-agent 命令行入口点。
 
-The CLI is intentionally a thin transport layer.  It builds a stable request
-object and delegates all agent behaviour, persistence and provider access to a
-handler supplied by ``run``.
-"""
+CLI 有意成为一个薄传输层。  它建立了一个稳定的请求
+对象并将所有代理行为、持久性和提供者访问委托给
+由“run”提供的处理程序。"""
 
 from __future__ import annotations
 
@@ -311,8 +310,8 @@ def _interactive_command(
                 {"user": user, "source": source, "session_id": session_id}, root=root
             )
         except Exception:
-            # Keep the transport-level status useful in minimal/test workspaces
-            # that do not yet contain a global configuration.
+                        # 保持传输级别状态在最小/测试工作空间中有用
+                        # 尚未包含全局配置。
             sessions = {
                 item["session_id"]: item for item in list_sessions(root, user, source)
             }
@@ -389,7 +388,7 @@ def _interactive_command(
         print(f"已删除 {len(removed)} 条记忆。", file=stdout)
         return True, session_id
 
-    # --- task plan commands ---
+        # --- 任务计划命令 ---
     if command == "/plans":
         from run.task_plan_executor import list_plans
         plans = list_plans(root, user)
@@ -550,7 +549,7 @@ def _interactive_command(
             print(f"取消失败：{exc}", file=stdout)
         return True, session_id
 
-    # --- cron commands ---
+        # --- cron 命令 ---
     if command == "/crons":
         from run.cron_store import CronStore
         store = CronStore(root, user)
@@ -677,7 +676,7 @@ def _interactive_command(
         return True, session_id
     if command == "/cron-start":
         from cron.scheduler import CronScheduler
-        # Use a module-level singleton
+                # 使用模块级单例
         if not hasattr(run_interactive, '_cron_scheduler'):
             run_interactive._cron_scheduler = CronScheduler(root)
         sched = run_interactive._cron_scheduler

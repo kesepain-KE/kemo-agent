@@ -1,4 +1,4 @@
-"""Derived, atomic context-summary cache for removed historical rounds."""
+"""用于删除历史回合的派生原子上下文摘要缓存。"""
 
 from __future__ import annotations
 

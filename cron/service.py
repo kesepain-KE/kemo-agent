@@ -1,4 +1,4 @@
-"""Cron task generation service: calls time_plan sub-agent via AgentRunner."""
+"""Cron任务生成服务：通过AgentRunner调用time_plan子代理。"""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def generate_cron_task(
 
     session_id = data.get("session_id", "cron")
 
-    # Compute next_run_at using deterministic schedule calculation
+        # 使用确定性调度计算来计算 next_run_at
     try:
         next_run_at = compute_next_run(schedule)
     except CronValidationError as exc:

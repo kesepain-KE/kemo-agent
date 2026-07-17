@@ -1,4 +1,4 @@
-"""Lightweight file knowledge indexing and deterministic retrieval."""
+"""轻量级文件知识索引和确定性检索。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Task plan generation service: calls task_plan sub-agent via AgentRunner."""
+"""任务计划生成服务：通过AgentRunner调用task_plan子代理。"""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def generate_plan(
     if not isinstance(steps, list) or len(steps) == 0:
         raise PlanGenerationError("task_plan 子代理未返回步骤列表")
 
-    # Validate max steps
+        # 验证最大步数
     if len(steps) > max_steps:
         raise PlanGenerationError(
             f"步骤数量 {len(steps)} 超过最大限制 {max_steps}"

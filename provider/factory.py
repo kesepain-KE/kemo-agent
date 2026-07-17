@@ -1,4 +1,4 @@
-"""Provider factory."""
+"""供应商工厂。"""
 
 from __future__ import annotations
 
