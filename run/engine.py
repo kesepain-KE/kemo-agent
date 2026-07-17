@@ -16,6 +16,7 @@ from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import commit_window, prepare_window
+from run.knowledge import select_knowledge
 from run.memory import MemoryStore
 from run.memory_pipeline import submit_memory_extraction
 from run.prompt import build_system_prompt
@@ -189,11 +190,13 @@ def iter_request_events(
                 if prompt and bool(memory_config.get("injection_enabled", True))
                 else memory_store.select_for_injection("", max_items=0)
             )
+            knowledge_selection = select_knowledge(base, user, prompt, config)
             system_prompt = build_system_prompt(
                 base,
                 user,
                 config,
                 memory_text=memory_selection.text,
+                knowledge_text=knowledge_selection.text,
             )
             system_message = (
                 {"role": "system", "content": system_prompt} if system_prompt else None
@@ -554,6 +557,17 @@ def iter_request_events(
                         "injected_chars": memory_selection.chars,
                         "extraction_task_id": memory_task_id,
                         "extraction_error": memory_error,
+                    },
+                    "knowledge": {
+                        "documents": [
+                            {
+                                "scope": item.scope,
+                                "path": item.relative_path,
+                                "title": item.title,
+                            }
+                            for item in knowledge_selection.documents
+                        ],
+                        "injected_chars": len(knowledge_selection.text),
                     },
                     "committed": True,
                 }

@@ -1,4 +1,4 @@
-"""Minimal fixed-order system prompt assembly."""
+"""Fixed-order system prompt assembly."""
 
 from __future__ import annotations
 
@@ -26,13 +26,17 @@ def build_system_prompt(
     config: dict,
     *,
     memory_text: str = "",
+    knowledge_text: str = "",
 ) -> str:
-    """Assemble enabled prompt sections in the architecture's fixed order.
+    """Assemble stable prompt sections from highest-priority base to context data.
 
-    Fragmented memories, tools, child-agent instructions and on-demand
-    knowledge are intentionally left for later stages.  The hot-memory file is
-    included because it already has a stable path and is part of the permanent
-    base sequence; an empty file contributes nothing.
+    Order is intentionally fixed:
+      global soul → user soul → framework manual → hot memory
+      → selected memory fragments → selected knowledge documents.
+
+    Tool schemas are sent through the Provider request and sub-agent instructions
+    remain private to AgentRunner; neither is duplicated into the main prompt.
+    Conversation history is appended later by the context selector.
     """
 
     prompt_config = config.get("prompt") or {}
@@ -40,7 +44,7 @@ def build_system_prompt(
         "global_soul": bool(prompt_config.get("include_global_soul", True)),
         "user_soul": bool(prompt_config.get("include_user_soul", True)),
         "agents_manual": bool(prompt_config.get("include_agents_manual", True)),
-        "important_memory": True,
+        "important_memory": bool(prompt_config.get("include_important_memory", True)),
     }
     sections: list[str] = []
     for name, relative in _PROMPT_SOURCES:
@@ -52,4 +56,6 @@ def build_system_prompt(
             sections.append(f"[{name}]\n{content}")
     if memory_text.strip():
         sections.append(f"[relevant_memory]\n{memory_text.strip()}")
+    if knowledge_text.strip():
+        sections.append(f"[relevant_knowledge]\n{knowledge_text.strip()}")
     return "\n\n".join(sections)

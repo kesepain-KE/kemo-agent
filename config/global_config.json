@@ -21,7 +21,15 @@
   "prompt": {
     "include_global_soul": true,
     "include_user_soul": true,
-    "include_agents_manual": true
+    "include_agents_manual": true,
+    "include_important_memory": true
+  },
+  "knowledge": {
+    "enabled": true,
+    "max_items": 4,
+    "max_chars": 4000,
+    "max_file_chars": 20000,
+    "minimum_score": 2
   },
   "memory": {
     "fragment_limits": {
@@ -84,6 +92,11 @@
   "runtime_host": {
     "start_cron": true,
     "shutdown_timeout": 10
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 1478,
+    "log_level": "info"
   },
   "message": {
     "max_workers": 4,
