@@ -25,6 +25,10 @@ desktop.ini
 # Logs
 *.log
 
+# Backups & temp
+*.bak
+*.tmp
+
 # Environment
 .env
 .env.local
@@ -33,8 +37,22 @@ desktop.ini
 node_modules/
 web/node_modules/
 
-# User data (if needed to exclude later)
-# users/*/avatar/*
-# users/*/download/*
-# users/*/history/*
-# users/*/file_upload/*
+# Obsidian workspace (frequently changing state)
+开发临时目录/obsidian/.obsidian/
+
+# User runtime data — only _template is tracked
+users/*/avatar/
+users/*/download/
+users/*/expand/
+users/*/file_upload/
+users/*/history/
+users/*/improve/
+users/*/knowledge/
+users/*/message_state/
+users/*/task_cron/
+users/*/task_plan/
+users/*/user_skills/
+users/*/user_config.json
+users/*/user_soul.md
+users/*/memory_temporary_important.md
+users/*/*.txt

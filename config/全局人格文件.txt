@@ -1,2 +1,0 @@
-全局人格文件config\global_soul.md
-用于规定全局人格，优先级高于用户人格文件users\kesepain\user_soul.md

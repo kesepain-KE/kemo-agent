@@ -1,7 +1,0 @@
-用户技能文件(不可被更新脚本覆盖)
-优先级高于一切
-智能体创建的技能users\kesepain\user_skills\agent_create
-用户主动要求智能体创建的技能users\kesepain\user_skills\user_create
-
-智能体创建技能来自于(180天临时记忆升级而来)
-用户主动创建技能来自于(用自己上传的技能、用于要求智能体创建的技能)
