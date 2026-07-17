@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "memory_temporary_important",
+  "version": "1.0.0",
+  "description": "巡检临时记忆并维护临时重要记忆热画像。",
+  "enabled": true,
+  "instruction": "临时重要记忆.txt",
+  "model_profile": "cheap",
+  "timeout": 180,
+  "execution": "background_serial",
+  "write_policy": "user_memory",
+  "input_schema": {"type": "object", "additionalProperties": true},
+  "output_schema": {"type": "object", "additionalProperties": true}
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "self_improve",
+  "version": "1.0.0",
+  "description": "从显式传入的数据中提取、整理和升级记忆候选。",
+  "enabled": true,
+  "instruction": "自我改进.txt",
+  "model_profile": "reasoning",
+  "timeout": 180,
+  "execution": "background_serial",
+  "write_policy": "user_memory",
+  "input_schema": {"type": "object", "additionalProperties": true},
+  "output_schema": {"type": "object", "additionalProperties": true}
+}

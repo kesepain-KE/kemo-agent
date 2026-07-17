@@ -36,6 +36,15 @@
     },
     "important_memory_max_chars": 1500
   },
+  "agent_models": {
+    "default": {},
+    "cheap": {},
+    "reasoning": {}
+  },
+  "agent_runtime": {
+    "queue_maxsize": 0,
+    "default_timeout": 120
+  },
   "agents": {
     "n1_recent_rounds_before_tool_compression": 3,
     "n2_max_rounds": 30,

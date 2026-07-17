@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "token_condense",
+  "version": "1.0.0",
+  "description": "在 Token 上限触发时按完整轮次生成结构化压缩摘要。",
+  "enabled": true,
+  "instruction": "token压缩.txt",
+  "model_profile": "cheap",
+  "timeout": 120,
+  "execution": "sync",
+  "write_policy": "derived_cache",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "previous_summary": {"type": ["object", "null"]},
+      "rounds": {"type": "array"},
+      "trigger": {"type": "string"}
+    },
+    "required": ["rounds", "trigger"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "facts": {"type": "array", "items": {"type": "string"}},
+      "requirements": {"type": "array", "items": {"type": "string"}},
+      "decisions": {"type": "array", "items": {"type": "string"}},
+      "unfinished": {"type": "array", "items": {"type": "string"}},
+      "tool_results": {"type": "array", "items": {"type": "string"}},
+      "entities": {"type": "array", "items": {"type": "string"}},
+      "narrative": {"type": "string"}
+    },
+    "required": ["facts", "requirements", "decisions", "unfinished", "tool_results", "entities", "narrative"],
+    "additionalProperties": false
+  }
+}

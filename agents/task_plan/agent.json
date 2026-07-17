@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "task_plan",
+  "version": "1.0.0",
+  "description": "根据显式任务数据创建或编辑结构化任务计划。",
+  "enabled": true,
+  "instruction": "任务计划.txt",
+  "model_profile": "reasoning",
+  "timeout": 180,
+  "execution": "background_serial",
+  "write_policy": "user_task",
+  "input_schema": {"type": "object", "additionalProperties": true},
+  "output_schema": {"type": "object", "additionalProperties": true}
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "time_plan",
+  "version": "1.0.0",
+  "description": "根据显式任务数据创建、编辑、删除或执行定时任务。",
+  "enabled": true,
+  "instruction": "定时任务.txt",
+  "model_profile": "default",
+  "timeout": 180,
+  "execution": "background_serial",
+  "write_policy": "user_task",
+  "input_schema": {"type": "object", "additionalProperties": true},
+  "output_schema": {"type": "object", "additionalProperties": true}
+}

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -63,6 +64,8 @@ class RuntimeFeatureTests(unittest.TestCase):
             "utf-8",
         )
         (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        project_agents = Path(__file__).resolve().parents[1] / "agents"
+        shutil.copytree(project_agents, root / "agents")
         return temporary, root
 
     def write_tool(self, base: Path, name: str, source_value: str, *, enabled: bool = True, async_tool: bool = False) -> None:

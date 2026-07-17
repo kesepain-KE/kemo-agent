@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from provider.schema import ChatRequest
+from events import RunEvent
+from run.agent_runner import AgentRunner
 from run.context import RoundGroup, estimate_text_tokens
 
 
@@ -74,24 +74,6 @@ def _normalise_summary(value: Any) -> dict[str, Any]:
     return result
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        return _normalise_summary(json.loads(cleaned))
-    except (json.JSONDecodeError, SummaryError):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
-            raise SummaryError("摘要响应中没有 JSON 对象") from None
-        try:
-            return _normalise_summary(json.loads(cleaned[start : end + 1]))
-        except (json.JSONDecodeError, SummaryError) as exc:
-            raise SummaryError(f"摘要 JSON 无效：{exc}") from exc
-
-
 def _read_cache(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -140,25 +122,6 @@ def _chunks(groups: list[RoundGroup], token_budget: int) -> list[list[RoundGroup
     return chunks
 
 
-def _summary_prompt(
-    groups: list[RoundGroup], previous: dict[str, Any] | None
-) -> list[dict[str, Any]]:
-    instructions = (
-        "你是上下文压缩器。只根据输入内容生成严格 JSON，不使用 Markdown。"
-        "不得编造；保留用户要求、已确认事实、决策、未完成事项、关键工具结果和实体。"
-        "输出字段固定为 facts、requirements、decisions、unfinished、tool_results、entities、narrative；"
-        "前六项为字符串数组，narrative 为简短字符串。"
-    )
-    payload = {
-        "previous_summary": previous,
-        "rounds": summary_source(groups),
-    }
-    return [
-        {"role": "system", "content": instructions},
-        {"role": "user", "content": _stable_json(payload)},
-    ]
-
-
 def build_summary_message(cache: dict[str, Any] | None) -> dict[str, Any] | None:
     if not cache:
         return None
@@ -176,12 +139,14 @@ def get_or_create_summary(
     *,
     cache_path: Path,
     groups: list[RoundGroup],
-    provider: Any,
-    model: str,
+    agent_runner: AgentRunner,
+    agent_name: str,
+    trigger: str,
     cancel_event: threading.Event | None = None,
     chunk_token_budget: int = 24000,
     max_tokens: int = 2048,
     response_hook: Callable[[dict[str, Any]], None] | None = None,
+    event_callback: Callable[[RunEvent], None] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return an exact cache hit or atomically generate a replacement.
 
@@ -213,17 +178,20 @@ def get_or_create_summary(
         for chunk in chunks:
             if cancel_event is not None and cancel_event.is_set():
                 raise SummaryError("cancelled")
-            response = provider.chat(
-                ChatRequest(
-                    model=model,
-                    messages=_summary_prompt(chunk, rolling),
-                    stream=False,
-                    max_tokens=max_tokens,
-                )
+            result = agent_runner.run(
+                agent_name,
+                {
+                    "previous_summary": rolling,
+                    "rounds": summary_source(chunk),
+                    "trigger": trigger,
+                },
+                cancel_event=cancel_event,
+                event_callback=event_callback,
+                max_tokens=max_tokens,
             )
-            rolling = _parse_json_object(response.text)
+            rolling = _normalise_summary(result.data)
             if response_hook is not None:
-                response_hook(response.usage.to_dict())
+                response_hook(result.usage)
         if rolling is None:
             raise SummaryError("摘要结果为空")
         if cancel_event is not None and cancel_event.is_set():

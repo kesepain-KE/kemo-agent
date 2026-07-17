@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Callable, Iterator
 from events import RunEvent, error_event
 from provider.factory import create_provider
 from provider.schema import ChatRequest, ChatResponse, ToolCall, Usage
+from run.agent_runner import AgentRunner
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
@@ -164,6 +165,12 @@ def iter_request_events(
             config = load_config(user, base)
             runtime_provider = provider_runtime_config(config)
             provider = provider_factory(runtime_provider)
+            agent_runner = AgentRunner(
+                base,
+                user,
+                config=config,
+                provider_factory=provider_factory,
+            )
             window_path, window, _ = prepare_window(base, user, source, session_id)
             tool_config = config.get("tools") or {}
             tools_enabled = bool(tool_config.get("enabled", True))
@@ -191,6 +198,7 @@ def iter_request_events(
                 force_compress=force_compress,
             )
             summary_usage = _usage_total()
+            subagent_events: list[RunEvent] = []
             summary_cache = None
             summary_diagnostics: dict[str, Any] = {
                 "cache_hit": False,
@@ -206,17 +214,29 @@ def iter_request_events(
                 removed_before = [item.number for item in context_selection.removed_rounds]
                 if not removed_before:
                     break
+                summary_agent = (
+                    "token_condense"
+                    if context_selection.token_limit_triggered
+                    else "context_manage"
+                )
+                summary_trigger = (
+                    "token_limit"
+                    if context_selection.token_limit_triggered
+                    else ("manual" if force_compress else "round_limit")
+                )
                 summary_cache, summary_diagnostics = get_or_create_summary(
                     cache_path=window_path / "context_summary.json",
                     groups=context_selection.removed_rounds,
-                    provider=provider,
-                    model=runtime_provider["model"],
+                    agent_runner=agent_runner,
+                    agent_name=summary_agent,
+                    trigger=summary_trigger,
                     cancel_event=cancel_event,
                     chunk_token_budget=max(256, context_policy.input_budget // 2),
                     max_tokens=min(4096, max(256, context_policy.output_reserve)),
                     response_hook=lambda raw: _merge_usage(
                         summary_usage, _usage_from_dict(raw)
                     ),
+                    event_callback=subagent_events.append,
                 )
                 next_selection = select_context(
                     window=window,
@@ -231,10 +251,14 @@ def iter_request_events(
                 context_selection = next_selection
                 if removed_after == removed_before:
                     break
+            if cancel_event is not None and cancel_event.is_set():
+                return
             messages = context_selection.messages
             context_stats = context_selection.stats()
             context_stats["summary"] = summary_diagnostics
             context_stats["summary_usage"] = summary_usage
+            for subagent_event in subagent_events:
+                yield subagent_event
             if compress_only:
                 yield RunEvent(
                     type="done",

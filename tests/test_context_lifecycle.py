@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from provider.schema import ChatResponse, Usage
+from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
 
@@ -43,12 +44,12 @@ def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dic
     }
 
 
-class SummaryProvider:
+class SummaryRunner:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls = 0
 
-    def chat(self, request):
+    def run(self, name, input_data, **kwargs):
         self.calls += 1
         if self.fail:
             raise RuntimeError("summary unavailable")
@@ -61,9 +62,12 @@ class SummaryProvider:
             "entities": [],
             "narrative": "compressed",
         }
-        return ChatResponse(
-            text=json.dumps(payload),
-            usage=Usage(10, 2, 12, source="summary-mock"),
+        return AgentRunResult(
+            agent=name,
+            data=payload,
+            raw_text=json.dumps(payload),
+            usage=Usage(10, 2, 12, source="summary-mock").to_dict(),
+            model="mock",
         )
 
 
@@ -149,13 +153,14 @@ class ContextLifecycleTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         cache_path = Path(temporary.name) / "summary.json"
         groups = build_round_groups(make_window(3), ContextPolicy())
-        provider = SummaryProvider()
+        provider = SummaryRunner()
         usage = []
         first, diagnostics = get_or_create_summary(
             cache_path=cache_path,
             groups=groups,
-            provider=provider,
-            model="mock",
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
             response_hook=usage.append,
         )
         self.assertTrue(diagnostics["generated"])
@@ -166,8 +171,9 @@ class ContextLifecycleTests(unittest.TestCase):
         second, diagnostics = get_or_create_summary(
             cache_path=cache_path,
             groups=groups,
-            provider=provider,
-            model="mock",
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
         )
         self.assertTrue(diagnostics["cache_hit"])
         self.assertEqual(provider.calls, 1)
@@ -184,8 +190,9 @@ class ContextLifecycleTests(unittest.TestCase):
         value, diagnostics = get_or_create_summary(
             cache_path=cache_path,
             groups=groups,
-            provider=SummaryProvider(fail=True),
-            model="mock",
+            agent_runner=SummaryRunner(fail=True),
+            agent_name="context_manage",
+            trigger="round_limit",
         )
         self.assertIsNone(value)
         self.assertTrue(diagnostics["failed"])
@@ -196,8 +203,9 @@ class ContextLifecycleTests(unittest.TestCase):
         value, diagnostics = get_or_create_summary(
             cache_path=cache_path,
             groups=groups,
-            provider=SummaryProvider(),
-            model="mock",
+            agent_runner=SummaryRunner(),
+            agent_name="context_manage",
+            trigger="round_limit",
             cancel_event=cancelled,
         )
         self.assertIsNone(value)
@@ -208,12 +216,13 @@ class ContextLifecycleTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         groups = build_round_groups(make_window(5, chars=300), ContextPolicy())
-        provider = SummaryProvider()
+        provider = SummaryRunner()
         value, diagnostics = get_or_create_summary(
             cache_path=Path(temporary.name) / "summary.json",
             groups=groups,
-            provider=provider,
-            model="mock",
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
             chunk_token_budget=256,
         )
         self.assertIsNotNone(value)
