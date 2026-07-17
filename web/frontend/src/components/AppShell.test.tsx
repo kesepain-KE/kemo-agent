@@ -16,12 +16,22 @@ describe('AppShell navigation', () => {
     renderApp('/chat')
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
     expect(screen.getByText(/Web 已接入真实用户/)).toBeInTheDocument()
-    expect(screen.getByLabelText('切换当前用户')).toHaveValue('kesepain')
+    expect(screen.getByRole('button', { name: '切换当前用户' })).toBeInTheDocument()
   })
 
   it('从 URL 恢复用户与会话并加载历史空状态', async () => {
     renderApp('/chat?user=kesepain&session=s1')
     await waitFor(() => expect(screen.getAllByText('s1').length).toBeGreaterThan(0))
     expect((await screen.findAllByText('kemo-agent')).length).toBeGreaterThan(0)
+  })
+
+  it('顶部栏包含上下文窗口、字号、主题和运行状态控件', async () => {
+    renderApp('/chat')
+    await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
+    expect(screen.getAllByTitle('查看上下文与运行状态').length).toBeGreaterThan(0)
+    expect(screen.getAllByTitle('调整界面字号').length).toBeGreaterThan(0)
+    expect(screen.getByTitle(/切换为高级/)).toBeInTheDocument()
+    expect(screen.getByTitle('运行状态')).toBeInTheDocument()
+    expect(screen.getByTitle('命令面板')).toBeInTheDocument()
   })
 })

@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bot, Plus, Send, Square, UserRound } from 'lucide-react'
+import {
+  Bot,
+  CheckCircle2,
+  Clock,
+  FileText,
+  Image,
+  BrainCircuit,
+  LayoutGrid,
+  Plus,
+  Send,
+  Square,
+  UserRound,
+  Wrench,
+  Zap,
+} from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useOutletContext } from 'react-router-dom'
@@ -62,6 +76,23 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
   return items
 }
 
+const quickStartCards = [
+  { prompt: '检查 kemo-agent 当前运行状态', icon: Zap, title: '检查运行状态', desc: '汇总核心模块、兼容 API 与外接服务状态' },
+  { prompt: '总结当前 Web 架构与已接接口', icon: FileText, title: '总结架构', desc: '梳理前端、后端与 Run 核心的接口边界' },
+  { prompt: '查询知识库中关于 kemo-agent 的设计资料', icon: BookOpen_, title: '查询知识库', desc: '默认使用文件索引进行本地检索' },
+  { prompt: '帮我规划今天的任务并生成优先级计划', icon: CheckCircle2, title: '规划今日任务', desc: '读取任务与上下文，生成执行顺序' },
+]
+
+function BookOpen_() { return <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z" /></svg> }
+
+const toolDockButtons = [
+  { icon: FileText, label: '添加文件' },
+  { icon: Image, label: '图像' },
+  { icon: BookOpen_, label: '知识库' },
+  { icon: BrainCircuit, label: '全局感知' },
+  { icon: LayoutGrid, label: '选择技能' },
+]
+
 export function ChatPage() {
   const { user, sessionId, setSessionId } = useOutletContext<ShellOutletContext>()
   const queryClient = useQueryClient()
@@ -69,6 +100,7 @@ export function ChatPage() {
   const [liveItems, setLiveItems] = useState<ChatItem[]>([])
   const [running, setRunning] = useState(false)
   const [usage, setUsage] = useState<Record<string, unknown> | undefined>()
+  const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const historyQuery = useQuery({
@@ -105,6 +137,7 @@ export function ChatPage() {
     const activeSession = sessionId || createSessionId()
     setDraft('')
     setRunning(true)
+    setConversationMenuOpen(false)
     setLiveItems((current) => [...current, { id: eventId('user'), kind: 'message', role: 'user', content: prompt }])
     const controller = new AbortController()
     abortRef.current = controller
@@ -136,7 +169,12 @@ export function ChatPage() {
   const newConversation = () => {
     abortRef.current?.abort()
     setSessionId(createSessionId())
+    setConversationMenuOpen(false)
   }
+
+  const usageText = usage
+    ? `${String(usage.prompt_tokens ?? '?')} + ${String(usage.completion_tokens ?? '?')} = ${String(usage.total_tokens ?? '?')}`
+    : null
 
   return (
     <div className="view chat-view active">
@@ -145,14 +183,27 @@ export function ChatPage() {
           <section className="welcome">
             <div className="welcome-top">
               <article className="greeting-card">
-                <div className="hero-logo"><img src="/kemo-agent.jpg" alt="kemo-agent" /></div>
-                <div className="greeting-copy"><h1>你好，{user || '用户'}</h1><p>Web 已接入真实用户、会话、历史与流式聊天。今天需要处理什么？</p><span className="role-line">● 当前用户 · {user || '未选择'}</span></div>
+                <div className="hero-logo"><img src="/kemo-agent.jpg" alt="kemo-agent logo" /></div>
+                <div className="greeting-copy">
+                  <h1>你好，{user || '用户'}</h1>
+                  <p>Web 已接入真实用户、会话、历史与流式聊天。今天需要处理什么？</p>
+                  <span className="role-line">● 当前用户 · users/{user || '—'}</span>
+                </div>
               </article>
-              <article className="snapshot-card"><div className="snapshot-item"><strong className="ok">已接通</strong><span>POST SSE</span></div><div className="snapshot-item"><strong>7 类</strong><span>RunEvent</span></div><div className="snapshot-item"><strong>只读</strong><span>历史恢复</span></div><div className="snapshot-item"><strong>独立</strong><span>Web 会话</span></div></article>
+              <article className="snapshot-card">
+                <div className="snapshot-item"><strong className="ok">已接通</strong><span>POST SSE</span></div>
+                <div className="snapshot-item"><strong>7 类</strong><span>RunEvent</span></div>
+                <div className="snapshot-item"><strong>只读</strong><span>历史恢复</span></div>
+                <div className="snapshot-item"><strong>独立</strong><span>Web 会话</span></div>
+              </article>
             </div>
             <div className="quick-start">
-              {['检查 kemo-agent 当前运行状态', '总结当前 Web 架构', '查询知识库中的相关资料', '帮我规划今天的任务'].map((prompt) => (
-                <button key={prompt} className="quick-card" onClick={() => setDraft(prompt)}><strong>{prompt}</strong><span>填入输入框后发送</span></button>
+              {quickStartCards.map(({ prompt, icon: Icon, title, desc }) => (
+                <button key={prompt} className="quick-card" onClick={() => setDraft(prompt)}>
+                  <span className="quick-icon"><Icon size={17} /></span>
+                  <strong>{title}</strong>
+                  <span>{desc}</span>
+                </button>
               ))}
             </div>
           </section>
@@ -186,10 +237,57 @@ export function ChatPage() {
             rows={1}
           />
           <div className="composer-row">
-            <div className="composer-meta"><i /><span>{user || '未选择用户'}</span><span>·</span><span>{sessionId || '新会话'}</span>{usage && <><span>·</span><span>{JSON.stringify(usage)}</span></>}</div>
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+              <div className="tool-dock">
+                {toolDockButtons.map(({ icon: Icon, label }) => (
+                  <button key={label} className="tool-btn" aria-label={label} title={label} disabled>
+                    <Icon size={19} />
+                  </button>
+                ))}
+              </div>
+              <div className="composer-meta">
+                <i />
+                <span>{user || '未选择用户'}</span>
+                <span>·</span>
+                <span>{sessionId || '新会话'}</span>
+                {usageText && <><span>·</span><span>{usageText}</span></>}
+              </div>
+            </div>
             <div className="composer-submit">
-              <button className="composer-more-btn" onClick={newConversation} disabled={running}><Plus size={15} /> 新对话</button>
-              {running ? <button className="send-btn stop" onClick={stop}><Square size={15} /> 停止</button> : <button className="send-btn" onClick={() => void send()} disabled={!draft.trim() || !user}><Send size={15} /> 发送</button>}
+              <div className="composer-more">
+                <button
+                  className={`composer-more-btn ${conversationMenuOpen ? 'active' : ''}`}
+                  onClick={() => setConversationMenuOpen((v) => !v)}
+                  aria-expanded={conversationMenuOpen}
+                  aria-label="展开对话操作"
+                  title="对话操作"
+                  disabled={running}
+                >
+                  <span>对话操作</span>
+                  <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+                </button>
+                {conversationMenuOpen && (
+                  <div className="conversation-menu show" role="menu">
+                    <div className="conversation-menu-head">对话操作</div>
+                    <button className="conversation-action" role="menuitem" onClick={newConversation}>
+                      <span className="conversation-action-icon"><Plus size={16} /></span>
+                      <span className="conversation-action-copy"><strong>创建新对话</strong><span>开启独立的上下文窗口</span></span>
+                    </button>
+                    <button className="conversation-action" role="menuitem" onClick={() => setConversationMenuOpen(false)}>
+                      <span className="conversation-action-icon"><FileText size={16} /></span>
+                      <span className="conversation-action-copy"><strong>保存当前对话</strong><span>写入当前用户的历史记录</span></span>
+                    </button>
+                    <button className="conversation-action compress" role="menuitem" onClick={() => setConversationMenuOpen(false)}>
+                      <span className="conversation-action-icon"><Zap size={16} /></span>
+                      <span className="conversation-action-copy"><strong>压缩上下文</strong><span>默认使用 Token 压缩机制</span></span>
+                    </button>
+                    <div className="conversation-menu-foot">自动压缩阈值 80% · 保留高权重记忆</div>
+                  </div>
+                )}
+              </div>
+              {running
+                ? <button className="send-btn stop" onClick={stop}><Square size={15} /> 停止</button>
+                : <button className="send-btn" onClick={() => void send()} disabled={!draft.trim() || !user}><Send size={15} /> 发送 ↗</button>}
             </div>
           </div>
         </div>
