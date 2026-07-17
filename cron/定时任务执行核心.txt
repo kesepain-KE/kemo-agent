@@ -1,2 +1,8 @@
 检测到用户文件内的定时任务达到执行时间
-执行定时任务，调用子智能体agents\time_plan执行任务
+执行定时任务，直接调用 Run 核心 (run/engine.py handle_request)
+不经过 cli.py，不经过 time_plan 子代理执行
+
+time_plan 子代理只负责将自然语言要求解析为结构化定时任务草案
+cron/schedule.py 负责确定性时间计算
+cron/executor.py 负责原子领取和执行
+cron/scheduler.py 负责后台扫描和调度

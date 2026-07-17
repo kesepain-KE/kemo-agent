@@ -550,6 +550,152 @@ def _interactive_command(
             print(f"取消失败：{exc}", file=stdout)
         return True, session_id
 
+    # --- cron commands ---
+    if command == "/crons":
+        from run.cron_store import CronStore
+        store = CronStore(root, user)
+        tasks = store.list_tasks()
+        if not tasks:
+            print("暂无定时任务。", file=stdout)
+        for item in tasks:
+            print(
+                f"{item['task_id']} | {item.get('status', '?')} | "
+                f"{item.get('schedule', {}).get('type', '?')} | "
+                f"next={item.get('next_run_at', '')} | {item.get('title', '')}",
+                file=stdout,
+            )
+        return True, session_id
+    if command == "/cron":
+        if not argument:
+            print("用法：/cron <自然语言定时要求>", file=stdout)
+            return True, session_id
+        from cron.service import generate_cron_task, CronGenerationError, CronSkipped
+        from run.cron_store import CronStore
+        try:
+            task = generate_cron_task(
+                root=root, user=user, user_request=argument,
+                source=source, session_id=session_id,
+            )
+        except CronSkipped as exc:
+            print(f"不需要创建定时任务：{exc}", file=stdout)
+            return True, session_id
+        except CronGenerationError as exc:
+            print(f"定时任务生成失败：{exc}", file=stdout)
+            return True, session_id
+        store = CronStore(root, user)
+        created = store.create(task)
+        print(
+            f"已创建定时任务：{created['task_id']} | {created['title']} | "
+            f"{created['schedule']['type']} | next={created['next_run_at']}",
+            file=stdout,
+        )
+        return True, session_id
+    if command == "/cron-show":
+        if not argument:
+            print("用法：/cron-show <任务ID>", file=stdout)
+            return True, session_id
+        from run.cron_store import CronStore
+        store = CronStore(root, user)
+        try:
+            task = store.read(argument)
+        except Exception as exc:
+            print(f"读取任务失败：{exc}", file=stdout)
+            return True, session_id
+        print(
+            f"{task['task_id']} | {task['status']} | {task['title']}",
+            file=stdout,
+        )
+        print(f"调度：{task.get('schedule', {})}", file=stdout)
+        print(f"下一次执行：{task.get('next_run_at', '')}", file=stdout)
+        print(f"上次执行：{task.get('last_run_at', '')}", file=stdout)
+        print(f"执行次数：{task.get('run_count', 0)}", file=stdout)
+        if task.get("last_error"):
+            print(f"上次错误：{task['last_error'].get('message', '')}", file=stdout)
+        return True, session_id
+    if command == "/cron-pause":
+        if not argument:
+            print("用法：/cron-pause <任务ID>", file=stdout)
+            return True, session_id
+        from run.cron_store import CronStore
+        store = CronStore(root, user)
+        try:
+            store.update(argument, lambda t: {**t, "status": "paused"})
+            print(f"已暂停定时任务 {argument}。", file=stdout)
+        except Exception as exc:
+            print(f"暂停失败：{exc}", file=stdout)
+        return True, session_id
+    if command == "/cron-resume":
+        if not argument:
+            print("用法：/cron-resume <任务ID>", file=stdout)
+            return True, session_id
+        from run.cron_store import CronStore
+        from cron.schedule import compute_next_run
+        from datetime import datetime, timezone
+        store = CronStore(root, user)
+        def _resume(t):
+            t["status"] = "enabled"
+            t["next_run_at"] = compute_next_run(t["schedule"])
+            return t
+        try:
+            store.update(argument, _resume)
+            print(f"已恢复定时任务 {argument}。", file=stdout)
+        except Exception as exc:
+            print(f"恢复失败：{exc}", file=stdout)
+        return True, session_id
+    if command == "/cron-cancel":
+        if not argument:
+            print("用法：/cron-cancel <任务ID>", file=stdout)
+            return True, session_id
+        from run.cron_store import CronStore
+        store = CronStore(root, user)
+        try:
+            store.update(argument, lambda t: {**t, "status": "cancelled"})
+            print(f"已取消定时任务 {argument}。", file=stdout)
+        except Exception as exc:
+            print(f"取消失败：{exc}", file=stdout)
+        return True, session_id
+    if command == "/cron-run":
+        if not argument:
+            print("用法：/cron-run <任务ID>", file=stdout)
+            return True, session_id
+        from cron.executor import execute_cron_task
+        from run.config import load_config
+        config = load_config(user, root)
+        print(f"立即执行定时任务 {argument}...", file=stdout)
+        try:
+            result = execute_cron_task(
+                root=root, user=user, task_id=argument, config=config,
+            )
+            print(
+                f"完成：{result.get('status', '?')} | "
+                f"result={bool(result.get('last_result'))} | "
+                f"error={bool(result.get('last_error'))}",
+                file=stdout,
+            )
+        except Exception as exc:
+            print(f"执行失败：{exc}", file=stdout)
+        return True, session_id
+    if command == "/cron-start":
+        from cron.scheduler import CronScheduler
+        # Use a module-level singleton
+        if not hasattr(run_interactive, '_cron_scheduler'):
+            run_interactive._cron_scheduler = CronScheduler(root)
+        sched = run_interactive._cron_scheduler
+        if sched.running:
+            print("调度器已在运行。", file=stdout)
+        else:
+            sched.start()
+            print("调度器已启动。", file=stdout)
+        return True, session_id
+    if command == "/cron-stop":
+        if hasattr(run_interactive, '_cron_scheduler'):
+            sched = run_interactive._cron_scheduler
+            sched.stop()
+            print("调度器已停止。", file=stdout)
+        else:
+            print("调度器未运行。", file=stdout)
+        return True, session_id
+
     return False, session_id
 
 
