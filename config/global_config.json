@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "provider": {
+    "type": "kemo",
+    "base_url": "http://127.0.0.1:8741/v1",
+    "api_key_env": "KEMO_API_KEY",
+    "model": "deepseek-deepseek-v4-pro",
+    "timeout": 120,
+    "stream": false
+  },
+  "tools": {
+    "enabled": true,
+    "timeout": 60,
+    "max_iterations": 8
+  },
+  "history": {
+    "schema_version": 1,
+    "recent_full_rounds": 3,
+    "older_tool_log_max_chars": 200
+  },
+  "prompt": {
+    "include_global_soul": true,
+    "include_user_soul": true,
+    "include_agents_manual": true
+  },
+  "memory": {
+    "fragment_limits": {
+      "seven_days": 15,
+      "one_month": 20,
+      "half_year": 25,
+      "permanent": 30
+    },
+    "fragment_max_chars": {
+      "temporary": 200,
+      "permanent": 300
+    },
+    "important_memory_max_chars": 1500
+  },
+  "agents": {
+    "n1_recent_rounds_before_tool_compression": 3,
+    "n2_max_rounds": 30,
+    "n3_rounds_after_compression": 10,
+    "n4_token_limit": 120000,
+    "n5_token_compression_ratio": 0.6,
+    "n6_important_memory_review_hours": 6,
+    "n7_daily_memory_review_time": "03:00",
+    "n8_task_plan_max_steps": 10
+  }
+}
