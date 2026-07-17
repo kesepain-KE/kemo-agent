@@ -1,6 +1,6 @@
-# kemo-agent Web 后端契约（v1）
+# kemo-agent Web 后端契约（v2）
 
-本阶段只实现可供后续前端接入的 FastAPI 后端，不实现 React/Vite 页面。
+FastAPI 为 React/Vite 前端提供聊天链路与只读 Observer 接口。写操作仍只开放 `POST /api/chat`。
 
 ## 运行拓扑
 
@@ -11,7 +11,7 @@
 → run.engine.iter_request_events
 ```
 
-Web 后端不启动 `RuntimeHost`、CronScheduler、OneBot、Telegram 或其他 Transport。长期后台宿主仍由 `start_host.py` 独立运行，避免 Web 开发/重载造成 Cron 重复实例。
+`create_app()` 本身不启动 `RuntimeHost`、CronScheduler 或消息 Transport。`start_web.py` 默认提供一站式运行并在 Web API 之外启动 RuntimeHost；使用 `--no-host` 可保持纯 Web API 模式，避免开发时重复后台宿主。
 
 ## 通用约定
 
@@ -51,7 +51,7 @@ Web 后端不启动 `RuntimeHost`、CronScheduler、OneBot、Telegram 或其他 
 {
   "status": "ok",
   "service": "kemo-agent-web",
-  "version": 1
+  "version": 2
 }
 ```
 
@@ -87,6 +87,30 @@ Web 后端不启动 `RuntimeHost`、CronScheduler、OneBot、Telegram 或其他 
   "messages": [{"role": "user", "content": "..."}]
 }
 ```
+
+### GET /api/users/{user}/overview
+
+查询参数：`session_id` 可选。聚合当前用户的真实上下文占用、脱敏 Provider 元数据、会话/知识/工具/子代理/活动任务计数、当前活动计划和最近活动。
+
+### GET /api/users/{user}/tasks
+
+只读返回 `PlanStore` 与 `CronStore` 的安全摘要。不会返回计划步骤结果、工具参数、Cron prompt 或错误详情。
+
+### GET /api/users/{user}/knowledge
+
+只读返回文件索引元数据和检索配置摘要。不会通过列表接口返回知识正文或绝对路径。
+
+### GET /api/users/{user}/skills
+
+只读返回工具注册表的名称、描述、版本、启用状态、来源层级和覆盖数量；不会加载或执行工具入口。
+
+### GET /api/users/{user}/sense
+
+只读返回实际注册的感知来源与注入开关。`global_sense` 说明目录不等同于已注册来源；不存在注册表时明确返回真实空态。
+
+### GET /api/users/{user}/settings
+
+返回脱敏配置镜像：Provider 类型/端点/模型、凭据来源状态、功能开关和运行限制。禁止返回 API Key、环境变量值、完整配置对象或内部绝对路径。
 
 ### POST /api/chat
 
@@ -133,18 +157,17 @@ done
 5. 路由/校验错误发生在流建立前时返回 JSON 错误；Run 执行错误发生在流建立后时通过 SSE `error`。
 6. 客户端断开时设置该请求独立的 cancel_event；不影响其他会话。
 
-## 本阶段明确不实现
+## 当前明确不实现
 
-- React/TypeScript/Vite 前端
 - WebSocket
 - 登录、Token、Cookie 或公网鉴权
 - 跨域开放策略
 - 会话删除、压缩和取消 API
-- 任务计划、Cron、记忆、配置管理 API
-- RuntimeHost 进程内托管
+- 任务计划、Cron、技能、感知和系统配置的 Web 写操作
+- 通过 Web API 管理 RuntimeHost 生命周期
 - OneBot/NapCat、Telegram
-- kemo-graph/RAG
+- kemo-graph/RAG Web 连接管理
 - 多模态上传
 - update.py
 
-这些能力在后续前端与部署需求明确后分阶段加入，不在 v1 隐式扩张。
+这些能力在部署需求和写入权限模型明确后分阶段加入，不在 v2 隐式扩张。

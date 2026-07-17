@@ -1,59 +1,48 @@
-# V16 静态原型迁移盘点
+# V16 Layered Observer UI 迁移状态
 
-源文件：`users/kesepain/history/file/kemo-agent-ui-v16-layered-view.html`（只读设计参考）
-实际位置：`D:\votx-agent\users\kesepain\history\file\kemo-agent-ui-v16-layered-view.html`
+标准参考：`E:\下载\kemo-agent-ui-v16-layered-view.html`。
 
 ## 页面
 
-- 对话 `/chat` ✅ 已接入
-- 任务 `/tasks` ⬜ 待接入
-- 知识库 `/knowledge` ⬜ 待接入
-- 技能 `/skills` ⬜ 待接入
-- 全局感知 `/sense` ⬜ 待接入
-- 配置概览 `/settings` ⬜ 待接入
+- `/chat`：真实用户、会话、历史、POST SSE、RunEvent、上下文用量、活动计划与最近活动
+- `/tasks`：独立任务中枢，读取 PlanStore / CronStore 安全摘要和真实空态
+- `/knowledge`：独立文件知识页，读取用户层与全局层索引元数据
+- `/skills`：独立技能中心，读取实际工具注册表和来源层级
+- `/sense`：独立全局感知观察页；未实现注册运行时时不生成演示来源
+- `/settings`：独立配置概览，提供外观设置与脱敏运行配置镜像
 
-## 已还原的 V16 视觉结构
+## AppShell
 
-### AppShell (components/AppShell.tsx)
+- V16 分层侧栏、最近会话、用户切换菜单和折叠态
+- 真实健康状态、上下文 Token 用量与占用比例
+- 当前 Provider / 模型只读菜单
+- 字号与高级白/高级黑主题
+- 运行状态抽屉：上下文、Provider、知识、工具、子代理和最近活动
+- 可搜索命令面板，支持 `Ctrl+K` 与页面导航
 
-- **侧栏**：brand-mark + brand-copy("Personal Agent Runtime") + sidebar-toggle + nav-section(6项含nav-icon/nav-label/nav-tip) + sidebar-rule + recent-block(最近对话列表) + sidebar-spacer + role-wrap
-- **用户切换**：role-button(头像+用户名+users/路径) + role-menu弹出式(mini-avatar/strong/small/space-option-id/check/space-mode-badge) 替代原生select
-- **顶部栏**：page-title + agent-line(status-dot绿/红) + role-chip + context-button(上下文窗口控件含进度条) + font-size-wrap(弹出式字号菜单Aa+小/中/大+font-sample) + theme-toggle-btn + 运行状态icon-btn + 命令面板icon-btn
-- **运行状态抽屉**：drawer + drawer-head + drawer-section(后端/用户/会话状态 + 能力边界说明)
-- **响应式**：mobile-menu在780px以下显示，侧栏变为fixed定位
+## ChatPage
 
-### ChatPage (pages/ChatPage.tsx)
+- 欢迎卡、真实运行指标、活动计划、快捷入口和最近活动
+- 文本、思考与工具调用流式卡片
+- 可用的知识、感知和技能页面入口；未接入的文件/图片按钮明确禁用
+- 新会话可用；保存状态说明为自动提交；手动压缩明确标记未接入
 
-- **欢迎页**：greeting-card(hero-logo+问候语+role-line含users/路径) + snapshot-card(4项:已接通POST SSE/7类RunEvent/只读历史恢复/独立Web会话) + quick-start(4卡片:检查运行状态/总结架构/查询知识库/规划今日任务，每卡含quick-icon+strong+span)
-- **消息区**：message.ai/user + msg-avatar(Bot/UserRound图标) + bubble(ReactMarkdown渲染) + messages.show控制显示
-- **输入区**：composer + textarea + composer-row(tool-dock 5按钮disabled待接入 + composer-meta含绿点/用户/会话/usage + composer-more弹出conversation-menu + send-btn带↗箭头)
-- **对话操作菜单**：conversation-menu弹出式(创建新对话/保存当前对话/压缩上下文)，每项含conversation-action-icon+strong+span，底部含说明
-- **运行/停止状态**：running时send-btn变为stop(红色)，AbortController取消
+## 数据原则
 
-### RunEventCards (components/RunEventCards.tsx)
+- 标准稿中的演示数字、传感器、外接项目状态和任务不进入正式页面。
+- Observer API 只返回页面所需的安全摘要，不返回 API Key、环境变量值、知识正文、Cron prompt、工具参数/结果或绝对路径。
+- 全局感知说明目录不等同于已注册来源；没有注册表时显示真实空态。
+- Observer API 本身不启动 RuntimeHost；前端开发使用 `start_web.py --no-host`，避免第二个 CronScheduler。
 
-- **思考过程**：trace + trace-head(可折叠) + trace-body(pre)
-- **工具调用**：tool-call + tool-call-head(icon+name+callId+status+chevron) + tool-call-body(tool-call-grid双面板:输入参数+返回结果)
-- **状态**：running(LoaderCircle旋转/amber) / success(CheckCircle2/green) / error(AlertCircle/red)
+## 样式组织
 
-## 保留的数据链路
+- `src/styles/prototype.css`：设计 token、Shell、聊天、分层模块、表格、卡片、设置和响应式布局。
+- `src/styles/app.css`：React 专用模型菜单、活动任务、最近活动、命令面板和抽屉增强。
+- 关键断点：`1250px` 顶栏收缩、`1100px` 模块重排、`780px` 窄屏侧栏、`520px` 单列卡片。
 
-- POST SSE 聊天 (streamChat + ReadableStream)
-- AbortController 取消流
-- 历史恢复 (getHistory + React Query)
-- 会话管理 (getSessions + URL参数)
-- RunEvent 归约 (reduceRunEvent: text_delta/reasoning_delta/tool_call_start/tool_call_result/usage/error/done)
-- Zustand UI 持久化 (theme/fontSize/sidebar)
+## 自动化覆盖
 
-## 仍需人工审美确认
-
-- V16原型的字号系统(V9 style block)与当前html font-size映射是否一致
-- 主题切换时暗色侧栏与V16暗色主题的色值是否完全匹配
-- tool-call-grid在窄屏(1180px)下单列显示是否可接受
-- quick-card hover动画与V16原型是否一致
-- context-button进度条暂为静态(—)需后续接入真实Token计数
-
-## CSS 处理
-
-V16的9个style块已提取到 `src/styles/prototype.css`，React专用覆盖和语义修正在 `src/styles/app.css`。
-两者通过V16语义类名(如role-menu/font-size-menu/conversation-menu/tool-dock等)配合工作。
+- 后端 Observer API 的真实数据读取与脱敏测试
+- 前端 5 个模块页面的结构/真实空态测试
+- AppShell 命令面板、Provider、上下文和主题控件测试
+- Playwright 桌面、780px 窄屏与暗色主题视觉回归

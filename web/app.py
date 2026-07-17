@@ -44,7 +44,7 @@ def create_app(
 ) -> FastAPI:
     base = (root or project_root()).resolve()
     backend = service or WebRunService(base)
-    app = FastAPI(title="kemo-agent Web API", version="1")
+    app = FastAPI(title="kemo-agent Web API", version="2")
     app.state.web_service = backend
 
     @app.exception_handler(WebServiceError)
@@ -90,6 +90,33 @@ def create_app(
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
         return backend.history(user, session_id, source=source)
+
+    @app.get("/api/users/{user}/overview")
+    async def overview(
+        user: str,
+        session_id: str = Query(default=""),
+    ) -> dict[str, Any]:
+        return backend.overview(user, session_id=session_id)
+
+    @app.get("/api/users/{user}/tasks")
+    async def tasks(user: str) -> dict[str, Any]:
+        return backend.tasks(user)
+
+    @app.get("/api/users/{user}/knowledge")
+    async def knowledge(user: str) -> dict[str, Any]:
+        return backend.knowledge(user)
+
+    @app.get("/api/users/{user}/skills")
+    async def skills(user: str) -> dict[str, Any]:
+        return backend.skills(user)
+
+    @app.get("/api/users/{user}/sense")
+    async def sense(user: str) -> dict[str, Any]:
+        return backend.sense(user)
+
+    @app.get("/api/users/{user}/settings")
+    async def settings(user: str) -> dict[str, Any]:
+        return backend.settings(user)
 
     @app.post("/api/chat")
     async def chat(body: ChatBody, request: Request) -> StreamingResponse:

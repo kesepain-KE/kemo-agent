@@ -3,23 +3,25 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Bot,
   CheckCircle2,
-  Clock,
+  ChevronDown,
   FileText,
   Image,
   BrainCircuit,
   LayoutGrid,
+  ListChecks,
   Plus,
   Send,
   Square,
+  TimerReset,
   UserRound,
-  Wrench,
   Zap,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useOutletContext } from 'react-router-dom'
+import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { getHistory, streamChat } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import { formatDateTime, statusLabel } from '../components/ModuleUi'
 import { ReasoningTrace, ToolCallCard } from '../components/RunEventCards'
 import type { ChatItem, RunEvent } from '../types/api'
 
@@ -77,30 +79,41 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
 }
 
 const quickStartCards = [
-  { prompt: '检查 kemo-agent 当前运行状态', icon: Zap, title: '检查运行状态', desc: '汇总核心模块、兼容 API 与外接服务状态' },
-  { prompt: '总结当前 Web 架构与已接接口', icon: FileText, title: '总结架构', desc: '梳理前端、后端与 Run 核心的接口边界' },
-  { prompt: '查询知识库中关于 kemo-agent 的设计资料', icon: BookOpen_, title: '查询知识库', desc: '默认使用文件索引进行本地检索' },
-  { prompt: '帮我规划今天的任务并生成优先级计划', icon: CheckCircle2, title: '规划今日任务', desc: '读取任务与上下文，生成执行顺序' },
+  { prompt: '帮我整理今天的任务并生成优先级计划', icon: CheckCircle2, title: '整理今日任务', desc: '读取任务与上下文，生成执行顺序' },
+  { prompt: '查询知识库中与当前问题相关的资料', icon: BookOpen_, title: '查询知识库', desc: '使用当前用户和全局文件索引检索' },
+  { prompt: '检查 kemo-agent 当前运行状态', icon: Zap, title: '检查运行状态', desc: '汇总核心模块、Provider 与外接服务状态' },
+  { prompt: '为当前用户创建一个定时任务', icon: TimerReset, title: '创建定时任务', desc: '通过对话描述时间、内容与执行目标' },
 ]
+
+function greetingLabel() {
+  const hour = new Date().getHours()
+  if (hour < 6) return '夜深了'
+  if (hour < 12) return '上午好'
+  if (hour < 18) return '下午好'
+  return '晚上好'
+}
 
 function BookOpen_() { return <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z" /></svg> }
 
 const toolDockButtons = [
-  { icon: FileText, label: '添加文件' },
-  { icon: Image, label: '图像' },
-  { icon: BookOpen_, label: '知识库' },
-  { icon: BrainCircuit, label: '全局感知' },
-  { icon: LayoutGrid, label: '选择技能' },
+  { icon: FileText, label: '添加文件', disabled: true },
+  { icon: Image, label: '图像', disabled: true },
+  { icon: BookOpen_, label: '知识库', path: '/knowledge' },
+  { icon: BrainCircuit, label: '全局感知', path: '/sense' },
+  { icon: LayoutGrid, label: '选择技能', path: '/skills' },
 ]
 
 export function ChatPage() {
-  const { user, sessionId, setSessionId } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, setSessionId, overview, refreshOverview } = useOutletContext<ShellOutletContext>()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('')
   const [liveItems, setLiveItems] = useState<ChatItem[]>([])
   const [running, setRunning] = useState(false)
   const [usage, setUsage] = useState<Record<string, unknown> | undefined>()
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
+  const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const historyQuery = useQuery({
@@ -123,6 +136,15 @@ export function ChatPage() {
     abortRef.current?.abort()
     setRunning(false)
   }, [user, sessionId])
+
+  useEffect(() => {
+    const prompt = searchParams.get('prompt')
+    if (!prompt) return
+    setDraft(prompt)
+    const next = new URLSearchParams(searchParams)
+    next.delete('prompt')
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -155,6 +177,8 @@ export function ChatPage() {
       })
       if (!sessionId) setSessionId(activeSession)
       await queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+      await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+      refreshOverview()
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
         setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
@@ -168,13 +192,14 @@ export function ChatPage() {
   const stop = () => abortRef.current?.abort()
   const newConversation = () => {
     abortRef.current?.abort()
-    setSessionId(createSessionId())
+    setSessionId('')
     setConversationMenuOpen(false)
   }
 
   const usageText = usage
     ? `${String(usage.prompt_tokens ?? '?')} + ${String(usage.completion_tokens ?? '?')} = ${String(usage.total_tokens ?? '?')}`
     : null
+  const activePlan = overview?.active_plan
 
   return (
     <div className="view chat-view active">
@@ -185,18 +210,28 @@ export function ChatPage() {
               <article className="greeting-card">
                 <div className="hero-logo"><img src="/kemo-agent.jpg" alt="kemo-agent logo" /></div>
                 <div className="greeting-copy">
-                  <h1>你好，{user || '用户'}</h1>
-                  <p>Web 已接入真实用户、会话、历史与流式聊天。今天需要处理什么？</p>
+                  <h1>{greetingLabel()}，{user || '用户'}</h1>
+                  <p>当前用户的配置、历史、知识、任务与技能运行态已载入。今天需要处理什么？</p>
                   <span className="role-line">● 当前用户 · users/{user || '—'}</span>
                 </div>
               </article>
               <article className="snapshot-card">
-                <div className="snapshot-item"><strong className="ok">已接通</strong><span>POST SSE</span></div>
-                <div className="snapshot-item"><strong>7 类</strong><span>RunEvent</span></div>
-                <div className="snapshot-item"><strong>只读</strong><span>历史恢复</span></div>
-                <div className="snapshot-item"><strong>独立</strong><span>Web 会话</span></div>
+                <div className="snapshot-item"><strong>{overview?.counts.sessions ?? '—'} 个</strong><span>Web 会话</span></div>
+                <div className="snapshot-item"><strong className="ok">{overview?.counts.knowledge_documents ?? '—'} 项</strong><span>文件知识</span></div>
+                <div className="snapshot-item"><strong>{overview?.counts.enabled_tools ?? '—'} 个</strong><span>可用工具</span></div>
+                <div className="snapshot-item"><strong>{overview?.counts.active_tasks ?? '—'} 个</strong><span>活动任务</span></div>
               </article>
             </div>
+            {activePlan && <article className={`active-task-card ${activeTaskOpen ? 'open' : ''}`}>
+              <div className="active-task-main">
+                <span className="active-task-play"><ListChecks size={17} /></span>
+                <span className="active-task-copy"><small>{statusLabel(activePlan.status)} · 当前用户 {user}</small><strong>{activePlan.title}</strong><span>{activePlan.description}</span></span>
+                <span className="active-task-progress"><b>{activePlan.progress.percent}%</b><span className="progress-line"><i style={{ width: `${activePlan.progress.percent}%` }} /></span></span>
+                <button className="task-inline-btn" onClick={() => setActiveTaskOpen((value) => !value)}>{activeTaskOpen ? '收起步骤' : '展开步骤'} <ChevronDown size={13} /></button>
+                <button className="task-inline-btn primary" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}>任务中枢</button>
+              </div>
+              <div className="active-task-detail">{activePlan.steps.slice(0, 6).map((step, index) => <div className={`active-task-step ${step.status}`} key={step.step_id}><i>{step.status === 'completed' ? '✓' : index + 1}</i><span><strong>{step.title}</strong><small>{statusLabel(step.status)} · {step.description}</small></span></div>)}</div>
+            </article>}
             <div className="quick-start">
               {quickStartCards.map(({ prompt, icon: Icon, title, desc }) => (
                 <button key={prompt} className="quick-card" onClick={() => setDraft(prompt)}>
@@ -206,6 +241,11 @@ export function ChatPage() {
                 </button>
               ))}
             </div>
+            <article className="activity-card">
+              <div className="activity-head"><strong>最近活动</strong><span>当前用户</span></div>
+              {overview?.activities.slice(0, 4).map((activity, index) => <div className="activity-row" key={`${activity.type}:${activity.updated_at}:${index}`}><time>{formatDateTime(activity.updated_at)}</time><span><strong>{activity.title}</strong><small>{activity.detail}</small></span><b>{statusLabel(activity.status)}</b></div>)}
+              {!overview?.activities.length && <div className="activity-empty">暂无已提交活动；成功完成对话、计划或定时任务后会显示在这里。</div>}
+            </article>
           </section>
         )}
         {historyQuery.isLoading && <div className="center-state">正在加载历史…</div>}
@@ -239,8 +279,8 @@ export function ChatPage() {
           <div className="composer-row">
             <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
               <div className="tool-dock">
-                {toolDockButtons.map(({ icon: Icon, label }) => (
-                  <button key={label} className="tool-btn" aria-label={label} title={label} disabled>
+                {toolDockButtons.map(({ icon: Icon, label, path, disabled }) => (
+                  <button key={label} className="tool-btn" aria-label={label} title={disabled ? `${label} · 待接入` : label} disabled={disabled} onClick={() => path && navigate(`${path}?user=${encodeURIComponent(user)}`)}>
                     <Icon size={19} />
                   </button>
                 ))}
@@ -273,15 +313,15 @@ export function ChatPage() {
                       <span className="conversation-action-icon"><Plus size={16} /></span>
                       <span className="conversation-action-copy"><strong>创建新对话</strong><span>开启独立的上下文窗口</span></span>
                     </button>
-                    <button className="conversation-action" role="menuitem" onClick={() => setConversationMenuOpen(false)}>
+                    <button className="conversation-action" role="menuitem" disabled>
                       <span className="conversation-action-icon"><FileText size={16} /></span>
-                      <span className="conversation-action-copy"><strong>保存当前对话</strong><span>写入当前用户的历史记录</span></span>
+                      <span className="conversation-action-copy"><strong>自动保存已启用</strong><span>每轮成功后写入当前用户历史</span></span>
                     </button>
-                    <button className="conversation-action compress" role="menuitem" onClick={() => setConversationMenuOpen(false)}>
+                    <button className="conversation-action compress" role="menuitem" disabled>
                       <span className="conversation-action-icon"><Zap size={16} /></span>
-                      <span className="conversation-action-copy"><strong>压缩上下文</strong><span>默认使用 Token 压缩机制</span></span>
+                      <span className="conversation-action-copy"><strong>手动压缩待接入</strong><span>自动压缩仍由上下文生命周期处理</span></span>
                     </button>
-                    <div className="conversation-menu-foot">自动压缩阈值 80% · 保留高权重记忆</div>
+                    <div className="conversation-menu-foot">成功响应自动保存 · 手动压缩 API 尚未开放</div>
                   </div>
                 )}
               </div>

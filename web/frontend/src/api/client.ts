@@ -2,8 +2,14 @@ import { z } from 'zod'
 import type {
   ApiErrorPayload,
   HistoryResponse,
+  KnowledgeResponse,
+  OverviewResponse,
   RunEvent,
+  SenseResponse,
   SessionsResponse,
+  SettingsResponse,
+  SkillsResponse,
+  TasksResponse,
   UsersResponse,
 } from '../types/api'
 
@@ -75,6 +81,31 @@ export async function getHistory(user: string, sessionId: string): Promise<Histo
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history`,
   )
+}
+
+export async function getOverview(user: string, sessionId = ''): Promise<OverviewResponse> {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`)
+}
+
+export async function getTasks(user: string): Promise<TasksResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks`)
+}
+
+export async function getKnowledge(user: string): Promise<KnowledgeResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge`)
+}
+
+export async function getSkills(user: string): Promise<SkillsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills`)
+}
+
+export async function getSense(user: string): Promise<SenseResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sense`)
+}
+
+export async function getSettings(user: string): Promise<SettingsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/settings`)
 }
 
 export interface StreamChatOptions {

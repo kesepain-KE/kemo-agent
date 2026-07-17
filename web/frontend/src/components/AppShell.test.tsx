@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { AppShell } from './AppShell'
@@ -15,7 +15,7 @@ describe('AppShell navigation', () => {
   it('加载真实用户并展示空聊天入口', async () => {
     renderApp('/chat')
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
-    expect(screen.getByText(/Web 已接入真实用户/)).toBeInTheDocument()
+    expect(screen.getByText(/当前用户的配置、历史、知识/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换当前用户' })).toBeInTheDocument()
   })
 
@@ -33,5 +33,14 @@ describe('AppShell navigation', () => {
     expect(screen.getByTitle(/切换为高级/)).toBeInTheDocument()
     expect(screen.getByTitle('运行状态')).toBeInTheDocument()
     expect(screen.getByTitle('命令面板')).toBeInTheDocument()
+    expect(await screen.findByTitle('查看当前 Provider')).toBeInTheDocument()
+  })
+
+  it('命令面板可以打开并展示标准页面入口', async () => {
+    renderApp('/chat')
+    await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
+    fireEvent.click(screen.getByTitle('命令面板'))
+    expect(screen.getByRole('dialog', { name: '全局搜索与命令' })).toBeInTheDocument()
+    expect(screen.getByText('查看任务中枢')).toBeInTheDocument()
   })
 })

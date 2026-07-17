@@ -12,7 +12,9 @@ import httpx
 from unittest.mock import patch
 
 from events import RunEvent
+from run.cron_store import CronStore, normalize_task
 from run.history import commit_window, empty_window
+from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
 from web.service import WebRunService
 
@@ -173,25 +175,35 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(fake.seen["session_id"], "s1")
         self.assertTrue(fake.cancel_event.is_set())
 
-    def test_startup_config_defaults_and_overrides_without_provider(self) -> None:
+    def test_startup_options_without_provider(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
         (root / "config" / "global_config.json").write_text(
             json.dumps({"web": {"host": "127.0.0.1", "port": 1478, "log_level": "info"}}),
             "utf-8",
         )
-        from start_web import main, resolve_web_config
-        import argparse
+        import start_web
 
-        resolved = resolve_web_config(
-            root,
-            argparse.Namespace(host="0.0.0.0", port=19000, log_level="debug"),
-        )
-        self.assertEqual(resolved, {"host": "0.0.0.0", "port": 19000, "log_level": "debug"})
-        with patch("uvicorn.run") as run:
-            self.assertEqual(main([], root=root), 0)
-        self.assertEqual(run.call_args.kwargs["host"], "127.0.0.1")
-        self.assertEqual(run.call_args.kwargs["port"], 1478)
+        with (
+            patch.object(start_web, "project_root", return_value=root),
+            patch.object(start_web, "_check_users", return_value=True),
+            patch.object(start_web, "_can_bind", return_value=(True, "")),
+            patch("uvicorn.run") as run,
+        ):
+            self.assertEqual(
+                start_web.main(
+                    [
+                        "--host=0.0.0.0",
+                        "--port=19000",
+                        "--log-level=debug",
+                        "--no-host",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
+        self.assertEqual(run.call_args.kwargs["port"], 19000)
+        self.assertEqual(run.call_args.kwargs["log_level"], "debug")
 
     def test_missing_terminal_and_invalid_event_become_sse_error(self) -> None:
         missing = self.request(
@@ -214,6 +226,115 @@ class WebBackendTests(unittest.TestCase):
         parsed = self.parse_sse(response.text)
         self.assertEqual(parsed[-1][0], "error")
         self.assertEqual(parsed[-1][1]["error"]["exception_type"], "InvalidRunEvent")
+
+    def test_observer_endpoints_return_real_sanitized_state(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "openai",
+                        "base_url": "https://example.test/v1",
+                        "model": "test-model",
+                        "api_key": "super-secret",
+                        "timeout": 30,
+                    },
+                    "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
+                    "knowledge": {"enabled": True, "max_items": 3, "max_chars": 2000},
+                    "memory": {"extraction_enabled": True, "injection_enabled": True},
+                    "task_plan": {"auto_accept": False, "max_steps": 8},
+                    "cron": {"enabled": True, "auto_start": False},
+                    "agents": {"n4_token_limit": 100000},
+                }
+            ),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "knowledge").mkdir()
+        (root / "users" / "alice" / "knowledge" / "notes.md").write_text("# Alice Notes\nprivate index", "utf-8")
+        (root / "global_knowledge").mkdir()
+        (root / "global_knowledge" / "shared.md").write_text("# Shared", "utf-8")
+        (root / "global_sense").mkdir()
+        (root / "global_sense" / "README.md").write_text("observer core", "utf-8")
+        plugin = root / "plugins" / "clock"
+        plugin.mkdir(parents=True)
+        (plugin / "tool.json").write_text(
+            json.dumps(
+                {
+                    "name": "clock",
+                    "description": "read time",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "version": "1",
+                    "enabled": True,
+                    "entrypoint": "tool.py:run",
+                }
+            ),
+            "utf-8",
+        )
+        PlanStore(root, "alice").create(
+            normalize_plan(
+                title="Observer plan",
+                description="safe metadata",
+                user="alice",
+                steps=[
+                    {
+                        "step_id": "step_1",
+                        "title": "Inspect",
+                        "description": "read only",
+                        "critical": True,
+                    }
+                ],
+            )
+        )
+        CronStore(root, "alice").create(
+            normalize_task(
+                title="Daily check",
+                prompt="do not expose this prompt",
+                user="alice",
+                schedule={"type": "daily", "time": "09:00", "timezone": "Asia/Shanghai"},
+            )
+        )
+        window = empty_window("alice", "web", "observer-session")
+        window["data"]["rounds"] = 1
+        window["data"]["token_usage"] = {
+            "prompt_tokens": 1200,
+            "completion_tokens": 300,
+            "total_tokens": 1500,
+            "estimated": False,
+        }
+        commit_window(root / "users" / "alice" / "history" / "observer-window", window)
+        app = create_app(service=WebRunService(root))
+
+        overview = self.request(
+            app,
+            "GET",
+            "/api/users/alice/overview?session_id=observer-session",
+        )
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.json()["counts"]["knowledge_documents"], 2)
+        self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
+        self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
+
+        tasks = self.request(app, "GET", "/api/users/alice/tasks")
+        self.assertEqual(len(tasks.json()["plans"]), 1)
+        self.assertEqual(len(tasks.json()["cron_tasks"]), 1)
+        self.assertNotIn("do not expose", tasks.text)
+
+        knowledge = self.request(app, "GET", "/api/users/alice/knowledge")
+        self.assertEqual(knowledge.json()["summary"]["user_documents"], 1)
+        self.assertNotIn("private index", knowledge.text)
+
+        skills = self.request(app, "GET", "/api/users/alice/skills")
+        self.assertEqual(skills.json()["tools"][0]["name"], "clock")
+        sense = self.request(app, "GET", "/api/users/alice/sense")
+        self.assertTrue(sense.json()["core_available"])
+        self.assertEqual(sense.json()["sources"], [])
+
+        settings = self.request(app, "GET", "/api/users/alice/settings")
+        self.assertEqual(settings.json()["provider"]["model"], "test-model")
+        self.assertNotIn("super-secret", settings.text)
+        self.assertNotIn("api_key", settings.text)
 
 
 if __name__ == "__main__":

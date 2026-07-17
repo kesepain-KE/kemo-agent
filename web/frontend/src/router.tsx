@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
-import { ChatPage } from './pages/ChatPage'
-import { PendingModulePage } from './pages/PendingModulePage'
+
+const routeFallback = <div className="route-loading">正在加载模块…</div>
 
 export const router = createBrowserRouter([
   {
@@ -9,12 +9,12 @@ export const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <Navigate to="/chat" replace /> },
-      { path: 'chat', element: <ChatPage /> },
-      { path: 'tasks', element: <PendingModulePage kind="tasks" /> },
-      { path: 'knowledge', element: <PendingModulePage kind="knowledge" /> },
-      { path: 'skills', element: <PendingModulePage kind="skills" /> },
-      { path: 'sense', element: <PendingModulePage kind="sense" /> },
-      { path: 'settings', element: <PendingModulePage kind="settings" /> },
+      { path: 'chat', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/ChatPage')).ChatPage }) },
+      { path: 'tasks', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/TasksPage')).TasksPage }) },
+      { path: 'knowledge', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/KnowledgePage')).KnowledgePage }) },
+      { path: 'skills', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/SkillsPage')).SkillsPage }) },
+      { path: 'sense', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/SensePage')).SensePage }) },
+      { path: 'settings', hydrateFallbackElement: routeFallback, lazy: async () => ({ Component: (await import('./pages/SettingsPage')).SettingsPage }) },
       { path: '*', element: <Navigate to="/chat" replace /> },
     ],
   },
