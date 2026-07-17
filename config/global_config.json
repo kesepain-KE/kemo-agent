@@ -72,6 +72,10 @@
     "queue_maxsize": 0,
     "default_timeout": 120
   },
+  "task_plan": {
+    "auto_accept": false,
+    "max_steps": 10
+  },
   "agents": {
     "n1_recent_rounds_before_tool_compression": 3,
     "n2_max_rounds": 30,

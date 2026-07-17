@@ -388,6 +388,168 @@ def _interactive_command(
         removed = store.forget(argument)
         print(f"已删除 {len(removed)} 条记忆。", file=stdout)
         return True, session_id
+
+    # --- task plan commands ---
+    if command == "/plans":
+        from run.task_plan_executor import list_plans
+        plans = list_plans(root, user)
+        if not plans:
+            print("暂无任务计划。", file=stdout)
+        for item in plans:
+            done = sum(1 for s in item.get("steps", []) if s.get("status") == "completed")
+            total = len(item.get("steps", []))
+            print(
+                f"{item['plan_id']} | {item.get('status', '?')} | "
+                f"{done}/{total} | {item.get('title', '')}",
+                file=stdout,
+            )
+        return True, session_id
+    if command == "/plan":
+        if not argument:
+            print("用法：/plan <目标描述>", file=stdout)
+            return True, session_id
+        from run.task_plan_service import generate_plan, PlanGenerationError, PlanSkipped
+        from run.task_plan_store import PlanStore
+        try:
+            plan = generate_plan(
+                root=root,
+                user=user,
+                goal=argument,
+                source=source,
+                session_id=session_id,
+            )
+        except PlanSkipped as exc:
+            print(f"不需要创建计划：{exc}", file=stdout)
+            return True, session_id
+        except PlanGenerationError as exc:
+            print(f"计划生成失败：{exc}", file=stdout)
+            return True, session_id
+        store = PlanStore(root, user)
+        created = store.create(plan)
+        print(
+            f"已创建计划：{created['plan_id']} | {created['title']} | "
+            f"{len(created['steps'])} 步 | 状态：{created['status']}",
+            file=stdout,
+        )
+        for step in created["steps"]:
+            deps = ", ".join(step.get("depends_on") or []) or "无"
+            print(
+                f"  {step['step_id']} | {step.get('tool_name', '无工具')} | "
+                f"deps={deps} | {step['title']}",
+                file=stdout,
+            )
+        if created.get("auto_accept"):
+            print("auto_accept 已开启，可使用 /plan-approve 立即执行。", file=stdout)
+        else:
+            print("使用 /plan-approve 批准执行。", file=stdout)
+        return True, session_id
+    if command == "/plan-show":
+        if not argument:
+            print("用法：/plan-show <计划ID>", file=stdout)
+            return True, session_id
+        from run.task_plan_executor import get_plan
+        try:
+            plan = get_plan(root, user, argument)
+        except Exception as exc:
+            print(f"读取计划失败：{exc}", file=stdout)
+            return True, session_id
+        print(
+            f"{plan['plan_id']} | {plan['status']} | {plan['title']}",
+            file=stdout,
+        )
+        print(f"描述：{plan.get('description', '')}", file=stdout)
+        for step in plan["steps"]:
+            deps = ", ".join(step.get("depends_on") or []) or "无"
+            print(
+                f"  {step['step_id']} | {step['status']} | "
+                f"{step.get('tool_name', '无工具')} | deps={deps} | "
+                f"{'关键' if step.get('critical') else '非关键'} | {step['title']}",
+                file=stdout,
+            )
+            if step.get("error"):
+                print(f"    错误：{step['error'].get('message', '')}", file=stdout)
+        return True, session_id
+    if command == "/plan-approve":
+        if not argument:
+            print("用法：/plan-approve <计划ID>", file=stdout)
+            return True, session_id
+        from run.task_plan_executor import approve_plan, execute_plan
+        from run.config import load_config
+        try:
+            plan = approve_plan(root, user, argument)
+        except Exception as exc:
+            print(f"批准失败：{exc}", file=stdout)
+            return True, session_id
+        print(f"已批准计划 {argument}，开始执行...", file=stdout)
+        config = load_config(user, root)
+        for event in execute_plan(
+            root=root, user=user, plan_id=argument, config=config,
+        ):
+            if event.type == "tool_call_start":
+                print(f"  [{event.metadata.get('step_id', '')}] 开始：{event.tool_name}", file=stdout)
+            elif event.type == "tool_call_result":
+                status = event.metadata.get("status", "?")
+                print(f"  [{event.metadata.get('step_id', '')}] {status}", file=stdout)
+            elif event.type == "done":
+                status = event.metadata.get("status", "")
+                if status:
+                    print(f"计划 {argument} → {status}", file=stdout)
+            elif event.type == "error":
+                detail = event.error or {}
+                print(f"  错误：{detail.get('message', '')}", file=stdout)
+        return True, session_id
+    if command == "/plan-pause":
+        if not argument:
+            print("用法：/plan-pause <计划ID>", file=stdout)
+            return True, session_id
+        from run.task_plan_executor import pause_plan
+        try:
+            pause_plan(root, user, argument)
+            print(f"已暂停计划 {argument}。", file=stdout)
+        except Exception as exc:
+            print(f"暂停失败：{exc}", file=stdout)
+        return True, session_id
+    if command == "/plan-resume":
+        if not argument:
+            print("用法：/plan-resume <计划ID>", file=stdout)
+            return True, session_id
+        from run.task_plan_executor import resume_plan, execute_plan
+        from run.config import load_config
+        try:
+            resume_plan(root, user, argument)
+        except Exception as exc:
+            print(f"恢复失败：{exc}", file=stdout)
+            return True, session_id
+        print(f"已恢复计划 {argument}，继续执行...", file=stdout)
+        config = load_config(user, root)
+        for event in execute_plan(
+            root=root, user=user, plan_id=argument, config=config,
+        ):
+            if event.type == "tool_call_start":
+                print(f"  [{event.metadata.get('step_id', '')}] 开始：{event.tool_name}", file=stdout)
+            elif event.type == "tool_call_result":
+                status = event.metadata.get("status", "?")
+                print(f"  [{event.metadata.get('step_id', '')}] {status}", file=stdout)
+            elif event.type == "done":
+                status = event.metadata.get("status", "")
+                if status:
+                    print(f"计划 {argument} → {status}", file=stdout)
+            elif event.type == "error":
+                detail = event.error or {}
+                print(f"  错误：{detail.get('message', '')}", file=stdout)
+        return True, session_id
+    if command == "/plan-cancel":
+        if not argument:
+            print("用法：/plan-cancel <计划ID>", file=stdout)
+            return True, session_id
+        from run.task_plan_executor import cancel_plan
+        try:
+            cancel_plan(root, user, argument)
+            print(f"已取消计划 {argument}。", file=stdout)
+        except Exception as exc:
+            print(f"取消失败：{exc}", file=stdout)
+        return True, session_id
+
     return False, session_id
 
 
