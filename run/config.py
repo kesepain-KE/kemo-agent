@@ -1,3 +1,4 @@
+
 """Configuration loading for kemo-agent.
 
 Global defaults are merged with one user's overrides.  Secret values are
@@ -15,6 +16,32 @@ from typing import Any
 
 class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
+
+
+def load_dotenv(path: Path, *, override: bool = False) -> None:
+    """Load simple KEY=VALUE entries without adding a third-party dependency."""
+    try:
+        lines = path.read_text("utf-8-sig").splitlines()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ConfigError(f"环境变量文件不可读：{path}（{exc}）") from exc
+
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        if not separator or not name or not name.replace("_", "a").isalnum() or name[0].isdigit():
+            raise ConfigError(f".env 第 {line_number} 行格式无效")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'\"', "'"}:
+            value = value[1:-1]
+        if override or name not in os.environ:
+            os.environ[name] = value
 
 
 def project_root() -> Path:
@@ -53,6 +80,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     base = root or project_root()
+    load_dotenv(base / ".env")
     from run.users import user_dir
 
     global_config = read_json_object(base / "config" / "global_config.json")

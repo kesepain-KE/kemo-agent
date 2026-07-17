@@ -72,6 +72,12 @@ def _project_root() -> Path:
 
 
 def discover_user(explicit_user: str | None, root: Path | None = None) -> str:
+    try:
+        from run.config import load_dotenv
+
+        load_dotenv((root or _project_root()) / ".env")
+    except ModuleNotFoundError:
+        pass
     if explicit_user and explicit_user.strip():
         return explicit_user.strip()
 

@@ -123,6 +123,18 @@ class ConfigAndHistoryTests(unittest.TestCase):
         self.assertEqual(config["provider"], {"type": "kemo", "timeout": 30})
         self.assertEqual(config["nested"], {"a": 1, "b": 9})
 
+    def test_dotenv_is_loaded_without_overriding_process_environment(self) -> None:
+        _, root = self.make_root()
+        (root / ".env").write_text(
+            "# comment\nTEST_DOTENV_VALUE=from-file\nTEST_DOTENV_KEEP=from-file\n",
+            "utf-8",
+        )
+        with patch.dict(os.environ, {"TEST_DOTENV_KEEP": "from-process"}, clear=False):
+            load_config("alice", root)
+            self.assertEqual(os.environ["TEST_DOTENV_VALUE"], "from-file")
+            self.assertEqual(os.environ["TEST_DOTENV_KEEP"], "from-process")
+        os.environ.pop("TEST_DOTENV_VALUE", None)
+
     def test_runtime_secret_from_environment(self) -> None:
         config = {"provider": {"type": "openai", "model": "test", "api_key_env": "UNIT_KEY"}}
         with patch.dict(os.environ, {"UNIT_KEY": "runtime-secret"}, clear=False):
