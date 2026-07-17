@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import queue
 import re
 import threading
 from typing import Any, Callable, Iterator
@@ -14,6 +15,7 @@ from run.users import list_users
 
 
 _SESSION_RE = re.compile(r"^[^\x00-\x1f]{1,128}$")
+_WORKER_DONE = object()
 
 
 class WebServiceError(RuntimeError):
@@ -123,8 +125,65 @@ class WebRunService:
             "prompt": normalized_prompt,
             "stream": True,
         }
-        return self.event_source(
-            request,
-            root=self.root,
-            cancel_event=cancel_event,
+        # The Run generator owns thread-affine RLocks.  Its next()/close()
+        # calls must therefore stay on one dedicated worker thread instead
+        # of hopping between asyncio.to_thread workers.
+        output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
+
+        def put(value: RunEvent | BaseException | object) -> bool:
+            while True:
+                if cancel_event.is_set():
+                    return False
+                try:
+                    output.put(value, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+
+        def run_source() -> None:
+            iterator: Iterator[RunEvent] | None = None
+            try:
+                iterator = iter(
+                    self.event_source(
+                        request,
+                        root=self.root,
+                        cancel_event=cancel_event,
+                    )
+                )
+                for event in iterator:
+                    if not put(event):
+                        break
+            except BaseException as exc:
+                put(exc)
+            finally:
+                if iterator is not None:
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except BaseException as exc:
+                            put(exc)
+                put(_WORKER_DONE)
+
+        worker = threading.Thread(
+            target=run_source,
+            name=f"web-run-{name}-{normalized_session}",
+            daemon=True,
         )
+        worker.start()
+
+        def events() -> Iterator[RunEvent]:
+            try:
+                while True:
+                    value = output.get()
+                    if value is _WORKER_DONE:
+                        return
+                    if isinstance(value, BaseException):
+                        raise value
+                    if isinstance(value, RunEvent):
+                        yield value
+            finally:
+                cancel_event.set()
+                worker.join(timeout=1.0)
+
+        return events()

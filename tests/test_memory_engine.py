@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
+from run.memory import MemoryStore
 
 
 TIERS = {
@@ -60,6 +61,21 @@ class MemoryEngineTests(unittest.TestCase):
 
     def request(self):
         return {"user": "alice", "source": "cli", "session_id": "s", "prompt": "记住我喜欢川菜"}
+
+    def test_empty_tier_file_is_treated_as_empty_memory(self) -> None:
+        root = self.root()
+        config = {
+            "memory": {
+                "tiers": TIERS,
+                "extraction_enabled": True,
+                "injection_enabled": True,
+            }
+        }
+        store = MemoryStore(root, "alice", config)
+        path = store.path("permanent")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", "utf-8")
+        self.assertEqual(store.load_tier("permanent"), [])
 
     def test_only_committed_round_submits_extraction(self) -> None:
         root = self.root()

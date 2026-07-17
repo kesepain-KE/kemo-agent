@@ -216,7 +216,12 @@ class MemoryStore:
         current = now or utc_now()
         path = self.path(tier)
         try:
-            raw = json.loads(path.read_text("utf-8"))
+            text = path.read_text("utf-8")
+            # A zero-byte tier file is the common result of an interrupted
+            # first-run bootstrap and is semantically equivalent to no items.
+            if not text.strip():
+                return []
+            raw = json.loads(text)
         except FileNotFoundError:
             return []
         except (OSError, json.JSONDecodeError) as exc:

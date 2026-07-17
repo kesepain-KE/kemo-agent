@@ -124,6 +124,30 @@ class WebBackendTests(unittest.TestCase):
         self.assertNotIn(secret, failed.text)
         self.assertEqual(failed.json()["error"]["message"], "Web 服务处理请求失败")
 
+    def test_web_run_generator_keeps_thread_affinity(self) -> None:
+        _, root = self.make_root()
+        lock = threading.RLock()
+        thread_ids: list[int] = []
+
+        def source(*_args, **_kwargs):
+            with lock:
+                thread_ids.append(threading.get_ident())
+                try:
+                    yield RunEvent(type="text_delta", content="ok")
+                    yield RunEvent(type="done")
+                finally:
+                    thread_ids.append(threading.get_ident())
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_chat(
+                "alice", "thread-affinity", "hello", cancel_event=threading.Event()
+            )
+        )
+        self.assertEqual([event.type for event in events], ["text_delta", "done"])
+        self.assertEqual(len(set(thread_ids)), 1)
+        self.assertNotEqual(thread_ids[0], threading.get_ident())
+
     def test_sse_order_and_payload_are_preserved(self) -> None:
         events = [
             RunEvent(type="reasoning_delta", content="think"),
