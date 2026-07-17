@@ -13,4 +13,4 @@
 - permanent不自动到期，但用户可明确纠正或删除。
 
 临时重要记忆文件位于users/<user>/memory_temporary_important.md，它是派生热画像，不参与档位升级。
-统一实现与完整字段契约见项目根目录memory_lifecycle.md。
+统一实现与完整字段契约见项目 run/memory_lifecycle.md。

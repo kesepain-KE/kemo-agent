@@ -43,7 +43,10 @@ web/node_modules/
 # User runtime data — only _template is tracked
 users/*/avatar/
 users/*/download/
-users/*/expand/
+
+# Keep _template tracking (unignore)
+!users/_template/
+!users/_template/**/users/*/expand/
 users/*/file_upload/
 users/*/history/
 users/*/improve/
