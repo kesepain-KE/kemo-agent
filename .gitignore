@@ -37,7 +37,9 @@ desktop.ini
 node_modules/
 web/node_modules/
 
-# Obsidian workspace (frequently changing state)
+# Playwright test tools
+web/frontend/.playwright-cli/
+web/frontend/output/# Obsidian workspace (frequently changing state)
 开发临时目录/obsidian/.obsidian/
 
 # User runtime data — only _template is tracked
