@@ -27,3 +27,15 @@ def stream_cli_request(request: dict[str, Any]):
     from run.engine import iter_request_events
 
     return iter_request_events(request)
+
+
+def handle_cli_status(request: dict[str, Any]) -> dict[str, Any]:
+    from run.engine import context_status
+
+    return context_status(request)
+
+
+def handle_cli_compress(request: dict[str, Any]) -> dict[str, Any]:
+    from run.engine import compress_context
+
+    return compress_context(request)

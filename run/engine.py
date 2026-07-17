@@ -12,6 +12,8 @@ from events import RunEvent, error_event
 from provider.factory import create_provider
 from provider.schema import ChatRequest, ChatResponse, ToolCall, Usage
 from run.config import load_config, project_root, provider_runtime_config
+from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
+from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import commit_window, prepare_window
 from run.prompt import build_system_prompt
 from run.tools import ToolError, ToolRegistry, discover_tools, execute_tool
@@ -144,7 +146,10 @@ def iter_request_events(
 
     try:
         user = _required_text(request, "user")
-        prompt = _required_text(request, "prompt")
+        prompt_value = request.get("prompt", "")
+        prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
+        if not prompt and not bool(request.get("compress_only", False)):
+            raise EngineError("请求字段 'prompt' 必须是非空字符串")
         source = _required_text(request, "source")
         session_id = _required_text(request, "session_id")
         base = (root or project_root()).resolve()
@@ -167,18 +172,105 @@ def iter_request_events(
             tool_timeout = float(tool_config.get("timeout", 60))
             max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
 
-            messages: list[dict[str, Any]] = []
             system_prompt = build_system_prompt(base, user, config)
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.extend(_history_messages(window))
-            messages.append({"role": "user", "content": prompt})
+            system_message = (
+                {"role": "system", "content": system_prompt} if system_prompt else None
+            )
+            compress_only = bool(request.get("compress_only", False))
+            current_user_message = (
+                None if compress_only else {"role": "user", "content": prompt}
+            )
+            context_policy = ContextPolicy.from_config(config)
+            force_compress = bool(request.get("compress", False) or compress_only)
+            context_selection = select_context(
+                window=window,
+                policy=context_policy,
+                system_message=system_message,
+                current_user_message=current_user_message,
+                tools=tool_schemas,
+                force_compress=force_compress,
+            )
+            summary_usage = _usage_total()
+            summary_cache = None
+            summary_diagnostics: dict[str, Any] = {
+                "cache_hit": False,
+                "generated": False,
+                "failed": False,
+                "covered_rounds": [],
+            }
+            # A summary consumes input tokens too.  Re-select until the set of
+            # removed whole rounds is stable, so no round can be displaced by
+            # the summary without also being included in that summary.
+            max_summary_passes = len(context_selection.all_rounds) + 1
+            for _ in range(max_summary_passes):
+                removed_before = [item.number for item in context_selection.removed_rounds]
+                if not removed_before:
+                    break
+                summary_cache, summary_diagnostics = get_or_create_summary(
+                    cache_path=window_path / "context_summary.json",
+                    groups=context_selection.removed_rounds,
+                    provider=provider,
+                    model=runtime_provider["model"],
+                    cancel_event=cancel_event,
+                    chunk_token_budget=max(256, context_policy.input_budget // 2),
+                    max_tokens=min(4096, max(256, context_policy.output_reserve)),
+                    response_hook=lambda raw: _merge_usage(
+                        summary_usage, _usage_from_dict(raw)
+                    ),
+                )
+                next_selection = select_context(
+                    window=window,
+                    policy=context_policy,
+                    system_message=system_message,
+                    summary_message=build_summary_message(summary_cache),
+                    current_user_message=current_user_message,
+                    tools=tool_schemas,
+                    force_compress=force_compress,
+                )
+                removed_after = [item.number for item in next_selection.removed_rounds]
+                context_selection = next_selection
+                if removed_after == removed_before:
+                    break
+            messages = context_selection.messages
+            context_stats = context_selection.stats()
+            context_stats["summary"] = summary_diagnostics
+            context_stats["summary_usage"] = summary_usage
+            if compress_only:
+                yield RunEvent(
+                    type="done",
+                    usage=dict(summary_usage),
+                    metadata={
+                        "text": "",
+                        "reasoning": "",
+                        "usage": dict(summary_usage),
+                        "model": runtime_provider["model"],
+                        "user": user,
+                        "source": source,
+                        "session_id": session_id,
+                        "window": window_path.name,
+                        "context": context_stats,
+                        "summary_cache": (
+                            str(window_path / "context_summary.json")
+                            if summary_cache is not None
+                            else None
+                        ),
+                        "compressed": True,
+                        "committed": False,
+                    },
+                )
+                return
 
             stream = bool(request.get("stream", runtime_provider.get("stream", False)))
             all_text: list[str] = []
             all_reasoning: list[str] = []
             tool_records: list[dict[str, Any]] = []
-            usage_total = _usage_total()
+            usage_total = dict(summary_usage)
+            if summary_usage.get("total_tokens", 0):
+                yield RunEvent(
+                    type="usage",
+                    usage=dict(summary_usage),
+                    metadata={"phase": "context_summary"},
+                )
             seen_calls: dict[str, dict[str, Any]] = {}
             final_metadata: dict[str, Any] = {}
             completed = False
@@ -186,11 +278,31 @@ def iter_request_events(
             for iteration in range(1, max_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
                     return
+                if iteration > 1:
+                    current_tokens = estimate_messages_tokens(messages) + estimate_tools_tokens(tool_schemas)
+                    if current_tokens > context_policy.token_limit:
+                        yield error_event(
+                            EngineError(
+                                "当前工具循环已超过上下文上限；为避免拆散工具消息组，本轮已停止"
+                            ),
+                            phase="context",
+                        )
+                        return
+                configured_max_tokens = runtime_provider.get("max_tokens")
+                request_max_tokens = (
+                    min(
+                        context_policy.output_reserve,
+                        max(1, int(configured_max_tokens)),
+                    )
+                    if configured_max_tokens is not None
+                    else None
+                )
                 chat_request = ChatRequest(
                     model=runtime_provider["model"],
                     messages=messages,
                     stream=stream,
                     tools=tool_schemas,
+                    max_tokens=request_max_tokens,
                 )
                 iteration_text: list[str] = []
                 iteration_reasoning: list[str] = []
@@ -334,6 +446,12 @@ def iter_request_events(
             window["think"]["rounds"].append({"round": round_number, "content": reasoning})
             window["tool"]["rounds"].append({"round": round_number, "calls": tool_records})
             window["data"]["rounds"] = round_number
+            window["data"]["context"] = {
+                **context_stats,
+                "summary_cache": (
+                    "context_summary.json" if summary_cache is not None else None
+                ),
+            }
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
             commit_window(window_path, window)
 
@@ -348,6 +466,7 @@ def iter_request_events(
                     "session_id": session_id,
                     "window": window_path.name,
                     "tool_calls": len(tool_records),
+                    "context": context_stats,
                     "committed": True,
                 }
             )
@@ -408,3 +527,74 @@ def handle_request(
     if final is None:
         raise EngineError("运行在完成前被取消")
     return dict(final.metadata)
+
+
+def context_status(
+    request: dict[str, Any],
+    *,
+    root: Path | None = None,
+    tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+) -> dict[str, Any]:
+    user = _required_text(request, "user")
+    source = _required_text(request, "source")
+    session_id = _required_text(request, "session_id")
+    base = (root or project_root()).resolve()
+    config = load_config(user, base)
+    window_path, window, is_new = prepare_window(base, user, source, session_id)
+    tool_config = config.get("tools") or {}
+    registry = (
+        tool_registry_factory(base, user)
+        if bool(tool_config.get("enabled", True))
+        else ToolRegistry({})
+    )
+    system_prompt = build_system_prompt(base, user, config)
+    policy = ContextPolicy.from_config(config)
+    selection = select_context(
+        window=window,
+        policy=policy,
+        system_message=(
+            {"role": "system", "content": system_prompt} if system_prompt else None
+        ),
+        current_user_message=None,
+        tools=registry.schemas() or None,
+    )
+    cache_path = window_path / "context_summary.json"
+    persisted = window.get("data", {}).get("context")
+    return {
+        "user": user,
+        "source": source,
+        "session_id": session_id,
+        "window": None if is_new else window_path.name,
+        "rounds": int(window.get("data", {}).get("rounds", 0)),
+        "context": selection.stats(),
+        "last_committed_context": persisted if isinstance(persisted, dict) else None,
+        "summary_cache_exists": cache_path.is_file(),
+        "policy": {
+            "recent_tool_rounds": policy.recent_tool_rounds,
+            "max_rounds": policy.max_rounds,
+            "rounds_after_compression": policy.rounds_after_compression,
+            "token_limit": policy.token_limit,
+            "compression_ratio": policy.compression_ratio,
+            "input_budget": policy.input_budget,
+            "output_reserve": policy.output_reserve,
+        },
+    }
+
+
+def compress_context(
+    request: dict[str, Any],
+    *,
+    root: Path | None = None,
+    provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
+    tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+) -> dict[str, Any]:
+    payload = dict(request)
+    payload["prompt"] = ""
+    payload["compress_only"] = True
+    payload["compress"] = True
+    return handle_request(
+        payload,
+        root=root,
+        provider_factory=provider_factory,
+        tool_registry_factory=tool_registry_factory,
+    )

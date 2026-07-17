@@ -13,7 +13,7 @@ from unittest.mock import patch
 import cli
 from events import RunEvent
 from provider.schema import ChatResponse, ToolCall, Usage
-from run.engine import handle_request, iter_request_events
+from run.engine import compress_context, context_status, handle_request, iter_request_events
 from run.history import find_window, load_window
 from run.tools import ToolError, discover_tools, execute_tool
 
@@ -205,6 +205,60 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
+
+    def test_context_status_and_manual_compress_do_not_add_round(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[ChatResponse(text=f"reply-{index}", usage=Usage()) for index in range(12)]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for index in range(12):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "long",
+                        "prompt": f"round-{index}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            status = context_status(
+                {"user": "alice", "source": "cli", "session_id": "long"},
+                root=root,
+            )
+            self.assertEqual(status["rounds"], 12)
+            summary_provider = ScriptedProvider(
+                responses=[
+                    ChatResponse(
+                        text=json.dumps(
+                            {
+                                "facts": ["old rounds"],
+                                "requirements": [],
+                                "decisions": [],
+                                "unfinished": [],
+                                "tool_results": [],
+                                "entities": [],
+                                "narrative": "summary",
+                            }
+                        ),
+                        usage=Usage(3, 1, 4, source="mock"),
+                    )
+                ]
+            )
+            result = compress_context(
+                {"user": "alice", "source": "cli", "session_id": "long"},
+                root=root,
+                provider_factory=lambda _: summary_provider,
+            )
+        self.assertTrue(result["compressed"])
+        self.assertFalse(result["committed"])
+        self.assertEqual(result["context"]["rounds_kept"], 10)
+        self.assertEqual(result["context"]["rounds_removed"], 2)
+        self.assertEqual(len(summary_provider.requests), 1)
+        window = load_window(find_window(root, "alice", "cli", "long"))
+        self.assertEqual(window["data"]["rounds"], 12)
+        self.assertEqual(len(window["text"]["messages"]), 24)
 
     def test_cli_stream_reasoning_json_and_interrupt(self) -> None:
         stdout = io.StringIO()

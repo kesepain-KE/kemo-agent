@@ -268,6 +268,7 @@ def _interactive_command(
     session_id: str,
     stdout: Any,
 ) -> tuple[bool, str]:
+    from run.engine import compress_context, context_status
     from run.history import clear_session, list_sessions, session_messages
 
     command, _, argument = prompt.partition(" ")
@@ -303,10 +304,43 @@ def _interactive_command(
             print(f"{message.get('role', '?')}: {message.get('content', '')}", file=stdout)
         return True, session_id
     if command == "/status":
-        sessions = {item["session_id"]: item for item in list_sessions(root, user, source)}
-        item = sessions.get(session_id)
-        rounds = item["rounds"] if item else 0
-        print(f"user={user} | source={source} | session={session_id} | rounds={rounds}", file=stdout)
+        try:
+            status = context_status(
+                {"user": user, "source": source, "session_id": session_id}, root=root
+            )
+        except Exception:
+            # Keep the transport-level status useful in minimal/test workspaces
+            # that do not yet contain a global configuration.
+            sessions = {
+                item["session_id"]: item for item in list_sessions(root, user, source)
+            }
+            rounds = sessions.get(session_id, {}).get("rounds", 0)
+            print(
+                f"user={user} | source={source} | session={session_id} | rounds={rounds}",
+                file=stdout,
+            )
+            return True, session_id
+        context = status["context"]
+        print(
+            f"user={user} | source={source} | session={session_id} | "
+            f"rounds={status['rounds']} | context≈{context['estimated_tokens_before']}/"
+            f"{context['input_budget']} | kept={context['rounds_kept']} | "
+            f"removed={context['rounds_removed']} | summary={status['summary_cache_exists']}",
+            file=stdout,
+        )
+        return True, session_id
+    if command == "/compress":
+        result = compress_context(
+            {"user": user, "source": source, "session_id": session_id}, root=root
+        )
+        context = result["context"]
+        summary = context["summary"]
+        print(
+            f"上下文整理完成：removed={context['rounds_removed']} | "
+            f"kept={context['rounds_kept']} | cache_hit={summary['cache_hit']} | "
+            f"generated={summary['generated']} | failed={summary['failed']}",
+            file=stdout,
+        )
         return True, session_id
     return False, session_id
 
@@ -329,7 +363,7 @@ def run_interactive(
     base = (root or _project_root()).resolve()
     if getattr(stdin, "isatty", lambda: False)():
         print(f"kemo-agent CLI | user={user} | session={session_id}", file=stdout)
-        print("命令：/new /sessions /use <session> /clear /history /status /exit", file=stdout)
+        print("命令：/new /sessions /use <session> /clear /history /status /compress /exit", file=stdout)
 
     while True:
         try:
