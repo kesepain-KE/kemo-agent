@@ -82,11 +82,13 @@ def _iter_documents(base: Path, scope: str, *, max_file_chars: int) -> Iterable[
 
 
 def build_index(root: Path, user: str, *, max_file_chars: int = 20000) -> tuple[KnowledgeDocument, ...]:
-    """Build an in-memory index. User documents are ordered before shared documents."""
+    """Build an in-memory index ordered by user, shared, then global scope."""
     user_base = root / "users" / user / "knowledge"
+    shared_base = root / "shared_knowledge"
     global_base = root / "global_knowledge"
     return tuple(
         [*_iter_documents(user_base, "user", max_file_chars=max_file_chars)]
+        + [*_iter_documents(shared_base, "shared", max_file_chars=max_file_chars)]
         + [*_iter_documents(global_base, "global", max_file_chars=max_file_chars)]
     )
 
@@ -121,7 +123,7 @@ def select_knowledge(
             score += title_hits
         if score < minimum_score:
             continue
-        scope_priority = 0 if document.scope == "user" else 1
+        scope_priority = {"user": 0, "shared": 1, "global": 2}.get(document.scope, 3)
         ranked.append((-score, scope_priority, document.relative_path.casefold(), document))
     ranked.sort(key=lambda item: (item[0], item[1], item[2]))
 

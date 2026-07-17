@@ -228,6 +228,7 @@ class WebRunService:
             "summary": {
                 "documents": len(documents),
                 "user_documents": sum(item["scope"] == "user" for item in documents),
+                "shared_documents": sum(item["scope"] == "shared" for item in documents),
                 "global_documents": sum(item["scope"] == "global" for item in documents),
             },
             "documents": documents,
@@ -252,7 +253,7 @@ class WebRunService:
                     "version": tool.version,
                     "enabled": tool.enabled,
                     "source": tool.source,
-                    "layer": layer_by_source.get(tool.source, "project"),
+                    "layer": layer_by_source.get(tool.source, "core"),
                     "overrides": len(tool.overrides),
                 }
             )
@@ -278,12 +279,17 @@ class WebRunService:
             for index, item in enumerate(raw_sources):
                 if not isinstance(item, dict):
                     continue
+                layer = str(item.get("layer") or "user")
+                if layer == "project":
+                    layer = "global"
+                if layer not in {"user", "shared", "global"}:
+                    layer = "global"
                 sources.append(
                     {
                         "id": str(item.get("id") or f"source_{index + 1}"),
                         "name": str(item.get("name") or item.get("id") or "未命名来源"),
                         "description": str(item.get("description") or ""),
-                        "layer": str(item.get("layer") or "user"),
+                        "layer": layer,
                         "enabled": bool(item.get("enabled", True)),
                         "status": str(item.get("status") or "registered"),
                     }
@@ -308,7 +314,7 @@ class WebRunService:
                 "enabled": sum(item["enabled"] for item in sources),
                 "user": sum(item["layer"] == "user" for item in sources),
                 "shared": sum(item["layer"] == "shared" for item in sources),
-                "project": sum(item["layer"] == "project" for item in sources),
+                "global": sum(item["layer"] == "global" for item in sources),
             },
             "sources": sources,
             "decisions": [],

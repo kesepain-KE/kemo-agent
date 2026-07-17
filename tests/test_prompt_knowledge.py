@@ -36,6 +36,7 @@ class PromptKnowledgeTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "config").mkdir()
         (root / "global_knowledge").mkdir()
+        (root / "shared_knowledge").mkdir()
         (root / "users" / "alice" / "knowledge").mkdir(parents=True)
         (root / "users" / "alice" / "history").mkdir()
         (root / "users" / "alice" / "improve").mkdir()
@@ -80,18 +81,22 @@ class PromptKnowledgeTests(unittest.TestCase):
         offsets = [prompt.index(item) for item in ordered]
         self.assertEqual(offsets, sorted(offsets))
 
-    def test_index_user_before_global_and_skips_binary(self) -> None:
+    def test_index_orders_user_shared_global_and_skips_binary(self) -> None:
         _, root, _ = self.make_root()
         (root / "users" / "alice" / "knowledge" / "user.md").write_text("# User\nalpha", "utf-8")
+        (root / "shared_knowledge" / "shared.md").write_text("# Shared\nalpha", "utf-8")
         (root / "global_knowledge" / "global.md").write_text("# Global\nalpha", "utf-8")
         (root / "global_knowledge" / "ignore.bin").write_bytes(b"alpha")
         documents = build_index(root, "alice")
-        self.assertEqual([item.scope for item in documents], ["user", "global"])
+        self.assertEqual([item.scope for item in documents], ["user", "shared", "global"])
 
     def test_retrieval_prefers_user_and_obeys_budget(self) -> None:
         _, root, config = self.make_root()
         (root / "users" / "alice" / "knowledge" / "python.md").write_text(
             "# Python Notes\npython asyncio user detail " * 30, "utf-8"
+        )
+        (root / "shared_knowledge" / "python.md").write_text(
+            "# Python Notes\npython asyncio shared detail", "utf-8"
         )
         (root / "global_knowledge" / "python.md").write_text(
             "# Python Notes\npython asyncio global detail", "utf-8"
@@ -101,6 +106,17 @@ class PromptKnowledgeTests(unittest.TestCase):
         self.assertTrue(selection.documents)
         self.assertEqual(selection.documents[0].scope, "user")
         self.assertLessEqual(len(selection.text), 160)
+
+    def test_retrieval_prefers_shared_before_global_at_equal_score(self) -> None:
+        _, root, config = self.make_root()
+        (root / "shared_knowledge" / "guide.md").write_text(
+            "# Runtime Guide\nruntime transport rules", "utf-8"
+        )
+        (root / "global_knowledge" / "guide.md").write_text(
+            "# Runtime Guide\nruntime transport rules", "utf-8"
+        )
+        selection = select_knowledge(root, "alice", "runtime transport", config)
+        self.assertEqual([item.scope for item in selection.documents], ["shared", "global"])
 
     def test_unrelated_query_does_not_inject(self) -> None:
         _, root, config = self.make_root()

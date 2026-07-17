@@ -291,12 +291,22 @@ class WebBackendTests(unittest.TestCase):
                     "task_plan": {"auto_accept": False, "max_steps": 8},
                     "cron": {"enabled": True, "auto_start": False},
                     "agents": {"n4_token_limit": 100000},
+                    "global_sense": {
+                        "enabled": True,
+                        "sources": [
+                            {"id": "user-source", "layer": "user"},
+                            {"id": "shared-source", "layer": "shared"},
+                            {"id": "legacy-project-source", "layer": "project"},
+                        ],
+                    },
                 }
             ),
             "utf-8",
         )
         (root / "users" / "alice" / "knowledge").mkdir()
         (root / "users" / "alice" / "knowledge" / "notes.md").write_text("# Alice Notes\nprivate index", "utf-8")
+        (root / "shared_knowledge").mkdir()
+        (root / "shared_knowledge" / "team.md").write_text("# Team Shared", "utf-8")
         (root / "global_knowledge").mkdir()
         (root / "global_knowledge" / "shared.md").write_text("# Shared", "utf-8")
         (root / "global_sense").mkdir()
@@ -356,7 +366,7 @@ class WebBackendTests(unittest.TestCase):
             "/api/users/alice/overview?session_id=observer-session",
         )
         self.assertEqual(overview.status_code, 200)
-        self.assertEqual(overview.json()["counts"]["knowledge_documents"], 2)
+        self.assertEqual(overview.json()["counts"]["knowledge_documents"], 3)
         self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
         self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
 
@@ -367,13 +377,25 @@ class WebBackendTests(unittest.TestCase):
 
         knowledge = self.request(app, "GET", "/api/users/alice/knowledge")
         self.assertEqual(knowledge.json()["summary"]["user_documents"], 1)
+        self.assertEqual(knowledge.json()["summary"]["shared_documents"], 1)
+        self.assertEqual(knowledge.json()["summary"]["global_documents"], 1)
+        self.assertEqual(
+            [item["scope"] for item in knowledge.json()["documents"]],
+            ["user", "shared", "global"],
+        )
         self.assertNotIn("private index", knowledge.text)
 
         skills = self.request(app, "GET", "/api/users/alice/skills")
         self.assertEqual(skills.json()["tools"][0]["name"], "clock")
+        self.assertNotIn("project", skills.text)
         sense = self.request(app, "GET", "/api/users/alice/sense")
         self.assertTrue(sense.json()["core_available"])
-        self.assertEqual(sense.json()["sources"], [])
+        self.assertEqual(
+            [item["layer"] for item in sense.json()["sources"]],
+            ["user", "shared", "global"],
+        )
+        self.assertEqual(sense.json()["summary"]["global"], 1)
+        self.assertNotIn('"project"', sense.text)
 
         settings = self.request(app, "GET", "/api/users/alice/settings")
         self.assertEqual(settings.json()["provider"]["model"], "test-model")

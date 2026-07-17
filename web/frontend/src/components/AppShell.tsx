@@ -252,7 +252,7 @@ export function AppShell() {
         <section className="content"><Outlet context={{ user, sessionId, setSessionId, overview, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} /></section>
       </main>
 
-      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} aria-hidden={!ui.drawerOpen} inert={!ui.drawerOpen}>
+      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>
         <div className="drawer-head"><strong>运行状态</strong><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
         <div className="drawer-body">
           <section className="drawer-section"><div className="drawer-title"><strong>当前上下文</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话'}</span></div><div className="drawer-context-number"><strong>{formatTokens(contextTotal)} / {formatTokens(contextLimit)}</strong><span>{context?.usage.estimated ? '本地估算' : contextTotal ? 'Provider 统计' : '等待首轮统计'}</span></div><div className="progress-line"><i style={{ width: `${contextPercent}%` }} /></div><div className="drawer-context-meta"><span>占用 {contextPercent}%</span><span>上限 {contextLimit.toLocaleString()} Token</span></div></section>

@@ -6,10 +6,10 @@ import { getSkills } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { EmptyPanel, MetricCard, ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 
-type Layer = 'all' | 'user' | 'shared' | 'core' | 'project'
+type Layer = 'all' | 'user' | 'shared' | 'core'
 
 const layerLabels: Record<string, string> = {
-  user: '用户层', shared: '共享层', core: '基础插件', project: '项目层',
+  user: '用户层', shared: '共享层', core: '基础插件',
 }
 
 export function SkillsPage() {
@@ -49,7 +49,7 @@ export function SkillsPage() {
 
       <div className="module-toolbar">
         <div className="module-tabs">
-          {([['all', '全部技能'], ['user', '用户层'], ['shared', '共享层'], ['core', '基础插件'], ['project', '项目层']] as const).map(([value, label]) => (
+          {([['all', '全部技能'], ['user', '用户层'], ['shared', '共享层'], ['core', '基础插件']] as const).map(([value, label]) => (
             <button key={value} className={`module-tab-btn ${layer === value ? 'active' : ''}`} onClick={() => setLayer(value)}>{label}</button>
           ))}
         </div>

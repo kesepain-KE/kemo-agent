@@ -112,7 +112,7 @@ export interface TasksResponse {
 }
 
 export interface KnowledgeDocumentSummary {
-  scope: 'user' | 'global' | string
+  scope: 'user' | 'shared' | 'global' | string
   relative_path: string
   title: string
   size: number
@@ -128,7 +128,7 @@ export interface KnowledgeResponse {
     minimum_score: number
     mode: string
   }
-  summary: { documents: number; user_documents: number; global_documents: number }
+  summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
   extensions: { kemo_graph: string }
 }
@@ -139,7 +139,7 @@ export interface SkillSummary {
   version: string
   enabled: boolean
   source: string
-  layer: 'user' | 'shared' | 'core' | 'project' | string
+  layer: 'user' | 'shared' | 'core' | string
   overrides: number
 }
 
@@ -153,7 +153,7 @@ export interface SenseSourceSummary {
   id: string
   name: string
   description: string
-  layer: 'user' | 'shared' | 'project' | string
+  layer: 'user' | 'shared' | 'global' | string
   enabled: boolean
   status: string
 }
@@ -164,7 +164,7 @@ export interface SenseResponse {
   injection_enabled: boolean
   core_available: boolean
   core_files: number
-  summary: { registered: number; enabled: number; user: number; shared: number; project: number }
+  summary: { registered: number; enabled: number; user: number; shared: number; global: number }
   sources: SenseSourceSummary[]
   decisions: Array<Record<string, unknown>>
 }

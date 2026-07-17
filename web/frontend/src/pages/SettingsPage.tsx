@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, Database, Moon, RefreshCw, Sun, Wrench } from 'lucide-react'
+import { Bot, Database, RefreshCw, Wrench } from 'lucide-react'
 import { useOutletContext } from 'react-router-dom'
 import { getSettings } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
@@ -50,14 +50,20 @@ export function SettingsPage() {
           {tab === 'appearance' && <>
             <article className="setting-section">
               <div className="setting-section-head"><strong>界面主题</strong><span>侧边栏、工作区、浮层与控件使用统一语义色。</span></div>
-              <div className="theme-choice-grid">
-                <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} onClick={() => ui.setTheme('light')}><span className="theme-preview light"><Sun size={18} /></span><span><strong>高级白</strong><small>统一灰白 · 低对比边界</small></span><i>{ui.theme === 'light' ? '✓' : ''}</i></button>
-                <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} onClick={() => ui.setTheme('dark')}><span className="theme-preview dark"><Moon size={18} /></span><span><strong>高级黑</strong><small>中性黑灰 · 统一层级</small></span><i>{ui.theme === 'dark' ? '✓' : ''}</i></button>
+              <div className="setting-row theme-setting-row">
+                <span className="setting-copy"><strong>明暗主题</strong><span>高级白与高级黑共享相同的层级、边界和交互语义。</span></span>
+                <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
+                  <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => ui.setTheme('light')}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
+                  <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => ui.setTheme('dark')}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
+                </div>
               </div>
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，不改变功能布局。</span></div>
-              <div className="font-choice-row">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} onClick={() => ui.setFontSize(size)}><b>Aa</b><span>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</span><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></button>)}</div>
+              <div className="setting-row font-setting-row">
+                <span className="setting-copy"><strong>全局文字比例</strong><span>小、中、大三级缩放，默认使用“中”。</span></span>
+                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '80%' : size === 'medium' ? '90%' : '100%'}</span></button>)}</div>
+              </div>
             </article>
           </>}
 

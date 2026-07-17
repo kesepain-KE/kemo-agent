@@ -35,6 +35,8 @@ describe('V16 module pages', () => {
     renderPage('knowledge')
     expect(await screen.findByRole('heading', { name: '知识库' })).toBeInTheDocument()
     expect(await screen.findByText('个人笔记')).toBeInTheDocument()
+    expect(await screen.findByText('共享笔记')).toBeInTheDocument()
+    expect(screen.getAllByText('共享层').length).toBeGreaterThan(0)
     expect(screen.getByText('外接项目 · kemo-graph')).toBeInTheDocument()
   })
 
@@ -43,12 +45,15 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('heading', { name: '技能中心' })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'clock' })).toBeInTheDocument()
     expect(screen.getAllByText('基础插件').length).toBeGreaterThan(0)
+    expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
   it('感知页不伪造未注册来源', async () => {
     renderPage('sense')
     expect(await screen.findByRole('heading', { name: '全局感知' })).toBeInTheDocument()
     expect(await screen.findByText('尚无已注册感知来源')).toBeInTheDocument()
+    expect(screen.getAllByText('全局层').length).toBeGreaterThan(0)
+    expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
   it('配置页提供可操作的外观设置和只读边界', async () => {

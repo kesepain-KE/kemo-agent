@@ -6,9 +6,9 @@ import { getSense } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { EmptyPanel, MetricCard, ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 
-type Layer = 'all' | 'user' | 'shared' | 'project'
+type Layer = 'all' | 'user' | 'shared' | 'global'
 
-const layerLabels: Record<string, string> = { user: '用户层', shared: '共享层', project: '项目层' }
+const layerLabels: Record<string, string> = { user: '用户层', shared: '共享层', global: '全局层' }
 
 export function SensePage() {
   const { user } = useOutletContext<ShellOutletContext>()
@@ -33,14 +33,14 @@ export function SensePage() {
       <section className="metric-strip">
         <MetricCard label="已注册来源" value={data?.summary.registered ?? '—'} detail="当前用户清单" symbol={<DatabaseZap size={16} />} />
         <MetricCard label="已启用" value={data?.summary.enabled ?? '—'} detail="允许进入评估" symbol={<Activity size={16} />} tone={data?.summary.enabled ? 'success' : 'muted'} />
-        <MetricCard label="核心目录" value={data?.core_available ? '可用' : '缺失'} detail={`${data?.core_files ?? 0} 个说明文件`} symbol={<BrainCircuit size={16} />} />
+        <MetricCard label="全局层" value={data?.core_available ? '可用' : '缺失'} detail={`global_sense · ${data?.core_files ?? 0} 个文件`} symbol={<BrainCircuit size={16} />} />
         <MetricCard label="注入闸门" value={data?.injection_enabled ? '已开启' : '未配置'} detail="运行时真实状态" symbol={<ShieldAlert size={16} />} tone={data?.injection_enabled ? 'success' : 'warning'} />
       </section>
 
       <section className="layer-strip">
         <article className="layer-card"><small>用户层</small><strong>当前用户自有来源</strong><p>由当前用户注册与授权，只影响该用户的 Prompt 组装。</p></article>
         <article className="layer-card"><small>共享层</small><strong>工作区共享来源</strong><p>来源可共享，但仍需当前用户显式启用后才参与判断。</p></article>
-        <article className="layer-card"><small>项目层</small><strong>项目桥接来源</strong><p>由外部项目或适配器提供，断开时不影响核心对话。</p></article>
+        <article className="layer-card"><small>全局层</small><strong>全局感知来源</strong><p>由 global_sense 与全局配置提供，作为所有用户的基础感知层。</p></article>
       </section>
 
       <div className="sense-pipeline" aria-label="全局感知注入流程">
@@ -51,7 +51,7 @@ export function SensePage() {
 
       <div className="module-toolbar">
         <div className="module-tabs">
-          {([['all', '全部'], ['user', '用户层'], ['shared', '共享层'], ['project', '项目层']] as const).map(([value, label]) => (
+          {([['all', '全部'], ['user', '用户层'], ['shared', '共享层'], ['global', '全局层']] as const).map(([value, label]) => (
             <button key={value} className={`module-tab-btn ${layer === value ? 'active' : ''}`} onClick={() => setLayer(value)}>{label}</button>
           ))}
         </div>
