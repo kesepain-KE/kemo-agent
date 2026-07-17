@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import io
 import json
 import tempfile
@@ -138,6 +139,49 @@ class CLITests(unittest.TestCase):
         self.assertIn("当前会话暂无历史", value)
         self.assertIn("已切换会话：beta", value)
         self.assertIn("session=beta", value)
+
+    def test_interactive_memory_commands(self) -> None:
+        root = Path(self.make_root("kesepain").name)
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "provider": {
+                        "type": "kemo",
+                        "base_url": "http://127.0.0.1:1/v1",
+                        "api_key_env": "UNUSED",
+                        "model": "mock",
+                    },
+                    "memory": {
+                        "tiers": {
+                            "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
+                            "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
+                            "half_year": {"days": 180, "upgrade_threshold": 60, "next": "permanent"},
+                            "permanent": {"days": None, "upgrade_threshold": None, "next": None},
+                        }
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        (root / "users" / "kesepain" / "user_config.json").write_text("{}", "utf-8")
+        stdout = io.StringIO()
+        code = cli.main(
+            ["--interactive"],
+            handler=lambda _: "unused",
+            stdin=io.StringIO(
+                "/remember 用户喜欢川菜\n/memory\n/forget 川菜\n/memory\n/exit\n"
+            ),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            root=root,
+        )
+        self.assertEqual(code, 0)
+        value = stdout.getvalue()
+        self.assertIn("已保存永久记忆", value)
+        self.assertIn("permanent | weight=0 | 用户喜欢川菜", value)
+        self.assertIn("已删除 1 条记忆", value)
+        self.assertIn("暂无记忆", value)
 
     def test_handler_failure_returns_nonzero(self) -> None:
         root = Path(self.make_root("kesepain").name)

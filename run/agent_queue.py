@@ -17,6 +17,7 @@ from run.agent_runner import AgentCancelledError, AgentRunResult, AgentRunner
 TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 _TERMINAL = {"completed", "failed", "cancelled"}
 _SENTINEL = object()
+_BACKGROUND_SERIAL_LOCK = threading.Lock()
 
 
 class AgentQueueError(RuntimeError):
@@ -47,6 +48,7 @@ class AgentTask:
     timeout: float | None = None
     model_override: str | None = None
     max_tokens: int | None = None
+    result_handler: Callable[[AgentRunResult], None] | None = field(default=None, repr=False)
     result: AgentRunResult | None = None
     error: dict[str, Any] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -129,6 +131,7 @@ class AgentScheduler:
         timeout: float | None = None,
         model_override: str | None = None,
         max_tokens: int | None = None,
+        result_handler: Callable[[AgentRunResult], None] | None = None,
         block: bool = True,
         enqueue_timeout: float | None = None,
     ) -> str:
@@ -147,6 +150,7 @@ class AgentScheduler:
                 timeout=timeout,
                 model_override=model_override,
                 max_tokens=max_tokens,
+                result_handler=result_handler,
             )
             self._tasks[task.id] = task
         try:
@@ -234,16 +238,23 @@ class AgentScheduler:
                     task.status = "running"
                     task.started_at = datetime.now(timezone.utc).isoformat()
                 try:
-                    result = self.runner.run(
-                        task.agent,
-                        task.input_data,
-                        cancel_event=task.cancel_event,
-                        timeout=task.timeout,
-                        model_override=task.model_override,
-                        event_callback=self.event_callback,
-                        task_id=task.id,
-                        max_tokens=task.max_tokens,
-                    )
+                    # All background write agents share one process-wide lane,
+                    # even though schedulers remain isolated per user.
+                    with _BACKGROUND_SERIAL_LOCK:
+                        if task.cancel_event.is_set():
+                            raise AgentCancelledError("子代理任务已取消")
+                        result = self.runner.run(
+                            task.agent,
+                            task.input_data,
+                            cancel_event=task.cancel_event,
+                            timeout=task.timeout,
+                            model_override=task.model_override,
+                            event_callback=self.event_callback,
+                            task_id=task.id,
+                            max_tokens=task.max_tokens,
+                        )
+                        if task.result_handler is not None:
+                            task.result_handler(result)
                     with self._lock:
                         task.result = result
                         task.status = "completed"

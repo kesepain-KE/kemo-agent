@@ -9,6 +9,42 @@
   "timeout": 180,
   "execution": "background_serial",
   "write_policy": "user_memory",
-  "input_schema": {"type": "object", "additionalProperties": true},
-  "output_schema": {"type": "object", "additionalProperties": true}
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "user_text": {"type": "string"},
+      "assistant_text": {"type": "string"},
+      "tool_results": {"type": "array"},
+      "source": {"type": "object"},
+      "existing_candidates": {"type": "array"}
+    },
+    "required": ["user_text", "assistant_text", "tool_results", "source", "existing_candidates"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "candidates": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "content": {"type": "string"},
+            "type": {"type": "string"},
+            "confidence": {"type": "number"},
+            "importance": {"type": "number"},
+            "entities": {"type": "array", "items": {"type": "string"}},
+            "keywords": {"type": "array", "items": {"type": "string"}},
+            "explicit": {"type": "boolean"},
+            "action": {"type": "string"},
+            "target": {"type": "string"}
+          },
+          "required": ["content", "type", "confidence", "importance", "entities", "keywords", "explicit", "action"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["candidates"],
+    "additionalProperties": false
+  }
 }

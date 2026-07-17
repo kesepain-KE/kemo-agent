@@ -20,7 +20,13 @@ def _read_optional(path: Path) -> str:
         return ""
 
 
-def build_system_prompt(root: Path, user: str, config: dict) -> str:
+def build_system_prompt(
+    root: Path,
+    user: str,
+    config: dict,
+    *,
+    memory_text: str = "",
+) -> str:
     """Assemble enabled prompt sections in the architecture's fixed order.
 
     Fragmented memories, tools, child-agent instructions and on-demand
@@ -44,4 +50,6 @@ def build_system_prompt(root: Path, user: str, config: dict) -> str:
         content = _read_optional(path)
         if content:
             sections.append(f"[{name}]\n{content}")
+    if memory_text.strip():
+        sections.append(f"[relevant_memory]\n{memory_text.strip()}")
     return "\n\n".join(sections)

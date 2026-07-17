@@ -269,7 +269,9 @@ def _interactive_command(
     stdout: Any,
 ) -> tuple[bool, str]:
     from run.engine import compress_context, context_status
+    from run.config import load_config
     from run.history import clear_session, list_sessions, session_messages
+    from run.memory import MemoryStore
 
     command, _, argument = prompt.partition(" ")
     command = command.lower()
@@ -341,6 +343,50 @@ def _interactive_command(
             f"generated={summary['generated']} | failed={summary['failed']}",
             file=stdout,
         )
+        return True, session_id
+    if command == "/memory":
+        store = MemoryStore(root, user, load_config(user, root))
+        items = store.list_items()
+        if not items:
+            print("暂无记忆。", file=stdout)
+        for item in items:
+            print(
+                f"{item['id']} | {item['tier']} | weight={item['tier_weight']} | "
+                f"{item['content']}",
+                file=stdout,
+            )
+        return True, session_id
+    if command == "/remember":
+        if not argument:
+            print("用法：/remember <内容>", file=stdout)
+            return True, session_id
+        store = MemoryStore(root, user, load_config(user, root))
+        result = store.upsert_candidates(
+            [{
+                "content": argument,
+                "type": "explicit",
+                "confidence": 1.0,
+                "importance": 1.0,
+                "entities": [],
+                "keywords": [],
+                "explicit": True,
+                "action": "upsert",
+            }],
+            source={"source": source, "session_id": session_id, "explicit": True},
+        )
+        if result["rejected"]:
+            print("记忆内容为空或包含敏感凭据，未保存。", file=stdout)
+        else:
+            memory_id = (result["created"] or result["updated"])[0]
+            print(f"已保存永久记忆：{memory_id}", file=stdout)
+        return True, session_id
+    if command == "/forget":
+        if not argument:
+            print("用法：/forget <记忆ID或关键词>", file=stdout)
+            return True, session_id
+        store = MemoryStore(root, user, load_config(user, root))
+        removed = store.forget(argument)
+        print(f"已删除 {len(removed)} 条记忆。", file=stdout)
         return True, session_id
     return False, session_id
 

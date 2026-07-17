@@ -34,7 +34,34 @@
       "temporary": 200,
       "permanent": 300
     },
-    "important_memory_max_chars": 1500
+    "important_memory_max_chars": 1500,
+    "extraction_enabled": true,
+    "injection_enabled": true,
+    "injection_max_chars": 2000,
+    "injection_max_items": 8,
+    "existing_candidates_for_extraction": 12,
+    "tiers": {
+      "seven_days": {
+        "days": 7,
+        "upgrade_threshold": 3,
+        "next": "one_month"
+      },
+      "one_month": {
+        "days": 30,
+        "upgrade_threshold": 10,
+        "next": "half_year"
+      },
+      "half_year": {
+        "days": 180,
+        "upgrade_threshold": 60,
+        "next": "permanent"
+      },
+      "permanent": {
+        "days": null,
+        "upgrade_threshold": null,
+        "next": null
+      }
+    }
   },
   "agent_models": {
     "default": {},

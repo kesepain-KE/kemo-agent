@@ -1,5 +1,11 @@
-存放记忆的地方
-临时重要记忆文件存放在users\kesepain\memory_temporary_important.md
-内部由文件夹进行划分：seven_days、one_month、half_year、permanent(七天、单月、永久)
-一份合格记忆进化成永久记忆语言217天，进化成临时重要记忆最长需要n6小时
-除了永久记忆外，没分临时记忆文件夹内都有一份data.json用于记录权重和升级截止日期
+存放用户 kesepain 的记忆碎片。
+临时重要记忆文件位于 users\kesepain\memory_temporary_important.md，它是派生热画像，不参与档位升级。
+
+档位：seven_days → one_month → half_year → permanent。
+- seven_days：7天到期，达到3权重升级，否则删除。
+- one_month：30天到期，达到10权重升级，否则删除。
+- half_year：180天到期，达到60权重升级，否则删除。
+- permanent：不自动到期，用户仍可明确纠正或删除。
+
+不进行每日减权。只有记忆实际注入模型上下文或被任务实际使用才加权；同一用户本地自然日内，同一条记忆最多加权一次，权重无上限。升级后权重归零并按新档位重新计时。
+统一字段和实现说明见项目根目录 memory_lifecycle.md。

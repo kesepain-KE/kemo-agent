@@ -1,0 +1,16 @@
+存放用户记忆碎片。
+
+档位：seven_days → one_month → half_year → permanent。
+
+权重机制：
+- 不每天减权，不每日遍历全库。
+- 只有实际注入模型上下文或被任务使用才加权。
+- 同一用户本地自然日内，同一条记忆最多加权一次，权重无上限。
+- seven_days：7天到期，3权重升级；未达标删除。
+- one_month：30天到期，10权重升级；未达标删除。
+- half_year：180天到期，60权重升级；未达标删除。
+- 升级后权重归零，按新档位重新计时。
+- permanent不自动到期，但用户可明确纠正或删除。
+
+临时重要记忆文件位于users/<user>/memory_temporary_important.md，它是派生热画像，不参与档位升级。
+统一实现与完整字段契约见项目根目录memory_lifecycle.md。

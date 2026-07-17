@@ -185,6 +185,21 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(second_input["rounds"][0]["owner"], "bob")
         self.assertNotIn("bob", first_provider.requests[0].messages[1]["content"])
 
+    def test_scheduler_result_handler_is_serialized_with_agent(self) -> None:
+        registry = discover_agents(self.root)
+        order = []
+        runner = StubRunner(registry, order)
+        runner.gate.set()
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        task = scheduler.submit(
+            "self_improve",
+            {"value": 7},
+            result_handler=lambda result: order.append(("persist", result.data["value"])),
+        )
+        scheduler.wait(task, 1)
+        self.assertEqual(order, [("start", 7), ("end", 7), ("persist", 7)])
+
     def test_subagent_events_are_observable(self) -> None:
         events = []
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):

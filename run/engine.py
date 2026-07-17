@@ -16,6 +16,8 @@ from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import commit_window, prepare_window
+from run.memory import MemoryStore
+from run.memory_pipeline import submit_memory_extraction
 from run.prompt import build_system_prompt
 from run.tools import ToolError, ToolRegistry, discover_tools, execute_tool
 
@@ -179,7 +181,20 @@ def iter_request_events(
             tool_timeout = float(tool_config.get("timeout", 60))
             max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
 
-            system_prompt = build_system_prompt(base, user, config)
+            memory_config = config.get("memory") or {}
+            memory_store = MemoryStore(base, user, config)
+            memory_store.review_due()
+            memory_selection = (
+                memory_store.select_for_injection(prompt)
+                if prompt and bool(memory_config.get("injection_enabled", True))
+                else memory_store.select_for_injection("", max_items=0)
+            )
+            system_prompt = build_system_prompt(
+                base,
+                user,
+                config,
+                memory_text=memory_selection.text,
+            )
             system_message = (
                 {"role": "system", "content": system_prompt} if system_prompt else None
             )
@@ -479,6 +494,46 @@ def iter_request_events(
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
             commit_window(window_path, window)
 
+            # Weight only memories that were selected and actually sent to the
+            # successful main-model run.  A cancelled/failed round never gets
+            # here, and mere retrieval candidates are intentionally excluded.
+            memory_weighted_ids: list[str] = []
+            memory_weight_error = None
+            try:
+                memory_weighted_ids = memory_store.mark_used(memory_selection.selected_ids)
+            except Exception as exc:
+                memory_weight_error = {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+            memory_task_id = None
+            memory_error = None
+            if bool(memory_config.get("extraction_enabled", False)):
+                try:
+                    memory_task_id = submit_memory_extraction(
+                        root=base,
+                        user=user,
+                        config=config,
+                        user_text=prompt,
+                        assistant_text=text,
+                        tool_results=tool_records,
+                        source={
+                            "source": source,
+                            "session_id": session_id,
+                            "window": window_path.name,
+                            "round": round_number,
+                        },
+                        provider_factory=provider_factory,
+                    )
+                except Exception as exc:
+                    # Memory is an asynchronous derived side effect.  The main
+                    # four-file history transaction has already committed and
+                    # must not be rolled back by a queue/sub-agent failure.
+                    memory_error = {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
+
             final_metadata.update(
                 {
                     "text": text,
@@ -491,6 +546,15 @@ def iter_request_events(
                     "window": window_path.name,
                     "tool_calls": len(tool_records),
                     "context": context_stats,
+                    "memory": {
+                        "candidate_ids": memory_selection.candidate_ids,
+                        "injected_ids": memory_selection.selected_ids,
+                        "weighted_ids": memory_weighted_ids,
+                        "weight_error": memory_weight_error,
+                        "injected_chars": memory_selection.chars,
+                        "extraction_task_id": memory_task_id,
+                        "extraction_error": memory_error,
+                    },
                     "committed": True,
                 }
             )
