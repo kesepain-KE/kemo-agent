@@ -1,6 +1,22 @@
-外部消息路由核心(可被更新覆盖)
-默认入口为cli，独立的上下文窗口
-有独立的消息具有注册机制(帮助消息进行转发和调用)
+外部消息路由核心（可被更新覆盖）
 
-每个消息入口以文件夹的形式进行区分
-每个消息入口拥有限制性的工具调用权限
+当前实现文件：
+- schema.py：MessageEnvelope / OutboundMessage 平台无关契约
+- transport.py：Transport 协议、TransportRegistry、TransportPolicy、MockTransport
+- identity.py：外部身份绑定、内部用户映射、工具权限交集
+- state.py：processed.json 入站消息幂等与重启恢复
+- router.py：MessageRouter，直接调用 run.engine.iter_request_events
+- __init__.py：公共接口
+
+正确调用链：
+Transport → MessageEnvelope → IdentityResolver → MessageRouter → Run 核心 → OutboundMessage → Transport.send
+
+RuntimeHost 位于 run/runtime_host.py，统一托管 CronScheduler、MessageRouter 和 Transport。
+长期运行入口：python start_host.py
+
+会话隔离：
+- source = message:<platform>
+- session_id = <chat_type>:<external_chat_id>
+- 同一内部用户共享记忆，不同平台、聊天类型和聊天 ID 隔离历史窗口
+
+本轮仅提供 MockTransport，不包含 OneBot、Telegram 或 Web 适配器。

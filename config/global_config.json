@@ -81,6 +81,16 @@
     "poll_interval": 30,
     "auto_start": false
   },
+  "runtime_host": {
+    "start_cron": true,
+    "shutdown_timeout": 10
+  },
+  "message": {
+    "max_workers": 4,
+    "dedupe_max_entries": 2000,
+    "bindings": [],
+    "transports": {}
+  },
   "agents": {
     "n1_recent_rounds_before_tool_compression": 3,
     "n2_max_rounds": 30,
