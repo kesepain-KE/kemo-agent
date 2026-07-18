@@ -31,6 +31,7 @@ export interface UserSummary {
 export interface SessionSummary {
   session_id: string
   window: string
+  title: string
   rounds: number
   updated_at: string
 }
@@ -67,6 +68,27 @@ export interface SessionsResponse {
   sessions: SessionSummary[]
 }
 
+export interface SessionRenameResponse {
+  user: string
+  source: 'web'
+  session: SessionSummary
+}
+
+export interface SessionDeleteResponse {
+  user: string
+  source: 'web'
+  session_id: string
+  deleted: boolean
+}
+
+export interface SessionDeleteAllResponse {
+  user: string
+  source: 'web'
+  deleted: boolean
+  deleted_sessions: number
+  deleted_windows: number
+}
+
 export interface HistoryResponse {
   user: string
   source: 'web'
@@ -78,6 +100,20 @@ export interface HistoryResponse {
     elapsed_ms: number
     tool_calls: number
     guidance: string[]
+  }>
+  round_traces: Array<{
+    round: number
+    reasoning: string
+    tools: Array<{
+      call_id: string
+      name: string
+      status: 'running' | 'success' | 'error' | string
+      elapsed_ms: number
+      arguments_text: string
+      arguments_truncated: boolean
+      result_text: string
+      result_truncated: boolean
+    }>
   }>
 }
 
@@ -249,6 +285,7 @@ export interface SettingsResponse {
     cron_auto_start: boolean
   }
   limits: {
+    context_rounds: number
     context_tokens: number
     compression_ratio: number
     task_plan_steps: number
@@ -334,6 +371,8 @@ export interface OverviewResponse {
     }
     limit: number
     percent: number
+    rounds: number
+    round_limit: number
   }
   provider: ProviderSummary
   counts: {
@@ -378,7 +417,11 @@ export type ChatItem =
       callId: string
       name: string
       arguments?: Record<string, unknown>
+      argumentsText?: string
+      argumentsTruncated?: boolean
       result?: unknown
+      resultText?: string
+      resultTruncated?: boolean
       status: 'running' | 'success' | 'error'
       elapsedMs?: number
     }

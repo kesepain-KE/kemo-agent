@@ -20,7 +20,15 @@ from run.config import ConfigError, deep_merge, load_config, read_json_object
 from run.context import ContextPolicy
 from run.cron_store import CronStore
 from run.engine import iter_request_events
-from run.history import find_window, list_sessions, load_window, session_messages
+from run.history import (
+    delete_all_sessions as delete_all_history_sessions,
+    delete_session as delete_history_session,
+    find_window,
+    list_sessions,
+    load_window,
+    rename_session as rename_history_session,
+    session_messages,
+)
 from run.knowledge import build_index
 from run.memory import MemoryConfigError, MemoryStore
 from run.prompt import (
@@ -37,9 +45,11 @@ from run.users import list_users
 
 
 _SESSION_RE = re.compile(r"^[^\x00-\x1f]{1,128}$")
+_SESSION_TITLE_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _WORKER_DONE = object()
 _REDACTED = "***"
+_TOOL_TEXT_LIMIT = 5000
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {"api_key", "access_token", "password", "session_secret", "authorization"}
 )
@@ -72,6 +82,18 @@ _CONFIG_SOURCE_PATHS = (
     "perception.global_whitelist",
     "kemo_graph.enabled",
 )
+
+
+def _tool_text_preview(value: Any) -> tuple[str, bool]:
+    if isinstance(value, str):
+        rendered = value
+    else:
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except (TypeError, ValueError):
+            rendered = str(value)
+    truncated = len(rendered) > _TOOL_TEXT_LIMIT
+    return rendered[:_TOOL_TEXT_LIMIT], truncated
 
 
 @dataclass(slots=True)
@@ -257,6 +279,14 @@ class WebRunService:
             raise InvalidRequestError("session_id 必须是 1–128 字符且不能包含控制字符")
         return value
 
+    def require_session_title(self, title: Any) -> str:
+        if not isinstance(title, str):
+            raise InvalidRequestError("title 必须是字符串")
+        value = title.strip()
+        if not _SESSION_TITLE_RE.fullmatch(value):
+            raise InvalidRequestError("title 必须是 1–80 字符且不能包含控制字符")
+        return value
+
     def require_prompt(self, prompt: Any) -> str:
         if not isinstance(prompt, str) or not prompt.strip():
             raise InvalidRequestError("prompt 必须是非空字符串")
@@ -436,6 +466,96 @@ class WebRunService:
             "sessions": list_sessions(self.root, name, normalized_source),
         }
 
+    def rename_session(
+        self,
+        user: Any,
+        session_id: Any,
+        title: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        normalized_title = self.require_session_title(title)
+        changed = rename_history_session(
+            self.root,
+            name,
+            normalized_source,
+            normalized_session,
+            normalized_title,
+        )
+        if changed == 0:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        session = next(
+            (
+                item
+                for item in list_sessions(self.root, name, normalized_source)
+                if item.get("session_id") == normalized_session
+            ),
+            None,
+        )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session": session,
+        }
+
+    def delete_session(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        with self._active_runs_lock:
+            if any(
+                active.user == name and active.session_id == normalized_session
+                for active in self._active_runs.values()
+            ):
+                raise ConflictError("会话正在运行，结束当前响应后再删除")
+            deleted = delete_history_session(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+            )
+        if deleted == 0:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "deleted": True,
+        }
+
+    def delete_all_sessions(
+        self,
+        user: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        with self._active_runs_lock:
+            if any(active.user == name for active in self._active_runs.values()):
+                raise ConflictError("存在正在运行的会话，结束当前响应后再全部删除")
+            deleted_sessions, deleted_windows = delete_all_history_sessions(
+                self.root,
+                name,
+                normalized_source,
+            )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "deleted": True,
+            "deleted_sessions": deleted_sessions,
+            "deleted_windows": deleted_windows,
+        }
+
     def history(
         self,
         user: Any,
@@ -470,6 +590,59 @@ class WebRunService:
                         ] if isinstance(item.get("guidance"), list) else [],
                     }
                 )
+        reasoning_by_round: dict[int, str] = {}
+        raw_reasoning = (window.get("think") or {}).get("rounds") or []
+        if isinstance(raw_reasoning, list):
+            for item in raw_reasoning:
+                if not isinstance(item, dict):
+                    continue
+                round_number = int(item.get("round") or 0)
+                if round_number > 0:
+                    reasoning_by_round[round_number] = str(item.get("content") or "")
+
+        tools_by_round: dict[int, list[dict[str, Any]]] = {}
+        raw_tools = (window.get("tool") or {}).get("rounds") or []
+        if isinstance(raw_tools, list):
+            for item in raw_tools:
+                if not isinstance(item, dict):
+                    continue
+                round_number = int(item.get("round") or 0)
+                if round_number <= 0 or not isinstance(item.get("calls"), list):
+                    continue
+                calls = []
+                for call in item["calls"]:
+                    if not isinstance(call, dict):
+                        continue
+                    arguments_text, arguments_truncated = _tool_text_preview(call.get("arguments") or {})
+                    result_text, result_truncated = _tool_text_preview(call.get("result"))
+                    raw_status = str(call.get("status") or "completed").casefold()
+                    status = (
+                        "running" if raw_status in {"running", "started", "pending"}
+                        else "error" if raw_status in {"failed", "error"}
+                        else "success"
+                    )
+                    calls.append(
+                        {
+                            "call_id": str(call.get("id") or ""),
+                            "name": str(call.get("name") or "未知工具"),
+                            "status": status,
+                            "elapsed_ms": max(0, int(call.get("elapsed_ms") or 0)),
+                            "arguments_text": arguments_text,
+                            "arguments_truncated": arguments_truncated,
+                            "result_text": result_text,
+                            "result_truncated": result_truncated,
+                        }
+                    )
+                tools_by_round[round_number] = calls
+
+        round_traces = [
+            {
+                "round": round_number,
+                "reasoning": reasoning_by_round.get(round_number, ""),
+                "tools": tools_by_round.get(round_number, []),
+            }
+            for round_number in sorted(reasoning_by_round.keys() | tools_by_round.keys())
+        ]
         return {
             "user": name,
             "source": normalized_source,
@@ -478,6 +651,7 @@ class WebRunService:
                 self.root, name, normalized_source, normalized_session
             ),
             "round_metrics": round_metrics,
+            "round_traces": round_traces,
         }
 
     @staticmethod
@@ -746,6 +920,7 @@ class WebRunService:
                 "cron_auto_start": bool(cron.get("auto_start", False)),
             },
             "limits": {
+                "context_rounds": int(agents.get("n2_max_rounds") or 30),
                 "context_tokens": int(agents.get("n4_token_limit") or 120000),
                 "compression_ratio": float(agents.get("n5_token_compression_ratio") or 0.6),
                 "task_plan_steps": int(task_plan.get("max_steps") or agents.get("n8_task_plan_max_steps") or 10),
@@ -882,10 +1057,12 @@ class WebRunService:
             "total_tokens": 0,
             "estimated": False,
         }
+        rounds = 0
         if normalized_session:
             directory = find_window(self.root, name, "web", normalized_session)
             if directory is not None:
                 data = load_window(directory).get("data") or {}
+                rounds = max(0, int(data.get("rounds") or 0))
                 stored_usage = data.get("token_usage")
                 if isinstance(stored_usage, dict):
                     usage.update(
@@ -895,6 +1072,7 @@ class WebRunService:
                         }
                     )
         token_limit = int(settings_data["limits"]["context_tokens"])
+        round_limit = int(settings_data["limits"]["context_rounds"])
         total_tokens = max(0, int(usage.get("total_tokens") or 0))
         percent = min(100, round(total_tokens * 100 / token_limit)) if token_limit > 0 else 0
 
@@ -958,6 +1136,8 @@ class WebRunService:
                 "usage": usage,
                 "limit": token_limit,
                 "percent": percent,
+                "rounds": rounds,
+                "round_limit": round_limit,
             },
             "provider": settings_data["provider"],
             "counts": {

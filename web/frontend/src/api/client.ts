@@ -10,6 +10,9 @@ import type {
   PromptDiagnosticsResponse,
   RunEvent,
   SenseResponse,
+  SessionDeleteAllResponse,
+  SessionDeleteResponse,
+  SessionRenameResponse,
   SessionsResponse,
   SettingsResponse,
   SkillsResponse,
@@ -97,6 +100,38 @@ export async function getSessions(user: string): Promise<SessionsResponse> {
 export async function getHistory(user: string, sessionId: string): Promise<HistoryResponse> {
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history`,
+  )
+}
+
+export async function renameSession(
+  user: string,
+  sessionId: string,
+  title: string,
+): Promise<SessionRenameResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  )
+}
+
+export async function deleteSession(
+  user: string,
+  sessionId: string,
+): Promise<SessionDeleteResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function deleteAllSessions(user: string): Promise<SessionDeleteAllResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions`,
+    { method: 'DELETE' },
   )
 }
 

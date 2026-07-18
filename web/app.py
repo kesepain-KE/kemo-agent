@@ -51,6 +51,10 @@ class GuidanceBody(BaseModel):
     guidance: str
 
 
+class SessionRenameBody(BaseModel):
+    title: str
+
+
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "status": status}}
 
@@ -186,6 +190,30 @@ def create_app(
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
         return backend.sessions(user, source=source)
+
+    @app.delete("/api/users/{user}/sessions")
+    async def delete_all_sessions(
+        user: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.delete_all_sessions(user, source=source)
+
+    @app.patch("/api/users/{user}/sessions/{session_id}")
+    async def rename_session(
+        user: str,
+        session_id: str,
+        body: SessionRenameBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.rename_session(user, session_id, body.title, source=source)
+
+    @app.delete("/api/users/{user}/sessions/{session_id}")
+    async def delete_session(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.delete_session(user, session_id, source=source)
 
     @app.get("/api/users/{user}/sessions/{session_id}/history")
     async def history(
