@@ -16,16 +16,20 @@ class MemoryExtractionError(RuntimeError):
 
 
 def _existing_candidates(store: MemoryStore, text: str, limit: int) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": item["id"],
-            "content": item["content"],
-            "tier": item["tier"],
-            "keywords": item.get("keywords", []),
-            "entities": item.get("entities", []),
-        }
-        for item in store.search(text, limit=limit)
-    ]
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in store.search(text, limit=limit):
+        selected.append({"filename": item["filename"], "tier": item["tier"]})
+        seen.add(item["filename"].casefold())
+    for item in store.list_file_references():
+        if len(selected) >= max(0, limit):
+            break
+        key = item["filename"].casefold()
+        if key in seen:
+            continue
+        selected.append({"filename": item["filename"], "tier": item["tier"]})
+        seen.add(key)
+    return selected
 
 
 def submit_memory_extraction(

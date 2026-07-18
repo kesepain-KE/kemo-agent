@@ -1,4 +1,4 @@
-"""分层用户内存存储、查看、检索和使用权重。"""
+"""File-backed tiered user memory with lightweight lifecycle indexes."""
 
 from __future__ import annotations
 
@@ -12,11 +12,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
-MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCHEMA_VERSION = 2
 TIERS = ("seven_days", "one_month", "half_year", "permanent")
+TEMPORARY_TIERS = TIERS[:-1]
+FILENAME_MAX_CHARS = 20
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
@@ -24,10 +26,19 @@ DEFAULT_TIERS = {
     "permanent": {"days": None, "upgrade_threshold": None, "next": None},
 }
 _WORD_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]")
+_INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\r\n]')
 _SECRET_RE = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|passwd|secret|cookie|private[_ -]?key|验证码|密码|密钥|令牌)"
     r"\s*(?::|=|：|是|为|is)\s*[^\s,;，；]{4,}|\bsk-[A-Za-z0-9_-]{8,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )
+_WINDOWS_RESERVED = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
 
@@ -55,12 +66,11 @@ class TierRule:
 
 
 @dataclass(frozen=True, slots=True)
-class MemorySelection:
-    items: list[dict[str, Any]]
-    text: str
-    candidate_ids: list[str]
-    selected_ids: list[str]
-    chars: int
+class MemoryLocation:
+    tier: str
+    filename: str
+    path: Path
+    indexed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +84,7 @@ class TierPromptSelection:
     original_items: int
     injected_items: int
     truncated: bool
-    source_file: Path
+    source_files: tuple[Path, ...]
 
 
 def utc_now() -> datetime:
@@ -130,7 +140,7 @@ def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
 
 
 def _normalise_text(value: Any) -> str:
-    return " ".join(unicodedata.normalize("NFKC", str(value or "")).strip().split())
+    return unicodedata.normalize("NFKC", str(value or "")).strip()
 
 
 def _key(value: Any) -> str:
@@ -145,11 +155,26 @@ def _tokens(text: str) -> set[str]:
     normal = unicodedata.normalize("NFKC", text).casefold()
     words = _WORD_RE.findall(normal)
     result = set(words)
-        # 汉字二元组改进了确定性检索，而无需
-        # 嵌入依赖。
     chinese = "".join(item for item in words if len(item) == 1 and "\u4e00" <= item <= "\u9fff")
     result.update(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
     return {item for item in result if item}
+
+
+def normalize_memory_filename(value: Any) -> str:
+    title = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if title.casefold().endswith(".md"):
+        title = title[:-3]
+    title = _INVALID_FILENAME_RE.sub("", title)
+    title = " ".join(title.split()).strip(" .")[:FILENAME_MAX_CHARS].strip(" .")
+    if not title:
+        raise MemoryError("记忆文件名不能为空")
+    if title.casefold() in _WINDOWS_RESERVED:
+        title = f"_{title}"[:FILENAME_MAX_CHARS]
+    return f"{title}.md"
+
+
+def _filename_from_content(content: str) -> str:
+    return normalize_memory_filename(content)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -167,6 +192,25 @@ def _atomic_json(path: Path, value: Any) -> None:
             temporary.unlink()
 
 
+def _atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value.rstrip())
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _empty_index() -> dict[str, Any]:
+    return {"schema_version": MEMORY_SCHEMA_VERSION, "files": {}}
+
+
 class MemoryStore:
     def __init__(self, root: Path, user: str, config: dict[str, Any]) -> None:
         self.root = root.resolve()
@@ -176,357 +220,502 @@ class MemoryStore:
         self.base = self.root / "users" / user / "improve"
         self._lock = _store_lock(self.root, user)
 
-    def path(self, tier: str) -> Path:
+    def tier_dir(self, tier: str) -> Path:
         if tier not in TIERS:
             raise MemoryError(f"未知记忆档位：{tier}")
-        return self.base / tier / "data.json"
+        return self.base / tier
 
-    def _migrate(self, raw: Any, tier: str, now: datetime) -> list[dict[str, Any]]:
-        if isinstance(raw, dict):
-            raw = raw.get("items", [])
-        if not isinstance(raw, list):
-            raise MemoryError(f"记忆文件根节点必须是数组：{self.path(tier)}")
-        result = []
-        for value in raw:
-            if isinstance(value, str):
-                value = {"content": value}
-            if not isinstance(value, dict):
-                continue
-            content = _normalise_text(value.get("content") or value.get("text"))
-            if not content or contains_sensitive_credential(content):
-                continue
-            created = parse_time(value.get("created_at")) or now
-            entered = parse_time(value.get("tier_entered_at")) or created
-            rule = self.rules[tier]
-            review = parse_time(value.get("review_at"))
-            if review is None and rule.days is not None:
-                review = entered + timedelta(days=rule.days)
-            result.append(
-                {
-                    "schema_version": MEMORY_SCHEMA_VERSION,
-                    "id": str(value.get("id") or uuid.uuid4().hex),
-                    "content": content,
-                    "type": str(value.get("type") or "fact"),
-                    "keywords": sorted({_normalise_text(item) for item in value.get("keywords", []) if _normalise_text(item)}),
-                    "entities": sorted({_normalise_text(item) for item in value.get("entities", []) if _normalise_text(item)}),
-                    "source": dict(value.get("source") or {}),
-                    "confidence": min(1.0, max(0.0, float(value.get("confidence", 0.5)))),
-                    "importance": min(1.0, max(0.0, float(value.get("importance", 0.5)))),
-                    "status": str(value.get("status") or "active"),
-                    "tier": tier,
-                    "tier_weight": max(0, int(value.get("tier_weight", value.get("weight", 0)))),
-                    "tier_entered_at": iso(entered),
-                    "review_at": iso(review) if review is not None else None,
-                    "last_weight_date": value.get("last_weight_date"),
-                    "created_at": iso(created),
-                    "updated_at": str(value.get("updated_at") or iso(created)),
-                    "explicit": bool(value.get("explicit", tier == "permanent")),
-                    "version": max(1, int(value.get("version", 1))),
-                }
-            )
-        return result
+    def path(self, tier: str) -> Path:
+        directory = self.tier_dir(tier)
+        return directory if tier == "permanent" else directory / "data.json"
 
-    def load_tier(self, tier: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
-        current = now or utc_now()
+    def fragment_path(self, tier: str, filename: str) -> Path:
+        return self.tier_dir(tier) / normalize_memory_filename(filename)
+
+    def load_index(self, tier: str) -> dict[str, dict[str, Any]]:
+        if tier not in TEMPORARY_TIERS:
+            raise MemoryError("永久记忆没有 data.json 索引")
         path = self.path(tier)
         try:
             text = path.read_text("utf-8")
-                        # 零字节层文件是中断的常见结果
-                        # 首次运行引导程序，在语义上等同于没有项目。
-            if not text.strip():
-                return []
-            raw = json.loads(text)
         except FileNotFoundError:
-            return []
-        except (OSError, json.JSONDecodeError) as exc:
-            raise MemoryError(f"记忆文件不可读：{path}（{exc}）") from exc
-        return self._migrate(raw, tier, current)
-
-    def load_all(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
-        current = now or utc_now()
-        seen: set[str] = set()
-        result = []
-                # 如果崩溃在两个文件中留下相同的 ID，则较高层获胜。
-        for tier in reversed(TIERS):
-            for item in self.load_tier(tier, now=current):
-                if item["id"] not in seen:
-                    seen.add(item["id"])
-                    result.append(item)
+            return {}
+        except OSError as exc:
+            raise MemoryError(f"记忆索引不可读：{path}（{exc}）") from exc
+        if not text.strip():
+            return {}
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MemoryError(f"记忆索引不是有效 JSON：{path}（{exc}）") from exc
+        if isinstance(raw, list):
+            raise MemoryError(f"检测到旧版记忆数组，请先执行 v2 迁移：{path}")
+        if not isinstance(raw, dict) or raw.get("schema_version") != MEMORY_SCHEMA_VERSION:
+            raise MemoryError(f"记忆索引 schema_version 必须是 {MEMORY_SCHEMA_VERSION}：{path}")
+        files = raw.get("files")
+        if not isinstance(files, dict):
+            raise MemoryError(f"记忆索引 files 必须是对象：{path}")
+        result: dict[str, dict[str, Any]] = {}
+        for raw_filename, raw_meta in files.items():
+            filename = normalize_memory_filename(raw_filename)
+            if filename != raw_filename or not isinstance(raw_meta, dict):
+                raise MemoryError(f"记忆索引条目无效：{path}#{raw_filename}")
+            weight = raw_meta.get("weight", 0)
+            if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
+                raise MemoryError(f"记忆权重必须是非负整数：{path}#{filename}")
+            updated_at = parse_time(raw_meta.get("updated_at"))
+            expires_at = parse_time(raw_meta.get("expires_at"))
+            if updated_at is None or expires_at is None:
+                raise MemoryError(f"记忆索引时间字段无效：{path}#{filename}")
+            last_weight_date = raw_meta.get("last_weight_date")
+            if last_weight_date is not None and not isinstance(last_weight_date, str):
+                raise MemoryError(f"last_weight_date 必须是字符串或 null：{path}#{filename}")
+            result[filename] = {
+                "weight": weight,
+                "updated_at": iso(updated_at),
+                "last_weight_date": last_weight_date,
+                "expires_at": iso(expires_at),
+            }
         return result
 
-    def _write_partition(self, items: Iterable[dict[str, Any]]) -> None:
-        partition = {tier: [] for tier in TIERS}
-        for item in items:
-            partition[item["tier"]].append(item)
-        for tier in TIERS:
-            partition[tier].sort(key=lambda item: (item["created_at"], item["id"]))
-            _atomic_json(self.path(tier), partition[tier])
+    def write_index(self, tier: str, files: dict[str, dict[str, Any]]) -> None:
+        if tier not in TEMPORARY_TIERS:
+            raise MemoryError("永久记忆不能写入 data.json 索引")
+        ordered = {name: files[name] for name in sorted(files, key=str.casefold)}
+        _atomic_json(self.path(tier), {"schema_version": MEMORY_SCHEMA_VERSION, "files": ordered})
+
+    def _locations(self, filename: str) -> list[MemoryLocation]:
+        normalized = normalize_memory_filename(filename)
+        result: list[MemoryLocation] = []
+        for tier in TEMPORARY_TIERS:
+            matches = [
+                existing
+                for existing in self.load_index(tier)
+                if existing.casefold() == normalized.casefold()
+            ]
+            result.extend(
+                MemoryLocation(tier, existing, self.fragment_path(tier, existing), True)
+                for existing in matches
+            )
+        permanent_dir = self.tier_dir("permanent")
+        if permanent_dir.is_dir():
+            result.extend(
+                MemoryLocation("permanent", path.name, path, False)
+                for path in permanent_dir.glob("*.md")
+                if path.is_file() and path.name.casefold() == normalized.casefold()
+            )
+        return result
+
+    def locate(self, filename: str) -> MemoryLocation | None:
+        locations = self._locations(filename)
+        if len(locations) > 1:
+            tiers = ", ".join(location.tier for location in locations)
+            raise MemoryError(f"记忆文件名跨层重复：{normalize_memory_filename(filename)}（{tiers}）")
+        return locations[0] if locations else None
+
+    def _entry(self, location: MemoryLocation, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            content = location.path.read_text("utf-8").strip()
+        except FileNotFoundError as exc:
+            raise MemoryError(f"记忆索引指向不存在的文件：{location.path}") from exc
+        except OSError as exc:
+            raise MemoryError(f"记忆文件不可读：{location.path}（{exc}）") from exc
+        if location.tier == "permanent":
+            updated_at = iso(datetime.fromtimestamp(location.path.stat().st_mtime, timezone.utc))
+            return {
+                "filename": location.filename,
+                "content": content,
+                "tier": location.tier,
+                "weight": 0,
+                "updated_at": updated_at,
+                "last_weight_date": None,
+                "expires_at": None,
+            }
+        current_meta = meta or self.load_index(location.tier).get(location.filename)
+        if current_meta is None:
+            raise MemoryError(f"临时记忆缺少索引：{location.path}")
+        return {
+            "filename": location.filename,
+            "content": content,
+            "tier": location.tier,
+            **current_meta,
+        }
+
+    def load_tier(self, tier: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        del now
+        if tier == "permanent":
+            directory = self.tier_dir(tier)
+            if not directory.is_dir():
+                return []
+            return [
+                self._entry(MemoryLocation(tier, path.name, path, False))
+                for path in sorted(directory.glob("*.md"), key=lambda item: item.name.casefold())
+                if path.is_file()
+            ]
+        index = self.load_index(tier)
+        return [
+            self._entry(MemoryLocation(tier, filename, self.fragment_path(tier, filename), True), meta)
+            for filename, meta in index.items()
+        ]
+
+    def load_all(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        return [item for tier in TIERS for item in self.load_tier(tier, now=now)]
+
+    def list_file_references(self) -> list[dict[str, Any]]:
+        """Return filename-only metadata without reading Markdown bodies."""
+
+        references: list[dict[str, Any]] = []
+        for tier in TEMPORARY_TIERS:
+            references.extend(
+                {
+                    "filename": filename,
+                    "tier": tier,
+                    "weight": int(meta["weight"]),
+                    "updated_at": meta["updated_at"],
+                }
+                for filename, meta in self.load_index(tier).items()
+            )
+        permanent_dir = self.tier_dir("permanent")
+        if permanent_dir.is_dir():
+            references.extend(
+                {
+                    "filename": path.name,
+                    "tier": "permanent",
+                    "weight": 0,
+                    "updated_at": iso(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)),
+                }
+                for path in permanent_dir.glob("*.md")
+                if path.is_file()
+            )
+        return sorted(
+            references,
+            key=lambda item: (
+                -(parse_time(item["updated_at"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
+                item["filename"].casefold(),
+            ),
+        )
+
+    def _new_meta(self, tier: str, current: datetime) -> dict[str, Any]:
+        rule = self.rules[tier]
+        if rule.days is None:
+            raise MemoryError(f"永久层不应创建生命周期索引：{tier}")
+        return {
+            "weight": 0,
+            "updated_at": iso(current),
+            "last_weight_date": None,
+            "expires_at": iso(current + timedelta(days=rule.days)),
+        }
+
+    def _touch_temporary(self, location: MemoryLocation, current: datetime) -> bool:
+        index = self.load_index(location.tier)
+        meta = index.get(location.filename)
+        if meta is None:
+            raise MemoryError(f"临时记忆缺少索引：{location.path}")
+        day = local_day(current)
+        weighted = meta.get("last_weight_date") != day
+        if weighted:
+            meta["weight"] = int(meta.get("weight", 0)) + 1
+            meta["last_weight_date"] = day
+        meta["updated_at"] = iso(current)
+        index[location.filename] = meta
+        self.write_index(location.tier, index)
+        return weighted
+
+    def _delete_location(self, location: MemoryLocation) -> None:
+        if location.indexed:
+            index = self.load_index(location.tier)
+            index.pop(location.filename, None)
+            self.write_index(location.tier, index)
+        try:
+            location.path.unlink()
+        except FileNotFoundError:
+            return
+
+    def _promote_location(self, location: MemoryLocation, target_tier: str, current: datetime) -> None:
+        if location.tier == "permanent" or target_tier not in TIERS:
+            raise MemoryError(f"无效记忆晋升：{location.tier}→{target_tier}")
+        target_path = self.fragment_path(target_tier, location.filename)
+        if target_path.exists():
+            raise MemoryError(f"晋升目标已存在同名记忆：{target_path}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(location.path, target_path)
+        source_index = self.load_index(location.tier)
+        source_meta = source_index.pop(location.filename, None)
+        if source_meta is None:
+            os.replace(target_path, location.path)
+            raise MemoryError(f"晋升来源缺少索引：{location.path}")
+        try:
+            if target_tier != "permanent":
+                target_index = self.load_index(target_tier)
+                target_index[location.filename] = self._new_meta(target_tier, current)
+                self.write_index(target_tier, target_index)
+            self.write_index(location.tier, source_index)
+        except Exception:
+            if target_tier != "permanent":
+                try:
+                    rollback_index = self.load_index(target_tier)
+                    rollback_index.pop(location.filename, None)
+                    self.write_index(target_tier, rollback_index)
+                except Exception:
+                    pass
+            if target_path.exists() and not location.path.exists():
+                location.path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target_path, location.path)
+            raise
 
     def upsert_candidates(
         self,
         candidates: list[dict[str, Any]],
         *,
-        source: dict[str, Any],
+        source: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        del source
         current = now or utc_now()
+        created: list[str] = []
+        updated: list[str] = []
+        forgotten: list[str] = []
+        rejected = 0
         with self._lock:
-            items = self.load_all(now=current)
-            created: list[str] = []
-            updated: list[str] = []
-            forgotten: list[str] = []
-            rejected = 0
             for candidate in candidates:
                 if not isinstance(candidate, dict):
                     rejected += 1
                     continue
-                action = str(candidate.get("action") or "upsert")
-                target = _normalise_text(candidate.get("target"))
+                action = str(candidate.get("action") or "upsert").strip().casefold()
+                raw_filename = candidate.get("filename") or candidate.get("target")
                 content = _normalise_text(candidate.get("content"))
                 if action == "forget":
-                    query = target or content
-                    removed = self._remove_matches(items, query)
-                    forgotten.extend(removed)
+                    if raw_filename is None:
+                        raw_filename = content
+                    try:
+                        removed = self.forget(str(raw_filename))
+                    except MemoryError:
+                        rejected += 1
+                    else:
+                        forgotten.extend(removed)
                     continue
-                if not content or contains_sensitive_credential(content):
+                if action != "upsert" or not content or contains_sensitive_credential(content):
+                    rejected += 1
+                    continue
+                try:
+                    filename = normalize_memory_filename(raw_filename or content)
+                except MemoryError:
                     rejected += 1
                     continue
                 explicit = bool(candidate.get("explicit", False))
-                tier = "permanent" if explicit else "seven_days"
-                match = self._find_duplicate(items, content, candidate.get("keywords") or [])
-                if match is not None:
-                    match["content"] = content
-                    match["type"] = str(candidate.get("type") or match["type"])
-                    match["keywords"] = sorted(set(match["keywords"]) | {_normalise_text(item) for item in candidate.get("keywords", []) if _normalise_text(item)})
-                    match["entities"] = sorted(set(match["entities"]) | {_normalise_text(item) for item in candidate.get("entities", []) if _normalise_text(item)})
-                    match["confidence"] = max(match["confidence"], float(candidate.get("confidence", 0.5)))
-                    match["importance"] = max(match["importance"], float(candidate.get("importance", 0.5)))
-                    match["source"] = dict(source)
-                    match["updated_at"] = iso(current)
-                    match["version"] += 1
-                    if explicit and match["tier"] != "permanent":
-                        match["tier"] = "permanent"
-                        match["tier_weight"] = 0
-                        match["tier_entered_at"] = iso(current)
-                        match["review_at"] = None
-                        match["last_weight_date"] = None
-                        match["explicit"] = True
-                    updated.append(match["id"])
+                location = self.locate(filename)
+                if location is None:
+                    tier = "permanent" if explicit else "seven_days"
+                    path = self.fragment_path(tier, filename)
+                    _atomic_text(path, content)
+                    if tier != "permanent":
+                        try:
+                            index = self.load_index(tier)
+                            index[filename] = self._new_meta(tier, current)
+                            self.write_index(tier, index)
+                        except Exception:
+                            path.unlink(missing_ok=True)
+                            raise
+                    created.append(filename)
                     continue
-                rule = self.rules[tier]
-                review = current + timedelta(days=rule.days) if rule.days is not None else None
-                item = {
-                    "schema_version": MEMORY_SCHEMA_VERSION,
-                    "id": uuid.uuid4().hex,
-                    "content": content,
-                    "type": str(candidate.get("type") or "fact"),
-                    "keywords": sorted({_normalise_text(item) for item in candidate.get("keywords", []) if _normalise_text(item)}),
-                    "entities": sorted({_normalise_text(item) for item in candidate.get("entities", []) if _normalise_text(item)}),
-                    "source": dict(source),
-                    "confidence": min(1.0, max(0.0, float(candidate.get("confidence", 0.5)))),
-                    "importance": min(1.0, max(0.0, float(candidate.get("importance", 0.5)))),
-                    "status": "active",
-                    "tier": tier,
-                    "tier_weight": 0,
-                    "tier_entered_at": iso(current),
-                    "review_at": iso(review) if review else None,
-                    "last_weight_date": None,
-                    "created_at": iso(current),
-                    "updated_at": iso(current),
-                    "explicit": explicit,
-                    "version": 1,
-                }
-                items.append(item)
-                created.append(item["id"])
-            self._write_partition(items)
-            return {"created": created, "updated": updated, "forgotten": forgotten, "rejected": rejected}
-
-    def _find_duplicate(self, items: list[dict[str, Any]], content: str, keywords: list[Any]) -> dict[str, Any] | None:
-        key = _key(content)
-        wanted = {_key(item) for item in keywords if _key(item)}
-        for item in items:
-            if _key(item["content"]) == key:
-                return item
-            existing = {_key(value) for value in item.get("keywords", []) if _key(value)}
-            if wanted and len(wanted & existing) / max(1, len(wanted | existing)) >= 0.8:
-                return item
-        return None
-
-    def _remove_matches(self, items: list[dict[str, Any]], query: str) -> list[str]:
-        needle = _key(query)
-        if not needle:
-            return []
-        removed = [item["id"] for item in items if item["id"] == query or needle in _key(item["content"]) or any(needle in _key(key) for key in item.get("keywords", []))]
-        items[:] = [item for item in items if item["id"] not in set(removed)]
-        return removed
+                old_content = location.path.read_text("utf-8").strip()
+                changed = old_content != content
+                if explicit and location.tier != "permanent":
+                    if changed:
+                        _atomic_text(location.path, content)
+                    self._promote_location(location, "permanent", current)
+                    updated.append(filename)
+                    continue
+                if changed:
+                    _atomic_text(location.path, content)
+                    if location.tier != "permanent":
+                        self._touch_temporary(location, current)
+                updated.append(filename)
+        return {"created": created, "updated": updated, "forgotten": forgotten, "rejected": rejected}
 
     def forget(self, query: str) -> list[str]:
         with self._lock:
-            items = self.load_all()
-            removed = self._remove_matches(items, query)
-            if removed:
-                self._write_partition(items)
-            return removed
+            try:
+                filename = normalize_memory_filename(query)
+            except MemoryError:
+                return []
+            location = self.locate(filename)
+            if location is None:
+                return []
+            self._delete_location(location)
+            return [filename]
 
     def review_due(self, *, now: datetime | None = None) -> dict[str, list[str]]:
         current = now or utc_now()
+        upgraded: list[str] = []
+        deleted: list[str] = []
         with self._lock:
-            items = self.load_all(now=current)
-            upgraded: list[str] = []
-            deleted: list[str] = []
-            kept: list[dict[str, Any]] = []
-            for item in items:
-                rule = self.rules[item["tier"]]
-                due = parse_time(item.get("review_at"))
-                if due is None or due > current or rule.next is None:
-                    kept.append(item)
-                    continue
-                if item["tier_weight"] >= int(rule.upgrade_threshold or 0):
-                    next_rule = self.rules[rule.next]
-                    item["tier"] = rule.next
-                    item["tier_weight"] = 0
-                    item["tier_entered_at"] = iso(current)
-                    item["review_at"] = (
-                        iso(current + timedelta(days=next_rule.days))
-                        if next_rule.days is not None
-                        else None
-                    )
-                    item["last_weight_date"] = None
-                    item["updated_at"] = iso(current)
-                    item["version"] += 1
-                    kept.append(item)
-                    upgraded.append(item["id"])
-                else:
-                    deleted.append(item["id"])
-            if upgraded or deleted:
-                self._write_partition(kept)
+            for tier in TEMPORARY_TIERS:
+                for filename, meta in list(self.load_index(tier).items()):
+                    due = parse_time(meta.get("expires_at"))
+                    if due is None or due > current:
+                        continue
+                    location = MemoryLocation(tier, filename, self.fragment_path(tier, filename), True)
+                    rule = self.rules[tier]
+                    if int(meta.get("weight", 0)) >= int(rule.upgrade_threshold or 0):
+                        if rule.next is None:
+                            continue
+                        self._promote_location(location, rule.next, current)
+                        upgraded.append(filename)
+                    else:
+                        self._delete_location(location)
+                        deleted.append(filename)
             return {"upgraded": upgraded, "deleted": deleted}
 
     def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
         query_key = _key(query)
         query_tokens = _tokens(query)
         tier_rank = {"seven_days": 1, "one_month": 2, "half_year": 3, "permanent": 4}
-        scored = []
-        for item in self.load_all():
-            haystack = " ".join([item["content"], *item.get("keywords", []), *item.get("entities", [])])
-            item_tokens = _tokens(haystack)
-            overlap = len(query_tokens & item_tokens)
-            substring = 2 if query_key and query_key in _key(haystack) else 0
+        references: list[tuple[MemoryLocation, dict[str, Any] | None]] = []
+        for tier in TEMPORARY_TIERS:
+            references.extend(
+                (MemoryLocation(tier, filename, self.fragment_path(tier, filename), True), meta)
+                for filename, meta in self.load_index(tier).items()
+            )
+        permanent_dir = self.tier_dir("permanent")
+        if permanent_dir.is_dir():
+            references.extend(
+                (MemoryLocation("permanent", path.name, path, False), None)
+                for path in permanent_dir.glob("*.md")
+                if path.is_file()
+            )
+        scored: list[tuple[float, MemoryLocation, dict[str, Any] | None]] = []
+        for location, meta in references:
+            title = Path(location.filename).stem
+            title_key = _key(title)
+            title_tokens = _tokens(title)
+            overlap = len(query_tokens & title_tokens)
+            substring = 2 if query_key and (query_key in title_key or title_key in query_key) else 0
             if overlap == 0 and substring == 0:
                 continue
-            relevance = substring + overlap / max(1, math.sqrt(len(query_tokens) * len(item_tokens)))
-            score = relevance * 10 + tier_rank[item["tier"]] + item["importance"] + min(item["tier_weight"], 1000) / 1000
-            scored.append((score, item))
-        scored.sort(key=lambda pair: (-pair[0], pair[1]["id"]))
-        return [dict(item, _score=score) for score, item in scored[: max(0, limit)]]
-
-    def select_for_injection(
-        self,
-        query: str,
-        *,
-        max_chars: int | None = None,
-        max_items: int | None = None,
-    ) -> MemorySelection:
-        memory_config = self.config.get("memory") or {}
-        char_budget = int(max_chars if max_chars is not None else memory_config.get("injection_max_chars", 2000))
-        item_budget = int(max_items if max_items is not None else memory_config.get("injection_max_items", 8))
-        candidates = self.search(query, limit=max(item_budget * 4, item_budget))
-        selected = []
-        lines = []
-        used = 0
-        for item in candidates:
-            line = f"- [{item['id']}] ({item['tier']}, weight={item['tier_weight']}) {item['content']}"
-            extra = len(line) + (1 if lines else 0)
-            if len(selected) >= item_budget or used + extra > char_budget:
-                continue
-            selected.append(item)
-            lines.append(line)
-            used += extra
-        text = ""
-        if lines:
-            text = (
-                "以下是与当前请求相关的用户记忆，可能过期；当前用户指令和当前事实优先：\n"
-                + "\n".join(lines)
-            )
-        return MemorySelection(
-            items=selected,
-            text=text,
-            candidate_ids=[item["id"] for item in candidates],
-            selected_ids=[item["id"] for item in selected],
-            chars=len(text),
-        )
+            relevance = substring + overlap / max(1, math.sqrt(len(query_tokens) * len(title_tokens)))
+            weight = int((meta or {}).get("weight", 0))
+            score = relevance * 10 + tier_rank[location.tier] + min(weight, 1000) / 1000
+            scored.append((score, location, meta))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].filename.casefold()))
+        return [
+            dict(self._entry(location, meta), _score=score)
+            for score, location, meta in scored[: max(0, limit)]
+        ]
 
     def select_tier_for_prompt(
         self,
         tier: str,
         *,
-        max_files: int,
+        max_files: int | None,
         mode: str = "full",
     ) -> TierPromptSelection:
-        """Select one complete memory tier without request-dependent retrieval."""
-
         if tier not in TIERS:
             raise MemoryError(f"未知记忆档位：{tier}")
         if mode != "full":
             raise MemoryConfigError(f"{tier} 记忆注入模式暂不支持：{mode}")
-        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 0:
-            raise MemoryConfigError(f"{tier} 记忆文件上限必须是非负整数")
-        source_file = self.path(tier)
-        if max_files == 0:
-            return TierPromptSelection(tier, (), "", (), 0, 0, 0, 0, False, source_file)
+        if max_files is not None and (
+            isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 0
+        ):
+            raise MemoryConfigError(f"{tier} 记忆文件上限必须是非负整数或 null")
 
-        items = self.load_tier(tier)
+        if tier == "permanent":
+            items = self.load_tier(tier)
+            selected = sorted(items, key=lambda item: item["filename"].casefold())
+            original_items = len(items)
+            all_paths = [self.fragment_path(tier, item["filename"]) for item in items]
+        else:
+            index = self.load_index(tier)
+            ordered = sorted(
+                index.items(),
+                key=lambda pair: (
+                    -int(pair[1]["weight"]),
+                    -(parse_time(pair[1]["updated_at"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
+                    pair[0].casefold(),
+                ),
+            )
+            if max_files is not None:
+                ordered = ordered[:max_files]
+            selected = [
+                self._entry(
+                    MemoryLocation(tier, filename, self.fragment_path(tier, filename), True),
+                    meta,
+                )
+                for filename, meta in ordered
+            ]
+            original_items = len(index)
+            all_paths = [self.fragment_path(tier, filename) for filename in index]
 
         def line(item: dict[str, Any]) -> str:
             if tier == "permanent":
-                return f"- [{item['id']}] {item['content']}"
-            return f"- [{item['id']}] (weight={item['tier_weight']}) {item['content']}"
+                return f"- [{item['filename']}] {item['content']}"
+            return f"- [{item['filename']}] (weight={item['weight']}) {item['content']}"
 
-        original_text = "\n".join(line(item) for item in items)
-        if len(items) <= max_files:
-            selected = list(items)
-        else:
-            selected = sorted(
-                enumerate(items),
-                key=lambda pair: (-pair[1]["tier_weight"], pair[0]),
-            )
-            selected = [item for _, item in selected[:max_files]]
         text = "\n".join(line(item) for item in selected)
+        source_files = tuple(self.fragment_path(tier, item["filename"]) for item in selected)
+        original_size = sum(path.stat().st_size for path in all_paths if path.is_file())
         return TierPromptSelection(
             tier=tier,
             items=tuple(selected),
             text=text,
-            selected_ids=tuple(item["id"] for item in selected),
-            original_chars=len(original_text),
+            selected_ids=tuple(item["filename"] for item in selected),
+            original_chars=original_size,
             injected_chars=len(text),
-            original_items=len(items),
+            original_items=original_items,
             injected_items=len(selected),
-            truncated=len(selected) < len(items),
-            source_file=source_file,
+            truncated=len(selected) < original_items,
+            source_files=source_files,
         )
 
-    def mark_used(self, ids: list[str], *, now: datetime | None = None) -> list[str]:
-        if not ids:
+    def mark_used(self, filenames: list[str], *, now: datetime | None = None) -> list[str]:
+        if not filenames:
             return []
         current = now or utc_now()
-        day = local_day(current)
-        wanted = set(ids)
+        changed: list[str] = []
         with self._lock:
-            items = self.load_all(now=current)
-            changed = []
-            for item in items:
-                if item["id"] in wanted and item.get("last_weight_date") != day:
-                    item["tier_weight"] += 1
-                    item["last_weight_date"] = day
-                    item["updated_at"] = iso(current)
-                    item["version"] += 1
-                    changed.append(item["id"])
-            if changed:
-                self._write_partition(items)
-            return changed
+            for raw_filename in dict.fromkeys(filenames):
+                try:
+                    location = self.locate(raw_filename)
+                except MemoryError:
+                    continue
+                if location is None or location.tier == "permanent":
+                    continue
+                if self._touch_temporary(location, current):
+                    changed.append(location.filename)
+        return changed
 
     def list_items(self) -> list[dict[str, Any]]:
         with self._lock:
             items = self.load_all()
             rank = {tier: index for index, tier in enumerate(TIERS)}
-            return sorted(items, key=lambda item: (-rank[item["tier"]], -item["tier_weight"], item["id"]))
+            return sorted(
+                items,
+                key=lambda item: (-rank[item["tier"]], -int(item["weight"]), item["filename"].casefold()),
+            )
+
+    def integrity_issues(self) -> list[str]:
+        issues: list[str] = []
+        seen: dict[str, str] = {}
+        for tier in TEMPORARY_TIERS:
+            index = self.load_index(tier)
+            indexed = set(index)
+            present = {path.name for path in self.tier_dir(tier).glob("*.md") if path.is_file()}
+            for filename in sorted(indexed - present, key=str.casefold):
+                issues.append(f"missing_file:{tier}/{filename}")
+            for filename in sorted(present - indexed, key=str.casefold):
+                issues.append(f"orphan_file:{tier}/{filename}")
+            for filename in sorted(indexed & present, key=str.casefold):
+                key = filename.casefold()
+                if key in seen:
+                    issues.append(f"duplicate_filename:{seen[key]}/{filename}:{tier}/{filename}")
+                else:
+                    seen[key] = tier
+        for path in sorted(self.tier_dir("permanent").glob("*.md"), key=lambda item: item.name.casefold()):
+            key = path.name.casefold()
+            if key in seen:
+                issues.append(f"duplicate_filename:{seen[key]}/{path.name}:permanent/{path.name}")
+            else:
+                seen[key] = "permanent"
+        if (self.tier_dir("permanent") / "data.json").exists():
+            issues.append("unexpected_index:permanent/data.json")
+        return issues
