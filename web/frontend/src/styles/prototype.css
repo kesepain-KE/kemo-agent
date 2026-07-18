@@ -1333,8 +1333,8 @@ textarea{font-size:0.9375rem;line-height:1.65}.composer-meta{font-size:0.6875rem
   --font-small:.75rem;
   --font-heading:1.625rem;
 }
-html[data-font-size="small"]{--kemo-font-root:12.8px}
-html[data-font-size="medium"]{--kemo-font-root:14.4px}
+html[data-font-size="small"]{--kemo-font-root:10.24px}
+html[data-font-size="medium"]{--kemo-font-root:11.52px}
 html[data-font-size="large"]{--kemo-font-root:16px}
 html{font-size:var(--kemo-font-root)!important}
 body{font-size:1rem}
