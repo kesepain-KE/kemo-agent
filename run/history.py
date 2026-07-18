@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -75,6 +76,7 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
             "user": user,
             "source": source,
             "session_id": session_id,
+            "title": "",
             "created_at": timestamp,
             "updated_at": timestamp,
             "rounds": 0,
@@ -95,6 +97,16 @@ def commit_window(directory: Path, window: dict[str, Any]) -> None:
 
     with _lock(directory):
         data = dict(window["data"])
+        # 会话标题由独立的重命名 API 管理。运行中的请求可能持有一份较早
+        # 加载的 window，因此提交对话内容时应保留磁盘上的最新标题。
+        existing_data_path = directory / "data.json"
+        if existing_data_path.is_file():
+            try:
+                existing_data = _read_json(existing_data_path)
+            except HistoryError:
+                existing_data = None
+            if isinstance(existing_data, dict) and isinstance(existing_data.get("title"), str):
+                data["title"] = existing_data["title"]
         data["updated_at"] = _now()
         data["complete"] = False
         _atomic_write_json(directory / "data.json", data)
@@ -184,6 +196,7 @@ def list_sessions(root: Path, user: str, source: str) -> list[dict[str, Any]]:
         item = {
             "session_id": session_id,
             "window": directory.name,
+            "title": str(data.get("title") or ""),
             "rounds": int(data.get("rounds", 0)),
             "updated_at": str(data.get("updated_at") or ""),
         }
@@ -191,6 +204,79 @@ def list_sessions(root: Path, user: str, source: str) -> list[dict[str, Any]]:
         if previous is None or item["updated_at"] > previous["updated_at"]:
             sessions[session_id] = item
     return sorted(sessions.values(), key=lambda item: item["updated_at"], reverse=True)
+
+
+def _source_windows(root: Path, user: str, source: str) -> list[tuple[Path, str]]:
+    """Return verified committed windows for one user/source pair."""
+
+    history_dir = user_dir(user, root) / "history"
+    if not history_dir.is_dir():
+        return []
+    matches: list[tuple[Path, str]] = []
+    for directory in history_dir.iterdir():
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        try:
+            data = _read_json(directory / "data.json")
+        except HistoryError:
+            continue
+        if (
+            isinstance(data, dict)
+            and data.get("complete") is True
+            and data.get("user") == user
+            and data.get("source") == source
+        ):
+            session_id = str(data.get("session_id") or "")
+            if session_id:
+                matches.append((directory, session_id))
+    return matches
+
+
+def _matching_windows(root: Path, user: str, source: str, session_id: str) -> list[Path]:
+    """Return only committed windows whose stored identity matches exactly."""
+
+    return [
+        directory
+        for directory, stored_session_id in _source_windows(root, user, source)
+        if stored_session_id == session_id
+    ]
+
+
+def rename_session(root: Path, user: str, source: str, session_id: str, title: str) -> int:
+    """Persist a display title across every window belonging to a session."""
+
+    directories = _matching_windows(root, user, source, session_id)
+    for directory in directories:
+        with _lock(directory):
+            data_path = directory / "data.json"
+            data = _read_json(data_path)
+            if not isinstance(data, dict) or data.get("complete") is not True:
+                continue
+            data["title"] = title
+            # A cosmetic rename must not affect chronological session ordering.
+            _atomic_write_json(data_path, data)
+    return len(directories)
+
+
+def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
+    """Delete every verified history window belonging to a session."""
+
+    directories = _matching_windows(root, user, source, session_id)
+    for directory in directories:
+        with _lock(directory):
+            shutil.rmtree(directory)
+    return len(directories)
+
+
+def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
+    """Delete every verified history window for a user/source pair."""
+
+    entries = _source_windows(root, user, source)
+    session_ids = {session_id for _, session_id in entries}
+    for directory, _ in entries:
+        with _lock(directory):
+            shutil.rmtree(directory)
+    return len(session_ids), len(entries)
 
 
 def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
