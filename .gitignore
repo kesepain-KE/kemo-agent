@@ -57,6 +57,7 @@ users/*/download/
 users/*/file_upload/
 users/*/history/
 users/*/improve/
+users/*/improve_backup_v1_*/
 users/*/knowledge/
 users/*/agents/
 users/*/message_state/
@@ -67,6 +68,10 @@ users/*/user_config.json
 users/*/user_soul.md
 users/*/memory_temporary_important.md
 users/*/*.txt
+
+# Template memory schema and empty indexes are project fixtures, not runtime data.
+!users/_template/improve/
+!users/_template/improve/**
 
 # Template prompt-source layout remains versioned.
 !users/_template/task_plan/

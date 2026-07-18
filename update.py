@@ -476,6 +476,35 @@ def migrate_user_skeletons(*, dry_run: bool) -> None:
         print(yellow(f"用户目录补齐跳过: {exc}"))
 
 
+def migrate_user_memories(*, dry_run: bool) -> None:
+    users_dir = ROOT / "users"
+    if not users_dir.is_dir():
+        return
+    candidates = [
+        path
+        for path in sorted(users_dir.iterdir())
+        if path.is_dir()
+        and not path.name.startswith("_")
+        and (path / "user_config.json").is_file()
+        and (path / "improve").is_dir()
+        and not (path / "improve" / "storage.json").is_file()
+    ]
+    if not candidates:
+        return
+    if dry_run:
+        print(f"[dry-run] 将迁移 {len(candidates)} 个用户的文件型记忆到 schema v2")
+        return
+    try:
+        sys.path.insert(0, str(ROOT))
+        from run.memory_migrate import migrate_user_memory
+
+        reports = [migrate_user_memory(ROOT, path.name) for path in candidates]
+        migrated = sum(1 for report in reports if report.migrated)
+        print(green(f"用户记忆已迁移到 schema v2: {migrated} 个用户"))
+    except Exception as exc:
+        raise UpdateError(f"用户记忆迁移失败，旧数据已保留：{exc}") from exc
+
+
 def build_web_frontend(*, dry_run: bool) -> None:
     package_json = WEB_DIR / "package.json"
     if not package_json.is_file():
@@ -618,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
             handle_config(source, assume_yes=args.yes, dry_run=args.dry_run)
             handle_global_knowledge(source, assume_yes=args.yes, dry_run=args.dry_run)
             migrate_user_skeletons(dry_run=args.dry_run)
+            migrate_user_memories(dry_run=args.dry_run)
 
         if not args.skip_web_build:
             build_web_frontend(dry_run=args.dry_run)

@@ -225,16 +225,26 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 ### 权重规则
 
 - 不做每日权重衰减。
-- 仅被相关内容触发时加权，同一记忆每天最多加权一次。
+- 临时记忆正文实际修改或被 Prompt 实际引用时可加权；两类行为共用每日锁，同一记忆每天合计最多 `+1`。
+- 引用和修改都会更新 `updated_at`，但不会重置进入当前层时固定的 `expires_at`。
 - 到期未达晋升阈值直接删除，不降级保留。
 - 晋升后新挡位权重从 0 重新累计。
-- 仅实际注入 prompt 并成功完成任务的记忆才被加权。
+- 仅实际注入 Prompt 并成功完成任务的引用才被加权；失败和取消不加权。
+- 永久记忆没有索引、权重或到期时间。
+
+### 文件存储
+
+- 文件名是全部记忆层级中的全局唯一身份，基础名称最长 20 个字符。
+- 一个 Markdown 只保存一个微量化事实、偏好、关系或项目状态；同名写入更新原文件。
+- 临时三层正文存为 Markdown，同目录 `data.json` 只保存文件名、weight、updated_at、last_weight_date 和 expires_at。
+- 永久层只保存 Markdown，不存在 `data.json`。
+- 当前文件检索只使用文件名，不接入关键词、实体、向量或 `kemo-graph`。
 
 ### 注入
 
-- 当前 `full` 模式：注入各挡位中受数量上限约束的全部记忆。
-- `search` 模式尚未启用。
-- 各挡位有文件数上限（`memory.fragment_limits`）和单条字符上限（`memory.fragment_max_chars`）。
+- 永久记忆全部注入，不设置文件数量上限。
+- 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
+- `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
 - 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。
 - 记忆提取为异步操作，不阻塞主对话。
 
@@ -373,9 +383,9 @@ system prompt 按以下固定顺序拼接：
 6. **知识库索引** — 按 `knowledge.enabled/use_shared/use_global` 选择用户 + 共享 + 全局索引
 7. **永久记忆** — `improve/permanent/`
 8. **临时重要记忆** — `memory_temporary_important.md`
-9. **临时记忆 seven_days** — `improve/seven_days/`
+9. **临时记忆 half_year** — `improve/half_year/`
 10. **临时记忆 one_month** — `improve/one_month/`
-11. **临时记忆 half_year** — `improve/half_year/`
+11. **临时记忆 seven_days** — `improve/seven_days/`
 12. **任务计划** — 当前活跃计划的描述
 13. **拓展数据** — 注册 global/shared/user 三层后，过滤 global/shared；当前用户 Expand 全量动态解析
 14. **感知文件** — `global_sense/<module>/**/*.md`，按模块白名单过滤且忽略根目录 Markdown

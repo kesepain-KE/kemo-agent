@@ -29,20 +29,28 @@
       "candidates": {
         "type": "array",
         "items": {
-          "type": "object",
-          "properties": {
-            "content": {"type": "string"},
-            "type": {"type": "string"},
-            "confidence": {"type": "number"},
-            "importance": {"type": "number"},
-            "entities": {"type": "array", "items": {"type": "string"}},
-            "keywords": {"type": "array", "items": {"type": "string"}},
-            "explicit": {"type": "boolean"},
-            "action": {"type": "string"},
-            "target": {"type": "string"}
-          },
-          "required": ["content", "type", "confidence", "importance", "entities", "keywords", "explicit", "action"],
-          "additionalProperties": false
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "action": {"const": "upsert"},
+                "filename": {"type": "string", "minLength": 1, "maxLength": 20},
+                "content": {"type": "string", "minLength": 1},
+                "explicit": {"type": "boolean"}
+              },
+              "required": ["action", "filename", "content", "explicit"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {"const": "forget"},
+                "filename": {"type": "string", "minLength": 1, "maxLength": 20}
+              },
+              "required": ["action", "filename"],
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },

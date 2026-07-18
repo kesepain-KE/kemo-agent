@@ -361,7 +361,7 @@ def _interactive_command(
             print("暂无记忆。", file=stdout)
         for item in items:
             print(
-                f"{item['id']} | {item['tier']} | weight={item['tier_weight']} | "
+                f"{item['filename']} | {item['tier']} | weight={item['weight']} | "
                 f"{item['content']}",
                 file=stdout,
             )
@@ -374,11 +374,6 @@ def _interactive_command(
         result = store.upsert_candidates(
             [{
                 "content": argument,
-                "type": "explicit",
-                "confidence": 1.0,
-                "importance": 1.0,
-                "entities": [],
-                "keywords": [],
                 "explicit": True,
                 "action": "upsert",
             }],
@@ -387,8 +382,8 @@ def _interactive_command(
         if result["rejected"]:
             print("记忆内容为空或包含敏感凭据，未保存。", file=stdout)
         else:
-            memory_id = (result["created"] or result["updated"])[0]
-            print(f"已保存永久记忆：{memory_id}", file=stdout)
+            filename = (result["created"] or result["updated"])[0]
+            print(f"已保存永久记忆：{filename}", file=stdout)
         return True, session_id
     if command == "/forget":
         if not argument:
@@ -736,7 +731,7 @@ def run_interactive(
         print("  /compress         压缩上下文")
         print("  /memory           列出记忆")
         print("  /remember <内容>   保存永久记忆")
-        print("  /forget <ID>      删除记忆")
+        print("  /forget <文件名>  删除记忆")
         print("  /plans            列出任务计划")
         print("  /plan <目标>       创建任务计划")
         print("  /crons            列出定时任务")

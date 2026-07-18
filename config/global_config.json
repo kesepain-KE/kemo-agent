@@ -23,14 +23,7 @@
     "include_user_soul": true,
     "include_agents_manual": true,
     "include_important_memory": true,
-    "file_limits": {
-      "permanent_memory": 30000,
-      "temporary_seven_days": 10000,
-      "temporary_one_month": 15000,
-      "temporary_half_year": 20000
-    },
     "char_limits": {
-      "important_memory": 5000,
       "knowledge_index": 8000,
       "task_plan": 5000,
       "perception": 8000,
@@ -74,21 +67,15 @@
     "enabled": false
   },
   "memory": {
-    "fragment_limits": {
-      "seven_days": 15,
-      "one_month": 20,
-      "half_year": 25,
-      "permanent": 30
-    },
-    "fragment_max_chars": {
-      "temporary": 200,
-      "permanent": 300
+    "storage_schema_version": 2,
+    "temporary_injection_limits": {
+      "half_year": 3,
+      "one_month": 4,
+      "seven_days": 3
     },
     "important_memory_max_chars": 1500,
     "extraction_enabled": true,
     "injection_enabled": true,
-    "injection_max_chars": 2000,
-    "injection_max_items": 8,
     "existing_candidates_for_extraction": 12,
     "tiers": {
       "seven_days": {
