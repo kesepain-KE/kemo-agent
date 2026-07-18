@@ -70,7 +70,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def discover_user(explicit_user: str | None, root: Path | None = None) -> str:
+def discover_user(explicit_user: str | None, root: Path | None = None, *, interactive: bool = False) -> str:
     try:
         from run.config import load_dotenv
 
@@ -94,6 +94,21 @@ def discover_user(explicit_user: str | None, root: Path | None = None) -> str:
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
+            if interactive and sys.stdin.isatty():
+                print()
+                print("请选择用户：")
+                for i, name in enumerate(candidates, 1):
+                    print(f"  {i}) {name}")
+                while True:
+                    try:
+                        choice = input("> ").strip()
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(candidates):
+                            print()
+                            return candidates[idx]
+                    except (ValueError, EOFError, KeyboardInterrupt):
+                        pass
+                    print("请输入数字序号。")
             raise CLIError("检测到多个用户，请使用 --user 指定用户。")
 
     raise CLIError("未找到可用用户，请使用 --user 指定用户。")
@@ -185,12 +200,8 @@ def emit_event_stream(
             if event_type == "text_delta":
                 print(_event_value(event, "content", ""), end="", file=stdout, flush=True)
                 wrote_text = True
-            elif event_type == "reasoning_delta" and show_reasoning:
-                print(_event_value(event, "content", ""), end="", file=stderr, flush=True)
             elif event_type == "tool_call_start":
-                print(f"\n[工具] {_event_value(event, 'tool_name', '')}：开始", file=stderr, flush=True)
-            elif event_type == "tool_call_result":
-                print(f"[工具] {_event_value(event, 'tool_name', '')}：完成", file=stderr, flush=True)
+                print(f"\n  ⚙ {_event_value(event, 'tool_name', '')}", file=stdout, flush=True)
             elif event_type == "error":
                 error = _event_value(event, "error", {}) or {}
                 raise CLIError(str(error.get("message") or "运行失败"))
@@ -715,8 +726,23 @@ def run_interactive(
     error_stream = stderr or sys.stderr
     base = (root or _project_root()).resolve()
     if getattr(stdin, "isatty", lambda: False)():
-        print(f"kemo-agent CLI | user={user} | session={session_id}", file=stdout)
-        print("命令：/new /sessions /use <session> /clear /history /status /compress /exit", file=stdout)
+        print(f"kemo-agent 交互模式 | 用户: {user} | 会话: {session_id}")
+        print("─" * 50)
+        print("命令：")
+        print("  /new [名称]       新建会话")
+        print("  /sessions         列出所有会话")
+        print("  /use <会话ID>     切换会话")
+        print("  /status           查看上下文占用")
+        print("  /compress         压缩上下文")
+        print("  /memory           列出记忆")
+        print("  /remember <内容>   保存永久记忆")
+        print("  /forget <ID>      删除记忆")
+        print("  /plans            列出任务计划")
+        print("  /plan <目标>       创建任务计划")
+        print("  /crons            列出定时任务")
+        print("  /cron <要求>       创建定时任务")
+        print("  /exit             退出")
+        print("─" * 50)
 
     while True:
         try:
@@ -774,11 +800,11 @@ def main(
         if not args.source.strip() or not args.session.strip():
             raise CLIError("--source 和 --session 不能为空。")
 
-        user = discover_user(args.user, root)
+        user = discover_user(args.user, root, interactive=(prompt is None and not args.stdin))
         active_handler = handler or resolve_handler()
         active_stream_handler = None if args.no_stream or handler is not None else resolve_stream_handler()
 
-        if args.interactive or prompt is None:
+        if prompt is None:
             run_interactive(
                 active_handler,
                 user,
