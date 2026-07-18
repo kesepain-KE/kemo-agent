@@ -206,7 +206,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - 工具执行有超时限制（`tools.timeout`，默认 60 秒）。
 - 工具循环有最大次数限制（`tools.max_iterations`，默认 8 次）。
 - 用户取消时立即停止，不继续执行后续工具调用。
-- 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`，不注入主对话历史。
+- 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout`，不注入主对话历史。
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
 
 ---
@@ -389,7 +389,7 @@ system prompt 按以下固定顺序拼接：
 - 每个请求属于明确的 `user`、`source` 和 `session_id`。
 - 同一用户可共享记忆和知识库，但不同来源与会话的对话历史互相隔离。
 - 不假设拥有未注入的其他会话内容；需要旧对话时使用历史搜索工具。
-- 工具上下文只包含 `root`、`user`、`source`、`session_id`、`window`，不包含主对话历史。
+- 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。
 - 会话级锁（`_session_lock`）保证同一 user/source/session_id 的请求串行执行。
 
 ---
