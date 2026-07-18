@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bot, Database, RefreshCw, Wrench } from 'lucide-react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext, useSearchParams } from 'react-router-dom'
 import { getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig, updateUserConfig } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'prompt' | 'config'
+
+const settingsTabs = new Set<SettingsTab>(['appearance', 'provider', 'users', 'memory', 'permissions', 'runtime', 'prompt', 'config'])
+
+function isSettingsTab(value: string | null): value is SettingsTab {
+  return value !== null && settingsTabs.has(value as SettingsTab)
+}
 
 const credentialLabels: Record<string, string> = {
   environment: '环境变量已配置', inline: '配置文件内联', missing: '凭据未检测到',
@@ -26,9 +32,11 @@ function SettingRow({ title, description, control, source }: { title: string; de
 
 export function SettingsPage() {
   const { user } = useOutletContext<ShellOutletContext>()
+  const [searchParams] = useSearchParams()
   const ui = useUiStore()
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<SettingsTab>('appearance')
+  const requestedTab = searchParams.get('tab')
+  const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
   const query = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
   const configQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
   const promptQuery = useQuery({ queryKey: ['prompt-diagnostics', user], queryFn: () => getPromptDiagnostics(user), enabled: Boolean(user && tab === 'prompt') })
@@ -42,6 +50,10 @@ export function SettingsPage() {
   useEffect(() => {
     if (configQuery.data) setConfigDraft(JSON.stringify(configQuery.data.config, null, 2))
   }, [configQuery.data])
+
+  useEffect(() => {
+    if (isSettingsTab(requestedTab)) setTab(requestedTab)
+  }, [requestedTab])
 
   const saveConfig = async () => {
     if (!configQuery.data?.write_enabled || configSaving) return
@@ -113,10 +125,10 @@ export function SettingsPage() {
               </div>
             </article>
             <article className="setting-section">
-              <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，不改变功能布局。</span></div>
+              <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，并同步适配顶部栏组件与间距。</span></div>
               <div className="setting-row font-setting-row">
-                <span className="setting-copy"><strong>全局文字比例</strong><span>小、中、大三级缩放，默认使用“中”。</span></span>
-                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '80%' : size === 'medium' ? '90%' : '100%'}</span></button>)}</div>
+                <span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级同步缩放文字与关键控件，默认使用“中”。</span></span>
+                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '64%' : size === 'medium' ? '72%' : '100%'}</span></button>)}</div>
               </div>
             </article>
           </>}
