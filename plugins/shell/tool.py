@@ -274,6 +274,7 @@ def _execute(
             if builtin is not None:
                 last = builtin
                 current_cwd = Path(str(builtin.get("cwd") or current_cwd))
+                environment.update(session.get("env", {}))
             else:
                 last = _run_process(
                     segment,

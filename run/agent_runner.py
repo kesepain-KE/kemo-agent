@@ -297,6 +297,7 @@ class AgentRunner:
                             "user": self.user,
                             "caller": "subagent",
                             "agent": definition.name,
+                            "tool_timeout": tool_timeout,
                             "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
                         },
                         timeout=tool_timeout,

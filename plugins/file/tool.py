@@ -16,13 +16,18 @@ _TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "gbk")
 
 # ── 工具函数 ─────────────────────────────────────────────────────
 
-def _read(path: Path, encoding: str) -> str:
-    for enc in (encoding, *_TEXT_ENCODINGS) if encoding != "gbk" else (encoding,):
+def _read_with_encoding(path: Path, encoding: str) -> tuple[str, str]:
+    candidates = (encoding, *_TEXT_ENCODINGS) if encoding != "gbk" else (encoding,)
+    for enc in dict.fromkeys(value for value in candidates if value):
         try:
-            return path.read_text(enc)
+            return path.read_text(enc), enc
         except (UnicodeDecodeError, UnicodeError):
             continue
     raise ValueError(f"无法解码文件: {path}")
+
+
+def _read(path: Path, encoding: str) -> str:
+    return _read_with_encoding(path, encoding)[0]
 
 
 def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
@@ -103,7 +108,7 @@ def _run_edit(path: str, content: str = "", edit_mode: str = "replace_text",
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"文件不存在: {path}")
-    original = _read(p, encoding or "utf-8")
+    original, used_encoding = _read_with_encoding(p, encoding or "utf-8")
     original_lines = original.splitlines(keepends=True)
     total_lines = len(original_lines)
 
@@ -152,7 +157,7 @@ def _run_edit(path: str, content: str = "", edit_mode: str = "replace_text",
 
     if create_backup:
         shutil.copy2(p, p.with_suffix(p.suffix + ".bak"))
-    p.write_text(new_text, encoding or "utf-8")
+    p.write_text(new_text, used_encoding)
     return _result(True, path=path, original_chars=len(original), new_chars=len(new_text),
                    mode=edit_mode, backup_created=create_backup)
 

@@ -510,6 +510,7 @@ def iter_request_events(
                                     "source": source,
                                     "session_id": session_id,
                                     "window": window_path.name,
+                                    "tool_timeout": tool_timeout,
                                     "knowledge_enabled": source_policy.knowledge_enabled,
                                     "knowledge_scopes": list(source_policy.knowledge_scopes),
                                 },

@@ -221,6 +221,7 @@ def execute_plan(
                         "source": f"plan:{plan_id}",
                         "session_id": plan.get("session_id", ""),
                         "window": "",
+                        "tool_timeout": tool_timeout,
                         "plan_id": plan_id,
                         "step_id": step_id,
                     },
