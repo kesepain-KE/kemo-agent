@@ -10,7 +10,6 @@ import {
   CircleGauge,
   FileSearch,
   ListChecks,
-  LogOut,
   Menu,
   MessageSquarePlus,
   Moon,
@@ -21,8 +20,19 @@ import {
   X,
 } from 'lucide-react'
 import { NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { getHealth, getOverview, getSessions, getUsers, logoutAuth } from '../api/client'
+import {
+  deleteAllSessions,
+  deleteSession,
+  getHealth,
+  getOverview,
+  getSessions,
+  getUsers,
+  logoutAuth,
+  renameSession,
+} from '../api/client'
 import { formatDateTime, statusLabel } from './ModuleUi'
+import { SessionHistoryPanel } from './SessionHistoryPanel'
+import { UserProfileCard } from './UserProfileCard'
 import type { AuthStatusResponse, OverviewResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 
@@ -32,6 +42,7 @@ export interface ShellOutletContext {
   setSessionId: (sessionId: string) => void
   overview?: OverviewResponse
   refreshOverview: () => void
+  openCommandPanel: () => void
 }
 
 const navItems = [
@@ -88,14 +99,12 @@ export function AppShell() {
     refetchInterval: 30_000,
   })
 
-  const [roleMenuOpen, setRoleMenuOpen] = useState(false)
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState('')
   const [logoutPending, setLogoutPending] = useState(false)
-  const roleMenuRef = useRef<HTMLDivElement>(null)
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const commandInputRef = useRef<HTMLInputElement>(null)
@@ -108,7 +117,6 @@ export function AppShell() {
   useEffect(() => {
     const handler = (event: MouseEvent) => {
       const target = event.target as Node
-      if (roleMenuRef.current && !roleMenuRef.current.contains(target)) setRoleMenuOpen(false)
       if (fontSizeRef.current && !fontSizeRef.current.contains(target)) setFontSizeMenuOpen(false)
       if (modelMenuRef.current && !modelMenuRef.current.contains(target)) setModelMenuOpen(false)
     }
@@ -124,7 +132,6 @@ export function AppShell() {
       }
       if (event.key === 'Escape') {
         setCommandOpen(false)
-        setRoleMenuOpen(false)
         setFontSizeMenuOpen(false)
         setModelMenuOpen(false)
         ui.setDrawerOpen(false)
@@ -151,7 +158,6 @@ export function AppShell() {
     const next = new URLSearchParams()
     next.set('user', nextUser)
     setParams(next)
-    setRoleMenuOpen(false)
   }
 
   const setSessionId = (nextSession: string) => {
@@ -159,6 +165,39 @@ export function AppShell() {
     if (nextSession) next.set('session', nextSession)
     else next.delete('session')
     setParams(next)
+  }
+
+  const renameHistorySession = async (targetSessionId: string, title: string) => {
+    if (!user) throw new Error('当前没有可用用户')
+    await renameSession(user, targetSessionId, title)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', user] }),
+    ])
+  }
+
+  const deleteHistorySession = async (targetSessionId: string) => {
+    if (!user) throw new Error('当前没有可用用户')
+    await deleteSession(user, targetSessionId)
+    queryClient.removeQueries({ queryKey: ['history', user, targetSessionId] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', user] }),
+    ])
+    if (targetSessionId === sessionId) {
+      setSessionId('')
+    }
+  }
+
+  const deleteAllHistorySessions = async () => {
+    if (!user) throw new Error('当前没有可用用户')
+    await deleteAllSessions(user)
+    queryClient.removeQueries({ queryKey: ['history', user] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', user] }),
+    ])
+    if (sessionId) setSessionId('')
   }
 
   const runCommand = (action: () => void) => {
@@ -175,7 +214,6 @@ export function AppShell() {
         predicate: (query) => query.queryKey[0] !== 'auth-status',
       })
       await queryClient.invalidateQueries({ queryKey: ['auth-status'] })
-      setRoleMenuOpen(false)
     } finally {
       setLogoutPending(false)
     }
@@ -199,6 +237,11 @@ export function AppShell() {
   const contextPercent = Number(context?.percent || 0)
   const provider = overview?.provider
 
+  const settingsPath = (tab: 'users' | 'config') => {
+    const path = withContext('/settings')
+    return `${path}${path.includes('?') ? '&' : '?'}tab=${tab}`
+  }
+
   return (
     <div className={`app ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="sidebar" aria-label="主导航">
@@ -217,29 +260,29 @@ export function AppShell() {
           })}
         </nav>
         <div className="sidebar-rule" />
-        <section className="recent-block">
-          <div className="recent-title">最近对话</div>
-          <div className="recent-list">
-            {sessionsQuery.isLoading && <span className="sidebar-note">正在加载…</span>}
-            {sessionsQuery.isError && <span className="sidebar-note error">会话加载失败</span>}
-            {sessionsQuery.data?.sessions.slice(0, 8).map((session) => <button key={session.session_id} className={`recent-btn ${session.session_id === sessionId ? 'active' : ''}`} onClick={() => navigate(withContext('/chat', session.session_id))}><strong>{sessionLabel(session.session_id)}</strong><span>{session.rounds} 轮 · {formatDateTime(session.updated_at)}</span></button>)}
-            {sessionsQuery.data?.sessions.length === 0 && <span className="sidebar-note">暂无 Web 会话</span>}
-          </div>
-        </section>
+        <SessionHistoryPanel
+          sessions={sessionsQuery.data?.sessions ?? []}
+          activeSessionId={sessionId}
+          collapsed={ui.sidebarCollapsed}
+          loading={sessionsQuery.isLoading}
+          error={sessionsQuery.isError}
+          onSelectSession={(targetSessionId) => navigate(withContext('/chat', targetSessionId))}
+          onRenameSession={renameHistorySession}
+          onDeleteSession={deleteHistorySession}
+          onDeleteAllSessions={deleteAllHistorySessions}
+        />
         <div className="sidebar-spacer" />
-        <div className="role-wrap" ref={roleMenuRef}>
-          <button className="role-button" onClick={() => setRoleMenuOpen((value) => !value)} aria-label="切换当前用户" title="切换当前用户">
-            <span className="role-avatar">{user.slice(0, 1).toUpperCase() || '?'}</span>
-            <span className="role-copy"><strong>{user || '未选择用户'}</strong><span>users/{user || '—'} · 当前用户</span></span>
-            <span className="role-chevron"><ChevronDown size={15} /></span>
-          </button>
-          {roleMenuOpen && <div className="role-menu show">
-            <div className="role-menu-head"><span><strong>切换用户</strong><small>载入对应 users/&lt;user_id&gt; 运行态</small></span><span className="space-mode-badge">单用户执行</span></div>
-            {usersQuery.data?.users.map((item) => <button key={item.name} className={`role-option ${item.name === user ? 'active' : ''}`} onClick={() => setUser(item.name)}><span className="mini-avatar">{item.name.slice(0, 1).toUpperCase()}</span><span><strong>{item.name}</strong><small>用户运行态</small><em className="space-option-id">users/{item.name}</em></span><span className="check">{item.name === user ? '✓' : ''}</span></button>)}
-            {authStatus?.enabled && <button className="role-logout" onClick={() => void logout()} disabled={logoutPending}><LogOut size={15} />{logoutPending ? '正在退出…' : '退出 Web 会话'}</button>}
-            <div className="role-menu-foot">每个窗口只激活一个当前用户；切换不会并行运行多个智能体。</div>
-          </div>}
-        </div>
+        <UserProfileCard
+          username={user || '未选择用户'}
+          userPath={user ? `users/${user}` : 'users/—'}
+          users={usersQuery.data?.users.map((item) => ({ username: item.name, userPath: `users/${item.name}` }))}
+          compact={ui.sidebarCollapsed}
+          logoutPending={logoutPending}
+          onSelectUser={setUser}
+          onOpenProfile={() => navigate(settingsPath('users'))}
+          onOpenSettings={() => navigate(settingsPath('config'))}
+          onLogout={authStatus?.enabled ? () => { void logout() } : undefined}
+        />
       </aside>
 
       <main className="workspace">
@@ -252,25 +295,25 @@ export function AppShell() {
           </div>
           <div className="top-right">
             <button className="context-button" title="查看上下文与运行状态" onClick={() => ui.setDrawerOpen(true)}>
-              <span className="context-main"><span className="context-icon"><CircleGauge size={14} /></span><span className="context-copy"><strong>上下文窗口</strong><span>{contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '正在读取'}</span></span></span>
+              <span className="context-main"><span className="context-icon"><CircleGauge size="1.528rem" strokeWidth={2.3} /></span><span className="context-copy"><strong>上下文窗口</strong><span>{contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '正在读取'}</span></span></span>
               <span className="context-mini"><b>{contextLimit ? `${contextPercent}%` : '—'}</b><span className="context-track"><i style={{ width: `${contextPercent}%` }} /></span></span>
             </button>
             <div className="model-wrap" ref={modelMenuRef}>
               <button className="model-btn" onClick={() => setModelMenuOpen((value) => !value)} aria-expanded={modelMenuOpen} title="查看当前 Provider">
-                <span className="model-main"><span className="model-glyph">{provider?.type.slice(0, 1).toUpperCase() || 'K'}</span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size={14} />
+                <span className="model-main"><span className="model-glyph">{provider?.type.slice(0, 1).toUpperCase() || 'K'}</span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
               </button>
               {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像 · 只读</span></div><div className="model-current"><span className="model-glyph">{provider?.type.slice(0, 1).toUpperCase() || 'K'}</span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><button onClick={() => { setModelMenuOpen(false); navigate(withContext('/settings')) }}>查看 Provider 配置 <span>›</span></button></div>}
             </div>
             <div className="font-size-wrap" ref={fontSizeRef}>
-              <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size={13} /></button>
-              {fontSizeMenuOpen && <div className="font-size-menu show" role="menu"><div className="font-size-menu-head"><strong>界面字号</strong><span>仅调整文字，不改变功能布局</span></div>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={`font-size-option ${ui.fontSize === size ? 'active' : ''}`} role="menuitem" onClick={() => { ui.setFontSize(size); setFontSizeMenuOpen(false) }}><span className={`font-sample ${size}`}>Aa</span><span><strong>{fontSizeLabels[size]}</strong><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></span><i>{ui.fontSize === size ? '✓' : ''}</i></button>)}</div>}
+              <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size="1.181rem" strokeWidth={2.2} /></button>
+              {fontSizeMenuOpen && <div className="font-size-menu show" role="menu"><div className="font-size-menu-head"><strong>界面字号</strong><span>文字与顶部布局同步适配</span></div>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={`font-size-option ${ui.fontSize === size ? 'active' : ''}`} role="menuitem" onClick={() => { ui.setFontSize(size); setFontSizeMenuOpen(false) }}><span className={`font-sample ${size}`}>Aa</span><span><strong>{fontSizeLabels[size]}</strong><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></span><i>{ui.fontSize === size ? '✓' : ''}</i></button>)}</div>}
             </div>
-            <button className="icon-btn theme-toggle-btn" onClick={() => ui.setTheme(ui.theme === 'dark' ? 'light' : 'dark')} aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'}>{ui.theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
-            <button className="icon-btn" onClick={() => ui.setDrawerOpen(true)} aria-label="运行状态" title="运行状态"><Activity size={18} /></button>
-            <button className="icon-btn" onClick={() => setCommandOpen(true)} aria-label="命令面板" title="命令面板"><Search size={18} /></button>
+            <button className="icon-btn theme-toggle-btn" onClick={() => ui.setTheme(ui.theme === 'dark' ? 'light' : 'dark')} aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'}>{ui.theme === 'dark' ? <Sun size="1.736rem" strokeWidth={2.1} /> : <Moon size="1.736rem" strokeWidth={2.1} />}</button>
+            <button className="icon-btn" onClick={() => ui.setDrawerOpen(true)} aria-label="运行状态" title="运行状态"><Activity size="1.806rem" strokeWidth={2.1} /></button>
+            <button className="icon-btn" onClick={() => setCommandOpen(true)} aria-label="命令面板" title="命令面板"><Search size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, sessionId, setSessionId, overview, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, sessionId, setSessionId, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel: () => setCommandOpen(true) } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

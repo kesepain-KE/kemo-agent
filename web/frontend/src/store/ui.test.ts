@@ -8,6 +8,11 @@ describe('useUiStore', () => {
     useUiStore.setState({ theme: 'light', fontSize: 'medium', sidebarCollapsed: false, drawerOpen: false })
   })
 
+  it('默认使用中等字号', () => {
+    const { result } = renderHook(() => useUiStore())
+    expect(result.current.fontSize).toBe('medium')
+  })
+
   it('持久化主题、字号与侧栏偏好', () => {
     const { result } = renderHook(() => useUiStore())
     act(() => {
