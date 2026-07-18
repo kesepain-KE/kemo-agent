@@ -80,7 +80,7 @@ svg{display:block}
   border:1px solid rgba(102,92,255,.08);
   box-shadow:0 8px 22px rgba(102,92,255,.10);
 }
-.brand-mark img{width:38px;height:38px;object-fit:contain}
+.brand-mark img{width:38px;height:auto;aspect-ratio:571/568;object-fit:contain}
 .brand-copy{min-width:0;overflow:hidden;white-space:nowrap;transition:.18s}
 .brand-copy strong{display:block;font-size:0.875rem;letter-spacing:-.15px}
 .brand-copy span{display:block;font-size:0.5625rem;color:var(--muted-2);margin-top:2px;letter-spacing:.5px;text-transform:uppercase}
@@ -241,7 +241,7 @@ svg{display:block}
 .greeting-card{border-radius:20px;padding:21px 22px;display:flex;align-items:center;gap:16px;min-height:138px;position:relative;overflow:hidden}
 .greeting-card:after{content:"";position:absolute;width:190px;height:190px;border-radius:50%;right:-66px;top:-102px;background:radial-gradient(circle,rgba(102,92,255,.12),transparent 66%)}
 .hero-logo{width:64px;height:64px;flex:0 0 64px;border-radius:20px;display:grid;place-items:center;background:#fff;border:1px solid rgba(102,92,255,.08);box-shadow:0 12px 30px rgba(102,92,255,.1)}
-.hero-logo img{width:55px;height:55px;object-fit:contain}
+.hero-logo img{width:55px;height:auto;aspect-ratio:571/568;object-fit:contain}
 .greeting-copy{position:relative;z-index:1}.greeting-copy h1{font-size:1.4375rem;letter-spacing:-.7px;margin:0 0 6px;font-weight:790}.greeting-copy p{margin:0;color:#8d909d;font-size:0.75rem;line-height:1.6}.greeting-copy .role-line{display:inline-flex;align-items:center;gap:5px;margin-top:12px;padding:5px 8px;border-radius:9px;background:var(--brand-soft);color:var(--brand);font-size:0.5625rem;font-weight:700}
 .snapshot-card{border-radius:20px;padding:14px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .snapshot-item{border-radius:13px;background:var(--surface-2);padding:11px;min-height:52px}.snapshot-item strong{display:block;font-size:0.75rem}.snapshot-item span{display:block;font-size:0.5625rem;color:#989ba7;margin-top:4px}.snapshot-item .ok{color:var(--green)}
@@ -400,7 +400,7 @@ button:active{transform:translateY(1px)}
   border-color:rgba(255,255,255,.1);
   box-shadow:0 7px 18px rgba(0,0,0,.18);
 }
-.brand-mark img{width:36px;height:36px}
+.brand-mark img{width:36px;height:auto}
 .brand-copy strong{font-size:0.875rem;color:#fff;font-weight:720;letter-spacing:-.1px}
 .brand-copy span{font-size:0.5625rem;color:#7f8798;letter-spacing:.75px}
 .sidebar-toggle{
@@ -501,7 +501,7 @@ button:active{transform:translateY(1px)}
 }
 .greeting-card:after{width:230px;height:230px;right:-64px;top:-118px;background:radial-gradient(circle,rgba(93,95,239,.14),transparent 65%)}
 .hero-logo{width:68px;height:68px;flex-basis:68px;border-radius:14px;box-shadow:0 9px 24px rgba(93,95,239,.12)}
-.hero-logo img{width:58px;height:58px}
+.hero-logo img{width:58px;height:auto}
 .greeting-copy h1{font-size:1.75rem;line-height:1.18;letter-spacing:-.9px;margin-bottom:8px;font-weight:730}
 .greeting-copy p{font-size:0.8125rem;color:#667085;line-height:1.65}
 .greeting-copy .role-line{margin-top:14px;padding:6px 8px;border-radius:7px;font-size:0.625rem}
@@ -1327,15 +1327,15 @@ textarea{font-size:0.9375rem;line-height:1.65}.composer-meta{font-size:0.6875rem
 @media(max-width:780px){html{font-size:1rem}.module-shell{padding:18px 14px 26px}.observer-banner{grid-template-columns:34px 1fr}.observer-badge{grid-column:2}.module-heading h2{font-size:1.4375rem}.module-heading p{font-size:0.84375rem}.bubble{font-size:0.9375rem}.skill-grid{grid-template-columns:1fr}}
 
 :root{
-  --kemo-font-root:14.4px;
+  --kemo-font-root:14.08px;
   --font-body:1rem;
   --font-ui:.875rem;
   --font-small:.75rem;
   --font-heading:1.625rem;
 }
-html[data-font-size="small"]{--kemo-font-root:10.24px}
-html[data-font-size="medium"]{--kemo-font-root:11.52px}
-html[data-font-size="large"]{--kemo-font-root:16px}
+html[data-font-size="small"]{--kemo-font-root:11.52px}
+html[data-font-size="medium"]{--kemo-font-root:14.08px}
+html[data-font-size="large"]{--kemo-font-root:16.8px}
 html{font-size:var(--kemo-font-root)!important}
 body{font-size:1rem}
 

@@ -246,7 +246,7 @@ export function AppShell() {
     <div className={`app ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-head">
-          <div className="brand-mark"><img src="/kemo-agent.jpg" alt="kemo-agent logo" /></div>
+          <div className="brand-mark"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></div>
           <div className="brand-copy"><strong>kemo-agent</strong><span>Personal Agent Runtime</span></div>
           <button className="sidebar-toggle" onClick={ui.toggleSidebar} aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'}><ChevronLeft size={16} /></button>
         </div>

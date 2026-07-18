@@ -62,7 +62,7 @@ export function AuthPage({
     <main className="auth-screen">
       <section className="auth-panel" aria-label="Web 访问认证">
         <div className="auth-brand">
-          <span className="auth-logo"><img src="/kemo-agent.jpg" alt="kemo-agent logo" /></span>
+          <span className="auth-logo"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></span>
           <span><strong>kemo-agent</strong><small>Personal Agent Runtime</small></span>
         </div>
         <div className="auth-heading">

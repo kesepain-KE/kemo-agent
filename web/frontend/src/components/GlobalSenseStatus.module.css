@@ -1,0 +1,95 @@
+.root { width: 100%; }
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .8rem;
+}
+
+.metric {
+  position: relative;
+  min-width: 0;
+  min-height: 5.7rem;
+  padding: 1.15rem 3.9rem 1rem 1.2rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--surface-elevated) 98%, transparent), color-mix(in srgb, var(--surface-2) 74%, var(--surface-elevated)));
+  color: var(--text);
+  text-align: left;
+  box-shadow: var(--shadow-soft);
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+
+.metricButton { width: 100%; cursor: pointer; }
+.metricButton:hover { transform: translateY(-1px); border-color: var(--brand-line); box-shadow: var(--shadow-card); }
+.metricButton:active { transform: scale(.985); }
+
+.metricCopy { min-width: 0; display: flex; flex-direction: column; }
+.metricCopy strong { overflow: hidden; color: var(--text); font-size: 1rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.metricCopy span { margin-top: .5rem; overflow: hidden; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+
+.metricIcon {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 2.45rem;
+  height: 2.45rem;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-control-lg);
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.metricState { position: absolute; right: 1rem; bottom: .8rem; width: 1.15rem; height: 1.15rem; display: grid; place-items: center; }
+
+.pipeline {
+  min-height: 6.4rem;
+  margin-top: .8rem;
+  padding: 1rem 1.35rem;
+  display: grid;
+  grid-template-columns: minmax(9.5rem, 1fr) 3.6rem minmax(9.5rem, 1fr) 3.6rem minmax(9.5rem, 1fr) 3.6rem minmax(9.5rem, 1fr);
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: linear-gradient(145deg, var(--surface-elevated), color-mix(in srgb, var(--surface-2) 68%, var(--surface-elevated)));
+  box-shadow: var(--shadow-soft);
+}
+
+.pipelineStep { min-width: 0; padding: .65rem; display: flex; align-items: center; gap: .8rem; border-radius: var(--radius-card); transition: background .16s ease; }
+.pipelineStep:hover { background: var(--surface-hover); }
+.pipelineIcon { width: 2.7rem; height: 2.7rem; flex: 0 0 2.7rem; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--brand) 9%, var(--line)); border-radius: var(--radius-control-lg); background: var(--brand-soft); color: var(--brand); }
+.pipelineCopy { min-width: 0; flex: 1; }
+.pipelineCopy strong, .pipelineCopy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pipelineCopy strong { color: var(--text); font-size: .875rem; }
+.pipelineCopy span { margin-top: .28rem; color: var(--muted); font-size: .72rem; }
+.pipelineState { width: 1.05rem; height: 1.05rem; flex: 0 0 1.05rem; display: grid; place-items: center; }
+
+.connector { position: relative; height: 1.5rem; display: flex; align-items: center; }
+.connector::before { content: ''; width: 100%; height: 1px; background: repeating-linear-gradient(to right, currentColor 0, currentColor 3px, transparent 3px, transparent 7px); opacity: .48; }
+.connector::after { content: ''; position: absolute; right: 0; width: .45rem; height: .45rem; border-top: 1.5px solid currentColor; border-right: 1.5px solid currentColor; transform: rotate(45deg); }
+
+.success { color: var(--green); }
+.warning { color: var(--amber); }
+.error { color: var(--red); }
+.running { color: var(--brand); }
+.idle { color: var(--muted-2); }
+.metric.warning { border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
+.metric.error { border-color: color-mix(in srgb, var(--red) 30%, var(--line)); }
+.metric.running { border-color: var(--brand-line); }
+.spinning { animation: spin .85s linear infinite; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1180px) {
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pipeline { grid-template-columns: repeat(4, minmax(10rem, 1fr)); gap: .6rem; overflow-x: auto; }
+  .connector { display: none; }
+}
+
+@media (max-width: 680px) {
+  .metrics { grid-template-columns: 1fr; }
+  .pipeline { display: flex; align-items: stretch; flex-direction: column; padding: .8rem; overflow: visible; }
+  .pipelineStep { width: 100%; }
+}

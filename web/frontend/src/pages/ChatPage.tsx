@@ -349,13 +349,13 @@ export function ChatPage() {
   }
 
   return (
-    <div className="view chat-view active">
+    <div className={`view chat-view active${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
       <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
         {items.length === 0 && (!sessionId || !historyQuery.isLoading) && (
           <section className="welcome">
             <div className="welcome-top">
               <article className="greeting-card">
-                <div className="hero-logo"><img src="/kemo-agent.jpg" alt="kemo-agent logo" /></div>
+                <div className="hero-logo"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></div>
                 <div className="greeting-copy">
                   <h1>{greetingLabel()}，{user || '用户'}</h1>
                   <p>当前用户的配置、历史、知识、任务与技能运行态已载入。今天需要处理什么？</p>
@@ -407,7 +407,7 @@ export function ChatPage() {
             if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
             return (
               <article key={item.id} className={`message ${item.role === 'assistant' ? 'ai' : 'user'}`}>
-                <div className="msg-avatar">{item.role === 'assistant' ? <img src="/kemo-agent.jpg" alt="" /> : <UserRound size={17} />}</div>
+                <div className="msg-avatar">{item.role === 'assistant' ? <img src="/kemo-agent.jpg" width={571} height={568} alt="" /> : <UserRound size={17} />}</div>
                 <div className="message-body">
                   <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content || (item.streaming ? '…' : '')}</ReactMarkdown></div>
                   <div className="message-actions">

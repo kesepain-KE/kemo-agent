@@ -17,7 +17,7 @@ import uuid
 from events import RunEvent
 from run.agents import discover_agents
 from run.config import ConfigError, deep_merge, load_config, read_json_object
-from run.context import ContextPolicy
+from run.context import ContextPolicy, estimate_text_tokens
 from run.cron_store import CronStore
 from run.engine import iter_request_events
 from run.history import (
@@ -67,8 +67,10 @@ _CONFIG_SOURCE_PATHS = (
     "knowledge.max_chars",
     "memory.extraction_enabled",
     "memory.injection_enabled",
-    "memory.injection_max_items",
-    "memory.injection_max_chars",
+    "memory.temporary_injection_limits.half_year",
+    "memory.temporary_injection_limits.one_month",
+    "memory.temporary_injection_limits.seven_days",
+    "memory.important_memory_max_chars",
     "task_plan.auto_accept",
     "task_plan.max_steps",
     "cron.enabled",
@@ -851,6 +853,13 @@ class WebRunService:
         inventory = registry.perception_inventory(
             allow_modules=source_policy.global_perception.selector()
         )
+        prompt_settings = parse_prompt_settings(config)
+        selection = registry.select_perception(
+            max_chars=prompt_settings.char_limits["perception"],
+            mode=prompt_settings.injection_mode["perception"],
+            allow_modules=source_policy.global_perception.selector(),
+        )
+        injected_files = set(selection.source_files)
         sources = [
             {
                 "id": item["name"],
@@ -861,10 +870,22 @@ class WebRunService:
                 "active_for_main_agent": item["active"],
                 "status": item["status"],
                 "files": item["files"],
+                "registered_items": item["files"],
+                "injected_items": sum(
+                    path in injected_files
+                    for path in (
+                        f"global_sense/{item['name']}/{relative_path}"
+                        for relative_path in item["data_items"]
+                    )
+                ),
+                "data_items": item["data_items"],
+                "updated_at": item["updated_at"],
             }
             for item in inventory
         ]
         core_files = sum(item["files"] for item in inventory)
+        preview_limit = 4000
+        preview = selection.text[:preview_limit]
         return {
             "user": name,
             "registry_available": registry_available,
@@ -877,8 +898,24 @@ class WebRunService:
                 "user": sum(item["layer"] == "user" for item in sources),
                 "shared": sum(item["layer"] == "shared" for item in sources),
                 "global": sum(item["layer"] == "global" for item in sources),
+                "registered_data": core_files,
+                "injected_data": selection.injected_items,
             },
             "sources": sources,
+            "injection": {
+                "enabled": bool(selection.text),
+                "registered_items": core_files,
+                "injected_items": selection.injected_items,
+                "original_chars": selection.original_chars,
+                "injected_chars": selection.injected_chars,
+                "estimated_tokens": estimate_text_tokens(selection.text),
+                "truncated": selection.truncated,
+                "preview": preview,
+                "preview_truncated": len(selection.text) > preview_limit,
+                "source_files": list(selection.source_files),
+                "prompt_section": "perception",
+                "prompt_position": "System Prompt / Global Sense",
+            },
             "decisions": [],
             "source_policy": source_policy.public_summary(),
         }
@@ -895,6 +932,7 @@ class WebRunService:
         tools = config.get("tools") or {}
         knowledge = config.get("knowledge") or {}
         memory = config.get("memory") or {}
+        temporary_memory_limits = memory.get("temporary_injection_limits") or {}
         task_plan = config.get("task_plan") or {}
         cron = config.get("cron") or {}
         agents = config.get("agents") or {}
@@ -928,8 +966,11 @@ class WebRunService:
                 "tool_timeout": float(tools.get("timeout") or 60),
                 "knowledge_items": int(knowledge.get("max_items") or 4),
                 "knowledge_chars": int(knowledge.get("max_chars") or 4000),
-                "memory_items": int(memory.get("injection_max_items") or 8),
-                "memory_chars": int(memory.get("injection_max_chars") or 2000),
+                "memory_items": sum(
+                    int(temporary_memory_limits.get(tier, default))
+                    for tier, default in (("half_year", 3), ("one_month", 4), ("seven_days", 3))
+                ),
+                "memory_chars": int(memory.get("important_memory_max_chars", 1500)),
             },
             "users": [item["name"] for item in self.users()],
             "source_policy": source_policy.public_summary(),
@@ -975,14 +1016,11 @@ class WebRunService:
             content = str(item.get("content") or "")
             result.append(
                 {
-                    "id": str(item.get("id") or ""),
+                    "filename": str(item.get("filename") or ""),
                     "tier": str(item.get("tier") or ""),
-                    "type": str(item.get("type") or "fact"),
-                    "status": str(item.get("status") or "active"),
-                    "tier_weight": int(item.get("tier_weight") or 0),
-                    "review_at": item.get("review_at"),
-                    "created_at": str(item.get("created_at") or ""),
+                    "weight": int(item.get("weight") or 0),
                     "updated_at": str(item.get("updated_at") or ""),
+                    "expires_at": item.get("expires_at"),
                     "preview": content[:160],
                     "truncated": len(content) > 160,
                 }

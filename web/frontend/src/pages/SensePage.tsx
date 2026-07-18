@@ -1,82 +1,173 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, BrainCircuit, DatabaseZap, Eye, RefreshCw, ShieldAlert } from 'lucide-react'
-import { useOutletContext } from 'react-router-dom'
+import {
+  Activity,
+  Bot,
+  Database,
+  Eye,
+  FileText,
+  FolderOpen,
+  MoreVertical,
+  Plus,
+  RefreshCw,
+  Settings2,
+  Sparkles,
+  UserRound,
+} from 'lucide-react'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { getSense } from '../api/client'
+import { GlobalSenseStatus, type SenseStatus } from '../components/GlobalSenseStatus'
 import type { ShellOutletContext } from '../components/AppShell'
-import { EmptyPanel, MetricCard, ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
+import { EmptyPanel, formatDateTime, ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
+import styles from './SensePage.module.css'
 
-type Layer = 'all' | 'global'
-
-const layerLabels: Record<string, string> = { global: '全局模块' }
+const statusLabels: Record<string, string> = {
+  active: '已启用',
+  filtered: '已过滤',
+  empty: '无数据',
+}
 
 export function SensePage() {
   const { user } = useOutletContext<ShellOutletContext>()
-  const [layer, setLayer] = useState<Layer>('all')
+  const navigate = useNavigate()
+  const [guideOpen, setGuideOpen] = useState(false)
+  const [previewSource, setPreviewSource] = useState<string | null>(null)
+  const sourceSectionRef = useRef<HTMLElement>(null)
+  const injectionSectionRef = useRef<HTMLElement>(null)
   const query = useQuery({ queryKey: ['sense', user], queryFn: () => getSense(user), enabled: Boolean(user) })
   const data = query.data
-  const sources = useMemo(() => (data?.sources || []).filter((source) => layer === 'all' || source.layer === layer), [data?.sources, layer])
+  const sources = data?.sources || []
+  const registeredData = data?.summary.registered_data ?? data?.core_files ?? 0
+  const injectedData = data?.summary.injected_data ?? sources.reduce((total, source) => total + (source.injected_items || 0), 0)
+  const injection = data?.injection
+  const estimatedTokens = injection?.estimated_tokens || 0
+  const senseStatus: SenseStatus = query.isError
+    ? 'error'
+    : !data
+      ? query.isFetching ? 'running' : 'idle'
+      : !data.registry_available
+        ? 'warning'
+        : data.summary.registered > 0 && !data.injection_enabled
+          ? 'warning'
+          : data.summary.registered > 0
+            ? 'success'
+            : 'idle'
+
+  const recentSources = useMemo(
+    () => [...sources].sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0)),
+    [sources],
+  )
+
+  const goToSettings = () => navigate(`/settings?user=${encodeURIComponent(user)}`)
+  const scrollMetricIntoView = (type: 'sources' | 'enabled' | 'data' | 'tokens') => {
+    const target = type === 'tokens' ? injectionSectionRef.current : sourceSectionRef.current
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   return (
     <ModuleFrame
-      kicker="User-Registered Context Sources"
+      kicker="System Capability / Global Sense"
       title="全局感知"
-      description="global_sense 的每个直接子目录都是独立感知模块；注册阶段发现全部模块，用户白名单决定主智能体实际注入范围。"
-      actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />刷新来源</button>}
+      description="管理外部感知源、注册可注入数据，并展示用户过滤后进入系统提示词的真实结果。"
+      actions={<>
+        <button className="module-btn" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCw className={query.isFetching ? styles.spinning : ''} size={15} />刷新数据</button>
+        <button className="module-btn primary" onClick={() => setGuideOpen((value) => !value)}><Plus size={15} />注册感知源</button>
+      </>}
     >
-      {query.isError && <ModuleError />}
-      <div className="observer-banner">
-        <span className="observer-banner-icon"><Eye size={17} /></span>
-        <span><strong>观察视图</strong><small>只读取模块目录内的 Markdown；global_sense 根目录文件不会注入。</small></span>
-        <span className="observer-badge">当前用户 · {user}</span>
-      </div>
-      <section className="metric-strip">
-        <MetricCard label="发现模块" value={data?.summary.registered ?? '—'} detail="直接子目录" symbol={<DatabaseZap size={16} />} />
-        <MetricCard label="主智能体启用" value={data?.summary.enabled ?? '—'} detail="注册 + 白名单 + 非空" symbol={<Activity size={16} />} tone={data?.summary.enabled ? 'success' : 'muted'} />
-        <MetricCard label="模块文件" value={data?.core_files ?? '—'} detail="可注入 Markdown" symbol={<BrainCircuit size={16} />} />
-        <MetricCard label="注册模块" value={data?.registry_available ? '可用' : '缺失'} detail="global_sense/register.py" symbol={<ShieldAlert size={16} />} tone={data?.registry_available ? 'success' : 'warning'} />
-      </section>
+      {query.isError && <ModuleError message="全局感知状态读取失败，请检查注册模块后重试。" />}
 
-      <section className="layer-strip">
-        <article className="layer-card"><small>发现边界</small><strong>直接子目录即模块</strong><p>模块内部递归读取 Markdown，并跳过隐藏目录与其他文件类型。</p></article>
-        <article className="layer-card"><small>用户过滤</small><strong>{data?.source_policy.perception.global.mode === 'all' ? '全量启用' : `白名单：${data?.source_policy.perception.global.names.join('、') || '无'}`}</strong><p>空数组代表全量；非空数组按模块目录名精确匹配。</p></article>
-        <article className="layer-card"><small>子代理边界</small><strong>不继承主策略</strong><p>子代理继续使用自己的 agent-config.json，不与此白名单求交集。</p></article>
-      </section>
+      {guideOpen && <section className={styles.registrationGuide} aria-label="感知源注册说明">
+        <span><FolderOpen size={18} /></span>
+        <div><strong>目录即感知模块，数据文件即注册项</strong><p>在 global_sense 下创建独立模块目录，由模块从外部采集并写入 Markdown 数据文件；register.py 负责把该数据根注册到提示词管线，用户配置只负责过滤。</p></div>
+        <code>global_sense/&lt;module&gt;/**/*.md</code>
+      </section>}
 
-      <div className="sense-pipeline" aria-label="全局感知注入流程">
-        <span><b>01</b><strong>全量注册</strong><small>{data?.registry_available ? 'register.py 已加载' : '注册模块缺失'}</small></span><i>→</i>
-        <span><b>02</b><strong>用户过滤</strong><small>{data?.summary.enabled || 0} 个模块通过</small></span><i>→</i>
-        <span><b>03</b><strong>Prompt 注入</strong><small>{data?.injection_enabled ? '存在有效模块' : '注入为空'}</small></span>
-      </div>
+      <GlobalSenseStatus
+        sourceCount={data?.summary.registered || 0}
+        enabledSourceCount={data?.summary.enabled || 0}
+        registeredDataCount={registeredData}
+        registeredPassedCount={registeredData}
+        filteredSourceCount={data?.summary.enabled || 0}
+        injectedTokens={estimatedTokens}
+        status={senseStatus}
+        refreshing={query.isFetching}
+        onMetricClick={scrollMetricIntoView}
+      />
 
-      <div className="module-toolbar">
-        <div className="module-tabs">
-          {([['all', '全部模块'], ['global', '全局模块']] as const).map(([value, label]) => (
-            <button key={value} className={`module-tab-btn ${layer === value ? 'active' : ''}`} onClick={() => setLayer(value)}>{label}</button>
-          ))}
+      <div className={styles.workspace}>
+        <div className={styles.leftColumn}>
+          <section className={styles.panel} ref={sourceSectionRef}>
+            <header className={styles.panelHead}>
+              <span><strong>感知源</strong><small>注册发现与用户过滤后的实际来源</small></span>
+              <StatusChip status={data?.registry_available ? 'enabled' : 'missing'}>{data?.registry_available ? `${sources.length} 个已注册` : '注册模块缺失'}</StatusChip>
+            </header>
+
+            {sources.length ? <div className={styles.sourceList}>
+              {sources.map((source) => {
+                const open = previewSource === source.id
+                return <article className={`${styles.sourceRow} ${source.active_for_main_agent ? styles.sourceActive : ''}`} key={source.id}>
+                  <div className={styles.sourceMain}>
+                    <span className={styles.sourceIcon}><Activity size={19} /></span>
+                    <span className={styles.sourceCopy}>
+                      <span className={styles.sourceTitle}><h3>{source.name}</h3><StatusChip status={source.status === 'active' ? 'enabled' : source.status === 'filtered' ? 'paused' : 'warning'}>{statusLabels[source.status] || source.status}</StatusChip></span>
+                      <p>{source.description || '该来源尚未注册任何可注入数据。'}</p>
+                    </span>
+                    <span className={styles.sourceActions}>
+                      <button type="button" onClick={() => setPreviewSource(open ? null : source.id)}><Eye size={14} />数据预览</button>
+                      <button type="button" onClick={goToSettings}><Settings2 size={14} />注入设置</button>
+                      <button type="button" disabled title="当前后端尚未提供手动采集 API"><RefreshCw size={14} />测试采集</button>
+                      <button className={styles.moreButton} type="button" disabled aria-label={`${source.name} 更多操作`}><MoreVertical size={16} /></button>
+                    </span>
+                  </div>
+                  <div className={styles.sourceMeta}>
+                    <span>来源类型：模块目录</span>
+                    <span>注册数据：{source.registered_items ?? source.files} 项</span>
+                    <span>注入数据：{source.injected_items || 0} 项</span>
+                    <span>最后更新：{source.updated_at ? formatDateTime(source.updated_at) : '尚未运行'}</span>
+                    <span>注入范围：主智能体 · {user}</span>
+                  </div>
+                  {open && <div className={styles.sourcePreview}>
+                    <strong>已注册数据文件</strong>
+                    {source.data_items?.length ? <ul>{source.data_items.map((item) => <li key={item}><FileText size={13} /><code>{item}</code></li>)}</ul> : <p>该模块当前没有可注册的 Markdown 数据文件。</p>}
+                  </div>}
+                </article>
+              })}
+            </div> : <EmptyPanel title="尚无感知源" description="在 global_sense 下创建模块目录并写入采集数据后，刷新即可完成热发现。" icon={<Activity size={21} />} />}
+          </section>
+
+          <section className={styles.panel}>
+            <header className={styles.panelHead}><span><strong>最近更新</strong><small>按感知数据文件的最后修改时间排序</small></span></header>
+            {recentSources.length ? <div className={styles.updateTableWrap}><table className={styles.updateTable}>
+              <thead><tr><th>来源名称</th><th>注册数据</th><th>更新时间</th><th>状态</th></tr></thead>
+              <tbody>{recentSources.map((source) => <tr key={source.id}>
+                <td>{source.name}</td>
+                <td>{source.registered_items ?? source.files} 项 · {source.data_items?.slice(0, 2).join('、') || '暂无数据'}</td>
+                <td>{source.updated_at ? formatDateTime(source.updated_at) : '尚未运行'}</td>
+                <td><StatusChip status={source.status === 'active' ? 'saved' : source.status === 'filtered' ? 'paused' : 'warning'}>{statusLabels[source.status] || source.status}</StatusChip></td>
+              </tr>)}</tbody>
+            </table></div> : <EmptyPanel title="暂无更新记录" description="感知模块写入数据后，这里会显示真实文件更新时间。" />}
+          </section>
         </div>
-        <div className="toolbar-spacer" />
-        <span className="toolbar-note">Web Observer · 只读</span>
-      </div>
 
-      {sources.length ? <section className="source-grid sense-source-grid">
-        {sources.map((source) => <article className="source-card" key={source.id}>
-          <div className="source-head"><span className="source-icon"><Activity size={16} /></span><StatusChip status={source.enabled ? 'enabled' : 'paused'}>{source.enabled ? '已启用' : '已停用'}</StatusChip></div>
-          <h3>{source.name}</h3><p>{source.description || '该模块没有可注入文件。'}</p>
-          <div className="source-foot"><span>{layerLabels[source.layer] || source.layer}</span><span>{source.status} · {source.files} 文件</span></div>
-        </article>)}
-      </section> : <EmptyPanel title="尚无感知模块" description="请在 global_sense 下创建独立模块目录；根目录 Markdown 不会被当成模块。" icon={<Eye size={21} />} />}
-
-      <div className="module-grid sense-bottom-grid">
-        <article className="panel">
-          <div className="panel-head"><div className="panel-title"><span className="panel-title-icon">L</span><span><strong>注入决策记录</strong><span>实际评估结果</span></span></div><StatusChip status={data?.injection_enabled ? 'enabled' : 'paused'} /></div>
-          <div className="panel-body">{data?.decisions.length ? <pre className="decision-output">{JSON.stringify(data.decisions, null, 2)}</pre> : <EmptyPanel title="暂无决策记录" description="当前运行时尚未实现感知决策事件流。" />}</div>
-        </article>
-        <aside><article className="panel"><div className="panel-head"><div className="panel-title"><span className="panel-title-icon">G</span><span><strong>当前用户注入策略</strong><span>只读镜像</span></span></div></div><div className="panel-body permission-list">
-          <div className="permission-row"><span><strong>跨用户隔离</strong><span>仅加载 users/{user} 对应状态</span></span><StatusChip status="enabled">已启用</StatusChip></div>
-          <div className="permission-row"><span><strong>未注册来源</strong><span>可显示库存，但不会进入 Prompt</span></span><StatusChip status="enabled">已阻止</StatusChip></div>
-          <div className="permission-row"><span><strong>Web 修改能力</strong><span>本页不修改来源和授权</span></span><StatusChip status="paused">只读</StatusChip></div>
-        </div></article></aside>
+        <aside className={`${styles.panel} ${styles.injectionPanel}`} ref={injectionSectionRef}>
+          <header className={styles.panelHead}><span><strong>当前注入</strong><small>主智能体系统提示词中的实时镜像</small></span><StatusChip status={injection?.enabled ? 'enabled' : 'paused'}>{injection?.enabled ? '正在注入' : '注入为空'}</StatusChip></header>
+          <dl className={styles.injectionFacts}>
+            <div><dt><UserRound size={15} />用户</dt><dd>{user}</dd></div>
+            <div><dt><Bot size={15} />目标智能体</dt><dd>主智能体</dd></div>
+            <div><dt><Activity size={15} />已启用来源</dt><dd>{data?.summary.enabled || 0} / {data?.summary.registered || 0}</dd></div>
+            <div><dt><Database size={15} />注册数据项</dt><dd>{registeredData} 项</dd></div>
+            <div><dt><Sparkles size={15} />实际注入</dt><dd>{injectedData} 项 · {estimatedTokens} tokens</dd></div>
+            <div><dt><FileText size={15} />注入位置</dt><dd>{injection?.prompt_position || 'System Prompt / Global Sense'}</dd></div>
+          </dl>
+          <div className={styles.previewBlock}>
+            <div><strong>注入内容预览</strong><span>{injection?.injected_chars || 0} 字符{injection?.truncated ? ' · 已按预算截断' : ''}</span></div>
+            {injection?.preview ? <pre>{injection.preview}{injection.preview_truncated ? '\n…' : ''}</pre> : <div className={styles.previewEmpty}><Eye size={19} /><span>当前没有感知数据进入系统提示词</span></div>}
+          </div>
+          <div className={styles.injectionActions}>
+            <button type="button" className="module-btn primary" onClick={() => injectionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Eye size={15} />预览最终 Prompt</button>
+            <button type="button" className="module-btn" onClick={goToSettings}><Settings2 size={15} />管理注入范围</button>
+          </div>
+        </aside>
       </div>
     </ModuleFrame>
   )

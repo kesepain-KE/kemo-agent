@@ -264,8 +264,8 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .auth-brand strong, .auth-brand small, .auth-method-title strong, .auth-method-title small { display: block; }
 .auth-brand strong { font-size: .9375rem; }
 .auth-brand small, .auth-method-title small { margin-top: 2px; color: var(--muted-2); font-size: .6875rem; }
-.auth-logo { width: 38px; height: 38px; overflow: hidden; border-radius: 11px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 70%, transparent); }
-.auth-logo img { width: 100%; height: 100%; object-fit: cover; }
+.auth-logo { width: 38px; height: 38px; overflow: hidden; border-radius: 11px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 70%, transparent); display: grid; place-items: center; }
+.auth-logo img { width: 100%; height: auto; aspect-ratio: 571 / 568; object-fit: contain; }
 .auth-heading { margin: 30px 0 22px; }
 .auth-kicker { color: var(--brand); font-size: .6875rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
 .auth-heading h1 { margin: 7px 0 8px; font-size: clamp(1.8rem, 5vw, 2.65rem); letter-spacing: -.04em; }
@@ -336,6 +336,11 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .message.user .message-body { justify-items: end; }
 .message-actions { min-height: 24px; display: flex; align-items: center; gap: 6px; opacity: 0; transition: opacity .16s ease; }
 .message:hover .message-actions, .message-actions:focus-within { opacity: 1; }
+.chat-view.conversation-menu-open .message .message-actions {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
 .message-actions button, .event-copy-btn { min-height: 24px; padding: 0 7px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); font-size: .625rem; cursor: pointer; }
 .message-actions button:hover, .event-copy-btn:hover { color: var(--text); border-color: var(--line-strong); }
 .edited-label { color: var(--brand); font-size: .625rem; font-weight: 700; }
@@ -405,7 +410,7 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   background: var(--surface-elevated);
   box-shadow: var(--shadow-soft);
 }
-.msg-avatar img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.msg-avatar img { width: 100%; height: auto; aspect-ratio: 571 / 568; display: block; object-fit: contain; }
 .message-body { gap: 3px; }
 .message.ai .message-body {
   width: min(86%, 880px);
@@ -428,7 +433,7 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   position: absolute;
   right: 0;
   bottom: -34px;
-  z-index: 2;
+  z-index: 1;
   justify-content: flex-end;
   opacity: 1;
 }
@@ -686,6 +691,8 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 }
 
 .composer-zone {
+  z-index: 20;
+  isolation: isolate;
   padding: 14px clamp(14px, 2vw, 30px) 14px;
   background: linear-gradient(to top, var(--content-bg) 82%, transparent);
 }
@@ -775,8 +782,8 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   .guidance-message { width: calc(100% - 39px); margin-left: 39px; }
 }
 
-/* Font-aware desktop top bar. Geometry is authored against the 14.4px
-   reference unit; medium intentionally renders it at 80% per the UI scale. */
+/* Font-aware desktop top bar. Geometry scales from the root font size;
+   medium intentionally renders at 88% of the browser's 16px reference. */
 @media (min-width: 781px) {
   .app {
     --topbar-row: 5rem;

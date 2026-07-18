@@ -128,7 +128,7 @@ export function SettingsPage() {
               <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，并同步适配顶部栏组件与间距。</span></div>
               <div className="setting-row font-setting-row">
                 <span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级同步缩放文字与关键控件，默认使用“中”。</span></span>
-                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '64%' : size === 'medium' ? '72%' : '100%'}</span></button>)}</div>
+                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div>
               </div>
             </article>
           </>}
@@ -168,12 +168,12 @@ export function SettingsPage() {
             <article className="setting-section">
               <div className="setting-section-head"><strong>记忆管线</strong><span>抽取与注入开关来自当前用户合并配置。</span></div>
               <SettingRow title="记忆抽取" description="成功对话后生成候选记忆" source={data?.provenance['memory.extraction_enabled']} control={<StatusChip status={data?.features.memory_extraction ? 'enabled' : 'paused'} />} />
-              <SettingRow title="记忆注入" description={`最多 ${data?.limits.memory_items || '—'} 条 / ${data?.limits.memory_chars || '—'} 字符`} source={data?.provenance['memory.injection_enabled']} control={<StatusChip status={data?.features.memory_injection ? 'enabled' : 'paused'} />} />
+              <SettingRow title="记忆注入" description={`临时层最多 ${data?.limits.memory_items || '—'} 条；重要记忆 ${data?.limits.memory_chars || '—'} 字符；永久记忆全部注入`} source={data?.provenance['memory.injection_enabled']} control={<StatusChip status={data?.features.memory_injection ? 'enabled' : 'paused'} />} />
             </article>
             <article className="setting-section">
-              <div className="setting-section-head"><strong>记忆库存</strong><span>只读预览；显示实际 id、挡位权重和复核时间。</span></div>
+              <div className="setting-section-head"><strong>记忆库存</strong><span>只读预览；显示文件名、挡位权重和固定到期时间。</span></div>
               <div className="memory-tier-strip">{(['seven_days', 'one_month', 'half_year', 'permanent'] as const).map((tier) => <span key={tier}><small>{tier}</small><strong>{memoryQuery.data?.summary[tier] ?? '—'}</strong></span>)}</div>
-              <div className="memory-observer-list">{memoryQuery.data?.items.map((item) => <div className="memory-observer-row" key={item.id}><span><strong>{item.preview || item.id}</strong><small>{item.tier} · {item.type} · {item.id}</small></span><span><b>weight {item.tier_weight}</b><small>{item.review_at ? `复核 ${item.review_at}` : '永久'}</small></span></div>)}{memoryQuery.isSuccess && !memoryQuery.data.items.length ? <span className="drawer-empty">当前用户没有记忆条目。</span> : null}</div>
+              <div className="memory-observer-list">{memoryQuery.data?.items.map((item) => <div className="memory-observer-row" key={item.filename}><span><strong>{item.preview || item.filename}</strong><small>{item.tier} · {item.filename}</small></span><span><b>{item.tier === 'permanent' ? '永久' : `weight ${item.weight}`}</b><small>{item.expires_at ? `到期 ${item.expires_at}` : '全部注入'}</small></span></div>)}{memoryQuery.isSuccess && !memoryQuery.data.items.length ? <span className="drawer-empty">当前用户没有记忆条目。</span> : null}</div>
             </article>
           </>}
 

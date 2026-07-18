@@ -247,6 +247,10 @@ export interface SenseSourceSummary {
   active_for_main_agent: boolean
   status: string
   files: number
+  registered_items: number
+  injected_items: number
+  data_items: string[]
+  updated_at: number
 }
 
 export interface SenseResponse {
@@ -255,8 +259,30 @@ export interface SenseResponse {
   injection_enabled: boolean
   core_available: boolean
   core_files: number
-  summary: { registered: number; enabled: number; user: number; shared: number; global: number }
+  summary: {
+    registered: number
+    enabled: number
+    user: number
+    shared: number
+    global: number
+    registered_data: number
+    injected_data: number
+  }
   sources: SenseSourceSummary[]
+  injection: {
+    enabled: boolean
+    registered_items: number
+    injected_items: number
+    original_chars: number
+    injected_chars: number
+    estimated_tokens: number
+    truncated: boolean
+    preview: string
+    preview_truncated: boolean
+    source_files: string[]
+    prompt_section: string
+    prompt_position: string
+  }
   decisions: Array<Record<string, unknown>>
   source_policy: MainAgentSourcePolicySummary
 }
@@ -338,14 +364,11 @@ export interface MemorySummaryResponse {
   user: string
   summary: { total: number; seven_days: number; one_month: number; half_year: number; permanent: number }
   items: Array<{
-    id: string
+    filename: string
     tier: string
-    type: string
-    status: string
-    tier_weight: number
-    review_at: string | null
-    created_at: string
+    weight: number
     updated_at: string
+    expires_at: string | null
     preview: string
     truncated: boolean
   }>
