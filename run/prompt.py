@@ -29,22 +29,20 @@ PROMPT_SECTION_ORDER = (
     "knowledge_index",
     "permanent_memory",
     "important_memory",
-    "temporary_memory:seven_days",
-    "temporary_memory:one_month",
     "temporary_memory:half_year",
+    "temporary_memory:one_month",
+    "temporary_memory:seven_days",
     "task_plan",
     "expand_data",
     "perception",
 )
 
-DEFAULT_FILE_LIMITS = {
-    "permanent_memory": 30000,
-    "temporary_seven_days": 10000,
-    "temporary_one_month": 15000,
-    "temporary_half_year": 20000,
+DEFAULT_TEMPORARY_MEMORY_LIMITS = {
+    "half_year": 3,
+    "one_month": 4,
+    "seven_days": 3,
 }
 DEFAULT_CHAR_LIMITS = {
-    "important_memory": 5000,
     "knowledge_index": 8000,
     "task_plan": 5000,
     "perception": 8000,
@@ -75,9 +73,10 @@ class PromptSettings:
     include_user_soul: bool
     include_agents_manual: bool
     include_important_memory: bool
-    file_limits: dict[str, int]
     char_limits: dict[str, int]
     injection_mode: dict[str, str]
+    temporary_memory_limits: dict[str, int]
+    important_memory_max_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +99,7 @@ class PromptBundle:
     sections: tuple[PromptSection, ...]
     memory_ids: tuple[str, ...]
     diagnostics: dict[str, Any]
+    memory_files: tuple[str, ...] = ()
 
 
 def _nonnegative_group(raw: Any, defaults: dict[str, int], name: str) -> dict[str, int]:
@@ -134,7 +134,6 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
             raise PromptConfigError(f"prompt.{name} 必须是布尔值")
         return value
 
-    file_limits = _nonnegative_group(raw.get("file_limits"), DEFAULT_FILE_LIMITS, "file_limits")
     char_limits = _nonnegative_group(raw.get("char_limits"), DEFAULT_CHAR_LIMITS, "char_limits")
     mode_raw = raw.get("injection_mode")
     if mode_raw is None:
@@ -159,14 +158,40 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
             raise PromptConfigError(
                 f"prompt.injection_mode.{key}={mode!r} 暂不支持；当前只支持 'full'"
             )
+    memory_raw = config.get("memory") or {}
+    if not isinstance(memory_raw, dict):
+        raise PromptConfigError("memory 必须是对象")
+    limits_raw = memory_raw.get("temporary_injection_limits")
+    if limits_raw is None:
+        limits_raw = {}
+    if not isinstance(limits_raw, dict):
+        raise PromptConfigError("memory.temporary_injection_limits 必须是对象")
+    unknown_limits = sorted(set(limits_raw) - set(DEFAULT_TEMPORARY_MEMORY_LIMITS))
+    if unknown_limits:
+        raise PromptConfigError(
+            "memory.temporary_injection_limits 包含未知项：" + ", ".join(unknown_limits)
+        )
+    temporary_memory_limits = dict(DEFAULT_TEMPORARY_MEMORY_LIMITS)
+    for tier, value in limits_raw.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise PromptConfigError(f"memory.temporary_injection_limits.{tier} 必须是非负整数")
+        temporary_memory_limits[tier] = value
+    important_memory_max_chars = memory_raw.get("important_memory_max_chars", 1500)
+    if (
+        isinstance(important_memory_max_chars, bool)
+        or not isinstance(important_memory_max_chars, int)
+        or important_memory_max_chars < 0
+    ):
+        raise PromptConfigError("memory.important_memory_max_chars 必须是非负整数")
     return PromptSettings(
         include_global_soul=switch("include_global_soul"),
         include_user_soul=switch("include_user_soul"),
         include_agents_manual=switch("include_agents_manual"),
         include_important_memory=switch("include_important_memory"),
-        file_limits=file_limits,
         char_limits=char_limits,
         injection_mode=modes,
+        temporary_memory_limits=temporary_memory_limits,
+        important_memory_max_chars=important_memory_max_chars,
     )
 
 
@@ -309,26 +334,45 @@ def build_prompt_bundle(
             )
         )
 
+    memory_enabled = bool((config.get("memory") or {}).get("injection_enabled", True))
     tier_specs = (
-        ("permanent", "permanent_memory", "permanent_memory"),
-        ("seven_days", "temporary_memory:seven_days", "temporary_seven_days"),
-        ("one_month", "temporary_memory:one_month", "temporary_one_month"),
-        ("half_year", "temporary_memory:half_year", "temporary_half_year"),
+        ("permanent", "permanent_memory", "permanent_memory", None),
+        (
+            "half_year",
+            "temporary_memory:half_year",
+            "temporary_half_year",
+            settings.temporary_memory_limits["half_year"],
+        ),
+        (
+            "one_month",
+            "temporary_memory:one_month",
+            "temporary_one_month",
+            settings.temporary_memory_limits["one_month"],
+        ),
+        (
+            "seven_days",
+            "temporary_memory:seven_days",
+            "temporary_seven_days",
+            settings.temporary_memory_limits["seven_days"],
+        ),
     )
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
-    for tier, section_name, config_name in tier_specs:
+    memory_files: list[str] = []
+    for tier, section_name, config_name, max_files in tier_specs if memory_enabled else ():
         selection = store.select_tier_for_prompt(
             tier,
-            max_files=settings.file_limits[config_name],
+            max_files=max_files,
             mode=settings.injection_mode[config_name],
         )
-        memory_ids.extend(selection.selected_ids)
+        memory_files.extend(f"{tier}/{filename}" for filename in selection.selected_ids)
+        if tier != "permanent":
+            memory_ids.extend(selection.selected_ids)
         if selection.text:
             tier_sections[section_name] = PromptSection(
                 section_name,
                 selection.text,
-                (relative_path(selection.source_file, root),),
+                tuple(relative_path(path, root) for path in selection.source_files),
                 selection.selected_ids,
                 selection.original_chars,
                 selection.injected_chars,
@@ -340,11 +384,16 @@ def build_prompt_bundle(
     if "permanent_memory" in tier_sections:
         sections.append(tier_sections["permanent_memory"])
 
-    if settings.include_important_memory and settings.char_limits["important_memory"] > 0:
+    if (
+        memory_enabled
+        and settings.include_important_memory
+        and settings.important_memory_max_chars > 0
+    ):
         important_path = root / "users" / user / "memory_temporary_important.md"
         important = read_optional_text(important_path)
-        injected, truncated = truncate_chars(important, settings.char_limits["important_memory"])
+        injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
         if injected:
+            memory_files.append("memory_temporary_important.md")
             sections.append(
                 PromptSection(
                     "important_memory",
@@ -359,9 +408,9 @@ def build_prompt_bundle(
                 )
             )
     for name in (
-        "temporary_memory:seven_days",
-        "temporary_memory:one_month",
         "temporary_memory:half_year",
+        "temporary_memory:one_month",
+        "temporary_memory:seven_days",
     ):
         if name in tier_sections:
             sections.append(tier_sections[name])
@@ -440,7 +489,13 @@ def build_prompt_bundle(
         "source_policy": source_policy.public_summary(),
         "source_selection": registered_sources.selection_diagnostics(),
     }
-    return PromptBundle(text, tuple(sections), tuple(memory_ids), diagnostics)
+    return PromptBundle(
+        text=text,
+        sections=tuple(sections),
+        memory_ids=tuple(memory_ids),
+        diagnostics=diagnostics,
+        memory_files=tuple(memory_files),
+    )
 
 
 def build_system_prompt(root: Path, user: str, config: dict[str, Any]) -> str:

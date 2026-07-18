@@ -196,7 +196,7 @@ def _ensure_fixed_content_fits(
         f"system_prompt≈{system_tokens} tokens，"
         f"tool_schema≈{selection.tool_schema_tokens} tokens，"
         f"input_budget={selection.input_budget} tokens；"
-        "请调小 prompt.file_limits 或 prompt.char_limits"
+        "请调小 memory.temporary_injection_limits 或 prompt.char_limits"
     )
 
 
@@ -204,7 +204,8 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
     return sum(
         section.injected_chars
         for section in bundle.sections
-        if section.name == "permanent_memory" or section.name.startswith("temporary_memory:")
+        if section.name in {"permanent_memory", "important_memory"}
+        or section.name.startswith("temporary_memory:")
     )
 
 
@@ -612,10 +613,10 @@ def iter_request_events(
                         # 仅对选择并实际发送到的记忆进行加权
                         # 主模型运行成功。  取消/失败的回合永远不会得到
                         # 在这里，仅仅检索候选者被有意排除。
-            memory_weighted_ids: list[str] = []
+            memory_weighted_files: list[str] = []
             memory_weight_error = None
             try:
-                memory_weighted_ids = memory_store.mark_used(list(prompt_bundle.memory_ids))
+                memory_weighted_files = memory_store.mark_used(list(prompt_bundle.memory_ids))
             except Exception as exc:
                 memory_weight_error = {
                     "message": str(exc),
@@ -666,8 +667,8 @@ def iter_request_events(
                     "context": context_stats,
                     "prompt": prompt_bundle.diagnostics,
                     "memory": {
-                        "injected_ids": list(prompt_bundle.memory_ids),
-                        "weighted_ids": memory_weighted_ids,
+                        "injected_files": list(prompt_bundle.memory_files),
+                        "weighted_files": memory_weighted_files,
                         "weight_error": memory_weight_error,
                         "injected_chars": _memory_injected_chars(prompt_bundle),
                         "extraction_task_id": memory_task_id,

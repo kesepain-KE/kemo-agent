@@ -90,10 +90,36 @@ def _type_matches(value: Any, expected: Any) -> bool:
 
 
 def validate_json_schema(value: Any, schema: dict[str, Any], *, location: str = "$") -> None:
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list):
+        matches = 0
+        for candidate in one_of:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                validate_json_schema(value, candidate, location=location)
+            except AgentInputError:
+                continue
+            matches += 1
+        if matches != 1:
+            raise AgentInputError(f"{location} 必须且只能匹配 oneOf 中的一个结构")
+        return
+    if "const" in schema and value != schema["const"]:
+        raise AgentInputError(f"{location} 必须等于 {schema['const']!r}")
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        raise AgentInputError(f"{location} 不在允许值中")
     expected = schema.get("type")
     if expected is not None and not _type_matches(value, expected):
         raise AgentInputError(f"{location} 类型不符合 {expected}")
-    if isinstance(value, dict):
+    if isinstance(value, str):
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise AgentInputError(f"{location} 长度不能小于 {minimum}")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise AgentInputError(f"{location} 长度不能大于 {maximum}")
+    elif isinstance(value, dict):
         properties = schema.get("properties") or {}
         required = schema.get("required") or []
         missing = [name for name in required if name not in value]

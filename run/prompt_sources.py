@@ -386,12 +386,22 @@ class PromptSourceRegistry:
             modules.sort(key=lambda path: natural_path_key(path.name))
             for module in modules:
                 files = iter_files(module, suffixes={".md"}, skip_hidden=True)
+                updated_at = 0.0
+                for path in files:
+                    try:
+                        updated_at = max(updated_at, path.stat().st_mtime)
+                    except OSError:
+                        continue
                 selected = self._allowed(module.name, allow_modules)
                 active = selected and bool(files)
                 inventory.append(
                     {
                         "name": module.name,
                         "files": len(files),
+                        "data_items": [
+                            path.relative_to(module).as_posix() for path in files
+                        ],
+                        "updated_at": updated_at,
                         "selected": selected,
                         "active": active,
                         "status": (

@@ -39,8 +39,21 @@ def _relevant_memory(root: Path, user: str, config: dict[str, Any], goal: str) -
     if not bool(memory_config.get("injection_enabled", True)):
         return ""
     store = MemoryStore(root, user, config)
-    selection = store.select_for_injection(goal, max_items=5, max_chars=1000)
-    return selection.text
+    lines: list[str] = []
+    used = 0
+    for item in store.search(goal, limit=5):
+        line = (
+            f"- [{item['filename']}] ({item['tier']}, weight={item['weight']}) "
+            f"{item['content']}"
+        )
+        extra = len(line) + (1 if lines else 0)
+        if used + extra > 1000:
+            continue
+        lines.append(line)
+        used += extra
+    if not lines:
+        return ""
+    return "以下是按文件名匹配的相关用户记忆，当前计划目标优先：\n" + "\n".join(lines)
 
 
 def generate_plan(
