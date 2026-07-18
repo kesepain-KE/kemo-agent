@@ -879,16 +879,20 @@ class WebBackendTests(unittest.TestCase):
         )
         memory_dir = root / "users" / "alice" / "improve" / "seven_days"
         memory_dir.mkdir(parents=True)
+        (memory_dir / "safe-memory.md").write_text("safe memory preview", "utf-8")
         (memory_dir / "data.json").write_text(
             json.dumps(
-                [
-                    {
-                        "id": "memory-1",
-                        "content": "safe memory preview",
-                        "tier_weight": 2,
-                        "created_at": "2026-07-18T00:00:00+00:00",
+                {
+                    "schema_version": 2,
+                    "files": {
+                        "safe-memory.md": {
+                            "weight": 2,
+                            "updated_at": "2026-07-18T00:00:00+00:00",
+                            "last_weight_date": None,
+                            "expires_at": "2099-07-25T00:00:00+00:00",
+                        }
                     }
-                ]
+                }
             ),
             "utf-8",
         )
@@ -968,6 +972,15 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(sense.json()["summary"]["global"], 2)
         self.assertEqual(sense.json()["summary"]["enabled"], 1)
         self.assertEqual(sense.json()["core_files"], 2)
+        self.assertEqual(sense.json()["summary"]["registered_data"], 2)
+        self.assertEqual(sense.json()["summary"]["injected_data"], 1)
+        self.assertTrue(sense.json()["injection"]["enabled"])
+        self.assertEqual(sense.json()["injection"]["injected_items"], 1)
+        self.assertGreater(sense.json()["injection"]["estimated_tokens"], 0)
+        self.assertEqual(
+            sense.json()["injection"]["source_files"],
+            ["global_sense/runtime/status.md"],
+        )
         self.assertEqual(
             {item["id"]: item["status"] for item in sense.json()["sources"]},
             {"network": "filtered", "runtime": "active"},
@@ -980,7 +993,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("expand", prompt.json())
         memory = self.request(app, "GET", "/api/users/alice/memory/summary")
         self.assertEqual(memory.json()["summary"]["seven_days"], 1)
-        self.assertEqual(memory.json()["items"][0]["tier_weight"], 2)
+        self.assertEqual(memory.json()["items"][0]["weight"], 2)
+        self.assertEqual(memory.json()["items"][0]["filename"], "safe-memory.md")
 
         settings = self.request(app, "GET", "/api/users/alice/settings")
         self.assertEqual(settings.json()["provider"]["model"], "test-model")

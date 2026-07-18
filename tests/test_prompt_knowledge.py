@@ -66,7 +66,10 @@ class PromptKnowledgeTests(unittest.TestCase):
         for tier in ("seven_days", "one_month", "half_year", "permanent"):
             folder = root / "users" / "alice" / "improve" / tier
             folder.mkdir()
-            (folder / "data.json").write_text("[]", "utf-8")
+            if tier != "permanent":
+                (folder / "data.json").write_text(
+                    json.dumps({"schema_version": 2, "files": {}}), "utf-8"
+                )
         return temporary, root, config
 
     def test_prompt_order_is_fixed(self) -> None:
@@ -76,9 +79,10 @@ class PromptKnowledgeTests(unittest.TestCase):
             "alice",
             config,
         )
-        ordered = ["USER", "GLOBAL", "AGENTS", "HOT"]
+        ordered = ["USER", "GLOBAL", "AGENTS"]
         offsets = [prompt.index(item) for item in ordered]
         self.assertEqual(offsets, sorted(offsets))
+        self.assertNotIn("HOT", prompt)
 
     def test_index_orders_user_shared_global_and_skips_binary(self) -> None:
         _, root, _ = self.make_root()

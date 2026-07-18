@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,7 +103,10 @@ class PromptPipelineTests(unittest.TestCase):
         for tier in ("seven_days", "one_month", "half_year", "permanent"):
             folder = root / "users" / "alice" / "improve" / tier
             folder.mkdir(parents=True)
-            (folder / "data.json").write_text("[]", "utf-8")
+            if tier != "permanent":
+                (folder / "data.json").write_text(
+                    json.dumps({"schema_version": 2, "files": {}}), "utf-8"
+                )
         return temporary, root, config
 
     def write_plugin(self, root: Path, name: str = "clock") -> None:
@@ -124,9 +128,27 @@ class PromptPipelineTests(unittest.TestCase):
         (directory / "tool.py").write_text("def run():\n    return {'ok': True}\n", "utf-8")
 
     def write_memory(self, root: Path, tier: str, items: list[dict]) -> None:
-        (root / "users" / "alice" / "improve" / tier / "data.json").write_text(
-            json.dumps(items), "utf-8"
-        )
+        directory = root / "users" / "alice" / "improve" / tier
+        directory.mkdir(parents=True, exist_ok=True)
+        files = {}
+        entered = datetime(2098, 1, 1, tzinfo=timezone.utc)
+        days = {"seven_days": 7, "one_month": 30, "half_year": 180}
+        for item in items:
+            filename = str(item.get("filename") or "memory")
+            if not filename.endswith(".md"):
+                filename += ".md"
+            (directory / filename).write_text(str(item.get("content") or ""), "utf-8")
+            if tier != "permanent":
+                files[filename] = {
+                    "weight": int(item.get("weight", 0)),
+                    "updated_at": entered.isoformat(),
+                    "last_weight_date": item.get("last_weight_date"),
+                    "expires_at": (entered + timedelta(days=days[tier])).isoformat(),
+                }
+        if tier != "permanent":
+            (directory / "data.json").write_text(
+                json.dumps({"schema_version": 2, "files": files}), "utf-8"
+            )
 
     def populate_all_sections(self, root: Path) -> None:
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
@@ -177,14 +199,14 @@ class PromptPipelineTests(unittest.TestCase):
 
     def test_config_defaults_switches_limits_and_search_rejection(self) -> None:
         defaults = parse_prompt_settings({})
-        self.assertEqual(defaults.file_limits["permanent_memory"], 30000)
+        self.assertEqual(defaults.temporary_memory_limits["seven_days"], 3)
         self.assertEqual(defaults.char_limits["knowledge_index"], 8000)
         disabled = parse_prompt_settings({"prompt": {"include_user_soul": False}})
         self.assertFalse(disabled.include_user_soul)
         with self.assertRaises(PromptConfigError):
             parse_prompt_settings({"prompt": {"char_limits": {"perception": -1}}})
         with self.assertRaisesRegex(PromptConfigError, "未知项"):
-            parse_prompt_settings({"prompt": {"file_limits": {"typo": 1}}})
+            parse_prompt_settings({"memory": {"temporary_injection_limits": {"typo": 1}}})
         with self.assertRaisesRegex(PromptConfigError, "暂不支持"):
             parse_prompt_settings({"prompt": {"injection_mode": {"knowledge_index": "search"}}})
 
@@ -387,20 +409,19 @@ class PromptPipelineTests(unittest.TestCase):
             root,
             "seven_days",
             [
-                {"id": "low", "content": "LOW", "tier_weight": 1},
-                {"id": "first", "content": "FIRST", "tier_weight": 9},
-                {"id": "second", "content": "SECOND", "tier_weight": 9},
+                {"filename": "low", "content": "LOW", "weight": 1},
+                {"filename": "first", "content": "FIRST", "weight": 9},
+                {"filename": "second", "content": "SECOND", "weight": 9},
             ],
         )
-        config["prompt"] = {
-            "file_limits": {"temporary_seven_days": 2},
-            "char_limits": {"important_memory": 4},
-        }
+        config["prompt"] = {}
+        config["memory"]["temporary_injection_limits"] = {"seven_days": 2}
+        config["memory"]["important_memory_max_chars"] = 4
         (root / "users" / "alice" / "memory_temporary_important.md").write_text("IMPORTANT", "utf-8")
         bundle = build_prompt_bundle(root, "alice", config)
         temporary = next(s for s in bundle.sections if s.name == "temporary_memory:seven_days")
         important = next(s for s in bundle.sections if s.name == "important_memory")
-        self.assertEqual(temporary.item_ids, ("first", "second"))
+        self.assertEqual(temporary.item_ids, ("first.md", "second.md"))
         self.assertLess(temporary.content.index("FIRST"), temporary.content.index("SECOND"))
         self.assertTrue(temporary.truncated)
         self.assertEqual(important.content, "IMPO")
@@ -515,20 +536,18 @@ class PromptPipelineTests(unittest.TestCase):
 
     def test_engine_uses_bundle_context_status_matches_and_memory_weights_after_commit(self) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"id": "memory", "content": "MEMORY", "tier_weight": 0}])
+        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
         provider = CaptureProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False), patch.object(
-            MemoryStore, "select_for_injection", side_effect=AssertionError("legacy search called")
-        ):
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             result = handle_request(
                 {"user": "alice", "source": "cli", "session_id": "ok", "prompt": "unrelated"},
                 root=root,
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(provider.requests[0].messages[0]["role"], "system")
-        self.assertEqual(result["memory"]["injected_ids"], ["memory"])
+        self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         weighted = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
-        self.assertEqual(weighted[0]["tier_weight"], 1)
+        self.assertEqual(weighted[0]["weight"], 1)
         status = context_status(
             {"user": "alice", "source": "cli", "session_id": "ok"},
             root=root,
@@ -538,7 +557,7 @@ class PromptPipelineTests(unittest.TestCase):
 
     def test_failed_provider_does_not_weight_memory(self) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"id": "memory", "content": "MEMORY", "tier_weight": 0}])
+        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
         provider = CaptureProvider(fail=True)
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             with self.assertRaises(EngineError):
@@ -548,11 +567,11 @@ class PromptPipelineTests(unittest.TestCase):
                     provider_factory=lambda _: provider,
                 )
         items = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
-        self.assertEqual(items[0]["tier_weight"], 0)
+        self.assertEqual(items[0]["weight"], 0)
 
     def test_cancelled_provider_does_not_weight_memory(self) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"id": "memory", "content": "MEMORY", "tier_weight": 0}])
+        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
         cancel = threading.Event()
 
         class CancellingProvider(CaptureProvider):
@@ -579,7 +598,7 @@ class PromptPipelineTests(unittest.TestCase):
             )
         self.assertEqual(events, [])
         items = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
-        self.assertEqual(items[0]["tier_weight"], 0)
+        self.assertEqual(items[0]["weight"], 0)
 
     def test_fixed_prompt_over_budget_fails_before_provider(self) -> None:
         _, root, config = self.make_root()
@@ -589,7 +608,7 @@ class PromptPipelineTests(unittest.TestCase):
         (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
         provider = CaptureProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            with self.assertRaisesRegex(EngineError, "prompt.file_limits"):
+            with self.assertRaisesRegex(EngineError, "memory.temporary_injection_limits"):
                 handle_request(
                     {"user": "alice", "source": "cli", "session_id": "large", "prompt": "go"},
                     root=root,

@@ -170,7 +170,7 @@ class CLITests(unittest.TestCase):
             ["--interactive"],
             handler=lambda _: "unused",
             stdin=io.StringIO(
-                "/remember 用户喜欢川菜\n/memory\n/forget 川菜\n/memory\n/exit\n"
+                "/remember 用户喜欢川菜\n/memory\n/forget 用户喜欢川菜\n/memory\n/exit\n"
             ),
             stdout=stdout,
             stderr=io.StringIO(),

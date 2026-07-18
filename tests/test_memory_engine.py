@@ -72,9 +72,7 @@ class MemoryEngineTests(unittest.TestCase):
             }
         }
         store = MemoryStore(root, "alice", config)
-        path = store.path("permanent")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", "utf-8")
+        store.tier_dir("permanent").mkdir(parents=True, exist_ok=True)
         self.assertEqual(store.load_tier("permanent"), [])
 
     def test_only_committed_round_submits_extraction(self) -> None:

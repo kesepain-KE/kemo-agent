@@ -1,19 +1,31 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from run.memory import MemoryError, MemoryStore, contains_sensitive_credential, tier_rules
+from run.memory import (
+    FILENAME_MAX_CHARS,
+    MemoryError,
+    MemoryStore,
+    contains_sensitive_credential,
+    normalize_memory_filename,
+    tier_rules,
+)
+from run.memory_pipeline import _existing_candidates
+from run.agent_runner import AgentInputError, validate_json_schema
 
 
 CONFIG = {
     "memory": {
-        "injection_max_chars": 240,
-        "injection_max_items": 2,
+        "temporary_injection_limits": {
+            "seven_days": 3,
+            "one_month": 4,
+            "half_year": 3,
+        },
         "tiers": {
             "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
             "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
@@ -32,16 +44,19 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.store = MemoryStore(self.root, "alice", CONFIG)
         self.start = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
 
-    def add(self, content: str, *, explicit: bool = False, now=None, keywords=None):
+    def add(
+        self,
+        filename: str,
+        content: str | None = None,
+        *,
+        explicit: bool = False,
+        now: datetime | None = None,
+    ) -> str:
         result = self.store.upsert_candidates(
             [
                 {
-                    "content": content,
-                    "type": "fact",
-                    "confidence": 0.9,
-                    "importance": 0.8,
-                    "entities": [],
-                    "keywords": keywords or [],
+                    "filename": filename,
+                    "content": content or filename,
                     "explicit": explicit,
                     "action": "upsert",
                 }
@@ -51,127 +66,219 @@ class MemoryLifecycleTests(unittest.TestCase):
         )
         return (result["created"] or result["updated"])[0]
 
-    def test_contract_and_old_list_migration(self) -> None:
-        path = self.store.path("seven_days")
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps([{"text": "用户在成都上学", "weight": 2}]), "utf-8")
-        item = self.store.load_tier("seven_days", now=self.start)[0]
-        required = {
-            "schema_version", "id", "content", "type", "keywords", "entities",
-            "source", "confidence", "importance", "status", "tier", "tier_weight",
-            "tier_entered_at", "review_at", "last_weight_date", "created_at",
-            "updated_at", "explicit", "version",
+    def seed_temporary(
+        self,
+        tier: str,
+        filename: str,
+        *,
+        content: str,
+        weight: int,
+        expires_at: datetime,
+    ) -> str:
+        normalized = normalize_memory_filename(filename)
+        path = self.store.fragment_path(tier, normalized)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, "utf-8")
+        index = self.store.load_index(tier)
+        index[normalized] = {
+            "weight": weight,
+            "updated_at": self.start.isoformat(),
+            "last_weight_date": None,
+            "expires_at": expires_at.isoformat(),
         }
-        self.assertTrue(required <= set(item))
-        self.assertEqual(item["tier_weight"], 2)
-        self.assertEqual(item["review_at"], (self.start + timedelta(days=7)).isoformat())
+        self.store.write_index(tier, index)
+        return normalized
 
-    def test_upsert_deduplicates_and_explicit_promotes(self) -> None:
-        memory_id = self.add("用户喜欢川菜", keywords=["川菜"])
-        result = self.store.upsert_candidates(
-            [{
-                "content": "用户喜欢川菜", "type": "preference", "confidence": 1.0,
-                "importance": 1.0, "entities": [], "keywords": ["川菜"],
-                "explicit": True, "action": "upsert",
-            }],
-            source={"session_id": "s", "round": 2}, now=self.start,
+    def test_filename_contract_and_tier_rules(self) -> None:
+        self.assertEqual(normalize_memory_filename("  用户喜欢川菜.md "), "用户喜欢川菜.md")
+        self.assertEqual(normalize_memory_filename("a/b:c"), "abc.md")
+        filename = normalize_memory_filename("超长记忆文件标题" * 5)
+        self.assertLessEqual(len(Path(filename).stem), FILENAME_MAX_CHARS)
+        with self.assertRaises(MemoryError):
+            normalize_memory_filename("***")
+        self.assertEqual(tier_rules(CONFIG)["seven_days"].next, "one_month")
+
+    def test_new_temporary_index_contains_only_lifecycle_metadata(self) -> None:
+        filename = self.add("用户在成都上学", "用户在成都上学。")
+        index = self.store.load_index("seven_days")
+        self.assertEqual(set(index[filename]), {"weight", "updated_at", "last_weight_date", "expires_at"})
+        self.assertEqual(index[filename]["weight"], 0)
+        self.assertEqual(
+            index[filename]["expires_at"],
+            (self.start + timedelta(days=7)).isoformat(),
         )
-        self.assertEqual(result["updated"], [memory_id])
-        item = self.store.list_items()[0]
-        self.assertEqual(item["tier"], "permanent")
-        self.assertEqual(item["tier_weight"], 0)
-        self.assertIsNone(item["review_at"])
+        raw = self.store.path("seven_days").read_text("utf-8")
+        self.assertNotIn("用户在成都上学。", raw)
+        self.assertEqual(self.store.fragment_path("seven_days", filename).read_text("utf-8").strip(), "用户在成都上学。")
+
+    def test_same_filename_updates_in_place_and_explicit_moves_to_permanent(self) -> None:
+        filename = self.add("用户喜欢川菜", "用户喜欢川菜。")
+        result = self.store.upsert_candidates(
+            [{"filename": "用户喜欢川菜", "content": "用户明确喜欢川菜。", "explicit": True, "action": "upsert"}],
+            source={},
+            now=self.start + timedelta(hours=1),
+        )
+        self.assertEqual(result["updated"], [filename])
+        self.assertEqual(self.store.load_index("seven_days"), {})
+        permanent = self.store.load_tier("permanent")
+        self.assertEqual([(item["filename"], item["content"]) for item in permanent], [(filename, "用户明确喜欢川菜。")])
+        self.assertFalse((self.store.tier_dir("permanent") / "data.json").exists())
 
     def test_sensitive_credentials_are_rejected(self) -> None:
         self.assertTrue(contains_sensitive_credential("API Key: sk-abcdefghijk"))
         result = self.store.upsert_candidates(
-            [{"content": "API Key: sk-abcdefghijk", "action": "upsert"}],
-            source={}, now=self.start,
+            [{"filename": "密钥", "content": "API Key: sk-abcdefghijk", "action": "upsert"}],
+            source={},
+            now=self.start,
         )
         self.assertEqual(result["rejected"], 1)
         self.assertEqual(self.store.list_items(), [])
 
-    def test_candidates_do_not_weight_and_selected_usage_does(self) -> None:
-        selected_id = self.add("用户正在开发 kemo-agent", keywords=["kemo-agent"])
-        other_id = self.add("用户喜欢川菜", keywords=["川菜"])
-        selection = self.store.select_for_injection("继续开发 kemo-agent")
-        self.assertIn(selected_id, selection.candidate_ids)
-        self.assertIn(selected_id, selection.selected_ids)
-        before = {item["id"]: item["tier_weight"] for item in self.store.list_items()}
-        self.assertEqual(before[selected_id], 0)
-        self.assertEqual(before[other_id], 0)
-        self.store.mark_used(selection.selected_ids, now=self.start)
-        after = {item["id"]: item["tier_weight"] for item in self.store.list_items()}
-        self.assertEqual(after[selected_id], 1)
-        self.assertEqual(after[other_id], 0)
+    def test_modify_and_reference_share_one_daily_weight_lock_without_sliding_expiry(self) -> None:
+        filename = self.add("长期项目", "用户维护长期项目。")
+        before = self.store.load_index("seven_days")[filename]["expires_at"]
+        self.store.upsert_candidates(
+            [{"filename": "长期项目", "content": "用户持续维护长期项目。", "action": "upsert"}],
+            source={},
+            now=self.start + timedelta(hours=1),
+        )
+        after_modify = self.store.load_index("seven_days")[filename]
+        self.assertEqual(after_modify["weight"], 1)
+        self.assertEqual(after_modify["expires_at"], before)
+        self.assertEqual(self.store.mark_used([filename], now=self.start + timedelta(hours=2)), [])
+        after_reference = self.store.load_index("seven_days")[filename]
+        self.assertEqual(after_reference["weight"], 1)
+        self.assertEqual(after_reference["expires_at"], before)
+        self.assertEqual(self.store.mark_used([filename], now=self.start + timedelta(days=1)), [filename])
+        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 2)
 
-    def test_same_local_day_once_cross_day_and_unbounded(self) -> None:
-        memory_id = self.add("用户维护长期项目", keywords=["项目"])
-        self.assertEqual(self.store.mark_used([memory_id], now=self.start), [memory_id])
-        self.assertEqual(self.store.mark_used([memory_id], now=self.start + timedelta(hours=2)), [])
-        self.assertEqual(self.store.mark_used([memory_id], now=self.start + timedelta(days=1)), [memory_id])
-        items = self.store.load_all()
-        items[0]["tier_weight"] = 100000
-        self.store._write_partition(items)
-        self.store.mark_used([memory_id], now=self.start + timedelta(days=2))
-        self.assertEqual(self.store.load_all()[0]["tier_weight"], 100001)
+    def test_unchanged_upsert_does_not_weight(self) -> None:
+        filename = self.add("稳定事实", "稳定事实。")
+        self.store.upsert_candidates(
+            [{"filename": "稳定事实", "content": "稳定事实。", "action": "upsert"}],
+            source={},
+            now=self.start + timedelta(hours=1),
+        )
+        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 0)
 
     def test_due_upgrade_resets_and_due_failure_deletes(self) -> None:
-        upgrade_id = self.add("会反复使用的记忆", now=self.start)
-        delete_id = self.add("未再使用的记忆", now=self.start)
-        items = self.store.load_all(now=self.start)
-        for item in items:
-            item["review_at"] = self.start.isoformat()
-            item["tier_weight"] = 3 if item["id"] == upgrade_id else 2
-        self.store._write_partition(items)
+        upgraded = self.seed_temporary(
+            "seven_days", "反复使用", content="会反复使用的记忆。", weight=3, expires_at=self.start
+        )
+        deleted = self.seed_temporary(
+            "seven_days", "未再使用", content="未再使用的记忆。", weight=2, expires_at=self.start
+        )
         result = self.store.review_due(now=self.start)
-        self.assertEqual(result["upgraded"], [upgrade_id])
-        self.assertEqual(result["deleted"], [delete_id])
-        item = self.store.load_all()[0]
-        self.assertEqual(item["tier"], "one_month")
-        self.assertEqual(item["tier_weight"], 0)
-        self.assertEqual(item["review_at"], (self.start + timedelta(days=30)).isoformat())
+        self.assertEqual(result, {"upgraded": [upgraded], "deleted": [deleted]})
+        self.assertEqual(self.store.load_index("seven_days"), {})
+        item = self.store.load_tier("one_month")[0]
+        self.assertEqual(item["filename"], upgraded)
+        self.assertEqual(item["weight"], 0)
+        self.assertEqual(item["expires_at"], (self.start + timedelta(days=30)).isoformat())
 
-    def test_half_year_upgrades_to_permanent_and_permanent_stays(self) -> None:
-        memory_id = self.add("长期稳定事实")
-        item = self.store.load_all()[0]
-        item.update({"tier": "half_year", "tier_weight": 60, "review_at": self.start.isoformat()})
-        self.store._write_partition([item])
-        result = self.store.review_due(now=self.start)
-        self.assertEqual(result["upgraded"], [memory_id])
-        permanent = self.store.load_all()[0]
-        self.assertEqual(permanent["tier"], "permanent")
-        self.assertEqual(permanent["tier_weight"], 0)
-        self.assertIsNone(permanent["review_at"])
+    def test_half_year_upgrades_to_unindexed_permanent(self) -> None:
+        filename = self.seed_temporary(
+            "half_year", "长期稳定事实", content="长期稳定事实。", weight=60, expires_at=self.start
+        )
+        self.assertEqual(self.store.review_due(now=self.start)["upgraded"], [filename])
+        self.assertEqual(self.store.load_index("half_year"), {})
+        permanent = self.store.load_tier("permanent")
+        self.assertEqual(permanent[0]["filename"], filename)
+        self.assertIsNone(permanent[0]["expires_at"])
         self.assertEqual(self.store.review_due(now=self.start + timedelta(days=10000)), {"upgraded": [], "deleted": []})
 
-    def test_forget_and_injection_budget(self) -> None:
-        first = self.add("用户喜欢非常辣的川菜", keywords=["川菜"])
-        self.add("用户也喜欢清淡早餐", keywords=["早餐"])
-        selection = self.store.select_for_injection("川菜 早餐", max_chars=120, max_items=1)
-        self.assertLessEqual(selection.chars, 120)
-        self.assertEqual(len(selection.selected_ids), 1)
-        self.assertGreaterEqual(len(selection.candidate_ids), len(selection.selected_ids))
-        self.assertIn("当前用户指令和当前事实优先", selection.text)
-        self.assertEqual(self.store.forget(first), [first])
-        self.assertNotIn(first, [item["id"] for item in self.store.list_items()])
+    def test_filename_search_and_forget(self) -> None:
+        first = self.add("川菜偏好", "用户喜欢非常辣的川菜。")
+        self.add("早餐偏好", "用户喜欢清淡早餐。")
+        matches = self.store.search("继续讨论川菜偏好", limit=1)
+        self.assertEqual([item["filename"] for item in matches], [first])
+        self.assertEqual(self.store.forget("川菜偏好"), [first])
+        self.assertNotIn(first, [item["filename"] for item in self.store.list_items()])
 
-    def test_atomic_write_failure_leaves_existing_target(self) -> None:
-        path = self.store.path("seven_days")
-        path.parent.mkdir(parents=True)
-        original = "[]\n"
-        path.write_text(original, "utf-8")
+    def test_extraction_candidates_expose_only_filename_and_tier(self) -> None:
+        filename = self.add("项目架构", "用户正在维护项目架构。")
+        candidates = _existing_candidates(self.store, "继续调整项目架构", 12)
+        self.assertEqual(candidates, [{"filename": filename, "tier": "seven_days"}])
+
+    def test_self_improve_candidate_schema_enforces_action_and_filename_length(self) -> None:
+        manifest = json.loads(
+            (Path(__file__).parents[1] / "agents" / "self_improve" / "agent.json").read_text("utf-8")
+        )
+        schema = manifest["output_schema"]
+        validate_json_schema(
+            {
+                "candidates": [
+                    {"action": "upsert", "filename": "项目架构", "content": "一个微量事实", "explicit": False},
+                    {"action": "forget", "filename": "旧偏好"},
+                ]
+            },
+            schema,
+        )
+        with self.assertRaises(AgentInputError):
+            validate_json_schema(
+                {"candidates": [{"action": "forget", "filename": "超长文件名" * 5}]},
+                schema,
+            )
+        with self.assertRaises(AgentInputError):
+            validate_json_schema(
+                {"candidates": [{"action": "upsert", "filename": "缺正文", "explicit": False}]},
+                schema,
+            )
+
+    def test_permanent_prompt_selection_is_unlimited(self) -> None:
+        self.add("永久一", "永久记忆一。", explicit=True)
+        self.add("永久二", "永久记忆二。", explicit=True)
+        selection = self.store.select_tier_for_prompt("permanent", max_files=0)
+        self.assertEqual(selection.injected_items, 2)
+        self.assertFalse(selection.truncated)
+        self.assertEqual(len(selection.source_files), 2)
+
+    def test_temporary_prompt_reads_only_selected_markdown(self) -> None:
+        high = self.seed_temporary(
+            "seven_days",
+            "高权重",
+            content="高权重正文。",
+            weight=9,
+            expires_at=self.start + timedelta(days=7),
+        )
+        low = self.seed_temporary(
+            "seven_days",
+            "低权重",
+            content="低权重正文。",
+            weight=1,
+            expires_at=self.start + timedelta(days=7),
+        )
+        self.store.fragment_path("seven_days", low).unlink()
+        selection = self.store.select_tier_for_prompt("seven_days", max_files=1)
+        self.assertEqual(selection.selected_ids, (high,))
+        self.assertIn("高权重正文", selection.text)
+        self.assertTrue(selection.truncated)
+
+    def test_atomic_markdown_failure_leaves_existing_target(self) -> None:
+        filename = self.add("原子写入", "原始内容。")
+        path = self.store.fragment_path("seven_days", filename)
         with patch("run.memory.os.replace", side_effect=OSError("disk failure")):
             with self.assertRaises(OSError):
-                self.add("不会写入")
-        self.assertEqual(path.read_text("utf-8"), original)
+                self.store.upsert_candidates(
+                    [{"filename": "原子写入", "content": "替换内容。", "action": "upsert"}],
+                    source={},
+                    now=self.start + timedelta(days=1),
+                )
+        self.assertEqual(path.read_text("utf-8").strip(), "原始内容。")
 
-    def test_users_are_isolated(self) -> None:
-        self.add("Alice 的记忆")
+    def test_integrity_and_user_isolation(self) -> None:
+        alice = self.add("用户记忆", "Alice 的记忆。")
         bob = MemoryStore(self.root, "bob", CONFIG)
-        bob.upsert_candidates([{"content": "Bob 的记忆", "action": "upsert"}], source={}, now=self.start)
-        self.assertEqual([item["content"] for item in self.store.list_items()], ["Alice 的记忆"])
-        self.assertEqual([item["content"] for item in bob.list_items()], ["Bob 的记忆"])
+        bob.upsert_candidates(
+            [{"filename": "用户记忆", "content": "Bob 的记忆。", "action": "upsert"}],
+            source={},
+            now=self.start,
+        )
+        self.assertEqual([item["content"] for item in self.store.list_items()], ["Alice 的记忆。"])
+        self.assertEqual([item["content"] for item in bob.list_items()], ["Bob 的记忆。"])
+        self.store.fragment_path("seven_days", "孤立文件").write_text("orphan", "utf-8")
+        self.assertIn("orphan_file:seven_days/孤立文件.md", self.store.integrity_issues())
+        self.assertEqual(self.store.locate(alice).filename, alice)
 
 
 if __name__ == "__main__":
