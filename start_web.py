@@ -5,7 +5,7 @@
     python start_web.py --port=8080  # 自定义端口
     python start_web.py --host=0.0.0.0 --port=1357  # 开放局域网访问
 
-启动时自动加载 .env、检查用户，然后拉起 RuntimeHost（Cron + 消息路由）
+启动时自动加载 .env、打印版本信息、检查用户，然后拉起 RuntimeHost（Cron + 消息路由）
 和 Web 后端，一站式运行。
 """
 
@@ -27,6 +27,50 @@ from run.users import ensure_user, list_users
 from web.auth import WebAuthConfig, WebAuthConfigError
 
 VERSION = "0.1.0-dev"
+
+
+# ── 版本信息 ──────────────────────────────────────────────────────
+
+def _print_banner(root: Path) -> None:
+    """Print a startup banner with version.json details."""
+    version_path = root / "version.json"
+    if not version_path.is_file():
+        print(f"kemo-agent {VERSION}")
+        return
+
+    try:
+        data = json.loads(version_path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"kemo-agent {VERSION} (version.json 损坏)")
+        return
+
+    agent_ver = data.get("version", VERSION)
+    components = data.get("components", {})
+    shared = data.get("shared_components", {})
+
+    BAR = "─" * 46
+    title = f"  kemo-agent  {agent_ver}"
+    print(f"┌{BAR}┐")
+    print(f"│{title:<46s}│")
+    print(f"├{BAR}┤")
+    for name, info in components.items():
+        if isinstance(info, dict):
+            ver = info.get("version", "?")
+            cnt = info.get("count")
+            extra = ""
+            if cnt is not None:
+                extra = f" {cnt} items" if cnt > 0 else " (empty)"
+            line = f"  {name:<18s} {ver:<10s}{extra}"
+            print(f"│{line:<46s}│")
+    print(f"├{BAR}┤")
+    for name, info in shared.items():
+        if isinstance(info, dict):
+            ver = info.get("version", "?")
+            cnt = info.get("count", 0)
+            extra = f" {cnt} items" if cnt > 0 else " (empty)"
+            line = f"  shared/{name:<11s} {ver:<10s}{extra}"
+            print(f"│{line:<46s}│")
+    print(f"└{BAR}┘")
 
 # ------------------------------------------------------------------------------------------
 # 帮手
@@ -145,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = project_root().resolve()
 
-        # 1.加载.env
+        # 1. 加载 .env 并打印版本信息
     load_dotenv(root / ".env")
 
     try:
@@ -156,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-        # 2.检查用户
+    _print_banner(root)
+
+        # 2. 检查用户
     if not _check_users(root):
         return 1
 
