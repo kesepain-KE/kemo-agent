@@ -16,11 +16,11 @@ from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
 from run.config import load_config
 from run.cron_store import CronStore, normalize_task
-from run.history import commit_window, empty_window
+from run.history import commit_window, empty_window, load_window
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError
-from web.service import WebRunService
+from web.service import ActiveRun, WebRunService
 
 
 class FakeService:
@@ -43,6 +43,34 @@ class FakeService:
 
     def history(self, user, session_id, *, source="web"):
         return {"user": user, "source": source, "session_id": session_id, "messages": []}
+
+    def rename_session(self, user, session_id, title, *, source="web"):
+        self.seen = {"user": user, "session_id": session_id, "title": title, "source": source}
+        return {
+            "user": user,
+            "source": source,
+            "session": {
+                "session_id": session_id,
+                "window": "window-1",
+                "title": title,
+                "rounds": 1,
+                "updated_at": "now",
+            },
+        }
+
+    def delete_session(self, user, session_id, *, source="web"):
+        self.seen = {"user": user, "session_id": session_id, "source": source}
+        return {"user": user, "source": source, "session_id": session_id, "deleted": True}
+
+    def delete_all_sessions(self, user, *, source="web"):
+        self.seen = {"user": user, "source": source}
+        return {
+            "user": user,
+            "source": source,
+            "deleted": True,
+            "deleted_sessions": 0,
+            "deleted_windows": 0,
+        }
 
     def settings(self, user):
         return {"user": user, "schema_version": 1}
@@ -367,6 +395,18 @@ class WebBackendTests(unittest.TestCase):
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "world"},
         ]
+        window["think"]["rounds"] = [{"round": 1, "content": "inspect first"}]
+        window["tool"]["rounds"] = [{
+            "round": 1,
+            "calls": [{
+                "id": "call-1",
+                "name": "clock",
+                "arguments": {"zone": "local"},
+                "result": "x" * 5200,
+                "status": "completed",
+                "elapsed_ms": 12,
+            }],
+        }]
         window["data"]["rounds"] = 1
         commit_window(root / "users" / "alice" / "history" / "window-1", window)
         app = create_app(service=WebRunService(root))
@@ -377,6 +417,130 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(sessions.json()["sessions"][0]["session_id"], "s1")
         history = self.request(app, "GET", "/api/users/alice/sessions/s1/history")
         self.assertEqual(len(history.json()["messages"]), 2)
+        trace = history.json()["round_traces"][0]
+        self.assertEqual(trace["reasoning"], "inspect first")
+        self.assertEqual(trace["tools"][0]["call_id"], "call-1")
+        self.assertEqual(trace["tools"][0]["status"], "success")
+        self.assertEqual(len(trace["tools"][0]["result_text"]), 5000)
+        self.assertTrue(trace["tools"][0]["result_truncated"])
+
+    def test_session_rename_is_persisted_without_changing_sort_time(self) -> None:
+        _, root = self.make_root()
+        window_dir = root / "users" / "alice" / "history" / "window-1"
+        commit_window(window_dir, empty_window("alice", "web", "s1"))
+        app = create_app(service=WebRunService(root))
+        before = self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"][0]
+        stale_window = load_window(window_dir)
+
+        response = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/sessions/s1",
+            json={"title": "  我的重要对话  "},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["session"]["title"], "我的重要对话")
+        after = self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"][0]
+        self.assertEqual(after["title"], "我的重要对话")
+        self.assertEqual(after["updated_at"], before["updated_at"])
+        stored = json.loads((window_dir / "data.json").read_text("utf-8"))
+        self.assertEqual(stored["title"], "我的重要对话")
+        commit_window(window_dir, stale_window)
+        stored_after_stale_commit = json.loads((window_dir / "data.json").read_text("utf-8"))
+        self.assertEqual(stored_after_stale_commit["title"], "我的重要对话")
+
+    def test_session_rename_validates_title(self) -> None:
+        _, root = self.make_root()
+        commit_window(
+            root / "users" / "alice" / "history" / "window-1",
+            empty_window("alice", "web", "s1"),
+        )
+        app = create_app(service=WebRunService(root))
+        for title in ("", "   ", "bad\nname", "x" * 81):
+            with self.subTest(title=repr(title)):
+                response = self.request(
+                    app,
+                    "PATCH",
+                    "/api/users/alice/sessions/s1",
+                    json={"title": title},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    def test_session_delete_removes_all_matching_windows_and_preserves_other_users(self) -> None:
+        _, root = self.make_root()
+        for name in ("window-1", "window-2"):
+            commit_window(
+                root / "users" / "alice" / "history" / name,
+                empty_window("alice", "web", "s1"),
+            )
+        bob_window = root / "users" / "bob" / "history" / "window-1"
+        commit_window(bob_window, empty_window("bob", "web", "s1"))
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(app, "DELETE", "/api/users/alice/sessions/s1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertEqual(
+            self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"],
+            [],
+        )
+        self.assertEqual(
+            self.request(app, "GET", "/api/users/alice/sessions/s1/history").status_code,
+            404,
+        )
+        self.assertTrue(bob_window.is_dir())
+        self.assertEqual(
+            self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code,
+            404,
+        )
+
+    def test_delete_all_sessions_is_scoped_and_reports_counts(self) -> None:
+        _, root = self.make_root()
+        for directory, session_id in (
+            ("window-1", "s1"),
+            ("window-2", "s1"),
+            ("window-3", "s2"),
+        ):
+            commit_window(
+                root / "users" / "alice" / "history" / directory,
+                empty_window("alice", "web", session_id),
+            )
+        bob_window = root / "users" / "bob" / "history" / "window-1"
+        commit_window(bob_window, empty_window("bob", "web", "s1"))
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(app, "DELETE", "/api/users/alice/sessions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["deleted_sessions"], 2)
+        self.assertEqual(response.json()["deleted_windows"], 3)
+        self.assertEqual(
+            self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"],
+            [],
+        )
+        self.assertTrue(bob_window.is_dir())
+
+    def test_active_session_cannot_be_deleted(self) -> None:
+        _, root = self.make_root()
+        window_dir = root / "users" / "alice" / "history" / "window-1"
+        commit_window(window_dir, empty_window("alice", "web", "busy"))
+        service = WebRunService(root)
+        service._active_runs["run_busy_123"] = ActiveRun("run_busy_123", "alice", "busy")
+        app = create_app(service=service)
+
+        response = self.request(app, "DELETE", "/api/users/alice/sessions/busy")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "conflict")
+        self.assertTrue(window_dir.is_dir())
+
+        bulk_response = self.request(app, "DELETE", "/api/users/alice/sessions")
+        self.assertEqual(bulk_response.status_code, 409)
+        self.assertEqual(bulk_response.json()["error"]["code"], "conflict")
+        self.assertTrue(window_dir.is_dir())
 
     def test_not_found_invalid_source_and_cross_user_session(self) -> None:
         _, root = self.make_root()
@@ -758,6 +922,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(overview.json()["counts"]["knowledge_documents"], 3)
         self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
         self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
+        self.assertEqual(overview.json()["context"]["rounds"], 1)
+        self.assertEqual(overview.json()["context"]["round_limit"], 30)
         self.assertEqual(overview.json()["agents"][0]["name"], "observer_agent")
         self.assertEqual(overview.json()["agents"][0]["source"], "user")
         self.assertEqual(overview.json()["summary_cache"]["covered_rounds"], [1])
