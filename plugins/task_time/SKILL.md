@@ -23,9 +23,11 @@
       "time": {"type": "string", "description": "daily 类型时的时间，HH:MM 格式（如 09:00）"},
       "interval_seconds": {"type": "integer", "description": "recurring 类型的执行间隔秒数，>=60"},
       "start_at": {"type": "string", "description": "once 类型时的执行时间（UTC ISO）"},
-      "timezone": {"type": "string", "description": "daily 类型时的时区，默认 UTC"}
+      "timezone": {"type": "string", "description": "daily 类型时的 IANA 时区，默认 UTC"},
+      "status": {"type": "string", "enum": ["enabled", "paused"], "description": "update 时可启用或暂停任务"}
     },
-    "required": ["action"]
+    "required": ["action"],
+    "additionalProperties": false
   },
   "version": "1.0.0",
   "enabled": true,

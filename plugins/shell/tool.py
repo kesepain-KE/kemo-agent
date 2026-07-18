@@ -1,4 +1,6 @@
-"""系统命令执行工具 — 会话模式 + 命令链 + 跨平台。kemo-agent 原生插件。"""
+"""无命令黑名单的本地命令执行工具。"""
+
+from __future__ import annotations
 
 import os
 import re
@@ -8,299 +10,354 @@ import time
 from pathlib import Path
 from typing import Any
 
+
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SESSION_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]+$")
 _SESSION_HISTORY_LIMIT = 2000
 _SESSION_MAX_COUNT = 500
+_SESSION_TTL_SECONDS = 86400
+_OUTPUT_MAX_CHARS = 100_000
 _SESSION_LOCK = threading.RLock()
-_SESSION_CACHE: dict[str, dict[str, Any]] = {}
+_SESSION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
 
-def _utc_timestamp() -> float:
+def _now() -> float:
     return time.time()
 
 
 def _decode_output(data: bytes) -> str:
-    for enc in ("utf-8", "gbk", "latin-1"):
+    for encoding in ("utf-8", "gbk", "latin-1"):
         try:
-            return data.decode(enc)
+            return data.decode(encoding)
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
 
 
-def _decide_encoding() -> str:
-    if os.name == "nt":
-        return "utf-8"
-    return "utf-8"
+def _truncate(value: str) -> tuple[str, bool]:
+    if len(value) <= _OUTPUT_MAX_CHARS:
+        return value, False
+    return value[:_OUTPUT_MAX_CHARS] + "\n…(输出已截断)", True
 
 
-# ── 会话管理 ──────────────────────────────────────────────────────
+def _session_key(context: dict[str, Any], root: Path, session_id: str) -> tuple[str, str, str, str]:
+    return (
+        str(root).casefold(),
+        str(context.get("user") or ""),
+        str(context.get("source") or ""),
+        session_id,
+    )
+
 
 def _cleanup_expired_sessions() -> None:
-    expired: list[str] = []
-    for sid, session in _SESSION_CACHE.items():
-        if not isinstance(session, dict):
-            expired.append(sid)
-            continue
-        if session.get("schema_version") != 2:
-            expired.append(sid)
-            continue
-        last = session.get("last_used", 0)
-        if isinstance(last, (int, float)) and last > 0 and _utc_timestamp() - last > 86400:
-            expired.append(sid)
-    for sid in expired:
-        _SESSION_CACHE.pop(sid, None)
+    deadline = _now() - _SESSION_TTL_SECONDS
+    expired = [
+        key for key, session in _SESSION_CACHE.items()
+        if not isinstance(session, dict) or float(session.get("last_used", 0)) < deadline
+    ]
+    for key in expired:
+        _SESSION_CACHE.pop(key, None)
     if len(_SESSION_CACHE) > _SESSION_MAX_COUNT:
-        oldest = sorted(_SESSION_CACHE.items(),
-                        key=lambda x: x[1].get("last_used", 0) if isinstance(x[1], dict) else 0)
-        _SESSION_CACHE.clear()
-        _SESSION_CACHE.update(dict(oldest[-(_SESSION_MAX_COUNT // 2):]))
+        oldest = sorted(_SESSION_CACHE, key=lambda key: float(_SESSION_CACHE[key].get("last_used", 0)))
+        for key in oldest[: len(_SESSION_CACHE) - (_SESSION_MAX_COUNT // 2)]:
+            _SESSION_CACHE.pop(key, None)
 
 
-def _get_session(session_id: str, root: Path) -> dict[str, Any]:
+def _get_session(key: tuple[str, str, str, str], root: Path) -> dict[str, Any]:
     with _SESSION_LOCK:
         _cleanup_expired_sessions()
-        session = _SESSION_CACHE.get(session_id)
-        if not isinstance(session, dict):
+        session = _SESSION_CACHE.get(key)
+        if session is None:
             session = {
                 "cwd": str(root),
                 "env": {},
                 "history": [],
-                "schema_version": 2,
-                "created": _utc_timestamp(),
-                "last_used": _utc_timestamp(),
+                "last_used": _now(),
+                "lock": threading.RLock(),
             }
-            _SESSION_CACHE[session_id] = session
-        session["last_used"] = _utc_timestamp()
+            _SESSION_CACHE[key] = session
+        session["last_used"] = _now()
         return session
 
 
-def _reset_session(session_id: str) -> None:
+def _reset_session(key: tuple[str, str, str, str]) -> None:
     with _SESSION_LOCK:
-        _SESSION_CACHE.pop(session_id, None)
+        _SESSION_CACHE.pop(key, None)
 
 
-# ── 命令链解析 ────────────────────────────────────────────────────
-
-def _parse_chain(command: str) -> list[list[str]]:
-    """解析 &&、||、; 分隔的命令链。"""
-    segments: list[list[str]] = [[]]
-    current = ""
-    in_double = False
-    in_single = False
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        if ch == "\\" and i + 1 < len(command):
-            current += command[i + 1]
-            i += 2
+def _split_chain(command: str) -> tuple[list[str], list[str]]:
+    """按未被引号包裹的 &&、||、; 拆分，并保留操作符。"""
+    commands: list[str] = []
+    operators: list[str] = []
+    current: list[str] = []
+    single = False
+    double = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and index + 1 < len(command):
+            current.extend((char, command[index + 1]))
+            index += 2
             continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            current += ch
-            i += 1
+        if char == "'" and not double:
+            single = not single
+            current.append(char)
+            index += 1
             continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            current += ch
-            i += 1
+        if char == '"' and not single:
+            double = not double
+            current.append(char)
+            index += 1
             continue
-        if not in_double and not in_single:
-            if command[i:i+2] == "&&":
-                segments[-1].append(current.strip())
-                segments.append([])
-                current = ""
-                i += 2
-                continue
-            if command[i:i+2] == "||":
-                segments[-1].append(current.strip())
-                segments.append([])
-                current = ""
-                i += 2
-                continue
-            if ch == ";":
-                segments[-1].append(current.strip())
-                segments.append([])
-                current = ""
-                i += 1
-                continue
-        current += ch
-        i += 1
-    segments[-1].append(current.strip())
-    return [s for s in segments if s and any(s)]
+        operator = ""
+        if not single and not double:
+            if command[index:index + 2] in {"&&", "||"}:
+                operator = command[index:index + 2]
+            elif char == ";":
+                operator = ";"
+        if operator:
+            segment = "".join(current).strip()
+            if not segment:
+                raise ValueError("命令链包含空命令")
+            commands.append(segment)
+            operators.append(operator)
+            current.clear()
+            index += len(operator)
+            continue
+        current.append(char)
+        index += 1
+    if single or double:
+        raise ValueError("命令包含未闭合的引号")
+    segment = "".join(current).strip()
+    if not segment:
+        raise ValueError("command 不能为空或不能以链操作符结尾")
+    commands.append(segment)
+    return commands, operators
 
 
-def _chain_operator(command: str) -> str:
-    """检测链操作符类型。"""
-    if "&&" in command:
-        return "and"
-    if "||" in command:
-        return "or"
-    if ";" in command:
-        return "semi"
-    return "none"
+def _resolve_cwd(value: str, root: Path) -> Path:
+    candidate = Path(value).expanduser() if value else root
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_dir():
+        raise NotADirectoryError(f"工作目录不存在: {candidate}")
+    return candidate
 
 
-# ── 会话内建命令 ──────────────────────────────────────────────────
+def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any] | None:
+    parts = command.strip().split(maxsplit=1)
+    name = parts[0].casefold()
+    argument = parts[1].strip() if len(parts) > 1 else ""
 
-def _handle_builtin(cmd: str, session: dict[str, Any], working_dir: str | None,
-                    env: dict[str, str] | None) -> tuple[bool, str | None]:
-    """处理会话内建命令，返回 (是否已处理, 输出)。"""
-    parts = cmd.strip().split(maxsplit=1)
-    name = parts[0].lower()
-
-    if name in ("cd", "chdir"):
-        target = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else str(Path.home())
-        new_cwd = Path(target)
-        if not new_cwd.is_absolute():
-            cwd = Path(working_dir or session.get("cwd", str(Path.home())))
-            new_cwd = (cwd / target).resolve()
-        if not new_cwd.is_dir():
-            return True, f"cd: 目录不存在: {new_cwd}"
-        session["cwd"] = str(new_cwd)
-        return True, str(new_cwd)
+    if name in {"cd", "chdir"}:
+        target_text = argument.strip('"\'') if argument else str(Path.home())
+        target = Path(target_text).expanduser()
+        if not target.is_absolute():
+            target = cwd / target
+        target = target.resolve()
+        if not target.is_dir():
+            return {"ok": False, "output": f"cd: 目录不存在: {target}", "exit_code": 1}
+        session["cwd"] = str(target)
+        return {"ok": True, "output": str(target), "exit_code": 0, "cwd": str(target)}
 
     if name == "pwd":
-        return True, working_dir or session.get("cwd", str(Path.home()))
+        return {"ok": True, "output": str(cwd), "exit_code": 0}
 
-    if name in ("export", "set", "env"):
-        if len(parts) == 1:
-            env_items = [f"{k}={v}" for k, v in sorted(session.get("env", {}).items())]
-            return True, "\n".join(env_items) if env_items else "(empty)"
-        arg = parts[1].strip()
-        if "=" in arg:
-            kv = arg.split("=", 1)
-            k, v = kv[0].strip(), kv[1].strip().strip('"').strip("'")
-            if _ENV_KEY_RE.match(k):
-                session.setdefault("env", {})[k] = v
-                return True, f"{k}={v}"
-            return True, f"export: 无效的变量名: {k}"
-        return True, f"{arg}=?"
+    if name in {"export", "set", "env"}:
+        if not argument:
+            values = session.get("env", {})
+            output = "\n".join(f"{key}={values[key]}" for key in sorted(values)) or "(empty)"
+            return {"ok": True, "output": output, "exit_code": 0}
+        if "=" not in argument:
+            return {"ok": False, "output": f"{name}: 需要 KEY=VALUE", "exit_code": 1}
+        key, value = argument.split("=", 1)
+        key = key.strip()
+        if not _ENV_KEY_RE.fullmatch(key):
+            return {"ok": False, "output": f"{name}: 无效变量名: {key}", "exit_code": 1}
+        value = value.strip().strip('"\'')
+        session.setdefault("env", {})[key] = value
+        return {"ok": True, "output": f"{key}={value}", "exit_code": 0}
 
     if name == "unset":
-        if len(parts) > 1:
-            session.get("env", {}).pop(parts[1].strip(), None)
-        return True, ""
+        if not argument or not _ENV_KEY_RE.fullmatch(argument):
+            return {"ok": False, "output": "unset: 需要有效变量名", "exit_code": 1}
+        session.setdefault("env", {}).pop(argument, None)
+        return {"ok": True, "output": "", "exit_code": 0}
 
     if name == "history":
         history = session.get("history", [])
-        if not history:
-            return True, "(empty)"
-        return True, "\n".join(f"[{i+1}] {h}" for i, h in enumerate(history[-50:]))
+        output = "\n".join(f"[{index}] {item}" for index, item in enumerate(history[-50:], 1))
+        return {"ok": True, "output": output or "(empty)", "exit_code": 0}
 
-    return False, None
+    return None
 
 
-# ── 执行 ──────────────────────────────────────────────────────────
-
-def _run_one(command: str, *, working_dir: str, env_extra: dict[str, str] | None,
-             timeout: int, encoding: str) -> dict[str, Any]:
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    if env_extra:
-        for k, v in env_extra.items():
-            if _ENV_KEY_RE.match(k):
-                env[k] = v
-
+def _run_process(
+    command: str,
+    *,
+    cwd: Path,
+    env_extra: dict[str, str],
+    stdin: str,
+    timeout: float,
+) -> dict[str, Any]:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment.update(env_extra)
     try:
-        proc = subprocess.run(
+        completed = subprocess.run(
             command,
             shell=True,
-            cwd=working_dir,
-            env=env,
-            timeout=timeout or None,
+            cwd=str(cwd),
+            env=environment,
+            input=stdin.encode("utf-8") if stdin else None,
+            timeout=timeout,
             capture_output=True,
         )
-        stdout = _decode_output(proc.stdout).strip()
-        stderr = _decode_output(proc.stderr).strip()
-        exit_code = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = _decode_output(exc.stdout or b"")
+        stderr = _decode_output(exc.stderr or b"")
+        output, truncated = _truncate("\n".join(value for value in (stdout, stderr) if value).strip())
+        return {
+            "ok": False,
+            "output": output or f"命令超时 ({timeout:g}s)",
+            "exit_code": -1,
+            "timed_out": True,
+            "truncated": truncated,
+        }
+    stdout = _decode_output(completed.stdout).strip()
+    stderr = _decode_output(completed.stderr).strip()
+    if stdout and stderr:
+        output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+    elif stderr:
+        output = f"STDERR:\n{stderr}"
+    else:
+        output = stdout or "(无输出)"
+    output, truncated = _truncate(output)
+    return {
+        "ok": completed.returncode == 0,
+        "output": output,
+        "exit_code": completed.returncode,
+        "timed_out": False,
+        "truncated": truncated,
+    }
 
-        if stdout and stderr:
-            output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-        elif stdout:
-            output = stdout
-        elif stderr:
-            output = f"STDERR:\n{stderr}"
+
+def _execute(
+    command: str,
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    stdin: str,
+    timeout: float,
+    session: dict[str, Any] | None,
+) -> dict[str, Any]:
+    commands, operators = _split_chain(command)
+    deadline = time.monotonic() + timeout
+    results: list[dict[str, Any]] = []
+    current_cwd = cwd
+    stdin_used = False
+    last: dict[str, Any] | None = None
+
+    for index, segment in enumerate(commands):
+        if index:
+            operator = operators[index - 1]
+            if (operator == "&&" and last is not None and not last["ok"]) or (
+                operator == "||" and last is not None and last["ok"]
+            ):
+                results.append({"command": segment, "skipped": True, "operator": operator})
+                continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last = {"ok": False, "output": f"命令链超时 ({timeout:g}s)", "exit_code": -1, "timed_out": True}
         else:
-            output = "(无输出)"
+            builtin = _builtin(segment, session, current_cwd) if session is not None else None
+            if builtin is not None:
+                last = builtin
+                current_cwd = Path(str(builtin.get("cwd") or current_cwd))
+            else:
+                last = _run_process(
+                    segment,
+                    cwd=current_cwd,
+                    env_extra=environment,
+                    stdin=stdin if not stdin_used else "",
+                    timeout=remaining,
+                )
+                stdin_used = True
+        results.append({"command": segment, **last})
 
-        if exit_code != 0:
-            output += f"\n(exit={exit_code})"
-
-        return {"ok": exit_code == 0, "output": output, "exit_code": exit_code}
-
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": f"命令超时 ({timeout}s)", "exit_code": -1}
-    except Exception as exc:
-        return {"ok": False, "output": f"命令执行失败: {exc}", "exit_code": -1}
+    assert last is not None
+    if len(commands) == 1:
+        return {**last, "cwd": str(current_cwd)}
+    rendered = []
+    for index, result in enumerate(results, 1):
+        if result.get("skipped"):
+            rendered.append(f"[{index}] skipped ({result['operator']}): {result['command']}")
+        else:
+            rendered.append(f"[{index}] {result['command']}\n{result.get('output', '')}")
+    output, truncated = _truncate("\n\n".join(rendered))
+    return {
+        "ok": bool(last["ok"]),
+        "output": output,
+        "exit_code": int(last.get("exit_code", 0)),
+        "timed_out": bool(last.get("timed_out", False)),
+        "truncated": truncated,
+        "chain": results,
+        "cwd": str(current_cwd),
+    }
 
 
 def run(
+    action: str,
     command: str,
     working_dir: str = "",
     timeout: int = 0,
     stdin: str = "",
-    env: dict[str, str] | None = None,
+    env: dict[str, Any] | None = None,
     session_id: str = "",
     reset_session: bool = False,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    root = Path(context.get("root", str(Path(__file__).resolve().parent.parent.parent)))
-    timeout = timeout or 120
-    encoding = _decide_encoding()
+    if action != "run_command":
+        raise ValueError("shell 仅支持 action=run_command")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command 不能为空")
+    root = Path(context.get("root") or Path.cwd()).resolve()
+    effective_timeout = float(timeout or context.get("tool_timeout") or 120)
+    effective_timeout = max(1.0, min(effective_timeout, 3600.0))
+    key = _session_key(context, root, session_id) if session_id else None
+    if reset_session:
+        if key is None:
+            raise ValueError("reset_session 需要 session_id")
+        _reset_session(key)
+    session = _get_session(key, root) if key is not None else None
 
-    if reset_session and session_id:
-        _reset_session(session_id)
+    def invoke() -> dict[str, Any]:
+        base_cwd = Path(str(session["cwd"])) if session is not None else root
+        cwd = _resolve_cwd(working_dir, root) if working_dir else _resolve_cwd(str(base_cwd), root)
+        environment = dict(session.get("env", {})) if session is not None else {}
+        for name, value in (env or {}).items():
+            if not _ENV_KEY_RE.fullmatch(str(name)):
+                raise ValueError(f"无效环境变量名: {name}")
+            environment[str(name)] = str(value)
+            if session is not None:
+                session.setdefault("env", {})[str(name)] = str(value)
+        result = _execute(
+            command.strip(),
+            cwd=cwd,
+            environment=environment,
+            stdin=stdin,
+            timeout=effective_timeout,
+            session=session,
+        )
+        if session is not None:
+            history = session.setdefault("history", [])
+            history.append(command.strip())
+            del history[:-_SESSION_HISTORY_LIMIT]
+            session["last_used"] = _now()
+        return {**result, "session_id": session_id}
 
-    session = _get_session(session_id, root) if session_id else None
-    effective_cwd = working_dir or (session["cwd"] if session else str(root))
-    effective_env = dict(session["env"]) if session else {}
-    if env:
-        for k, v in env.items():
-            if _ENV_KEY_RE.match(k):
-                effective_env[k] = v
-                if session:
-                    session["env"][k] = v
-
-    # 先检查是否为会话内建命令
-    if session:
-        handled, output = _handle_builtin(command, session, effective_cwd, effective_env)
-        if handled:
-            session["history"].append(command)
-            if len(session["history"]) > _SESSION_HISTORY_LIMIT:
-                session["history"] = session["history"][-_SESSION_HISTORY_LIMIT:]
-            return {"ok": True, "output": output or "", "session_id": session_id, "cwd": effective_cwd}
-
-    # 命令链
-    op = _chain_operator(command)
-    if op != "none":
-        segments = _parse_chain(command)
-        all_outputs: list[str] = []
-        for seg_idx, cmd_parts in enumerate(segments):
-            cmd = " ".join(cmd_parts)
-            result = _run_one(cmd, working_dir=effective_cwd, env_extra=effective_env,
-                              timeout=timeout, encoding=encoding)
-            all_outputs.append(f"[{seg_idx}] {result['output']}")
-            if op == "and" and not result["ok"]:
-                break
-            if op == "or" and result["ok"]:
-                break
-            # 更新 cwd（会话模式下）
-            if session:
-                effective_cwd = session.get("cwd", effective_cwd)
-        if session:
-            session["history"].append(command)
-        return {"ok": True, "output": "\n".join(all_outputs), "chain": op, "session_id": session_id,
-                "cwd": effective_cwd}
-
-    # 普通单命令
-    result = _run_one(command, working_dir=effective_cwd, env_extra=effective_env,
-                      timeout=timeout, encoding=encoding)
-    if session:
-        session["history"].append(command)
-        if len(session["history"]) > _SESSION_HISTORY_LIMIT:
-            session["history"] = session["history"][-_SESSION_HISTORY_LIMIT:]
-
-    return {**result, "session_id": session_id, "cwd": effective_cwd}
+    if session is None:
+        return invoke()
+    with session["lock"]:
+        return invoke()
