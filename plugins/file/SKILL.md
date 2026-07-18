@@ -29,6 +29,7 @@
       "expected_count": {"type": "integer", "description": "edit 期望匹配次数，默认 1; -1 跳过检查"},
       "line": {"type": "integer", "description": "edit 行号(1-based)"},
       "column": {"type": "integer", "description": "edit 列号(1-based)"},
+      "end_column": {"type": "integer", "description": "edit replace_range 结束列号(1-based)"},
       "create_backup": {"type": "boolean", "description": "edit 是否创建 .bak 备份，默认 true"},
       "dst_path": {"type": "string", "description": "copy/move 的目标路径"},
       "overwrite": {"type": "boolean", "description": "copy/move 是否覆盖"},
@@ -43,7 +44,8 @@
       "regex": {"type": "boolean", "description": "search query 是否按正则处理"},
       "parents": {"type": "boolean", "description": "make_dir 是否递归创建父目录，默认 true"}
     },
-    "required": ["action", "path"]
+    "required": ["action", "path"],
+    "additionalProperties": false
   },
   "version": "1.0.0",
   "enabled": true,

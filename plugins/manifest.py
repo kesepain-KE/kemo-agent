@@ -38,9 +38,12 @@ class PluginManifest:
 
 def _tool_block(text: str, path: Path) -> dict[str, Any]:
     lines = text.splitlines()
-    start = next((index + 1 for index, line in enumerate(lines) if _TOOL_HEADING.fullmatch(line.strip())), None)
-    if start is None:
+    headings = [index for index, line in enumerate(lines) if _TOOL_HEADING.fullmatch(line.strip())]
+    if not headings:
         raise PluginManifestError(f"插件 SKILL.md 缺少 ## Tool：{path}")
+    if len(headings) != 1:
+        raise PluginManifestError(f"每个插件只能声明一个 ## Tool：{path}")
+    start = headings[0] + 1
     end = len(lines)
     for index in range(start, len(lines)):
         if _SECONDARY_HEADING.match(lines[index].strip()):
