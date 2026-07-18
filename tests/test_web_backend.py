@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -12,10 +13,13 @@ import httpx
 from unittest.mock import patch
 
 from events import RunEvent
+from agents._runtime.user_packages import create_user_agent_package
+from run.config import load_config
 from run.cron_store import CronStore, normalize_task
 from run.history import commit_window, empty_window
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
+from web.auth import WebAuthConfig, WebAuthConfigError
 from web.service import WebRunService
 
 
@@ -40,9 +44,12 @@ class FakeService:
     def history(self, user, session_id, *, source="web"):
         return {"user": user, "source": source, "session_id": session_id, "messages": []}
 
-    def stream_chat(self, user, session_id, prompt, *, cancel_event):
+    def settings(self, user):
+        return {"user": user, "schema_version": 1}
+
+    def stream_chat(self, user, session_id, prompt, *, cancel_event, run_id=""):
         self.cancel_event = cancel_event
-        self.seen = {"user": user, "session_id": session_id, "prompt": prompt}
+        self.seen = {"user": user, "session_id": session_id, "prompt": prompt, "run_id": run_id}
         return iter(self.events)
 
 
@@ -77,6 +84,237 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
+
+    def test_auth_config_rejects_partial_or_unsigned_configuration(self) -> None:
+        with self.assertRaisesRegex(WebAuthConfigError, "必须同时配置"):
+            WebAuthConfig(username="alice")
+        with self.assertRaisesRegex(WebAuthConfigError, "SESSION_SECRET"):
+            WebAuthConfig(access_token="token")
+        disabled = WebAuthConfig()
+        self.assertFalse(disabled.enabled)
+        self.assertEqual(disabled.public_summary()["enabled"], False)
+
+    def test_token_and_password_auth_protect_business_api_and_persist_session(self) -> None:
+        fake = FakeService()
+        config = WebAuthConfig(
+            access_token="token-secret",
+            username="alice",
+            password="password-secret",
+            session_secret="session-secret",
+            cookie_name="kemo_test_session",
+        )
+        app = create_app(service=fake, auth_config=config)
+
+        async def invoke():
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                status = await client.get("/api/auth/status")
+                health = await client.get("/api/health")
+                denied = await client.get("/api/users")
+                denied_chat = await client.post(
+                    "/api/chat",
+                    json={"user": "alice", "session_id": "s1", "prompt": "hello"},
+                )
+                wrong = await client.post(
+                    "/api/auth/bootstrap", json={"token": "wrong"}
+                )
+                bootstrap = await client.post(
+                    "/api/auth/bootstrap", json={"token": "token-secret"}
+                )
+                allowed = await client.get("/api/users")
+                settings = await client.get("/api/users/alice/settings")
+                refreshed = await client.get("/api/auth/status")
+                logout = await client.post("/api/auth/logout")
+                denied_again = await client.get("/api/users")
+                login = await client.post(
+                    "/api/auth/login",
+                    json={"username": "alice", "password": "password-secret"},
+                )
+                allowed_by_password = await client.get("/api/users")
+                return {
+                    "status": status,
+                    "health": health,
+                    "denied": denied,
+                    "denied_chat": denied_chat,
+                    "wrong": wrong,
+                    "bootstrap": bootstrap,
+                    "allowed": allowed,
+                    "settings": settings,
+                    "refreshed": refreshed,
+                    "logout": logout,
+                    "denied_again": denied_again,
+                    "login": login,
+                    "allowed_by_password": allowed_by_password,
+                }
+
+        result = asyncio.run(invoke())
+        self.assertEqual(result["status"].status_code, 200)
+        self.assertFalse(result["status"].json()["authenticated"])
+        self.assertEqual(result["health"].status_code, 200)
+        self.assertEqual(result["denied"].status_code, 401)
+        self.assertEqual(result["denied"].json()["error"]["code"], "authentication_required")
+        self.assertEqual(result["denied_chat"].status_code, 401)
+        self.assertTrue(result["denied_chat"].headers["content-type"].startswith("application/json"))
+        self.assertIsNone(fake.cancel_event)
+        self.assertEqual(result["wrong"].status_code, 401)
+        self.assertEqual(result["bootstrap"].status_code, 200)
+        cookie = result["bootstrap"].headers["set-cookie"]
+        self.assertIn("kemo_test_session=", cookie)
+        self.assertIn("httponly", cookie.lower())
+        self.assertIn("samesite=lax", cookie.lower())
+        self.assertEqual(result["allowed"].status_code, 200)
+        self.assertTrue(result["settings"].json()["authentication"]["enabled"])
+        for secret in ("token-secret", "password-secret", "session-secret"):
+            self.assertNotIn(secret, result["settings"].text)
+        self.assertTrue(result["refreshed"].json()["authenticated"])
+        self.assertEqual(result["logout"].status_code, 200)
+        self.assertEqual(result["denied_again"].status_code, 401)
+        self.assertEqual(result["login"].status_code, 200)
+        self.assertEqual(result["allowed_by_password"].status_code, 200)
+
+    def test_authenticated_config_edit_is_redacted_atomic_and_conflict_safe(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "kemo",
+                        "base_url": "http://127.0.0.1:8741/v1",
+                        "model": "global-model",
+                        "timeout": 120,
+                        "stream": False,
+                    },
+                    "tools": {"enabled": True, "max_iterations": 8, "timeout": 60},
+                }
+            ),
+            "utf-8",
+        )
+        user_config_path = root / "users" / "alice" / "user_config.json"
+        user_config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {"model": "old-model", "api_key": "disk-secret"},
+                }
+            ),
+            "utf-8",
+        )
+        app = create_app(
+            service=WebRunService(root, config_write_enabled=True),
+            auth_config=WebAuthConfig(
+                access_token="edit-token",
+                session_secret="session-secret",
+            ),
+        )
+
+        async def invoke():
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                denied = await client.get("/api/users/alice/config/full")
+                await client.post("/api/auth/bootstrap", json={"token": "edit-token"})
+                loaded = await client.get("/api/users/alice/config/full")
+                payload = loaded.json()
+                candidate = payload["config"]
+                candidate["provider"]["model"] = "new-model"
+                saved = await client.put(
+                    "/api/users/alice/config",
+                    json={"config": candidate, "etag": payload["etag"]},
+                )
+                stale = await client.put(
+                    "/api/users/alice/config",
+                    json={"config": candidate, "etag": payload["etag"]},
+                )
+                invalid_candidate = saved.json()["config"]
+                invalid_candidate["schema_version"] = 2
+                invalid = await client.put(
+                    "/api/users/alice/config",
+                    json={"config": invalid_candidate, "etag": saved.json()["etag"]},
+                )
+                return denied, loaded, saved, stale, invalid
+
+        denied, loaded, saved, stale, invalid = asyncio.run(invoke())
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(loaded.status_code, 200)
+        self.assertTrue(loaded.json()["write_enabled"])
+        self.assertEqual(loaded.json()["config"]["provider"]["api_key"], "***")
+        self.assertNotIn("disk-secret", loaded.text)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(invalid.status_code, 400)
+        stored = json.loads(user_config_path.read_text("utf-8"))
+        self.assertEqual(stored["provider"]["api_key"], "disk-secret")
+        self.assertEqual(stored["provider"]["model"], "new-model")
+        self.assertEqual(load_config("alice", root)["provider"]["model"], "new-model")
+
+    def test_config_write_stays_closed_without_web_authentication(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "kemo",
+                        "base_url": "http://127.0.0.1:8741/v1",
+                        "model": "model",
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        path = root / "users" / "alice" / "user_config.json"
+        path.write_text('{"schema_version":1}', "utf-8")
+        app = create_app(service=WebRunService(root, config_write_enabled=True))
+        loaded = self.request(app, "GET", "/api/users/alice/config/full")
+        blocked = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/config",
+            json={"config": loaded.json()["config"], "etag": loaded.json()["etag"]},
+        )
+        self.assertFalse(loaded.json()["write_enabled"])
+        self.assertEqual(blocked.status_code, 403)
+
+    def test_cookie_names_isolate_web_instances(self) -> None:
+        first = create_app(
+            service=FakeService(),
+            auth_config=WebAuthConfig(
+                access_token="token",
+                session_secret="shared-secret",
+                cookie_name="instance_one",
+            ),
+        )
+        second = create_app(
+            service=FakeService(),
+            auth_config=WebAuthConfig(
+                access_token="token",
+                session_secret="shared-secret",
+                cookie_name="instance_two",
+            ),
+        )
+
+        async def invoke():
+            first_transport = httpx.ASGITransport(app=first, raise_app_exceptions=False)
+            second_transport = httpx.ASGITransport(app=second, raise_app_exceptions=False)
+            async with httpx.AsyncClient(
+                transport=first_transport, base_url="http://test"
+            ) as first_client:
+                login = await first_client.post(
+                    "/api/auth/bootstrap", json={"token": "token"}
+                )
+                cookie = first_client.cookies.get("instance_one")
+            async with httpx.AsyncClient(
+                transport=second_transport, base_url="http://test"
+            ) as second_client:
+                second_client.cookies.set("instance_one", cookie, domain="test.local")
+                denied = await second_client.get("/api/users")
+            return login, denied
+
+        login, denied = asyncio.run(invoke())
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(denied.status_code, 401)
 
     def test_frontend_dist_and_spa_routes_are_served(self) -> None:
         _, root = self.make_root()
@@ -194,6 +432,36 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(len(set(thread_ids)), 1)
         self.assertNotEqual(thread_ids[0], threading.get_ident())
 
+    def test_web_guidance_queue_is_user_scoped_and_removed_after_run(self) -> None:
+        _, root = self.make_root()
+        seen: list[str] = []
+
+        def source(request, **_kwargs):
+            seen.append(request["_guidance_queue"].get(timeout=2))
+            yield RunEvent(type="done", metadata={"run_id": request["run_id"]})
+
+        service = WebRunService(root, event_source=source)
+        iterator = service.stream_chat(
+            "alice",
+            "guided-session",
+            "start",
+            cancel_event=threading.Event(),
+            run_id="run_guidance_123",
+        )
+        captured: list[RunEvent] = []
+        worker = threading.Thread(target=lambda: captured.extend(iterator))
+        worker.start()
+        queued = service.submit_guidance("alice", "run_guidance_123", "adjust target")
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.submit_guidance("bob", "run_guidance_123", "cross user")
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(seen, ["adjust target"])
+        self.assertEqual(captured[-1].metadata["run_id"], "run_guidance_123")
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.submit_guidance("alice", "run_guidance_123", "too late")
+
     def test_sse_order_and_payload_are_preserved(self) -> None:
         events = [
             RunEvent(type="reasoning_delta", content="think"),
@@ -249,6 +517,49 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["port"], 19000)
         self.assertEqual(run.call_args.kwargs["log_level"], "debug")
 
+    def test_startup_uses_web_environment_defaults_and_cli_overrides(self) -> None:
+        _, root = self.make_root()
+        import start_web
+
+        with (
+            patch.dict(os.environ, {"WEB_HOST": "0.0.0.0", "WEB_PORT": "19001"}),
+            patch.object(start_web, "project_root", return_value=root),
+            patch.object(start_web, "_check_users", return_value=True),
+            patch.object(start_web, "_can_bind", return_value=(True, "")),
+            patch("uvicorn.run") as run,
+        ):
+            self.assertEqual(start_web.main(["--no-host"]), 0)
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
+        self.assertEqual(run.call_args.kwargs["port"], 19001)
+
+        with (
+            patch.dict(os.environ, {"WEB_HOST": "127.0.0.2", "WEB_PORT": "19002"}),
+            patch.object(start_web, "project_root", return_value=root),
+            patch.object(start_web, "_check_users", return_value=True),
+            patch.object(start_web, "_can_bind", return_value=(True, "")),
+            patch("uvicorn.run") as run,
+        ):
+            self.assertEqual(
+                start_web.main(["--host=127.0.0.3", "--port=19003", "--no-host"]),
+                0,
+            )
+        self.assertEqual(run.call_args.kwargs["host"], "127.0.0.3")
+        self.assertEqual(run.call_args.kwargs["port"], 19003)
+
+    def test_startup_rejects_invalid_web_port_environment(self) -> None:
+        _, root = self.make_root()
+        import start_web
+
+        with (
+            patch.dict(os.environ, {"WEB_PORT": "not-a-port"}),
+            patch.object(start_web, "project_root", return_value=root),
+            patch.object(start_web, "_check_users") as check_users,
+            patch("uvicorn.run") as run,
+        ):
+            self.assertEqual(start_web.main(["--no-host"]), 1)
+        check_users.assert_not_called()
+        run.assert_not_called()
+
     def test_missing_terminal_and_invalid_event_become_sse_error(self) -> None:
         missing = self.request(
             create_app(service=FakeService(events=[RunEvent(type="text_delta", content="partial")])),
@@ -286,19 +597,27 @@ class WebBackendTests(unittest.TestCase):
                         "timeout": 30,
                     },
                     "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
-                    "knowledge": {"enabled": True, "max_items": 3, "max_chars": 2000},
+                    "knowledge": {
+                        "enabled": True,
+                        "use_shared": False,
+                        "use_global": True,
+                        "max_items": 3,
+                        "max_chars": 2000,
+                    },
+                    "skills": {
+                        "shared_whitelist": ["observer"],
+                        "user_whitelist": [],
+                    },
+                    "expand": {
+                        "global_whitelist": [],
+                        "shared_whitelist": [],
+                    },
+                    "perception": {"global_whitelist": ["runtime"]},
+                    "kemo_graph": {"enabled": True},
                     "memory": {"extraction_enabled": True, "injection_enabled": True},
                     "task_plan": {"auto_accept": False, "max_steps": 8},
                     "cron": {"enabled": True, "auto_start": False},
                     "agents": {"n4_token_limit": 100000},
-                    "global_sense": {
-                        "enabled": True,
-                        "sources": [
-                            {"id": "user-source", "layer": "user"},
-                            {"id": "shared-source", "layer": "shared"},
-                            {"id": "legacy-project-source", "layer": "project"},
-                        ],
-                    },
                 }
             ),
             "utf-8",
@@ -311,19 +630,44 @@ class WebBackendTests(unittest.TestCase):
         (root / "global_knowledge" / "shared.md").write_text("# Shared", "utf-8")
         (root / "global_sense").mkdir()
         (root / "global_sense" / "README.md").write_text("observer core", "utf-8")
+        for module_name in ("runtime", "network"):
+            module = root / "global_sense" / module_name
+            module.mkdir()
+            (module / "status.md").write_text(module_name, "utf-8")
+        (root / "global_sense" / "register.py").write_text(
+            "from pathlib import Path\n\n"
+            "def register(registry):\n"
+            "    registry.add_perception(Path(__file__).resolve().parent)\n",
+            "utf-8",
+        )
+        shared_skills = root / "shared_skills"
+        shared_skills.mkdir()
+        (shared_skills / "register.py").write_text(
+            "from pathlib import Path\n\n"
+            "def register(registry):\n"
+            "    registry.add_skills('shared', Path(__file__).resolve().parent)\n",
+            "utf-8",
+        )
+        for skill_name in ("observer", "filtered"):
+            skill = shared_skills / skill_name
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(
+                f"# {skill_name}\n{skill_name} description", "utf-8"
+            )
         plugin = root / "plugins" / "clock"
         plugin.mkdir(parents=True)
-        (plugin / "tool.json").write_text(
-            json.dumps(
-                {
-                    "name": "clock",
-                    "description": "read time",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "version": "1",
-                    "enabled": True,
-                    "entrypoint": "tool.py:run",
-                }
-            ),
+        clock_manifest = {
+            "name": "clock",
+            "description": "read time",
+            "input_schema": {"type": "object", "properties": {}},
+            "version": "1",
+            "enabled": True,
+            "entrypoint": "tool.py:run",
+        }
+        (plugin / "SKILL.md").write_text(
+            "# clock\nread time\n\n## Tool\n\n```json\n"
+            + json.dumps(clock_manifest)
+            + "\n```\n",
             "utf-8",
         )
         PlanStore(root, "alice").create(
@@ -358,7 +702,52 @@ class WebBackendTests(unittest.TestCase):
             "estimated": False,
         }
         commit_window(root / "users" / "alice" / "history" / "observer-window", window)
-        app = create_app(service=WebRunService(root))
+        (root / "users" / "alice" / "history" / "observer-window" / "context_summary.json").write_text(
+            json.dumps(
+                {
+                    "source_hash": "hash",
+                    "covered_rounds": [1],
+                    "created_at": "2026-07-18T00:00:00+00:00",
+                    "summary": {"narrative": "must not be exposed"},
+                }
+            ),
+            "utf-8",
+        )
+        memory_dir = root / "users" / "alice" / "improve" / "seven_days"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "data.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "memory-1",
+                        "content": "safe memory preview",
+                        "tier_weight": 2,
+                        "created_at": "2026-07-18T00:00:00+00:00",
+                    }
+                ]
+            ),
+            "utf-8",
+        )
+        create_user_agent_package(
+            root,
+            "alice",
+            {
+                "name": "observer_agent",
+                "description": "user hot-plug agent",
+                "instruction": "Return JSON.",
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+            },
+        )
+        app = create_app(
+            service=WebRunService(
+                root,
+                runtime_status_provider=lambda: {
+                    "state": "running",
+                    "components": {"cron": {"name": "cron", "state": "running"}},
+                },
+            )
+        )
 
         overview = self.request(
             app,
@@ -369,6 +758,11 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(overview.json()["counts"]["knowledge_documents"], 3)
         self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
         self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
+        self.assertEqual(overview.json()["agents"][0]["name"], "observer_agent")
+        self.assertEqual(overview.json()["agents"][0]["source"], "user")
+        self.assertEqual(overview.json()["summary_cache"]["covered_rounds"], [1])
+        self.assertNotIn("must not be exposed", overview.text)
+        self.assertEqual(overview.json()["runtime_host"]["state"], "running")
 
         tasks = self.request(app, "GET", "/api/users/alice/tasks")
         self.assertEqual(len(tasks.json()["plans"]), 1)
@@ -383,22 +777,52 @@ class WebBackendTests(unittest.TestCase):
             [item["scope"] for item in knowledge.json()["documents"]],
             ["user", "shared", "global"],
         )
+        self.assertEqual(
+            [item["active_for_main_agent"] for item in knowledge.json()["documents"]],
+            [True, False, True],
+        )
+        self.assertEqual(
+            knowledge.json()["source_policy"]["knowledge"]["effective_scopes"],
+            ["user", "global"],
+        )
+        self.assertEqual(knowledge.json()["extensions"]["kemo_graph"], "not_connected")
         self.assertNotIn("private index", knowledge.text)
 
         skills = self.request(app, "GET", "/api/users/alice/skills")
         self.assertEqual(skills.json()["tools"][0]["name"], "clock")
+        self.assertEqual(skills.json()["prompt_summary"]["registered"], 2)
+        self.assertEqual(skills.json()["prompt_summary"]["active"], 1)
         self.assertNotIn("project", skills.text)
         sense = self.request(app, "GET", "/api/users/alice/sense")
         self.assertTrue(sense.json()["core_available"])
         self.assertEqual(
             [item["layer"] for item in sense.json()["sources"]],
-            ["user", "shared", "global"],
+            ["global", "global"],
         )
-        self.assertEqual(sense.json()["summary"]["global"], 1)
+        self.assertEqual(sense.json()["summary"]["global"], 2)
+        self.assertEqual(sense.json()["summary"]["enabled"], 1)
+        self.assertEqual(sense.json()["core_files"], 2)
+        self.assertEqual(
+            {item["id"]: item["status"] for item in sense.json()["sources"]},
+            {"network": "filtered", "runtime": "active"},
+        )
         self.assertNotIn('"project"', sense.text)
+
+        prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
+        self.assertEqual(len(prompt.json()["sections"]), 14)
+        self.assertNotIn("safe memory preview", prompt.text)
+        self.assertIn("expand", prompt.json())
+        memory = self.request(app, "GET", "/api/users/alice/memory/summary")
+        self.assertEqual(memory.json()["summary"]["seven_days"], 1)
+        self.assertEqual(memory.json()["items"][0]["tier_weight"], 2)
 
         settings = self.request(app, "GET", "/api/users/alice/settings")
         self.assertEqual(settings.json()["provider"]["model"], "test-model")
+        self.assertFalse(settings.json()["authentication"]["enabled"])
+        self.assertEqual(
+            settings.json()["source_policy"]["kemo_graph"]["status"],
+            "not_connected",
+        )
         self.assertNotIn("super-secret", settings.text)
         self.assertNotIn("api_key", settings.text)
 

@@ -44,6 +44,23 @@ export interface UsersResponse {
   users: UserSummary[]
 }
 
+export interface AuthStatusResponse {
+  enabled: boolean
+  authenticated: boolean
+  methods: {
+    token: boolean
+    password: boolean
+  }
+  session_cookie_configured: boolean
+}
+
+export interface AuthenticationSummary {
+  enabled: boolean
+  token_enabled: boolean
+  password_enabled: boolean
+  session_cookie_configured: boolean
+}
+
 export interface SessionsResponse {
   user: string
   source: 'web'
@@ -55,6 +72,13 @@ export interface HistoryResponse {
   source: 'web'
   session_id: string
   messages: HistoryMessage[]
+  round_metrics: Array<{
+    round: number
+    usage: Record<string, unknown>
+    elapsed_ms: number
+    tool_calls: number
+    guidance: string[]
+  }>
 }
 
 export interface PlanStepSummary {
@@ -117,6 +141,25 @@ export interface KnowledgeDocumentSummary {
   title: string
   size: number
   updated_at: number
+  active_for_main_agent: boolean
+}
+
+export interface NamePolicySummary {
+  mode: 'all' | 'allowlist'
+  names: string[]
+}
+
+export interface MainAgentSourcePolicySummary {
+  knowledge: { enabled: boolean; effective_scopes: string[] }
+  skills: { shared: NamePolicySummary; user: NamePolicySummary }
+  expand: { global: NamePolicySummary; shared: NamePolicySummary }
+  perception: { global: NamePolicySummary }
+  kemo_graph: {
+    requested: boolean
+    connected: false
+    effective: false
+    status: 'disabled' | 'not_connected'
+  }
 }
 
 export interface KnowledgeResponse {
@@ -131,6 +174,7 @@ export interface KnowledgeResponse {
   summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
   extensions: { kemo_graph: string }
+  source_policy: MainAgentSourcePolicySummary
 }
 
 export interface SkillSummary {
@@ -147,6 +191,15 @@ export interface SkillsResponse {
   user: string
   summary: { registered: number; enabled: number; user: number; shared: number; core: number }
   tools: SkillSummary[]
+  prompt_summary: { registered: number; active: number; user: number; shared: number }
+  prompt_skills: Array<{
+    name: string
+    title: string
+    description: string
+    scope: 'shared' | 'user'
+    active_for_main_agent: boolean
+  }>
+  source_policy: MainAgentSourcePolicySummary
 }
 
 export interface SenseSourceSummary {
@@ -155,7 +208,9 @@ export interface SenseSourceSummary {
   description: string
   layer: 'user' | 'shared' | 'global' | string
   enabled: boolean
+  active_for_main_agent: boolean
   status: string
+  files: number
 }
 
 export interface SenseResponse {
@@ -167,6 +222,7 @@ export interface SenseResponse {
   summary: { registered: number; enabled: number; user: number; shared: number; global: number }
   sources: SenseSourceSummary[]
   decisions: Array<Record<string, unknown>>
+  source_policy: MainAgentSourcePolicySummary
 }
 
 export interface ProviderSummary {
@@ -204,6 +260,58 @@ export interface SettingsResponse {
     memory_chars: number
   }
   users: string[]
+  authentication: AuthenticationSummary
+  source_policy: MainAgentSourcePolicySummary
+  provenance: Record<string, 'user' | 'global' | 'default'>
+}
+
+export interface ConfigFullResponse {
+  user: string
+  config: Record<string, unknown>
+  etag: string
+  redacted_paths: string[]
+  write_enabled: boolean
+}
+
+export interface PromptDiagnosticsResponse {
+  user: string
+  total_chars: number
+  sections: Array<{
+    name: string
+    status: 'injected' | 'omitted'
+    original_items: number
+    injected_items: number
+    original_chars: number
+    injected_chars: number
+    truncated: boolean
+    source_files: string[]
+  }>
+  source_policy: MainAgentSourcePolicySummary
+  source_selection: Record<string, unknown>
+  expand: Record<string, {
+    mode: string
+    discovered: string[]
+    selected: string[]
+    filtered: string[]
+    unmatched: string[]
+  }>
+}
+
+export interface MemorySummaryResponse {
+  user: string
+  summary: { total: number; seven_days: number; one_month: number; half_year: number; permanent: number }
+  items: Array<{
+    id: string
+    tier: string
+    type: string
+    status: string
+    tier_weight: number
+    review_at: string | null
+    created_at: string
+    updated_at: string
+    preview: string
+    truncated: boolean
+  }>
 }
 
 export interface ActivitySummary {
@@ -235,6 +343,20 @@ export interface OverviewResponse {
     enabled_agents: number
     active_tasks: number
   }
+  agents: Array<{
+    name: string
+    description: string
+    enabled: boolean
+    source: 'builtin' | 'user'
+    execution: string
+    model_profile: string
+    exposure: string
+  }>
+  summary_cache: { exists: boolean; covered_rounds: number[]; created_at: string; window: string; invalid?: boolean }
+  runtime_host: {
+    state: string
+    components: Record<string, { name?: string; kind?: string; state?: string; last_error?: unknown }>
+  }
   active_plan: PlanSummary | null
   activities: ActivitySummary[]
 }
@@ -248,7 +370,7 @@ export interface ApiErrorPayload {
 }
 
 export type ChatItem =
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; streaming?: boolean }
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
   | {
       id: string
@@ -258,5 +380,8 @@ export type ChatItem =
       arguments?: Record<string, unknown>
       result?: unknown
       status: 'running' | 'success' | 'error'
+      elapsedMs?: number
     }
+  | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number }
+  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'error' }
   | { id: string; kind: 'error'; content: string }

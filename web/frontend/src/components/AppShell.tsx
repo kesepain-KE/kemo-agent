@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   BookOpen,
@@ -10,6 +10,7 @@ import {
   CircleGauge,
   FileSearch,
   ListChecks,
+  LogOut,
   Menu,
   MessageSquarePlus,
   Moon,
@@ -20,9 +21,9 @@ import {
   X,
 } from 'lucide-react'
 import { NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { getHealth, getOverview, getSessions, getUsers } from '../api/client'
+import { getHealth, getOverview, getSessions, getUsers, logoutAuth } from '../api/client'
 import { formatDateTime, statusLabel } from './ModuleUi'
-import type { OverviewResponse } from '../types/api'
+import type { AuthStatusResponse, OverviewResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 
 export interface ShellOutletContext {
@@ -69,6 +70,8 @@ export function AppShell() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const ui = useUiStore()
+  const queryClient = useQueryClient()
+  const authStatus = queryClient.getQueryData<AuthStatusResponse>(['auth-status'])
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: getUsers })
   const healthQuery = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
   const user = params.get('user') || usersQuery.data?.users[0]?.name || ''
@@ -88,8 +91,10 @@ export function AppShell() {
   const [roleMenuOpen, setRoleMenuOpen] = useState(false)
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [agentsOpen, setAgentsOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState('')
+  const [logoutPending, setLogoutPending] = useState(false)
   const roleMenuRef = useRef<HTMLDivElement>(null)
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
@@ -161,6 +166,21 @@ export function AppShell() {
     action()
   }
 
+  const logout = async () => {
+    if (logoutPending) return
+    setLogoutPending(true)
+    try {
+      await logoutAuth()
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== 'auth-status',
+      })
+      await queryClient.invalidateQueries({ queryKey: ['auth-status'] })
+      setRoleMenuOpen(false)
+    } finally {
+      setLogoutPending(false)
+    }
+  }
+
   const commands = useMemo(() => [
     { label: '新建对话', detail: '打开当前用户的新上下文窗口', shortcut: 'N', keywords: 'chat conversation', action: () => { setSessionId(''); navigate(withContext('/chat', '')) } },
     { label: '查看任务中枢', detail: '计划、Cron 与执行记录', shortcut: 'T', keywords: 'task plan cron', action: () => navigate(withContext('/tasks')) },
@@ -216,6 +236,7 @@ export function AppShell() {
           {roleMenuOpen && <div className="role-menu show">
             <div className="role-menu-head"><span><strong>切换用户</strong><small>载入对应 users/&lt;user_id&gt; 运行态</small></span><span className="space-mode-badge">单用户执行</span></div>
             {usersQuery.data?.users.map((item) => <button key={item.name} className={`role-option ${item.name === user ? 'active' : ''}`} onClick={() => setUser(item.name)}><span className="mini-avatar">{item.name.slice(0, 1).toUpperCase()}</span><span><strong>{item.name}</strong><small>用户运行态</small><em className="space-option-id">users/{item.name}</em></span><span className="check">{item.name === user ? '✓' : ''}</span></button>)}
+            {authStatus?.enabled && <button className="role-logout" onClick={() => void logout()} disabled={logoutPending}><LogOut size={15} />{logoutPending ? '正在退出…' : '退出 Web 会话'}</button>}
             <div className="role-menu-foot">每个窗口只激活一个当前用户；切换不会并行运行多个智能体。</div>
           </div>}
         </div>
@@ -255,8 +276,22 @@ export function AppShell() {
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>
         <div className="drawer-head"><strong>运行状态</strong><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
         <div className="drawer-body">
-          <section className="drawer-section"><div className="drawer-title"><strong>当前上下文</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话'}</span></div><div className="drawer-context-number"><strong>{formatTokens(contextTotal)} / {formatTokens(contextLimit)}</strong><span>{context?.usage.estimated ? '本地估算' : contextTotal ? 'Provider 统计' : '等待首轮统计'}</span></div><div className="progress-line"><i style={{ width: `${contextPercent}%` }} /></div><div className="drawer-context-meta"><span>占用 {contextPercent}%</span><span>上限 {contextLimit.toLocaleString()} Token</span></div></section>
-          <section className="drawer-section"><div className="drawer-title"><strong>核心与能力</strong><span>真实只读状态</span></div><div className="state-row"><span>●</span><span>{healthQuery.data?.service || 'kemo-agent-web'}</span><span className={`state-pill ${healthQuery.isError ? 'muted' : ''}`}>{healthQuery.isSuccess ? '正常' : '不可用'}</span></div><div className="state-row"><span>M</span><span>{provider?.model || 'Provider'}</span><span className="state-pill">{provider?.configured ? '已配置' : '待配置'}</span></div><div className="state-row"><span>K</span><span>文件知识</span><span className="state-pill">{overview?.counts.knowledge_documents ?? '—'} 项</span></div><div className="state-row"><span>T</span><span>可用工具</span><span className="state-pill">{overview?.counts.enabled_tools ?? '—'} 个</span></div><div className="state-row"><span>A</span><span>子代理</span><span className="state-pill">{overview?.counts.enabled_agents ?? '—'} 个</span></div></section>
+          <section className="drawer-section">
+            <div className="drawer-title"><strong>当前上下文</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话'}</span></div>
+            <div className="drawer-context-number"><strong>{formatTokens(contextTotal)} / {formatTokens(contextLimit)}</strong><span>{context?.usage.estimated ? '本地估算' : contextTotal ? 'Provider 统计' : '等待首轮统计'}</span></div>
+            <div className="progress-line"><i style={{ width: `${contextPercent}%` }} /></div><div className="drawer-context-meta"><span>占用 {contextPercent}%</span><span>上限 {contextLimit.toLocaleString()} Token</span></div>
+            <div className="state-row"><span>S</span><span>摘要缓存</span><span className="state-pill">{overview?.summary_cache.exists ? `覆盖 ${overview.summary_cache.covered_rounds.length} 轮` : '无缓存'}</span></div>
+          </section>
+          <section className="drawer-section">
+            <div className="drawer-title"><strong>核心与能力</strong><span>真实只读状态</span></div>
+            <div className="state-row"><span>●</span><span>{healthQuery.data?.service || 'kemo-agent-web'}</span><span className={`state-pill ${healthQuery.isError ? 'muted' : ''}`}>{healthQuery.isSuccess ? '正常' : '不可用'}</span></div>
+            <div className="state-row"><span>H</span><span>RuntimeHost</span><span className="state-pill">{overview?.runtime_host.state || '读取中'}</span></div>
+            <div className="state-row"><span>M</span><span>{provider?.model || 'Provider'}</span><span className="state-pill">{provider?.configured ? '已配置' : '待配置'}</span></div>
+            <div className="state-row"><span>K</span><span>文件知识</span><span className="state-pill">{overview?.counts.knowledge_documents ?? '—'} 项</span></div>
+            <div className="state-row"><span>T</span><span>可用工具</span><span className="state-pill">{overview?.counts.enabled_tools ?? '—'} 个</span></div>
+            <button className="state-row state-row-button" onClick={() => setAgentsOpen((value) => !value)}><span>A</span><span>子代理</span><span className="state-pill">{overview?.counts.enabled_agents ?? '—'} 个 {agentsOpen ? '⌃' : '⌄'}</span></button>
+            {agentsOpen ? <div className="drawer-agent-list">{overview?.agents.map((agent) => <div key={`${agent.source}:${agent.name}`}><span><strong>{agent.name}</strong><small>{agent.description}</small></span><span>{agent.source} · {agent.model_profile}</span></div>)}</div> : null}
+          </section>
           <section className="drawer-section"><div className="drawer-title"><strong>最近活动</strong><span>{overview?.activities.length || 0} 条</span></div><div className="drawer-activities">{overview?.activities.slice(0, 4).map((item, index) => <div className="drawer-activity" key={`${item.type}:${item.updated_at}:${index}`}><span>{item.type === 'session' ? <MessageSquarePlus size={13} /> : item.type === 'plan' ? <ListChecks size={13} /> : <FileSearch size={13} />}</span><span><strong>{item.title}</strong><small>{formatDateTime(item.updated_at)} · {statusLabel(item.status)}</small></span></div>)}{!overview?.activities.length && <span className="drawer-empty">暂无可显示的运行活动</span>}</div></section>
         </div>
       </aside>

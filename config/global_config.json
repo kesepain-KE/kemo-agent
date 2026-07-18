@@ -22,14 +22,56 @@
     "include_global_soul": true,
     "include_user_soul": true,
     "include_agents_manual": true,
-    "include_important_memory": true
+    "include_important_memory": true,
+    "file_limits": {
+      "permanent_memory": 30000,
+      "temporary_seven_days": 10000,
+      "temporary_one_month": 15000,
+      "temporary_half_year": 20000
+    },
+    "char_limits": {
+      "important_memory": 5000,
+      "knowledge_index": 8000,
+      "task_plan": 5000,
+      "perception": 8000,
+      "expand_data": 8000,
+      "skill_prompts": 4000,
+      "plugin_prompts": 4000
+    },
+    "injection_mode": {
+      "permanent_memory": "full",
+      "important_memory": "full",
+      "temporary_seven_days": "full",
+      "temporary_one_month": "full",
+      "temporary_half_year": "full",
+      "knowledge_index": "full",
+      "task_plan": "full",
+      "expand_data": "full",
+      "perception": "full"
+    }
   },
   "knowledge": {
     "enabled": true,
+    "use_shared": true,
+    "use_global": true,
     "max_items": 4,
     "max_chars": 4000,
     "max_file_chars": 20000,
     "minimum_score": 2
+  },
+  "skills": {
+    "shared_whitelist": [],
+    "user_whitelist": []
+  },
+  "expand": {
+    "shared_whitelist": [],
+    "global_whitelist": []
+  },
+  "perception": {
+    "global_whitelist": []
+  },
+  "kemo_graph": {
+    "enabled": false
   },
   "memory": {
     "fragment_limits": {

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Bot,
   CheckCircle2,
+  Check,
   ChevronDown,
   FileText,
   Image,
@@ -10,6 +11,8 @@ import {
   LayoutGrid,
   ListChecks,
   Plus,
+  Copy,
+  Pencil,
   Send,
   Square,
   TimerReset,
@@ -19,11 +22,12 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { getHistory, streamChat } from '../api/client'
+import { getHistory, streamChat, submitGuidance } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { formatDateTime, statusLabel } from '../components/ModuleUi'
-import { ReasoningTrace, ToolCallCard } from '../components/RunEventCards'
+import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import type { ChatItem, RunEvent } from '../types/api'
+import { copyText } from '../utils/clipboard'
 
 function createSessionId() {
   return `web_${crypto.randomUUID()}`
@@ -57,13 +61,17 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     }]
   }
   if (event.type === 'tool_call_result') {
+    const result = event.result && typeof event.result === 'object' ? event.result as Record<string, unknown> : undefined
+    const backendStatus = String(event.metadata?.status || '')
+    const failed = Boolean(event.error) || backendStatus === 'failed' || result?.ok === false
+    const elapsedMs = event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms)
     const found = items.some((item) => item.kind === 'tool' && item.callId === event.tool_call_id)
     if (!found) return [...items, {
       id: eventId('tool'), kind: 'tool', callId: event.tool_call_id || eventId('call'), name: event.tool_name || '未知工具',
-      result: event.result, status: event.error ? 'error' : 'success',
+      result: event.result, status: failed ? 'error' : 'success', elapsedMs,
     }]
     return items.map((item) => item.kind === 'tool' && item.callId === event.tool_call_id
-      ? { ...item, name: event.tool_name || item.name, result: event.result, status: event.error ? 'error' : 'success' }
+      ? { ...item, name: event.tool_name || item.name, result: event.result, status: failed ? 'error' : 'success', elapsedMs }
       : item)
   }
   if (event.type === 'error') {
@@ -73,7 +81,20 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     ]
   }
   if (event.type === 'done') {
-    return items.map((item) => item.kind === 'message' || item.kind === 'reasoning' ? { ...item, streaming: false } : item)
+    let guidanceRemaining = Number(event.metadata?.guidance_count || 0)
+    const completed = items.map((item) => {
+      if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
+      if (item.kind === 'guidance' && item.status === 'queued' && guidanceRemaining > 0) {
+        guidanceRemaining -= 1
+        return { ...item, status: 'accepted' as const }
+      }
+      return item
+    })
+    return event.usage ? [...completed, {
+      id: eventId('usage'), kind: 'usage', usage: event.usage,
+      elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
+      toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
+    }] : completed
   }
   return items
 }
@@ -112,6 +133,10 @@ export function ChatPage() {
   const [liveItems, setLiveItems] = useState<ChatItem[]>([])
   const [running, setRunning] = useState(false)
   const [usage, setUsage] = useState<Record<string, unknown> | undefined>()
+  const [editingSource, setEditingSource] = useState<{ id: string; content: string } | null>(null)
+  const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
+  const [copiedItem, setCopiedItem] = useState('')
+  const [activeRunId, setActiveRunId] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -123,16 +148,36 @@ export function ChatPage() {
     retry: false,
   })
 
-  const historyItems = useMemo<ChatItem[]>(() => (historyQuery.data?.messages ?? [])
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message, index) => ({
-      id: `history_${index}`, kind: 'message', role: message.role as 'user' | 'assistant', content: message.content,
-    })), [historyQuery.data])
+  const historyItems = useMemo<ChatItem[]>(() => {
+    const metrics = new Map((historyQuery.data?.round_metrics || []).map((item) => [item.round, item]))
+    const result: ChatItem[] = []
+    let round = 0
+    for (const [index, message] of (historyQuery.data?.messages ?? []).entries()) {
+      if (message.role !== 'user' && message.role !== 'assistant') continue
+      result.push({ id: `history_${index}`, kind: 'message', role: message.role, content: message.content })
+      if (message.role === 'assistant') {
+        round += 1
+        const selected = metrics.get(round)
+        if (selected) {
+          selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'accepted' }))
+          result.push({
+            id: `history_usage_${round}`, kind: 'usage', usage: selected.usage,
+            elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
+          })
+        }
+      }
+    }
+    return result
+  }, [historyQuery.data])
   const items = [...historyItems, ...liveItems]
 
   useEffect(() => {
     setLiveItems([])
     setUsage(undefined)
+    setEditingSource(null)
+    setEditedSources(new Set())
+    setCopiedItem('')
+    setActiveRunId('')
     abortRef.current?.abort()
     setRunning(false)
   }, [user, sessionId])
@@ -157,10 +202,17 @@ export function ChatPage() {
     const prompt = draft.trim()
     if (!prompt || !user || running) return
     const activeSession = sessionId || createSessionId()
+    const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
     setDraft('')
     setRunning(true)
+    setActiveRunId(runId)
     setConversationMenuOpen(false)
-    setLiveItems((current) => [...current, { id: eventId('user'), kind: 'message', role: 'user', content: prompt }])
+    if (editingSource) setEditedSources((current) => new Set(current).add(editingSource.id))
+    setLiveItems((current) => [...current, {
+      id: eventId('user'), kind: 'message', role: 'user', content: prompt,
+      edited: Boolean(editingSource), originalContent: editingSource?.content,
+    }])
+    setEditingSource(null)
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -168,6 +220,7 @@ export function ChatPage() {
         user,
         sessionId: activeSession,
         prompt,
+        runId,
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === 'usage') setUsage(event.usage)
@@ -185,6 +238,7 @@ export function ChatPage() {
       }
     } finally {
       abortRef.current = null
+      setActiveRunId('')
       setRunning(false)
     }
   }
@@ -194,6 +248,32 @@ export function ChatPage() {
     abortRef.current?.abort()
     setSessionId('')
     setConversationMenuOpen(false)
+  }
+
+  const editAndResend = (id: string, content: string) => {
+    if (running) return
+    setDraft(content)
+    setEditingSource({ id, content })
+  }
+
+  const copyMessage = async (id: string, content: string) => {
+    await copyText(content)
+    setCopiedItem(id)
+    window.setTimeout(() => setCopiedItem((current) => current === id ? '' : current), 1200)
+  }
+
+  const sendGuidance = async () => {
+    const guidance = draft.trim()
+    if (!guidance || !user || !running || !activeRunId) return
+    setDraft('')
+    const id = eventId('guidance')
+    setLiveItems((current) => [...current, { id, kind: 'guidance', content: guidance, status: 'queued' }])
+    try {
+      await submitGuidance(user, activeRunId, guidance)
+    } catch (error) {
+      setLiveItems((current) => current.map((item) => item.kind === 'guidance' && item.id === id ? { ...item, status: 'error' } : item))
+      setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '运行中引导提交失败' }])
+    }
   }
 
   const usageText = usage
@@ -254,11 +334,21 @@ export function ChatPage() {
           {items.map((item) => {
             if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
             if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
+            if (item.kind === 'usage') return <UsageCard key={item.id} item={item} />
+            if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
             if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
             return (
               <article key={item.id} className={`message ${item.role === 'assistant' ? 'ai' : 'user'}`}>
                 <div className="msg-avatar">{item.role === 'assistant' ? <Bot size={17} /> : <UserRound size={17} />}</div>
-                <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content || (item.streaming ? '…' : '')}</ReactMarkdown></div>
+                <div className="message-body">
+                  <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content || (item.streaming ? '…' : '')}</ReactMarkdown></div>
+                  <div className="message-actions">
+                    {item.edited ? <span className="edited-label">编辑后重发</span> : null}
+                    {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
+                    {item.role === 'user' && !running ? <button onClick={() => editAndResend(item.id, item.content)} aria-label="编辑后重发"><Pencil size={12} />编辑重发</button> : null}
+                    <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
+                  </div>
+                </div>
               </article>
             )
           })}
@@ -266,14 +356,15 @@ export function ChatPage() {
       </div>
       <div className="composer-zone">
         <div className="composer">
+          {editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
+              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (running) void sendGuidance(); else void send() }
             }}
-            placeholder={user ? '向 kemo-agent 发送消息…' : '请先选择用户'}
-            disabled={!user || running}
+            placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '向 kemo-agent 发送消息…' : '请先选择用户'}
+            disabled={!user}
             rows={1}
           />
           <div className="composer-row">
@@ -290,6 +381,7 @@ export function ChatPage() {
                 <span>{user || '未选择用户'}</span>
                 <span>·</span>
                 <span>{sessionId || '新会话'}</span>
+                {running && activeRunId ? <><span>·</span><span className="guidance-mode-label">引导模式</span></> : null}
                 {usageText && <><span>·</span><span>{usageText}</span></>}
               </div>
             </div>
@@ -326,7 +418,7 @@ export function ChatPage() {
                 )}
               </div>
               {running
-                ? <button className="send-btn stop" onClick={stop}><Square size={15} /> 停止</button>
+                ? <><button className="send-btn guidance" onClick={() => void sendGuidance()} disabled={!draft.trim()}><Send size={15} /> 发送引导</button><button className="send-btn stop" onClick={stop}><Square size={15} /> 停止</button></>
                 : <button className="send-btn" onClick={() => void send()} disabled={!draft.trim() || !user}><Send size={15} /> 发送 ↗</button>}
             </div>
           </div>

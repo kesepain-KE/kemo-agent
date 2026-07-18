@@ -2,27 +2,85 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 import queue
 import re
 import threading
+import time
 from typing import Any, Callable, Iterator
+import uuid
 
 from events import RunEvent
 from run.agents import discover_agents
-from run.config import load_config
+from run.config import ConfigError, deep_merge, load_config, read_json_object
+from run.context import ContextPolicy
 from run.cron_store import CronStore
 from run.engine import iter_request_events
 from run.history import find_window, list_sessions, load_window, session_messages
 from run.knowledge import build_index
+from run.memory import MemoryConfigError, MemoryStore
+from run.prompt import (
+    PROMPT_SECTION_ORDER,
+    PromptConfigError,
+    build_prompt_bundle,
+    parse_prompt_settings,
+)
+from run.prompt_sources import load_prompt_source_registry
+from run.source_policy import MainAgentSourcePolicy
 from run.task_plan_store import PlanStore
 from run.tools import discover_tools
 from run.users import list_users
 
 
 _SESSION_RE = re.compile(r"^[^\x00-\x1f]{1,128}$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _WORKER_DONE = object()
+_REDACTED = "***"
+_SENSITIVE_CONFIG_KEYS = frozenset(
+    {"api_key", "access_token", "password", "session_secret", "authorization"}
+)
+_CONFIG_SOURCE_PATHS = (
+    "provider.type",
+    "provider.base_url",
+    "provider.model",
+    "provider.timeout",
+    "provider.stream",
+    "tools.enabled",
+    "tools.max_iterations",
+    "tools.timeout",
+    "knowledge.enabled",
+    "knowledge.max_items",
+    "knowledge.max_chars",
+    "memory.extraction_enabled",
+    "memory.injection_enabled",
+    "memory.injection_max_items",
+    "memory.injection_max_chars",
+    "task_plan.auto_accept",
+    "task_plan.max_steps",
+    "cron.enabled",
+    "cron.auto_start",
+    "agents.n4_token_limit",
+    "agents.n5_token_compression_ratio",
+    "skills.shared_whitelist",
+    "skills.user_whitelist",
+    "expand.global_whitelist",
+    "expand.shared_whitelist",
+    "perception.global_whitelist",
+    "kemo_graph.enabled",
+)
+
+
+@dataclass(slots=True)
+class ActiveRun:
+    run_id: str
+    user: str
+    session_id: str
+    guidance: queue.Queue[str] = field(default_factory=lambda: queue.Queue(maxsize=8))
+    started_at: float = field(default_factory=time.monotonic)
 
 
 class WebServiceError(RuntimeError):
@@ -40,6 +98,114 @@ class NotFoundError(WebServiceError):
     status = 404
 
 
+class ConflictError(WebServiceError):
+    code = "conflict"
+    status = 409
+
+
+class ConfigWriteDisabledError(WebServiceError):
+    code = "config_write_disabled"
+    status = 403
+
+
+def _env_switch(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.casefold()
+    return lowered in _SENSITIVE_CONFIG_KEYS or lowered.endswith("_secret")
+
+
+def _redact_config(value: Any, path: tuple[str, ...] = ()) -> tuple[Any, list[str]]:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        redacted: list[str] = []
+        for key, item in value.items():
+            rendered = str(key)
+            current = (*path, rendered)
+            if _is_sensitive_key(rendered):
+                result[rendered] = _REDACTED
+                redacted.append(".".join(current))
+                continue
+            clean, nested = _redact_config(item, current)
+            result[rendered] = clean
+            redacted.extend(nested)
+        return result, redacted
+    if isinstance(value, list):
+        result = []
+        redacted: list[str] = []
+        for index, item in enumerate(value):
+            clean, nested = _redact_config(item, (*path, str(index)))
+            result.append(clean)
+            redacted.extend(nested)
+        return result, redacted
+    return value, []
+
+
+def _sensitive_values(value: Any, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
+    found: dict[tuple[str, ...], Any] = {}
+    if not isinstance(value, dict):
+        return found
+    for key, item in value.items():
+        current = (*path, str(key))
+        if _is_sensitive_key(str(key)):
+            found[current] = item
+        elif isinstance(item, dict):
+            found.update(_sensitive_values(item, current))
+    return found
+
+
+def _value_at(value: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    current: Any = value
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _set_value(value: dict[str, Any], path: tuple[str, ...], selected: Any) -> None:
+    current = value
+    for part in path[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[path[-1]] = selected
+
+
+def _config_etag(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        payload = b"{}"
+    except OSError as exc:
+        raise InvalidRequestError(f"用户配置不可读：{exc}") from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class WebRunService:
     """A thin, injectable boundary between HTTP routes and the Run core."""
 
@@ -48,9 +214,21 @@ class WebRunService:
         root: Path,
         *,
         event_source: Callable[..., Iterator[RunEvent]] = iter_request_events,
+        config_write_enabled: bool | None = None,
+        runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.event_source = event_source
+        self.config_write_enabled = (
+            _env_switch("WEB_ALLOW_CONFIG_WRITE")
+            if config_write_enabled is None
+            else bool(config_write_enabled)
+        )
+        self.runtime_status_provider = runtime_status_provider
+        self._config_locks: dict[str, threading.RLock] = {}
+        self._config_locks_guard = threading.Lock()
+        self._active_runs: dict[str, ActiveRun] = {}
+        self._active_runs_lock = threading.RLock()
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "service": "kemo-agent-web", "version": 2}
@@ -84,6 +262,171 @@ class WebRunService:
             raise InvalidRequestError("prompt 必须是非空字符串")
         return prompt.strip()
 
+    def require_run_id(self, run_id: Any) -> str:
+        if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id.strip()):
+            raise InvalidRequestError("run_id 必须是 8–128 位字母、数字、下划线或连字符")
+        return run_id.strip()
+
+    def submit_guidance(self, user: Any, run_id: Any, guidance: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_run_id = self.require_run_id(run_id)
+        text = self.require_prompt(guidance)
+        with self._active_runs_lock:
+            active = self._active_runs.get(normalized_run_id)
+            if active is None:
+                raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
+            if active.user != name:
+                raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
+            try:
+                active.guidance.put_nowait(text)
+            except queue.Full as exc:
+                raise ConflictError("运行中引导队列已满，请等待当前引导被处理") from exc
+            queued = active.guidance.qsize()
+        return {
+            "run_id": normalized_run_id,
+            "user": name,
+            "session_id": active.session_id,
+            "status": "queued",
+            "queued": queued,
+        }
+
+    def _config_lock(self, user: str) -> threading.RLock:
+        with self._config_locks_guard:
+            return self._config_locks.setdefault(user, threading.RLock())
+
+    def _config_path(self, user: str) -> Path:
+        return self.root / "users" / user / "user_config.json"
+
+    @staticmethod
+    def _has_path(value: dict[str, Any], dotted: str) -> bool:
+        current: Any = value
+        for part in dotted.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        return True
+
+    def _config_provenance(self, user: str) -> dict[str, str]:
+        global_config = read_json_object(self.root / "config" / "global_config.json")
+        user_config = read_json_object(self._config_path(user), allow_empty=True)
+        return {
+            dotted: (
+                "user"
+                if self._has_path(user_config, dotted)
+                else "global"
+                if self._has_path(global_config, dotted)
+                else "default"
+            )
+            for dotted in _CONFIG_SOURCE_PATHS
+        }
+
+    def _validate_user_config(self, user: str, candidate: dict[str, Any]) -> None:
+        schema_version = candidate.get("schema_version")
+        if isinstance(schema_version, bool) or schema_version != 1:
+            raise InvalidRequestError("user_config.schema_version 必须为 1")
+        if "user" in candidate:
+            raise InvalidRequestError("user_config 不允许包含运行时字段 user")
+        global_config = read_json_object(self.root / "config" / "global_config.json")
+        merged = deep_merge(global_config, candidate)
+        merged["user"] = user
+        try:
+            provider = merged.get("provider")
+            if not isinstance(provider, dict):
+                raise ConfigError("provider 必须是对象")
+            provider_type = str(provider.get("type") or "").strip().casefold()
+            if provider_type not in {"kemo", "openai"}:
+                raise ConfigError("provider.type 必须是 'kemo' 或 'openai'")
+            timeout = provider.get("timeout", 120)
+            if isinstance(timeout, bool) or float(timeout) <= 0:
+                raise ConfigError("provider.timeout 必须是正数")
+            if not isinstance(provider.get("stream", False), bool):
+                raise ConfigError("provider.stream 必须是布尔值")
+            headers = provider.get("headers", {})
+            if not isinstance(headers, dict):
+                raise ConfigError("provider.headers 必须是对象")
+
+            tools = merged.get("tools") or {}
+            if not isinstance(tools, dict):
+                raise ConfigError("tools 必须是对象")
+            if not isinstance(tools.get("enabled", True), bool):
+                raise ConfigError("tools.enabled 必须是布尔值")
+            if int(tools.get("max_iterations", 8)) < 1:
+                raise ConfigError("tools.max_iterations 必须至少为 1")
+            if float(tools.get("timeout", 60)) <= 0:
+                raise ConfigError("tools.timeout 必须是正数")
+
+            MainAgentSourcePolicy.from_config(merged)
+            parse_prompt_settings(merged)
+            ContextPolicy.from_config(merged)
+            MemoryStore(self.root, user, merged)
+        except InvalidRequestError:
+            raise
+        except (ConfigError, MemoryConfigError, PromptConfigError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"用户配置校验失败：{exc}") from exc
+
+    def user_config(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        path = self._config_path(name)
+        config = read_json_object(path, allow_empty=True)
+        redacted, redacted_paths = _redact_config(config)
+        return {
+            "user": name,
+            "config": redacted,
+            "etag": _config_etag(path),
+            "redacted_paths": redacted_paths,
+            "write_enabled": self.config_write_enabled,
+        }
+
+    def update_user_config(
+        self,
+        user: Any,
+        candidate: Any,
+        *,
+        etag: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not self.config_write_enabled:
+            raise ConfigWriteDisabledError(
+                "配置写入未启用；请设置 WEB_ALLOW_CONFIG_WRITE=true 并启用 Web 认证"
+            )
+        if not isinstance(candidate, dict):
+            raise InvalidRequestError("config 必须是 JSON 对象")
+        if not isinstance(etag, str) or not etag.strip():
+            raise InvalidRequestError("etag 必须是非空字符串")
+        path = self._config_path(name)
+        with self._config_lock(name):
+            current_etag = _config_etag(path)
+            if etag.strip() != current_etag:
+                raise ConflictError("用户配置已被其他请求修改，请重新加载后再保存")
+            current = read_json_object(path, allow_empty=True)
+            try:
+                selected = json.loads(json.dumps(candidate, ensure_ascii=False))
+            except (TypeError, ValueError) as exc:
+                raise InvalidRequestError("config 必须可以序列化为 JSON") from exc
+
+            existing_sensitive = _sensitive_values(current)
+            submitted_sensitive = _sensitive_values(selected)
+            unexpected = sorted(set(submitted_sensitive) - set(existing_sensitive))
+            if unexpected:
+                raise InvalidRequestError(
+                    "Web 不允许新增敏感配置字段："
+                    + ", ".join(".".join(path) for path in unexpected)
+                )
+            for sensitive_path, value in existing_sensitive.items():
+                present, submitted = _value_at(selected, sensitive_path)
+                if present and submitted != _REDACTED:
+                    raise InvalidRequestError(
+                        f"Web 不允许修改敏感配置字段：{'.'.join(sensitive_path)}"
+                    )
+                _set_value(selected, sensitive_path, value)
+
+            self._validate_user_config(name, selected)
+            try:
+                _atomic_json(path, selected)
+            except OSError as exc:
+                raise InvalidRequestError(f"用户配置写入失败：{exc}") from exc
+        return self.user_config(name)
+
     def sessions(self, user: Any, *, source: Any = "web") -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
@@ -103,8 +446,30 @@ class WebRunService:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id)
-        if find_window(self.root, name, normalized_source, normalized_session) is None:
+        directory = find_window(self.root, name, normalized_source, normalized_session)
+        if directory is None:
             raise NotFoundError(f"会话不存在：{normalized_session}")
+        window = load_window(directory)
+        raw_metrics = (window.get("data") or {}).get("round_metrics") or []
+        round_metrics = []
+        if isinstance(raw_metrics, list):
+            for item in raw_metrics:
+                if not isinstance(item, dict):
+                    continue
+                usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
+                round_metrics.append(
+                    {
+                        "round": int(item.get("round") or 0),
+                        "usage": dict(usage),
+                        "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
+                        "tool_calls": max(0, int(item.get("tool_calls") or 0)),
+                        "guidance": [
+                            str(value)
+                            for value in item.get("guidance", [])
+                            if isinstance(value, str)
+                        ] if isinstance(item.get("guidance"), list) else [],
+                    }
+                )
         return {
             "user": name,
             "source": normalized_source,
@@ -112,6 +477,7 @@ class WebRunService:
             "messages": session_messages(
                 self.root, name, normalized_source, normalized_session
             ),
+            "round_metrics": round_metrics,
         }
 
     @staticmethod
@@ -196,6 +562,8 @@ class WebRunService:
     def knowledge(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
+        source_policy = MainAgentSourcePolicy.from_config(config)
+        policy_summary = source_policy.public_summary()
         knowledge_config = config.get("knowledge") or {}
         max_file_chars = max(1000, int(knowledge_config.get("max_file_chars", 20000)))
         documents = []
@@ -214,11 +582,12 @@ class WebRunService:
                     "title": document.title,
                     "size": size,
                     "updated_at": updated_at,
+                    "active_for_main_agent": document.scope in source_policy.knowledge_scopes,
                 }
             )
         return {
             "user": name,
-            "enabled": bool(knowledge_config.get("enabled", True)),
+            "enabled": source_policy.knowledge_enabled,
             "retrieval": {
                 "max_items": int(knowledge_config.get("max_items", 4)),
                 "max_chars": int(knowledge_config.get("max_chars", 4000)),
@@ -232,18 +601,16 @@ class WebRunService:
                 "global_documents": sum(item["scope"] == "global" for item in documents),
             },
             "documents": documents,
-            "extensions": {"kemo_graph": "not_connected"},
+            "extensions": {"kemo_graph": policy_summary["kemo_graph"]["status"]},
+            "source_policy": policy_summary,
         }
 
     def skills(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
+        config = load_config(name, self.root)
+        source_policy = MainAgentSourcePolicy.from_config(config)
         registry = discover_tools(self.root, name)
-        layer_by_source = {
-            "agent_create": "user",
-            "user_create": "user",
-            "shared_skills": "shared",
-            "plugins": "core",
-        }
+        layer_by_source = {"plugins": "core"}
         tools = []
         for tool in sorted(registry.tools.values(), key=lambda item: item.name.casefold()):
             tools.append(
@@ -257,6 +624,29 @@ class WebRunService:
                     "overrides": len(tool.overrides),
                 }
             )
+        prompt_skills = []
+        prompt_sources = load_prompt_source_registry(self.root, name)
+        for descriptor in prompt_sources.select_skills():
+            base = (
+                self.root / "shared_skills"
+                if descriptor.scope == "shared"
+                else self.root / "users" / name / "user_skills"
+            )
+            logical_name = descriptor.path.parent.relative_to(base).as_posix()
+            allowed = (
+                source_policy.shared_skills
+                if descriptor.scope == "shared"
+                else source_policy.user_skills
+            )
+            prompt_skills.append(
+                {
+                    "name": logical_name,
+                    "title": descriptor.title,
+                    "description": descriptor.description,
+                    "scope": descriptor.scope,
+                    "active_for_main_agent": allowed.allows(logical_name),
+                }
+            )
         return {
             "user": name,
             "summary": {
@@ -267,47 +657,45 @@ class WebRunService:
                 "core": sum(item["layer"] == "core" for item in tools),
             },
             "tools": tools,
+            "prompt_summary": {
+                "registered": len(prompt_skills),
+                "active": sum(item["active_for_main_agent"] for item in prompt_skills),
+                "user": sum(item["scope"] == "user" for item in prompt_skills),
+                "shared": sum(item["scope"] == "shared" for item in prompt_skills),
+            },
+            "prompt_skills": prompt_skills,
+            "source_policy": source_policy.public_summary(),
         }
 
     def sense(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
-        sense_config = config.get("global_sense")
-        raw_sources = sense_config.get("sources") if isinstance(sense_config, dict) else []
-        sources = []
-        if isinstance(raw_sources, list):
-            for index, item in enumerate(raw_sources):
-                if not isinstance(item, dict):
-                    continue
-                layer = str(item.get("layer") or "user")
-                if layer == "project":
-                    layer = "global"
-                if layer not in {"user", "shared", "global"}:
-                    layer = "global"
-                sources.append(
-                    {
-                        "id": str(item.get("id") or f"source_{index + 1}"),
-                        "name": str(item.get("name") or item.get("id") or "未命名来源"),
-                        "description": str(item.get("description") or ""),
-                        "layer": layer,
-                        "enabled": bool(item.get("enabled", True)),
-                        "status": str(item.get("status") or "registered"),
-                    }
-                )
+        source_policy = MainAgentSourcePolicy.from_config(config)
         core_dir = self.root / "global_sense"
-        core_files = 0
-        if core_dir.is_dir():
-            core_files = sum(
-                path.is_file() and path.suffix.casefold() in {".md", ".txt", ".json"}
-                for path in core_dir.rglob("*")
-            )
+        registry_available = (core_dir / "register.py").is_file()
+        registry = load_prompt_source_registry(self.root, name)
+        inventory = registry.perception_inventory(
+            allow_modules=source_policy.global_perception.selector()
+        )
+        sources = [
+            {
+                "id": item["name"],
+                "name": item["name"],
+                "description": f"{item['files']} 个可注入 Markdown 文件",
+                "layer": "global",
+                "enabled": item["active"],
+                "active_for_main_agent": item["active"],
+                "status": item["status"],
+                "files": item["files"],
+            }
+            for item in inventory
+        ]
+        core_files = sum(item["files"] for item in inventory)
         return {
             "user": name,
-            "registry_available": isinstance(sense_config, dict),
-            "injection_enabled": bool(
-                sense_config.get("enabled", False) if isinstance(sense_config, dict) else False
-            ),
-            "core_available": core_files > 0,
+            "registry_available": registry_available,
+            "injection_enabled": any(item["active_for_main_agent"] for item in sources),
+            "core_available": bool(sources),
             "core_files": core_files,
             "summary": {
                 "registered": len(sources),
@@ -318,11 +706,13 @@ class WebRunService:
             },
             "sources": sources,
             "decisions": [],
+            "source_policy": source_policy.public_summary(),
         }
 
     def settings(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
+        source_policy = MainAgentSourcePolicy.from_config(config)
         provider = config.get("provider") or {}
         env_name = str(provider.get("api_key_env") or "")
         inline_key = bool(str(provider.get("api_key") or "").strip())
@@ -367,6 +757,112 @@ class WebRunService:
                 "memory_chars": int(memory.get("injection_max_chars") or 2000),
             },
             "users": [item["name"] for item in self.users()],
+            "source_policy": source_policy.public_summary(),
+            "provenance": self._config_provenance(name),
+        }
+
+    def prompt_sections(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        config = load_config(name, self.root)
+        bundle = build_prompt_bundle(self.root, name, config)
+        selected = bundle.diagnostics.get("sections") or {}
+        sections = []
+        for section_name in PROMPT_SECTION_ORDER:
+            detail = selected.get(section_name)
+            sections.append(
+                {
+                    "name": section_name,
+                    "status": "injected" if isinstance(detail, dict) else "omitted",
+                    "original_items": int((detail or {}).get("original_items") or 0),
+                    "injected_items": int((detail or {}).get("injected_items") or 0),
+                    "original_chars": int((detail or {}).get("original_chars") or 0),
+                    "injected_chars": int((detail or {}).get("injected_chars") or 0),
+                    "truncated": bool((detail or {}).get("truncated", False)),
+                    "source_files": list((detail or {}).get("source_files") or []),
+                }
+            )
+        source_selection = bundle.diagnostics.get("source_selection") or {}
+        return {
+            "user": name,
+            "total_chars": int(bundle.diagnostics.get("total_chars") or 0),
+            "sections": sections,
+            "source_policy": bundle.diagnostics.get("source_policy") or {},
+            "source_selection": source_selection,
+            "expand": source_selection.get("expand") or {},
+        }
+
+    def memory_summary(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        config = load_config(name, self.root)
+        items = MemoryStore(self.root, name, config).list_items()
+        result = []
+        for item in items:
+            content = str(item.get("content") or "")
+            result.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "tier": str(item.get("tier") or ""),
+                    "type": str(item.get("type") or "fact"),
+                    "status": str(item.get("status") or "active"),
+                    "tier_weight": int(item.get("tier_weight") or 0),
+                    "review_at": item.get("review_at"),
+                    "created_at": str(item.get("created_at") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "preview": content[:160],
+                    "truncated": len(content) > 160,
+                }
+            )
+        tiers = ("seven_days", "one_month", "half_year", "permanent")
+        return {
+            "user": name,
+            "summary": {
+                "total": len(result),
+                **{tier: sum(item["tier"] == tier for item in result) for tier in tiers},
+            },
+            "items": result,
+        }
+
+    def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
+        empty = {
+            "exists": False,
+            "covered_rounds": [],
+            "created_at": "",
+            "window": "",
+        }
+        if not session_id:
+            return empty
+        directory = find_window(self.root, user, "web", session_id)
+        if directory is None:
+            return empty
+        path = directory / "context_summary.json"
+        if not path.is_file():
+            return {**empty, "window": directory.name}
+        try:
+            value = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {**empty, "exists": True, "window": directory.name, "invalid": True}
+        return {
+            "exists": True,
+            "covered_rounds": [
+                int(item) for item in value.get("covered_rounds", []) if isinstance(item, int)
+            ] if isinstance(value, dict) else [],
+            "created_at": str(value.get("created_at") or "") if isinstance(value, dict) else "",
+            "window": directory.name,
+        }
+
+    def _runtime_status(self) -> dict[str, Any]:
+        if self.runtime_status_provider is None:
+            return {"state": "unmanaged", "components": {}}
+        try:
+            value = self.runtime_status_provider()
+        except Exception:
+            return {"state": "unavailable", "components": {}}
+        if not isinstance(value, dict):
+            return {"state": "unavailable", "components": {}}
+        components = value.get("components")
+        return {
+            "state": str(value.get("state") or "unknown"),
+            "components": dict(components) if isinstance(components, dict) else {},
         }
 
     def overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
@@ -440,7 +936,21 @@ class WebRunService:
             )
         activities.sort(key=lambda item: item["updated_at"], reverse=True)
 
-        agent_registry = discover_agents(self.root)
+        agent_registry = discover_agents(self.root, name)
+        agents = [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "enabled": definition.enabled,
+                "source": definition.source,
+                "execution": definition.execution,
+                "model_profile": definition.model_profile,
+                "exposure": definition.capabilities.exposure,
+            }
+            for definition in sorted(
+                agent_registry.agents.values(), key=lambda item: item.name.casefold()
+            )
+        ]
         return {
             "user": name,
             "session_id": normalized_session,
@@ -457,6 +967,9 @@ class WebRunService:
                 "enabled_agents": len(agent_registry.enabled_agents()),
                 "active_tasks": task_data["summary"]["active_plans"] + task_data["summary"]["enabled_crons"],
             },
+            "agents": agents,
+            "summary_cache": self._summary_cache_status(name, normalized_session),
+            "runtime_host": self._runtime_status(),
             "active_plan": active_plan,
             "activities": activities[:6],
         }
@@ -468,16 +981,27 @@ class WebRunService:
         prompt: Any,
         *,
         cancel_event: threading.Event,
+        run_id: Any = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
         normalized_prompt = self.require_prompt(prompt)
+        normalized_run_id = (
+            self.require_run_id(run_id) if run_id else f"run_{uuid.uuid4().hex}"
+        )
+        active = ActiveRun(normalized_run_id, name, normalized_session)
+        with self._active_runs_lock:
+            if normalized_run_id in self._active_runs:
+                raise ConflictError(f"run_id 已在使用：{normalized_run_id}")
+            self._active_runs[normalized_run_id] = active
         request = {
             "user": name,
             "source": "web",
             "session_id": normalized_session,
             "prompt": normalized_prompt,
             "stream": True,
+            "run_id": normalized_run_id,
+            "_guidance_queue": active.guidance,
         }
                 # Run 生成器拥有线程仿射 RLock。  它的 next()/close()
                 # 因此，调用必须保留在一个专用工作线程上
@@ -539,5 +1063,7 @@ class WebRunService:
             finally:
                 cancel_event.set()
                 worker.join(timeout=1.0)
+                with self._active_runs_lock:
+                    self._active_runs.pop(normalized_run_id, None)
 
         return events()

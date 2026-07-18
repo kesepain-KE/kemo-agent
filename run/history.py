@@ -78,6 +78,7 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
             "created_at": timestamp,
             "updated_at": timestamp,
             "rounds": 0,
+            "round_metrics": [],
             "token_usage": {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,

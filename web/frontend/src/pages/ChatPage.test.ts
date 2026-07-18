@@ -16,8 +16,8 @@ describe('reduceRunEvent', () => {
 
   it('按 tool_call_id 配对开始和结果', () => {
     let items: ChatItem[] = reduceRunEvent([], { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'time', arguments: { zone: 'local' } })
-    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'time', result: { ok: true } })
-    expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'success', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'time', result: { ok: false }, metadata: { status: 'failed', elapsed_ms: 12 } })
+    expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'error', result: { ok: false }, elapsedMs: 12 })
   })
 
   it('done 结束流式标记，error 生成错误项', () => {
@@ -26,5 +26,10 @@ describe('reduceRunEvent', () => {
     expect(items[0]).toMatchObject({ streaming: false })
     items = reduceRunEvent(items, { type: 'error', error: { message: 'failed' } })
     expect(items.at(-1)).toMatchObject({ kind: 'error', content: 'failed' })
+  })
+
+  it('done 生成可持久化的逐轮统计卡片', () => {
+    const items = reduceRunEvent([], { type: 'done', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }, metadata: { elapsed_ms: 35, tool_calls: 1 } })
+    expect(items[0]).toMatchObject({ kind: 'usage', elapsedMs: 35, toolCalls: 1, usage: { total_tokens: 12 } })
   })
 })

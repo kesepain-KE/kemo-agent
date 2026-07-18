@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "exposure": {"mode": "tool", "allowed_callers": ["main_agent"]},
+  "tools": {"plugins": {"allow": ["get_current_time"]}, "max_iterations": 3},
+  "prompt_sources": {"skills": {"shared": ["*"], "user": ["*"]}, "expand": {"global": [], "shared": [], "user": []}},
+  "knowledge": {"scopes": [], "index_enabled": false, "body_access": "none", "max_index_chars": 0},
+  "context": {"inherit_main_history": false, "inherit_current_request": false}
+}

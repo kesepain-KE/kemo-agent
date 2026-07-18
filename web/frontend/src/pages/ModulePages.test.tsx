@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { AppShell } from '../components/AppShell'
@@ -48,11 +48,11 @@ describe('V16 module pages', () => {
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
-  it('感知页不伪造未注册来源', async () => {
+  it('感知页展示目录模块与主智能体过滤状态', async () => {
     renderPage('sense')
     expect(await screen.findByRole('heading', { name: '全局感知' })).toBeInTheDocument()
-    expect(await screen.findByText('尚无已注册感知来源')).toBeInTheDocument()
-    expect(screen.getAllByText('全局层').length).toBeGreaterThan(0)
+    expect(await screen.findByRole('heading', { name: 'runtime' })).toBeInTheDocument()
+    expect(screen.getAllByText('全局模块').length).toBeGreaterThan(0)
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
@@ -61,5 +61,11 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('heading', { name: '配置概览' })).toBeInTheDocument()
     expect(screen.getByText('默认只读')).toBeInTheDocument()
     expect(screen.getByText('界面主题')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Prompt 与 Expand'))
+    expect(await screen.findByText('Prompt 注入诊断')).toBeInTheDocument()
+    expect(await screen.findByText('user_soul')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('用户配置 JSON'))
+    expect(await screen.findByLabelText('用户配置 JSON')).toBeInTheDocument()
+    expect(screen.getByText('只读模式')).toBeInTheDocument()
   })
 })

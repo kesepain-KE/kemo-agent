@@ -1,7 +1,7 @@
 """kemo-agent Web UI 启动入口
 
 用法:
-    python start_web.py              # 默认端口 1357，冲突自动轮询（最多10次）
+    python start_web.py              # 读取 WEB_HOST/WEB_PORT，端口冲突自动轮询（最多10次）
     python start_web.py --port=8080  # 自定义端口
     python start_web.py --host=0.0.0.0 --port=1357  # 开放局域网访问
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import socket
 import sys
@@ -23,6 +24,7 @@ from typing import Any
 from run.config import load_dotenv, project_root
 from run.runtime_host import build_host
 from run.users import ensure_user, list_users
+from web.auth import WebAuthConfig, WebAuthConfigError
 
 VERSION = "0.1.0-dev"
 
@@ -43,6 +45,24 @@ def _can_bind(host: str, port: int) -> tuple[bool, str]:
         return False, str(exc)
     finally:
         sock.close()
+
+
+def _resolve_web_host(cli_value: str | None) -> str:
+    value = cli_value if cli_value is not None else os.getenv("WEB_HOST", "")
+    return str(value).strip() or "127.0.0.1"
+
+
+def _resolve_web_port(cli_value: int | None) -> int:
+    raw: object = cli_value if cli_value is not None else os.getenv("WEB_PORT", "")
+    if raw in {None, ""}:
+        return 1357
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("WEB_PORT 必须是整数") from exc
+    if port < 1 or port > 65535:
+        raise ValueError("Web 监听端口必须在 1–65535 之间")
+    return port
 
 
 def _check_users(root: Path) -> bool:
@@ -99,14 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Web 监听地址（默认 127.0.0.1）",
+        default=None,
+        help="Web 监听地址（默认读取 WEB_HOST，最后回退 127.0.0.1）",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=1357,
-        help="Web 监听端口（默认 1357，冲突自动轮询最多 10 次）",
+        default=None,
+        help="Web 监听端口（默认读取 WEB_PORT，最后回退 1357）",
     )
     parser.add_argument(
         "--log-level",
@@ -128,17 +148,24 @@ def main(argv: list[str] | None = None) -> int:
         # 1.加载.env
     load_dotenv(root / ".env")
 
+    try:
+        web_host = _resolve_web_host(args.host)
+        base_port = _resolve_web_port(args.port)
+        auth_config = WebAuthConfig.from_env()
+    except (ValueError, WebAuthConfigError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
         # 2.检查用户
     if not _check_users(root):
         return 1
 
         # 3. 端口轮询：1357 + 0..9（最多 10 次尝试）
-    base_port = args.port
     max_tries = 10
     chosen_port: int | None = None
     for offset in range(max_tries):
         try_port = base_port + offset
-        ok, err = _can_bind(args.host, try_port)
+        ok, err = _can_bind(web_host, try_port)
         if ok:
             chosen_port = try_port
             if offset > 0:
@@ -178,8 +205,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     from web.app import create_app
+    from web.service import WebRunService
 
-    app = create_app(root=root)
+    service = WebRunService(
+        root,
+        runtime_status_provider=host.status if host is not None else None,
+    )
+    app = create_app(root=root, service=service, auth_config=auth_config)
 
         # 优雅关闭：进程退出时停止 RuntimeHost。
     def _shutdown() -> None:
@@ -196,11 +228,11 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, OSError):
             pass
 
-    print(f"Web 后端 → http://{args.host}:{chosen_port}")
+    print(f"Web 后端 → http://{web_host}:{chosen_port}")
     try:
         uvicorn.run(
             app,
-            host=args.host,
+            host=web_host,
             port=chosen_port,
             log_level=args.log_level,
         )

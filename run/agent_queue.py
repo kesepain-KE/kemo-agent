@@ -135,7 +135,12 @@ class AgentScheduler:
         block: bool = True,
         enqueue_timeout: float | None = None,
     ) -> str:
-        definition = self.runner.registry.get(agent)
+        registry = (
+            self.runner.refresh_registry()
+            if hasattr(self.runner, "refresh_registry")
+            else self.runner.registry
+        )
+        definition = registry.get(agent)
         if definition.execution != "background_serial":
             raise AgentQueueError(f"子代理 {agent} 未声明 background_serial 执行模式")
         if not isinstance(input_data, dict):

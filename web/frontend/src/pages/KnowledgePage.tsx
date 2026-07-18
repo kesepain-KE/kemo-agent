@@ -40,7 +40,7 @@ export function KnowledgePage() {
     <ModuleFrame
       kicker="File Knowledge & Retrieval"
       title="知识库"
-      description="按用户层、共享层、全局层建立纯文件索引；检索优先级为用户 > 共享 > 全局。"
+      description="列出用户层、共享层、全局层的完整文件库存，并标明当前主智能体实际启用的范围。"
       actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />刷新索引状态</button>}
     >
       {query.isError && <ModuleError />}
@@ -58,7 +58,7 @@ export function KnowledgePage() {
       <section className="index-summary panel">
         <div className="index-copy">
           <span className="panel-title-icon">I</span>
-          <span><strong>文件索引管理</strong><small>读取用户层、共享层、全局层中的 Markdown、TXT 与 JSON</small></span>
+          <span><strong>文件索引管理</strong><small>有效范围：{data?.source_policy.knowledge.effective_scopes.join(' / ') || '无（不注入、不搜索）'}</small></span>
         </div>
         <div className="index-progress">
           <span><b>{query.isFetching ? '正在读取' : data?.enabled ? '索引可用' : '索引停用'}</b><small>按请求实时构建，不维护第二份缓存</small></span>
@@ -81,8 +81,8 @@ export function KnowledgePage() {
         <div>
           <article className="panel table-panel">
             <div className="panel-head"><div className="panel-title"><span className="panel-title-icon">K</span><span><strong>知识文件</strong><span>只展示元数据，不通过列表接口返回正文</span></span></div><span className="panel-count">{documents.length}</span></div>
-            {documents.length ? <div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>名称</th><th>层级</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>
-              {documents.map((document) => <tr key={`${document.scope}:${document.relative_path}`}><td><span className="table-main"><span className="table-icon"><FileText size={14} /></span><span><strong>{document.title}</strong><span>{document.relative_path.split('/').at(-1)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope] || document.scope}</span></td><td className="path-cell">{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}
+            {documents.length ? <div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>名称</th><th>层级</th><th>主智能体</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>
+              {documents.map((document) => <tr key={`${document.scope}:${document.relative_path}`}><td><span className="table-main"><span className="table-icon"><FileText size={14} /></span><span><strong>{document.title}</strong><span>{document.relative_path.split('/').at(-1)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope] || document.scope}</span></td><td><StatusChip status={document.active_for_main_agent ? 'enabled' : 'paused'}>{document.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></td><td className="path-cell">{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}
             </tbody></table></div> : <EmptyPanel title="没有匹配的知识文件" description={queryText ? '调整搜索词或切换层级后重试。' : '当前知识目录中还没有可索引文件。'} icon={<FolderTree size={21} />} />}
           </article>
         </div>
@@ -96,8 +96,8 @@ export function KnowledgePage() {
             </div>
           </article>
           <article className="panel extension-card">
-            <div className="panel-head"><div className="panel-title"><span className="panel-title-icon"><PlugZap size={15} /></span><span><strong>外接项目 · kemo-graph</strong><span>可选扩展，不属于核心索引</span></span></div><StatusChip status="not_connected" /></div>
-            <div className="panel-body"><p className="panel-copy">当前未连接图谱扩展，检索自动保持为纯文件模式，不影响现有知识注入。</p></div>
+            <div className="panel-head"><div className="panel-title"><span className="panel-title-icon"><PlugZap size={15} /></span><span><strong>外接项目 · kemo-graph</strong><span>可选的独立 CLI 项目，本服务不会自动启动</span></span></div><StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'} /></div>
+            <div className="panel-body"><p className="panel-copy">{data?.source_policy.kemo_graph.requested ? '用户已请求启用，但连接管线尚未接入；当前不会执行图谱调用。' : '用户未启用图谱连接；当前保持纯文件知识模式。'}</p></div>
           </article>
         </aside>
       </div>

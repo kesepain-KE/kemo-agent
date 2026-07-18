@@ -12,16 +12,43 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
 from events import RunEvent, TERMINAL_EVENTS
 from run.config import project_root
-from web.service import InvalidRequestError, WebRunService, WebServiceError
+from web.auth import WebAuthConfig, WebAuthError, WebAuthenticator
+from web.service import (
+    ConfigWriteDisabledError,
+    InvalidRequestError,
+    WebRunService,
+    WebServiceError,
+)
 
 
 class ChatBody(BaseModel):
     user: str
     session_id: str
     prompt: str
+    run_id: str = ""
+
+
+class TokenBody(BaseModel):
+    token: str
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+class ConfigUpdateBody(BaseModel):
+    config: dict[str, Any]
+    etag: str
+
+
+class GuidanceBody(BaseModel):
+    user: str
+    guidance: str
 
 
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
@@ -52,15 +79,57 @@ def create_app(
     *,
     root: Path | None = None,
     service: WebRunService | None = None,
+    auth_config: WebAuthConfig | None = None,
 ) -> FastAPI:
     base = (root or project_root()).resolve()
     backend = service or WebRunService(base)
     frontend_dist = (base / "web" / "frontend" / "dist").resolve()
     app = FastAPI(title="kemo-agent Web API", version="2")
     app.state.web_service = backend
+    configured_auth = auth_config or WebAuthConfig()
+    authenticator = WebAuthenticator(configured_auth)
+    app.state.web_auth = configured_auth
+
+    @app.middleware("http")
+    async def require_web_auth(request: Request, call_next):
+        path = request.url.path
+        public = path == "/api/health" or path.startswith("/api/auth/")
+        if (
+            configured_auth.enabled
+            and (path == "/api" or path.startswith("/api/"))
+            and not public
+            and not authenticator.is_authenticated(request.session)
+        ):
+            return JSONResponse(
+                status_code=401,
+                content=_error_body(
+                    "authentication_required",
+                    "需要先完成 Web 认证",
+                    401,
+                ),
+            )
+        return await call_next(request)
+
+    # SessionMiddleware must wrap the auth guard so request.session is available.
+    if configured_auth.enabled:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=configured_auth.session_secret,
+            session_cookie=configured_auth.cookie_name,
+            max_age=None,
+            same_site="lax",
+            https_only=False,
+        )
 
     @app.exception_handler(WebServiceError)
     async def web_service_error(_: Request, exc: WebServiceError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status,
+            content=_error_body(exc.code, str(exc), exc.status),
+        )
+
+    @app.exception_handler(WebAuthError)
+    async def web_auth_error(_: Request, exc: WebAuthError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status,
             content=_error_body(exc.code, str(exc), exc.status),
@@ -83,6 +152,29 @@ def create_app(
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         return backend.health()
+
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request) -> dict[str, Any]:
+        session = request.session if configured_auth.enabled else None
+        return authenticator.status(session)
+
+    @app.post("/api/auth/bootstrap")
+    async def auth_bootstrap(body: TokenBody, request: Request) -> dict[str, Any]:
+        authenticator.authenticate_token(body.token)
+        authenticator.establish(request.session, "token")
+        return authenticator.status(request.session)
+
+    @app.post("/api/auth/login")
+    async def auth_login(body: LoginBody, request: Request) -> dict[str, Any]:
+        authenticator.authenticate_password(body.username, body.password)
+        authenticator.establish(request.session, "password")
+        return authenticator.status(request.session)
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request) -> dict[str, bool]:
+        if configured_auth.enabled:
+            authenticator.logout(request.session)
+        return {"authenticated": False}
 
     @app.get("/api/users")
     async def users() -> dict[str, Any]:
@@ -128,7 +220,37 @@ def create_app(
 
     @app.get("/api/users/{user}/settings")
     async def settings(user: str) -> dict[str, Any]:
-        return backend.settings(user)
+        value = backend.settings(user)
+        return {**value, "authentication": configured_auth.public_summary()}
+
+    @app.get("/api/users/{user}/prompt/sections")
+    async def prompt_sections(user: str) -> dict[str, Any]:
+        return backend.prompt_sections(user)
+
+    @app.get("/api/users/{user}/memory/summary")
+    async def memory_summary(user: str) -> dict[str, Any]:
+        return backend.memory_summary(user)
+
+    @app.get("/api/users/{user}/config/full")
+    async def full_config(user: str) -> dict[str, Any]:
+        value = backend.user_config(user)
+        return {
+            **value,
+            "write_enabled": bool(
+                value.get("write_enabled", False) and configured_auth.enabled
+            ),
+        }
+
+    @app.put("/api/users/{user}/config")
+    async def update_config(user: str, body: ConfigUpdateBody) -> dict[str, Any]:
+        if not configured_auth.enabled:
+            raise ConfigWriteDisabledError("配置写入要求先启用 Web Token 或账号密码认证")
+        value = backend.update_user_config(user, body.config, etag=body.etag)
+        return {**value, "write_enabled": True}
+
+    @app.post("/api/runs/{run_id}/guidance")
+    async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:
+        return backend.submit_guidance(body.user, run_id, body.guidance)
 
     @app.post("/api/chat")
     async def chat(body: ChatBody, request: Request) -> StreamingResponse:
@@ -139,6 +261,7 @@ def create_app(
                 body.session_id,
                 body.prompt,
                 cancel_event=cancel_event,
+                run_id=body.run_id,
             )
         except WebServiceError:
             raise
@@ -207,6 +330,7 @@ def create_app(
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Kemo-Run-Id": body.run_id,
             },
         )
 

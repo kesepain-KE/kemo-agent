@@ -1,4 +1,51 @@
 {
   "schema_version": 1,
-  "provider": {}
+
+  "provider": {
+    "type": "kemo",
+    "base_url": "http://127.0.0.1:8741/v1",
+    "api_key_env": "KEMO_API_KEY",
+    "model": "",
+    "timeout": 120,
+    "stream": false,
+    "headers": {}
+  },
+
+  "multimodal_models": {
+    "vision": "",
+    "image_generation": "",
+    "image_edit": "",
+    "audio_transcription": "",
+    "speech_generation": "",
+    "speech_to_speech": "",
+    "video_generation": ""
+  },
+
+  "task_plan": {
+    "auto_accept": false
+  },
+
+  "skills": {
+    "shared_whitelist": [],
+    "user_whitelist": []
+  },
+
+  "expand": {
+    "shared_whitelist": [],
+    "global_whitelist": []
+  },
+
+  "perception": {
+    "global_whitelist": []
+  },
+
+  "knowledge": {
+    "enabled": true,
+    "use_shared": true,
+    "use_global": true
+  },
+
+  "kemo_graph": {
+    "enabled": false
+  }
 }

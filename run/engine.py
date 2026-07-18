@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
@@ -16,10 +18,10 @@ from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import commit_window, prepare_window
-from run.knowledge import select_knowledge
 from run.memory import MemoryStore
 from run.memory_pipeline import submit_memory_extraction
-from run.prompt import build_system_prompt
+from run.prompt import PromptBundle, build_prompt_bundle
+from run.source_policy import MainAgentSourcePolicy
 from run.tools import ToolError, ToolRegistry, discover_tools, execute_tool
 
 
@@ -44,6 +46,30 @@ def _required_text(request: dict[str, Any], name: str) -> str:
     return value.strip()
 
 
+def _drain_guidance(channel: Any) -> list[str]:
+    if channel is None or not callable(getattr(channel, "get_nowait", None)):
+        return []
+    values: list[str] = []
+    while True:
+        try:
+            value = channel.get_nowait()
+        except queue.Empty:
+            break
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return values
+
+
+def _append_guidance(messages: list[dict[str, Any]], values: list[str]) -> None:
+    if values:
+        messages.append(
+            {
+                "role": "user",
+                "content": "[运行中引导]\n" + "\n".join(f"- {item}" for item in values),
+            }
+        )
+
+
 def _usage_from_dict(value: dict[str, Any] | None) -> Usage:
     raw = value or {}
     known = {"prompt_tokens", "completion_tokens", "total_tokens", "estimated", "source"}
@@ -62,6 +88,25 @@ def _merge_usage(total: dict[str, Any], usage: Usage) -> None:
     total["completion_tokens"] = int(total.get("completion_tokens", 0)) + usage.completion_tokens
     total["total_tokens"] = int(total.get("total_tokens", 0)) + usage.total_tokens
     total["estimated"] = bool(total.get("estimated", False) or usage.estimated)
+    cached: int | None = None
+    for key in ("cached_prompt_tokens", "cache_hit_tokens", "cached_tokens"):
+        value = usage.extra.get(key)
+        if value is not None:
+            cached = max(0, int(value))
+            break
+    details = usage.extra.get("prompt_tokens_details")
+    if cached is None and isinstance(details, dict) and details.get("cached_tokens") is not None:
+        cached = max(0, int(details["cached_tokens"]))
+    missed_raw = usage.extra.get("cache_miss_tokens")
+    missed = max(0, int(missed_raw)) if missed_raw is not None else None
+    if cached is not None:
+        missed = max(0, usage.prompt_tokens - cached) if missed is None else missed
+        total["cached_prompt_tokens"] = int(total.get("cached_prompt_tokens", 0)) + cached
+        total["cache_miss_tokens"] = int(total.get("cache_miss_tokens", 0)) + missed
+        denominator = total["cached_prompt_tokens"] + total["cache_miss_tokens"]
+        total["cache_hit_rate"] = (
+            round(total["cached_prompt_tokens"] / denominator, 6) if denominator else 0.0
+        )
 
 
 def _usage_total() -> dict[str, Any]:
@@ -138,6 +183,31 @@ def _json_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _ensure_fixed_content_fits(
+    selection: Any,
+    *,
+    system_message: dict[str, Any] | None,
+) -> None:
+    if not selection.fixed_content_over_budget:
+        return
+    system_tokens = estimate_messages_tokens([system_message]) if system_message else 0
+    raise EngineError(
+        "固定提示词和工具定义超过输入预算："
+        f"system_prompt≈{system_tokens} tokens，"
+        f"tool_schema≈{selection.tool_schema_tokens} tokens，"
+        f"input_budget={selection.input_budget} tokens；"
+        "请调小 prompt.file_limits 或 prompt.char_limits"
+    )
+
+
+def _memory_injected_chars(bundle: PromptBundle) -> int:
+    return sum(
+        section.injected_chars
+        for section in bundle.sections
+        if section.name == "permanent_memory" or section.name.startswith("temporary_memory:")
+    )
+
+
 def iter_request_events(
     request: dict[str, Any],
     *,
@@ -148,6 +218,7 @@ def iter_request_events(
 ) -> Iterator[RunEvent]:
     """Run one complete model/tool loop, committing only on successful done."""
 
+    run_started = time.monotonic()
     try:
         user = _required_text(request, "user")
         prompt_value = request.get("prompt", "")
@@ -166,6 +237,7 @@ def iter_request_events(
     with _session_lock(base, user, source, session_id):
         try:
             config = load_config(user, base)
+            source_policy = MainAgentSourcePolicy.from_config(config)
             runtime_provider = provider_runtime_config(config)
             provider = provider_factory(runtime_provider)
             agent_runner = AgentRunner(
@@ -185,21 +257,17 @@ def iter_request_events(
             memory_config = config.get("memory") or {}
             memory_store = MemoryStore(base, user, config)
             memory_store.review_due()
-            memory_selection = (
-                memory_store.select_for_injection(prompt)
-                if prompt and bool(memory_config.get("injection_enabled", True))
-                else memory_store.select_for_injection("", max_items=0)
-            )
-            knowledge_selection = select_knowledge(base, user, prompt, config)
-            system_prompt = build_system_prompt(
+            prompt_bundle = build_prompt_bundle(
                 base,
                 user,
                 config,
-                memory_text=memory_selection.text,
-                knowledge_text=knowledge_selection.text,
+                plugin_manifests=registry.plugin_manifests,
+                memory_store=memory_store,
             )
             system_message = (
-                {"role": "system", "content": system_prompt} if system_prompt else None
+                {"role": "system", "content": prompt_bundle.text}
+                if prompt_bundle.text
+                else None
             )
             compress_only = bool(request.get("compress_only", False))
             current_user_message = (
@@ -215,6 +283,7 @@ def iter_request_events(
                 tools=tool_schemas,
                 force_compress=force_compress,
             )
+            _ensure_fixed_content_fits(context_selection, system_message=system_message)
             summary_usage = _usage_total()
             subagent_events: list[RunEvent] = []
             summary_cache = None
@@ -267,6 +336,7 @@ def iter_request_events(
                 )
                 removed_after = [item.number for item in next_selection.removed_rounds]
                 context_selection = next_selection
+                _ensure_fixed_content_fits(context_selection, system_message=system_message)
                 if removed_after == removed_before:
                     break
             if cancel_event is not None and cancel_event.is_set():
@@ -291,6 +361,7 @@ def iter_request_events(
                         "session_id": session_id,
                         "window": window_path.name,
                         "context": context_stats,
+                        "prompt": prompt_bundle.diagnostics,
                         "summary_cache": (
                             str(window_path / "context_summary.json")
                             if summary_cache is not None
@@ -306,6 +377,9 @@ def iter_request_events(
             all_text: list[str] = []
             all_reasoning: list[str] = []
             tool_records: list[dict[str, Any]] = []
+            guidance_channel = request.get("_guidance_queue")
+            consumed_guidance: list[str] = []
+            run_id = str(request.get("run_id") or "")
             usage_total = dict(summary_usage)
             if summary_usage.get("total_tokens", 0):
                 yield RunEvent(
@@ -394,6 +468,16 @@ def iter_request_events(
                 final_metadata = dict(iteration_done.metadata)
 
                 if not calls:
+                    pending_guidance = _drain_guidance(guidance_channel)
+                    if pending_guidance and iteration < max_iterations:
+                        messages.append(
+                            {"role": "assistant", "content": "".join(iteration_text)}
+                        )
+                        _append_guidance(messages, pending_guidance)
+                        consumed_guidance.extend(pending_guidance)
+                        all_text.append("\n\n")
+                        yield RunEvent(type="text_delta", content="\n\n")
+                        continue
                     completed = True
                     break
                 if iteration >= max_iterations:
@@ -410,6 +494,7 @@ def iter_request_events(
                         return
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     duplicate = signature in seen_calls
+                    tool_started = time.monotonic()
                     if duplicate:
                         result_payload = seen_calls[signature]
                         status = "duplicate_reused"
@@ -425,6 +510,8 @@ def iter_request_events(
                                     "source": source,
                                     "session_id": session_id,
                                     "window": window_path.name,
+                                    "knowledge_enabled": source_policy.knowledge_enabled,
+                                    "knowledge_scopes": list(source_policy.knowledge_scopes),
                                 },
                                 timeout=tool_timeout,
                                 cancel_event=cancel_event,
@@ -443,6 +530,7 @@ def iter_request_events(
                             }
                             status = "failed"
                         seen_calls[signature] = result_payload
+                    elapsed_ms = max(0, round((time.monotonic() - tool_started) * 1000))
                     record = {
                         "id": call.id,
                         "name": call.name,
@@ -451,6 +539,7 @@ def iter_request_events(
                         "duplicate": duplicate,
                         "result": result_payload,
                         "iteration": iteration,
+                        "elapsed_ms": elapsed_ms,
                     }
                     tool_records.append(record)
                     yield RunEvent(
@@ -459,7 +548,12 @@ def iter_request_events(
                         tool_name=call.name,
                         arguments=call.arguments,
                         result=result_payload,
-                        metadata={"status": status, "duplicate": duplicate, "iteration": iteration},
+                        metadata={
+                            "status": status,
+                            "duplicate": duplicate,
+                            "iteration": iteration,
+                            "elapsed_ms": elapsed_ms,
+                        },
                     )
                     messages.append(
                         {
@@ -469,6 +563,9 @@ def iter_request_events(
                             "content": _json_result(result_payload),
                         }
                     )
+                pending_guidance = _drain_guidance(guidance_channel)
+                _append_guidance(messages, pending_guidance)
+                consumed_guidance.extend(pending_guidance)
 
             if not completed:
                 yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
@@ -477,6 +574,7 @@ def iter_request_events(
                 return
 
             round_number = int(window["data"].get("rounds", 0)) + 1
+            round_elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
             text = "".join(all_text)
             reasoning = "".join(all_reasoning)
             window["text"]["messages"].extend(
@@ -488,6 +586,19 @@ def iter_request_events(
             window["think"]["rounds"].append({"round": round_number, "content": reasoning})
             window["tool"]["rounds"].append({"round": round_number, "calls": tool_records})
             window["data"]["rounds"] = round_number
+            round_metrics = window["data"].setdefault("round_metrics", [])
+            if not isinstance(round_metrics, list):
+                round_metrics = []
+                window["data"]["round_metrics"] = round_metrics
+            round_metrics.append(
+                {
+                    "round": round_number,
+                    "usage": dict(usage_total),
+                    "elapsed_ms": round_elapsed_ms,
+                    "tool_calls": len(tool_records),
+                    "guidance": list(consumed_guidance),
+                }
+            )
             window["data"]["context"] = {
                 **context_stats,
                 "summary_cache": (
@@ -503,7 +614,7 @@ def iter_request_events(
             memory_weighted_ids: list[str] = []
             memory_weight_error = None
             try:
-                memory_weighted_ids = memory_store.mark_used(memory_selection.selected_ids)
+                memory_weighted_ids = memory_store.mark_used(list(prompt_bundle.memory_ids))
             except Exception as exc:
                 memory_weight_error = {
                     "message": str(exc),
@@ -548,26 +659,24 @@ def iter_request_events(
                     "session_id": session_id,
                     "window": window_path.name,
                     "tool_calls": len(tool_records),
+                    "elapsed_ms": round_elapsed_ms,
+                    "run_id": run_id,
+                    "guidance_count": len(consumed_guidance),
                     "context": context_stats,
+                    "prompt": prompt_bundle.diagnostics,
                     "memory": {
-                        "candidate_ids": memory_selection.candidate_ids,
-                        "injected_ids": memory_selection.selected_ids,
+                        "injected_ids": list(prompt_bundle.memory_ids),
                         "weighted_ids": memory_weighted_ids,
                         "weight_error": memory_weight_error,
-                        "injected_chars": memory_selection.chars,
+                        "injected_chars": _memory_injected_chars(prompt_bundle),
                         "extraction_task_id": memory_task_id,
                         "extraction_error": memory_error,
                     },
                     "knowledge": {
-                        "documents": [
-                            {
-                                "scope": item.scope,
-                                "path": item.relative_path,
-                                "title": item.title,
-                            }
-                            for item in knowledge_selection.documents
-                        ],
-                        "injected_chars": len(knowledge_selection.text),
+                        "documents": prompt_bundle.diagnostics["knowledge_documents"],
+                        "injected_chars": prompt_bundle.diagnostics["sections"]
+                        .get("knowledge_index", {})
+                        .get("injected_chars", 0),
                     },
                     "committed": True,
                 }
@@ -649,13 +758,22 @@ def context_status(
         if bool(tool_config.get("enabled", True))
         else ToolRegistry({})
     )
-    system_prompt = build_system_prompt(base, user, config)
+    memory_store = MemoryStore(base, user, config)
+    prompt_bundle = build_prompt_bundle(
+        base,
+        user,
+        config,
+        plugin_manifests=registry.plugin_manifests,
+        memory_store=memory_store,
+    )
     policy = ContextPolicy.from_config(config)
     selection = select_context(
         window=window,
         policy=policy,
         system_message=(
-            {"role": "system", "content": system_prompt} if system_prompt else None
+            {"role": "system", "content": prompt_bundle.text}
+            if prompt_bundle.text
+            else None
         ),
         current_user_message=None,
         tools=registry.schemas() or None,
@@ -669,6 +787,7 @@ def context_status(
         "window": None if is_new else window_path.name,
         "rounds": int(window.get("data", {}).get("rounds", 0)),
         "context": selection.stats(),
+        "prompt": prompt_bundle.diagnostics,
         "last_committed_context": persisted if isinstance(persisted, dict) else None,
         "summary_cache_exists": cache_path.is_file(),
         "policy": {

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
+import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,8 +17,14 @@ from typing import Any, Callable
 from events import RunEvent
 from provider.factory import create_provider
 from provider.schema import ChatRequest
+from agents._runtime.resources import (
+    AgentPromptBundle,
+    build_agent_prompt_bundle,
+    build_agent_tool_registry,
+)
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
 from run.config import deep_merge, load_config, provider_runtime_config
+from run.tools import ToolRegistry, execute_tool
 
 
 class AgentRunError(RuntimeError):
@@ -141,6 +150,42 @@ def resolve_agent_provider_config(
     return provider_runtime_config(merged)
 
 
+@dataclass(slots=True)
+class AgentExecutionContext:
+    runner: "AgentRunner"
+    definition: AgentDefinition
+    prompt_bundle: AgentPromptBundle
+    tool_registry: ToolRegistry
+    cancel_event: threading.Event
+    model_override: str | None
+    max_tokens: int | None
+    task_id: str
+
+    def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
+        return self.runner._run_model(self, input_data)
+
+
+def _load_executor(definition: AgentDefinition) -> Callable[[AgentExecutionContext, dict[str, Any]], Any]:
+    if definition.executor == "builtin:llm":
+        return lambda context, input_data: context.run_model(input_data)
+    file_name, _, function_name = definition.executor.partition(":")
+    path = definition.directory / file_name
+    module_name = f"kemo_agent_executor_{definition.name}_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise AgentRunError(f"无法加载子代理执行模块：{path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    function = getattr(module, function_name, None)
+    if not callable(function):
+        raise AgentRunError(f"子代理执行入口不可调用：{definition.executor}")
+    return function
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -154,8 +199,161 @@ class AgentRunner:
         self.root = root.resolve()
         self.user = user
         self.config = config or load_config(user, self.root)
-        self.registry = registry or discover_agents(self.root)
+        self._fixed_registry = registry
+        self.registry = registry or discover_agents(self.root, self.user)
         self.provider_factory = provider_factory
+
+    def refresh_registry(self) -> AgentRegistry:
+        if self._fixed_registry is None:
+            self.registry = discover_agents(self.root, self.user)
+        return self.registry
+
+    @staticmethod
+    def _merge_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total[key] = int(total.get(key, 0)) + int(usage.get(key, 0))
+        total["estimated"] = bool(total.get("estimated", False) or usage.get("estimated", False))
+
+    def _run_model(
+        self,
+        context: AgentExecutionContext,
+        input_data: dict[str, Any],
+    ) -> AgentRunResult:
+        definition = context.definition
+        runtime = resolve_agent_provider_config(
+            self.config,
+            definition,
+            model_override=context.model_override,
+        )
+        provider = self.provider_factory(runtime)
+        system = (
+            context.prompt_bundle.text
+            + "\n\n[output_schema]\n"
+            + json.dumps(definition.output_schema, ensure_ascii=False, sort_keys=True)
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": json.dumps(input_data, ensure_ascii=False, sort_keys=True),
+            },
+        ]
+        schemas = context.tool_registry.schemas() or None
+        total_usage: dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "estimated": False,
+        }
+        tool_records: list[dict[str, Any]] = []
+        final_text = ""
+        final_model = runtime["model"]
+        max_iterations = definition.capabilities.max_tool_iterations
+        tool_timeout = float((self.config.get("tools") or {}).get("timeout", 60))
+        for iteration in range(1, max_iterations + 1):
+            if context.cancel_event.is_set():
+                raise AgentCancelledError(f"子代理 {definition.name} 已取消")
+            response = provider.chat(
+                ChatRequest(
+                    model=runtime["model"],
+                    messages=messages,
+                    stream=False,
+                    tools=schemas,
+                    max_tokens=context.max_tokens,
+                )
+            )
+            self._merge_usage(total_usage, response.usage.to_dict())
+            final_model = response.model or runtime["model"]
+            if not response.tool_calls:
+                final_text = response.text
+                break
+            if iteration >= max_iterations:
+                raise AgentRunError(f"子代理 {definition.name} 工具调用超过最大循环次数 {max_iterations}")
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.text or None,
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                            },
+                        }
+                        for call in response.tool_calls
+                    ],
+                }
+            )
+            for call in response.tool_calls:
+                try:
+                    tool = context.tool_registry.get(call.name)
+                    value = execute_tool(
+                        tool,
+                        call.arguments,
+                        context={
+                            "root": str(self.root),
+                            "user": self.user,
+                            "caller": "subagent",
+                            "agent": definition.name,
+                            "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
+                        },
+                        timeout=tool_timeout,
+                        cancel_event=context.cancel_event,
+                    )
+                    payload = {"ok": True, "result": value}
+                    status = "completed"
+                except Exception as exc:
+                    payload = {
+                        "ok": False,
+                        "error": {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        },
+                    }
+                    status = "failed"
+                tool_records.append(
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "status": status,
+                        "result": payload,
+                        "iteration": iteration,
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "content": json.dumps(payload, ensure_ascii=False, default=str),
+                    }
+                )
+        else:
+            raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
+        data = _parse_json_object(final_text)
+        try:
+            validate_json_schema(data, definition.output_schema)
+        except AgentInputError as exc:
+            raise AgentOutputError(str(exc)) from exc
+        return AgentRunResult(
+            agent=definition.name,
+            data=data,
+            raw_text=final_text,
+            usage=total_usage,
+            model=final_model,
+            metadata={
+                "model_profile": definition.model_profile,
+                "execution": definition.execution,
+                "write_policy": definition.write_policy,
+                "source": definition.source,
+                "task_id": context.task_id,
+                "prompt": context.prompt_bundle.diagnostics,
+                "tool_calls": tool_records,
+            },
+        )
 
     def run(
         self,
@@ -169,41 +367,37 @@ class AgentRunner:
         task_id: str = "",
         max_tokens: int | None = None,
     ) -> AgentRunResult:
-        definition = self.registry.get(name)
+        definition = self.refresh_registry().get(name)
         if not isinstance(input_data, dict):
             raise AgentInputError("子代理输入必须是 JSON 对象")
         validate_json_schema(input_data, definition.input_schema)
         stopped = cancel_event or threading.Event()
         if stopped.is_set():
             raise AgentCancelledError(f"子代理 {name} 已取消")
-        runtime = resolve_agent_provider_config(
-            self.config, definition, model_override=model_override
-        )
-        provider = self.provider_factory(runtime)
         effective_timeout = float(timeout if timeout is not None else definition.timeout)
         if effective_timeout <= 0:
             raise AgentRunError("子代理 timeout 必须是正数")
-        system = (
-            definition.instruction
-            + "\n\n只处理调用方显式传入的数据，不假设拥有主对话上下文。"
-            + "\n必须只返回符合以下 JSON Schema 的 JSON 对象，不使用 Markdown：\n"
-            + json.dumps(definition.output_schema, ensure_ascii=False, sort_keys=True)
+        prompt_bundle = build_agent_prompt_bundle(
+            self.root,
+            self.user,
+            definition,
+            self.config,
         )
-        request = ChatRequest(
-            model=runtime["model"],
-            messages=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": json.dumps(input_data, ensure_ascii=False, sort_keys=True),
-                },
-            ],
-            stream=False,
+        tool_registry = build_agent_tool_registry(self.root, self.user, definition)
+        context = AgentExecutionContext(
+            runner=self,
+            definition=definition,
+            prompt_bundle=prompt_bundle,
+            tool_registry=tool_registry,
+            cancel_event=stopped,
+            model_override=model_override,
             max_tokens=max_tokens,
+            task_id=task_id,
         )
+        function = _load_executor(definition)
         _event(event_callback, agent=name, status="started", task_id=task_id)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"agent-{name}")
-        future = executor.submit(provider.chat, request)
+        future = executor.submit(function, context, input_data)
         deadline = time.monotonic() + effective_timeout
         try:
             while True:
@@ -213,31 +407,13 @@ class AgentRunner:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     future.cancel()
-                    raise AgentTimeoutError(
-                        f"子代理 {name} 执行超时（{effective_timeout:g}s）"
-                    )
+                    raise AgentTimeoutError(f"子代理 {name} 执行超时（{effective_timeout:g}s）")
                 if future.done():
-                    response = future.result()
+                    result = future.result()
                     break
                 stopped.wait(min(0.05, remaining))
-            data = _parse_json_object(response.text)
-            try:
-                validate_json_schema(data, definition.output_schema)
-            except AgentInputError as exc:
-                raise AgentOutputError(str(exc)) from exc
-            result = AgentRunResult(
-                agent=name,
-                data=data,
-                raw_text=response.text,
-                usage=response.usage.to_dict(),
-                model=response.model or runtime["model"],
-                metadata={
-                    "model_profile": definition.model_profile,
-                    "execution": definition.execution,
-                    "write_policy": definition.write_policy,
-                    "task_id": task_id,
-                },
-            )
+            if not isinstance(result, AgentRunResult):
+                raise AgentRunError(f"子代理 {name} executor 必须返回 AgentRunResult")
             _event(
                 event_callback,
                 agent=name,

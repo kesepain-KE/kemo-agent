@@ -1,3 +1,9 @@
+# history_search
+搜索当前用户已提交对话窗口中的用户与助手文本。不会读取思考记录或工具日志。
+
+## Tool
+
+```json
 {
   "name": "history_search",
   "description": "搜索当前用户已提交对话窗口中的用户与助手文本。不会读取思考记录或工具日志。",
@@ -23,3 +29,4 @@
   "enabled": true,
   "entrypoint": "tool.py:run"
 }
+```

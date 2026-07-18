@@ -53,6 +53,7 @@ users/*/file_upload/
 users/*/history/
 users/*/improve/
 users/*/knowledge/
+users/*/agents/
 users/*/message_state/
 users/*/task_cron/
 users/*/task_plan/
@@ -61,3 +62,11 @@ users/*/user_config.json
 users/*/user_soul.md
 users/*/memory_temporary_important.md
 users/*/*.txt
+
+# Template prompt-source layout remains versioned.
+!users/_template/task_plan/
+!users/_template/task_plan/.gitkeep
+!users/_template/user_skills/
+!users/_template/user_skills/.gitkeep
+!users/_template/agents/
+!users/_template/agents/.gitkeep

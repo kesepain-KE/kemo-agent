@@ -97,7 +97,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
     def test_discovery_order_lookup_disabled_and_manifest_validation(self) -> None:
         registry = discover_agents(self.root)
         self.assertEqual(list(registry.agents), sorted(registry.agents, key=str.casefold))
-        self.assertEqual(registry.get("context_manage").instruction_file, "上下文管理.txt")
+        self.assertEqual(registry.get("context_manage").instruction_file, "AGENT.md")
 
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

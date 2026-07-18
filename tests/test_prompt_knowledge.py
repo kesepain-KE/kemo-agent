@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from plugins.knowledge_search.tool import run as knowledge_search
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request
-from run.knowledge import build_index, select_knowledge
+from run.knowledge import build_index, select_knowledge, select_knowledge_index
 from run.prompt import build_system_prompt
 
 
@@ -74,10 +75,8 @@ class PromptKnowledgeTests(unittest.TestCase):
             root,
             "alice",
             config,
-            memory_text="MEMORY",
-            knowledge_text="KNOWLEDGE",
         )
-        ordered = ["GLOBAL", "USER", "AGENTS", "HOT", "MEMORY", "KNOWLEDGE"]
+        ordered = ["USER", "GLOBAL", "AGENTS", "HOT"]
         offsets = [prompt.index(item) for item in ordered]
         self.assertEqual(offsets, sorted(offsets))
 
@@ -126,8 +125,11 @@ class PromptKnowledgeTests(unittest.TestCase):
 
     def test_engine_injects_knowledge_and_reports_source(self) -> None:
         _, root, _ = self.make_root()
+        (root / "users" / "alice" / "knowledge" / "data_structure.md").write_text(
+            "# Project Alpha Index\nproject alpha index entry", "utf-8"
+        )
         (root / "users" / "alice" / "knowledge" / "project.md").write_text(
-            "# Project Alpha\nproject alpha uses event streams", "utf-8"
+            "ORDINARY_BODY_MUST_NOT_BE_INJECTED", "utf-8"
         )
         seen: list[list[dict]] = []
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -141,8 +143,71 @@ class PromptKnowledgeTests(unittest.TestCase):
                 root=root,
                 provider_factory=lambda _: MockProvider(seen),
             )
-        self.assertIn("Project Alpha", seen[0][0]["content"])
-        self.assertEqual(result["knowledge"]["documents"][0]["path"], "project.md")
+        self.assertIn("Project Alpha Index", seen[0][0]["content"])
+        self.assertNotIn("ORDINARY_BODY_MUST_NOT_BE_INJECTED", seen[0][0]["content"])
+        self.assertEqual(result["knowledge"]["documents"][0]["path"], "data_structure.md")
+
+    def test_prompt_knowledge_selection_only_reads_index_names(self) -> None:
+        _, root, _ = self.make_root()
+        (root / "users" / "alice" / "knowledge" / "INDEX.MD").write_text("USER INDEX", "utf-8")
+        (root / "users" / "alice" / "knowledge" / "body.md").write_text("BODY", "utf-8")
+        (root / "shared_knowledge" / "目录.md").write_text("SHARED INDEX", "utf-8")
+        (root / "global_knowledge" / "索引.md").write_text("GLOBAL INDEX", "utf-8")
+        selection = select_knowledge_index(root, "alice", max_chars=1000)
+        self.assertEqual([item.scope for item in selection.documents], ["user", "shared", "global"])
+        self.assertNotIn("BODY", selection.text)
+
+    def test_user_knowledge_switches_control_prompt_retrieval_and_tool_scopes(self) -> None:
+        _, root, config = self.make_root()
+        (root / "users" / "alice" / "knowledge" / "data_structure.md").write_text(
+            "USER_SCOPE_TOKEN", "utf-8"
+        )
+        (root / "shared_knowledge" / "data_structure.md").write_text(
+            "SHARED_SCOPE_TOKEN", "utf-8"
+        )
+        (root / "global_knowledge" / "data_structure.md").write_text(
+            "GLOBAL_SCOPE_TOKEN", "utf-8"
+        )
+        config["knowledge"].update({"use_shared": False, "use_global": True})
+        prompt = build_system_prompt(root, "alice", config)
+        self.assertIn("USER_SCOPE_TOKEN", prompt)
+        self.assertNotIn("SHARED_SCOPE_TOKEN", prompt)
+        self.assertIn("GLOBAL_SCOPE_TOKEN", prompt)
+        selected = select_knowledge(root, "alice", "scope_token", config)
+        self.assertNotIn("shared", [item.scope for item in selected.documents])
+
+        tool_result = knowledge_search(
+            "scope_token",
+            context={
+                "root": str(root),
+                "user": "alice",
+                "knowledge_enabled": True,
+                "knowledge_scopes": ["user", "global"],
+            },
+        )
+        self.assertEqual(tool_result["effective_scopes"], ["global", "user"])
+        self.assertNotIn("shared", [item["scope"] for item in tool_result["matches"]])
+
+    def test_knowledge_disabled_produces_empty_prompt_retrieval_and_tool_results(self) -> None:
+        _, root, config = self.make_root()
+        (root / "global_knowledge" / "data_structure.md").write_text(
+            "DISABLED_KNOWLEDGE_TOKEN", "utf-8"
+        )
+        config["knowledge"]["enabled"] = False
+        prompt = build_system_prompt(root, "alice", config)
+        self.assertNotIn("DISABLED_KNOWLEDGE_TOKEN", prompt)
+        self.assertEqual(select_knowledge(root, "alice", "disabled_knowledge_token", config).text, "")
+        result = knowledge_search(
+            "disabled_knowledge_token",
+            context={
+                "root": str(root),
+                "user": "alice",
+                "knowledge_enabled": False,
+                "knowledge_scopes": ["user", "shared", "global"],
+            },
+        )
+        self.assertEqual(result["effective_scopes"], [])
+        self.assertEqual(result["matches"], [])
 
 
 if __name__ == "__main__":

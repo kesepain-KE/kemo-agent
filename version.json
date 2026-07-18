@@ -1,0 +1,60 @@
+{
+  "name": "kemo-agent",
+  "version": "0.1.0-dev",
+  "schema_version": 1,
+
+  "components": {
+    "agent": {
+      "version": "0.1.0-dev",
+      "description": "kemo-agent framework core"
+    },
+    "plugins": {
+      "version": "0.1.0-dev",
+      "count": 9,
+      "description": "Executable tool plugins"
+    },
+    "agents": {
+      "version": "0.1.0-dev",
+      "count": 6,
+      "description": "Sub-agent manifests"
+    },
+    "global_knowledge": {
+      "version": "0.1.0-dev",
+      "count": 3,
+      "description": "Global shared knowledge base"
+    },
+    "global_expand": {
+      "version": "0.1.0-dev",
+      "count": 0,
+      "description": "Global expand injection modules"
+    },
+    "global_sense": {
+      "version": "0.1.0-dev",
+      "count": 1,
+      "description": "Global perception sources"
+    },
+    "config": {
+      "version": "0.1.0-dev",
+      "schema_version": 1,
+      "description": "Global configuration and soul"
+    }
+  },
+
+  "shared_components": {
+    "shared_knowledge": {
+      "version": "0.1.0-dev",
+      "count": 1,
+      "description": "Shared knowledge base"
+    },
+    "shared_expand": {
+      "version": "0.1.0-dev",
+      "count": 0,
+      "description": "Shared expand injection modules"
+    },
+    "shared_skills": {
+      "version": "0.1.0-dev",
+      "count": 0,
+      "description": "Shared instructional skills"
+    }
+  }
+}

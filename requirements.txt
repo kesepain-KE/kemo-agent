@@ -1,0 +1,8 @@
+# kemo-agent 核心依赖
+# Web 后端: FastAPI + Pydantic + Uvicorn
+
+fastapi>=0.110.0
+pydantic>=2.0.0
+uvicorn>=0.27.0
+itsdangerous>=2.2.0
+tavily-python>=0.7.0

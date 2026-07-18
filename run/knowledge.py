@@ -7,6 +7,9 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from run.prompt_sources import iter_files, read_required_text, truncate_chars
+from run.source_policy import MainAgentSourcePolicy
+
 
 _TEXT_SUFFIXES = frozenset({".md", ".txt", ".json"})
 _ASCII_WORD = re.compile(r"[A-Za-z0-9_./-]{2,}")
@@ -29,8 +32,78 @@ class KnowledgeSelection:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class KnowledgeIndexSelection:
+    documents: tuple[KnowledgeDocument, ...]
+    text: str
+    original_chars: int
+    injected_chars: int
+    original_items: int
+    injected_items: int
+    truncated: bool
+
+
 class KnowledgeError(RuntimeError):
     pass
+
+
+def select_knowledge_index(
+    root: Path,
+    user: str,
+    *,
+    max_chars: int,
+    mode: str = "full",
+    scopes: tuple[str, ...] = ("user", "shared", "global"),
+) -> KnowledgeIndexSelection:
+    """Select only named index files in user → shared → global order."""
+
+    if mode != "full":
+        raise KnowledgeError(f"knowledge_index 注入模式暂不支持：{mode}")
+    if max_chars == 0:
+        return KnowledgeIndexSelection((), "", 0, 0, 0, 0, False)
+    available_scopes = (
+        ("user", root / "users" / user / "knowledge"),
+        ("shared", root / "shared_knowledge"),
+        ("global", root / "global_knowledge"),
+    )
+    documents: list[KnowledgeDocument] = []
+    pieces: list[str] = []
+    offsets: list[int] = []
+    used = 0
+    allowed_scopes = set(scopes)
+    for scope, base in available_scopes:
+        if scope not in allowed_scopes:
+            continue
+        for path in iter_files(base, names=_INDEX_NAMES):
+            content = read_required_text(path)
+            if not content:
+                continue
+            relative = path.relative_to(base).as_posix()
+            document = KnowledgeDocument(
+                scope=scope,
+                path=path,
+                relative_path=relative,
+                title=_title(path, content),
+                content=content,
+            )
+            piece = f"[{scope}:{relative}]\n{content}"
+            offsets.append(used + (2 if pieces else 0))
+            pieces.append(piece)
+            documents.append(document)
+            used += len(piece) + (2 if len(pieces) > 1 else 0)
+    full_text = "\n\n".join(pieces)
+    text, truncated = truncate_chars(full_text, max_chars)
+    injected_count = sum(offset < len(text) for offset in offsets)
+    injected_documents = tuple(documents[:injected_count])
+    return KnowledgeIndexSelection(
+        injected_documents,
+        text,
+        len(full_text),
+        len(text),
+        len(documents),
+        injected_count,
+        truncated,
+    )
 
 
 def _terms(text: str) -> set[str]:
@@ -81,15 +154,22 @@ def _iter_documents(base: Path, scope: str, *, max_file_chars: int) -> Iterable[
         )
 
 
-def build_index(root: Path, user: str, *, max_file_chars: int = 20000) -> tuple[KnowledgeDocument, ...]:
+def build_index(
+    root: Path,
+    user: str,
+    *,
+    scopes: Iterable[str] = ("user", "shared", "global"),
+    max_file_chars: int = 20000,
+) -> tuple[KnowledgeDocument, ...]:
     """Build an in-memory index ordered by user, shared, then global scope."""
+    allowed = set(scopes)
     user_base = root / "users" / user / "knowledge"
     shared_base = root / "shared_knowledge"
     global_base = root / "global_knowledge"
     return tuple(
-        [*_iter_documents(user_base, "user", max_file_chars=max_file_chars)]
-        + [*_iter_documents(shared_base, "shared", max_file_chars=max_file_chars)]
-        + [*_iter_documents(global_base, "global", max_file_chars=max_file_chars)]
+        ([*_iter_documents(user_base, "user", max_file_chars=max_file_chars)] if "user" in allowed else [])
+        + ([*_iter_documents(shared_base, "shared", max_file_chars=max_file_chars)] if "shared" in allowed else [])
+        + ([*_iter_documents(global_base, "global", max_file_chars=max_file_chars)] if "global" in allowed else [])
     )
 
 
@@ -100,7 +180,8 @@ def select_knowledge(
     config: dict,
 ) -> KnowledgeSelection:
     knowledge_config = config.get("knowledge") or {}
-    if not bool(knowledge_config.get("enabled", True)) or not query.strip():
+    source_policy = MainAgentSourcePolicy.from_config(config)
+    if not source_policy.knowledge_enabled or not query.strip():
         return KnowledgeSelection((), "")
     max_items = max(0, int(knowledge_config.get("max_items", 4)))
     max_chars = max(0, int(knowledge_config.get("max_chars", 4000)))
@@ -113,7 +194,12 @@ def select_knowledge(
     if not query_terms:
         return KnowledgeSelection((), "")
     ranked: list[tuple[int, int, str, KnowledgeDocument]] = []
-    for document in build_index(root, user, max_file_chars=max_file_chars):
+    for document in build_index(
+        root,
+        user,
+        scopes=source_policy.knowledge_scopes,
+        max_file_chars=max_file_chars,
+    ):
         title_terms = _terms(f"{document.title} {document.relative_path}")
         content_terms = _terms(document.content)
         title_hits = len(query_terms & title_terms)

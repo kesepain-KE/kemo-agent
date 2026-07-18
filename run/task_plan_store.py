@@ -7,9 +7,12 @@ import os
 import re
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from run.prompt_sources import natural_path_key, relative_path, truncate_chars
 
 SCHEMA_VERSION = 1
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{8}$")
@@ -47,6 +50,17 @@ class PlanValidationError(PlanError):
 
 class PlanConflictError(PlanError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPlanSelection:
+    text: str
+    source_files: tuple[str, ...]
+    original_chars: int
+    injected_chars: int
+    original_items: int
+    injected_items: int
+    truncated: bool
 
 
 def _now() -> str:
@@ -325,3 +339,74 @@ class PlanStore:
                     _atomic_write(path, data)
                     recovered.append(data.get("plan_id", path.stem))
         return recovered
+
+
+def _prompt_step(step: dict[str, Any]) -> str:
+    description = step.get("description") or step.get("title") or "未命名步骤"
+    status = str(step.get("status") or "pending")
+    if status == "completed":
+        return f"- [x] {description} ✓"
+    return f"- [ ] {description}（{status}）"
+
+
+def select_prompt_plans(root: Path, user: str, *, max_chars: int) -> TaskPlanSelection:
+    """Read unfinished plans without changing the persisted plan state machine."""
+
+    if max_chars == 0:
+        return TaskPlanSelection("", (), 0, 0, 0, 0, False)
+    directory = _plan_dir(root, user)
+    if not directory.is_dir():
+        return TaskPlanSelection("", (), 0, 0, 0, 0, False)
+    paths = list(directory.glob("plan_*.json"))
+    paths.sort(key=lambda path: natural_path_key(path.name))
+    status_map = {
+        "pending": "pending",
+        "approved": "active",
+        "running": "active",
+        "paused": "active",
+        "completed": "completed",
+        "failed": "aborted",
+        "cancelled": "aborted",
+    }
+    pieces: list[str] = []
+    selected_paths: list[str] = []
+    offsets: list[int] = []
+    used = 0
+    for path in paths:
+        try:
+            data = json.loads(path.read_text("utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise PlanError(f"计划文件损坏：{path}（{exc}）") from exc
+        if not isinstance(data, dict):
+            raise PlanError(f"计划文件根节点必须是对象：{path}")
+        mapped = status_map.get(str(data.get("status") or ""))
+        if mapped is None:
+            raise PlanError(f"计划状态无效：{path}")
+        if mapped in {"completed", "aborted"}:
+            continue
+        title = str(data.get("title") or data.get("plan_id") or path.stem)
+        description = str(data.get("description") or "").strip()
+        lines = [f"[plan:{data.get('plan_id') or path.stem}]", f"title: {title}", f"status: {mapped}"]
+        if description:
+            lines.append(f"description: {description}")
+        steps = data.get("steps") or []
+        if not isinstance(steps, list):
+            raise PlanError(f"计划 steps 必须是数组：{path}")
+        lines.extend(_prompt_step(step) for step in steps if isinstance(step, dict))
+        piece = "\n".join(lines)
+        offsets.append(used + (2 if pieces else 0))
+        pieces.append(piece)
+        selected_paths.append(relative_path(path, root))
+        used += len(piece) + (2 if len(pieces) > 1 else 0)
+    full_text = "\n\n".join(pieces)
+    text, truncated = truncate_chars(full_text, max_chars)
+    injected_count = sum(offset < len(text) for offset in offsets)
+    return TaskPlanSelection(
+        text=text,
+        source_files=tuple(selected_paths[:injected_count]),
+        original_chars=len(full_text),
+        injected_chars=len(text),
+        original_items=len(pieces),
+        injected_items=injected_count,
+        truncated=truncated,
+    )

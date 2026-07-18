@@ -74,8 +74,8 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(second["text"], "reply:two")
         roles = [message["role"] for message in seen[1]]
         self.assertEqual(roles, ["system", "user", "assistant", "user"])
-        self.assertLess(seen[1][0]["content"].index("GLOBAL"), seen[1][0]["content"].index("USER"))
-        self.assertLess(seen[1][0]["content"].index("USER"), seen[1][0]["content"].index("AGENTS"))
+        self.assertLess(seen[1][0]["content"].index("USER"), seen[1][0]["content"].index("GLOBAL"))
+        self.assertLess(seen[1][0]["content"].index("GLOBAL"), seen[1][0]["content"].index("AGENTS"))
         path = find_window(root, "alice", "cli", "s1")
         window = load_window(path)
         self.assertEqual(window["data"]["rounds"], 2)

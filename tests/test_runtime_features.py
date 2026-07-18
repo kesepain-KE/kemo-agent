@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -16,7 +17,7 @@ from events import RunEvent
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.engine import compress_context, context_status, handle_request, iter_request_events
 from run.history import find_window, load_window
-from run.tools import ToolError, discover_tools, execute_tool
+from run.tools import discover_tools, execute_tool
 
 
 class ScriptedProvider:
@@ -71,32 +72,32 @@ class RuntimeFeatureTests(unittest.TestCase):
     def write_tool(self, base: Path, name: str, source_value: str, *, enabled: bool = True, async_tool: bool = False) -> None:
         directory = base / name
         directory.mkdir(parents=True)
-        (directory / "tool.json").write_text(
-            json.dumps(
-                {
-                    "name": name,
-                    "description": source_value,
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"value": {"type": "string"}},
-                        "required": ["value"],
-                        "additionalProperties": False,
-                    },
-                    "version": "1.0.0",
-                    "enabled": enabled,
-                    "entrypoint": "tool.py:run",
-                }
-            ),
+        manifest = {
+            "name": name,
+            "description": source_value,
+            "input_schema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            "version": "1.0.0",
+            "enabled": enabled,
+            "entrypoint": "tool.py:run",
+        }
+        (directory / "SKILL.md").write_text(
+            f"# {name}\n{source_value}\n\n## Tool\n\n```json\n"
+            f"{json.dumps(manifest, ensure_ascii=False)}\n```\n",
             "utf-8",
         )
         prefix = "async " if async_tool else ""
         await_line = "    await __import__('asyncio').sleep(0)\n" if async_tool else ""
         (directory / "tool.py").write_text(
-            f"{prefix}def run(value, *, context):\n{await_line}    return {{'value': value, 'source': '{source_value}', 'user': context['user']}}\n",
+            f"{prefix}def run(value, *, context):\n{await_line}    return {{'value': value, 'source': '{source_value}', 'user': context['user'], 'knowledge_enabled': context.get('knowledge_enabled'), 'knowledge_scopes': context.get('knowledge_scopes')}}\n",
             "utf-8",
         )
 
-    def test_four_level_override_and_disabled_lookup(self) -> None:
+    def test_only_plugins_supply_executable_tools(self) -> None:
         _, root = self.make_root()
         locations = [
             root / "plugins",
@@ -108,11 +109,10 @@ class RuntimeFeatureTests(unittest.TestCase):
             self.write_tool(location, "same", f"level-{index}", enabled=index != 3)
         registry = discover_tools(root, "alice")
         chosen = registry.tools["same"]
-        self.assertEqual(chosen.source, "user_create")
-        self.assertEqual(len(chosen.overrides), 3)
-        self.assertFalse(chosen.enabled)
-        with self.assertRaises(ToolError):
-            registry.get("same")
+        self.assertEqual(chosen.source, "plugins")
+        self.assertEqual(chosen.overrides, [])
+        self.assertTrue(chosen.enabled)
+        self.assertIs(registry.get("same"), chosen)
 
     def test_sync_and_async_tool_execution(self) -> None:
         _, root = self.make_root()
@@ -125,6 +125,87 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(sync["source"], "sync")
         self.assertEqual(async_result["source"], "async")
 
+    def test_main_tool_context_receives_effective_knowledge_policy(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "policy_probe", "probe")
+        user_config = root / "users" / "alice" / "user_config.json"
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("enabled", "policy_probe", {"value": "a"})],
+                    finish_reason="tool_calls",
+                    usage=Usage(),
+                ),
+                ChatResponse(text="enabled done", usage=Usage()),
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("disabled", "policy_probe", {"value": "b"})],
+                    finish_reason="tool_calls",
+                    usage=Usage(),
+                ),
+                ChatResponse(text="disabled done", usage=Usage()),
+            ]
+        )
+
+        user_config.write_text(
+            json.dumps(
+                {
+                    "knowledge": {
+                        "enabled": True,
+                        "use_shared": False,
+                        "use_global": True,
+                    }
+                }
+            ),
+            "utf-8",
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            enabled_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "knowledge-enabled",
+                        "prompt": "probe",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+            user_config.write_text(
+                json.dumps({"knowledge": {"enabled": False}}),
+                "utf-8",
+            )
+            disabled_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "knowledge-disabled",
+                        "prompt": "probe",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        enabled_result = next(
+            event.result["result"]
+            for event in enabled_events
+            if event.type == "tool_call_result"
+        )
+        disabled_result = next(
+            event.result["result"]
+            for event in disabled_events
+            if event.type == "tool_call_result"
+        )
+        self.assertTrue(enabled_result["knowledge_enabled"])
+        self.assertEqual(enabled_result["knowledge_scopes"], ["user", "global"])
+        self.assertFalse(disabled_result["knowledge_enabled"])
+        self.assertEqual(disabled_result["knowledge_scopes"], [])
+
     def test_tool_loop_and_transaction_commit(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
@@ -134,9 +215,25 @@ class RuntimeFeatureTests(unittest.TestCase):
                     text="",
                     tool_calls=[ToolCall(id="c1", name="lookup", arguments={"value": "x"})],
                     finish_reason="tool_calls",
-                    usage=Usage(1, 1, 2, source="mock"),
+                    usage=Usage(
+                        1,
+                        1,
+                        2,
+                        source="mock",
+                        extra={"prompt_tokens_details": {"cached_tokens": 1}},
+                    ),
                 ),
-                ChatResponse(text="final", usage=Usage(2, 2, 4, source="mock"), finish_reason="stop"),
+                ChatResponse(
+                    text="final",
+                    usage=Usage(
+                        2,
+                        2,
+                        4,
+                        source="mock",
+                        extra={"cached_prompt_tokens": 1},
+                    ),
+                    finish_reason="stop",
+                ),
             ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -156,7 +253,57 @@ class RuntimeFeatureTests(unittest.TestCase):
         window = load_window(path)
         self.assertEqual(window["text"]["messages"][-1]["content"], "final")
         self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["status"], "completed")
+        self.assertGreaterEqual(window["tool"]["rounds"][0]["calls"][0]["elapsed_ms"], 0)
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 6)
+        self.assertEqual(window["data"]["token_usage"]["cached_prompt_tokens"], 2)
+        self.assertEqual(window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1)
+        done = events[-1]
+        self.assertEqual(done.usage["cached_prompt_tokens"], 2)
+        self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
+        self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
+
+    def test_runtime_guidance_is_injected_at_tool_boundary_and_persisted(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        guidance: queue.Queue[str] = queue.Queue()
+        guidance.put("focus on the revised target")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("g1", "lookup", {"value": "x"})],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="guided", usage=Usage()),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "guided",
+                    "prompt": "start",
+                    "run_id": "run_guided_test",
+                    "_guidance_queue": guidance,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        guidance_messages = [
+            item["content"]
+            for item in provider.requests[1].messages
+            if item.get("role") == "user" and "运行中引导" in item.get("content", "")
+        ]
+        self.assertEqual(len(guidance_messages), 1)
+        self.assertIn("focus on the revised target", guidance_messages[0])
+        self.assertEqual(result["guidance_count"], 1)
+        self.assertEqual(result["run_id"], "run_guided_test")
+        window = load_window(find_window(root, "alice", "cli", "guided"))
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["guidance"],
+            ["focus on the revised target"],
+        )
 
     def test_error_and_cancel_do_not_commit(self) -> None:
         _, root = self.make_root(stream=True)

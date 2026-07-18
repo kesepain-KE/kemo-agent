@@ -142,6 +142,32 @@ class ConfigAndHistoryTests(unittest.TestCase):
         self.assertEqual(provider["api_key"], "runtime-secret")
         self.assertEqual(provider["base_url"], "https://api.openai.com/v1")
 
+    def test_provider_base_url_environment_fallback_and_explicit_precedence(self) -> None:
+        env = {
+            "KEMO_BASE_URL": "http://kemo-env.test/gateway/",
+            "OPENAI_BASE_URL": "https://openai-env.test/v1/",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            kemo = provider_runtime_config(
+                {"provider": {"type": "kemo", "model": "test", "api_key": "key"}}
+            )
+            openai = provider_runtime_config(
+                {"provider": {"type": "openai", "model": "test", "api_key": "key"}}
+            )
+            explicit = provider_runtime_config(
+                {
+                    "provider": {
+                        "type": "kemo",
+                        "base_url": "http://explicit.test/v1/",
+                        "model": "test",
+                        "api_key": "key",
+                    }
+                }
+            )
+        self.assertEqual(kemo["base_url"], "http://kemo-env.test/gateway/v1")
+        self.assertEqual(openai["base_url"], "https://openai-env.test/v1")
+        self.assertEqual(explicit["base_url"], "http://explicit.test/v1")
+
     def test_history_isolates_users_sources_and_sessions(self) -> None:
         _, root = self.make_root()
         alice_cli_path, alice_cli = get_or_create_window(root, "alice", "cli", "default")

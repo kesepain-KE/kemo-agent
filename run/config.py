@@ -111,7 +111,11 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     if not model:
         raise ConfigError(f"Provider 模型未设置；请配置 provider.model 或 {model_env}")
 
-    base_url = str(provider.get("base_url") or "").strip().rstrip("/")
+    base_url_env = "KEMO_BASE_URL" if provider_type == "kemo" else "OPENAI_BASE_URL"
+    base_url = str(provider.get("base_url") or "").strip()
+    if not base_url:
+        base_url = os.getenv(base_url_env, "").strip()
+    base_url = base_url.rstrip("/")
     if not base_url:
         base_url = (
             "http://127.0.0.1:8741/v1"

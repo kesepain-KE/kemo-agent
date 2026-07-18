@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "exposure": {"mode": "internal", "allowed_callers": ["scheduler"]},
+  "tools": {"plugins": {"allow": []}, "max_iterations": 1},
+  "prompt_sources": {"skills": {"shared": [], "user": []}, "expand": {"global": [], "shared": [], "user": []}},
+  "knowledge": {"scopes": [], "index_enabled": false, "body_access": "none", "max_index_chars": 0},
+  "context": {"inherit_main_history": false, "inherit_current_request": false}
+}

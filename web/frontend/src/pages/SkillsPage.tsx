@@ -12,6 +12,11 @@ const layerLabels: Record<string, string> = {
   user: '用户层', shared: '共享层', core: '基础插件',
 }
 
+function policyLabel(mode: 'all' | 'allowlist' | undefined, names: string[] | undefined) {
+  if (!mode) return '—'
+  return mode === 'all' ? '全量启用' : `白名单：${names?.join('、') || '无'}`
+}
+
 export function SkillsPage() {
   const { user } = useOutletContext<ShellOutletContext>()
   const [layer, setLayer] = useState<Layer>('all')
@@ -30,22 +35,30 @@ export function SkillsPage() {
     <ModuleFrame
       kicker="Capability Registry"
       title="技能中心"
-      description="按用户层、共享层与基础插件展示当前工具注册结果；Web 仅负责观察，不修改本地技能文件。"
+      description="分别展示可执行插件与 Prompt 技能库存；用户白名单只过滤主智能体的共享/用户技能，不改变注册结果。"
       actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />刷新注册表</button>}
     >
       {query.isError && <ModuleError />}
       <section className="metric-strip">
         <MetricCard label="已注册" value={data?.summary.registered ?? '—'} detail="工具清单" symbol={<Boxes size={16} />} />
         <MetricCard label="已启用" value={data?.summary.enabled ?? '—'} detail="可供 Run 调用" symbol={<ShieldCheck size={16} />} tone="success" />
-        <MetricCard label="用户层" value={data?.summary.user ?? '—'} detail={`users/${user}/user_skills`} symbol={<UserRound size={16} />} />
+        <MetricCard label="Prompt 技能" value={data ? `${data.prompt_summary.active}/${data.prompt_summary.registered}` : '—'} detail="主智能体启用 / 已注册" symbol={<UserRound size={16} />} />
         <MetricCard label="基础插件" value={data?.summary.core ?? '—'} detail="plugins 目录" symbol={<Wrench size={16} />} />
       </section>
 
       <section className="layer-strip">
-        <article className="layer-card"><small>用户层</small><strong>当前用户技能</strong><p>由智能体或用户在当前用户目录创建，具有最高覆盖优先级。</p></article>
-        <article className="layer-card"><small>共享层</small><strong>工作区共享技能</strong><p>多个用户可按权限共同调用，适合作为公共能力集合。</p></article>
-        <article className="layer-card"><small>基础层</small><strong>内置插件注册表</strong><p>由项目 plugins 目录提供，更新时可被项目版本维护。</p></article>
+        <article className="layer-card"><small>用户技能策略</small><strong>{policyLabel(data?.source_policy.skills.user.mode, data?.source_policy.skills.user.names)}</strong><p>只影响当前用户的主智能体；不会限制子代理自己的授权。</p></article>
+        <article className="layer-card"><small>共享技能策略</small><strong>{policyLabel(data?.source_policy.skills.shared.mode, data?.source_policy.skills.shared.names)}</strong><p>空白名单表示全量启用；非空列表按相对技能 ID 精确匹配。</p></article>
+        <article className="layer-card"><small>基础插件</small><strong>独立工具注册表</strong><p>插件是否可执行由工具系统控制，不使用 Prompt 技能白名单。</p></article>
       </section>
+
+      {data?.prompt_skills.length ? <section className="skill-grid">
+        {data.prompt_skills.map((skill) => <article className="skill-card" key={`${skill.scope}:${skill.name}`}>
+          <div className="skill-card-top"><span className="skill-mark">{skill.title.slice(0, 2).toUpperCase()}</span><StatusChip status={skill.active_for_main_agent ? 'enabled' : 'paused'}>{skill.active_for_main_agent ? '主智能体已启用' : '已过滤'}</StatusChip></div>
+          <h3>{skill.title}</h3><p>{skill.description || skill.name}</p>
+          <div className="skill-meta"><span className="skill-tag">{layerLabels[skill.scope]}</span><span>{skill.name}</span></div>
+        </article>)}
+      </section> : null}
 
       <div className="module-toolbar">
         <div className="module-tabs">

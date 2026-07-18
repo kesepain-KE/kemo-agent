@@ -1,9 +1,13 @@
 import { z } from 'zod'
 import type {
   ApiErrorPayload,
+  AuthStatusResponse,
+  ConfigFullResponse,
   HistoryResponse,
   KnowledgeResponse,
+  MemorySummaryResponse,
   OverviewResponse,
+  PromptDiagnosticsResponse,
   RunEvent,
   SenseResponse,
   SessionsResponse,
@@ -14,6 +18,8 @@ import type {
 } from '../types/api'
 
 const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+
+export const AUTH_REQUIRED_EVENT = 'kemo-auth-required'
 
 export class ApiError extends Error {
   constructor(
@@ -26,7 +32,10 @@ export class ApiError extends Error {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, init)
+  const response = await fetch(`${apiBase}${path}`, {
+    credentials: 'same-origin',
+    ...init,
+  })
   if (!response.ok) {
     let payload: ApiErrorPayload | undefined
     try {
@@ -34,11 +43,19 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       payload = undefined
     }
-    throw new ApiError(
+    const error = new ApiError(
       payload?.error?.message || `请求失败（${response.status}）`,
       response.status,
       payload?.error?.code,
     )
+    if (
+      response.status === 401
+      && error.code === 'authentication_required'
+      && typeof window !== 'undefined'
+    ) {
+      window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT))
+    }
+    throw error
   }
   return (await response.json()) as T
 }
@@ -83,6 +100,33 @@ export async function getHistory(user: string, sessionId: string): Promise<Histo
   )
 }
 
+export async function getAuthStatus(): Promise<AuthStatusResponse> {
+  return requestJson('/api/auth/status')
+}
+
+export async function bootstrapAuth(token: string): Promise<AuthStatusResponse> {
+  return requestJson('/api/auth/bootstrap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  })
+}
+
+export async function loginAuth(
+  username: string,
+  password: string,
+): Promise<AuthStatusResponse> {
+  return requestJson('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+}
+
+export async function logoutAuth(): Promise<{ authenticated: boolean }> {
+  return requestJson('/api/auth/logout', { method: 'POST' })
+}
+
 export async function getOverview(user: string, sessionId = ''): Promise<OverviewResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`)
@@ -108,12 +152,49 @@ export async function getSettings(user: string): Promise<SettingsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/settings`)
 }
 
+export async function getUserConfig(user: string): Promise<ConfigFullResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/config/full`)
+}
+
+export async function getPromptDiagnostics(user: string): Promise<PromptDiagnosticsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/prompt/sections`)
+}
+
+export async function getMemorySummary(user: string): Promise<MemorySummaryResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
+}
+
+export async function updateUserConfig(
+  user: string,
+  config: Record<string, unknown>,
+  etag: string,
+): Promise<ConfigFullResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config, etag }),
+  })
+}
+
 export interface StreamChatOptions {
   user: string
   sessionId: string
   prompt: string
+  runId: string
   signal?: AbortSignal
   onEvent: (event: RunEvent) => void
+}
+
+export async function submitGuidance(
+  user: string,
+  runId: string,
+  guidance: string,
+): Promise<{ run_id: string; status: string; queued: number }> {
+  return requestJson(`/api/runs/${encodeURIComponent(runId)}/guidance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, guidance }),
+  })
 }
 
 export interface SseFrame {
@@ -140,11 +221,13 @@ export function parseSseFrames(buffer: string): { frames: SseFrame[]; rest: stri
 export async function streamChat(options: StreamChatOptions): Promise<void> {
   const response = await fetch(`${apiBase}/api/chat`, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({
       user: options.user,
       session_id: options.sessionId,
       prompt: options.prompt,
+      run_id: options.runId,
     }),
     signal: options.signal,
   })

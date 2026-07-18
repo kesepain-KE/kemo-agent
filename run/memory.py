@@ -63,6 +63,20 @@ class MemorySelection:
     chars: int
 
 
+@dataclass(frozen=True, slots=True)
+class TierPromptSelection:
+    tier: str
+    items: tuple[dict[str, Any], ...]
+    text: str
+    selected_ids: tuple[str, ...]
+    original_chars: int
+    injected_chars: int
+    original_items: int
+    injected_items: int
+    truncated: bool
+    source_file: Path
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -440,6 +454,55 @@ class MemoryStore:
             candidate_ids=[item["id"] for item in candidates],
             selected_ids=[item["id"] for item in selected],
             chars=len(text),
+        )
+
+    def select_tier_for_prompt(
+        self,
+        tier: str,
+        *,
+        max_files: int,
+        mode: str = "full",
+    ) -> TierPromptSelection:
+        """Select one complete memory tier without request-dependent retrieval."""
+
+        if tier not in TIERS:
+            raise MemoryError(f"未知记忆档位：{tier}")
+        if mode != "full":
+            raise MemoryConfigError(f"{tier} 记忆注入模式暂不支持：{mode}")
+        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 0:
+            raise MemoryConfigError(f"{tier} 记忆文件上限必须是非负整数")
+        source_file = self.path(tier)
+        if max_files == 0:
+            return TierPromptSelection(tier, (), "", (), 0, 0, 0, 0, False, source_file)
+
+        items = self.load_tier(tier)
+
+        def line(item: dict[str, Any]) -> str:
+            if tier == "permanent":
+                return f"- [{item['id']}] {item['content']}"
+            return f"- [{item['id']}] (weight={item['tier_weight']}) {item['content']}"
+
+        original_text = "\n".join(line(item) for item in items)
+        if len(items) <= max_files:
+            selected = list(items)
+        else:
+            selected = sorted(
+                enumerate(items),
+                key=lambda pair: (-pair[1]["tier_weight"], pair[0]),
+            )
+            selected = [item for _, item in selected[:max_files]]
+        text = "\n".join(line(item) for item in selected)
+        return TierPromptSelection(
+            tier=tier,
+            items=tuple(selected),
+            text=text,
+            selected_ids=tuple(item["id"] for item in selected),
+            original_chars=len(original_text),
+            injected_chars=len(text),
+            original_items=len(items),
+            injected_items=len(selected),
+            truncated=len(selected) < len(items),
+            source_file=source_file,
         )
 
     def mark_used(self, ids: list[str], *, now: datetime | None = None) -> list[str]:

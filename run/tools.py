@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
-import json
 import sys
 import threading
 import uuid
@@ -13,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
 
 
 class ToolError(RuntimeError):
@@ -79,6 +80,7 @@ class ToolDefinition:
 @dataclass(slots=True)
 class ToolRegistry:
     tools: dict[str, ToolDefinition]
+    plugin_manifests: tuple[PluginManifest, ...] = ()
 
     def enabled_tools(self) -> list[ToolDefinition]:
         return [tool for tool in self.tools.values() if tool.enabled]
@@ -95,28 +97,8 @@ class ToolRegistry:
         return tool
 
 
-def _source_dirs(root: Path, user: str) -> list[tuple[str, Path]]:
-    return [
-        ("plugins", root / "plugins"),
-        ("shared_skills", root / "shared_skills"),
-        ("agent_create", root / "users" / user / "user_skills" / "agent_create"),
-        ("user_create", root / "users" / user / "user_skills" / "user_create"),
-    ]
-
-
-def _manifest(path: Path, source: str) -> ToolDefinition:
-    try:
-        raw = json.loads(path.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ToolError(f"工具清单不可读：{path}（{exc}）") from exc
-    if not isinstance(raw, dict):
-        raise ToolError(f"工具清单必须是对象：{path}")
-    required = ("name", "description", "input_schema", "version", "enabled", "entrypoint")
-    missing = [name for name in required if name not in raw]
-    if missing:
-        raise ToolError(f"工具清单缺少字段 {', '.join(missing)}：{path}")
-    if not isinstance(raw["input_schema"], dict) or raw["input_schema"].get("type") != "object":
-        raise ToolError(f"工具 input_schema 必须是 object JSON Schema：{path}")
+def _definition(manifest: PluginManifest) -> ToolDefinition:
+    raw = manifest.tool
     return ToolDefinition(
         name=str(raw["name"]),
         description=str(raw["description"]),
@@ -124,24 +106,21 @@ def _manifest(path: Path, source: str) -> ToolDefinition:
         version=str(raw["version"]),
         enabled=bool(raw["enabled"]),
         entrypoint=str(raw["entrypoint"]),
-        source=source,
-        directory=path.parent,
+        source="plugins",
+        directory=manifest.descriptor.path.parent,
     )
 
 
 def discover_tools(root: Path, user: str) -> ToolRegistry:
-    tools: dict[str, ToolDefinition] = {}
-    for source, base in _source_dirs(root, user):
-        if not base.is_dir():
-            continue
-        manifests = sorted(base.glob("*/tool.json"), key=lambda item: str(item).casefold())
-        for path in manifests:
-            tool = _manifest(path, source)
-            previous = tools.get(tool.name)
-            if previous is not None:
-                tool.overrides = [*previous.overrides, f"{previous.source}:{previous.directory}"]
-            tools[tool.name] = tool
-    return ToolRegistry(tools)
+    """Discover executable tools exclusively from plugins/*/SKILL.md."""
+
+    del user  # The executable-tool surface is intentionally user-independent.
+    try:
+        manifests = discover_plugin_manifests(root)
+    except PluginManifestError as exc:
+        raise ToolError(str(exc)) from exc
+    tools = {manifest.tool["name"]: _definition(manifest) for manifest in manifests}
+    return ToolRegistry(tools, manifests)
 
 
 def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> None:
