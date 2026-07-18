@@ -1,0 +1,167 @@
+.compactItem { position: relative; }
+.compactActive { background: var(--brand-soft) !important; }
+.compactActive strong { color: var(--brand) !important; }
+
+.deleteAllButton {
+  width: calc(100% - 6px);
+  min-height: 34px;
+  margin: 0 3px 8px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--red) 16%, var(--line));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--red-soft) 34%, transparent);
+  color: color-mix(in srgb, var(--red) 72%, var(--muted));
+  font: inherit;
+  font-size: .6875rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+.deleteAllButton:hover:not(:disabled) { border-color: color-mix(in srgb, var(--red) 38%, var(--line)); background: var(--red-soft); color: var(--red); transform: translateY(-1px); }
+.deleteAllButton:disabled { border-color: var(--line); background: color-mix(in srgb, var(--surface-2) 68%, transparent); color: var(--muted-2); cursor: default; opacity: .68; }
+.deleteAllButton small { min-width: 23px; height: 21px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: color-mix(in srgb, currentColor 9%, transparent); color: inherit; font-size: .625rem; }
+
+.expandButton {
+  width: calc(100% - 6px);
+  min-height: 35px;
+  margin: 7px 3px 1px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+  font-size: .6875rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+.expandButton:hover { border-color: color-mix(in srgb, var(--brand) 32%, var(--line)); background: var(--brand-soft); color: var(--brand); }
+.expandButton small { min-width: 23px; height: 21px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: var(--surface-3); color: var(--muted-2); font-size: .625rem; }
+
+.historyLayer,
+.confirmLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  padding: clamp(18px, 5vh, 54px) 18px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, #11131b 34%, transparent);
+  backdrop-filter: blur(8px);
+  animation: layerIn .16s ease-out;
+}
+
+.historyDialog {
+  width: min(720px, 100%);
+  height: min(710px, 82vh);
+  min-height: 420px;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border: 1px solid color-mix(in srgb, var(--line-strong) 80%, transparent);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--surface-elevated) 97%, transparent);
+  color: var(--text);
+  box-shadow: 0 28px 80px rgba(14, 17, 31, .28), inset 0 1px 0 color-mix(in srgb, #fff 64%, transparent);
+  backdrop-filter: blur(22px) saturate(1.06);
+  animation: dialogIn .2s cubic-bezier(.2, .8, .2, 1);
+}
+
+.dialogHeader { min-height: 78px; padding: 18px 20px; display: grid; grid-template-columns: 40px minmax(0, 1fr) 34px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.dialogIcon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 13px; background: var(--brand-soft); color: var(--brand); }
+.dialogHeading { min-width: 0; }
+.dialogHeading strong, .dialogHeading small { display: block; }
+.dialogHeading strong { color: var(--text); font-size: 1rem; letter-spacing: -.15px; }
+.dialogHeading small { margin-top: 4px; color: var(--muted); font-size: .6875rem; }
+.iconButton { width: 34px; height: 34px; border: 0; border-radius: 11px; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.iconButton:hover { background: var(--surface-hover); color: var(--text); }
+
+.searchBox { min-height: 45px; margin: 16px 20px 12px; padding: 0 12px; display: grid; grid-template-columns: 19px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface-2); color: var(--muted-2); transition: border-color .16s ease, box-shadow .16s ease, background .16s ease; }
+.searchBox:focus-within { border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--brand-soft); color: var(--brand); }
+.searchBox input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: .8125rem; }
+.searchBox input:focus-visible { border-color: transparent !important; outline: 0 !important; box-shadow: none !important; }
+.searchBox input::placeholder { color: var(--muted-2); }
+.searchBox button { width: 27px; height: 27px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.searchBox button:hover { background: var(--surface-hover); color: var(--text); }
+
+.historyResults { min-height: 0; margin: 0 10px 12px 14px; padding: 3px 7px 7px 3px; overflow-x: hidden; overflow-y: auto; display: grid; align-content: start; gap: 5px; scrollbar-width: thin; }
+.historyItem { width: 100%; min-height: 64px; padding: 9px 12px; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid transparent; border-radius: 14px; background: transparent; color: var(--text); text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+.historyItem:hover { border-color: var(--line); background: var(--surface-hover); transform: translateY(-1px); }
+.historyItemActive { border-color: color-mix(in srgb, var(--brand) 24%, var(--line)); background: var(--brand-soft); }
+.itemIcon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px; background: var(--surface-3); color: var(--muted); }
+.historyItemActive .itemIcon { background: color-mix(in srgb, var(--brand) 13%, var(--surface)); color: var(--brand); }
+.itemCopy { min-width: 0; }
+.itemCopy strong, .itemCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.itemCopy strong { color: var(--text); font-size: .8125rem; }
+.itemCopy small { margin-top: 4px; color: var(--muted-2); font-family: var(--font-mono); font-size: .625rem; }
+.itemMeta { min-width: 112px; text-align: right; }
+.itemMeta strong, .itemMeta small { display: block; }
+.itemMeta strong { color: var(--muted); font-size: .6875rem; }
+.itemMeta small { margin-top: 4px; color: var(--muted-2); font-size: .625rem; }
+.emptyResult { min-height: 245px; padding: 32px; display: grid; place-items: center; align-content: center; gap: 7px; color: var(--muted-2); text-align: center; }
+.emptyResult strong { margin-top: 4px; color: var(--text); font-size: .8125rem; }
+.emptyResult span { font-size: .6875rem; }
+
+.contextMenu { position: fixed; z-index: 310; width: 180px; padding: 6px; border: 1px solid color-mix(in srgb, var(--line-strong) 84%, transparent); border-radius: 13px; background: color-mix(in srgb, var(--surface-elevated) 97%, transparent); box-shadow: var(--shadow-float); backdrop-filter: blur(18px); animation: menuIn .12s ease-out; }
+.contextMenu button { width: 100%; min-height: 40px; padding: 0 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text-2); font: inherit; font-size: .75rem; text-align: left; cursor: pointer; }
+.contextMenu button:hover { background: var(--surface-hover); color: var(--text); }
+.contextMenu .dangerMenuItem { color: var(--red); }
+.contextMenu .dangerMenuItem:hover { background: var(--red-soft); color: var(--red); }
+
+.confirmLayer { z-index: 330; }
+.confirmDialog { width: min(430px, 100%); padding: 22px; border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent); border-radius: 22px; background: color-mix(in srgb, var(--surface-elevated) 98%, transparent); color: var(--text); box-shadow: 0 28px 80px rgba(14, 17, 31, .3); backdrop-filter: blur(22px); animation: dialogIn .18s cubic-bezier(.2, .8, .2, 1); }
+.confirmIcon { width: 42px; height: 42px; margin-bottom: 14px; display: grid; place-items: center; border-radius: 13px; background: var(--brand-soft); color: var(--brand); }
+.deleteIcon { background: var(--red-soft); color: var(--red); }
+.confirmHeading strong, .confirmHeading span { display: block; }
+.confirmHeading strong { color: var(--text); font-size: 1rem; }
+.confirmHeading span { margin-top: 7px; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+.renameField { position: relative; margin-top: 18px; display: grid; gap: 7px; }
+.renameField > span { color: var(--muted); font-size: .6875rem; font-weight: 700; }
+.renameField input { width: 100%; min-height: 43px; padding: 0 52px 0 12px; border: 1px solid var(--line-strong); border-radius: 11px; outline: 0; background: var(--surface-2); color: var(--text); font: inherit; font-size: .8125rem; }
+.renameField input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.renameField small { position: absolute; right: 11px; bottom: 13px; color: var(--muted-2); font-size: .625rem; }
+.dialogError { margin-top: 12px; padding: 9px 11px; border-radius: 9px; background: var(--red-soft); color: var(--red); font-size: .6875rem; }
+.confirmActions { margin-top: 20px; display: flex; justify-content: flex-end; gap: 9px; }
+.confirmActions button { min-height: 39px; padding: 0 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--text-2); font: inherit; font-size: .75rem; font-weight: 700; cursor: pointer; }
+.confirmActions button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-hover); }
+.confirmActions button:disabled { opacity: .55; cursor: default; }
+.confirmActions .primaryAction { border-color: transparent; background: var(--brand); color: #fff; }
+.confirmActions .primaryAction:hover:not(:disabled) { border-color: transparent; background: var(--brand-2); }
+.confirmActions .deleteAction { border-color: transparent; background: var(--red); color: #fff; }
+.confirmActions .deleteAction:hover:not(:disabled) { border-color: transparent; background: color-mix(in srgb, var(--red) 86%, #000); }
+
+@keyframes layerIn { from { opacity: 0; } }
+@keyframes dialogIn { from { opacity: 0; transform: translateY(8px) scale(.985); } }
+@keyframes menuIn { from { opacity: 0; transform: translateY(-3px) scale(.98); } }
+
+@media (max-width: 620px) {
+  .historyLayer { padding: 10px; align-items: end; }
+  .historyDialog { height: min(760px, calc(100dvh - 20px)); min-height: 0; border-radius: 22px; }
+  .dialogHeader { min-height: 70px; padding: 14px; grid-template-columns: 36px minmax(0, 1fr) 34px; }
+  .dialogIcon { width: 36px; height: 36px; }
+  .searchBox { margin: 12px 14px 9px; }
+  .historyResults { margin: 0 7px 9px 10px; }
+  .historyItem { grid-template-columns: 34px minmax(0, 1fr); min-height: 61px; padding: 8px 9px; gap: 9px; }
+  .itemIcon { width: 34px; height: 34px; }
+  .itemMeta { grid-column: 2; min-width: 0; margin-top: -3px; display: flex; gap: 7px; text-align: left; }
+  .itemMeta strong, .itemMeta small { margin: 0; font-size: .625rem; }
+  .confirmLayer { padding: 12px; }
+  .confirmDialog { padding: 19px; border-radius: 19px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .historyLayer, .historyDialog, .contextMenu, .confirmDialog { animation: none; }
+}
