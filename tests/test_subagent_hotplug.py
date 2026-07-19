@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agents._runtime.user_packages import UserAgentPackageError
 from plugins.subagent_dispatch.tool import run as dispatch
+from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.agent_queue import AgentScheduler
 from run.agent_runner import AgentRunner
@@ -21,6 +22,9 @@ class ScriptedProvider:
     def chat(self, request):
         self.requests.append(request)
         return self.responses.pop(0)
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
 
 
 class SubAgentHotPlugTests(unittest.TestCase):

@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from provider.factory import create_provider
-from provider.schema import ChatRequest, ProviderAuthError, ProviderError
+from provider.protocol.enums import MessageRole, StreamEventType
+from provider.protocol.models import KemoRequest, MessageItem, ToolCallItem, text_from_content
+from provider.schema import ProviderAuthError, ProviderError
 from run.config import (
     ConfigError,
     deep_merge,
@@ -125,7 +127,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
         (root / "users" / "alice" / "user_config.json").write_text(
             json.dumps(
                 {
-                    "provider": {"type": "openai", "model": "user-model"},
+                    "provider": {"type": "chat", "model": "user-model"},
                     "nested": {"b": 9},
                 }
             ),
@@ -139,7 +141,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
         config = load_config("alice", root)
         self.assertEqual(
             config["provider"],
-            {"type": "openai", "model": "user-model"},
+            {"type": "chat", "model": "user-model"},
         )
         self.assertEqual(config["nested"], {"a": 1, "b": 9})
 
@@ -163,13 +165,19 @@ class ConfigAndHistoryTests(unittest.TestCase):
         os.environ.pop("TEST_DOTENV_VALUE", None)
 
     def test_runtime_secret_from_environment(self) -> None:
-        config = {"provider": {"type": "openai", "model": "test", "api_key_env": "UNIT_KEY"}}
+        config = {"provider": {"type": "chat", "model": "test", "api_key_env": "UNIT_KEY"}}
         with patch.dict(os.environ, {"UNIT_KEY": "runtime-secret"}, clear=False):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "runtime-secret")
         self.assertEqual(provider["base_url"], "https://api.openai.com/v1")
         self.assertTrue(provider["stream"])
         self.assertEqual(provider["timeout"], 120.0)
+
+    def test_only_chat_and_kemo_provider_types_are_accepted(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "chat.*kemo"):
+            provider_runtime_config(
+                {"provider": {"type": "openai", "model": "test", "api_key": "key"}}
+            )
 
     def test_inline_api_key_and_multimodal_model_precedence(self) -> None:
         config = {
@@ -202,8 +210,8 @@ class ConfigAndHistoryTests(unittest.TestCase):
             kemo = provider_runtime_config(
                 {"provider": {"type": "kemo", "model": "test", "api_key": "key"}}
             )
-            openai = provider_runtime_config(
-                {"provider": {"type": "openai", "model": "test", "api_key": "key"}}
+            chat = provider_runtime_config(
+                {"provider": {"type": "chat", "model": "test", "api_key": "key"}}
             )
             explicit = provider_runtime_config(
                 {
@@ -215,8 +223,8 @@ class ConfigAndHistoryTests(unittest.TestCase):
                     }
                 }
             )
-        self.assertEqual(kemo["base_url"], "http://kemo-env.test/gateway/v1")
-        self.assertEqual(openai["base_url"], "https://openai-env.test/v1")
+        self.assertEqual(kemo["base_url"], "http://kemo-env.test/gateway")
+        self.assertEqual(chat["base_url"], "https://openai-env.test/v1")
         self.assertEqual(explicit["base_url"], "http://explicit.test/v1")
 
     def test_history_isolates_users_sources_and_sessions(self) -> None:
@@ -249,56 +257,84 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             "timeout": 5,
         }
 
-    def test_kemo_request_and_exact_usage(self) -> None:
-        provider = create_provider(self.config("kemo"))
-        response = provider.chat(ChatRequest(model="mock-model", messages=[{"role": "user", "content": "hello"}]))
-        self.assertEqual(response.text, "mock reply")
-        self.assertFalse(response.usage.estimated)
-        self.assertEqual(response.usage.source, "kemo_gateway")
+    @staticmethod
+    def request(model: str = "mock-model", *, stream: bool = False) -> KemoRequest:
+        return KemoRequest(
+            model=model,
+            stream=stream,
+            system_prompt="",
+            input=[MessageItem.text(MessageRole.USER, "hello")],
+        )
+
+    def test_chat_bridge_request_and_exact_usage(self) -> None:
+        provider = create_provider(self.config("chat"))
+        response = provider.create(self.request())
+        message = next(item for item in response.output if isinstance(item, MessageItem))
+        self.assertEqual(text_from_content(message.content), "mock reply")
+        self.assertTrue(response.usage.measurement.exact)
         self.assertEqual(response.usage.total_tokens, 5)
         request = MockChatHandler.requests[-1]
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(request["authorization"], "Bearer test-key")
 
-    def test_openai_missing_usage_is_marked_estimated(self) -> None:
-        provider = create_provider(self.config("openai", model="no-usage"))
-        response = provider.chat(ChatRequest(model="no-usage", messages=[{"role": "user", "content": "hello world"}]))
-        self.assertTrue(response.usage.estimated)
-        self.assertEqual(response.usage.source, "local_estimate")
-        self.assertGreater(response.usage.total_tokens, 0)
+    def test_chat_missing_usage_is_marked_estimated(self) -> None:
+        provider = create_provider(self.config("chat", model="no-usage"))
+        response = provider.create(self.request("no-usage"))
+        self.assertFalse(response.usage.measurement.exact)
+        self.assertGreater(response.usage.total_tokens or 0, 0)
 
     def test_stream_parsing_and_usage(self) -> None:
-        provider = create_provider(self.config("kemo"))
-        events = list(provider.chat_stream(ChatRequest(model="mock-model", messages=[{"role": "user", "content": "hello"}], stream=True)))
-        self.assertEqual("".join(event.content for event in events if event.type == "text_delta"), "你好")
-        usage = [event.usage for event in events if event.type == "usage"][-1]
+        provider = create_provider(self.config("chat"))
+        events = list(provider.stream(self.request(stream=True)))
+        self.assertEqual(
+            "".join(
+                event.delta or ""
+                for event in events
+                if event.type == StreamEventType.OUTPUT_TEXT_DELTA
+            ),
+            "你好",
+        )
+        usage = [event.usage for event in events if event.type == StreamEventType.USAGE_UPDATED][-1]
         self.assertIsNotNone(usage)
-        self.assertEqual(usage["total_tokens"], 6)
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(usage.total_tokens, 6)
+        self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_stream_tool_arguments_are_joined(self) -> None:
-        provider = create_provider(self.config("kemo", model="tool-stream"))
-        events = list(provider.chat_stream(ChatRequest(model="tool-stream", messages=[], stream=True)))
-        calls = [event for event in events if event.type == "tool_call_start"]
+        provider = create_provider(self.config("chat", model="tool-stream"))
+        events = list(provider.stream(self.request("tool-stream", stream=True)))
+        calls = [event.item for event in events if event.type == StreamEventType.TOOL_CALL_COMPLETED]
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].tool_call_id, "call-1")
-        self.assertEqual(calls[0].tool_name, "history_search")
+        self.assertIsInstance(calls[0], ToolCallItem)
+        self.assertEqual(calls[0].call_id, "call-1")
+        self.assertEqual(calls[0].name, "history_search")
         self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
-        self.assertEqual(events[-2].type, "usage")
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_auth_error_mapping(self) -> None:
-        provider = create_provider(self.config("kemo", key="bad-key"))
+        provider = create_provider(self.config("chat", key="bad-key"))
         with self.assertRaises(ProviderAuthError) as caught:
-            provider.chat(ChatRequest(model="mock-model", messages=[]))
+            provider.create(self.request())
         self.assertEqual(caught.exception.status_code, 401)
 
     def test_gateway_error_body_is_preserved(self) -> None:
-        provider = create_provider(self.config("kemo", model="broken-model"))
+        provider = create_provider(self.config("chat", model="broken-model"))
         with self.assertRaises(ProviderError) as caught:
-            provider.chat(ChatRequest(model="broken-model", messages=[]))
+            provider.create(self.request("broken-model"))
         self.assertIn("upstream failed", str(caught.exception))
         self.assertIsNotNone(caught.exception.body)
+
+    def test_kemo_mode_has_no_chat_surface(self) -> None:
+        provider = create_provider(
+            {
+                "type": "kemo",
+                "base_url": "http://127.0.0.1:8741",
+                "api_key": "test-key",
+                "model": "group:chat-default",
+            }
+        )
+        self.assertEqual(provider.mode, "kemo")
+        self.assertFalse(hasattr(provider, "chat"))
+        self.assertFalse(hasattr(provider, "chat_stream"))
 
 
 if __name__ == "__main__":

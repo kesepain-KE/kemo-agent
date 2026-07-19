@@ -9,28 +9,49 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cli
-from provider.schema import ChatResponse, Usage
+from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
+from provider.protocol.models import (
+    KemoResponse,
+    Measurement,
+    MessageItem,
+    Usage,
+    text_from_content,
+)
 from run.engine import handle_request
 from run.history import find_window, load_window
 
 
 class MockProvider:
-    def __init__(self, seen: list[list[dict]], *, stream: bool = False) -> None:
+    def __init__(self, seen: list, *, stream: bool = False) -> None:
         self.seen = seen
         self.stream = stream
 
-    def chat(self, request):
-        self.seen.append(request.messages)
-        user_text = request.messages[-1]["content"]
-        return ChatResponse(
-            text=f"reply:{user_text}",
-            usage=Usage(prompt_tokens=2, completion_tokens=3, total_tokens=5, source="mock"),
-            model=request.model,
-            finish_reason="stop",
+    def create(self, request):
+        self.seen.append(request)
+        user_message = next(
+            item
+            for item in reversed(request.input)
+            if isinstance(item, MessageItem) and item.role == MessageRole.USER
         )
-
-    def chat_stream(self, request):
-        raise AssertionError("stream path not requested")
+        user_text = text_from_content(user_message.content)
+        return KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.COMPLETED,
+            model=request.model,
+            output=[
+                MessageItem.text(
+                    MessageRole.ASSISTANT,
+                    f"reply:{user_text}",
+                    phase=MessagePhase.FINAL_ANSWER,
+                )
+            ],
+            usage=Usage(
+                input_tokens=2,
+                output_tokens=3,
+                total_tokens=5,
+                measurement=Measurement(mode="provider", exact=True),
+            ),
+        )
 
 
 class EngineAndCLITests(unittest.TestCase):
@@ -46,7 +67,7 @@ class EngineAndCLITests(unittest.TestCase):
         (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
         provider = {
             "type": "kemo",
-            "base_url": "http://127.0.0.1:1/v1",
+            "base_url": "http://127.0.0.1:1",
             "api_key_env": "TEST_KEMO_KEY",
             "model": "mock-model",
             "stream": False,
@@ -65,7 +86,7 @@ class EngineAndCLITests(unittest.TestCase):
 
     def test_engine_persists_rounds_and_injects_history(self) -> None:
         _, root = self.make_root()
-        seen: list[list[dict]] = []
+        seen: list = []
         factory = lambda _: MockProvider(seen)
         request = {"user": "alice", "source": "cli", "session_id": "s1", "prompt": "one"}
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -74,10 +95,10 @@ class EngineAndCLITests(unittest.TestCase):
             second = handle_request(request, root=root, provider_factory=factory)
         self.assertEqual(first["text"], "reply:one")
         self.assertEqual(second["text"], "reply:two")
-        roles = [message["role"] for message in seen[1]]
-        self.assertEqual(roles, ["system", "user", "assistant", "user"])
-        self.assertLess(seen[1][0]["content"].index("USER"), seen[1][0]["content"].index("GLOBAL"))
-        self.assertLess(seen[1][0]["content"].index("GLOBAL"), seen[1][0]["content"].index("AGENTS"))
+        roles = [str(item.role) for item in seen[1].input if isinstance(item, MessageItem)]
+        self.assertEqual(roles, ["user", "assistant", "user"])
+        self.assertLess(seen[1].system_prompt.index("USER"), seen[1].system_prompt.index("GLOBAL"))
+        self.assertLess(seen[1].system_prompt.index("GLOBAL"), seen[1].system_prompt.index("AGENTS"))
         path = find_window(root, "alice", "cli", "s1")
         window = load_window(path)
         self.assertEqual(window["data"]["rounds"], 2)
@@ -88,7 +109,7 @@ class EngineAndCLITests(unittest.TestCase):
         _, root = self.make_root()
 
         class FailingProvider(MockProvider):
-            def chat(self, request):
+            def create(self, request):
                 raise RuntimeError("failed")
 
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -102,7 +123,7 @@ class EngineAndCLITests(unittest.TestCase):
 
     def test_cli_single_stdin_json_and_interactive_use_run_contract(self) -> None:
         _, root = self.make_root()
-        seen: list[list[dict]] = []
+        seen: list = []
         factory = lambda _: MockProvider(seen)
 
         def handler(request):

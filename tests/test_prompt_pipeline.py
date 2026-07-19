@@ -10,6 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from events import RunEvent
+from provider.adapters.compat import (
+    chat_response_to_kemo,
+    chat_stream_to_protocol,
+    kemo_request_to_chat,
+)
 from provider.schema import ChatResponse, Usage
 from run.config import load_config
 from run.engine import EngineError, context_status, handle_request, iter_request_events
@@ -43,6 +48,15 @@ class CaptureProvider:
 
     def chat_stream(self, request):
         raise AssertionError("streaming not expected")
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
+
+    def stream(self, request):
+        return chat_stream_to_protocol(
+            self.chat_stream(kemo_request_to_chat(request)),
+            request,
+        )
 
 
 class PromptPipelineTests(unittest.TestCase):
@@ -266,16 +280,19 @@ class PromptPipelineTests(unittest.TestCase):
 
     def test_exact_section_order_empty_omission_and_perception_last(self) -> None:
         _, root, config = self.make_root()
-        self.assertEqual(build_prompt_bundle(root, "alice", config).sections, ())
+        empty_bundle = build_prompt_bundle(root, "alice", config)
+        self.assertEqual(
+            tuple(section.name for section in empty_bundle.sections),
+            PROMPT_SECTION_ORDER,
+        )
+        self.assertTrue(
+            all(section.content == "（无）" for section in empty_bundle.sections)
+        )
         self.populate_all_sections(root)
         bundle = build_prompt_bundle(root, "alice", config)
         self.assertEqual(
             tuple(section.name for section in bundle.sections),
-            tuple(
-                name
-                for name in PROMPT_SECTION_ORDER
-                if name not in {"kemo_graph", "subagent_registry"}
-            ),
+            PROMPT_SECTION_ORDER,
         )
         self.assertEqual(bundle.sections[-1].name, "perception")
         self.assertEqual(bundle.text.count("[perception]"), 1)
@@ -329,14 +346,16 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("OPERATION_SECRET", section.content)
         self.assertEqual(section.item_ids, ("demo_agent",))
 
-    def test_kemo_graph_replaces_direct_knowledge_and_memory_injection(self) -> None:
+    def test_kemo_graph_replaces_selected_knowledge_scope_only(self) -> None:
         _, root, config = self.make_root()
         self.populate_all_sections(root)
-        config["kemo_graph"] = {"enabled": True}
+        (root / "shared_knowledge" / "index.md").write_text("SHARED_INDEX", "utf-8")
+        (root / "global_knowledge" / "index.md").write_text("GLOBAL_INDEX", "utf-8")
+        config["kemo_graph"] = {"kemo_graph_user_knowledge": True}
 
         def graph_loader(*_args, **kwargs):
             self.assertTrue(kwargs["replaces_knowledge"])
-            self.assertTrue(kwargs["replaces_memory"])
+            self.assertFalse(kwargs["replaces_memory"])
             return KemoGraphPromptContext(
                 requested=True,
                 connected=True,
@@ -350,17 +369,73 @@ class PromptPipelineTests(unittest.TestCase):
             config,
             graph_context_loader=graph_loader,
         )
-        names = tuple(section.name for section in bundle.sections)
-        self.assertIn("kemo_graph", names)
-        self.assertNotIn("knowledge_index", names)
-        self.assertNotIn("permanent_memory", names)
-        self.assertNotIn("important_memory", names)
-        self.assertFalse(any(name.startswith("temporary_memory:") for name in names))
+        self.assertEqual(
+            [item["scope"] for item in bundle.diagnostics["knowledge_documents"]],
+            ["shared", "global"],
+        )
         self.assertIn("GRAPH_RETRIEVAL_RESULT", bundle.text)
-        self.assertNotIn("INDEX", bundle.text)
-        self.assertNotIn("IMPORTANT", bundle.text)
+        self.assertNotIn("[user:index.md]", bundle.text)
+        self.assertIn("[shared:index.md]", bundle.text)
+        self.assertIn("[global:index.md]", bundle.text)
+        self.assertIn("PERMANENT", bundle.text)
+        self.assertIn("IMPORTANT", bundle.text)
+        self.assertIn("SEVEN", bundle.text)
+
+    def test_kemo_graph_can_replace_all_knowledge_scopes(self) -> None:
+        _, root, config = self.make_root()
+        self.populate_all_sections(root)
+        config["kemo_graph"] = {
+            "kemo_graph_global_knowledge": True,
+            "kemo_graph_shared_knowledge": True,
+            "kemo_graph_user_knowledge": True,
+        }
+
+        bundle = build_prompt_bundle(root, "alice", config)
+
+        self.assertEqual(bundle.diagnostics["knowledge_documents"], [])
+        knowledge = next(
+            section for section in bundle.sections if section.name == "knowledge_index"
+        )
+        self.assertEqual(knowledge.content, "（无）")
+        self.assertIn("PERMANENT", bundle.text)
+        self.assertIn("IMPORTANT", bundle.text)
+        self.assertIn("SEVEN", bundle.text)
+
+    def test_kemo_graph_temporary_memory_keeps_permanent_and_important(self) -> None:
+        _, root, config = self.make_root()
+        self.populate_all_sections(root)
+        config["kemo_graph"] = {"kemo_graph_temporary_memory": True}
+
+        def graph_loader(*_args, **kwargs):
+            self.assertFalse(kwargs["replaces_knowledge"])
+            self.assertTrue(kwargs["replaces_memory"])
+            return KemoGraphPromptContext(
+                requested=True,
+                connected=True,
+                status="connected",
+                text="GRAPH_MEMORY_RESULT",
+            )
+
+        bundle = build_prompt_bundle(
+            root,
+            "alice",
+            config,
+            graph_context_loader=graph_loader,
+        )
+        sections = {section.name: section for section in bundle.sections}
+        self.assertIn("INDEX", bundle.text)
+        self.assertIn("PERMANENT", sections["permanent_memory"].content)
+        self.assertIn("IMPORTANT", sections["important_memory"].content)
+        for name in (
+            "temporary_memory:half_year",
+            "temporary_memory:one_month",
+            "temporary_memory:seven_days",
+        ):
+            self.assertEqual(sections[name].content, "（无）")
+        self.assertNotIn("HALF", bundle.text)
+        self.assertNotIn("MONTH", bundle.text)
+        self.assertNotIn("SEVEN", bundle.text)
         self.assertEqual(bundle.memory_ids, ())
-        self.assertEqual(bundle.memory_files, ())
 
     def test_plugin_whitelist_filters_prompt_manifests(self) -> None:
         _, root, config = self.make_root()
@@ -421,9 +496,16 @@ class PromptPipelineTests(unittest.TestCase):
         settings = parse_prompt_settings(merged)
         self.assertEqual(settings.char_limits["task_plan"], 7)
         self.assertEqual(settings.char_limits["perception"], 200)
-        names = [section.name for section in build_prompt_bundle(root, "alice", merged).sections]
+        bundle = build_prompt_bundle(root, "alice", merged)
         self.assertEqual(
-            names,
+            tuple(section.name for section in bundle.sections),
+            PROMPT_SECTION_ORDER,
+        )
+        nonempty = [
+            section.name for section in bundle.sections if section.content != "（无）"
+        ]
+        self.assertEqual(
+            nonempty,
             ["user_soul", "global_soul", "agents_manual", "important_memory"],
         )
 

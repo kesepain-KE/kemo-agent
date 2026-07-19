@@ -216,7 +216,7 @@ class WebBackendTests(unittest.TestCase):
                     "schema_version": 1,
                     "provider": {
                         "type": "kemo",
-                        "base_url": "http://127.0.0.1:8741/v1",
+                "base_url": "http://127.0.0.1:8741",
                         "model": "old-model",
                         "api_key": "disk-secret",
                         "stream": False,
@@ -702,7 +702,10 @@ class WebBackendTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
-                    "kemo_graph": {"enabled": True},
+                    "kemo_graph": {
+                        "kemo_graph_user_knowledge": True,
+                        "kemo_graph_temporary_memory": True,
+                    },
                     "memory": {"history_read_enabled": True},
                     "task_plan": {"auto_accept": False, "max_steps": 8},
                     "cron": {"enabled": True},
@@ -716,7 +719,7 @@ class WebBackendTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "provider": {
-                        "type": "openai",
+                        "type": "chat",
                         "base_url": "https://example.test/v1",
                         "model": "test-model",
                         "api_key": "super-secret",
@@ -923,11 +926,11 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["active_for_main_agent"] for item in knowledge.json()["documents"]],
-            [False, False, False],
+            [False, False, True],
         )
         self.assertEqual(
             knowledge.json()["source_policy"]["knowledge"]["effective_scopes"],
-            ["user", "global"],
+            ["global"],
         )
         self.assertEqual(knowledge.json()["extensions"]["kemo_graph"], "not_connected")
         self.assertNotIn("private index", knowledge.text)

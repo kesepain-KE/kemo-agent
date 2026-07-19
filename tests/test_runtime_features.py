@@ -14,6 +14,11 @@ from unittest.mock import patch
 
 import cli
 from events import RunEvent
+from provider.adapters.compat import (
+    chat_response_to_kemo,
+    chat_stream_to_protocol,
+    kemo_request_to_chat,
+)
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.engine import compress_context, context_status, handle_request, iter_request_events
 from run.history import find_window, load_runtime_window, load_window
@@ -36,6 +41,15 @@ class ScriptedProvider:
     def chat_stream(self, request):
         self.requests.append(request)
         yield from self.streams.pop(0)
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
+
+    def stream(self, request):
+        return chat_stream_to_protocol(
+            self.chat_stream(kemo_request_to_chat(request)),
+            request,
+        )
 
 
 class RuntimeFeatureTests(unittest.TestCase):
@@ -176,7 +190,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             discover_tools(root, "alice"),
             {
                 "plugins": {"whitelist": []},
-                "kemo_graph": {"enabled": True},
+                "kemo_graph": {"kemo_graph_temporary_memory": True},
             },
         )
         self.assertEqual(set(graph_replaced.tools), {"clock", "weather"})

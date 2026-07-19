@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from events import RunEvent
+from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.agent_runner import AgentRunResult
 from agents.task_plan.executor import execute as execute_task_plan_agent
@@ -80,6 +81,9 @@ class MockProvider:
 
     def chat_stream(self, request):
         raise AssertionError("stream not expected")
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
 
 
 def _make_root(users: list[str]) -> tuple[tempfile.TemporaryDirectory, Path]:

@@ -41,7 +41,7 @@ from provider.protocol.streaming import (
     parse_sse_events,
 )
 from provider.protocol.validation import validate_request
-from provider.schema import ChatRequest, ChatResponse, Usage as LegacyUsage
+from provider.schema import ChatRequest, ChatResponse, Usage as ChatUsage
 from run.engine import handle_request, iter_request_events
 from run.history import commit_window, empty_window, find_window, load_window
 
@@ -161,7 +161,7 @@ class NativeProvider:
         )
 
 
-class LegacyProvider:
+class ChatOnlyProvider:
     def __init__(self) -> None:
         self.requests: list[ChatRequest] = []
 
@@ -170,7 +170,7 @@ class LegacyProvider:
         return ChatResponse(
             text="legacy",
             model=request.model,
-            usage=LegacyUsage(2, 1, 3, source="mock"),
+            usage=ChatUsage(2, 1, 3, source="mock"),
         )
 
     def chat_stream(self, request: ChatRequest):
@@ -196,7 +196,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     "schema_version": 1,
                     "provider": {
                         "type": "kemo",
-                        "base_url": "http://127.0.0.1:1/v1",
+                        "base_url": "http://127.0.0.1:1",
                         "api_key_env": "TEST_KEMO_KEY",
                         "model": "gateway/test",
                         "stream": stream,
@@ -296,7 +296,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         with self.assertRaises(StreamProtocolError):
             gap_guard.accept(parsed[1])
 
-    def test_legacy_chat_mapping_and_multimodal_capability_error(self) -> None:
+    def test_chat_bridge_mapping_and_multimodal_capability_error(self) -> None:
         chat = ChatRequest(
             model="test",
             stream=False,
@@ -401,7 +401,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         )
         self.assertEqual(len(list(adapter.stream(request))), 2)
 
-    def test_run_native_protocol_history_items_and_legacy_fallback(self) -> None:
+    def test_run_native_protocol_history_items_and_rejects_chat_only_provider(self) -> None:
         _, root = self.make_root(stream=False)
         native = NativeProvider()
         request = {
@@ -427,20 +427,20 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(window["items"]["schema_version"], 2)
         self.assertTrue(any(item.get("type") == "reasoning" for item in window["items"]["items"]))
 
-        legacy = LegacyProvider()
+        chat_only = ChatOnlyProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            result = handle_request(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "legacy",
-                    "prompt": "hello",
-                },
-                root=root,
-                provider_factory=lambda _: legacy,
-            )
-        self.assertEqual(result["text"], "legacy")
-        self.assertEqual(len(legacy.requests), 1)
+            with self.assertRaisesRegex(Exception, "Kemo create"):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "legacy",
+                        "prompt": "hello",
+                    },
+                    root=root,
+                    provider_factory=lambda _: chat_only,
+                )
+        self.assertEqual(len(chat_only.requests), 0)
 
     def test_v1_history_loads_without_items_and_is_dual_written_on_commit(self) -> None:
         _, root = self.make_root()

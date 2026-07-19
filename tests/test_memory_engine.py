@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
 from run.memory import MemoryStore
@@ -29,6 +30,9 @@ class Provider:
         if self.fail:
             raise RuntimeError("provider failed")
         return ChatResponse(text="完成", usage=Usage(1, 1, 2, source="mock"), model=request.model)
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
 
 
 class MemoryEngineTests(unittest.TestCase):

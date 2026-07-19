@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request
 from run.knowledge import select_knowledge_index
@@ -27,6 +28,9 @@ class MockProvider:
 
     def chat_stream(self, request):
         raise AssertionError("stream path not requested")
+
+    def create(self, request):
+        return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
 
 
 class PromptKnowledgeTests(unittest.TestCase):

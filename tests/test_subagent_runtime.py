@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from provider.schema import ChatResponse, Usage
+from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
+from provider.protocol.models import (
+    KemoResponse,
+    Measurement,
+    MessageItem,
+    Usage,
+    text_from_content,
+)
 from run.agent_queue import AgentQueueError, AgentScheduler
 from run.agent_runner import (
     AgentCancelledError,
@@ -39,20 +46,32 @@ class MockProvider:
         self.order = order
         self.requests = []
 
-    def chat(self, request):
+    def create(self, request):
         self.requests.append(request)
+        payload = json.loads(text_from_content(request.input[0].content))
         if self.order is not None:
-            payload = json.loads(request.messages[1]["content"])
             self.order.append(("start", payload.get("value")))
         if self.delay:
             time.sleep(self.delay)
         if self.order is not None:
-            payload = json.loads(request.messages[1]["content"])
             self.order.append(("end", payload.get("value")))
-        return ChatResponse(
-            text=self.text,
+        return KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.COMPLETED,
             model=request.model,
-            usage=Usage(2, 1, 3, source="mock"),
+            output=[
+                MessageItem.text(
+                    MessageRole.ASSISTANT,
+                    self.text,
+                    phase=MessagePhase.FINAL_ANSWER,
+                )
+            ],
+            usage=Usage(
+                input_tokens=2,
+                output_tokens=1,
+                total_tokens=3,
+                measurement=Measurement(mode="provider", exact=True),
+            ),
         )
 
 
@@ -78,7 +97,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.config = {
             "provider": {
                 "type": "kemo",
-                "base_url": "http://127.0.0.1:1/v1",
+                "base_url": "http://127.0.0.1:1",
                 "api_key_env": "TEST_AGENT_KEY",
                 "model": "main-model",
             },
@@ -147,11 +166,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data["narrative"], "summary")
         request = provider.requests[0]
         self.assertEqual(request.model, "main-model")
-        self.assertEqual(len(request.messages), 2)
-        self.assertIn("[trigger_registration]", request.messages[0]["content"])
-        self.assertNotIn("# 操作信息", request.messages[0]["content"])
-        self.assertNotIn("main conversation", json.dumps(request.messages, ensure_ascii=False))
-        self.assertEqual(json.loads(request.messages[1]["content"])["trigger"], "manual")
+        self.assertEqual(len(request.input), 1)
+        self.assertIn("[trigger_registration]", request.system_prompt)
+        self.assertNotIn("# 操作信息", request.system_prompt)
+        self.assertNotIn(
+            "main conversation",
+            json.dumps(request.model_dump(mode="json"), ensure_ascii=False),
+        )
+        self.assertEqual(json.loads(text_from_content(request.input[0].content))["trigger"], "manual")
 
     def test_runner_uses_loose_input_but_rejects_invalid_output_timeout_and_cancel(self) -> None:
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
@@ -201,11 +223,11 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "context_manage",
                 {"previous_summary": None, "rounds": [{"owner": "bob"}], "trigger": "manual"},
             )
-        first_input = json.loads(first_provider.requests[0].messages[1]["content"])
-        second_input = json.loads(second_provider.requests[0].messages[1]["content"])
+        first_input = json.loads(text_from_content(first_provider.requests[0].input[0].content))
+        second_input = json.loads(text_from_content(second_provider.requests[0].input[0].content))
         self.assertEqual(first_input["rounds"][0]["owner"], "alice")
         self.assertEqual(second_input["rounds"][0]["owner"], "bob")
-        self.assertNotIn("bob", first_provider.requests[0].messages[1]["content"])
+        self.assertNotIn("bob", text_from_content(first_provider.requests[0].input[0].content))
 
     def test_scheduler_result_handler_is_serialized_with_agent(self) -> None:
         registry = discover_agents(self.root)
