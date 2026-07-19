@@ -140,11 +140,7 @@ export async function getAuthStatus(): Promise<AuthStatusResponse> {
 }
 
 export async function bootstrapAuth(token: string): Promise<AuthStatusResponse> {
-  return requestJson('/api/auth/bootstrap', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-  })
+  return requestJson(`/api/auth/status?token=${encodeURIComponent(token)}`)
 }
 
 export async function loginAuth(
@@ -197,18 +193,6 @@ export async function getPromptDiagnostics(user: string): Promise<PromptDiagnost
 
 export async function getMemorySummary(user: string): Promise<MemorySummaryResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
-}
-
-export async function updateUserConfig(
-  user: string,
-  config: Record<string, unknown>,
-  etag: string,
-): Promise<ConfigFullResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/config`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config, etag }),
-  })
 }
 
 export interface StreamChatOptions {

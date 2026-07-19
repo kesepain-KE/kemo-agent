@@ -32,22 +32,18 @@ describe('AuthGate', () => {
     let authenticated = false
     let seenToken = ''
     server.use(
-      http.get('/api/auth/status', () => HttpResponse.json({
-        enabled: true,
-        authenticated,
-        methods: { token: true, password: false },
-        session_cookie_configured: true,
-      })),
-      http.post('/api/auth/bootstrap', async ({ request }) => {
-        const body = await request.json() as { token?: string }
-        seenToken = body.token || ''
-        authenticated = seenToken === 'url-secret'
+      http.get('/api/auth/status', ({ request }) => {
+        const token = new URL(request.url).searchParams.get('token') || ''
+        if (token) {
+          seenToken = token
+          authenticated = token === 'url-secret'
+        }
         return HttpResponse.json({
           enabled: true,
           authenticated,
           methods: { token: true, password: false },
           session_cookie_configured: true,
-        }, { status: authenticated ? 200 : 401 })
+        }, { status: token && !authenticated ? 401 : 200 })
       }),
     )
     window.history.replaceState({}, '', '/chat?token=url-secret&user=alice')

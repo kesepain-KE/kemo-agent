@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Bot, Database, RefreshCw, Wrench } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
-import { getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig, updateUserConfig } from '../api/client'
+import { getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
@@ -34,7 +34,6 @@ export function SettingsPage() {
   const { user } = useOutletContext<ShellOutletContext>()
   const [searchParams] = useSearchParams()
   const ui = useUiStore()
-  const queryClient = useQueryClient()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
   const query = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
@@ -42,9 +41,6 @@ export function SettingsPage() {
   const promptQuery = useQuery({ queryKey: ['prompt-diagnostics', user], queryFn: () => getPromptDiagnostics(user), enabled: Boolean(user && tab === 'prompt') })
   const memoryQuery = useQuery({ queryKey: ['memory-summary', user], queryFn: () => getMemorySummary(user), enabled: Boolean(user && tab === 'memory') })
   const [configDraft, setConfigDraft] = useState('')
-  const [configSaving, setConfigSaving] = useState(false)
-  const [configNotice, setConfigNotice] = useState('')
-  const [configError, setConfigError] = useState('')
   const data = query.data
 
   useEffect(() => {
@@ -54,39 +50,6 @@ export function SettingsPage() {
   useEffect(() => {
     if (isSettingsTab(requestedTab)) setTab(requestedTab)
   }, [requestedTab])
-
-  const saveConfig = async () => {
-    if (!configQuery.data?.write_enabled || configSaving) return
-    setConfigNotice('')
-    setConfigError('')
-    let parsed: Record<string, unknown>
-    try {
-      const value = JSON.parse(configDraft) as unknown
-      if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('根节点必须是对象')
-      parsed = value as Record<string, unknown>
-    } catch (error) {
-      setConfigError(`JSON 无效：${error instanceof Error ? error.message : '无法解析'}`)
-      return
-    }
-    setConfigSaving(true)
-    try {
-      const saved = await updateUserConfig(user, parsed, configQuery.data.etag)
-      queryClient.setQueryData(['user-config', user], saved)
-      setConfigDraft(JSON.stringify(saved.config, null, 2))
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['settings', user] }),
-        queryClient.invalidateQueries({ queryKey: ['knowledge', user] }),
-        queryClient.invalidateQueries({ queryKey: ['skills', user] }),
-        queryClient.invalidateQueries({ queryKey: ['sense', user] }),
-        queryClient.invalidateQueries({ queryKey: ['overview', user] }),
-      ])
-      setConfigNotice('保存成功；下一次请求将读取新配置。')
-    } catch (error) {
-      setConfigError(error instanceof Error ? error.message : '配置保存失败')
-    } finally {
-      setConfigSaving(false)
-    }
-  }
 
   return (
     <ModuleFrame
@@ -143,7 +106,7 @@ export function SettingsPage() {
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>调用参数</strong><span>Provider 运行时的只读镜像。</span></div>
-              <SettingRow title="请求超时" description="单次 Provider 调用上限" source={data?.provenance['provider.timeout']} control={<span className="value-pill">{data?.provider.timeout ?? '—'} 秒</span>} />
+              <SettingRow title="请求超时" description="源码默认的单次 Provider 调用上限" control={<span className="value-pill">{data?.provider.timeout ?? '—'} 秒</span>} />
               <SettingRow title="原生流式" description="Provider 配置中的 stream 开关；Web 自身仍使用 SSE" source={data?.provenance['provider.stream']} control={<StatusChip status={data?.provider.stream ? 'enabled' : 'paused'}>{data?.provider.stream ? '已开启' : '已关闭'}</StatusChip>} />
             </article>
           </>}
@@ -162,13 +125,13 @@ export function SettingsPage() {
           {tab === 'memory' && <>
             <article className="setting-section">
               <div className="setting-section-head"><strong>上下文窗口</strong><span>历史窗口的真实 Token 使用量会显示在顶栏。</span></div>
-              <SettingRow title="Token 上限" description="达到限制前由上下文生命周期执行压缩" source={data?.provenance['agents.n4_token_limit']} control={<span className="value-pill">{data?.limits.context_tokens.toLocaleString() || '—'}</span>} />
-              <SettingRow title="压缩比例" description="上下文压缩后的目标比例" source={data?.provenance['agents.n5_token_compression_ratio']} control={<span className="value-pill">{data ? Math.round(data.limits.compression_ratio * 100) : '—'}%</span>} />
+              <SettingRow title="Token 上限" description="达到限制前由上下文生命周期执行压缩" source={data?.provenance['agents.token_limit']} control={<span className="value-pill">{data?.limits.context_tokens.toLocaleString() || '—'}</span>} />
+              <SettingRow title="压缩比例" description="上下文压缩后的目标比例" source={data?.provenance['agents.token_compression_ratio']} control={<span className="value-pill">{data ? Math.round(data.limits.compression_ratio * 100) : '—'}%</span>} />
             </article>
             <article className="setting-section">
-              <div className="setting-section-head"><strong>记忆管线</strong><span>抽取与注入开关来自当前用户合并配置。</span></div>
-              <SettingRow title="记忆抽取" description="成功对话后生成候选记忆" source={data?.provenance['memory.extraction_enabled']} control={<StatusChip status={data?.features.memory_extraction ? 'enabled' : 'paused'} />} />
-              <SettingRow title="记忆注入" description={`临时层最多 ${data?.limits.memory_items || '—'} 条；重要记忆 ${data?.limits.memory_chars || '—'} 字符；永久记忆全部注入`} source={data?.provenance['memory.injection_enabled']} control={<StatusChip status={data?.features.memory_injection ? 'enabled' : 'paused'} />} />
+              <div className="setting-section-head"><strong>记忆管线</strong><span>记忆提取与注入为默认管线；历史读取工具单独受控。</span></div>
+              <SettingRow title="历史对话读取" description="控制 history_search 工具是否注册" source={data?.provenance['memory.history_read_enabled']} control={<StatusChip status={data?.features.history_read ? 'enabled' : 'paused'} />} />
+              <SettingRow title="记忆注入" description={`临时层最多 ${data?.limits.memory_items || '—'} 条；重要记忆 ${data?.limits.memory_chars || '—'} 字符；永久记忆全部注入`} control={<StatusChip status={data?.features.memory_injection ? 'enabled' : 'paused'} />} />
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>记忆库存</strong><span>只读预览；显示文件名、挡位权重和固定到期时间。</span></div>
@@ -192,29 +155,32 @@ export function SettingsPage() {
             <article className="setting-section">
               <div className="setting-section-head"><strong>功能开关</strong><span>当前用户合并配置中的运行能力。</span></div>
               <SettingRow title="工具调用" description="Run 工具编排" source={data?.provenance['tools.enabled']} control={<StatusChip status={data?.features.tools ? 'enabled' : 'paused'}><Wrench size={12} />{data?.features.tools ? '已启用' : '已停用'}</StatusChip>} />
-              <SettingRow title="文件知识" description="本地文件索引与 Prompt 注入" source={data?.provenance['knowledge.enabled']} control={<StatusChip status={data?.features.knowledge ? 'enabled' : 'paused'}><Database size={12} />{data?.features.knowledge ? '已启用' : '已停用'}</StatusChip>} />
+              <SettingRow title="文件知识" description="默认启用；图谱替换模式下停止直接注入" control={<StatusChip status={data?.features.knowledge ? 'enabled' : 'paused'}><Database size={12} />{data?.features.knowledge ? '已启用' : '已停用'}</StatusChip>} />
               <SettingRow title="任务计划自动接受" description="计划是否跳过人工批准" source={data?.provenance['task_plan.auto_accept']} control={<StatusChip status={data?.features.task_plan_auto_accept ? 'enabled' : 'paused'}><Bot size={12} />{data?.features.task_plan_auto_accept ? '已开启' : '需确认'}</StatusChip>} />
               <SettingRow title="Cron 调度" description="Web 不启动调度器，只显示主宿主配置" source={data?.provenance['cron.enabled']} control={<StatusChip status={data?.features.cron ? 'enabled' : 'paused'}>{data?.features.cron ? '已启用' : '已停用'}</StatusChip>} />
+              <SettingRow title="统一后台调度" description="统一管理 Cron、记忆维护与上下文整理" source={data?.provenance['runtime_host.enable_background_scheduler']} control={<StatusChip status={data?.features.background_scheduler ? 'enabled' : 'paused'}>{data?.features.background_scheduler ? '已启用' : '已停用'}</StatusChip>} />
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>主智能体来源策略</strong><span>注册阶段保留完整库存，以下策略只在 Prompt 选择与知识检索阶段过滤。</span></div>
-              <SettingRow title="知识范围" description="enabled=false 时索引注入与正文搜索都为空" control={<span className="value-pill">{data?.source_policy.knowledge.effective_scopes.join(' / ') || '无'}</span>} />
+              <SettingRow title="知识范围" description="知识默认启用；共享与全局范围由用户配置选择" control={<span className="value-pill">{data?.source_policy.knowledge.effective_scopes.join(' / ') || '无'}</span>} />
+              <SettingRow title="插件工具" description="空白名单表示加载全部插件" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.plugins)}</span>} />
               <SettingRow title="共享 / 用户技能" description="空白名单表示全量启用" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.skills.shared)} / {sourceModeLabel(data?.source_policy.skills.user)}</span>} />
               <SettingRow title="全局 / 共享 Expand" description="用户 Expand 始终按当前用户目录动态注册" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.expand.global)} / {sourceModeLabel(data?.source_policy.expand.shared)}</span>} />
               <SettingRow title="全局感知模块" description="按 global_sense 直接子目录名过滤" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.perception.global)}</span>} />
-              <SettingRow title="kemo-graph" description="独立项目连接占位；本服务不会启动或调用其 CLI" control={<StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'}>{data?.source_policy.kemo_graph.status === 'not_connected' ? '已请求 / 未连接' : '未启用'}</StatusChip>} />
+              <SettingRow title="kemo-graph" description="启用后替换原始知识和记忆注入；不会自动启动外部项目" control={<StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'}>{data?.source_policy.kemo_graph.status === 'not_connected' ? '替换已启用 / 未连接' : '未启用'}</StatusChip>} />
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>执行限制</strong><span>用于约束工具、知识和任务计划。</span></div>
               <SettingRow title="工具迭代" description={`单次调用超时 ${data?.limits.tool_timeout || '—'} 秒`} source={data?.provenance['tools.max_iterations']} control={<span className="value-pill">{data?.limits.tool_iterations || '—'} 轮</span>} />
+              <SettingRow title="每轮工具软上限" description="达到后提交中间状态并等待用户继续" source={data?.provenance['tools.max_per_round']} control={<span className="value-pill">{data?.limits.tool_max_per_round ?? '不限'}</span>} />
               <SettingRow title="任务步骤" description="单个计划最大步骤数" source={data?.provenance['task_plan.max_steps']} control={<span className="value-pill">{data?.limits.task_plan_steps || '—'} 步</span>} />
-              <SettingRow title="知识注入" description={`最多 ${data?.limits.knowledge_chars || '—'} 字符`} source={data?.provenance['knowledge.max_items']} control={<span className="value-pill">{data?.limits.knowledge_items || '—'} 项</span>} />
+              <SettingRow title="知识检索" description={`内部上限 ${data?.limits.knowledge_chars || '—'} 字符`} control={<span className="value-pill">{data?.limits.knowledge_items || '—'} 项</span>} />
             </article>
           </>}
 
           {tab === 'prompt' && <>
             <article className="setting-section">
-              <div className="setting-section-head"><strong>Prompt 注入诊断</strong><span>不返回正文，只展示固定 14 段的体积、条目、截断和来源文件。</span></div>
+              <div className="setting-section-head"><strong>Prompt 注入诊断</strong><span>不返回正文，只展示固定 15 段的体积、条目、截断和来源文件。</span></div>
               <div className="prompt-total"><span>当前系统 Prompt</span><strong>{promptQuery.data?.total_chars.toLocaleString() ?? '—'} 字符</strong></div>
               <div className="prompt-section-list">{promptQuery.data?.sections.map((section) => {
                 const percent = section.original_chars ? Math.min(100, Math.round(section.injected_chars * 100 / section.original_chars)) : 0
@@ -229,19 +195,17 @@ export function SettingsPage() {
 
           {tab === 'config' && <>
             <article className="setting-section config-editor-section">
-              <div className="setting-section-head"><strong>users/{user}/user_config.json</strong><span>保存后仅影响下一次请求；当前正在执行的任务继续使用启动时的配置快照。</span></div>
-              <div className={`config-write-banner ${configQuery.data?.write_enabled ? 'enabled' : 'locked'}`}>
-                <span><strong>{configQuery.data?.write_enabled ? '已启用安全写入' : '只读模式'}</strong><small>{configQuery.data?.write_enabled ? '使用 ETag 防冲突和原子替换，敏感字段保持原值。' : '需要启用 Web 认证并设置 WEB_ALLOW_CONFIG_WRITE=true。'}</small></span>
-                <StatusChip status={configQuery.data?.write_enabled ? 'enabled' : 'paused'}>{configQuery.data?.write_enabled ? '可保存' : '不可写'}</StatusChip>
+              <div className="setting-section-head"><strong>users/{user}/user_config.json</strong><span>Web 仅展示脱敏镜像；配置修改必须直接通过本机文件和专用流程完成。</span></div>
+              <div className="config-write-banner locked">
+                <span><strong>只读模式</strong><small>Web 配置写入接口已移除，认证状态不会开放写权限。</small></span>
+                <StatusChip status="paused">不可写</StatusChip>
               </div>
               {configQuery.isError ? <div className="config-editor-error">用户配置读取失败。</div> : null}
-              <textarea className="config-json-editor" value={configDraft} onChange={(event) => setConfigDraft(event.target.value)} spellCheck={false} aria-label="用户配置 JSON" />
+              <textarea className="config-json-editor" value={configDraft} readOnly spellCheck={false} aria-label="用户配置 JSON" />
               <div className="config-editor-foot">
-                <span>脱敏字段：{configQuery.data?.redacted_paths.join('、') || '无'}；`***` 保存时不会覆盖磁盘密钥。</span>
-                <div><button className="module-btn" onClick={() => configQuery.data && setConfigDraft(JSON.stringify(configQuery.data.config, null, 2))}>撤销编辑</button><button className="module-btn primary" disabled={!configQuery.data?.write_enabled || configSaving} onClick={() => void saveConfig()}>{configSaving ? '正在保存…' : '校验并保存'}</button></div>
+                <span>脱敏字段：{configQuery.data?.redacted_paths.join('、') || '无'}；敏感值不会进入浏览器响应。</span>
+                <div><button className="module-btn" onClick={() => void configQuery.refetch()}>重新读取</button></div>
               </div>
-              {configNotice ? <div className="config-editor-notice">{configNotice}</div> : null}
-              {configError ? <div className="config-editor-error">{configError}</div> : null}
             </article>
           </>}
         </div>

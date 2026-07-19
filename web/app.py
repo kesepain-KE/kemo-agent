@@ -16,9 +16,13 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from events import RunEvent, TERMINAL_EVENTS
 from run.config import project_root
-from web.auth import WebAuthConfig, WebAuthError, WebAuthenticator
+from web.auth import (
+    WEB_SESSION_MAX_AGE_SECONDS,
+    WebAuthConfig,
+    WebAuthError,
+    WebAuthenticator,
+)
 from web.service import (
-    ConfigWriteDisabledError,
     InvalidRequestError,
     WebRunService,
     WebServiceError,
@@ -32,18 +36,9 @@ class ChatBody(BaseModel):
     run_id: str = ""
 
 
-class TokenBody(BaseModel):
-    token: str
-
-
 class LoginBody(BaseModel):
     username: str
     password: str
-
-
-class ConfigUpdateBody(BaseModel):
-    config: dict[str, Any]
-    etag: str
 
 
 class GuidanceBody(BaseModel):
@@ -98,6 +93,16 @@ def create_app(
     async def require_web_auth(request: Request, call_next):
         path = request.url.path
         public = path == "/api/health" or path.startswith("/api/auth/")
+        query_token = request.query_params.get("token", "")
+        if query_token:
+            try:
+                authenticator.authenticate_token(query_token)
+                authenticator.establish(request.session, "token")
+            except WebAuthError as exc:
+                return JSONResponse(
+                    status_code=exc.status,
+                    content=_error_body(exc.code, str(exc), exc.status),
+                )
         if (
             configured_auth.enabled
             and (path == "/api" or path.startswith("/api/"))
@@ -120,7 +125,7 @@ def create_app(
             SessionMiddleware,
             secret_key=configured_auth.session_secret,
             session_cookie=configured_auth.cookie_name,
-            max_age=None,
+            max_age=WEB_SESSION_MAX_AGE_SECONDS,
             same_site="lax",
             https_only=False,
         )
@@ -161,12 +166,6 @@ def create_app(
     async def auth_status(request: Request) -> dict[str, Any]:
         session = request.session if configured_auth.enabled else None
         return authenticator.status(session)
-
-    @app.post("/api/auth/bootstrap")
-    async def auth_bootstrap(body: TokenBody, request: Request) -> dict[str, Any]:
-        authenticator.authenticate_token(body.token)
-        authenticator.establish(request.session, "token")
-        return authenticator.status(request.session)
 
     @app.post("/api/auth/login")
     async def auth_login(body: LoginBody, request: Request) -> dict[str, Any]:
@@ -261,20 +260,7 @@ def create_app(
 
     @app.get("/api/users/{user}/config/full")
     async def full_config(user: str) -> dict[str, Any]:
-        value = backend.user_config(user)
-        return {
-            **value,
-            "write_enabled": bool(
-                value.get("write_enabled", False) and configured_auth.enabled
-            ),
-        }
-
-    @app.put("/api/users/{user}/config")
-    async def update_config(user: str, body: ConfigUpdateBody) -> dict[str, Any]:
-        if not configured_auth.enabled:
-            raise ConfigWriteDisabledError("配置写入要求先启用 Web Token 或账号密码认证")
-        value = backend.update_user_config(user, body.config, etag=body.etag)
-        return {**value, "write_enabled": True}
+        return backend.user_config(user)
 
     @app.post("/api/runs/{run_id}/guidance")
     async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:

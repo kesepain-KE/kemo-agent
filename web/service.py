@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -16,8 +15,12 @@ import uuid
 
 from events import RunEvent
 from run.agents import discover_agents
-from run.config import ConfigError, deep_merge, load_config, read_json_object
-from run.context import ContextPolicy, estimate_text_tokens
+from run.config import (
+    USER_ONLY_SECTIONS,
+    load_config,
+    read_json_object,
+)
+from run.context import estimate_text_tokens
 from run.cron_store import CronStore
 from run.engine import iter_request_events
 from run.history import (
@@ -29,18 +32,23 @@ from run.history import (
     rename_session as rename_history_session,
     session_messages,
 )
-from run.knowledge import build_index
-from run.memory import MemoryConfigError, MemoryStore
+from run.knowledge import (
+    DEFAULT_KNOWLEDGE_MAX_CHARS,
+    DEFAULT_KNOWLEDGE_MAX_FILE_CHARS,
+    DEFAULT_KNOWLEDGE_MAX_ITEMS,
+    DEFAULT_KNOWLEDGE_MINIMUM_SCORE,
+    build_index,
+)
+from run.memory import MemoryStore
 from run.prompt import (
     PROMPT_SECTION_ORDER,
-    PromptConfigError,
     build_prompt_bundle,
     parse_prompt_settings,
 )
 from run.prompt_sources import load_prompt_source_registry
 from run.source_policy import MainAgentSourcePolicy
 from run.task_plan_store import PlanStore
-from run.tools import discover_tools
+from run.tools import apply_runtime_tool_policy, discover_tools
 from run.users import list_users
 
 
@@ -57,16 +65,12 @@ _CONFIG_SOURCE_PATHS = (
     "provider.type",
     "provider.base_url",
     "provider.model",
-    "provider.timeout",
     "provider.stream",
     "tools.enabled",
     "tools.max_iterations",
+    "tools.max_per_round",
     "tools.timeout",
-    "knowledge.enabled",
-    "knowledge.max_items",
-    "knowledge.max_chars",
-    "memory.extraction_enabled",
-    "memory.injection_enabled",
+    "memory.history_read_enabled",
     "memory.temporary_injection_limits.half_year",
     "memory.temporary_injection_limits.one_month",
     "memory.temporary_injection_limits.seven_days",
@@ -74,11 +78,12 @@ _CONFIG_SOURCE_PATHS = (
     "task_plan.auto_accept",
     "task_plan.max_steps",
     "cron.enabled",
-    "cron.auto_start",
-    "agents.n4_token_limit",
-    "agents.n5_token_compression_ratio",
+    "runtime_host.enable_background_scheduler",
+    "agents.max_rounds",
+    "agents.token_limit",
+    "agents.token_compression_ratio",
     "skills.shared_whitelist",
-    "skills.user_whitelist",
+    "plugins.whitelist",
     "expand.global_whitelist",
     "expand.shared_whitelist",
     "perception.global_whitelist",
@@ -127,18 +132,6 @@ class ConflictError(WebServiceError):
     status = 409
 
 
-class ConfigWriteDisabledError(WebServiceError):
-    code = "config_write_disabled"
-    status = 403
-
-
-def _env_switch(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().casefold() in {"1", "true", "yes", "on"}
-
-
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.casefold()
     return lowered in _SENSITIVE_CONFIG_KEYS or lowered.endswith("_secret")
@@ -170,66 +163,6 @@ def _redact_config(value: Any, path: tuple[str, ...] = ()) -> tuple[Any, list[st
     return value, []
 
 
-def _sensitive_values(value: Any, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
-    found: dict[tuple[str, ...], Any] = {}
-    if not isinstance(value, dict):
-        return found
-    for key, item in value.items():
-        current = (*path, str(key))
-        if _is_sensitive_key(str(key)):
-            found[current] = item
-        elif isinstance(item, dict):
-            found.update(_sensitive_values(item, current))
-    return found
-
-
-def _value_at(value: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
-    current: Any = value
-    for part in path:
-        if not isinstance(current, dict) or part not in current:
-            return False, None
-        current = current[part]
-    return True, current
-
-
-def _set_value(value: dict[str, Any], path: tuple[str, ...], selected: Any) -> None:
-    current = value
-    for part in path[:-1]:
-        child = current.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            current[part] = child
-        current = child
-    current[path[-1]] = selected
-
-
-def _config_etag(path: Path) -> str:
-    try:
-        payload = path.read_bytes()
-    except FileNotFoundError:
-        payload = b"{}"
-    except OSError as exc:
-        raise InvalidRequestError(f"用户配置不可读：{exc}") from exc
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
 class WebRunService:
     """A thin, injectable boundary between HTTP routes and the Run core."""
 
@@ -238,19 +171,11 @@ class WebRunService:
         root: Path,
         *,
         event_source: Callable[..., Iterator[RunEvent]] = iter_request_events,
-        config_write_enabled: bool | None = None,
         runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.event_source = event_source
-        self.config_write_enabled = (
-            _env_switch("WEB_ALLOW_CONFIG_WRITE")
-            if config_write_enabled is None
-            else bool(config_write_enabled)
-        )
         self.runtime_status_provider = runtime_status_provider
-        self._config_locks: dict[str, threading.RLock] = {}
-        self._config_locks_guard = threading.Lock()
         self._active_runs: dict[str, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
 
@@ -322,10 +247,6 @@ class WebRunService:
             "queued": queued,
         }
 
-    def _config_lock(self, user: str) -> threading.RLock:
-        with self._config_locks_guard:
-            return self._config_locks.setdefault(user, threading.RLock())
-
     def _config_path(self, user: str) -> Path:
         return self.root / "users" / user / "user_config.json"
 
@@ -346,55 +267,14 @@ class WebRunService:
                 "user"
                 if self._has_path(user_config, dotted)
                 else "global"
-                if self._has_path(global_config, dotted)
+                if (
+                    dotted.split(".", 1)[0] not in USER_ONLY_SECTIONS
+                    and self._has_path(global_config, dotted)
+                )
                 else "default"
             )
             for dotted in _CONFIG_SOURCE_PATHS
         }
-
-    def _validate_user_config(self, user: str, candidate: dict[str, Any]) -> None:
-        schema_version = candidate.get("schema_version")
-        if isinstance(schema_version, bool) or schema_version != 1:
-            raise InvalidRequestError("user_config.schema_version 必须为 1")
-        if "user" in candidate:
-            raise InvalidRequestError("user_config 不允许包含运行时字段 user")
-        global_config = read_json_object(self.root / "config" / "global_config.json")
-        merged = deep_merge(global_config, candidate)
-        merged["user"] = user
-        try:
-            provider = merged.get("provider")
-            if not isinstance(provider, dict):
-                raise ConfigError("provider 必须是对象")
-            provider_type = str(provider.get("type") or "").strip().casefold()
-            if provider_type not in {"kemo", "openai"}:
-                raise ConfigError("provider.type 必须是 'kemo' 或 'openai'")
-            timeout = provider.get("timeout", 120)
-            if isinstance(timeout, bool) or float(timeout) <= 0:
-                raise ConfigError("provider.timeout 必须是正数")
-            if not isinstance(provider.get("stream", False), bool):
-                raise ConfigError("provider.stream 必须是布尔值")
-            headers = provider.get("headers", {})
-            if not isinstance(headers, dict):
-                raise ConfigError("provider.headers 必须是对象")
-
-            tools = merged.get("tools") or {}
-            if not isinstance(tools, dict):
-                raise ConfigError("tools 必须是对象")
-            if not isinstance(tools.get("enabled", True), bool):
-                raise ConfigError("tools.enabled 必须是布尔值")
-            if int(tools.get("max_iterations", 8)) < 1:
-                raise ConfigError("tools.max_iterations 必须至少为 1")
-            if float(tools.get("timeout", 60)) <= 0:
-                raise ConfigError("tools.timeout 必须是正数")
-
-            MainAgentSourcePolicy.from_config(merged)
-            parse_prompt_settings(merged)
-            ContextPolicy.from_config(merged)
-            MemoryStore(self.root, user, merged)
-        except InvalidRequestError:
-            raise
-        except (ConfigError, MemoryConfigError, PromptConfigError, TypeError, ValueError) as exc:
-            raise InvalidRequestError(f"用户配置校验失败：{exc}") from exc
 
     def user_config(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -404,60 +284,8 @@ class WebRunService:
         return {
             "user": name,
             "config": redacted,
-            "etag": _config_etag(path),
             "redacted_paths": redacted_paths,
-            "write_enabled": self.config_write_enabled,
         }
-
-    def update_user_config(
-        self,
-        user: Any,
-        candidate: Any,
-        *,
-        etag: Any,
-    ) -> dict[str, Any]:
-        name = self.require_user(user)
-        if not self.config_write_enabled:
-            raise ConfigWriteDisabledError(
-                "配置写入未启用；请设置 WEB_ALLOW_CONFIG_WRITE=true 并启用 Web 认证"
-            )
-        if not isinstance(candidate, dict):
-            raise InvalidRequestError("config 必须是 JSON 对象")
-        if not isinstance(etag, str) or not etag.strip():
-            raise InvalidRequestError("etag 必须是非空字符串")
-        path = self._config_path(name)
-        with self._config_lock(name):
-            current_etag = _config_etag(path)
-            if etag.strip() != current_etag:
-                raise ConflictError("用户配置已被其他请求修改，请重新加载后再保存")
-            current = read_json_object(path, allow_empty=True)
-            try:
-                selected = json.loads(json.dumps(candidate, ensure_ascii=False))
-            except (TypeError, ValueError) as exc:
-                raise InvalidRequestError("config 必须可以序列化为 JSON") from exc
-
-            existing_sensitive = _sensitive_values(current)
-            submitted_sensitive = _sensitive_values(selected)
-            unexpected = sorted(set(submitted_sensitive) - set(existing_sensitive))
-            if unexpected:
-                raise InvalidRequestError(
-                    "Web 不允许新增敏感配置字段："
-                    + ", ".join(".".join(path) for path in unexpected)
-                )
-            for sensitive_path, value in existing_sensitive.items():
-                present, submitted = _value_at(selected, sensitive_path)
-                if present and submitted != _REDACTED:
-                    raise InvalidRequestError(
-                        f"Web 不允许修改敏感配置字段：{'.'.join(sensitive_path)}"
-                    )
-                _set_value(selected, sensitive_path, value)
-
-            self._validate_user_config(name, selected)
-            try:
-                _atomic_json(path, selected)
-            except OSError as exc:
-                raise InvalidRequestError(f"用户配置写入失败：{exc}") from exc
-        return self.user_config(name)
 
     def sessions(self, user: Any, *, source: Any = "web") -> dict[str, Any]:
         name = self.require_user(user)
@@ -590,6 +418,11 @@ class WebRunService:
                             for value in item.get("guidance", [])
                             if isinstance(value, str)
                         ] if isinstance(item.get("guidance"), list) else [],
+                        "tool_pause": (
+                            dict(item["tool_pause"])
+                            if isinstance(item.get("tool_pause"), dict)
+                            else None
+                        ),
                     }
                 )
         reasoning_by_round: dict[int, str] = {}
@@ -619,8 +452,11 @@ class WebRunService:
                     result_text, result_truncated = _tool_text_preview(call.get("result"))
                     raw_status = str(call.get("status") or "completed").casefold()
                     status = (
-                        "running" if raw_status in {"running", "started", "pending"}
-                        else "error" if raw_status in {"failed", "error"}
+                        "running"
+                        if raw_status in {"running", "started", "pending", "deferred"}
+                        else "error"
+                        if raw_status
+                        in {"failed", "error", "temporarily_unavailable"}
                         else "success"
                     )
                     calls.append(
@@ -740,10 +576,12 @@ class WebRunService:
         config = load_config(name, self.root)
         source_policy = MainAgentSourcePolicy.from_config(config)
         policy_summary = source_policy.public_summary()
-        knowledge_config = config.get("knowledge") or {}
-        max_file_chars = max(1000, int(knowledge_config.get("max_file_chars", 20000)))
         documents = []
-        for document in build_index(self.root, name, max_file_chars=max_file_chars):
+        for document in build_index(
+            self.root,
+            name,
+            max_file_chars=DEFAULT_KNOWLEDGE_MAX_FILE_CHARS,
+        ):
             try:
                 stat = document.path.stat()
                 size = stat.st_size
@@ -758,17 +596,24 @@ class WebRunService:
                     "title": document.title,
                     "size": size,
                     "updated_at": updated_at,
-                    "active_for_main_agent": document.scope in source_policy.knowledge_scopes,
+                    "active_for_main_agent": (
+                        document.scope in source_policy.knowledge_scopes
+                        and not source_policy.kemo_graph_replaces_knowledge
+                    ),
                 }
             )
         return {
             "user": name,
-            "enabled": source_policy.knowledge_enabled,
+            "enabled": True,
             "retrieval": {
-                "max_items": int(knowledge_config.get("max_items", 4)),
-                "max_chars": int(knowledge_config.get("max_chars", 4000)),
-                "minimum_score": int(knowledge_config.get("minimum_score", 2)),
-                "mode": "file_index",
+                "max_items": DEFAULT_KNOWLEDGE_MAX_ITEMS,
+                "max_chars": DEFAULT_KNOWLEDGE_MAX_CHARS,
+                "minimum_score": DEFAULT_KNOWLEDGE_MINIMUM_SCORE,
+                "mode": (
+                    "kemo_graph_replacement"
+                    if source_policy.kemo_graph_replaces_knowledge
+                    else "file_index"
+                ),
             },
             "summary": {
                 "documents": len(documents),
@@ -785,7 +630,7 @@ class WebRunService:
         name = self.require_user(user)
         config = load_config(name, self.root)
         source_policy = MainAgentSourcePolicy.from_config(config)
-        registry = discover_tools(self.root, name)
+        registry = apply_runtime_tool_policy(discover_tools(self.root, name), config)
         layer_by_source = {"plugins": "core"}
         tools = []
         for tool in sorted(registry.tools.values(), key=lambda item: item.name.casefold()):
@@ -935,6 +780,7 @@ class WebRunService:
         temporary_memory_limits = memory.get("temporary_injection_limits") or {}
         task_plan = config.get("task_plan") or {}
         cron = config.get("cron") or {}
+        runtime_host = config.get("runtime_host") or {}
         agents = config.get("agents") or {}
         return {
             "user": name,
@@ -943,34 +789,43 @@ class WebRunService:
                 "type": str(provider.get("type") or ""),
                 "base_url": str(provider.get("base_url") or ""),
                 "model": str(provider.get("model") or ""),
-                "timeout": float(provider.get("timeout") or 0),
-                "stream": bool(provider.get("stream", False)),
+                "timeout": 120.0,
+                "stream": bool(provider.get("stream", True)),
                 "credential_source": credential_source,
                 "configured": bool(provider.get("type") and provider.get("model") and provider.get("base_url")),
             },
             "features": {
                 "tools": bool(tools.get("enabled", True)),
-                "knowledge": bool(knowledge.get("enabled", True)),
-                "memory_extraction": bool(memory.get("extraction_enabled", True)),
-                "memory_injection": bool(memory.get("injection_enabled", True)),
+                "knowledge": True,
+                "history_read": bool(memory.get("history_read_enabled", True)),
+                "memory_injection": True,
                 "task_plan_auto_accept": bool(task_plan.get("auto_accept", False)),
                 "cron": bool(cron.get("enabled", False)),
-                "cron_auto_start": bool(cron.get("auto_start", False)),
+                "background_scheduler": bool(
+                    runtime_host.get("enable_background_scheduler", True)
+                ),
             },
             "limits": {
-                "context_rounds": int(agents.get("n2_max_rounds") or 30),
-                "context_tokens": int(agents.get("n4_token_limit") or 120000),
-                "compression_ratio": float(agents.get("n5_token_compression_ratio") or 0.6),
-                "task_plan_steps": int(task_plan.get("max_steps") or agents.get("n8_task_plan_max_steps") or 10),
+                "context_rounds": int(agents.get("max_rounds") or 30),
+                "context_tokens": int(agents.get("token_limit") or 120000),
+                "compression_ratio": float(
+                    agents.get("token_compression_ratio") or 0.6
+                ),
+                "task_plan_steps": int(task_plan.get("max_steps") or 10),
                 "tool_iterations": int(tools.get("max_iterations") or 8),
                 "tool_timeout": float(tools.get("timeout") or 60),
-                "knowledge_items": int(knowledge.get("max_items") or 4),
-                "knowledge_chars": int(knowledge.get("max_chars") or 4000),
+                "tool_max_per_round": tools.get("max_per_round"),
+                "knowledge_items": DEFAULT_KNOWLEDGE_MAX_ITEMS,
+                "knowledge_chars": DEFAULT_KNOWLEDGE_MAX_CHARS,
                 "memory_items": sum(
                     int(temporary_memory_limits.get(tier, default))
-                    for tier, default in (("half_year", 3), ("one_month", 4), ("seven_days", 3))
+                    for tier, default in (
+                        ("half_year", 300),
+                        ("one_month", 200),
+                        ("seven_days", 100),
+                    )
                 ),
-                "memory_chars": int(memory.get("important_memory_max_chars", 1500)),
+                "memory_chars": int(memory.get("important_memory_max_chars", 2000)),
             },
             "users": [item["name"] for item in self.users()],
             "source_policy": source_policy.public_summary(),

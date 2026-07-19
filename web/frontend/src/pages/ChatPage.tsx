@@ -222,6 +222,7 @@ export function ChatPage() {
   const [activeRunId, setActiveRunId] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
+  const [toolPause, setToolPause] = useState<{ limit: number; executed: number } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
@@ -234,6 +235,17 @@ export function ChatPage() {
 
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
   const items = [...historyItems, ...liveItems]
+  const persistedToolPause = useMemo(() => {
+    const metric = historyQuery.data?.round_metrics.at(-1)
+    if (!metric?.tool_pause || metric.tool_pause.reason !== 'max_per_round') return null
+    return {
+      limit: Number(metric.tool_pause.limit || 0),
+      executed: Number(metric.tool_pause.executed || 0),
+    }
+  }, [historyQuery.data])
+  const visibleToolPause = running
+    ? null
+    : toolPause ?? (liveItems.length === 0 ? persistedToolPause : null)
 
   useEffect(() => {
     followOutputRef.current = true
@@ -242,6 +254,7 @@ export function ChatPage() {
     setEditedSources(new Set())
     setCopiedItem('')
     setActiveRunId('')
+    setToolPause(null)
     abortRef.current?.abort()
     setRunning(false)
   }, [user, sessionId])
@@ -262,12 +275,13 @@ export function ChatPage() {
     else element.scrollTop = element.scrollHeight
   }, [items.length, liveItems, running])
 
-  const send = async () => {
-    const prompt = draft.trim()
+  const send = async (promptOverride?: string) => {
+    const prompt = (promptOverride ?? draft).trim()
     if (!prompt || !user || running) return
     const activeSession = sessionId || createSessionId()
     const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
     setDraft('')
+    setToolPause(null)
     setRunning(true)
     setActiveRunId(runId)
     setConversationMenuOpen(false)
@@ -289,6 +303,13 @@ export function ChatPage() {
         signal: controller.signal,
         onEvent: (event) => {
           setLiveItems((current) => reduceRunEvent(current, event))
+          if (event.type === 'done' && event.metadata?.awaiting_tool_confirmation) {
+            const pause = event.metadata.tool_pause as Record<string, unknown> | undefined
+            setToolPause({
+              limit: Number(pause?.limit || 0),
+              executed: Number(pause?.executed || 0),
+            })
+          }
         },
       })
       if (!sessionId) setSessionId(activeSession)
@@ -425,13 +446,13 @@ export function ChatPage() {
       <div className="composer-zone">
         <AgentComposer
           value={draft}
-          placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+          placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : visibleToolPause ? '已暂停工具调用；可点击继续或输入新的指令…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
           currentRound={currentRound}
           roundLimit={roundLimit}
           running={running}
           disabled={!user}
           conversationMenuOpen={conversationMenuOpen}
-          notice={editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
+          notice={visibleToolPause ? <div className="edit-resend-banner"><span>本轮已执行 {visibleToolPause.executed}/{visibleToolPause.limit} 次工具调用，中间结果已保存。确认后可继续。</span><button type="button" onClick={() => { void send('继续执行上轮未完成的任务。') }}>继续</button></div> : editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
               <div className="conversation-menu-head">对话操作</div>

@@ -100,6 +100,11 @@ export interface HistoryResponse {
     elapsed_ms: number
     tool_calls: number
     guidance: string[]
+    tool_pause?: {
+      reason?: string
+      limit?: number
+      executed?: number
+    } | null
   }>
   round_traces: Array<{
     round: number
@@ -186,8 +191,9 @@ export interface NamePolicySummary {
 }
 
 export interface MainAgentSourcePolicySummary {
-  knowledge: { enabled: boolean; effective_scopes: string[] }
-  skills: { shared: NamePolicySummary; user: NamePolicySummary }
+    knowledge: { enabled: boolean; effective_scopes: string[] }
+    plugins: NamePolicySummary
+    skills: { shared: NamePolicySummary; user: NamePolicySummary }
   expand: { global: NamePolicySummary; shared: NamePolicySummary }
   perception: { global: NamePolicySummary }
   kemo_graph: {
@@ -195,6 +201,9 @@ export interface MainAgentSourcePolicySummary {
     connected: false
     effective: false
     status: 'disabled' | 'not_connected'
+    replacement_active: boolean
+    replaces_knowledge: boolean
+    replaces_memory: boolean
   }
 }
 
@@ -304,11 +313,11 @@ export interface SettingsResponse {
   features: {
     tools: boolean
     knowledge: boolean
-    memory_extraction: boolean
+    history_read: boolean
     memory_injection: boolean
     task_plan_auto_accept: boolean
     cron: boolean
-    cron_auto_start: boolean
+    background_scheduler: boolean
   }
   limits: {
     context_rounds: number
@@ -317,6 +326,7 @@ export interface SettingsResponse {
     task_plan_steps: number
     tool_iterations: number
     tool_timeout: number
+    tool_max_per_round: number | null
     knowledge_items: number
     knowledge_chars: number
     memory_items: number
@@ -331,9 +341,7 @@ export interface SettingsResponse {
 export interface ConfigFullResponse {
   user: string
   config: Record<string, unknown>
-  etag: string
   redacted_paths: string[]
-  write_enabled: boolean
 }
 
 export interface PromptDiagnosticsResponse {

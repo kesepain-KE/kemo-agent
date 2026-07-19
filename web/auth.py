@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 import re
+import secrets
 import time
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Any
 
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _SESSION_KEY = "kemo_web_auth"
+WEB_SESSION_MAX_AGE_SECONDS = 2 * 60 * 60
 
 
 class WebAuthConfigError(ValueError):
@@ -37,12 +39,12 @@ class WebAuthConfig:
     def __post_init__(self) -> None:
         username = self.username.strip()
         cookie_name = self.cookie_name.strip() or "kemo_agent_session"
+        session_secret = self.session_secret or secrets.token_hex(32)
         object.__setattr__(self, "username", username)
         object.__setattr__(self, "cookie_name", cookie_name)
+        object.__setattr__(self, "session_secret", session_secret)
         if bool(username) != bool(self.password):
             raise WebAuthConfigError("WEB_USERNAME 与 WEB_PASSWORD 必须同时配置或同时留空")
-        if self.enabled and not self.session_secret:
-            raise WebAuthConfigError("启用 Web 鉴权时必须配置 WEB_SESSION_SECRET")
         if not _COOKIE_NAME.fullmatch(cookie_name):
             raise WebAuthConfigError("WEB_SESSION_COOKIE_NAME 不是合法的 Cookie 名称")
 

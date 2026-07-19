@@ -3,10 +3,11 @@ import { setupServer } from 'msw/node'
 
 const sourcePolicy = {
   knowledge: { enabled: true, effective_scopes: ['user', 'shared', 'global'] },
+  plugins: { mode: 'all', names: [] },
   skills: { shared: { mode: 'all', names: [] }, user: { mode: 'all', names: [] } },
   expand: { global: { mode: 'all', names: [] }, shared: { mode: 'all', names: [] } },
   perception: { global: { mode: 'all', names: [] } },
-  kemo_graph: { requested: false, connected: false, effective: false, status: 'disabled' },
+  kemo_graph: { requested: false, connected: false, effective: false, status: 'disabled', replacement_active: false, replaces_knowledge: false, replaces_memory: false },
 }
 
 export const handlers = [
@@ -46,8 +47,8 @@ export const handlers = [
     decisions: [],
     source_policy: sourcePolicy,
   })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, memory_extraction: true, memory_injection: true, task_plan_auto_accept: false, cron: true, cron_auto_start: false }, limits: { context_rounds: 30, context_tokens: 120000, compression_ratio: 0.6, task_plan_steps: 10, tool_iterations: 8, tool_timeout: 60, knowledge_items: 4, knowledge_chars: 4000, memory_items: 10, memory_chars: 1500 }, users: ['kesepain'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
-  http.get('/api/users/kesepain/config/full', () => HttpResponse.json({ user: 'kesepain', config: { schema_version: 1, provider: { model: 'test-model' } }, etag: 'mock-etag', redacted_paths: [], write_enabled: false })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, tool_max_per_round: null, knowledge_items: 4, knowledge_chars: 4000, memory_items: 600, memory_chars: 2000 }, users: ['kesepain'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/config/full', () => HttpResponse.json({ user: 'kesepain', config: { schema_version: 1, provider: { model: 'test-model' } }, redacted_paths: [] })),
   http.get('/api/users/kesepain/prompt/sections', () => HttpResponse.json({ user: 'kesepain', total_chars: 120, sections: [{ name: 'user_soul', status: 'injected', original_items: 1, injected_items: 1, original_chars: 20, injected_chars: 20, truncated: false, source_files: ['users/kesepain/user_soul.md'] }], source_policy: sourcePolicy, source_selection: {}, expand: { global: { mode: 'all', discovered: [], selected: [], filtered: [], unmatched: [] } } })),
   http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({ user: 'kesepain', summary: { total: 0, seven_days: 0, one_month: 0, half_year: 0, permanent: 0 }, items: [] })),
 ]

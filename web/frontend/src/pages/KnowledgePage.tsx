@@ -96,8 +96,8 @@ export function KnowledgePage() {
             </div>
           </article>
           <article className="panel extension-card">
-            <div className="panel-head"><div className="panel-title"><span className="panel-title-icon"><PlugZap size={15} /></span><span><strong>外接项目 · kemo-graph</strong><span>可选的独立 CLI 项目，本服务不会自动启动</span></span></div><StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'} /></div>
-            <div className="panel-body"><p className="panel-copy">{data?.source_policy.kemo_graph.requested ? '用户已请求启用，但连接管线尚未接入；当前不会执行图谱调用。' : '用户未启用图谱连接；当前保持纯文件知识模式。'}</p></div>
+            <div className="panel-head"><div className="panel-title"><span className="panel-title-icon"><PlugZap size={15} /></span><span><strong>外接项目 · kemo-graph</strong><span>知识与记忆的上层替换器，本服务不会自动启动外部项目</span></span></div><StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'} /></div>
+            <div className="panel-body"><p className="panel-copy">{data?.source_policy.kemo_graph.requested ? '替换模式已启用；连接不可用时不会回退注入原始知识或记忆，以免绕过用户配置。' : '用户未启用图谱替换；当前保持文件知识与分层记忆模式。'}</p></div>
           </article>
         </aside>
       </div>
