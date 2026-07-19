@@ -1,0 +1,11 @@
+{
+  "name": "智能灯光控制",
+  "explain": "控制客厅与卧室的智能灯组，支持开关、调光、色温调节。",
+  "open_input": true,
+  "input_data": "input_data.md",
+  "input_health": "正常",
+  "start_update": "data_update.py",
+  "open_control": true,
+  "start_expand": "start_expand.py",
+  "start_control": "expand_control.md"
+}

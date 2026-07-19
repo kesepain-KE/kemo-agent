@@ -1,0 +1,7 @@
+{
+  "name": "example",
+  "data_md": "sense.md",
+  "recent_update": "2026-07-19 14:30:00",
+  "health": "正常",
+  "start_update": "data_update.py"
+}

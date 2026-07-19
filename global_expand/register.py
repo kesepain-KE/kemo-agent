@@ -1,5 +1,7 @@
-"""Register global expand injection files with the prompt pipeline."""
+"""Register the standardized global expand root."""
+
+from pathlib import Path
 
 
 def register(registry) -> None:
-    pass
+    registry.add_expand_root("global", Path(__file__).resolve().parent)
