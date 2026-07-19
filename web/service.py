@@ -13,7 +13,16 @@ import time
 from typing import Any, Callable, Iterator
 import uuid
 
+from pydantic import TypeAdapter, ValidationError
+
 from events import RunEvent
+from provider.protocol.models import (
+    AudioContent,
+    ContentBlock,
+    FileContent,
+    ImageContent,
+    VideoContent,
+)
 from run.agents import discover_agents
 from run.config import (
     USER_ONLY_SECTIONS,
@@ -58,6 +67,7 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
+_CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {"api_key", "access_token", "password", "session_secret", "authorization"}
 )
@@ -218,6 +228,26 @@ class WebRunService:
         if not isinstance(prompt, str) or not prompt.strip():
             raise InvalidRequestError("prompt 必须是非空字符串")
         return prompt.strip()
+
+    def require_content(self, content: Any) -> list[dict[str, Any]]:
+        if content in (None, []):
+            return []
+        if not isinstance(content, list):
+            raise InvalidRequestError("content 必须是 Content Block 数组")
+        try:
+            blocks = _CONTENT_LIST_ADAPTER.validate_python(content)
+        except ValidationError as exc:
+            raise InvalidRequestError("content 包含无效的多模态内容块") from exc
+        media_types = (ImageContent, AudioContent, VideoContent, FileContent)
+        for block in blocks:
+            if isinstance(block, media_types):
+                if block.source is not None:
+                    raise InvalidRequestError(
+                        "Web 多模态入口只接受 asset_id，不接受 URL、Base64 或本地路径"
+                    )
+                if not block.asset_id:
+                    raise InvalidRequestError("Web 媒体内容必须提供 asset_id")
+        return [block.model_dump(mode="json", exclude_none=True) for block in blocks]
 
     def require_run_id(self, run_id: Any) -> str:
         if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id.strip()):
@@ -1055,10 +1085,16 @@ class WebRunService:
         *,
         cancel_event: threading.Event,
         run_id: Any = "",
+        content: Any = None,
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
-        normalized_prompt = self.require_prompt(prompt)
+        if not isinstance(prompt, str):
+            raise InvalidRequestError("prompt 必须是字符串")
+        normalized_prompt = prompt.strip()
+        normalized_content = self.require_content(content)
+        if not normalized_prompt and not normalized_content:
+            raise InvalidRequestError("prompt 和 content 不能同时为空")
         normalized_run_id = (
             self.require_run_id(run_id) if run_id else f"run_{uuid.uuid4().hex}"
         )
@@ -1072,6 +1108,7 @@ class WebRunService:
             "source": "web",
             "session_id": normalized_session,
             "prompt": normalized_prompt,
+            "content": normalized_content,
             "stream": True,
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,

@@ -199,6 +199,7 @@ export interface StreamChatOptions {
   user: string
   sessionId: string
   prompt: string
+  content?: Array<Record<string, unknown>>
   runId: string
   signal?: AbortSignal
   onEvent: (event: RunEvent) => void
@@ -246,6 +247,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       user: options.user,
       session_id: options.sessionId,
       prompt: options.prompt,
+      content: options.content ?? [],
       run_id: options.runId,
     }),
     signal: options.signal,

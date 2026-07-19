@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from events import RunEvent, TERMINAL_EVENTS
@@ -32,8 +32,15 @@ from web.service import (
 class ChatBody(BaseModel):
     user: str
     session_id: str
-    prompt: str
+    prompt: str = ""
+    content: list[dict[str, Any]] = Field(default_factory=list)
     run_id: str = ""
+
+    @model_validator(mode="after")
+    def require_input(self) -> "ChatBody":
+        if not self.prompt.strip() and not self.content:
+            raise ValueError("prompt 和 content 不能同时为空")
+        return self
 
 
 class LoginBody(BaseModel):
@@ -270,12 +277,14 @@ def create_app(
     async def chat(body: ChatBody, request: Request) -> StreamingResponse:
         cancel_event = threading.Event()
         try:
+            content_options = {"content": body.content} if body.content else {}
             events = backend.stream_chat(
                 body.user,
                 body.session_id,
                 body.prompt,
                 cancel_event=cancel_event,
                 run_id=body.run_id,
+                **content_options,
             )
         except WebServiceError:
             raise

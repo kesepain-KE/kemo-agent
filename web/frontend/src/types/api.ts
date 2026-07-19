@@ -9,6 +9,14 @@ export type RunEventType =
 
 export interface RunEvent {
   type: RunEventType
+  event_id?: string
+  sequence?: number
+  run_sequence?: number
+  request_id?: string
+  response_id?: string
+  item_id?: string
+  content_index?: number
+  protocol_event_type?: string
   content?: string
   tool_call_id?: string
   tool_name?: string
