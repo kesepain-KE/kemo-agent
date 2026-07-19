@@ -173,7 +173,6 @@ kemo-agent/
 │   └── web_search/
 ├── agents/                 # 内置子代理
 │   ├── context_manage/
-│   ├── token_condense/
 │   ├── self_improve/
 │   ├── memory_temporary_important/
 │   ├── task_plan/

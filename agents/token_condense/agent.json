@@ -1,6 +1,0 @@
-{
-  "name": "token_condense",
-  "version": "1.0.0",
-  "description": "在 Token 上限触发时按完整轮次生成结构化压缩摘要。",
-  "trigger": "trigger.md"
-}

@@ -95,6 +95,16 @@ class SubAgentRuntimeTests(unittest.TestCase):
     def test_discovery_order_lookup_disabled_and_manifest_validation(self) -> None:
         registry = discover_agents(self.root)
         self.assertEqual(list(registry.agents), sorted(registry.agents, key=str.casefold))
+        self.assertEqual(
+            set(registry.agents),
+            {
+                "context_manage",
+                "memory_temporary_important",
+                "self_improve",
+                "task_plan",
+                "time_plan",
+            },
+        )
         context_definition = registry.get("context_manage")
         self.assertEqual(context_definition.instruction_file, "AGENT.md")
         self.assertEqual(context_definition.trigger_file, "trigger.md")

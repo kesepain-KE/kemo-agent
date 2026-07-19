@@ -311,7 +311,6 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 | 子代理 | 路径 | 职责 |
 |--------|------|------|
 | `context_manage` | `agents/context_manage/` | 统一处理轮次、Token、API 超限和逐轮工具/思考压缩 |
-| `token_condense` | `agents/token_condense/` | 兼容保留，engine 已不再调用 |
 | `self_improve` | `agents/self_improve/` | 记忆提取与自我改进 |
 | `memory_temporary_important` | `agents/memory_temporary_important/` | 临时重要记忆处理 |
 | `task_plan` | `agents/task_plan/` | 任务计划生成与执行 |

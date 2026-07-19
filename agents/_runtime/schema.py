@@ -25,11 +25,6 @@ _BUILTIN_DEFAULTS: dict[str, dict[str, str]] = {
         "write_policy": "derived_cache",
         "model_profile": "cheap",
     },
-    "token_condense": {
-        "execution": "sync",
-        "write_policy": "derived_cache",
-        "model_profile": "cheap",
-    },
     "memory_temporary_important": {
         "execution": "background_serial",
         "write_policy": "user_memory",
