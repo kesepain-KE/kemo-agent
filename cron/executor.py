@@ -1,25 +1,177 @@
-"""Cron-to-Run 直接执行适配器。
-
-通过直接调用Run核心(handle_request)来执行cron任务，
-收集结果和错误，并将它们写回 CronStore。
-从不通过 cli.py 进行路由。"""
+"""Cron 三路执行适配器：主智能体、内部子代理和注册函数。"""
 
 from __future__ import annotations
 
+import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from provider.factory import create_provider
+from run.agent_runner import AgentRunner
 from run.config import load_config
-from run.cron_store import CronError, CronStore, CronValidationError
-from run.engine import EngineError, handle_request
+from run.cron_store import CronError, CronStore, CronValidationError, now_beijing
+from run.engine import handle_request
 from run.tools import ToolRegistry, discover_tools
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _parse_subagent_prompt(prompt: str) -> tuple[str, dict[str, Any]]:
+    try:
+        payload = json.loads(prompt)
+    except json.JSONDecodeError as exc:
+        raise CronValidationError("subagent 任务 prompt 必须是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise CronValidationError("subagent 任务 prompt 必须是 JSON 对象")
+    name = payload.get("subagent")
+    input_data = payload.get("input")
+    if not isinstance(name, str) or not name.strip():
+        raise CronValidationError("subagent 任务缺少非空 subagent 字符串")
+    if not isinstance(input_data, dict):
+        raise CronValidationError("subagent 任务 input 必须是 JSON 对象")
+    return name.strip(), input_data
+
+
+def _parse_function_prompt(prompt: str) -> str:
+    try:
+        payload = json.loads(prompt)
+    except json.JSONDecodeError as exc:
+        raise CronValidationError("function 任务 prompt 必须是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise CronValidationError("function 任务 prompt 必须是 JSON 对象")
+    name = payload.get("function")
+    if not isinstance(name, str) or not name.strip():
+        raise CronValidationError("function 任务缺少非空 function 字符串")
+    return name.strip()
+
+
+def _execute_internal_function(
+    function_name: str,
+    *,
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    provider_factory: Callable[[dict[str, Any]], Any],
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    if function_name != "cron.review_due.scan_and_promote":
+        raise CronValidationError(f"未注册的 cron 内部函数：{function_name}")
+    from cron.review_due import scan_and_promote
+
+    return scan_and_promote(
+        root=root,
+        user=user,
+        config=config,
+        provider_factory=provider_factory,
+        cancel_event=cancel_event,
+    )
+
+
+def _claim_task(store: CronStore, task_id: str) -> dict[str, Any]:
+    def _claim(task: dict[str, Any]) -> dict[str, Any]:
+        if task["status"] not in ("enabled", "failed"):
+            raise CronError(f"任务 {task_id} 当前状态为 {task['status']!r}，无法领取")
+        task["status"] = "running"
+        task["latest_run_at"] = now_beijing()
+        return task
+
+    try:
+        return store.update(task_id, _claim)
+    except (CronError, CronValidationError) as exc:
+        raise CronError(f"领取任务失败：{exc}") from exc
+
+
+def _finish_task(store: CronStore, task: dict[str, Any], *, failed: bool) -> dict[str, Any]:
+    task_id = task["task_id"]
+
+    def _finish(current: dict[str, Any]) -> dict[str, Any]:
+        current["latest_run_at"] = now_beijing()
+        if failed:
+            current["status"] = "failed"
+            return current
+        if current["type"] == "once":
+            current["status"] = "completed"
+            current["next_run_at"] = ""
+            return current
+        from cron.schedule import compute_next_run
+
+        current["status"] = "enabled"
+        current["next_run_at"] = compute_next_run(current, after=datetime.now().astimezone())
+        return current
+
+    try:
+        return store.update(task_id, _finish)
+    except (CronError, CronValidationError) as exc:
+        raise CronError(f"持久化执行状态失败：{exc}") from exc
+
+
+def _revert_claim(store: CronStore, task_id: str) -> dict[str, Any]:
+    def _revert(task: dict[str, Any]) -> dict[str, Any]:
+        task["status"] = "enabled"
+        return task
+
+    try:
+        return store.update(task_id, _revert)
+    except (CronError, CronValidationError):
+        return store.read(task_id)
+
+
+def _execute_claimed_task(
+    *,
+    root: Path,
+    user: str,
+    task: dict[str, Any],
+    config: dict[str, Any],
+    provider_factory: Callable[[dict[str, Any]], Any],
+    tool_registry_factory: Callable[[Path, str], ToolRegistry],
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    store = CronStore(root, user)
+    task_id = task["task_id"]
+    if cancel_event is not None and cancel_event.is_set():
+        return _revert_claim(store, task_id)
+
+    failed = False
+    try:
+        exec_mode = task.get("exec_mode", "agent")
+        if exec_mode == "subagent":
+            name, input_data = _parse_subagent_prompt(task["prompt"])
+            AgentRunner(
+                root,
+                user,
+                config=config,
+                provider_factory=provider_factory,
+            ).run(
+                name,
+                input_data,
+                cancel_event=cancel_event,
+                task_id=task_id,
+            )
+        elif exec_mode == "function":
+            _execute_internal_function(
+                _parse_function_prompt(task["prompt"]),
+                root=root,
+                user=user,
+                config=config,
+                provider_factory=provider_factory,
+                cancel_event=cancel_event,
+            )
+        else:
+            handle_request(
+                {
+                    "user": task["user"],
+                    "prompt": task["prompt"],
+                    "source": "cron",
+                    "session_id": "cron",
+                },
+                root=root,
+                provider_factory=provider_factory,
+                tool_registry_factory=tool_registry_factory,
+                cancel_event=cancel_event,
+            )
+    except Exception:
+        failed = True
+    return _finish_task(store, task, failed=failed)
 
 
 def execute_cron_task(
@@ -32,115 +184,67 @@ def execute_cron_task(
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    """Execute a single cron task and persist the result.
+    """根据 ``exec_mode`` 领取并执行一个 cron 任务。"""
+    cfg = config if config is not None else load_config(user, root)
+    task = _claim_task(CronStore(root, user), task_id)
+    return _execute_claimed_task(
+        root=root,
+        user=user,
+        task=task,
+        config=cfg,
+        provider_factory=provider_factory,
+        tool_registry_factory=tool_registry_factory,
+        cancel_event=cancel_event,
+    )
 
-    1. Atomically claim the task (enabled → running).
-    2. Call handle_request with the task's prompt.
-    3. Persist result or error, update next_run_at, increment run_count.
 
-    Returns the final task dict.
-    """
-    cfg = config or load_config(user, root)
+def execute_subagent_task(
+    *,
+    root: Path,
+    user: str,
+    task_id: str,
+    config: dict[str, Any] | None = None,
+    provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """显式执行 subagent 模式任务，并拒绝其他模式。"""
     store = CronStore(root, user)
+    task = store.read(task_id)
+    if task.get("exec_mode") != "subagent":
+        raise CronValidationError(f"任务 {task_id} 不是 subagent 执行模式")
+    cfg = config if config is not None else load_config(user, root)
+    return _execute_claimed_task(
+        root=root,
+        user=user,
+        task=_claim_task(store, task_id),
+        config=cfg,
+        provider_factory=provider_factory,
+        tool_registry_factory=discover_tools,
+        cancel_event=cancel_event,
+    )
 
-        # 1. 原子声明：启用→运行
-    def _claim(t: dict) -> dict:
-        if t["status"] not in ("enabled", "failed"):
-            raise CronError(
-                f"任务 {task_id} 当前状态为 {t['status']!r}，无法领取"
-            )
-        t["status"] = "running"
-        t["last_run_at"] = _now()
-        return t
 
-    try:
-        task = store.update(task_id, _claim)
-    except (CronError, CronValidationError) as exc:
-        raise CronError(f"领取任务失败：{exc}") from exc
-
-    prompt = task["prompt"]
-    source = task.get("source", "cron")
-    session_id = task.get("session_id", "cron")
-
-        # 2.通过Run core执行
-    request = {
-        "user": user,
-        "prompt": prompt,
-        "source": source,
-        "session_id": session_id,
-    }
-
-    result_payload: dict[str, Any] | None = None
-    error_payload: dict[str, Any] | None = None
-
-    if cancel_event is not None and cancel_event.is_set():
-                # 执行前取消 — 恢复为启用
-        def _revert(t: dict) -> dict:
-            t["status"] = "enabled"
-            return t
-        try:
-            store.update(task_id, _revert)
-        except (CronError, CronValidationError):
-            pass
-        return store.read(task_id)
-
-    try:
-        result_payload = handle_request(
-            request,
-            root=root,
-            provider_factory=provider_factory,
-            tool_registry_factory=tool_registry_factory,
-        )
-    except EngineError as exc:
-        error_payload = {
-            "message": str(exc),
-            "exception_type": type(exc).__name__,
-            "phase": "run",
-        }
-    except Exception as exc:
-        error_payload = {
-            "message": str(exc),
-            "exception_type": type(exc).__name__,
-            "phase": "run",
-        }
-
-        # 3. 保存结果并更新时间表
-    run_count = int(task.get("run_count", 0)) + 1
-    schedule = task.get("schedule") or {}
-    stype = schedule.get("type", "recurring")
-
-    def _finish(t: dict) -> dict:
-        t["run_count"] = run_count
-        t["last_result"] = (
-            {
-                "text": str(result_payload.get("text", ""))[:500],
-                "model": result_payload.get("model", ""),
-                "usage": result_payload.get("usage"),
-            }
-            if result_payload
-            else None
-        )
-        t["last_error"] = error_payload
-
-        if error_payload is not None:
-            t["status"] = "failed"
-        elif stype == "once":
-            t["status"] = "completed"
-            t["next_run_at"] = ""
-        else:
-            t["status"] = "enabled"
-                        # 从现在开始计算下一次运行
-            from cron.schedule import compute_next_run
-            now = datetime.now(timezone.utc)
-            try:
-                t["next_run_at"] = compute_next_run(schedule, after=now)
-            except Exception:
-                t["next_run_at"] = _now()
-        return t
-
-    try:
-        task = store.update(task_id, _finish)
-    except (CronError, CronValidationError) as exc:
-        raise CronError(f"持久化结果失败：{exc}") from exc
-
-    return task
+def execute_function_task(
+    *,
+    root: Path,
+    user: str,
+    task_id: str,
+    config: dict[str, Any] | None = None,
+    provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """显式执行 function 模式任务，并拒绝其他模式。"""
+    store = CronStore(root, user)
+    task = store.read(task_id)
+    if task.get("exec_mode") != "function":
+        raise CronValidationError(f"任务 {task_id} 不是 function 执行模式")
+    cfg = config if config is not None else load_config(user, root)
+    return _execute_claimed_task(
+        root=root,
+        user=user,
+        task=_claim_task(store, task_id),
+        config=cfg,
+        provider_factory=provider_factory,
+        tool_registry_factory=discover_tools,
+        cancel_event=cancel_event,
+    )
