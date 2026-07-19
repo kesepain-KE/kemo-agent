@@ -25,6 +25,7 @@ from message.transport import (
     TransportRegistry,
 )
 from run.runtime_host import RuntimeHost
+from run.cron_store import CronStore
 from run.tools import ToolDefinition, ToolRegistry
 
 
@@ -357,6 +358,14 @@ class HostTests(unittest.TestCase):
             [{"platform": "mock", "external_user_id": "ext-1", "internal_user": "alice"}],
             cron=cron,
         )
+        (self.root / "config" / "global_config.json").write_text(
+            json.dumps(config),
+            "utf-8",
+        )
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}),
+            "utf-8",
+        )
         return RuntimeHost(
             self.root,
             config=config,
@@ -403,6 +412,10 @@ class HostTests(unittest.TestCase):
         self.assertTrue(host.running)
         self.assertEqual(cron.started, 1)
         self.assertEqual(host.maintenance.started, 1)
+        self.assertEqual(
+            len(CronStore(self.root, "alice").list_tasks()),
+            3,
+        )
         host.stop()
         host.stop()
         self.assertEqual(host.state, "stopped")

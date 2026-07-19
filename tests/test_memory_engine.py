@@ -76,50 +76,42 @@ class MemoryEngineTests(unittest.TestCase):
         store.tier_dir("permanent").mkdir(parents=True, exist_ok=True)
         self.assertEqual(store.load_tier("permanent"), [])
 
-    def test_only_committed_round_submits_extraction(self) -> None:
+    def test_committed_round_defers_extraction_to_context_compression(self) -> None:
         root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False), patch(
-            "run.engine.submit_memory_extraction", return_value="memory-task"
-        ) as submit:
+        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
         self.assertTrue(result["committed"])
-        self.assertEqual(result["memory"]["extraction_task_id"], "memory-task")
-        submit.assert_called_once()
-        call = submit.call_args.kwargs
-        self.assertEqual(call["user_text"], "记住我喜欢川菜")
-        self.assertEqual(call["assistant_text"], "完成")
-        self.assertEqual(call["source"]["round"], 1)
+        self.assertIsNone(result["memory"]["extraction_task_id"])
+        self.assertIsNone(result["memory"]["extraction_error"])
+        self.assertEqual(result["memory"]["extraction_mode"], "context_compression")
+        self.assertEqual(
+            MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
+            [],
+        )
 
     def test_provider_failure_and_cancel_do_not_submit(self) -> None:
         root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False), patch(
-            "run.engine.submit_memory_extraction"
-        ) as submit:
+        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(self.request(), root=root, provider_factory=lambda _: Provider(fail=True))
-            submit.assert_not_called()
 
         stopped = threading.Event()
         iterator = iter_request_events(
             self.request(), root=root, provider_factory=lambda _: Provider(), cancel_event=stopped
         )
         stopped.set()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False), patch(
-            "run.engine.submit_memory_extraction"
-        ) as submit:
+        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             self.assertEqual(list(iterator), [])
-            submit.assert_not_called()
 
-    def test_queue_submission_failure_does_not_rollback_history(self) -> None:
+    def test_committed_round_persists_history_without_extraction_queue(self) -> None:
         root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False), patch(
-            "run.engine.submit_memory_extraction", side_effect=RuntimeError("queue unavailable")
-        ):
+        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
         self.assertTrue(result["committed"])
-        self.assertEqual(result["memory"]["extraction_error"]["message"], "queue unavailable")
-        windows = list((root / "users" / "alice" / "history").iterdir())
+        history = root / "users" / "alice" / "history"
+        windows = [item for item in history.iterdir() if item.name != "temp"]
         self.assertEqual(len(windows), 1)
+        self.assertTrue((history / "temp" / windows[0].name / "data.json").is_file())
 
 
 if __name__ == "__main__":

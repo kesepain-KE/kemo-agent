@@ -14,21 +14,24 @@ from unittest.mock import patch
 
 import cli
 from events import RunEvent
-from provider.schema import ChatResponse, ToolCall, Usage
+from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.engine import compress_context, context_status, handle_request, iter_request_events
-from run.history import find_window, load_window
+from run.history import find_window, load_runtime_window, load_window
 from run.tools import apply_runtime_tool_policy, discover_tools, execute_tool
 
 
 class ScriptedProvider:
-    def __init__(self, responses: list[ChatResponse] | None = None, streams: list[list[RunEvent]] | None = None) -> None:
+    def __init__(self, responses: list[ChatResponse | BaseException] | None = None, streams: list[list[RunEvent]] | None = None) -> None:
         self.responses = list(responses or [])
         self.streams = list(streams or [])
         self.requests = []
 
     def chat(self, request):
         self.requests.append(request)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def chat_stream(self, request):
         self.requests.append(request)
@@ -69,6 +72,11 @@ class RuntimeFeatureTests(unittest.TestCase):
         project_agents = Path(__file__).resolve().parents[1] / "agents"
         shutil.copytree(project_agents, root / "agents")
         return temporary, root
+
+    def copy_self_improve_plugins(self, root: Path) -> None:
+        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        for name in ("memory_manage", "skill_creater"):
+            shutil.copytree(project_plugins / name, root / "plugins" / name)
 
     def write_tool(self, base: Path, name: str, source_value: str, *, enabled: bool = True, async_tool: bool = False) -> None:
         directory = base / name
@@ -140,9 +148,9 @@ class RuntimeFeatureTests(unittest.TestCase):
             {"other_tool"},
         )
 
-    def test_plugin_whitelist_filters_registry_and_graph_replaces_knowledge_tool(self) -> None:
+    def test_plugin_whitelist_filters_registry_independently_of_graph_mode(self) -> None:
         _, root = self.make_root()
-        for name in ("knowledge_search", "clock", "weather"):
+        for name in ("clock", "weather"):
             self.write_tool(root / "plugins", name, name)
 
         unrestricted = apply_runtime_tool_policy(
@@ -151,17 +159,17 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertEqual(
             set(unrestricted.tools),
-            {"knowledge_search", "clock", "weather"},
+            {"clock", "weather"},
         )
 
         filtered = apply_runtime_tool_policy(
             discover_tools(root, "alice"),
-            {"plugins": {"whitelist": ["knowledge_search", "clock"]}},
+            {"plugins": {"whitelist": ["clock"]}},
         )
-        self.assertEqual(set(filtered.tools), {"knowledge_search", "clock"})
+        self.assertEqual(set(filtered.tools), {"clock"})
         self.assertEqual(
             {manifest.tool["name"] for manifest in filtered.plugin_manifests},
-            {"knowledge_search", "clock"},
+            {"clock"},
         )
 
         graph_replaced = apply_runtime_tool_policy(
@@ -171,7 +179,6 @@ class RuntimeFeatureTests(unittest.TestCase):
                 "kemo_graph": {"enabled": True},
             },
         )
-        self.assertNotIn("knowledge_search", graph_replaced.tools)
         self.assertEqual(set(graph_replaced.tools), {"clock", "weather"})
 
     def test_tavily_tool_is_exposed_only_when_api_key_is_available(self) -> None:
@@ -523,6 +530,17 @@ class RuntimeFeatureTests(unittest.TestCase):
 
     def test_context_status_and_manual_compress_do_not_add_round(self) -> None:
         _, root = self.make_root()
+        self.copy_self_improve_plugins(root)
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config["agents"] = {
+            "conserved_rounds": 3,
+            "max_rounds": 30,
+            "rounds_after_compression": 10,
+            "token_limit": 120000,
+            "token_compression_ratio": 0.6,
+        }
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
         provider = ScriptedProvider(
             responses=[ChatResponse(text=f"reply-{index}", usage=Usage()) for index in range(12)]
         )
@@ -548,6 +566,22 @@ class RuntimeFeatureTests(unittest.TestCase):
                     ChatResponse(
                         text=json.dumps(
                             {
+                                "candidates": [
+                                    {
+                                        "action": "upsert",
+                                        "filename": "压缩记忆",
+                                        "content": "old rounds fact",
+                                        "explicit": False,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        ),
+                        usage=Usage(1, 1, 2, source="mock"),
+                    ),
+                    ChatResponse(
+                        text=json.dumps(
+                            {
                                 "facts": ["old rounds"],
                                 "requirements": [],
                                 "decisions": [],
@@ -570,10 +604,92 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(result["committed"])
         self.assertEqual(result["context"]["rounds_kept"], 10)
         self.assertEqual(result["context"]["rounds_removed"], 2)
-        self.assertEqual(len(summary_provider.requests), 1)
+        self.assertEqual(len(summary_provider.requests), 2)
+        self.assertTrue(result["context"]["summary"]["generated"])
         window = load_window(find_window(root, "alice", "cli", "long"))
         self.assertEqual(window["data"]["rounds"], 12)
         self.assertEqual(len(window["text"]["messages"]), 24)
+        self.assertTrue(
+            (root / "users" / "alice" / "improve" / "seven_days" / "压缩记忆.md").is_file()
+        )
+
+    def test_provider_context_length_error_compresses_and_retries(self) -> None:
+        _, root = self.make_root()
+        self.copy_self_improve_plugins(root)
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config.update(
+            {
+                "agents": {
+                    "conserved_rounds": 3,
+                    "max_rounds": 80,
+                    "rounds_after_compression": 1,
+                    "token_limit": 120000,
+                    "token_compression_ratio": 0.6,
+                },
+                "history": {"recent_full_rounds": 1},
+            }
+        )
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        context_error = ProviderError(
+            "gateway rejected oversized context",
+            status_code=502,
+            body={
+                "code": "PROVIDER_BAD_RESPONSE",
+                "provider_status": 400,
+            },
+        )
+        summary = {
+            "facts": ["old rounds"],
+            "requirements": [],
+            "decisions": [],
+            "unfinished": [],
+            "tool_results": [],
+            "entities": [],
+            "narrative": "compressed history",
+        }
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(text="reply-1", usage=Usage()),
+                ChatResponse(text="reply-2", usage=Usage()),
+                ChatResponse(text="reply-3", usage=Usage()),
+                context_error,
+                ChatResponse(text=json.dumps({"candidates": []}), usage=Usage(1, 1, 2)),
+                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
+                ChatResponse(text="recovered", usage=Usage(3, 1, 4)),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for index in range(3):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "retry",
+                        "prompt": f"round-{index}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "retry",
+                    "prompt": "recover this request",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        self.assertEqual(result["text"], "recovered")
+        self.assertEqual(result["context"]["api_context_retries"], 1)
+        self.assertEqual(len(provider.requests), 7)
+        archive_path = find_window(root, "alice", "cli", "retry")
+        self.assertIsNotNone(archive_path)
+        archive = load_window(archive_path)
+        _, runtime = load_runtime_window(archive_path, archive)
+        self.assertEqual(archive["data"]["rounds"], 4)
+        self.assertEqual(runtime["data"]["rounds"], 4)
 
     def test_cli_stream_reasoning_json_and_interrupt(self) -> None:
         stdout = io.StringIO()

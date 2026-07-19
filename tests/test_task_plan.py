@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from events import RunEvent
 from provider.schema import ChatResponse, Usage
+from run.agent_runner import AgentRunResult
+from agents.task_plan.executor import execute as execute_task_plan_agent
 from run.task_plan_store import (
     PlanConflictError,
     PlanError,
@@ -31,8 +33,10 @@ from run.task_plan_executor import (
 from run.task_plan_service import (
     PlanGenerationError,
     PlanSkipped,
+    edit_plan,
     generate_plan,
 )
+from run.tools import ToolRegistry
 
 
 CONFIG = {
@@ -218,6 +222,34 @@ class PlanStoreTests(unittest.TestCase):
         with self.assertRaises(PlanError):
             store.read(plan["plan_id"])
 
+    def test_reminder_is_persisted_and_legacy_plan_defaults_to_empty(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        plan = normalize_plan(
+            title="Reminder",
+            description="Reminder test",
+            user="alice",
+            reminder="当前任务计划已创建，请让用户点击批准后执行",
+            steps=[{
+                "step_id": "step_1",
+                "title": "A",
+                "description": "A",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            }],
+        )
+        store.create(plan)
+        self.assertEqual(store.read(plan["plan_id"])["reminder"], plan["reminder"])
+
+        path = store._path(plan["plan_id"])
+        raw = json.loads(path.read_text("utf-8"))
+        raw.pop("reminder")
+        path.write_text(json.dumps(raw), "utf-8")
+        self.assertEqual(store.read(plan["plan_id"])["reminder"], "")
+        updated = store.update(plan["plan_id"], lambda item: item)
+        self.assertEqual(updated["reminder"], "")
+
 
 class PlanExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -396,6 +428,23 @@ class PlanExecutionTests(unittest.TestCase):
 
 
 class PlanGenerationTests(unittest.TestCase):
+    def _capturing_runner(self, response: dict, calls: list[dict]):
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                calls.append(input_data)
+                return AgentRunResult(
+                    agent="task_plan",
+                    data=response,
+                    raw_text="",
+                    usage={"total_tokens": 1},
+                    model="mock",
+                )
+
+        return Runner
+
     def test_generate_plan_with_mock_provider(self) -> None:
         _, root = _make_root(["alice"])
         (root / "agents").mkdir()
@@ -482,6 +531,259 @@ class PlanGenerationTests(unittest.TestCase):
                     provider_factory=lambda _: MockProvider("not json at all"),
                     config=CONFIG,
                 )
+
+    def test_generation_injects_all_skills_and_knowledge_in_fixed_order(self) -> None:
+        _, root = _make_root(["alice"])
+        files = {
+            root / "plugins" / "zeta" / "SKILL.md": "# zeta\n" + "Z" * 12000,
+            root / "plugins" / "alpha" / "SKILL.md": "# alpha",
+            root / "shared_skills" / "development" / "python" / "SKILL.md": "# shared python",
+            root / "users" / "alice" / "user_skills" / "agent_create" / "deploy" / "SKILL.md": "# user deploy",
+            root / "global_knowledge" / "data_structure.md": "GLOBAL INDEX",
+            root / "shared_knowledge" / "data_structure.md": "SHARED INDEX",
+            root / "users" / "alice" / "knowledge" / "data_structure.md": "USER INDEX",
+        }
+        for path, content in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, "utf-8")
+        calls: list[dict] = []
+        response = {
+            "action": "create",
+            "title": "Injected",
+            "description": "goal",
+            "steps": [{
+                "step_id": "step_1",
+                "title": "A",
+                "description": "A",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            }],
+        }
+        with patch(
+            "run.task_plan_service.AgentRunner",
+            self._capturing_runner(response, calls),
+        ):
+            plan = generate_plan(
+                root=root,
+                user="alice",
+                goal="goal",
+                config=CONFIG,
+                tool_registry=ToolRegistry({}),
+            )
+
+        input_data = calls[0]
+        ordered = list(input_data)
+        fields = [
+            "available_tools",
+            "plugin_skills",
+            "shared_skills_text",
+            "user_skills_text",
+            "global_knowledge_index",
+            "shared_knowledge_index",
+            "user_knowledge_index",
+        ]
+        self.assertEqual(sorted(ordered.index(field) for field in fields), [ordered.index(field) for field in fields])
+        self.assertLess(
+            input_data["plugin_skills"].index("plugins/alpha/SKILL.md"),
+            input_data["plugin_skills"].index("plugins/zeta/SKILL.md"),
+        )
+        self.assertIn("Z" * 12000, input_data["plugin_skills"])
+        self.assertIn("shared python", input_data["shared_skills_text"])
+        self.assertIn("user deploy", input_data["user_skills_text"])
+        self.assertEqual(input_data["global_knowledge_index"], "GLOBAL INDEX")
+        self.assertEqual(input_data["shared_knowledge_index"], "SHARED INDEX")
+        self.assertEqual(input_data["user_knowledge_index"], "USER INDEX")
+        self.assertFalse(input_data["auto_accept"])
+        self.assertEqual(
+            plan["reminder"],
+            "当前任务计划已创建，请让用户点击批准后执行",
+        )
+
+    def test_edit_rejects_terminal_and_running_statuses_before_model_call(self) -> None:
+        _, root = _make_root(["alice"])
+        base = _make_plan([{
+            "step_id": "step_1",
+            "title": "A",
+            "description": "A",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }])
+        for status in ("running", "completed", "failed", "cancelled"):
+            with self.subTest(status=status):
+                plan = {**base, "status": status}
+                with self.assertRaisesRegex(PlanGenerationError, "只能编辑"):
+                    edit_plan(
+                        root=root,
+                        user="alice",
+                        plan=plan,
+                        edit_request="change",
+                        config=CONFIG,
+                    )
+
+    def test_edit_preserves_completed_steps_and_passes_protection_summary(self) -> None:
+        _, root = _make_root(["alice"])
+        existing = normalize_plan(
+            title="Existing",
+            description="goal",
+            user="alice",
+            status="paused",
+            reminder="old",
+            steps=[
+                {
+                    "step_id": "step_1",
+                    "title": "Done",
+                    "description": "Finished work",
+                    "status": "completed",
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                    "result": {"ok": True},
+                    "finished_at": "2026-07-19T00:00:00+00:00",
+                },
+                {
+                    "step_id": "step_2",
+                    "title": "Pending",
+                    "description": "Old work",
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                },
+            ],
+        )
+        calls: list[dict] = []
+        response = {
+            "action": "edit",
+            "title": "Existing",
+            "description": "goal",
+            "steps": [
+                {"step_id": "step_1"},
+                {
+                    "step_id": "step_2",
+                    "title": "Changed",
+                    "description": "New work",
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                },
+            ],
+        }
+        with patch(
+            "run.task_plan_service.AgentRunner",
+            self._capturing_runner(response, calls),
+        ):
+            edited = edit_plan(
+                root=root,
+                user="alice",
+                plan=existing,
+                edit_request="change step two",
+                config=CONFIG,
+            )
+
+        self.assertEqual(
+            calls[0]["completed_steps"],
+            [{"step_id": "step_1", "title": "Done"}],
+        )
+        self.assertEqual(edited["status"], "paused")
+        self.assertEqual(edited["steps"][0], existing["steps"][0])
+        self.assertEqual(edited["steps"][1]["title"], "Changed")
+        self.assertEqual(
+            edited["reminder"],
+            "当前任务计划已修改，请让用户点击批准后执行",
+        )
+
+    def test_edit_rejects_completed_step_mutation(self) -> None:
+        _, root = _make_root(["alice"])
+        existing = normalize_plan(
+            title="Existing",
+            description="goal",
+            user="alice",
+            status="approved",
+            steps=[{
+                "step_id": "step_1",
+                "title": "Done",
+                "description": "Finished",
+                "status": "completed",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            }],
+        )
+        response = {
+            "action": "edit",
+            "title": "Existing",
+            "description": "goal",
+            "steps": [{
+                "step_id": "step_1",
+                "title": "Tampered",
+                "description": "Finished",
+                "status": "completed",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            }],
+        }
+        with patch(
+            "run.task_plan_service.AgentRunner",
+            self._capturing_runner(response, []),
+        ):
+            with self.assertRaisesRegex(PlanGenerationError, "不得修改"):
+                edit_plan(
+                    root=root,
+                    user="alice",
+                    plan=existing,
+                    edit_request="tamper",
+                    config=CONFIG,
+                )
+
+    def test_auto_accept_true_has_no_reminder(self) -> None:
+        _, root = _make_root(["alice"])
+        response = {
+            "action": "create",
+            "title": "Auto",
+            "description": "goal",
+            "steps": [{
+                "step_id": "step_1",
+                "title": "A",
+                "description": "A",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            }],
+        }
+        config = {**CONFIG, "task_plan": {"auto_accept": True, "max_steps": 10}}
+        with patch(
+            "run.task_plan_service.AgentRunner",
+            self._capturing_runner(response, []),
+        ):
+            plan = generate_plan(root=root, user="alice", goal="goal", config=config)
+        self.assertEqual(plan["reminder"], "")
+
+    def test_task_plan_executor_normalizes_reminder(self) -> None:
+        class Context:
+            def run_model(self, input_data):
+                return AgentRunResult(
+                    agent="task_plan",
+                    data={"action": input_data["action"], "steps": []},
+                    raw_text="",
+                    usage={},
+                    model="mock",
+                )
+
+        created = execute_task_plan_agent(
+            Context(),
+            {"action": "create", "auto_accept": False},
+        )
+        self.assertEqual(
+            created.data["reminder"],
+            "当前任务计划已创建，请让用户点击批准后执行",
+        )
+        edited = execute_task_plan_agent(
+            Context(),
+            {"action": "edit", "auto_accept": True},
+        )
+        self.assertEqual(edited.data["reminder"], "")
 
 
 if __name__ == "__main__":

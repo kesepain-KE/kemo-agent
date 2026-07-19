@@ -51,7 +51,7 @@ describe('V16 module pages', () => {
   it('感知页展示目录模块与主智能体过滤状态', async () => {
     renderPage('sense')
     expect(await screen.findByRole('heading', { name: '全局感知' })).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'runtime' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '运行时感知' })).toBeInTheDocument()
     expect(screen.getAllByText('1 个来源').length).toBeGreaterThan(0)
     expect(screen.getByText('数据注册')).toBeInTheDocument()
     expect(screen.getByText('用户过滤')).toBeInTheDocument()

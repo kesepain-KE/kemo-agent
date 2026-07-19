@@ -13,7 +13,6 @@ from provider.schema import ChatResponse, Usage
 from run.agent_queue import AgentQueueError, AgentScheduler
 from run.agent_runner import (
     AgentCancelledError,
-    AgentInputError,
     AgentOutputError,
     AgentRunResult,
     AgentRunner,
@@ -96,7 +95,19 @@ class SubAgentRuntimeTests(unittest.TestCase):
     def test_discovery_order_lookup_disabled_and_manifest_validation(self) -> None:
         registry = discover_agents(self.root)
         self.assertEqual(list(registry.agents), sorted(registry.agents, key=str.casefold))
-        self.assertEqual(registry.get("context_manage").instruction_file, "AGENT.md")
+        context_definition = registry.get("context_manage")
+        self.assertEqual(context_definition.instruction_file, "AGENT.md")
+        self.assertEqual(context_definition.trigger_file, "trigger.md")
+        self.assertIn("按完整对话轮", context_definition.trigger_registration)
+        self.assertEqual(context_definition.model_profile, "cheap")
+        self.assertEqual(context_definition.timeout, 600.0)
+        self.assertEqual(
+            context_definition.input_schema,
+            {"type": "object", "additionalProperties": True},
+        )
+        task_definition = registry.get("task_plan")
+        self.assertEqual(task_definition.capabilities.knowledge_scopes, ("global", "shared"))
+        self.assertEqual(task_definition.capabilities.knowledge_body_access, "none")
 
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -127,13 +138,15 @@ class SubAgentRuntimeTests(unittest.TestCase):
         request = provider.requests[0]
         self.assertEqual(request.model, "main-model")
         self.assertEqual(len(request.messages), 2)
+        self.assertIn("[trigger_registration]", request.messages[0]["content"])
+        self.assertNotIn("# 操作信息", request.messages[0]["content"])
         self.assertNotIn("main conversation", json.dumps(request.messages, ensure_ascii=False))
         self.assertEqual(json.loads(request.messages[1]["content"])["trigger"], "manual")
 
-    def test_runner_rejects_invalid_input_output_timeout_and_cancel(self) -> None:
+    def test_runner_uses_loose_input_but_rejects_invalid_output_timeout_and_cancel(self) -> None:
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
-            with self.assertRaises(AgentInputError):
-                self.runner(MockProvider()).run("context_manage", {"rounds": []})
+            loose = self.runner(MockProvider()).run("context_manage", {"rounds": []})
+            self.assertEqual(loose.data["narrative"], "summary")
             with self.assertRaises(AgentOutputError):
                 self.runner(MockProvider(text="not-json")).run(
                     "context_manage",

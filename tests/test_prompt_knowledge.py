@@ -7,11 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from plugins.knowledge_search.tool import run as knowledge_search
 from provider.schema import ChatResponse, Usage
-from run.config import ConfigError
 from run.engine import handle_request
-from run.knowledge import build_index, select_knowledge, select_knowledge_index
+from run.knowledge import select_knowledge_index
 from run.prompt import build_system_prompt
 
 
@@ -54,18 +52,15 @@ class PromptKnowledgeTests(unittest.TestCase):
                 "model": "mock",
                 "stream": False,
             },
-            "knowledge": {
-            },
+            "knowledge": {},
         }
         (root / "config" / "global_config.json").write_text("{}", "utf-8")
         (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "provider": config["provider"],
-                    "knowledge": config["knowledge"],
-                }
-            ),
+            json.dumps({
+                "schema_version": 1,
+                "provider": config["provider"],
+                "knowledge": config["knowledge"],
+            }),
             "utf-8",
         )
         for tier in ("seven_days", "one_month", "half_year", "permanent"):
@@ -73,71 +68,28 @@ class PromptKnowledgeTests(unittest.TestCase):
             folder.mkdir()
             if tier != "permanent":
                 (folder / "data.json").write_text(
-                    json.dumps({"schema_version": 2, "files": {}}), "utf-8"
+                    json.dumps({"schema_version": 2, "files": {}}),
+                    "utf-8",
                 )
         return temporary, root, config
 
     def test_prompt_order_is_fixed(self) -> None:
         _, root, config = self.make_root()
-        prompt = build_system_prompt(
-            root,
-            "alice",
-            config,
-        )
+        prompt = build_system_prompt(root, "alice", config)
         ordered = ["USER", "GLOBAL", "AGENTS"]
         offsets = [prompt.index(item) for item in ordered]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn("HOT", prompt)
 
-    def test_index_orders_user_shared_global_and_skips_binary(self) -> None:
-        _, root, _ = self.make_root()
-        (root / "users" / "alice" / "knowledge" / "user.md").write_text("# User\nalpha", "utf-8")
-        (root / "shared_knowledge" / "shared.md").write_text("# Shared\nalpha", "utf-8")
-        (root / "global_knowledge" / "global.md").write_text("# Global\nalpha", "utf-8")
-        (root / "global_knowledge" / "ignore.bin").write_bytes(b"alpha")
-        documents = build_index(root, "alice")
-        self.assertEqual([item.scope for item in documents], ["user", "shared", "global"])
-
-    def test_retrieval_prefers_user_and_obeys_budget(self) -> None:
-        _, root, config = self.make_root()
-        (root / "users" / "alice" / "knowledge" / "python.md").write_text(
-            "# Python Notes\npython asyncio user detail " * 30, "utf-8"
-        )
-        (root / "shared_knowledge" / "python.md").write_text(
-            "# Python Notes\npython asyncio shared detail", "utf-8"
-        )
-        (root / "global_knowledge" / "python.md").write_text(
-            "# Python Notes\npython asyncio global detail", "utf-8"
-        )
-        selection = select_knowledge(root, "alice", "python asyncio", config)
-        self.assertTrue(selection.documents)
-        self.assertEqual(selection.documents[0].scope, "user")
-        self.assertGreater(len(selection.text), 1)
-        self.assertLessEqual(len(selection.text), 4000)
-
-    def test_retrieval_prefers_shared_before_global_at_equal_score(self) -> None:
-        _, root, config = self.make_root()
-        (root / "shared_knowledge" / "guide.md").write_text(
-            "# Runtime Guide\nruntime transport rules", "utf-8"
-        )
-        (root / "global_knowledge" / "guide.md").write_text(
-            "# Runtime Guide\nruntime transport rules", "utf-8"
-        )
-        selection = select_knowledge(root, "alice", "runtime transport", config)
-        self.assertEqual([item.scope for item in selection.documents], ["shared", "global"])
-
-    def test_unrelated_query_does_not_inject(self) -> None:
-        _, root, config = self.make_root()
-        (root / "global_knowledge" / "python.md").write_text("python asyncio", "utf-8")
-        self.assertEqual(select_knowledge(root, "alice", "cooking recipe", config).text, "")
-
     def test_engine_injects_knowledge_and_reports_source(self) -> None:
         _, root, _ = self.make_root()
         (root / "users" / "alice" / "knowledge" / "data_structure.md").write_text(
-            "# Project Alpha Index\nproject alpha index entry", "utf-8"
+            "# Project Alpha Index\nproject alpha index entry",
+            "utf-8",
         )
         (root / "users" / "alice" / "knowledge" / "project.md").write_text(
-            "ORDINARY_BODY_MUST_NOT_BE_INJECTED", "utf-8"
+            "ORDINARY_BODY_MUST_NOT_BE_INJECTED",
+            "utf-8",
         )
         seen: list[list[dict]] = []
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -155,56 +107,28 @@ class PromptKnowledgeTests(unittest.TestCase):
         self.assertNotIn("ORDINARY_BODY_MUST_NOT_BE_INJECTED", seen[0][0]["content"])
         self.assertEqual(result["knowledge"]["documents"][0]["path"], "data_structure.md")
 
-    def test_prompt_knowledge_selection_only_reads_index_names(self) -> None:
+    def test_indexes_are_full_ordered_and_only_named_index_files(self) -> None:
         _, root, _ = self.make_root()
-        (root / "users" / "alice" / "knowledge" / "INDEX.MD").write_text("USER INDEX", "utf-8")
+        large = "U" * 9000
+        (root / "users" / "alice" / "knowledge" / "INDEX.MD").write_text(
+            large,
+            "utf-8",
+        )
         (root / "users" / "alice" / "knowledge" / "body.md").write_text("BODY", "utf-8")
         (root / "shared_knowledge" / "目录.md").write_text("SHARED INDEX", "utf-8")
         (root / "global_knowledge" / "索引.md").write_text("GLOBAL INDEX", "utf-8")
-        selection = select_knowledge_index(root, "alice", max_chars=1000)
-        self.assertEqual([item.scope for item in selection.documents], ["user", "shared", "global"])
+
+        selection = select_knowledge_index(root, "alice")
+
+        self.assertEqual(
+            [item.scope for item in selection.documents],
+            ["user", "shared", "global"],
+        )
+        self.assertIn(large, selection.text)
         self.assertNotIn("BODY", selection.text)
-
-    def test_user_knowledge_switches_control_prompt_retrieval_and_tool_scopes(self) -> None:
-        _, root, config = self.make_root()
-        (root / "users" / "alice" / "knowledge" / "data_structure.md").write_text(
-            "USER_SCOPE_TOKEN", "utf-8"
-        )
-        (root / "shared_knowledge" / "data_structure.md").write_text(
-            "SHARED_SCOPE_TOKEN", "utf-8"
-        )
-        (root / "global_knowledge" / "data_structure.md").write_text(
-            "GLOBAL_SCOPE_TOKEN", "utf-8"
-        )
-        config["knowledge"].update({"use_shared": False, "use_global": True})
-        prompt = build_system_prompt(root, "alice", config)
-        self.assertIn("USER_SCOPE_TOKEN", prompt)
-        self.assertNotIn("SHARED_SCOPE_TOKEN", prompt)
-        self.assertIn("GLOBAL_SCOPE_TOKEN", prompt)
-        selected = select_knowledge(root, "alice", "scope_token", config)
-        self.assertNotIn("shared", [item.scope for item in selected.documents])
-
-        tool_result = knowledge_search(
-            "scope_token",
-            context={
-                "root": str(root),
-                "user": "alice",
-                "knowledge_scopes": ["user", "global"],
-            },
-        )
-        self.assertEqual(tool_result["effective_scopes"], ["global", "user"])
-        self.assertNotIn("shared", [item["scope"] for item in tool_result["matches"]])
-
-    def test_removed_knowledge_enabled_is_rejected_by_prompt_and_retrieval(self) -> None:
-        _, root, config = self.make_root()
-        (root / "global_knowledge" / "data_structure.md").write_text(
-            "DISABLED_KNOWLEDGE_TOKEN", "utf-8"
-        )
-        config["knowledge"]["enabled"] = False
-        with self.assertRaisesRegex(ConfigError, "已移除"):
-            build_system_prompt(root, "alice", config)
-        with self.assertRaisesRegex(ConfigError, "已移除"):
-            select_knowledge(root, "alice", "disabled_knowledge_token", config)
+        self.assertEqual(selection.original_chars, selection.injected_chars)
+        self.assertEqual(selection.original_items, selection.injected_items)
+        self.assertFalse(selection.truncated)
 
 
 if __name__ == "__main__":

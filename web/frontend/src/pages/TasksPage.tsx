@@ -18,11 +18,11 @@ import type { CronTaskSummary, PlanSummary } from '../types/api'
 type TaskTab = 'plans' | 'cron' | 'history'
 
 function scheduleLabel(task: CronTaskSummary) {
-  const type = String(task.schedule.type || '')
-  if (type === 'daily') return `每天 ${String(task.schedule.time || '—')}`
-  if (type === 'once') return `单次 · ${formatDateTime(String(task.schedule.start_at || ''))}`
+  const type = task.type
+  if (type === 'daily') return `每天 ${task.time || '—'}`
+  if (type === 'once') return `单次 · ${formatDateTime(task.next_run_at)}`
   if (type === 'recurring') {
-    const seconds = Number(task.schedule.interval_seconds || 0)
+    const seconds = Number(task.interval_seconds || 0)
     return seconds >= 3600 ? `每 ${Math.round(seconds / 3600)} 小时` : `每 ${Math.round(seconds / 60)} 分钟`
   }
   return '未配置调度'
@@ -74,7 +74,7 @@ export function TasksPage() {
       id: item.plan_id, title: item.title, kind: '任务计划', status: item.status, updatedAt: item.updated_at,
     })) || []),
     ...(data?.cron_tasks.filter((item) => item.last_state !== 'never').map((item) => ({
-      id: item.task_id, title: item.title, kind: '定时任务', status: item.last_state, updatedAt: item.last_run_at || item.updated_at,
+      id: item.task_id, title: item.title, kind: '定时任务', status: item.last_state, updatedAt: item.latest_run_at || item.created_at,
     })) || []),
   ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 
@@ -139,8 +139,8 @@ export function TasksPage() {
       {tab === 'cron' && (
         <article className="panel table-panel">
           <div className="panel-head"><div className="panel-title"><span className="panel-title-icon">C</span><span><strong>周期调度</strong><span>Web 只读展示，不启动第二个调度器</span></span></div><span className="panel-count">{data?.cron_tasks.length || 0}</span></div>
-          {data?.cron_tasks.length ? <div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>任务</th><th>调度</th><th>状态</th><th>运行次数</th><th>下次运行</th></tr></thead><tbody>
-            {data.cron_tasks.map((task) => <tr key={task.task_id}><td><span className="table-main"><span className="table-icon">C</span><span><strong>{task.title}</strong><span>{task.task_id}</span></span></span></td><td>{scheduleLabel(task)}</td><td><StatusChip status={task.status} /></td><td>{task.run_count}</td><td>{formatDateTime(task.next_run_at)}</td></tr>)}
+          {data?.cron_tasks.length ? <div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>任务</th><th>调度</th><th>状态</th><th>最近运行</th><th>下次运行</th></tr></thead><tbody>
+            {data.cron_tasks.map((task) => <tr key={task.task_id}><td><span className="table-main"><span className="table-icon">C</span><span><strong>{task.title}</strong><span>{task.task_id}</span></span></span></td><td>{scheduleLabel(task)}</td><td><StatusChip status={task.status} /></td><td>{formatDateTime(task.latest_run_at)}</td><td>{formatDateTime(task.next_run_at)}</td></tr>)}
           </tbody></table></div> : <EmptyPanel title="暂无定时任务" description="定时任务需要由任务系统创建；Web 页面目前保持只读。" icon={<TimerReset size={21} />} />}
         </article>
       )}

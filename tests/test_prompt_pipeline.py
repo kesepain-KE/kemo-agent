@@ -67,8 +67,8 @@ class PromptPipelineTests(unittest.TestCase):
         ):
             path.mkdir(parents=True, exist_ok=True)
         registrars = (
-            (root / "global_expand" / "register.py", "pass"),
-            (root / "shared_expand" / "register.py", "pass"),
+            (root / "global_expand" / "register.py", 'registry.add_expand_root("global", Path(__file__).resolve().parent)'),
+            (root / "shared_expand" / "register.py", 'registry.add_expand_root("shared", Path(__file__).resolve().parent)'),
             (root / "users" / "alice" / "expand" / "register.py", "pass"),
             (root / "shared_skills" / "register.py", 'registry.add_skills("shared", Path(__file__).resolve().parent)'),
             (root / "users" / "alice" / "user_skills" / "register.py", 'registry.add_skills("user", Path(__file__).resolve().parent)'),
@@ -134,6 +134,80 @@ class PromptPipelineTests(unittest.TestCase):
         )
         (directory / "tool.py").write_text("def run():\n    return {'ok': True}\n", "utf-8")
 
+    def write_sense_module(
+        self,
+        root: Path,
+        name: str,
+        content: str,
+        *,
+        display_name: str | None = None,
+        health: str = "正常",
+        recent_update: str = "2026-07-19 12:00:00",
+    ) -> Path:
+        module = root / "global_sense" / name
+        module.mkdir(parents=True, exist_ok=True)
+        (module / "sense.md").write_text(content, "utf-8")
+        (module / "sense.json").write_text(
+            json.dumps(
+                {
+                    "name": display_name or name,
+                    "data_md": "sense.md",
+                    "recent_update": recent_update,
+                    "health": health,
+                    "start_update": "data_update.py",
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+        return module
+
+    def write_expand_module(
+        self,
+        root: Path,
+        scope: str,
+        name: str,
+        *,
+        input_text: str = "",
+        control_injection: str = "",
+        operation_text: str = "Detailed operation manual.",
+        open_input: bool = True,
+        open_control: bool = True,
+        input_health: str = "正常",
+        display_name: str | None = None,
+        user: str = "alice",
+    ) -> Path:
+        base = {
+            "global": root / "global_expand",
+            "shared": root / "shared_expand",
+            "user": root / "users" / user / "expand",
+        }[scope]
+        module = base / name
+        module.mkdir(parents=True, exist_ok=True)
+        (module / "input_data.md").write_text(input_text, "utf-8")
+        (module / "expand_control.md").write_text(
+            f"## 注入层\n\n{control_injection}\n\n## 操作层\n\n{operation_text}",
+            "utf-8",
+        )
+        (module / "expand.json").write_text(
+            json.dumps(
+                {
+                    "name": display_name or name,
+                    "explain": f"{name} expand module",
+                    "open_input": open_input,
+                    "input_data": "input_data.md",
+                    "input_health": input_health,
+                    "start_update": "data_update.py",
+                    "open_control": open_control,
+                    "start_expand": "start_expand.py",
+                    "start_control": "expand_control.md",
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+        return module
+
     def write_memory(self, root: Path, tier: str, items: list[dict]) -> None:
         directory = root / "users" / "alice" / "improve" / tier
         directory.mkdir(parents=True, exist_ok=True)
@@ -181,19 +255,14 @@ class PromptPipelineTests(unittest.TestCase):
         (root / "users" / "alice" / "task_plan" / "plan_00000001.json").write_text(
             json.dumps(plan), "utf-8"
         )
-        module = root / "global_expand" / "water"
-        module.mkdir()
-        (module / "inject.md").write_text("EXPAND", "utf-8")
-        (root / "global_expand" / "register.py").write_text(
-            "from pathlib import Path\n\n"
-            "def register(registry):\n"
-            "    base = Path(__file__).resolve().parent\n"
-            "    registry.add_expand('global', 'water', base / 'water' / 'inject.md')\n",
-            "utf-8",
+        self.write_expand_module(
+            root,
+            "global",
+            "water",
+            input_text="EXPAND",
+            open_control=False,
         )
-        sense_module = root / "global_sense" / "runtime"
-        sense_module.mkdir()
-        (sense_module / "sense.md").write_text("SENSE", "utf-8")
+        self.write_sense_module(root, "runtime", "SENSE")
 
     def test_exact_section_order_empty_omission_and_perception_last(self) -> None:
         _, root, config = self.make_root()
@@ -202,10 +271,63 @@ class PromptPipelineTests(unittest.TestCase):
         bundle = build_prompt_bundle(root, "alice", config)
         self.assertEqual(
             tuple(section.name for section in bundle.sections),
-            tuple(name for name in PROMPT_SECTION_ORDER if name != "kemo_graph"),
+            tuple(
+                name
+                for name in PROMPT_SECTION_ORDER
+                if name not in {"kemo_graph", "subagent_registry"}
+            ),
         )
         self.assertEqual(bundle.sections[-1].name, "perception")
         self.assertEqual(bundle.text.count("[perception]"), 1)
+
+    def test_subagent_registry_injects_registration_only(self) -> None:
+        _, root, config = self.make_root()
+        directory = root / "agents" / "demo_agent"
+        directory.mkdir(parents=True)
+        (directory / "agent.json").write_text(
+            json.dumps(
+                {
+                    "name": "demo_agent",
+                    "version": "1.0.0",
+                    "description": "demo",
+                    "trigger": "trigger.md",
+                }
+            ),
+            "utf-8",
+        )
+        (directory / "agent-config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "internal_mode": True,
+                    "allowed_callers": ["main_agent"],
+                    "tools": {
+                        "plugins": {"allow": []},
+                        "shared_skills": {"allow": []},
+                        "max_iterations": 20,
+                    },
+                    "global_knowledge": False,
+                    "shared_knowledge": False,
+                    "inherit_main_history": False,
+                }
+            ),
+            "utf-8",
+        )
+        (directory / "AGENT.md").write_text("# demo_agent\nHandle demo input.", "utf-8")
+        (directory / "executor.py").write_text(
+            "def execute(context, input_data):\n    return context.run_model(input_data)\n",
+            "utf-8",
+        )
+        (directory / "trigger.md").write_text(
+            "# 注册信息\n\n- **触发**: demo condition\n- **职责**: demo duty\n\n"
+            "# 操作信息\n\nOPERATION_SECRET",
+            "utf-8",
+        )
+        bundle = build_prompt_bundle(root, "alice", config)
+        section = next(item for item in bundle.sections if item.name == "subagent_registry")
+        self.assertIn("demo condition", section.content)
+        self.assertNotIn("OPERATION_SECRET", section.content)
+        self.assertEqual(section.item_ids, ("demo_agent",))
 
     def test_kemo_graph_replaces_direct_knowledge_and_memory_injection(self) -> None:
         _, root, config = self.make_root()
@@ -336,31 +458,12 @@ class PromptPipelineTests(unittest.TestCase):
         user_skill.mkdir()
         (user_skill / "SKILL.md").write_text("# private\nUSER_DROP", "utf-8")
 
-        global_keep = root / "global_expand" / "keep"
-        global_drop = root / "global_expand" / "drop"
-        user_expand = root / "users" / "alice" / "expand" / "personal"
-        for directory, text in (
-            (global_keep, "GLOBAL_KEEP"),
-            (global_drop, "GLOBAL_DROP"),
-            (user_expand, "USER_EXPAND"),
-        ):
-            directory.mkdir()
-            (directory / "inject.md").write_text(text, "utf-8")
-        (root / "global_expand" / "register.py").write_text(
-            "from pathlib import Path\n\n"
-            "def register(registry):\n"
-            "    base = Path(__file__).resolve().parent\n"
-            "    registry.add_expand('global', 'keep', base / 'keep' / 'inject.md')\n"
-            "    registry.add_expand('global', 'drop', base / 'drop' / 'inject.md')\n",
-            "utf-8",
-        )
+        self.write_expand_module(root, "global", "keep", input_text="GLOBAL_KEEP", open_control=False)
+        self.write_expand_module(root, "global", "drop", input_text="GLOBAL_DROP", open_control=False)
+        self.write_expand_module(root, "user", "personal", input_text="USER_EXPAND", open_control=False)
 
-        runtime = root / "global_sense" / "runtime"
-        network = root / "global_sense" / "network"
-        runtime.mkdir()
-        network.mkdir()
-        (runtime / "status.md").write_text("SENSE_KEEP", "utf-8")
-        (network / "status.md").write_text("SENSE_DROP", "utf-8")
+        self.write_sense_module(root, "runtime", "SENSE_KEEP")
+        self.write_sense_module(root, "network", "SENSE_DROP", health="异常")
         (root / "global_sense" / "root.md").write_text("ROOT_DROP", "utf-8")
 
         config.update(
@@ -520,31 +623,23 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("plan_10", selection.text)
         self.assertNotIn("plan_11", selection.text)
 
-    def test_expand_registration_module_only_and_path_escape(self) -> None:
+    def test_expand_registration_module_controls_root_and_rejects_wrong_root(self) -> None:
         _, root, _ = self.make_root()
-        registered = root / "global_expand" / "registered"
-        registered.mkdir()
-        (registered / "inject.md").write_text("REGISTERED", "utf-8")
-        unregistered = root / "global_expand" / "unregistered"
-        unregistered.mkdir()
-        (unregistered / "inject.md").write_text("UNREGISTERED", "utf-8")
+        self.write_expand_module(root, "global", "registered", input_text="REGISTERED", open_control=False)
+        self.write_expand_module(root, "global", "second", input_text="SECOND", open_control=False)
         registrar = root / "global_expand" / "register.py"
-        registrar.write_text(
-            "from pathlib import Path\n\n"
-            "def register(registry):\n"
-            "    base = Path(__file__).resolve().parent\n"
-            "    registry.add_expand('global', 'registered', base / 'registered' / 'inject.md')\n",
-            "utf-8",
-        )
         sources = load_prompt_source_registry(root, "alice")
         selection = sources.select_expand(max_chars=1000)
         self.assertIn("REGISTERED", selection.text)
-        self.assertNotIn("UNREGISTERED", selection.text)
+        self.assertIn("SECOND", selection.text)
+        registrar.unlink()
+        selection = load_prompt_source_registry(root, "alice").select_expand(max_chars=1000)
+        self.assertNotIn("REGISTERED", selection.text)
+        self.assertNotIn("SECOND", selection.text)
         registrar.write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
-            "    base = Path(__file__).resolve().parent\n"
-            "    registry.add_expand('global', 'registered', base / 'unregistered' / 'inject.md')\n",
+            "    registry.add_expand_root('global', Path(__file__).resolve().parent.parent)\n",
             "utf-8",
         )
         with self.assertRaises(PromptRegistrationError):
@@ -553,39 +648,220 @@ class PromptPipelineTests(unittest.TestCase):
             "from pathlib import Path\n\n"
             "def register(registry):\n"
             "    base = Path(__file__).resolve().parent\n"
-            "    path = base / 'registered' / 'inject.md'\n"
-            "    registry.add_expand('global', 'registered', path)\n"
-            "    registry.add_expand('global', 'registered', path)\n",
+            "    registry.add_expand_root('global', base)\n"
+            "    registry.add_expand_root('global', base)\n",
             "utf-8",
         )
         with self.assertRaisesRegex(PromptRegistrationError, "重复"):
             load_prompt_source_registry(root, "alice")
 
-    def test_perception_is_recursive_md_only_hidden_safe_and_naturally_sorted(self) -> None:
+    def test_expand_standard_module_injects_data_and_only_control_injection_layer(self) -> None:
+        _, root, _ = self.make_root()
+        self.write_expand_module(
+            root,
+            "global",
+            "light",
+            input_text="LIGHT_STATE",
+            control_injection="LIGHT_CONTROL_AVAILABLE",
+            operation_text="OPERATION_SECRET",
+        )
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_expand(max_chars=2000)
+        self.assertIn("[global:light]", selection.text)
+        self.assertIn("## 数据采集\nLIGHT_STATE", selection.text)
+        self.assertIn("## 操控能力\nLIGHT_CONTROL_AVAILABLE", selection.text)
+        self.assertNotIn("OPERATION_SECRET", selection.text)
+        self.assertEqual(
+            selection.source_files,
+            (
+                "global_expand/light/input_data.md",
+                "global_expand/light/expand_control.md",
+            ),
+        )
+        status = registry.selection_diagnostics()["expand"]["global"]["health_status"]["light"]
+        self.assertTrue(status["valid"])
+        self.assertEqual(status["input_health"], "正常")
+        self.assertEqual(status["control_file"], "global_expand/light/expand_control.md")
+
+    def test_expand_switches_health_and_missing_control_file_are_independent(self) -> None:
+        _, root, _ = self.make_root()
+        self.write_expand_module(
+            root,
+            "global",
+            "control_only",
+            input_text="INPUT_DISABLED",
+            control_injection="CONTROL_ONLY",
+            open_input=False,
+        )
+        self.write_expand_module(
+            root,
+            "global",
+            "unhealthy",
+            input_text="UNHEALTHY_INPUT",
+            control_injection="HEALTH_INDEPENDENT_CONTROL",
+            input_health="异常",
+        )
+        missing_control = self.write_expand_module(
+            root,
+            "global",
+            "missing_control",
+            input_text="DATA_STILL_AVAILABLE",
+        )
+        (missing_control / "expand_control.md").unlink()
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_expand(max_chars=4000)
+        self.assertNotIn("INPUT_DISABLED", selection.text)
+        self.assertIn("CONTROL_ONLY", selection.text)
+        self.assertNotIn("UNHEALTHY_INPUT", selection.text)
+        self.assertIn("HEALTH_INDEPENDENT_CONTROL", selection.text)
+        self.assertIn("DATA_STILL_AVAILABLE", selection.text)
+        self.assertNotIn("[global:missing_control]\n## 操控能力", selection.text)
+        status = registry.selection_diagnostics()["expand"]["global"]["health_status"]
+        self.assertTrue(status["missing_control"]["valid"])
+        self.assertEqual(status["unhealthy"]["input_health"], "异常")
+
+    def test_expand_invalid_manifests_are_diagnosed_and_scope_user_isolation_holds(self) -> None:
+        _, root, _ = self.make_root()
+        missing = root / "global_expand" / "missing_manifest"
+        missing.mkdir()
+        missing_field = self.write_expand_module(root, "global", "missing_field", input_text="MISSING_FIELD")
+        missing_payload = json.loads((missing_field / "expand.json").read_text("utf-8"))
+        missing_payload.pop("input_health")
+        (missing_field / "expand.json").write_text(json.dumps(missing_payload), "utf-8")
+        bad_bool = self.write_expand_module(root, "global", "bad_bool", input_text="BAD_BOOL")
+        bad_payload = json.loads((bad_bool / "expand.json").read_text("utf-8"))
+        bad_payload["open_input"] = "true"
+        (bad_bool / "expand.json").write_text(json.dumps(bad_payload), "utf-8")
+        traversal = self.write_expand_module(root, "global", "traversal", input_text="TRAVERSAL")
+        traversal_payload = json.loads((traversal / "expand.json").read_text("utf-8"))
+        traversal_payload["input_data"] = "../outside.md"
+        (traversal / "expand.json").write_text(json.dumps(traversal_payload), "utf-8")
+
+        self.write_expand_module(root, "global", "global_ok", input_text="GLOBAL_LAYER", open_control=False)
+        self.write_expand_module(root, "shared", "shared_ok", input_text="SHARED_LAYER", open_control=False)
+        self.write_expand_module(root, "user", "alice_only", input_text="ALICE_LAYER", open_control=False)
+        self.write_expand_module(root, "user", "bob_only", input_text="BOB_LAYER", open_control=False, user="bob")
+
+        alice_registry = load_prompt_source_registry(root, "alice")
+        alice = alice_registry.select_expand(max_chars=5000)
+        self.assertLess(alice.text.index("GLOBAL_LAYER"), alice.text.index("SHARED_LAYER"))
+        self.assertLess(alice.text.index("SHARED_LAYER"), alice.text.index("ALICE_LAYER"))
+        self.assertNotIn("BOB_LAYER", alice.text)
+        diagnostics = alice_registry.selection_diagnostics()["expand"]["global"]
+        self.assertEqual(
+            set(diagnostics["invalid"]),
+            {"bad_bool", "missing_field", "missing_manifest", "traversal"},
+        )
+        self.assertTrue(all(not diagnostics["health_status"][name]["valid"] for name in diagnostics["invalid"]))
+
+        bob = load_prompt_source_registry(root, "bob").select_expand(max_chars=5000)
+        self.assertIn("BOB_LAYER", bob.text)
+        self.assertNotIn("ALICE_LAYER", bob.text)
+
+    def test_perception_injects_only_declared_data_file(self) -> None:
         _, root, _ = self.make_root()
         base = root / "global_sense"
-        (base / "sensors").mkdir()
-        (base / "sensors" / "file10.md").write_text("TEN", "utf-8")
-        (base / "sensors" / "file2.md").write_text("TWO", "utf-8")
-        (base / "sensors" / "ignore.txt").write_text("TXT", "utf-8")
+        sensors = self.write_sense_module(root, "sensors", "ONLY_DECLARED")
+        (sensors / "extra.md").write_text("EXTRA_MARKDOWN", "utf-8")
+        (sensors / "helper.py").write_text("SECRET_HELPER = True", "utf-8")
         (base / ".hidden").mkdir()
         (base / ".hidden" / "secret.md").write_text("SECRET", "utf-8")
         (base / "root.md").write_text("ROOT", "utf-8")
         selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=1000)
-        self.assertLess(selection.text.index("TWO"), selection.text.index("TEN"))
-        self.assertNotIn("TXT", selection.text)
+        self.assertEqual(selection.text, "[sensors]\nONLY_DECLARED")
+        self.assertNotIn("EXTRA_MARKDOWN", selection.text)
+        self.assertNotIn("SECRET_HELPER", selection.text)
         self.assertNotIn("SECRET", selection.text)
         self.assertNotIn("ROOT", selection.text)
+
+    def test_perception_invalid_manifests_are_reported_and_skipped(self) -> None:
+        _, root, _ = self.make_root()
+        base = root / "global_sense"
+        missing_manifest = base / "missing_manifest"
+        missing_manifest.mkdir()
+        (missing_manifest / "old.md").write_text("OLD_DATA", "utf-8")
+
+        missing_field = base / "missing_field"
+        missing_field.mkdir()
+        (missing_field / "sense.md").write_text("MISSING_FIELD_DATA", "utf-8")
+        (missing_field / "sense.json").write_text(
+            json.dumps(
+                {
+                    "name": "missing field",
+                    "recent_update": "2026-07-19 12:00:00",
+                    "health": "正常",
+                    "start_update": "data_update.py",
+                }
+            ),
+            "utf-8",
+        )
+
+        broken_json = base / "broken_json"
+        broken_json.mkdir()
+        (broken_json / "sense.json").write_text("{broken", "utf-8")
+
+        missing_file = base / "missing_file"
+        missing_file.mkdir()
+        (missing_file / "sense.json").write_text(
+            json.dumps(
+                {
+                    "name": "missing file",
+                    "data_md": "sense.md",
+                    "recent_update": "2026-07-19 12:00:00",
+                    "health": "正常",
+                    "start_update": "data_update.py",
+                }
+            ),
+            "utf-8",
+        )
+
+        traversal = base / "traversal"
+        traversal.mkdir()
+        (traversal / "sense.json").write_text(
+            json.dumps(
+                {
+                    "name": "traversal",
+                    "data_md": "../outside.md",
+                    "recent_update": "2026-07-19 12:00:00",
+                    "health": "正常",
+                    "start_update": "data_update.py",
+                }
+            ),
+            "utf-8",
+        )
+
+        registry = load_prompt_source_registry(root, "alice")
+        inventory = {item["name"]: item for item in registry.perception_inventory()}
+        self.assertEqual(set(inventory), {"broken_json", "missing_field", "missing_file", "missing_manifest", "traversal"})
+        self.assertTrue(all(not item["valid"] for item in inventory.values()))
+        self.assertTrue(all(item["health"] == "异常" for item in inventory.values()))
+        self.assertTrue(all(item["status"] == "invalid" for item in inventory.values()))
+        selection = registry.select_perception(max_chars=1000)
+        self.assertEqual(selection.text, "")
+        diagnostics = registry.selection_diagnostics()["perception"]["global"]
+        self.assertEqual(set(diagnostics["invalid"]), set(inventory))
+        self.assertTrue(all(not item["valid"] for item in diagnostics["health_status"].values()))
+
+    def test_perception_health_diagnostics_and_zero_budget_preserve_discovery(self) -> None:
+        _, root, _ = self.make_root()
+        self.write_sense_module(root, "healthy", "HEALTHY")
+        self.write_sense_module(root, "reported_error", "REPORTED_ERROR", health="异常")
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_perception(max_chars=0, allow_modules=("healthy",))
+        self.assertEqual(selection.text, "")
+        diagnostics = registry.selection_diagnostics()["perception"]["global"]
+        self.assertEqual(diagnostics["selected"], ["healthy"])
+        self.assertEqual(diagnostics["filtered"], ["reported_error"])
+        self.assertEqual(diagnostics["health_status"]["healthy"]["health"], "正常")
+        self.assertEqual(diagnostics["health_status"]["reported_error"]["health"], "异常")
 
     def test_perception_registration_module_controls_source(self) -> None:
         _, root, _ = self.make_root()
         base = root / "global_sense"
         registered = base / "registered"
         unregistered = base / "unregistered"
-        registered.mkdir()
-        unregistered.mkdir()
-        (registered / "status.md").write_text("REGISTERED", "utf-8")
-        (unregistered / "status.md").write_text("UNREGISTERED", "utf-8")
+        self.write_sense_module(root, "registered", "REGISTERED")
+        self.write_sense_module(root, "unregistered", "UNREGISTERED")
         selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=1000)
         self.assertIn("REGISTERED", selection.text)
         self.assertIn("UNREGISTERED", selection.text)

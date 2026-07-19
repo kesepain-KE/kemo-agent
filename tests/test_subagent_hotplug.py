@@ -6,8 +6,6 @@ import unittest
 from pathlib import Path
 
 from agents._runtime.user_packages import UserAgentPackageError
-from agents._runtime.resources import AgentCapabilityError
-from plugins.knowledge_search.tool import run as knowledge_search
 from plugins.subagent_dispatch.tool import run as dispatch
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.agent_queue import AgentScheduler
@@ -111,8 +109,6 @@ class SubAgentHotPlugTests(unittest.TestCase):
             "knowledge": {
                 "scopes": [],
                 "index_enabled": False,
-                "body_access": "none",
-                "max_index_chars": 0,
             },
             "context": {"inherit_main_history": False, "inherit_current_request": False},
         }
@@ -209,6 +205,13 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(created["status"], "created")
         listed = dispatch("list", context={"root": str(root), "user": "alice"})
         self.assertEqual([item["name"] for item in listed["agents"]], ["created_agent"])
+        package = root / "users" / "alice" / "agents" / "created_agent"
+        self.assertEqual(
+            set(json.loads((package / "agent.json").read_text("utf-8"))),
+            {"name", "version", "description", "trigger"},
+        )
+        self.assertTrue((package / "trigger.md").is_file())
+        self.assertIn("# 注册信息", (package / "trigger.md").read_text("utf-8"))
         self.assertEqual(
             dispatch("list", context={"root": str(root), "user": "bob"})["agents"],
             [],
@@ -254,7 +257,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
             )
         self.assertFalse((root / "users" / "alice" / "agents" / "reserved").exists())
 
-    def test_user_resources_are_resolved_per_invocation(self) -> None:
+    def test_new_runtime_does_not_inject_user_skills(self) -> None:
         _, root, config = self.make_root()
         for user in ("alice", "bob"):
             skill = root / "users" / user / "user_skills" / "private"
@@ -275,9 +278,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         alice_system = alice_provider.requests[0].messages[0]["content"]
         bob_system = bob_provider.requests[0].messages[0]["content"]
-        self.assertIn("ALICE_ONLY", alice_system)
+        self.assertNotIn("ALICE_ONLY", alice_system)
         self.assertNotIn("BOB_ONLY", alice_system)
-        self.assertIn("BOB_ONLY", bob_system)
+        self.assertNotIn("BOB_ONLY", bob_system)
         self.assertNotIn("ALICE_ONLY", bob_system)
 
     def test_main_source_policy_does_not_restrict_subagent_capabilities(self) -> None:
@@ -330,8 +333,6 @@ class SubAgentHotPlugTests(unittest.TestCase):
         agent_config["knowledge"] = {
             "scopes": ["global"],
             "index_enabled": True,
-            "body_access": "none",
-            "max_index_chars": 1000,
         }
         agent_config_path.write_text(json.dumps(agent_config), "utf-8")
 
@@ -347,7 +348,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
 
         system_prompt = provider.requests[0].messages[0]["content"]
         self.assertIn("CHILD_SKILL", system_prompt)
-        self.assertIn("CHILD_EXPAND", system_prompt)
+        self.assertNotIn("CHILD_EXPAND", system_prompt)
         self.assertIn("CHILD_KNOWLEDGE", system_prompt)
 
     def test_agent_tool_whitelist_drives_provider_tool_loop(self) -> None:
@@ -375,41 +376,6 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
         self.assertEqual(result.metadata["tool_calls"][0]["status"], "completed")
-
-    def test_knowledge_search_intersects_requested_and_granted_scopes(self) -> None:
-        _, root, _ = self.make_root()
-        (root / "users" / "alice" / "knowledge" / "user.md").write_text(
-            "# User\nscope-token user", "utf-8"
-        )
-        (root / "shared_knowledge" / "shared.md").write_text(
-            "# Shared\nscope-token shared", "utf-8"
-        )
-        (root / "global_knowledge" / "global.md").write_text(
-            "# Global\nscope-token global", "utf-8"
-        )
-        result = knowledge_search(
-            "scope-token",
-            scopes=["global", "shared", "user"],
-            context={
-                "root": str(root),
-                "user": "alice",
-                "knowledge_scopes": ["user"],
-            },
-        )
-        self.assertEqual(result["effective_scopes"], ["user"])
-        self.assertEqual([item["scope"] for item in result["matches"]], ["user"])
-
-    def test_knowledge_search_requires_body_access_authorization(self) -> None:
-        _, root, config = self.make_root()
-        self.write_plugin(root, "knowledge_search")
-        self.write_agent(root, "alice", "no_body_access", tools=["knowledge_search"])
-        provider = ScriptedProvider(
-            [ChatResponse(text='{"answer":"must not run"}', model="mock", usage=Usage())]
-        )
-        runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
-        with self.assertRaisesRegex(AgentCapabilityError, "未授权知识正文检索"):
-            runner.run("no_body_access", {})
-        self.assertEqual(provider.requests, [])
 
     def test_background_scheduler_detects_hot_plugged_agent(self) -> None:
         _, root, config = self.make_root()

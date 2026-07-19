@@ -15,8 +15,7 @@ from run.memory import (
     normalize_memory_filename,
     tier_rules,
 )
-from run.memory_pipeline import _existing_candidates
-from run.agent_runner import AgentInputError, validate_json_schema
+from run.agents import discover_agents
 
 
 CONFIG = {
@@ -151,14 +150,14 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(self.store.mark_used([filename], now=self.start + timedelta(days=1)), [filename])
         self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 2)
 
-    def test_unchanged_upsert_does_not_weight(self) -> None:
+    def test_unchanged_match_weights_once_per_day(self) -> None:
         filename = self.add("稳定事实", "稳定事实。")
         self.store.upsert_candidates(
             [{"filename": "稳定事实", "content": "稳定事实。", "action": "upsert"}],
             source={},
             now=self.start + timedelta(hours=1),
         )
-        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 0)
+        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 1)
 
     def test_due_upgrade_resets_and_due_failure_deletes(self) -> None:
         upgraded = self.seed_temporary(
@@ -194,35 +193,15 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(self.store.forget("川菜偏好"), [first])
         self.assertNotIn(first, [item["filename"] for item in self.store.list_items()])
 
-    def test_extraction_candidates_expose_only_filename_and_tier(self) -> None:
-        filename = self.add("项目架构", "用户正在维护项目架构。")
-        candidates = _existing_candidates(self.store, "继续调整项目架构", 12)
-        self.assertEqual(candidates, [{"filename": filename, "tier": "seven_days"}])
-
-    def test_self_improve_candidate_schema_enforces_action_and_filename_length(self) -> None:
-        manifest = json.loads(
-            (Path(__file__).parents[1] / "agents" / "self_improve" / "agent.json").read_text("utf-8")
+    def test_self_improve_compact_manifest_uses_trigger_and_loose_schema(self) -> None:
+        definition = discover_agents(Path(__file__).parents[1]).get("self_improve")
+        self.assertEqual(
+            definition.output_schema,
+            {"type": "object", "additionalProperties": True},
         )
-        schema = manifest["output_schema"]
-        validate_json_schema(
-            {
-                "candidates": [
-                    {"action": "upsert", "filename": "项目架构", "content": "一个微量事实", "explicit": False},
-                    {"action": "forget", "filename": "旧偏好"},
-                ]
-            },
-            schema,
-        )
-        with self.assertRaises(AgentInputError):
-            validate_json_schema(
-                {"candidates": [{"action": "forget", "filename": "超长文件名" * 5}]},
-                schema,
-            )
-        with self.assertRaises(AgentInputError):
-            validate_json_schema(
-                {"candidates": [{"action": "upsert", "filename": "缺正文", "explicit": False}]},
-                schema,
-            )
+        self.assertEqual(definition.trigger_file, "trigger.md")
+        self.assertIn("candidates", definition.trigger_content)
+        self.assertIn("最长 20 字符", definition.trigger_content)
 
     def test_permanent_prompt_selection_is_unlimited(self) -> None:
         self.add("永久一", "永久记忆一。", explicit=True)

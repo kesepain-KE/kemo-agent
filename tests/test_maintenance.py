@@ -71,13 +71,11 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         result = MaintenanceScheduler(root).scan_once(now=now, force=True)
 
-        self.assertEqual(result["alice"]["memory_lifecycle"]["upgraded"], [filename])
-        self.assertTrue(store.fragment_path("permanent", filename).is_file())
-        self.assertEqual(store.load_index("half_year"), {})
-        self.assertEqual(
-            result["alice"]["important_memory"]["reason"],
-            "no_temporary_memory",
-        )
+        self.assertNotIn("memory_lifecycle", result["alice"])
+        self.assertFalse(store.fragment_path("permanent", filename).is_file())
+        self.assertIn(filename, store.load_index("half_year"))
+        self.assertNotIn("important_memory", result["alice"])
+        self.assertNotIn("daily_memory_review", result["alice"])
 
 
 if __name__ == "__main__":

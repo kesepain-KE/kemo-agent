@@ -15,7 +15,8 @@ from unittest.mock import patch
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
 from run.cron_store import CronStore, normalize_task
-from run.history import commit_window, empty_window, load_window
+from run.history import commit_window, empty_window, load_window, runtime_window_path
+from run.prompt import PROMPT_SECTION_ORDER
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError
@@ -748,7 +749,23 @@ class WebBackendTests(unittest.TestCase):
         for module_name in ("runtime", "network"):
             module = root / "global_sense" / module_name
             module.mkdir()
-            (module / "status.md").write_text(module_name, "utf-8")
+            (module / "sense.md").write_text(module_name, "utf-8")
+            (module / "sense.json").write_text(
+                json.dumps(
+                    {
+                        "name": f"{module_name} display",
+                        "data_md": "sense.md",
+                        "recent_update": "2026-07-19 12:00:00",
+                        "health": "正常" if module_name == "runtime" else "异常",
+                        "start_update": "data_update.py",
+                    },
+                    ensure_ascii=False,
+                ),
+                "utf-8",
+            )
+        broken_module = root / "global_sense" / "broken"
+        broken_module.mkdir()
+        (broken_module / "legacy.md").write_text("must not be injected", "utf-8")
         (root / "global_sense" / "register.py").write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
@@ -805,7 +822,9 @@ class WebBackendTests(unittest.TestCase):
                 title="Daily check",
                 prompt="do not expose this prompt",
                 user="alice",
-                schedule={"type": "daily", "time": "09:00", "timezone": "Asia/Shanghai"},
+                type="daily",
+                time="09:00",
+                next_run_at="2026-07-20T09:00:00+08:00",
             )
         )
         window = empty_window("alice", "web", "observer-session")
@@ -817,7 +836,11 @@ class WebBackendTests(unittest.TestCase):
             "estimated": False,
         }
         commit_window(root / "users" / "alice" / "history" / "observer-window", window)
-        (root / "users" / "alice" / "history" / "observer-window" / "context_summary.json").write_text(
+        runtime_cache = runtime_window_path(
+            root / "users" / "alice" / "history" / "observer-window"
+        ) / "context_summary.json"
+        runtime_cache.parent.mkdir(parents=True, exist_ok=True)
+        runtime_cache.write_text(
             json.dumps(
                 {
                     "source_hash": "hash",
@@ -918,10 +941,13 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(sense.json()["core_available"])
         self.assertEqual(
             [item["layer"] for item in sense.json()["sources"]],
-            ["global", "global"],
+            ["global", "global", "global"],
         )
-        self.assertEqual(sense.json()["summary"]["global"], 2)
+        self.assertEqual(sense.json()["summary"]["global"], 3)
         self.assertEqual(sense.json()["summary"]["enabled"], 1)
+        self.assertEqual(sense.json()["summary"]["healthy"], 1)
+        self.assertEqual(sense.json()["summary"]["unhealthy"], 2)
+        self.assertEqual(sense.json()["summary"]["invalid"], 1)
         self.assertEqual(sense.json()["core_files"], 2)
         self.assertEqual(sense.json()["summary"]["registered_data"], 2)
         self.assertEqual(sense.json()["summary"]["injected_data"], 1)
@@ -930,16 +956,28 @@ class WebBackendTests(unittest.TestCase):
         self.assertGreater(sense.json()["injection"]["estimated_tokens"], 0)
         self.assertEqual(
             sense.json()["injection"]["source_files"],
-            ["global_sense/runtime/status.md"],
+            ["global_sense/runtime/sense.md"],
         )
         self.assertEqual(
             {item["id"]: item["status"] for item in sense.json()["sources"]},
-            {"network": "filtered", "runtime": "active"},
+            {"broken": "invalid", "network": "filtered", "runtime": "active"},
         )
+        runtime_source = next(item for item in sense.json()["sources"] if item["id"] == "runtime")
+        self.assertEqual(runtime_source["display_name"], "runtime display")
+        self.assertEqual(runtime_source["data_md"], "sense.md")
+        self.assertEqual(runtime_source["recent_update"], "2026-07-19 12:00:00")
+        self.assertEqual(runtime_source["health"], "正常")
+        self.assertTrue(runtime_source["valid"])
+        broken_source = next(item for item in sense.json()["sources"] if item["id"] == "broken")
+        self.assertFalse(broken_source["enabled"])
+        self.assertFalse(broken_source["valid"])
+        self.assertEqual(broken_source["health"], "异常")
+        self.assertIn("sense.json", broken_source["error"])
+        self.assertNotIn("must not be injected", sense.text)
         self.assertNotIn('"project"', sense.text)
 
         prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
-        self.assertEqual(len(prompt.json()["sections"]), 15)
+        self.assertEqual(len(prompt.json()["sections"]), len(PROMPT_SECTION_ORDER))
         self.assertNotIn("safe memory preview", prompt.text)
         self.assertIn("expand", prompt.json())
         memory = self.request(app, "GET", "/api/users/alice/memory/summary")

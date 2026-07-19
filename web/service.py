@@ -39,14 +39,8 @@ from run.history import (
     list_sessions,
     load_window,
     rename_session as rename_history_session,
+    runtime_window_path,
     session_messages,
-)
-from run.knowledge import (
-    DEFAULT_KNOWLEDGE_MAX_CHARS,
-    DEFAULT_KNOWLEDGE_MAX_FILE_CHARS,
-    DEFAULT_KNOWLEDGE_MAX_ITEMS,
-    DEFAULT_KNOWLEDGE_MINIMUM_SCORE,
-    build_index,
 )
 from run.memory import MemoryStore
 from run.prompt import (
@@ -54,7 +48,7 @@ from run.prompt import (
     build_prompt_bundle,
     parse_prompt_settings,
 )
-from run.prompt_sources import load_prompt_source_registry
+from run.prompt_sources import iter_files, load_prompt_source_registry
 from run.source_policy import MainAgentSourcePolicy
 from run.task_plan_store import PlanStore
 from run.tools import apply_runtime_tool_policy, discover_tools
@@ -562,31 +556,33 @@ class WebRunService:
 
     @staticmethod
     def _cron_summary(task: dict[str, Any]) -> dict[str, Any]:
-        schedule = task.get("schedule")
-        return {
+        summary = {
             "task_id": str(task.get("task_id") or ""),
             "title": str(task.get("title") or ""),
             "status": str(task.get("status") or "enabled"),
-            "schedule": dict(schedule) if isinstance(schedule, dict) else {},
-            "source": str(task.get("source") or ""),
-            "session_id": str(task.get("session_id") or ""),
+            "type": str(task.get("type") or ""),
             "next_run_at": str(task.get("next_run_at") or ""),
-            "last_run_at": str(task.get("last_run_at") or ""),
-            "run_count": int(task.get("run_count") or 0),
-            "revision": int(task.get("revision") or 1),
+            "latest_run_at": str(task.get("latest_run_at") or ""),
             "created_at": str(task.get("created_at") or ""),
-            "updated_at": str(task.get("updated_at") or ""),
-            "last_state": "failed" if task.get("last_error") else (
-                "completed" if task.get("last_result") is not None else "never"
-            ),
         }
+        if task.get("type") == "daily":
+            summary["time"] = str(task.get("time") or "")
+        elif task.get("type") == "recurring":
+            summary["interval_seconds"] = int(task.get("interval_seconds") or 0)
+        summary["last_state"] = (
+            "never" if not task.get("latest_run_at") else str(task.get("status") or "completed")
+        )
+        return summary
 
     def tasks(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         plans = [self._plan_summary(item) for item in PlanStore(self.root, name).list_plans()]
         crons = [self._cron_summary(item) for item in CronStore(self.root, name).list_tasks()]
         plans.sort(key=lambda item: item["updated_at"], reverse=True)
-        crons.sort(key=lambda item: item["updated_at"], reverse=True)
+        crons.sort(
+            key=lambda item: item.get("latest_run_at") or item.get("created_at") or "",
+            reverse=True,
+        )
         active_statuses = {"approved", "running", "paused"}
         waiting_statuses = {"pending", "approved", "paused"}
         return {
@@ -607,43 +603,38 @@ class WebRunService:
         source_policy = MainAgentSourcePolicy.from_config(config)
         policy_summary = source_policy.public_summary()
         documents = []
-        for document in build_index(
-            self.root,
-            name,
-            max_file_chars=DEFAULT_KNOWLEDGE_MAX_FILE_CHARS,
+        for scope, base in (
+            ("user", self.root / "users" / name / "knowledge"),
+            ("shared", self.root / "shared_knowledge"),
+            ("global", self.root / "global_knowledge"),
         ):
-            try:
-                stat = document.path.stat()
-                size = stat.st_size
-                updated_at = stat.st_mtime
-            except OSError:
-                size = 0
-                updated_at = 0
-            documents.append(
-                {
-                    "scope": document.scope,
-                    "relative_path": document.relative_path,
-                    "title": document.title,
-                    "size": size,
-                    "updated_at": updated_at,
-                    "active_for_main_agent": (
-                        document.scope in source_policy.knowledge_scopes
-                        and not source_policy.kemo_graph_replaces_knowledge
-                    ),
-                }
-            )
+            for path in iter_files(base, suffixes={".md", ".txt", ".json"}):
+                try:
+                    stat = path.stat()
+                    size = stat.st_size
+                    updated_at = stat.st_mtime
+                except OSError:
+                    size = 0
+                    updated_at = 0
+                documents.append(
+                    {
+                        "scope": scope,
+                        "relative_path": path.relative_to(base).as_posix(),
+                        "title": path.stem,
+                        "size": size,
+                        "updated_at": updated_at,
+                        "active_for_main_agent": (
+                            scope in source_policy.knowledge_scopes
+                            and not source_policy.kemo_graph_replaces_knowledge
+                        ),
+                    }
+                )
         return {
             "user": name,
             "enabled": True,
             "retrieval": {
-                "max_items": DEFAULT_KNOWLEDGE_MAX_ITEMS,
-                "max_chars": DEFAULT_KNOWLEDGE_MAX_CHARS,
-                "minimum_score": DEFAULT_KNOWLEDGE_MINIMUM_SCORE,
-                "mode": (
-                    "kemo_graph_replacement"
-                    if source_policy.kemo_graph_replaces_knowledge
-                    else "file_index"
-                ),
+                "mode": "index_only",
+                "full_index": True,
             },
             "summary": {
                 "documents": len(documents),
@@ -739,17 +730,28 @@ class WebRunService:
             {
                 "id": item["name"],
                 "name": item["name"],
-                "description": f"{item['files']} 个可注入 Markdown 文件",
+                "display_name": item["display_name"],
+                "description": (
+                    f"标准数据文件：{item['data_md']}"
+                    if item["valid"]
+                    else f"模块配置无效：{item['error']}"
+                ),
                 "layer": "global",
                 "enabled": item["active"],
                 "active_for_main_agent": item["active"],
                 "status": item["status"],
+                "data_md": item["data_md"],
+                "recent_update": item["recent_update"],
+                "health": item["health"],
+                "valid": item["valid"],
+                "error": item["error"],
+                "start_update": item["start_update"],
                 "files": item["files"],
                 "registered_items": item["files"],
                 "injected_items": sum(
                     path in injected_files
                     for path in (
-                        f"global_sense/{item['name']}/{relative_path}"
+                        f"{item['root']}/{item['name']}/{relative_path}"
                         for relative_path in item["data_items"]
                     )
                 ),
@@ -773,6 +775,9 @@ class WebRunService:
                 "user": sum(item["layer"] == "user" for item in sources),
                 "shared": sum(item["layer"] == "shared" for item in sources),
                 "global": sum(item["layer"] == "global" for item in sources),
+                "healthy": sum(item["valid"] and item["health"] == "正常" for item in sources),
+                "unhealthy": sum(item["health"] == "异常" for item in sources),
+                "invalid": sum(not item["valid"] for item in sources),
                 "registered_data": core_files,
                 "injected_data": selection.injected_items,
             },
@@ -845,8 +850,6 @@ class WebRunService:
                 "tool_iterations": int(tools.get("max_iterations") or 8),
                 "tool_timeout": float(tools.get("timeout") or 60),
                 "tool_max_per_round": tools.get("max_per_round"),
-                "knowledge_items": DEFAULT_KNOWLEDGE_MAX_ITEMS,
-                "knowledge_chars": DEFAULT_KNOWLEDGE_MAX_CHARS,
                 "memory_items": sum(
                     int(temporary_memory_limits.get(tier, default))
                     for tier, default in (
@@ -932,7 +935,7 @@ class WebRunService:
         directory = find_window(self.root, user, "web", session_id)
         if directory is None:
             return empty
-        path = directory / "context_summary.json"
+        path = runtime_window_path(directory) / "context_summary.json"
         if not path.is_file():
             return {**empty, "window": directory.name}
         try:
@@ -1032,7 +1035,7 @@ class WebRunService:
                     "title": task["title"],
                     "detail": "定时任务",
                     "status": task["status"],
-                    "updated_at": task["updated_at"],
+                    "updated_at": task.get("latest_run_at") or task.get("created_at") or "",
                 }
             )
         activities.sort(key=lambda item: item["updated_at"], reverse=True)

@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_nine_native_plugins(self) -> None:
+    def test_repository_discovers_all_eleven_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -30,9 +30,10 @@ class PluginManifestTests(unittest.TestCase):
                 "file",
                 "get_current_time",
                 "history_search",
-                "knowledge_search",
+                "memory_manage",
                 "network",
                 "shell",
+                "skill_creater",
                 "subagent_dispatch",
                 "task_time",
                 "web_search",
@@ -43,7 +44,7 @@ class PluginManifestTests(unittest.TestCase):
             self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 9)
+        self.assertEqual(len(registry.tools), 10)
         shell_schema = registry.get("shell").input_schema
         validate_arguments(shell_schema, {"action": "run_command", "command": "pwd"})
         with self.assertRaises(Exception):
@@ -165,13 +166,15 @@ class TaskTimePluginTests(unittest.TestCase):
             task_id = created["task"]["task_id"]
             updated = run_task_time("update", task_id=task_id, title="renamed", context=context)
             self.assertTrue(updated["ok"])
-            self.assertEqual(updated["task"]["schedule"], {"type": "recurring", "interval_seconds": 300})
+            self.assertEqual(updated["task"]["type"], "recurring")
+            self.assertEqual(updated["task"]["interval_seconds"], 300)
             paused = run_task_time("update", task_id=task_id, status="paused", context=context)
             self.assertEqual(paused["task"]["status"], "paused")
             self.assertEqual(run_task_time("list", context=context)["total"], 1)
             stored = CronStore(root, "alice").read(task_id)
-            self.assertEqual(stored["source"], "cli")
-            self.assertEqual(stored["session_id"], "s1")
+            self.assertEqual(stored["user"], "alice")
+            self.assertNotIn("source", stored)
+            self.assertNotIn("session_id", stored)
             self.assertTrue(run_task_time("delete", task_id=task_id, context=context)["deleted"])
 
 

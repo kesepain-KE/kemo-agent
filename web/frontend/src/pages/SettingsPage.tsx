@@ -174,7 +174,7 @@ export function SettingsPage() {
               <SettingRow title="工具迭代" description={`单次调用超时 ${data?.limits.tool_timeout || '—'} 秒`} source={data?.provenance['tools.max_iterations']} control={<span className="value-pill">{data?.limits.tool_iterations || '—'} 轮</span>} />
               <SettingRow title="每轮工具软上限" description="达到后提交中间状态并等待用户继续" source={data?.provenance['tools.max_per_round']} control={<span className="value-pill">{data?.limits.tool_max_per_round ?? '不限'}</span>} />
               <SettingRow title="任务步骤" description="单个计划最大步骤数" source={data?.provenance['task_plan.max_steps']} control={<span className="value-pill">{data?.limits.task_plan_steps || '—'} 步</span>} />
-              <SettingRow title="知识检索" description={`内部上限 ${data?.limits.knowledge_chars || '—'} 字符`} control={<span className="value-pill">{data?.limits.knowledge_items || '—'} 项</span>} />
+              <SettingRow title="知识索引" description="完整注入三层 data_structure.md / index.md 等索引文件" control={<span className="value-pill">全量</span>} />
             </article>
           </>}
 
@@ -189,7 +189,7 @@ export function SettingsPage() {
             </article>
             <article className="setting-section">
               <div className="setting-section-head"><strong>Expand 注册与过滤</strong><span>注册库存与当前用户主智能体选择结果分开展示。</span></div>
-              <div className="expand-observer-grid">{Object.entries(promptQuery.data?.expand || {}).map(([scope, item]) => <div key={scope}><strong>{scope}</strong><span>发现 {item.discovered.length} · 选择 {item.selected.length}</span><small>已过滤：{item.filtered.join('、') || '无'}</small><small>未匹配：{item.unmatched.join('、') || '无'}</small></div>)}</div>
+              <div className="expand-observer-grid">{Object.entries(promptQuery.data?.expand || {}).map(([scope, item]) => <div key={scope}><strong>{scope}</strong><span>发现 {item.discovered.length} · 选择 {item.selected.length} · 异常 {item.invalid?.length || 0}</span><small>已过滤：{item.filtered.join('、') || '无'}</small><small>异常模块：{item.invalid?.join('、') || '无'}</small><small>未匹配：{item.unmatched.join('、') || '无'}</small></div>)}</div>
             </article>
           </>}
 

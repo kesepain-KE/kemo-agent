@@ -24,7 +24,15 @@ import styles from './SensePage.module.css'
 const statusLabels: Record<string, string> = {
   active: '已启用',
   filtered: '已过滤',
-  empty: '无数据',
+  invalid: '配置异常',
+}
+
+function senseTimestamp(recentUpdate: string, updatedAt: number) {
+  if (recentUpdate) {
+    const parsed = Date.parse(recentUpdate.replace(' ', 'T'))
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  return (updatedAt || 0) * 1000
 }
 
 export function SensePage() {
@@ -54,7 +62,7 @@ export function SensePage() {
             : 'idle'
 
   const recentSources = useMemo(
-    () => [...sources].sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0)),
+    () => [...sources].sort((left, right) => senseTimestamp(right.recent_update, right.updated_at) - senseTimestamp(left.recent_update, left.updated_at)),
     [sources],
   )
 
@@ -78,8 +86,8 @@ export function SensePage() {
 
       {guideOpen && <section className={styles.registrationGuide} aria-label="感知源注册说明">
         <span><FolderOpen size={18} /></span>
-        <div><strong>目录即感知模块，数据文件即注册项</strong><p>在 global_sense 下创建独立模块目录，由模块从外部采集并写入 Markdown 数据文件；register.py 负责把该数据根注册到提示词管线，用户配置只负责过滤。</p></div>
-        <code>global_sense/&lt;module&gt;/**/*.md</code>
+        <div><strong>每个模块使用一份声明和一个标准数据文件</strong><p>在 global_sense 下创建独立模块目录，sense.json 的 data_md 明确指定唯一可注入的 Markdown；其他文档和采集脚本不会被扫描。</p></div>
+        <code>global_sense/&lt;module&gt;/sense.json + data_md</code>
       </section>}
 
       <GlobalSenseStatus
@@ -109,7 +117,7 @@ export function SensePage() {
                   <div className={styles.sourceMain}>
                     <span className={styles.sourceIcon}><Activity size={19} /></span>
                     <span className={styles.sourceCopy}>
-                      <span className={styles.sourceTitle}><h3>{source.name}</h3><StatusChip status={source.status === 'active' ? 'enabled' : source.status === 'filtered' ? 'paused' : 'warning'}>{statusLabels[source.status] || source.status}</StatusChip></span>
+                      <span className={styles.sourceTitle}><h3>{source.display_name || source.name}</h3><StatusChip status={source.status === 'active' ? 'enabled' : source.status === 'filtered' ? 'paused' : 'warning'}>{statusLabels[source.status] || source.status}</StatusChip></span>
                       <p>{source.description || '该来源尚未注册任何可注入数据。'}</p>
                     </span>
                     <span className={styles.sourceActions}>
@@ -120,15 +128,17 @@ export function SensePage() {
                     </span>
                   </div>
                   <div className={styles.sourceMeta}>
-                    <span>来源类型：模块目录</span>
+                    <span>模块 ID：{source.name}</span>
+                    <span>健康状态：{source.health || '异常'}</span>
                     <span>注册数据：{source.registered_items ?? source.files} 项</span>
                     <span>注入数据：{source.injected_items || 0} 项</span>
-                    <span>最后更新：{source.updated_at ? formatDateTime(source.updated_at) : '尚未运行'}</span>
+                    <span>最后更新：{source.recent_update || (source.updated_at ? formatDateTime(source.updated_at) : '未知')}</span>
                     <span>注入范围：主智能体 · {user}</span>
                   </div>
                   {open && <div className={styles.sourcePreview}>
-                    <strong>已注册数据文件</strong>
-                    {source.data_items?.length ? <ul>{source.data_items.map((item) => <li key={item}><FileText size={13} /><code>{item}</code></li>)}</ul> : <p>该模块当前没有可注册的 Markdown 数据文件。</p>}
+                    <strong>{source.valid ? '标准数据文件' : '模块校验结果'}</strong>
+                    {source.valid && source.data_md ? <ul><li><FileText size={13} /><code>{source.data_md}</code></li></ul> : <p>{source.error || 'sense.json 配置无效。'}</p>}
+                    {source.start_update && <p>更新入口：<code>{source.start_update}</code></p>}
                   </div>}
                 </article>
               })}
@@ -140,9 +150,9 @@ export function SensePage() {
             {recentSources.length ? <div className={styles.updateTableWrap}><table className={styles.updateTable}>
               <thead><tr><th>来源名称</th><th>注册数据</th><th>更新时间</th><th>状态</th></tr></thead>
               <tbody>{recentSources.map((source) => <tr key={source.id}>
-                <td>{source.name}</td>
-                <td>{source.registered_items ?? source.files} 项 · {source.data_items?.slice(0, 2).join('、') || '暂无数据'}</td>
-                <td>{source.updated_at ? formatDateTime(source.updated_at) : '尚未运行'}</td>
+                <td>{source.display_name || source.name}</td>
+                <td>{source.valid ? source.data_md : source.error || '配置无效'}</td>
+                <td>{source.recent_update || (source.updated_at ? formatDateTime(source.updated_at) : '未知')}</td>
                 <td><StatusChip status={source.status === 'active' ? 'saved' : source.status === 'filtered' ? 'paused' : 'warning'}>{statusLabels[source.status] || source.status}</StatusChip></td>
               </tr>)}</tbody>
             </table></div> : <EmptyPanel title="暂无更新记录" description="感知模块写入数据后，这里会显示真实文件更新时间。" />}

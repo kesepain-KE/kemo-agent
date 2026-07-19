@@ -160,15 +160,12 @@ export interface CronTaskSummary {
   task_id: string
   title: string
   status: string
-  schedule: Record<string, unknown>
-  source: string
-  session_id: string
+  type: 'daily' | 'once' | 'recurring'
+  time?: string
+  interval_seconds?: number
   next_run_at: string
-  last_run_at: string
-  run_count: number
-  revision: number
+  latest_run_at: string
   created_at: string
-  updated_at: string
   last_state: 'failed' | 'completed' | 'never' | string
 }
 
@@ -219,10 +216,8 @@ export interface KnowledgeResponse {
   user: string
   enabled: boolean
   retrieval: {
-    max_items: number
-    max_chars: number
-    minimum_score: number
-    mode: string
+    mode: 'index_only'
+    full_index: boolean
   }
   summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
@@ -258,11 +253,18 @@ export interface SkillsResponse {
 export interface SenseSourceSummary {
   id: string
   name: string
+  display_name: string
   description: string
   layer: 'user' | 'shared' | 'global' | string
   enabled: boolean
   active_for_main_agent: boolean
-  status: string
+  status: 'active' | 'filtered' | 'invalid' | string
+  data_md: string
+  recent_update: string
+  health: '正常' | '异常' | string
+  valid: boolean
+  error: string
+  start_update: string
   files: number
   registered_items: number
   injected_items: number
@@ -282,6 +284,9 @@ export interface SenseResponse {
     user: number
     shared: number
     global: number
+    healthy: number
+    unhealthy: number
+    invalid: number
     registered_data: number
     injected_data: number
   }
@@ -335,8 +340,6 @@ export interface SettingsResponse {
     tool_iterations: number
     tool_timeout: number
     tool_max_per_round: number | null
-    knowledge_items: number
-    knowledge_chars: number
     memory_items: number
     memory_chars: number
   }
@@ -372,7 +375,22 @@ export interface PromptDiagnosticsResponse {
     discovered: string[]
     selected: string[]
     filtered: string[]
+    invalid: string[]
     unmatched: string[]
+    health_status: Record<string, {
+      name: string
+      explain: string
+      valid: boolean
+      input_health: string
+      open_input: boolean
+      open_control: boolean
+      input_data: string
+      start_update: string
+      start_expand: string
+      start_control: string
+      control_file: string
+      error: string
+    }>
   }>
 }
 

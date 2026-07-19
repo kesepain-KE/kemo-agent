@@ -10,6 +10,8 @@ from provider.schema import ChatResponse, Usage
 from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
+from run.engine import _compress_per_round_tool_think
+from run.history import commit_window, empty_window, load_runtime_window, load_window, runtime_window_path
 
 
 def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dict:
@@ -230,6 +232,52 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(diagnostics["chunks"], 5)
         self.assertEqual(provider.calls, 5)
         self.assertEqual(value["covered_rounds"], [1, 2, 3, 4, 5])
+
+    def test_tool_think_compression_processes_one_unprotected_round(self) -> None:
+        window = make_window(5, with_tools=True)
+        window["items"] = {"items": []}
+        runner = SummaryRunner()
+        diagnostics = _compress_per_round_tool_think(
+            window=window,
+            conserved_rounds=2,
+            agent_runner=runner,
+            cancel_event=None,
+        )
+        self.assertTrue(diagnostics["compressed"])
+        self.assertEqual(diagnostics["round"], 1)
+        self.assertEqual(runner.calls, 1)
+        self.assertTrue(window["think"]["rounds"][0]["compressed"])
+        self.assertEqual(window["think"]["rounds"][0]["content"], "compressed")
+        self.assertEqual(window["tool"]["rounds"][0]["calls"], [])
+        self.assertFalse(window["think"]["rounds"][1].get("compressed", False))
+
+    def test_runtime_mirror_can_compress_without_mutating_archive(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        archive_path = Path(temporary.name) / "history" / "archive-window"
+        archive = empty_window("alice", "cli", "session")
+        archive["think"]["rounds"].append({"round": 1, "content": "raw reasoning"})
+        archive["tool"]["rounds"].append(
+            {"round": 1, "calls": [{"name": "lookup", "result": "raw result"}]}
+        )
+        archive["data"]["rounds"] = 1
+        commit_window(archive_path, archive)
+        runtime = json.loads(json.dumps(archive, ensure_ascii=False))
+        runtime["think"]["rounds"][0].update(
+            {"content": "compressed", "compressed": True}
+        )
+        runtime["tool"]["rounds"][0].update({"calls": [], "compressed": True})
+        commit_window(runtime_window_path(archive_path), runtime)
+
+        reloaded_archive = load_window(archive_path)
+        runtime_path, reloaded_runtime = load_runtime_window(
+            archive_path, reloaded_archive
+        )
+        self.assertEqual(reloaded_archive["think"]["rounds"][0]["content"], "raw reasoning")
+        self.assertEqual(reloaded_archive["tool"]["rounds"][0]["calls"][0]["result"], "raw result")
+        self.assertEqual(runtime_path, runtime_window_path(archive_path))
+        self.assertEqual(reloaded_runtime["think"]["rounds"][0]["content"], "compressed")
+        self.assertEqual(reloaded_runtime["tool"]["rounds"][0]["calls"], [])
 
 
 if __name__ == "__main__":
