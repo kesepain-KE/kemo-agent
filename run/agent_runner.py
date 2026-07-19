@@ -16,7 +16,18 @@ from typing import Any, Callable
 
 from events import RunEvent
 from provider.factory import create_provider
-from provider.schema import ChatRequest
+from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.protocol.models import (
+    JsonContent,
+    KemoRequest,
+    KemoResponse,
+    MessageItem,
+    ToolCallItem,
+    ToolDefinition,
+    ToolResultItem,
+    Usage,
+    text_from_content,
+)
 from agents._runtime.resources import (
     AgentPromptBundle,
     build_agent_prompt_bundle,
@@ -225,10 +236,45 @@ class AgentRunner:
         return self.registry
 
     @staticmethod
+    def _usage_dict(usage: Usage) -> dict[str, Any]:
+        return {
+            "prompt_tokens": int(usage.input_tokens or 0),
+            "completion_tokens": int(usage.output_tokens or 0),
+            "total_tokens": int(
+                usage.total_tokens
+                if usage.total_tokens is not None
+                else (usage.input_tokens or 0) + (usage.output_tokens or 0)
+            ),
+            "estimated": not usage.measurement.exact,
+            "source": str(usage.measurement.mode),
+            "cached_tokens": int(usage.cached_input_tokens or 0),
+            "reasoning_tokens": int(usage.reasoning_tokens or 0),
+        }
+
+    @staticmethod
     def _merge_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total[key] = int(total.get(key, 0)) + int(usage.get(key, 0))
         total["estimated"] = bool(total.get("estimated", False) or usage.get("estimated", False))
+
+    @staticmethod
+    def _tool_definitions(schemas: list[dict[str, Any]]) -> list[ToolDefinition]:
+        definitions: list[ToolDefinition] = []
+        for raw in schemas:
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+            definitions.append(
+                ToolDefinition(
+                    name=str(function.get("name") or ""),
+                    description=str(function.get("description") or ""),
+                    parameters=dict(
+                        function.get("parameters")
+                        or function.get("input_schema")
+                        or {"type": "object"}
+                    ),
+                    strict=bool(function.get("strict", True)),
+                )
+            )
+        return definitions
 
     def _run_model(
         self,
@@ -247,12 +293,12 @@ class AgentRunner:
             + "\n\n[output_schema]\n"
             + json.dumps(definition.output_schema, ensure_ascii=False, sort_keys=True)
         )
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": json.dumps(input_data, ensure_ascii=False, sort_keys=True),
-            },
+        items: list[Any] = [
+            MessageItem.text(
+                MessageRole.USER,
+                json.dumps(input_data, ensure_ascii=False, sort_keys=True),
+                item_id=f"msg_{uuid.uuid4().hex}",
+            )
         ]
         total_usage: dict[str, Any] = {
             "prompt_tokens": 0,
@@ -263,6 +309,8 @@ class AgentRunner:
         tool_records: list[dict[str, Any]] = []
         final_text = ""
         final_model = runtime["model"]
+        response_ids: list[str] = []
+        parent_request_id: str | None = None
         max_iterations = definition.capabilities.max_tool_iterations
         tool_timeout = float((self.config.get("tools") or {}).get("timeout", 240))
         raw_failure_limit = (self.config.get("history") or {}).get(
@@ -279,43 +327,46 @@ class AgentRunner:
         for iteration in range(1, max_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
-            response = provider.chat(
-                ChatRequest(
+            request_id = f"req_{uuid.uuid4().hex}"
+            tool_schemas = context.tool_registry.schemas(exclude=failures.unavailable)
+            response = provider.create(
+                KemoRequest(
+                    request_id=request_id,
+                    parent_request_id=parent_request_id,
+                    attempt=1,
                     model=runtime["model"],
-                    messages=messages,
                     stream=False,
-                    tools=(
-                        context.tool_registry.schemas(exclude=failures.unavailable)
-                        or None
-                    ),
-                    max_tokens=context.max_tokens,
+                    system_prompt=system,
+                    input=list(items),
+                    tools=self._tool_definitions(tool_schemas),
+                    generation={"max_output_tokens": context.max_tokens},
+                    metadata={
+                        "user": self.user,
+                        "source": "subagent",
+                        "agent": definition.name,
+                        "task_id": context.task_id,
+                        "iteration": iteration,
+                    },
                 )
             )
-            self._merge_usage(total_usage, response.usage.to_dict())
+            if not isinstance(response, KemoResponse):
+                raise AgentRunError("Provider create() 必须返回 KemoResponse")
+            response_ids.append(response.id)
+            parent_request_id = parent_request_id or request_id
+            self._merge_usage(total_usage, self._usage_dict(response.usage))
             final_model = response.model or runtime["model"]
-            if not response.tool_calls:
-                final_text = response.text
+            if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+                message = response.error.message if response.error is not None else str(response.status)
+                raise AgentRunError(f"子代理 Provider 响应失败：{message}")
+            calls = [item for item in response.output if isinstance(item, ToolCallItem)]
+            messages = [item for item in response.output if isinstance(item, MessageItem)]
+            items.extend(response.output)
+            if not calls:
+                final_text = "".join(text_from_content(item.content) for item in messages)
                 break
             if iteration >= max_iterations:
                 raise AgentRunError(f"子代理 {definition.name} 工具调用超过最大循环次数 {max_iterations}")
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.text or None,
-                    "tool_calls": [
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": json.dumps(call.arguments, ensure_ascii=False),
-                            },
-                        }
-                        for call in response.tool_calls
-                    ],
-                }
-            )
-            for call in response.tool_calls:
+            for call in calls:
                 if failures.is_unavailable(call.name):
                     payload = {
                         "ok": False,
@@ -373,7 +424,7 @@ class AgentRunner:
                         )
                 tool_records.append(
                     {
-                        "id": call.id,
+                        "id": call.call_id,
                         "name": call.name,
                         "arguments": call.arguments,
                         "status": status,
@@ -381,13 +432,14 @@ class AgentRunner:
                         "iteration": iteration,
                     }
                 )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "name": call.name,
-                        "content": json.dumps(payload, ensure_ascii=False, default=str),
-                    }
+                items.append(
+                    ToolResultItem(
+                        id=f"result_{uuid.uuid4().hex}",
+                        call_id=call.call_id,
+                        name=call.name,
+                        is_error=not bool(payload.get("ok")),
+                        content=[JsonContent(data=payload)],
+                    )
                 )
         else:
             raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
@@ -410,6 +462,7 @@ class AgentRunner:
                 "task_id": context.task_id,
                 "prompt": context.prompt_bundle.diagnostics,
                 "tool_calls": tool_records,
+                "response_ids": response_ids,
             },
         )
 

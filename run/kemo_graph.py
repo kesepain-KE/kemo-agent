@@ -46,9 +46,8 @@ def load_kemo_graph_prompt_context(
     prompt pipeline contract and tests.
     """
 
-    del user
-    graph = config.get("kemo_graph") or {}
-    requested = bool(graph.get("enabled", False)) if isinstance(graph, dict) else False
+    del user, config
+    requested = replaces_knowledge or replaces_memory
     if not requested:
         return KemoGraphPromptContext(False, False, "disabled")
     configured_root = os.getenv("KEMO_GRAPH_ROOT", "").strip()

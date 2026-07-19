@@ -30,7 +30,7 @@ from provider.protocol.models import (
     Usage as ProtocolUsage,
 )
 from provider.protocol.streaming import ProviderStreamEvent
-from provider.schema import ChatRequest, ChatResponse, ProviderError, ToolCall, Usage
+from provider.schema import ChatRequest, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
@@ -47,7 +47,6 @@ from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from run.tools import (
     ConsecutiveToolFailureTracker,
-    ToolError,
     ToolRegistry,
     apply_runtime_tool_policy,
     discover_tools,
@@ -276,31 +275,6 @@ def _history_messages(window: dict[str, Any]) -> list[dict[str, Any]]:
         and message.get("role") in {"user", "assistant"}
         and isinstance(message.get("content"), str)
     ]
-
-
-def _events_for_response(response: ChatResponse) -> Iterator[RunEvent]:
-    if response.reasoning:
-        yield RunEvent(type="reasoning_delta", content=response.reasoning)
-    if response.text:
-        yield RunEvent(type="text_delta", content=response.text)
-    for call in response.tool_calls:
-        yield RunEvent(
-            type="tool_call_start",
-            tool_call_id=call.id,
-            tool_name=call.name,
-            arguments=call.arguments,
-        )
-    usage = response.usage.to_dict()
-    yield RunEvent(type="usage", usage=usage)
-    yield RunEvent(
-        type="done",
-        usage=usage,
-        metadata={
-            "finish_reason": response.finish_reason,
-            "model": response.model,
-            "response_id": response.response_id,
-        },
-    )
 
 
 def _protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
@@ -537,49 +511,24 @@ def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEv
 
 def _provider_events(
     provider: Any,
-    chat_request: ChatRequest,
     protocol_request: KemoRequest,
 ) -> Iterator[RunEvent]:
-    native_stream = getattr(provider, "stream", None)
-    native_create = getattr(provider, "create", None)
-    if chat_request.stream and callable(native_stream):
-        for protocol_event in native_stream(protocol_request):
+    stream = getattr(provider, "stream", None)
+    create = getattr(provider, "create", None)
+    if protocol_request.stream:
+        if not callable(stream):
+            raise EngineError("Provider 必须实现 Kemo stream() 接口")
+        for protocol_event in stream(protocol_request):
             if not isinstance(protocol_event, ProviderStreamEvent):
                 raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
             yield from _run_events_for_protocol_event(protocol_event)
         return
-    if not chat_request.stream and callable(native_create):
-        response = native_create(protocol_request)
-        if not isinstance(response, KemoResponse):
-            raise EngineError("Provider create() 必须返回 KemoResponse")
-        yield from _events_for_protocol_response(response)
-        return
-    # 兼容尚未迁移的 Provider 和测试 Mock；统一请求仍已在 Run 中完成编译。
-    legacy_request = ChatRequest(
-        model=chat_request.model,
-        messages=[
-            {
-                key: copy.deepcopy(value)
-                for key, value in message.items()
-                if not key.startswith("_")
-            }
-            for message in chat_request.messages
-        ],
-        stream=chat_request.stream,
-        tools=copy.deepcopy(chat_request.tools),
-        temperature=chat_request.temperature,
-        max_tokens=chat_request.max_tokens,
-        extra=copy.deepcopy(chat_request.extra),
-    )
-    events = (
-        provider.chat_stream(legacy_request)
-        if legacy_request.stream
-        else _events_for_response(provider.chat(legacy_request))
-    )
-    for event in events:
-        event.request_id = event.request_id or protocol_request.request_id
-        event.protocol_event_type = event.protocol_event_type or f"legacy.{event.type}"
-        yield event
+    if not callable(create):
+        raise EngineError("Provider 必须实现 Kemo create() 接口")
+    response = create(protocol_request)
+    if not isinstance(response, KemoResponse):
+        raise EngineError("Provider create() 必须返回 KemoResponse")
+    yield from _events_for_protocol_response(response)
 
 
 def _assistant_tool_message(text: str, calls: list[ToolCall]) -> dict[str, Any]:
@@ -1079,7 +1028,7 @@ def _iter_request_events_impl(
                     )
                     try:
                         buffered_provider_events = list(
-                            _provider_events(provider, chat_request, protocol_request)
+                            _provider_events(provider, protocol_request)
                         )
                         for buffered_event in buffered_provider_events:
                             if buffered_event.type == "error":

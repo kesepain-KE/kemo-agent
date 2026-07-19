@@ -142,8 +142,8 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
 def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     provider = copy.deepcopy(config.get("provider") or {})
     provider_type = str(provider.get("type") or "").strip().lower()
-    if provider_type not in {"openai", "kemo"}:
-        raise ConfigError("provider.type 必须是 'openai' 或 'kemo'")
+    if provider_type not in {"chat", "kemo"}:
+        raise ConfigError("provider.type 必须是 'chat' 或 'kemo'")
 
     default_env = "KEMO_API_KEY" if provider_type == "kemo" else "OPENAI_API_KEY"
     env_name = str(provider.get("api_key_env") or default_env).strip()
@@ -166,11 +166,11 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     base_url = base_url.rstrip("/")
     if not base_url:
         base_url = (
-            "http://127.0.0.1:8741/v1"
+            "http://127.0.0.1:8741"
             if provider_type == "kemo"
             else "https://api.openai.com/v1"
         )
-    if not base_url.endswith("/v1"):
+    if provider_type == "chat" and not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
 
     provider.update(
@@ -188,7 +188,7 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
-    """Resolve a multimodal model, falling back to the user's chat model."""
+    """Resolve a dedicated multimodal model or use the configured default model."""
 
     name = str(capability or "").strip()
     if name not in MULTIMODAL_CAPABILITIES:
@@ -205,7 +205,7 @@ def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
     provider = config.get("provider") or {}
     if not isinstance(provider, dict):
         raise ConfigError("provider 必须是对象")
-    fallback = str(provider.get("model") or "").strip()
-    if not fallback:
+    default_model = str(provider.get("model") or "").strip()
+    if not default_model:
         raise ConfigError(f"{name} 未配置专用模型，且 provider.model 为空")
-    return fallback
+    return default_model

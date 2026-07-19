@@ -302,12 +302,19 @@ def build_prompt_bundle(
     root = root.resolve()
     settings = parse_prompt_settings(config)
     source_policy = MainAgentSourcePolicy.from_config(config)
+    replaces_knowledge = any(
+        (
+            source_policy.kemo_graph_global_knowledge,
+            source_policy.kemo_graph_shared_knowledge,
+            source_policy.kemo_graph_user_knowledge,
+        )
+    )
     graph_context = graph_context_loader(
         root,
         user,
         config,
-        replaces_knowledge=source_policy.kemo_graph_replaces_knowledge,
-        replaces_memory=source_policy.kemo_graph_replaces_memory,
+        replaces_knowledge=replaces_knowledge,
+        replaces_memory=source_policy.kemo_graph_replaces_temporary_memory,
     )
     manifests = (
         discover_plugin_manifests(root)
@@ -359,11 +366,7 @@ def build_prompt_bundle(
     knowledge = select_knowledge_index(
         root,
         user,
-        scopes=(
-            ()
-            if source_policy.kemo_graph_replaces_knowledge
-            else source_policy.knowledge_scopes
-        ),
+        scopes=source_policy.knowledge_scopes,
     )
     if knowledge.text:
         sections.append(
@@ -393,7 +396,7 @@ def build_prompt_bundle(
             )
         )
 
-    tier_specs = (
+    tier_specs_all = (
         ("permanent", "permanent_memory", "permanent_memory", None),
         (
             "half_year",
@@ -414,6 +417,11 @@ def build_prompt_bundle(
             settings.temporary_memory_limits["seven_days"],
         ),
     )
+    # 永久记忆始终注入；三层临时记忆受 kemo_graph 替换控制
+    if source_policy.kemo_graph_replaces_temporary_memory:
+        tier_specs = (tier_specs_all[0],)  # 只保留 permanent
+    else:
+        tier_specs = tier_specs_all
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
     memory_files: list[str] = []
@@ -422,7 +430,7 @@ def build_prompt_bundle(
         section_name,
         config_name,
         max_files,
-    ) in (() if source_policy.kemo_graph_replaces_memory else tier_specs):
+    ) in tier_specs:
         selection = store.select_tier_for_prompt(
             tier,
             max_files=max_files,
@@ -447,10 +455,7 @@ def build_prompt_bundle(
     if "permanent_memory" in tier_sections:
         sections.append(tier_sections["permanent_memory"])
 
-    if (
-        not source_policy.kemo_graph_replaces_memory
-        and settings.important_memory_max_chars > 0
-    ):
+    if settings.important_memory_max_chars > 0:
         important_path = root / "users" / user / "memory_temporary_important.md"
         important = read_optional_text(important_path)
         injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
@@ -535,29 +540,36 @@ def build_prompt_bundle(
             )
         )
 
-    order = [section.name for section in sections]
-    expected = [name for name in PROMPT_SECTION_ORDER if name in set(order)]
+    section_map = {section.name: section for section in sections}
+    padded: list[PromptSection] = []
+    for name in PROMPT_SECTION_ORDER:
+        if name in section_map:
+            padded.append(section_map[name])
+        else:
+            padded.append(PromptSection(name=name, content="（无）"))
+    order = [section.name for section in padded]
+    expected = list(PROMPT_SECTION_ORDER)
     if order != expected:
         raise AssertionError(f"提示词段顺序偏离固定契约：{order}")
-    text = "\n\n".join(f"[{section.name}]\n{section.content}" for section in sections)
+    text = "\n\n".join(f"[{section.name}]\n{section.content}" for section in padded)
     diagnostics = {
         "total_chars": len(text),
         "section_order": order,
-        "sections": {section.name: _section_diagnostic(section) for section in sections},
+        "sections": {section.name: _section_diagnostic(section) for section in padded},
         "knowledge_documents": [
             {"scope": item.scope, "path": item.relative_path, "title": item.title}
             for item in knowledge.documents
         ],
         "source_policy": source_policy.public_summary(),
         "kemo_graph": graph_context.diagnostics(
-            replaces_knowledge=source_policy.kemo_graph_replaces_knowledge,
-            replaces_memory=source_policy.kemo_graph_replaces_memory,
+            replaces_knowledge=replaces_knowledge,
+            replaces_memory=source_policy.kemo_graph_replaces_temporary_memory,
         ),
         "source_selection": registered_sources.selection_diagnostics(),
     }
     return PromptBundle(
         text=text,
-        sections=tuple(sections),
+        sections=tuple(padded),
         memory_ids=tuple(memory_ids),
         diagnostics=diagnostics,
         memory_files=tuple(memory_files),
