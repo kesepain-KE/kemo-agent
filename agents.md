@@ -42,7 +42,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 任务计划 | `run/task_plan_store.py` | 计划创建、状态机、磁盘持久化 |
 | 定时任务 | `run/cron_store.py` | cron 任务 CRUD、校验 |
 | 运行时宿主 | `run/runtime_host.py` | Web + cron + 消息路由的统一宿主 |
-| Provider | `provider/` | OpenAI 兼容 HTTP 传输，kemo 网关 / 直连双模式 |
+| Provider | `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
 
 ---
 
@@ -159,13 +159,16 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `expand.global_whitelist` | 全局 Expand 白名单 |
 | `expand.shared_whitelist` | 共享 Expand 白名单；用户 Expand 始终按当前用户目录动态解析 |
 | `perception.global_whitelist` | `global_sense/` 直接子目录模块白名单 |
-| `kemo_graph.enabled` | 启用图谱替换边界；替代适用的知识索引和全部记忆碎片直接注入 |
+| `kemo_graph.kemo_graph_global_knowledge` | 仅以图谱替换全局知识库索引 |
+| `kemo_graph.kemo_graph_shared_knowledge` | 仅以图谱替换共享知识库索引 |
+| `kemo_graph.kemo_graph_user_knowledge` | 仅以图谱替换用户知识库索引 |
+| `kemo_graph.kemo_graph_temporary_memory` | 仅以图谱替换 half_year、one_month、seven_days 三层临时记忆；永久记忆与临时重要记忆始终保留 |
 
 主智能体白名单 `[]` 表示全量允许；非空数组按资源 ID 精确匹配。技能 ID 支持相对路径（如 `development/python`）。`"*"` 不属于主配置协议。
 
 `knowledge.enabled` 与 `skills.user_whitelist` 已从配置契约删除，继续提供会被判定为未知字段。
-`kemo_graph.enabled=true` 时不会自动启动外部项目；未建立连接接口时明确返回
-`not_connected`，并且不回退注入已被替换的原始知识或记忆内容。
+任一 `kemo_graph` 替换开关为 `true` 时不会自动启动外部项目；未建立连接接口时明确返回
+`not_connected`，并且不回退注入该开关已替换的原始知识或临时记忆内容。
 
 这些字段不控制子代理。子代理只服从各自 `agent-config.json`，不与主智能体策略求交集。
 
@@ -173,10 +176,10 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `type` | string | `"kemo"` 或 `"openai"` |
-| `base_url` | string | API 地址；为空时读取 `KEMO_BASE_URL` / `OPENAI_BASE_URL`，自动补全 `/v1` |
+| `type` | string | `"chat"` 或 `"kemo"`；启动前选择，运行中不自动回退 |
+| `base_url` | string | API 地址；chat 模式自动补全 `/v1`，kemo 模式保持配置的协议根地址 |
 | `api_key` | string | 用户独立密钥（优先读取），为空时读环境变量兜底 |
-| `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，openai 默认 `OPENAI_API_KEY` |
+| `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，chat 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
 
@@ -414,7 +417,7 @@ system prompt 按以下固定顺序拼接：
 15. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
 
 每段有字符上限配置（`prompt.char_limits`）。知识正文不自动注入，只注入索引；需要正文时使用显式搜索机制或工具。
-图谱替换启用时，适用的知识索引与记忆段和 `kemo_graph` 段互斥，不能同时进入同一个 Prompt。
+图谱替换按来源独立生效：启用某个知识层级开关时，仅该层级索引与 `kemo_graph` 段互斥；启用临时记忆开关时，仅三层临时记忆与其互斥。永久记忆和临时重要记忆始终保留。
 
 ---
 
@@ -432,8 +435,9 @@ system prompt 按以下固定顺序拼接：
 
 ### Provider 类型
 
-- `kemo`：通过 Kemo 网关，网关提供精确 token 统计。
-- `openai`：直连 OpenAI 兼容 API，上游省略 usage 时回退本地估算。
+- `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。
+- `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。
+- 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
 
 ### 密钥优先级
 
@@ -447,7 +451,7 @@ system prompt 按以下固定顺序拼接：
 2. `KEMO_BASE_URL` / `OPENAI_BASE_URL`
 3. Provider 类型对应的内置默认地址
 
-最终地址统一去除尾部 `/` 并补全 `/v1`。
+最终地址统一去除尾部 `/`。只有 `chat` 模式自动补全 `/v1`；`kemo` 模式默认协议根地址为 `http://127.0.0.1:8741`。
 
 ### Web 启动与认证
 
@@ -466,8 +470,10 @@ system prompt 按以下固定顺序拼接：
 ### 多模态
 
 - `MULTIMODAL_CAPABILITIES` 定义了支持的能力集合：vision、image generation/edit、audio ASR/TTS、speech_to_speech、video generation。
-- 多模态模型名通过 `multimodal_models` 配置；专用模型为空时统一回退到 `provider.model`。
+- 多模态模型名通过 `multimodal_models` 配置；专用模型为空时使用 `provider.model`。
 - 不含 embedding 和 rerank。
+- `chat` 模式的可移植基线仅包含文本、工具调用和图片输入；图片直接发送给视觉模型，不先调用识图工具。
+- `kemo` 模式通过 Asset 与能力声明使用网关实际支持的完整多模态能力。
 
 ### 网络与插件环境
 

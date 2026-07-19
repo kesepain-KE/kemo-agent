@@ -95,6 +95,11 @@ cp .env.example .env
 | `WEB_SESSION_SECRET` | Cookie 签名密钥；为空时自动生成 | 随机值 |
 | `WEB_SESSION_COOKIE_NAME` | Session Cookie 名称 | `kemo_agent_session` |
 
+Provider 只提供两种正式模式：`provider.type=chat` 连接最广泛的
+`/v1/chat/completions`，保证文本、工具循环和原生图片输入；`provider.type=kemo`
+连接完整 Kemo Provider，提供 Asset、音视频、媒体输出和更完整的生命周期能力。
+两种模式不会在请求失败后互相回退。
+
 ## 用法
 
 ### Web 服务
@@ -156,7 +161,8 @@ kemo-agent/
 │   ├── schema.py
 │   ├── factory.py
 │   ├── kemo_gateway.py
-│   └── openai_chat.py
+│   ├── openai_chat.py      # Chat Completions HTTP 传输
+│   └── adapters/           # Kemo ↔ Chat Bridge 与原生传输
 ├── web/                    # Web 模块
 │   ├── app.py              # FastAPI 后端
 │   ├── service.py          # 服务适配

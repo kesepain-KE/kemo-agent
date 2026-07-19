@@ -91,7 +91,10 @@ _CONFIG_SOURCE_PATHS = (
     "expand.global_whitelist",
     "expand.shared_whitelist",
     "perception.global_whitelist",
-    "kemo_graph.enabled",
+    "kemo_graph.kemo_graph_global_knowledge",
+    "kemo_graph.kemo_graph_shared_knowledge",
+    "kemo_graph.kemo_graph_user_knowledge",
+    "kemo_graph.kemo_graph_temporary_memory",
 )
 
 
@@ -623,10 +626,8 @@ class WebRunService:
                         "title": path.stem,
                         "size": size,
                         "updated_at": updated_at,
-                        "active_for_main_agent": (
-                            scope in source_policy.knowledge_scopes
-                            and not source_policy.kemo_graph_replaces_knowledge
-                        ),
+                        "active_for_main_agent": scope
+                        in source_policy.knowledge_scopes,
                     }
                 )
         return {
@@ -810,7 +811,6 @@ class WebRunService:
         environment_key = bool(env_name and os.getenv(env_name, "").strip())
         credential_source = "inline" if inline_key else "environment" if environment_key else "missing"
         tools = config.get("tools") or {}
-        knowledge = config.get("knowledge") or {}
         memory = config.get("memory") or {}
         temporary_memory_limits = memory.get("temporary_injection_limits") or {}
         task_plan = config.get("task_plan") or {}

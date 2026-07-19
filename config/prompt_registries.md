@@ -93,7 +93,12 @@ def register(registry) -> None:
 | `expand.global_whitelist` | 全局 Expand 过滤 |
 | `expand.shared_whitelist` | 共享 Expand 过滤 |
 | `perception.global_whitelist` | 全局感知模块过滤 |
-| `kemo_graph.enabled` | 仅记录请求状态；当前显示 `disabled` 或 `not_connected`，不启动或调用图谱 CLI |
+| `kemo_graph.kemo_graph_global_knowledge` | 独立替换全局知识索引 |
+| `kemo_graph.kemo_graph_shared_knowledge` | 独立替换共享知识索引 |
+| `kemo_graph.kemo_graph_user_knowledge` | 独立替换用户知识索引 |
+| `kemo_graph.kemo_graph_temporary_memory` | 独立替换三层临时记忆；永久记忆和临时重要记忆不受影响 |
+
+四个开关任一启用即记录图谱请求状态；当前显示 `disabled` 或 `not_connected`，不启动或调用图谱 CLI。
 
 ## 安全与错误行为
 
