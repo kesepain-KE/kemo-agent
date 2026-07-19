@@ -166,7 +166,6 @@ kemo-agent/
 │   ├── file/
 │   ├── get_current_time/
 │   ├── history_search/
-│   ├── knowledge_search/
 │   ├── network/
 │   ├── shell/
 │   ├── subagent_dispatch/

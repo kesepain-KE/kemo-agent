@@ -664,3 +664,17 @@ kemo-agent 执行工具后，会用新的 `request_id` 发起下一次请求，�
 | Web `content[]` / asset_id 边界 | `web/app.py`、`web/service.py` |
 
 联调时以本文件和上述 Pydantic 模型为准。若网关需要新增字段，优先放入 `metadata` 或 `extensions`；任何核心字段改义都必须升级协议主版本。
+
+## 15. Cron 三路执行补充要求
+
+Cron 运行时按 `exec_mode` 分为三路，其中只有 `agent` 模式访问 Kemo 网关：
+
+| `exec_mode` | 执行路径 | 是否访问网关 |
+| --- | --- | --- |
+| `agent` | `handle_request()` → 主智能体 | 是 |
+| `subagent` | `AgentRunner.run()` → 内部子代理 | 仅子代理本身需要模型时访问 |
+| `function` | 注册的 Python 内部函数 | 否；`review_due` 扫描本身零 LLM 消耗 |
+
+网关侧只需接受正常的 `metadata.source="cron"`、`metadata.session_id="cron"` 请求，并按统一协议处理其工具循环、Usage、取消和恢复。网关不需要理解 `exec_mode`、`system_key`、`type`、`interval_seconds`、`time` 或 `next_run_at`，也不得维护 cron 调度状态。
+
+`session_id="cron"` 仅用于运行时会话关联，不能被当作全局幂等键。每次实际模型请求仍使用独立 `request_id`，并按 `user`/租户严格隔离。内部 `function` 任务没有 Provider 请求，因此网关不得期待每次 cron tick 都产生流量。

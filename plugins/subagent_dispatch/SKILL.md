@@ -15,30 +15,22 @@
       "input": {"type": "object", "description": "call 时传给子代理的结构化输入"},
       "definition": {
         "type": "object",
-        "description": "create 时使用的数据型用户代理定义；未提供 agent_config 时使用全拒绝默认授权",
+        "description": "create 时使用的数据型用户代理定义；生成四字段 agent.json、六字段 agent-config.json 和 trigger.md",
         "properties": {
           "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
           "description": {"type": "string"},
           "instruction": {"type": "string", "description": "写入 AGENT.md 的完整代理指令"},
+          "trigger_condition": {"type": "string", "description": "写入 trigger.md 注册信息的触发条件"},
           "version": {"type": "string", "default": "1.0.0"},
-          "model_profile": {"type": "string", "default": "default"},
-          "timeout": {"type": "number", "exclusiveMinimum": 0, "default": 120},
-          "execution": {"type": "string", "enum": ["sync", "background_serial"], "default": "sync"},
-          "write_policy": {"type": "string", "enum": ["none", "derived_cache", "user_memory", "user_task"], "default": "none"},
-          "input_schema": {"type": "object", "description": "必须以 type=object 开头的 JSON Schema"},
-          "output_schema": {"type": "object", "description": "必须以 type=object 开头的 JSON Schema"},
+          "input_schema": {"type": "object", "description": "可选，仅作为 trigger.md 中的输入参考"},
+          "output_schema": {"type": "object", "description": "可选，仅作为 trigger.md 中的输出参考"},
           "agent_config": {
             "type": "object",
-            "description": "可选运行时授权；schema_version 固定为 1",
+            "description": "可选运行时授权；未提供时创建可由 main_agent 调用、无工具和知识权限的代理",
             "properties": {
               "schema_version": {"type": "integer", "enum": [1]},
-              "exposure": {
-                "type": "object",
-                "properties": {
-                  "mode": {"type": "string", "enum": ["internal", "tool"]},
-                  "allowed_callers": {"type": "array", "items": {"type": "string"}}
-                }
-              },
+              "internal_mode": {"type": "boolean"},
+              "allowed_callers": {"type": "array", "items": {"type": "string"}},
               "tools": {
                 "type": "object",
                 "properties": {
@@ -48,34 +40,24 @@
                       "allow": {"type": "array", "items": {"type": "string"}}
                     }
                   },
+                  "shared_skills": {
+                    "type": "object",
+                    "properties": {
+                      "allow": {"type": "array", "items": {"type": "string"}}
+                    }
+                  },
                   "max_iterations": {"type": "integer", "minimum": 1}
                 }
               },
-              "prompt_sources": {
-                "type": "object",
-                "description": "skills.shared/user 与 expand.global/shared/user 均使用名称白名单；* 表示该层全部"
-              },
-              "knowledge": {
-                "type": "object",
-                "properties": {
-                  "scopes": {"type": "array", "items": {"type": "string", "enum": ["global", "shared", "user"]}},
-                  "index_enabled": {"type": "boolean"},
-                  "body_access": {"type": "string", "enum": ["none", "search_tool"]},
-                  "max_index_chars": {"type": "integer", "minimum": 0}
-                }
-              },
-              "context": {
-                "type": "object",
-                "properties": {
-                  "inherit_main_history": {"type": "boolean"},
-                  "inherit_current_request": {"type": "boolean"}
-                }
-              }
+              "global_knowledge": {"type": "boolean"},
+              "shared_knowledge": {"type": "boolean"},
+              "inherit_main_history": {"type": "boolean"}
             },
-            "required": ["schema_version"]
+            "required": ["schema_version", "internal_mode", "allowed_callers", "tools", "global_knowledge", "shared_knowledge", "inherit_main_history"],
+            "additionalProperties": false
           }
         },
-        "required": ["name", "description", "instruction", "input_schema", "output_schema"],
+        "required": ["name", "description", "instruction"],
         "additionalProperties": false
       },
       "wait": {"type": "boolean", "description": "call 时是否同步等待；默认 true", "default": true},

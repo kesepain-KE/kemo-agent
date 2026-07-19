@@ -1,60 +1,49 @@
-"""定时任务管理工具 — 创建/列出/修改/删除 cron 任务。kemo-agent 原生插件。"""
+"""精简 cron 定时任务管理工具。"""
+
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 from cron.schedule import compute_next_run
-from run.cron_store import CronStore, normalize_task, CronConflictError, CronNotFoundError
+from run.cron_store import CronConflictError, CronNotFoundError, CronStore, normalize_task
+
 
 def _result(ok: bool, **fields: Any) -> dict[str, Any]:
     return {"ok": ok, **fields}
 
 
 def _summary(task: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "task_id": task["task_id"],
-        "title": task["title"],
-        "prompt": task["prompt"],
-        "type": task["schedule"]["type"],
-        "schedule": dict(task["schedule"]),
-        "status": task["status"],
-        "next_run_at": task.get("next_run_at", ""),
-        "last_run_at": task.get("last_run_at", ""),
-        "run_count": task.get("run_count", 0),
-        "revision": task.get("revision", 1),
-        "created_at": task.get("created_at", ""),
-        "updated_at": task.get("updated_at", ""),
-    }
+    return dict(task)
 
 
-def _schedule(
+def _schedule_fields(
     kind: str,
     *,
     time_value: str,
     interval_seconds: int,
-    start_at: str,
-    timezone_name: str,
+    next_run_at: str,
     current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    existing = dict(current or {})
-    schedule_type = kind or str(existing.get("type") or "daily")
-    if schedule_type == "daily":
-        return {
-            "type": "daily",
-            "time": time_value or str(existing.get("time") or "09:00"),
-            "timezone": timezone_name or str(existing.get("timezone") or "UTC"),
-        }
-    if schedule_type == "once":
-        value = start_at or str(existing.get("start_at") or "")
-        if not value:
-            raise ValueError("once 任务需要 start_at")
-        return {"type": "once", "start_at": value}
-    if schedule_type == "recurring":
+    existing = current or {}
+    task_type = kind or str(existing.get("type") or "daily")
+    fields: dict[str, Any] = {"type": task_type}
+    if task_type == "daily":
+        fields["time"] = time_value or str(existing.get("time") or "09:00")
+    elif task_type == "recurring":
         interval = interval_seconds or int(existing.get("interval_seconds") or 0)
         if interval < 60:
-            raise ValueError("recurring 任务需要 interval_seconds >= 60")
-        return {"type": "recurring", "interval_seconds": interval}
-    raise ValueError(f"未知任务类型: {schedule_type}，可选: daily / once / recurring")
+            raise ValueError("用户 recurring 任务需要 interval_seconds >= 60")
+        fields["interval_seconds"] = interval
+    elif task_type == "once":
+        value = next_run_at or str(existing.get("next_run_at") or "")
+        if not value:
+            raise ValueError("once 任务需要 next_run_at（北京时间 ISO）")
+        fields["next_run_at"] = value
+    else:
+        raise ValueError(f"未知任务类型: {task_type}，可选: daily / once / recurring")
+    fields["next_run_at"] = compute_next_run(fields)
+    return fields
 
 
 def run(
@@ -65,8 +54,7 @@ def run(
     type: str = "",
     time: str = "",
     interval_seconds: int = 0,
-    start_at: str = "",
-    timezone: str = "",
+    next_run_at: str = "",
     status: str = "",
     *,
     context: dict[str, Any],
@@ -77,67 +65,67 @@ def run(
 
     if action == "list":
         tasks = [_summary(task) for task in store.list_tasks()]
-        active = sum(1 for t in tasks if t["status"] in {"enabled", "running"})
+        active = sum(1 for task in tasks if task["status"] in {"enabled", "running"})
         return _result(True, tasks=tasks, total=len(tasks), active=active)
 
     if action == "create":
         if not title.strip() or not prompt.strip():
             raise ValueError("title 和 prompt 不能为空")
-        schedule = _schedule(
+        fields = _schedule_fields(
             type or "daily",
             time_value=time,
             interval_seconds=interval_seconds,
-            start_at=start_at,
-            timezone_name=timezone,
+            next_run_at=next_run_at,
         )
         task = normalize_task(
-            title=title.strip(),
-            prompt=prompt.strip(),
+            title=title,
+            prompt=prompt,
             user=user,
-            schedule=schedule,
-            source=str(context.get("source") or "tool"),
-            session_id=str(context.get("session_id") or "cron"),
-            next_run_at=compute_next_run(schedule),
+            type=fields["type"],
+            interval_seconds=fields.get("interval_seconds"),
+            time=fields.get("time"),
+            next_run_at=fields["next_run_at"],
         )
         try:
-            created = store.create(task)
+            return _result(True, task=_summary(store.create(task)))
         except CronConflictError as exc:
             return _result(False, error=str(exc))
-        return _result(True, task=_summary(created))
 
     if action == "update":
         if not task_id:
             raise ValueError("update 需要 task_id")
+
         def mutate(current: dict[str, Any]) -> dict[str, Any]:
             if title.strip():
                 current["title"] = title.strip()
             if prompt.strip():
                 current["prompt"] = prompt.strip()
-            if type or time or interval_seconds or start_at or timezone:
-                schedule = _schedule(
+            if type or time or interval_seconds or next_run_at:
+                fields = _schedule_fields(
                     type,
                     time_value=time,
                     interval_seconds=interval_seconds,
-                    start_at=start_at,
-                    timezone_name=timezone,
-                    current=current.get("schedule") or {},
+                    next_run_at=next_run_at,
+                    current=current,
                 )
-                current["schedule"] = schedule
-                current["next_run_at"] = compute_next_run(schedule)
+                current.pop("time", None)
+                current.pop("interval_seconds", None)
+                current.update(fields)
             if status:
                 current["status"] = status
+                if status == "enabled" and not (type or time or interval_seconds or next_run_at):
+                    current["next_run_at"] = compute_next_run(current)
             return current
+
         try:
-            updated = store.update(task_id, mutate)
+            return _result(True, task=_summary(store.update(task_id, mutate)))
         except CronNotFoundError as exc:
             return _result(False, error=str(exc))
-        return _result(True, task=_summary(updated))
 
     if action == "delete":
         if not task_id:
             raise ValueError("delete 需要 task_id")
-        deleted = store.delete(task_id)
-        if not deleted:
+        if not store.delete(task_id):
             return _result(False, error=f"任务不存在: {task_id}")
         return _result(True, task_id=task_id, deleted=True)
 
