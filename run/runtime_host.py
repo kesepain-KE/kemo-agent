@@ -20,11 +20,14 @@ from message.transport import (
 )
 from provider.factory import create_provider
 from run.config import read_json_object
+from run.maintenance import MaintenanceScheduler
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
 
 
 _HOST_STATES = frozenset({"stopped", "starting", "running", "stopping", "failed"})
+DEFAULT_SHUTDOWN_TIMEOUT = 10.0
+DEFAULT_PROCESSED_MESSAGE_LIMIT = 2000
 
 
 @dataclass(slots=True)
@@ -51,10 +54,12 @@ class RuntimeHost:
         root: Path,
         *,
         config: dict[str, Any] | None = None,
+        message_config: dict[str, Any] | None = None,
         registry: TransportRegistry | None = None,
         provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         cron_scheduler: CronScheduler | None = None,
+        maintenance_scheduler: MaintenanceScheduler | None = None,
         router: MessageRouter | None = None,
         on_result: Callable[[RouteResult], None] | None = None,
         on_error: Callable[[str, BaseException], None] | None = None,
@@ -63,6 +68,14 @@ class RuntimeHost:
         self.config = config or read_json_object(
             self.root / "config" / "global_config.json"
         )
+        self.message_config = (
+            message_config
+            if message_config is not None
+            else read_json_object(
+                self.root / "config" / "message_config.json",
+                allow_empty=True,
+            )
+        )
         self.registry = registry or TransportRegistry()
         self.provider_factory = provider_factory
         self.tool_registry_factory = tool_registry_factory
@@ -70,24 +83,26 @@ class RuntimeHost:
         self.on_error = on_error
 
         host_config = self.config.get("runtime_host") or {}
-        message_config = self.config.get("message") or {}
+        runtime_message_config = self.config.get("message") or {}
         cron_config = self.config.get("cron") or {}
-        self.cron_enabled = bool(cron_config.get("enabled", True)) and bool(
-            host_config.get("start_cron", True)
+        self.background_enabled = bool(
+            host_config.get("enable_background_scheduler", True)
         )
-        self.shutdown_timeout = float(host_config.get("shutdown_timeout", 10))
+        self.cron_enabled = self.background_enabled and bool(
+            cron_config.get("enabled", True)
+        )
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
         self._state = "stopped"
         self._components: dict[str, ComponentStatus] = {}
 
-        self.resolver = IdentityResolver.from_config(self.root, self.config)
+        self.resolver = IdentityResolver.from_config(self.root, self.message_config)
         self.router = router or MessageRouter(
             self.root,
             self.resolver,
             self.registry,
-            max_workers=int(message_config.get("max_workers", 4)),
-            dedupe_max_entries=int(message_config.get("dedupe_max_entries", 2000)),
+            max_workers=int(runtime_message_config.get("max_workers", 4)),
+            processed_message_limit=DEFAULT_PROCESSED_MESSAGE_LIMIT,
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             on_result=self._handle_result,
@@ -100,8 +115,21 @@ class RuntimeHost:
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
         )
+        self.maintenance = maintenance_scheduler or MaintenanceScheduler(
+            self.root,
+            poll_interval=float(cron_config.get("poll_interval", 30)),
+            provider_factory=provider_factory,
+            tool_registry_factory=tool_registry_factory,
+            on_error=self._handle_error,
+        )
         self._components["router"] = ComponentStatus("router", "router")
+        self._components["background"] = ComponentStatus(
+            "background", "scheduler_group"
+        )
         self._components["cron"] = ComponentStatus("cron", "scheduler")
+        self._components["maintenance"] = ComponentStatus(
+            "maintenance", "scheduler"
+        )
         for item in self.registry.items():
             self._components[f"transport:{item.transport.name}"] = ComponentStatus(
                 item.transport.name, "transport"
@@ -148,12 +176,24 @@ class RuntimeHost:
             for item in self.registry.items():
                 self._start_transport(item)
 
+            if self.background_enabled:
+                self._set_component("background", "starting")
+                self._set_component("maintenance", "starting")
+                self.maintenance.start()
+                self._set_component("maintenance", "running")
+            else:
+                self._set_component("background", "stopped")
+                self._set_component("maintenance", "stopped")
+
             if self.cron_enabled:
                 self._set_component("cron", "starting")
                 self.cron.start()
                 self._set_component("cron", "running")
             else:
                 self._set_component("cron", "stopped")
+
+            if self.background_enabled:
+                self._set_component("background", "running")
 
             with self._lock:
                 self._state = "running"
@@ -196,10 +236,21 @@ class RuntimeHost:
             self._set_component("router", "failed", exc)
 
         try:
-            self.cron.stop(timeout=self.shutdown_timeout)
+            self.cron.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
             self._set_component("cron", "stopped")
         except Exception as exc:
             self._set_component("cron", "failed", exc)
+
+        try:
+            self.maintenance.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+            self._set_component("maintenance", "stopped")
+        except Exception as exc:
+            self._set_component("maintenance", "failed", exc)
+
+        if self._components["cron"].state == "stopped" and self._components[
+            "maintenance"
+        ].state == "stopped":
+            self._set_component("background", "stopped")
 
         with self._lock:
             if previous != "failed":
@@ -254,12 +305,12 @@ class RuntimeHost:
                 self._handle_error(platform, exc)
 
     def _recover_message_state(self) -> None:
-        message_config = self.config.get("message") or {}
-        max_entries = int(message_config.get("dedupe_max_entries", 2000))
         for user in list_users(self.root):
             try:
                 ProcessedMessageStore(
-                    self.root, user, max_entries=max_entries
+                    self.root,
+                    user,
+                    max_entries=DEFAULT_PROCESSED_MESSAGE_LIMIT,
                 ).recover_interrupted()
             except Exception as exc:
                 self._handle_error(f"message_state:{user}", exc)
@@ -311,7 +362,16 @@ def build_host(
     """Build a RuntimeHost from global config for CLI/background startup."""
     base = root.resolve()
     config = read_json_object(base / "config" / "global_config.json")
+    message_config = read_json_object(
+        base / "config" / "message_config.json",
+        allow_empty=True,
+    )
     registry = TransportRegistry()
     if include_mock:
         registry.register(MockTransport(), mock_policy)
-    return RuntimeHost(base, config=config, registry=registry)
+    return RuntimeHost(
+        base,
+        config=config,
+        message_config=message_config,
+        registry=registry,
+    )

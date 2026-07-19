@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from plugins.manifest import PluginManifest, discover_plugin_manifests
 from run.knowledge import select_knowledge_index
+from run.kemo_graph import KemoGraphPromptContext, load_kemo_graph_prompt_context
 from run.memory import MemoryStore
 from run.prompt_sources import (
     SkillDescriptor,
@@ -27,6 +28,7 @@ PROMPT_SECTION_ORDER = (
     "plugins",
     "skills",
     "knowledge_index",
+    "kemo_graph",
     "permanent_memory",
     "important_memory",
     "temporary_memory:half_year",
@@ -38,17 +40,17 @@ PROMPT_SECTION_ORDER = (
 )
 
 DEFAULT_TEMPORARY_MEMORY_LIMITS = {
-    "half_year": 3,
-    "one_month": 4,
-    "seven_days": 3,
+    "half_year": 300,
+    "one_month": 200,
+    "seven_days": 100,
 }
+KNOWLEDGE_INDEX_MAX_CHARS = 8000
 DEFAULT_CHAR_LIMITS = {
-    "knowledge_index": 8000,
-    "task_plan": 5000,
+    "task_plan": 6000,
     "perception": 8000,
-    "expand_data": 8000,
-    "skill_prompts": 4000,
-    "plugin_prompts": 4000,
+    "expand_data": 10000,
+    "skill_prompts": 8000,
+    "plugin_prompts": 10000,
 }
 DEFAULT_INJECTION_MODES = {
     "permanent_memory": "full",
@@ -69,10 +71,6 @@ class PromptConfigError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class PromptSettings:
-    include_global_soul: bool
-    include_user_soul: bool
-    include_agents_manual: bool
-    include_important_memory: bool
     char_limits: dict[str, int]
     injection_mode: dict[str, str]
     temporary_memory_limits: dict[str, int]
@@ -127,12 +125,11 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
         raw = {}
     if not isinstance(raw, dict):
         raise PromptConfigError("prompt 必须是对象")
-
-    def switch(name: str) -> bool:
-        value = raw.get(name, True)
-        if not isinstance(value, bool):
-            raise PromptConfigError(f"prompt.{name} 必须是布尔值")
-        return value
+    unknown_prompt = sorted(set(raw) - {"char_limits", "injection_mode"})
+    if unknown_prompt:
+        raise PromptConfigError(
+            "prompt 包含已移除或未知项：" + ", ".join(unknown_prompt)
+        )
 
     char_limits = _nonnegative_group(raw.get("char_limits"), DEFAULT_CHAR_LIMITS, "char_limits")
     mode_raw = raw.get("injection_mode")
@@ -176,7 +173,7 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise PromptConfigError(f"memory.temporary_injection_limits.{tier} 必须是非负整数")
         temporary_memory_limits[tier] = value
-    important_memory_max_chars = memory_raw.get("important_memory_max_chars", 1500)
+    important_memory_max_chars = memory_raw.get("important_memory_max_chars", 2000)
     if (
         isinstance(important_memory_max_chars, bool)
         or not isinstance(important_memory_max_chars, int)
@@ -184,10 +181,6 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
     ):
         raise PromptConfigError("memory.important_memory_max_chars 必须是非负整数")
     return PromptSettings(
-        include_global_soul=switch("include_global_soul"),
-        include_user_soul=switch("include_user_soul"),
-        include_agents_manual=switch("include_agents_manual"),
-        include_important_memory=switch("include_important_memory"),
         char_limits=char_limits,
         injection_mode=modes,
         temporary_memory_limits=temporary_memory_limits,
@@ -268,29 +261,45 @@ def build_prompt_bundle(
     *,
     plugin_manifests: tuple[PluginManifest, ...] | None = None,
     memory_store: MemoryStore | None = None,
+    graph_context_loader: Callable[..., KemoGraphPromptContext] = (
+        load_kemo_graph_prompt_context
+    ),
 ) -> PromptBundle:
     """Build one immutable prompt snapshot for a complete provider/tool loop."""
 
     root = root.resolve()
     settings = parse_prompt_settings(config)
     source_policy = MainAgentSourcePolicy.from_config(config)
-    manifests = discover_plugin_manifests(root) if plugin_manifests is None else plugin_manifests
+    graph_context = graph_context_loader(
+        root,
+        user,
+        config,
+        replaces_knowledge=source_policy.kemo_graph_replaces_knowledge,
+        replaces_memory=source_policy.kemo_graph_replaces_memory,
+    )
+    manifests = (
+        discover_plugin_manifests(root)
+        if plugin_manifests is None
+        else plugin_manifests
+    )
+    manifests = tuple(
+        manifest
+        for manifest in manifests
+        if source_policy.plugins.allows(str(manifest.tool.get("name") or ""))
+    )
     store = memory_store or MemoryStore(root, user, config)
     registered_sources = load_prompt_source_registry(root, user)
     sections: list[PromptSection] = []
 
-    if settings.include_user_soul:
-        section = _base_section(root, "user_soul", root / "users" / user / "user_soul.md")
-        if section:
-            sections.append(section)
-    if settings.include_global_soul:
-        section = _base_section(root, "global_soul", root / "config" / "global_soul.md")
-        if section:
-            sections.append(section)
-    if settings.include_agents_manual:
-        section = _base_section(root, "agents_manual", root / "agents.md")
-        if section:
-            sections.append(section)
+    section = _base_section(root, "user_soul", root / "users" / user / "user_soul.md")
+    if section:
+        sections.append(section)
+    section = _base_section(root, "global_soul", root / "config" / "global_soul.md")
+    if section:
+        sections.append(section)
+    section = _base_section(root, "agents_manual", root / "agents.md")
+    if section:
+        sections.append(section)
 
     section = _descriptor_section(
         "plugins",
@@ -315,7 +324,11 @@ def build_prompt_bundle(
     knowledge = select_knowledge_index(
         root,
         user,
-        max_chars=settings.char_limits["knowledge_index"],
+        max_chars=(
+            0
+            if source_policy.kemo_graph_replaces_knowledge
+            else KNOWLEDGE_INDEX_MAX_CHARS
+        ),
         mode=settings.injection_mode["knowledge_index"],
         scopes=source_policy.knowledge_scopes,
     )
@@ -334,7 +347,19 @@ def build_prompt_bundle(
             )
         )
 
-    memory_enabled = bool((config.get("memory") or {}).get("injection_enabled", True))
+    if graph_context.text:
+        sections.append(
+            PromptSection(
+                "kemo_graph",
+                graph_context.text,
+                tuple(relative_path(path, root) for path in graph_context.source_files),
+                original_chars=len(graph_context.text),
+                injected_chars=len(graph_context.text),
+                original_items=1,
+                injected_items=1,
+            )
+        )
+
     tier_specs = (
         ("permanent", "permanent_memory", "permanent_memory", None),
         (
@@ -359,7 +384,12 @@ def build_prompt_bundle(
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
     memory_files: list[str] = []
-    for tier, section_name, config_name, max_files in tier_specs if memory_enabled else ():
+    for (
+        tier,
+        section_name,
+        config_name,
+        max_files,
+    ) in (() if source_policy.kemo_graph_replaces_memory else tier_specs):
         selection = store.select_tier_for_prompt(
             tier,
             max_files=max_files,
@@ -385,8 +415,7 @@ def build_prompt_bundle(
         sections.append(tier_sections["permanent_memory"])
 
     if (
-        memory_enabled
-        and settings.include_important_memory
+        not source_policy.kemo_graph_replaces_memory
         and settings.important_memory_max_chars > 0
     ):
         important_path = root / "users" / user / "memory_temporary_important.md"
@@ -487,6 +516,10 @@ def build_prompt_bundle(
             for item in knowledge.documents
         ],
         "source_policy": source_policy.public_summary(),
+        "kemo_graph": graph_context.diagnostics(
+            replaces_knowledge=source_policy.kemo_graph_replaces_knowledge,
+            replaces_memory=source_policy.kemo_graph_replaces_memory,
+        ),
         "source_selection": registered_sources.selection_diagnostics(),
     }
     return PromptBundle(

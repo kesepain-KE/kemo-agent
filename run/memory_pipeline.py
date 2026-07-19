@@ -15,6 +15,9 @@ class MemoryExtractionError(RuntimeError):
     pass
 
 
+EXISTING_CANDIDATE_LIMIT = 12
+
+
 def _existing_candidates(store: MemoryStore, text: str, limit: int) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -46,8 +49,11 @@ def submit_memory_extraction(
     """Queue one committed round; the worker validates then atomically writes."""
 
     store = MemoryStore(root, user, config)
-    limit = int((config.get("memory") or {}).get("existing_candidates_for_extraction", 12))
-    existing = _existing_candidates(store, f"{user_text}\n{assistant_text}", limit)
+    existing = _existing_candidates(
+        store,
+        f"{user_text}\n{assistant_text}",
+        EXISTING_CANDIDATE_LIMIT,
+    )
 
     def persist(result: AgentRunResult) -> None:
         candidates = result.data.get("candidates")

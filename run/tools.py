@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import os
 import sys
 import threading
 import uuid
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
+from run.source_policy import MainAgentSourcePolicy
 
 
 class ToolError(RuntimeError):
@@ -26,6 +28,37 @@ class ToolValidationError(ToolError):
 
 class ToolTimeoutError(ToolError):
     pass
+
+
+@dataclass(slots=True)
+class ConsecutiveToolFailureTracker:
+    """Track only an uninterrupted failure streak for the same tool."""
+
+    limit: int
+    tool_name: str = ""
+    count: int = 0
+    unavailable: set[str] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.limit, bool) or self.limit < 1:
+            raise ValueError("consecutive_tool_fail_limit 必须是正整数")
+
+    def is_unavailable(self, name: str) -> bool:
+        return name in self.unavailable
+
+    def record(self, name: str, *, succeeded: bool) -> int:
+        if succeeded:
+            self.tool_name = ""
+            self.count = 0
+            return 0
+        if name == self.tool_name:
+            self.count += 1
+        else:
+            self.tool_name = name
+            self.count = 1
+        if self.count >= self.limit:
+            self.unavailable.add(name)
+        return self.count
 
 
 @dataclass(slots=True)
@@ -82,11 +115,29 @@ class ToolRegistry:
     tools: dict[str, ToolDefinition]
     plugin_manifests: tuple[PluginManifest, ...] = ()
 
-    def enabled_tools(self) -> list[ToolDefinition]:
-        return [tool for tool in self.tools.values() if tool.enabled]
+    def enabled_tools(self, *, exclude: set[str] | None = None) -> list[ToolDefinition]:
+        blocked = exclude or set()
+        return [
+            tool
+            for tool in self.tools.values()
+            if tool.enabled and tool.name not in blocked
+        ]
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [tool.openai_schema() for tool in self.enabled_tools()]
+    def schemas(self, *, exclude: set[str] | None = None) -> list[dict[str, Any]]:
+        return [tool.openai_schema() for tool in self.enabled_tools(exclude=exclude)]
+
+    def selected(self, names: set[str]) -> "ToolRegistry":
+        selected = {
+            name: tool
+            for name, tool in self.tools.items()
+            if name in names and tool.enabled
+        }
+        manifests = tuple(
+            manifest
+            for manifest in self.plugin_manifests
+            if str(manifest.tool.get("name") or "") in selected
+        )
+        return ToolRegistry(selected, manifests)
 
     def get(self, name: str) -> ToolDefinition:
         tool = self.tools.get(name)
@@ -121,6 +172,30 @@ def discover_tools(root: Path, user: str) -> ToolRegistry:
         raise ToolError(str(exc)) from exc
     tools = {manifest.tool["name"]: _definition(manifest) for manifest in manifests}
     return ToolRegistry(tools, manifests)
+
+
+def apply_runtime_tool_policy(
+    registry: ToolRegistry, config: dict[str, Any]
+) -> ToolRegistry:
+    """Apply global runtime switches that control individual registered tools."""
+
+    source_policy = MainAgentSourcePolicy.from_config(config)
+    memory = config.get("memory") or {}
+    if not isinstance(memory, dict):
+        raise ToolError("memory 配置必须是对象")
+    history_read_enabled = memory.get("history_read_enabled", True)
+    if not isinstance(history_read_enabled, bool):
+        raise ToolError("memory.history_read_enabled 必须是布尔值")
+    names = set(registry.tools)
+    if not source_policy.plugins.unrestricted:
+        names &= set(source_policy.plugins.names)
+    if source_policy.kemo_graph_replaces_knowledge:
+        names.discard("knowledge_search")
+    if not os.getenv("TAVILY_API_KEY", "").strip():
+        names.discard("web_search")
+    if not history_read_enabled:
+        names.discard("history_search")
+    return registry.selected(names)
 
 
 def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> None:

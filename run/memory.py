@@ -22,8 +22,7 @@ FILENAME_MAX_CHARS = 20
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
-    "half_year": {"days": 180, "upgrade_threshold": 60, "next": "permanent"},
-    "permanent": {"days": None, "upgrade_threshold": None, "next": None},
+    "half_year": {"days": 180, "upgrade_threshold": 60, "next": None},
 }
 _WORD_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]")
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\r\n]')
@@ -115,8 +114,13 @@ def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
     raw = (config.get("memory") or {}).get("tiers", DEFAULT_TIERS)
     if not isinstance(raw, dict):
         raise MemoryConfigError("memory.tiers 必须是对象")
+    unknown = sorted(set(raw) - set(TEMPORARY_TIERS))
+    if unknown:
+        raise MemoryConfigError(
+            "memory.tiers 只声明临时层，包含未知项：" + ", ".join(unknown)
+        )
     rules: dict[str, TierRule] = {}
-    for name in TIERS:
+    for name in TEMPORARY_TIERS:
         item = raw.get(name)
         if not isinstance(item, dict):
             raise MemoryConfigError(f"memory.tiers.{name} 未配置")
@@ -131,10 +135,16 @@ def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
             raise MemoryConfigError(
                 f"memory.tiers.{name}.upgrade_threshold 必须是非负整数或 null"
             )
-        if next_name is not None and next_name not in TIERS:
+        if next_name is not None and next_name not in TEMPORARY_TIERS:
             raise MemoryConfigError(f"memory.tiers.{name}.next 无效")
-        rules[name] = TierRule(name, days, threshold, next_name)
-    if [rules[name].next for name in TIERS] != ["one_month", "half_year", "permanent", None]:
+        effective_next = "permanent" if name == "half_year" and next_name is None else next_name
+        rules[name] = TierRule(name, days, threshold, effective_next)
+    rules["permanent"] = TierRule("permanent", None, None, None)
+    if [rules[name].next for name in TEMPORARY_TIERS] != [
+        "one_month",
+        "half_year",
+        "permanent",
+    ]:
         raise MemoryConfigError("记忆档位升级路径必须是 seven_days→one_month→half_year→permanent")
     return rules
 
@@ -559,7 +569,7 @@ class MemoryStore:
                     rule = self.rules[tier]
                     if int(meta.get("weight", 0)) >= int(rule.upgrade_threshold or 0):
                         if rule.next is None:
-                            continue
+                            raise MemoryConfigError(f"临时记忆层缺少晋升目标：{tier}")
                         self._promote_location(location, rule.next, current)
                         upgraded.append(filename)
                     else:

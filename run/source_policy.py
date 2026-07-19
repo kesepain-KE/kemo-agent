@@ -60,16 +60,26 @@ def _boolean(container: dict[str, Any], key: str, *, field: str, default: bool) 
     return value
 
 
+def _reject_unknown(
+    container: dict[str, Any], allowed: set[str], *, field: str
+) -> None:
+    unknown = sorted(set(container) - allowed)
+    if unknown:
+        raise ConfigError(f"{field} 包含已移除或未知项：{', '.join(unknown)}")
+
+
 @dataclass(frozen=True, slots=True)
 class MainAgentSourcePolicy:
-    knowledge_enabled: bool
     knowledge_scopes: tuple[str, ...]
+    plugins: NameFilter
     shared_skills: NameFilter
     user_skills: NameFilter
     global_expand: NameFilter
     shared_expand: NameFilter
     global_perception: NameFilter
     kemo_graph_requested: bool
+    kemo_graph_replaces_knowledge: bool
+    kemo_graph_replaces_memory: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MainAgentSourcePolicy":
@@ -80,13 +90,18 @@ class MainAgentSourcePolicy:
         expand = _object(config, "expand")
         perception = _object(config, "perception")
         graph = _object(config, "kemo_graph")
-
-        enabled = _boolean(
-            knowledge,
-            "enabled",
-            field="knowledge.enabled",
-            default=True,
+        plugins = _object(config, "plugins")
+        _reject_unknown(knowledge, {"use_shared", "use_global"}, field="knowledge")
+        _reject_unknown(skills, {"shared_whitelist"}, field="skills")
+        _reject_unknown(
+            expand,
+            {"global_whitelist", "shared_whitelist"},
+            field="expand",
         )
+        _reject_unknown(perception, {"global_whitelist"}, field="perception")
+        _reject_unknown(graph, {"enabled"}, field="kemo_graph")
+        _reject_unknown(plugins, {"whitelist"}, field="plugins")
+
         use_shared = _boolean(
             knowledge,
             "use_shared",
@@ -99,25 +114,29 @@ class MainAgentSourcePolicy:
             field="knowledge.use_global",
             default=True,
         )
-        scopes: list[str] = []
-        if enabled:
-            scopes.append("user")
-            if use_shared:
-                scopes.append("shared")
-            if use_global:
-                scopes.append("global")
+        scopes: list[str] = ["user"]
+        if use_shared:
+            scopes.append("shared")
+        if use_global:
+            scopes.append("global")
+        graph_requested = _boolean(
+            graph,
+            "enabled",
+            field="kemo_graph.enabled",
+            default=False,
+        )
 
         return cls(
-            knowledge_enabled=enabled,
             knowledge_scopes=tuple(scopes),
+            plugins=NameFilter.from_config(
+                plugins.get("whitelist", []),
+                field="plugins.whitelist",
+            ),
             shared_skills=NameFilter.from_config(
                 skills.get("shared_whitelist", []),
                 field="skills.shared_whitelist",
             ),
-            user_skills=NameFilter.from_config(
-                skills.get("user_whitelist", []),
-                field="skills.user_whitelist",
-            ),
+            user_skills=NameFilter(unrestricted=True),
             global_expand=NameFilter.from_config(
                 expand.get("global_whitelist", []),
                 field="expand.global_whitelist",
@@ -130,21 +149,20 @@ class MainAgentSourcePolicy:
                 perception.get("global_whitelist", []),
                 field="perception.global_whitelist",
             ),
-            kemo_graph_requested=_boolean(
-                graph,
-                "enabled",
-                field="kemo_graph.enabled",
-                default=False,
-            ),
+            kemo_graph_requested=graph_requested,
+            kemo_graph_replaces_knowledge=graph_requested
+            and (use_shared or use_global),
+            kemo_graph_replaces_memory=graph_requested,
         )
 
     def public_summary(self) -> dict[str, Any]:
         graph_status = "not_connected" if self.kemo_graph_requested else "disabled"
         return {
             "knowledge": {
-                "enabled": self.knowledge_enabled,
+                "enabled": True,
                 "effective_scopes": list(self.knowledge_scopes),
             },
+            "plugins": self.plugins.public_summary(),
             "skills": {
                 "shared": self.shared_skills.public_summary(),
                 "user": self.user_skills.public_summary(),
@@ -161,5 +179,8 @@ class MainAgentSourcePolicy:
                 "connected": False,
                 "effective": False,
                 "status": graph_status,
+                "replacement_active": self.kemo_graph_requested,
+                "replaces_knowledge": self.kemo_graph_replaces_knowledge,
+                "replaces_memory": self.kemo_graph_replaces_memory,
             },
         }

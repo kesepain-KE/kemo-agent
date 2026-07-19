@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import queue
 import threading
@@ -22,7 +23,14 @@ from run.memory import MemoryStore
 from run.memory_pipeline import submit_memory_extraction
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
-from run.tools import ToolError, ToolRegistry, discover_tools, execute_tool
+from run.tools import (
+    ConsecutiveToolFailureTracker,
+    ToolError,
+    ToolRegistry,
+    apply_runtime_tool_policy,
+    discover_tools,
+    execute_tool,
+)
 
 
 class EngineError(RuntimeError):
@@ -189,7 +197,12 @@ def _ensure_fixed_content_fits(
     system_message: dict[str, Any] | None,
 ) -> None:
     if not selection.fixed_content_over_budget:
-        return
+        if not selection.recent_content_over_budget:
+            return
+        raise EngineError(
+            "最近完整历史超过输入预算；请调大 agents.token_limit、调低 "
+            "history.recent_full_rounds，或缩小 Prompt 注入内容"
+        )
     system_tokens = estimate_messages_tokens([system_message]) if system_message else 0
     raise EngineError(
         "固定提示词和工具定义超过输入预算："
@@ -250,10 +263,36 @@ def iter_request_events(
             window_path, window, _ = prepare_window(base, user, source, session_id)
             tool_config = config.get("tools") or {}
             tools_enabled = bool(tool_config.get("enabled", True))
-            registry = tool_registry_factory(base, user) if tools_enabled else ToolRegistry({})
+            registry = (
+                apply_runtime_tool_policy(tool_registry_factory(base, user), config)
+                if tools_enabled
+                else ToolRegistry({})
+            )
             tool_schemas = registry.schemas() or None
             tool_timeout = float(tool_config.get("timeout", 60))
             max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
+            raw_max_per_round = tool_config.get("max_per_round")
+            if raw_max_per_round is None:
+                max_per_round = None
+            elif (
+                isinstance(raw_max_per_round, bool)
+                or not isinstance(raw_max_per_round, int)
+                or raw_max_per_round < 1
+            ):
+                raise EngineError("tools.max_per_round 必须是正整数或 null")
+            else:
+                max_per_round = raw_max_per_round
+            raw_failure_limit = (config.get("history") or {}).get(
+                "consecutive_tool_fail_limit", 5
+            )
+            if (
+                isinstance(raw_failure_limit, bool)
+                or not isinstance(raw_failure_limit, int)
+                or raw_failure_limit < 1
+            ):
+                raise EngineError("history.consecutive_tool_fail_limit 必须是正整数")
+            failure_limit = raw_failure_limit
+            failures = ConsecutiveToolFailureTracker(failure_limit)
 
             memory_config = config.get("memory") or {}
             memory_store = MemoryStore(base, user, config)
@@ -391,12 +430,19 @@ def iter_request_events(
             seen_calls: dict[str, dict[str, Any]] = {}
             final_metadata: dict[str, Any] = {}
             completed = False
+            tool_calls_this_round = 0
+            tool_pause: dict[str, Any] | None = None
 
             for iteration in range(1, max_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
                     return
                 if iteration > 1:
-                    current_tokens = estimate_messages_tokens(messages) + estimate_tools_tokens(tool_schemas)
+                    active_tool_schemas = (
+                        registry.schemas(exclude=failures.unavailable) or None
+                    )
+                    current_tokens = estimate_messages_tokens(messages) + estimate_tools_tokens(
+                        active_tool_schemas
+                    )
                     if current_tokens > context_policy.token_limit:
                         yield error_event(
                             EngineError(
@@ -405,6 +451,8 @@ def iter_request_events(
                             phase="context",
                         )
                         return
+                else:
+                    active_tool_schemas = tool_schemas
                 configured_max_tokens = runtime_provider.get("max_tokens")
                 request_max_tokens = (
                     min(
@@ -418,7 +466,7 @@ def iter_request_events(
                     model=runtime_provider["model"],
                     messages=messages,
                     stream=stream,
-                    tools=tool_schemas,
+                    tools=active_tool_schemas,
                     max_tokens=request_max_tokens,
                 )
                 iteration_text: list[str] = []
@@ -494,44 +542,105 @@ def iter_request_events(
                     if cancel_event is not None and cancel_event.is_set():
                         return
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
-                    duplicate = signature in seen_calls
+                    duplicate = False
                     tool_started = time.monotonic()
-                    if duplicate:
-                        result_payload = seen_calls[signature]
-                        status = "duplicate_reused"
+                    if (
+                        max_per_round is not None
+                        and tool_calls_this_round >= max_per_round
+                    ):
+                        result_payload = {
+                            "ok": False,
+                            "error": {
+                                "message": (
+                                    f"本轮最多执行 {max_per_round} 次工具调用；"
+                                    "该调用尚未执行，等待用户确认继续"
+                                ),
+                                "exception_type": "ToolCallDeferred",
+                                "awaiting_user_confirmation": True,
+                            },
+                        }
+                        status = "deferred"
+                        tool_pause = {
+                            "reason": "max_per_round",
+                            "limit": max_per_round,
+                            "executed": tool_calls_this_round,
+                        }
                     else:
-                        try:
-                            definition = registry.get(call.name)
-                            result = execute_tool(
-                                definition,
-                                call.arguments,
-                                context={
-                                    "root": str(base),
-                                    "user": user,
-                                    "source": source,
-                                    "session_id": session_id,
-                                    "window": window_path.name,
-                                    "tool_timeout": tool_timeout,
-                                    "knowledge_enabled": source_policy.knowledge_enabled,
-                                    "knowledge_scopes": list(source_policy.knowledge_scopes),
-                                },
-                                timeout=tool_timeout,
-                                cancel_event=cancel_event,
-                            )
-                            result_payload = {"ok": True, "result": result}
-                            status = "completed"
-                        except BaseException as exc:
-                            if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
-                                raise
+                        tool_calls_this_round += 1
+                        if failures.is_unavailable(call.name):
                             result_payload = {
                                 "ok": False,
                                 "error": {
-                                    "message": str(exc),
-                                    "exception_type": type(exc).__name__,
+                                    "message": (
+                                        f"工具 {call.name} 已连续失败 {failure_limit} 次，"
+                                        "本轮暂时不可用；请更换工具或调整方案"
+                                    ),
+                                    "exception_type": "ToolTemporarilyUnavailable",
+                                    "consecutive_failures": failure_limit,
+                                    "temporarily_unavailable": True,
                                 },
                             }
-                            status = "failed"
-                        seen_calls[signature] = result_payload
+                            status = "temporarily_unavailable"
+                        else:
+                            duplicate = signature in seen_calls
+                            if duplicate:
+                                result_payload = copy.deepcopy(seen_calls[signature])
+                                status = "duplicate_reused"
+                            else:
+                                try:
+                                    definition = registry.get(call.name)
+                                    result = execute_tool(
+                                        definition,
+                                        call.arguments,
+                                        context={
+                                            "root": str(base),
+                                            "user": user,
+                                            "source": source,
+                                            "session_id": session_id,
+                                            "window": window_path.name,
+                                            "tool_timeout": tool_timeout,
+                                            "knowledge_scopes": list(source_policy.knowledge_scopes),
+                                        },
+                                        timeout=tool_timeout,
+                                        cancel_event=cancel_event,
+                                    )
+                                    result_payload = {"ok": True, "result": result}
+                                    status = "completed"
+                                except BaseException as exc:
+                                    if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                                        raise
+                                    result_payload = {
+                                        "ok": False,
+                                        "error": {
+                                            "message": str(exc),
+                                            "exception_type": type(exc).__name__,
+                                        },
+                                    }
+                                    status = "failed"
+                                seen_calls[signature] = copy.deepcopy(result_payload)
+                            failure_count = failures.record(
+                                call.name,
+                                succeeded=bool(result_payload.get("ok")),
+                            )
+                            if failure_count >= failure_limit:
+                                result_payload["error"].update(
+                                    {
+                                        "consecutive_failures": failure_count,
+                                        "temporarily_unavailable": True,
+                                        "instruction": (
+                                            "请更换工具或调整方案，不要继续重试该工具"
+                                        ),
+                                    }
+                                )
+                        if (
+                            max_per_round is not None
+                            and tool_calls_this_round >= max_per_round
+                        ):
+                            tool_pause = {
+                                "reason": "max_per_round",
+                                "limit": max_per_round,
+                                "executed": tool_calls_this_round,
+                            }
                     elapsed_ms = max(0, round((time.monotonic() - tool_started) * 1000))
                     record = {
                         "id": call.id,
@@ -568,6 +677,9 @@ def iter_request_events(
                 pending_guidance = _drain_guidance(guidance_channel)
                 _append_guidance(messages, pending_guidance)
                 consumed_guidance.extend(pending_guidance)
+                if tool_pause is not None:
+                    completed = True
+                    break
 
             if not completed:
                 yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
@@ -599,6 +711,7 @@ def iter_request_events(
                     "elapsed_ms": round_elapsed_ms,
                     "tool_calls": len(tool_records),
                     "guidance": list(consumed_guidance),
+                    "tool_pause": copy.deepcopy(tool_pause),
                 }
             )
             window["data"]["context"] = {
@@ -624,7 +737,7 @@ def iter_request_events(
                 }
             memory_task_id = None
             memory_error = None
-            if bool(memory_config.get("extraction_enabled", False)):
+            if memory_config and tool_pause is None:
                 try:
                     memory_task_id = submit_memory_extraction(
                         root=base,
@@ -664,6 +777,8 @@ def iter_request_events(
                     "elapsed_ms": round_elapsed_ms,
                     "run_id": run_id,
                     "guidance_count": len(consumed_guidance),
+                    "awaiting_tool_confirmation": tool_pause is not None,
+                    "tool_pause": copy.deepcopy(tool_pause),
                     "context": context_stats,
                     "prompt": prompt_bundle.diagnostics,
                     "memory": {
@@ -724,6 +839,7 @@ def handle_request(
     root: Path | None = None,
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     final: RunEvent | None = None
     for event in iter_request_events(
@@ -731,6 +847,7 @@ def handle_request(
         root=root,
         provider_factory=provider_factory,
         tool_registry_factory=tool_registry_factory,
+        cancel_event=cancel_event,
     ):
         if event.type == "error":
             detail = event.error or {}
@@ -756,7 +873,7 @@ def context_status(
     window_path, window, is_new = prepare_window(base, user, source, session_id)
     tool_config = config.get("tools") or {}
     registry = (
-        tool_registry_factory(base, user)
+        apply_runtime_tool_policy(tool_registry_factory(base, user), config)
         if bool(tool_config.get("enabled", True))
         else ToolRegistry({})
     )
@@ -794,6 +911,7 @@ def context_status(
         "summary_cache_exists": cache_path.is_file(),
         "policy": {
             "recent_tool_rounds": policy.recent_tool_rounds,
+            "recent_full_rounds": policy.recent_full_rounds,
             "max_rounds": policy.max_rounds,
             "rounds_after_compression": policy.rounds_after_compression,
             "token_limit": policy.token_limit,
@@ -810,6 +928,7 @@ def compress_context(
     root: Path | None = None,
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     payload = dict(request)
     payload["prompt"] = ""
@@ -820,4 +939,5 @@ def compress_context(
         root=root,
         provider_factory=provider_factory,
         tool_registry_factory=tool_registry_factory,
+        cancel_event=cancel_event,
     )

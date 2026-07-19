@@ -13,6 +13,30 @@ from pathlib import Path
 from typing import Any
 
 
+USER_ONLY_SECTIONS = frozenset(
+    {
+        "provider",
+        "multimodal_models",
+        "knowledge",
+        "skills",
+        "expand",
+        "perception",
+        "plugins",
+    }
+)
+MULTIMODAL_CAPABILITIES = frozenset(
+    {
+        "vision",
+        "image_generation",
+        "image_edit",
+        "audio_transcription",
+        "speech_generation",
+        "speech_to_speech",
+        "video_generation",
+    }
+)
+
+
 class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
 
@@ -77,6 +101,30 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+def merge_user_config(
+    global_config: dict[str, Any], user_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge framework defaults with one user's private runtime choices.
+
+    Provider routing and main-agent source selection are user-owned.  Keeping
+    those sections out of the global merge prevents a stale global file from
+    silently becoming a credential/model or data-scope fallback.
+    """
+
+    global_defaults = {
+        key: value
+        for key, value in global_config.items()
+        if key not in USER_ONLY_SECTIONS
+    }
+    merged = deep_merge(global_defaults, user_config)
+    for section in USER_ONLY_SECTIONS:
+        if section in user_config:
+            merged[section] = copy.deepcopy(user_config[section])
+        else:
+            merged.pop(section, None)
+    return merged
+
+
 def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     base = root or project_root()
     load_dotenv(base / ".env")
@@ -86,7 +134,7 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     user_config = read_json_object(
         user_dir(user, base) / "user_config.json", allow_empty=True
     )
-    merged = deep_merge(global_config, user_config)
+    merged = merge_user_config(global_config, user_config)
     merged["user"] = user
     return merged
 
@@ -131,8 +179,33 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
-            "timeout": float(provider.get("timeout", 120)),
-            "stream": bool(provider.get("stream", False)),
+            "timeout": 120.0,
+            "stream": bool(provider.get("stream", True)),
         }
     )
+    provider.pop("headers", None)
     return provider
+
+
+def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
+    """Resolve a multimodal model, falling back to the user's chat model."""
+
+    name = str(capability or "").strip()
+    if name not in MULTIMODAL_CAPABILITIES:
+        raise ConfigError(f"未知多模态能力：{name!r}")
+    models = config.get("multimodal_models") or {}
+    if not isinstance(models, dict):
+        raise ConfigError("multimodal_models 必须是对象")
+    unknown = sorted(set(models) - MULTIMODAL_CAPABILITIES)
+    if unknown:
+        raise ConfigError("multimodal_models 包含未知项：" + ", ".join(unknown))
+    selected = str(models.get(name) or "").strip()
+    if selected:
+        return selected
+    provider = config.get("provider") or {}
+    if not isinstance(provider, dict):
+        raise ConfigError("provider 必须是对象")
+    fallback = str(provider.get("model") or "").strip()
+    if not fallback:
+        raise ConfigError(f"{name} 未配置专用模型，且 provider.model 为空")
+    return fallback

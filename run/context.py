@@ -13,14 +13,18 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 
+DEFAULT_OLDER_TOOL_RESULT_CHARS = 200
+
+
 @dataclass(frozen=True, slots=True)
 class ContextPolicy:
     recent_tool_rounds: int = 3
+    recent_full_rounds: int = 3
     max_rounds: int = 30
     rounds_after_compression: int = 10
     token_limit: int = 120000
     compression_ratio: float = 0.6
-    older_tool_log_max_chars: int = 200
+    older_tool_result_chars: int = DEFAULT_OLDER_TOOL_RESULT_CHARS
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ContextPolicy":
@@ -28,22 +32,20 @@ class ContextPolicy:
         history = config.get("history") or {}
         policy = cls(
             recent_tool_rounds=max(
-                0, int(agents.get("n1_recent_rounds_before_tool_compression", 3))
+                0, int(agents.get("conserved_rounds", 3))
             ),
-            max_rounds=max(1, int(agents.get("n2_max_rounds", 30))),
+            recent_full_rounds=max(0, int(history.get("recent_full_rounds", 3))),
+            max_rounds=max(1, int(agents.get("max_rounds", 30))),
             rounds_after_compression=max(
-                1, int(agents.get("n3_rounds_after_compression", 10))
+                1, int(agents.get("rounds_after_compression", 10))
             ),
-            token_limit=max(1, int(agents.get("n4_token_limit", 120000))),
-            compression_ratio=float(agents.get("n5_token_compression_ratio", 0.6)),
-            older_tool_log_max_chars=max(
-                16, int(history.get("older_tool_log_max_chars", 200))
-            ),
+            token_limit=max(1, int(agents.get("token_limit", 120000))),
+            compression_ratio=float(agents.get("token_compression_ratio", 0.6)),
         )
         if not 0 < policy.compression_ratio < 1:
-            raise ValueError("agents.n5_token_compression_ratio 必须在 0 和 1 之间")
+            raise ValueError("agents.token_compression_ratio 必须在 0 和 1 之间")
         if policy.rounds_after_compression > policy.max_rounds:
-            raise ValueError("n3_rounds_after_compression 不能大于 n2_max_rounds")
+            raise ValueError("agents.rounds_after_compression 不能大于 agents.max_rounds")
         return policy
 
     @property
@@ -78,6 +80,7 @@ class ContextSelection:
     round_limit_triggered: bool
     token_limit_triggered: bool
     fixed_content_over_budget: bool
+    recent_content_over_budget: bool
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -94,6 +97,7 @@ class ContextSelection:
             "round_limit_triggered": self.round_limit_triggered,
             "token_limit_triggered": self.token_limit_triggered,
             "fixed_content_over_budget": self.fixed_content_over_budget,
+            "recent_content_over_budget": self.recent_content_over_budget,
         }
 
 
@@ -242,7 +246,7 @@ def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[Ro
             provider_messages.extend(
                 _tool_iteration_messages(
                     records,
-                    compact_limit=None if is_recent else policy.older_tool_log_max_chars,
+                    compact_limit=None if is_recent else policy.older_tool_result_chars,
                 )
             )
         provider_messages.extend(assistant_messages)
@@ -283,14 +287,17 @@ def select_context(
     projected_rounds = len(rounds) + (1 if current_user_message is not None else 0)
     round_trigger = projected_rounds >= policy.max_rounds
     if round_trigger or force_compress:
-        keep_count = min(policy.rounds_after_compression, len(rounds))
+        keep_count = min(
+            max(policy.rounds_after_compression, policy.recent_full_rounds),
+            len(rounds),
+        )
         kept = rounds[-keep_count:] if keep_count else []
     else:
         kept = list(rounds)
 
     fixed_tokens = estimate_messages_tokens([*fixed_prefix, *fixed_suffix]) + tool_tokens
     token_trigger = before > policy.token_limit
-    while kept and token_trigger:
+    while len(kept) > policy.recent_full_rounds and token_trigger:
         candidate_messages = [*fixed_prefix]
         for group in kept:
             candidate_messages.extend(group.messages)
@@ -304,6 +311,11 @@ def select_context(
         selected_messages.extend(group.messages)
     selected_messages.extend(fixed_suffix)
     after = estimate_messages_tokens(selected_messages) + tool_tokens
+    recent_content_over_budget = bool(
+        token_trigger
+        and len(kept) <= policy.recent_full_rounds
+        and after > policy.input_budget
+    )
     kept_numbers = {item.number for item in kept}
     removed = [item for item in rounds if item.number not in kept_numbers]
     return ContextSelection(
@@ -319,4 +331,5 @@ def select_context(
         round_limit_triggered=round_trigger or force_compress,
         token_limit_triggered=token_trigger,
         fixed_content_over_budget=fixed_tokens > policy.input_budget,
+        recent_content_over_budget=recent_content_over_budget,
     )

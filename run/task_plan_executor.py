@@ -22,7 +22,13 @@ from run.task_plan_store import (
     PlanStore,
     PlanValidationError,
 )
-from run.tools import ToolRegistry, discover_tools, execute_tool, ToolError
+from run.tools import (
+    ToolError,
+    ToolRegistry,
+    apply_runtime_tool_policy,
+    discover_tools,
+    execute_tool,
+)
 
 
 class PlanExecutionError(RuntimeError):
@@ -76,7 +82,7 @@ def execute_plan(
     if tool_registry is None:
         tool_config = cfg.get("tools") or {}
         tool_registry = (
-            discover_tools(root, user)
+            apply_runtime_tool_policy(discover_tools(root, user), cfg)
             if bool(tool_config.get("enabled", True))
             else ToolRegistry({})
         )

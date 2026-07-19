@@ -23,8 +23,8 @@ from agents._runtime.resources import (
     build_agent_tool_registry,
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
-from run.config import deep_merge, load_config, provider_runtime_config
-from run.tools import ToolRegistry, execute_tool
+from run.config import load_config, provider_runtime_config
+from run.tools import ConsecutiveToolFailureTracker, ToolRegistry, execute_tool
 
 
 class AgentRunError(RuntimeError):
@@ -162,18 +162,8 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 def resolve_agent_provider_config(
     config: dict[str, Any], definition: AgentDefinition, *, model_override: str | None = None
 ) -> dict[str, Any]:
-    profiles = config.get("agent_models") or {}
-    profile = profiles.get(definition.model_profile, {})
-    if not isinstance(profile, dict):
-        raise AgentRunError(f"子代理模型档位必须是对象：{definition.model_profile}")
-    overrides = profile.get("provider", profile)
-    if not isinstance(overrides, dict):
-        raise AgentRunError(f"子代理模型档位 provider 必须是对象：{definition.model_profile}")
-    merged = dict(config)
-    merged["provider"] = deep_merge(config.get("provider") or {}, overrides)
-    if model_override:
-        merged["provider"]["model"] = model_override
-    return provider_runtime_config(merged)
+    del definition, model_override
+    return provider_runtime_config(config)
 
 
 @dataclass(slots=True)
@@ -264,7 +254,6 @@ class AgentRunner:
                 "content": json.dumps(input_data, ensure_ascii=False, sort_keys=True),
             },
         ]
-        schemas = context.tool_registry.schemas() or None
         total_usage: dict[str, Any] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -276,6 +265,17 @@ class AgentRunner:
         final_model = runtime["model"]
         max_iterations = definition.capabilities.max_tool_iterations
         tool_timeout = float((self.config.get("tools") or {}).get("timeout", 60))
+        raw_failure_limit = (self.config.get("history") or {}).get(
+            "consecutive_tool_fail_limit", 5
+        )
+        if (
+            isinstance(raw_failure_limit, bool)
+            or not isinstance(raw_failure_limit, int)
+            or raw_failure_limit < 1
+        ):
+            raise AgentRunError("history.consecutive_tool_fail_limit 必须是正整数")
+        failure_limit = raw_failure_limit
+        failures = ConsecutiveToolFailureTracker(failure_limit)
         for iteration in range(1, max_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
@@ -284,7 +284,10 @@ class AgentRunner:
                     model=runtime["model"],
                     messages=messages,
                     stream=False,
-                    tools=schemas,
+                    tools=(
+                        context.tool_registry.schemas(exclude=failures.unavailable)
+                        or None
+                    ),
                     max_tokens=context.max_tokens,
                 )
             )
@@ -313,33 +316,60 @@ class AgentRunner:
                 }
             )
             for call in response.tool_calls:
-                try:
-                    tool = context.tool_registry.get(call.name)
-                    value = execute_tool(
-                        tool,
-                        call.arguments,
-                        context={
-                            "root": str(self.root),
-                            "user": self.user,
-                            "caller": "subagent",
-                            "agent": definition.name,
-                            "tool_timeout": tool_timeout,
-                            "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
-                        },
-                        timeout=tool_timeout,
-                        cancel_event=context.cancel_event,
-                    )
-                    payload = {"ok": True, "result": value}
-                    status = "completed"
-                except Exception as exc:
+                if failures.is_unavailable(call.name):
                     payload = {
                         "ok": False,
                         "error": {
-                            "message": str(exc),
-                            "exception_type": type(exc).__name__,
+                            "message": (
+                                f"工具 {call.name} 已连续失败 {failure_limit} 次，"
+                                "本轮暂时不可用；请更换工具或调整方案"
+                            ),
+                            "exception_type": "ToolTemporarilyUnavailable",
+                            "consecutive_failures": failure_limit,
+                            "temporarily_unavailable": True,
                         },
                     }
-                    status = "failed"
+                    status = "temporarily_unavailable"
+                else:
+                    try:
+                        tool = context.tool_registry.get(call.name)
+                        value = execute_tool(
+                            tool,
+                            call.arguments,
+                            context={
+                                "root": str(self.root),
+                                "user": self.user,
+                                "caller": "subagent",
+                                "agent": definition.name,
+                                "tool_timeout": tool_timeout,
+                                "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
+                            },
+                            timeout=tool_timeout,
+                            cancel_event=context.cancel_event,
+                        )
+                        payload = {"ok": True, "result": value}
+                        status = "completed"
+                    except Exception as exc:
+                        payload = {
+                            "ok": False,
+                            "error": {
+                                "message": str(exc),
+                                "exception_type": type(exc).__name__,
+                            },
+                        }
+                        status = "failed"
+                    failure_count = failures.record(
+                        call.name,
+                        succeeded=bool(payload.get("ok")),
+                    )
+                    if failure_count >= failure_limit:
+                        payload["error"].update(
+                            {
+                                "consecutive_failures": failure_count,
+                                "temporarily_unavailable": True,
+                                "instruction": "请更换工具或调整方案，不要继续重试该工具",
+                            }
+                        )
                 tool_records.append(
                     {
                         "id": call.id,
@@ -410,7 +440,12 @@ class AgentRunner:
             definition,
             self.config,
         )
-        tool_registry = build_agent_tool_registry(self.root, self.user, definition)
+        tool_registry = build_agent_tool_registry(
+            self.root,
+            self.user,
+            definition,
+            self.config,
+        )
         context = AgentExecutionContext(
             runner=self,
             definition=definition,
@@ -433,8 +468,10 @@ class AgentRunner:
                     raise AgentCancelledError(f"子代理 {name} 已取消")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    future.cancel()
-                    raise AgentTimeoutError(f"子代理 {name} 执行超时（{effective_timeout:g}s）")
+                    raise AgentTimeoutError(
+                        f"子代理 {name} 执行超时（{effective_timeout:g}s）；"
+                        "运行线程未被强制终止，请主智能体查看子代理运行日志后决定是否取消"
+                    )
                 if future.done():
                     result = future.result()
                     break
@@ -452,13 +489,27 @@ class AgentRunner:
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                 raise
-            status = "cancelled" if isinstance(exc, AgentCancelledError) else "failed"
+            status = (
+                "cancelled"
+                if isinstance(exc, AgentCancelledError)
+                else "timed_out_running"
+                if isinstance(exc, AgentTimeoutError)
+                else "failed"
+            )
+            detail = {"error": str(exc), "exception_type": type(exc).__name__}
+            if isinstance(exc, AgentTimeoutError):
+                detail.update(
+                    {
+                        "process_terminated": False,
+                        "action_required": "inspect_subagent_logs",
+                    }
+                )
             _event(
                 event_callback,
                 agent=name,
                 status=status,
                 task_id=task_id,
-                detail={"error": str(exc), "exception_type": type(exc).__name__},
+                detail=detail,
             )
             raise
         finally:

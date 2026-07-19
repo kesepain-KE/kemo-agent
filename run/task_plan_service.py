@@ -15,7 +15,7 @@ from run.task_plan_store import (
     PlanValidationError,
     normalize_plan,
 )
-from run.tools import ToolRegistry, discover_tools
+from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 
 class PlanGenerationError(RuntimeError):
@@ -35,9 +35,6 @@ def _tool_summary(registry: ToolRegistry, max_tools: int = 50) -> list[dict[str,
 
 
 def _relevant_memory(root: Path, user: str, config: dict[str, Any], goal: str) -> str:
-    memory_config = config.get("memory") or {}
-    if not bool(memory_config.get("injection_enabled", True)):
-        return ""
     store = MemoryStore(root, user, config)
     lines: list[str] = []
     used = 0
@@ -80,14 +77,13 @@ def generate_plan(
     if tool_registry is None:
         tool_config = cfg.get("tools") or {}
         tool_registry = (
-            discover_tools(root, user)
+            apply_runtime_tool_policy(discover_tools(root, user), cfg)
             if bool(tool_config.get("enabled", True))
             else ToolRegistry({})
         )
     tool_names = set(tool_registry.tools.keys())
-    agents_config = cfg.get("agents") or {}
-    max_steps = int(agents_config.get("n8_task_plan_max_steps", 10))
     task_plan_config = cfg.get("task_plan") or {}
+    max_steps = int(task_plan_config.get("max_steps", 10))
     auto_accept = bool(task_plan_config.get("auto_accept", False))
 
     runner = AgentRunner(root, user, config=cfg, provider_factory=provider_factory)
@@ -161,13 +157,13 @@ def edit_plan(
     if tool_registry is None:
         tool_config = cfg.get("tools") or {}
         tool_registry = (
-            discover_tools(root, user)
+            apply_runtime_tool_policy(discover_tools(root, user), cfg)
             if bool(tool_config.get("enabled", True))
             else ToolRegistry({})
         )
     tool_names = set(tool_registry.tools.keys())
-    agents_config = cfg.get("agents") or {}
-    max_steps = int(agents_config.get("n8_task_plan_max_steps", 10))
+    task_plan_config = cfg.get("task_plan") or {}
+    max_steps = int(task_plan_config.get("max_steps", 10))
 
     runner = AgentRunner(root, user, config=cfg, provider_factory=provider_factory)
     memory_text = _relevant_memory(root, user, cfg, edit_request)

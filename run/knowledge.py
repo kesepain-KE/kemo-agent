@@ -15,6 +15,10 @@ _TEXT_SUFFIXES = frozenset({".md", ".txt", ".json"})
 _ASCII_WORD = re.compile(r"[A-Za-z0-9_./-]{2,}")
 _CJK_RUN = re.compile(r"[\u3400-\u9fff]{2,}")
 _INDEX_NAMES = frozenset({"index.md", "data_structure.md", "索引.md", "目录.md"})
+DEFAULT_KNOWLEDGE_MAX_ITEMS = 4
+DEFAULT_KNOWLEDGE_MAX_CHARS = 4000
+DEFAULT_KNOWLEDGE_MAX_FILE_CHARS = 20000
+DEFAULT_KNOWLEDGE_MINIMUM_SCORE = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,14 +183,13 @@ def select_knowledge(
     query: str,
     config: dict,
 ) -> KnowledgeSelection:
-    knowledge_config = config.get("knowledge") or {}
     source_policy = MainAgentSourcePolicy.from_config(config)
-    if not source_policy.knowledge_enabled or not query.strip():
+    if not query.strip():
         return KnowledgeSelection((), "")
-    max_items = max(0, int(knowledge_config.get("max_items", 4)))
-    max_chars = max(0, int(knowledge_config.get("max_chars", 4000)))
-    max_file_chars = max(1000, int(knowledge_config.get("max_file_chars", 20000)))
-    minimum_score = max(1, int(knowledge_config.get("minimum_score", 2)))
+    max_items = DEFAULT_KNOWLEDGE_MAX_ITEMS
+    max_chars = DEFAULT_KNOWLEDGE_MAX_CHARS
+    max_file_chars = DEFAULT_KNOWLEDGE_MAX_FILE_CHARS
+    minimum_score = DEFAULT_KNOWLEDGE_MINIMUM_SCORE
     if max_items == 0 or max_chars == 0:
         return KnowledgeSelection((), "")
 
