@@ -81,6 +81,13 @@ class AssetContent(ProtocolModel):
     mime_type: str | None = None
     checksum_sha256: str | None = None
 
+    @field_validator("asset_id")
+    @classmethod
+    def validate_asset_id(cls, value: str | None) -> str | None:
+        if value is not None and not _ID_RE.fullmatch(value):
+            raise ValueError("asset_id 必须是稳定标识符，不能是本地路径")
+        return value
+
     @model_validator(mode="after")
     def validate_reference(self) -> "AssetContent":
         if not self.asset_id and self.source is None:

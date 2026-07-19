@@ -20,6 +20,7 @@ from run.users import user_dir
 
 
 SCHEMA_VERSION = 1
+ITEMS_SCHEMA_VERSION = 2
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -71,6 +72,7 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
         "text": {"schema_version": SCHEMA_VERSION, "messages": []},
         "think": {"schema_version": SCHEMA_VERSION, "rounds": []},
         "tool": {"schema_version": SCHEMA_VERSION, "rounds": []},
+        "items": {"schema_version": ITEMS_SCHEMA_VERSION, "items": []},
         "data": {
             "schema_version": SCHEMA_VERSION,
             "user": user,
@@ -92,8 +94,281 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
     }
 
 
+def _item_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _text_content(value: Any) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": str(value or "")}]
+
+
+def _history_message_item(
+    role: str,
+    content: Any,
+    *,
+    round_number: int,
+) -> dict[str, Any]:
+    blocks = content if isinstance(content, list) else _text_content(content)
+    item: dict[str, Any] = {
+        "id": _item_id("msg"),
+        "type": "message",
+        "status": "completed",
+        "role": role,
+        "content": blocks,
+        "metadata": {"round": round_number, "history_source": "legacy"},
+        "extensions": {},
+    }
+    if role == "assistant":
+        item["phase"] = "final_answer"
+    return item
+
+
+def synthesize_items(window: dict[str, Any]) -> dict[str, Any]:
+    """Build Item v2 in memory from a legacy text/think/tool window."""
+
+    messages = (window.get("text") or {}).get("messages", [])
+    think_rounds = {
+        int(value.get("round")): value
+        for value in (window.get("think") or {}).get("rounds", [])
+        if isinstance(value, dict) and str(value.get("round", "")).isdigit()
+    }
+    tool_rounds = {
+        int(value.get("round")): value
+        for value in (window.get("tool") or {}).get("rounds", [])
+        if isinstance(value, dict) and str(value.get("round", "")).isdigit()
+    }
+    grouped: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for raw in messages if isinstance(messages, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("role") == "user" and current:
+            grouped.append(current)
+            current = []
+        current.append(raw)
+    if current:
+        grouped.append(current)
+
+    items: list[dict[str, Any]] = []
+    for round_number, group in enumerate(grouped, start=1):
+        user_messages = [value for value in group if value.get("role") == "user"]
+        assistant_messages = [value for value in group if value.get("role") == "assistant"]
+        other_messages = [
+            value for value in group if value.get("role") not in {"user", "assistant"}
+        ]
+        for message in user_messages:
+            items.append(
+                _history_message_item(
+                    "user", message.get("content"), round_number=round_number
+                )
+            )
+        think = think_rounds.get(round_number) or {}
+        reasoning = str(think.get("content") or "")
+        if reasoning:
+            items.append(
+                {
+                    "id": _item_id("rs"),
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": reasoning,
+                    "metadata": {"round": round_number, "history_source": "legacy"},
+                    "extensions": {},
+                }
+            )
+        records = (tool_rounds.get(round_number) or {}).get("calls", [])
+        for position, record in enumerate(records if isinstance(records, list) else []):
+            if not isinstance(record, dict):
+                continue
+            call_id = str(record.get("id") or f"history-{round_number}-{position}")
+            name = str(record.get("name") or "unknown_tool")
+            metadata = {
+                "round": round_number,
+                "iteration": int(record.get("iteration", 1)),
+                "history_source": "legacy",
+            }
+            items.append(
+                {
+                    "id": _item_id("call"),
+                    "type": "tool_call",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": record.get("arguments") or {},
+                    "metadata": metadata,
+                    "extensions": {},
+                }
+            )
+            result = record.get("result")
+            items.append(
+                {
+                    "id": _item_id("result"),
+                    "type": "tool_result",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": name,
+                    "is_error": bool(
+                        isinstance(result, dict) and result.get("ok") is False
+                    ),
+                    "content": [{"type": "json", "data": result}],
+                    "metadata": metadata,
+                    "extensions": {},
+                }
+            )
+        for message in [*assistant_messages, *other_messages]:
+            role = str(message.get("role") or "assistant")
+            if role not in {"user", "assistant"}:
+                role = "assistant"
+            items.append(
+                _history_message_item(
+                    role, message.get("content"), round_number=round_number
+                )
+            )
+    return {"schema_version": ITEMS_SCHEMA_VERSION, "items": items}
+
+
+def append_round_items(
+    window: dict[str, Any],
+    *,
+    round_number: int,
+    user_content: list[dict[str, Any]],
+    reasoning: str,
+    text: str,
+    tool_records: list[dict[str, Any]],
+    provider_responses: list[dict[str, Any]],
+) -> None:
+    """Append one committed round while preserving native Provider output Items."""
+
+    container = window.setdefault(
+        "items", {"schema_version": ITEMS_SCHEMA_VERSION, "items": []}
+    )
+    items = container.setdefault("items", [])
+    if not isinstance(items, list):
+        items = []
+        container["items"] = items
+    items.append(
+        {
+            "id": _item_id("msg"),
+            "type": "message",
+            "status": "completed",
+            "role": "user",
+            "content": user_content,
+            "metadata": {"round": round_number},
+            "extensions": {},
+        }
+    )
+
+    has_reasoning = False
+    has_assistant = False
+    for iteration, response in enumerate(provider_responses, start=1):
+        response_id = str(response.get("id") or "")
+        for raw in response.get("output", []) if isinstance(response, dict) else []:
+            if not isinstance(raw, dict):
+                continue
+            item = json.loads(json.dumps(raw, ensure_ascii=False, default=str))
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            item["metadata"] = {
+                **metadata,
+                "round": round_number,
+                "iteration": iteration,
+                "response_id": response_id,
+            }
+            has_reasoning = has_reasoning or item.get("type") == "reasoning"
+            has_assistant = has_assistant or (
+                item.get("type") == "message" and item.get("role") == "assistant"
+            )
+            items.append(item)
+        for record in tool_records:
+            if not isinstance(record, dict) or int(record.get("iteration", 1)) != iteration:
+                continue
+            result = record.get("result")
+            items.append(
+                {
+                    "id": _item_id("result"),
+                    "type": "tool_result",
+                    "status": "completed",
+                    "call_id": str(record.get("id") or ""),
+                    "name": str(record.get("name") or "unknown_tool"),
+                    "is_error": bool(
+                        isinstance(result, dict) and result.get("ok") is False
+                    ),
+                    "content": [{"type": "json", "data": result}],
+                    "metadata": {
+                        "round": round_number,
+                        "iteration": iteration,
+                        "tool_status": record.get("status"),
+                    },
+                    "extensions": {},
+                }
+            )
+
+    if not provider_responses:
+        if reasoning:
+            items.append(
+                {
+                    "id": _item_id("rs"),
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": reasoning,
+                    "metadata": {"round": round_number},
+                    "extensions": {},
+                }
+            )
+        for record in tool_records:
+            call_id = str(record.get("id") or _item_id("callid"))
+            name = str(record.get("name") or "unknown_tool")
+            metadata = {
+                "round": round_number,
+                "iteration": int(record.get("iteration", 1)),
+            }
+            items.extend(
+                [
+                    {
+                        "id": _item_id("call"),
+                        "type": "tool_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": record.get("arguments") or {},
+                        "metadata": metadata,
+                        "extensions": {},
+                    },
+                    {
+                        "id": _item_id("result"),
+                        "type": "tool_result",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": name,
+                        "is_error": bool(
+                            isinstance(record.get("result"), dict)
+                            and record["result"].get("ok") is False
+                        ),
+                        "content": [{"type": "json", "data": record.get("result")}],
+                        "metadata": metadata,
+                        "extensions": {},
+                    },
+                ]
+            )
+    elif reasoning and not has_reasoning:
+        items.append(
+            {
+                "id": _item_id("rs"),
+                "type": "reasoning",
+                "status": "completed",
+                "content": reasoning,
+                "metadata": {"round": round_number},
+                "extensions": {},
+            }
+        )
+    if text and not has_assistant:
+        item = _history_message_item("assistant", text, round_number=round_number)
+        item["metadata"]["history_source"] = "run_fallback"
+        items.append(item)
+
+
 def commit_window(directory: Path, window: dict[str, Any]) -> None:
-    """Atomically replace each file and mark the four-file set complete last."""
+    """Atomically replace history files and mark the transaction complete last."""
 
     with _lock(directory):
         data = dict(window["data"])
@@ -113,6 +388,11 @@ def commit_window(directory: Path, window: dict[str, Any]) -> None:
         _atomic_write_json(directory / "text.json", window["text"])
         _atomic_write_json(directory / "think.json", window["think"])
         _atomic_write_json(directory / "tool.json", window["tool"])
+        items = window.get("items")
+        if not isinstance(items, dict) or not isinstance(items.get("items"), list):
+            items = synthesize_items(window)
+            window["items"] = items
+        _atomic_write_json(directory / "items.json", items)
         data["complete"] = True
         _atomic_write_json(directory / "data.json", data)
         window["data"] = data
@@ -131,6 +411,15 @@ def load_window(directory: Path) -> dict[str, Any]:
         window["data"] = data
         if not isinstance(window["text"], dict) or not isinstance(window["text"].get("messages"), list):
             raise HistoryError(f"text.json schema 无效：{directory}")
+        items_path = directory / "items.json"
+        if items_path.is_file():
+            items = _read_json(items_path)
+            if not isinstance(items, dict) or not isinstance(items.get("items"), list):
+                raise HistoryError(f"items.json schema 无效：{directory}")
+            window["items"] = items
+        else:
+            # v1 四文件历史在内存中无损升级；下一次成功提交时再双写 items.json。
+            window["items"] = synthesize_items(window)
         return window
 
 

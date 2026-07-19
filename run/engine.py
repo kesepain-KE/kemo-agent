@@ -8,17 +8,33 @@ import json
 import queue
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
+from pydantic import TypeAdapter, ValidationError
+
 from events import RunEvent, error_event
+from provider.adapters.compat import chat_request_to_kemo
 from provider.factory import create_provider
+from provider.protocol.enums import ResponseStatus, StreamEventType
+from provider.protocol.models import (
+    ContentBlock,
+    KemoRequest,
+    KemoResponse,
+    MessageItem,
+    ReasoningItem,
+    TextContent,
+    ToolCallItem,
+    Usage as ProtocolUsage,
+)
+from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ChatRequest, ChatResponse, ToolCall, Usage
 from run.agent_runner import AgentRunner
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
-from run.history import commit_window, prepare_window
+from run.history import append_round_items, commit_window, prepare_window
 from run.memory import MemoryStore
 from run.memory_pipeline import submit_memory_extraction
 from run.prompt import PromptBundle, build_prompt_bundle
@@ -39,6 +55,7 @@ class EngineError(RuntimeError):
 
 _SESSION_LOCKS: dict[tuple[str, str, str, str], threading.RLock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
+_CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
 
 
 def _session_lock(root: Path, user: str, source: str, session_id: str) -> threading.RLock:
@@ -52,6 +69,43 @@ def _required_text(request: dict[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EngineError(f"请求字段 {name!r} 必须是非空字符串")
     return value.strip()
+
+
+def _request_content_blocks(request: dict[str, Any]) -> list[ContentBlock]:
+    prompt_value = request.get("prompt", "")
+    prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
+    raw_content = request.get("content")
+    if raw_content is None:
+        raw_content = []
+    if not isinstance(raw_content, list):
+        raise EngineError("请求字段 'content' 必须是 Content Block 数组")
+    combined: list[Any] = []
+    if prompt:
+        combined.append({"type": "text", "text": prompt})
+    combined.extend(raw_content)
+    if not combined:
+        return []
+    try:
+        return _CONTENT_LIST_ADAPTER.validate_python(combined)
+    except ValidationError as exc:
+        raise EngineError(f"请求字段 'content' 无效：{exc.errors(include_url=False)}") from exc
+
+
+def _content_for_message(blocks: list[ContentBlock]) -> str | list[dict[str, Any]]:
+    if all(isinstance(block, TextContent) for block in blocks):
+        return "".join(block.text for block in blocks if isinstance(block, TextContent))
+    return [block.model_dump(mode="json", exclude_none=True) for block in blocks]
+
+
+def _content_display(blocks: list[ContentBlock]) -> str:
+    parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, TextContent):
+            parts.append(block.text)
+        else:
+            asset_id = getattr(block, "asset_id", None)
+            parts.append(f"[{block.type}:{asset_id or 'inline'}]")
+    return "\n".join(part for part in parts if part)
 
 
 def _drain_guidance(channel: Any) -> list[str]:
@@ -80,13 +134,38 @@ def _append_guidance(messages: list[dict[str, Any]], values: list[str]) -> None:
 
 def _usage_from_dict(value: dict[str, Any] | None) -> Usage:
     raw = value or {}
-    known = {"prompt_tokens", "completion_tokens", "total_tokens", "estimated", "source"}
+    prompt_value = raw.get("prompt_tokens")
+    if prompt_value is None:
+        prompt_value = raw.get("input_tokens")
+    completion_value = raw.get("completion_tokens")
+    if completion_value is None:
+        completion_value = raw.get("output_tokens")
+    prompt_tokens = max(0, int(prompt_value or 0))
+    completion_tokens = max(0, int(completion_value or 0))
+    total_value = raw.get("total_tokens")
+    measurement = raw.get("measurement") if isinstance(raw.get("measurement"), dict) else {}
+    mode = str(measurement.get("mode") or "")
+    estimated = bool(
+        raw.get("estimated", False)
+        or mode in {"estimated", "mixed", "unknown"}
+        or (measurement and not measurement.get("exact", False))
+    )
+    known = {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "estimated",
+        "source",
+    }
     return Usage(
-        prompt_tokens=int(raw.get("prompt_tokens") or 0),
-        completion_tokens=int(raw.get("completion_tokens") or 0),
-        total_tokens=int(raw.get("total_tokens") or 0),
-        estimated=bool(raw.get("estimated", False)),
-        source=str(raw.get("source") or "provider"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=max(
+            0,
+            int(total_value if total_value is not None else prompt_tokens + completion_tokens),
+        ),
+        estimated=estimated,
+        source=str(raw.get("source") or mode or "provider"),
         extra={key: item for key, item in raw.items() if key not in known},
     )
 
@@ -97,7 +176,12 @@ def _merge_usage(total: dict[str, Any], usage: Usage) -> None:
     total["total_tokens"] = int(total.get("total_tokens", 0)) + usage.total_tokens
     total["estimated"] = bool(total.get("estimated", False) or usage.estimated)
     cached: int | None = None
-    for key in ("cached_prompt_tokens", "cache_hit_tokens", "cached_tokens"):
+    for key in (
+        "cached_input_tokens",
+        "cached_prompt_tokens",
+        "cache_hit_tokens",
+        "cached_tokens",
+    ):
         value = usage.extra.get(key)
         if value is not None:
             cached = max(0, int(value))
@@ -115,6 +199,48 @@ def _merge_usage(total: dict[str, Any], usage: Usage) -> None:
         total["cache_hit_rate"] = (
             round(total["cached_prompt_tokens"] / denominator, 6) if denominator else 0.0
         )
+        total["cached_input_tokens"] = total["cached_prompt_tokens"]
+    reasoning = usage.extra.get("reasoning_tokens")
+    if reasoning is not None:
+        total["reasoning_tokens"] = int(total.get("reasoning_tokens", 0)) + max(
+            0, int(reasoning)
+        )
+    visible = usage.extra.get("visible_output_tokens")
+    if visible is not None:
+        total["visible_output_tokens"] = int(
+            total.get("visible_output_tokens", 0)
+        ) + max(0, int(visible))
+    stages = usage.extra.get("stages")
+    if isinstance(stages, list):
+        total.setdefault("stages", []).extend(copy.deepcopy(stages))
+    media = usage.extra.get("media")
+    if isinstance(media, dict):
+        aggregate_media = total.setdefault("media", {})
+        for key, value in media.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                aggregate_media[key] = aggregate_media.get(key, 0) + value
+    measurement = usage.extra.get("measurement")
+    if isinstance(measurement, dict):
+        previous = total.get("measurement")
+        if not isinstance(previous, dict) or previous.get("mode") == "unknown":
+            total["measurement"] = copy.deepcopy(measurement)
+        elif previous.get("mode") != measurement.get("mode"):
+            total["measurement"] = {
+                "mode": "mixed",
+                "exact": False,
+                "exact_fields": [],
+                "estimated_fields": sorted(
+                    {
+                        *previous.get("estimated_fields", []),
+                        *measurement.get("estimated_fields", []),
+                    }
+                ),
+            }
+    provider_raw = usage.extra.get("provider_raw")
+    if isinstance(provider_raw, dict) and provider_raw:
+        total.setdefault("provider_raw", []).append(copy.deepcopy(provider_raw))
+    total["input_tokens"] = total["prompt_tokens"]
+    total["output_tokens"] = total["completion_tokens"]
 
 
 def _usage_total() -> dict[str, Any]:
@@ -122,7 +248,12 @@ def _usage_total() -> dict[str, Any]:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
         "estimated": False,
+        "measurement": {"mode": "unknown", "exact": False},
+        "stages": [],
+        "media": {},
     }
 
 
@@ -162,11 +293,243 @@ def _events_for_response(response: ChatResponse) -> Iterator[RunEvent]:
     )
 
 
-def _provider_events(provider: Any, request: ChatRequest) -> Iterator[RunEvent]:
-    if request.stream:
-        yield from provider.chat_stream(request)
+def _protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
+    value = usage.model_dump(mode="json", exclude_none=True)
+    value.update(
+        {
+            "prompt_tokens": int(usage.input_tokens or 0),
+            "completion_tokens": int(usage.output_tokens or 0),
+            "total_tokens": int(
+                usage.total_tokens
+                if usage.total_tokens is not None
+                else (usage.input_tokens or 0) + (usage.output_tokens or 0)
+            ),
+            "estimated": not usage.measurement.exact,
+            "source": str(usage.measurement.mode),
+        }
+    )
+    return value
+
+
+def _protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
+    if value is None:
+        return {
+            "message": "Provider 返回了非成功终态",
+            "exception_type": "ProviderProtocolError",
+            "phase": phase,
+        }
+    raw = value.model_dump(mode="json", exclude_none=True)
+    return {
+        **raw,
+        "exception_type": str(raw.get("type") or "ProviderProtocolError"),
+        "phase": phase,
+    }
+
+
+def _events_for_protocol_response(response: KemoResponse) -> Iterator[RunEvent]:
+    common = {
+        "request_id": response.request_id,
+        "response_id": response.id,
+    }
+    for item in response.output:
+        if isinstance(item, ReasoningItem):
+            content = item.content or item.summary or ""
+            if content:
+                yield RunEvent(
+                    type="reasoning_delta",
+                    item_id=item.id,
+                    protocol_event_type="response.output.reasoning",
+                    content=content,
+                    **common,
+                )
+        elif isinstance(item, MessageItem):
+            for content_index, block in enumerate(item.content):
+                if isinstance(block, TextContent) and block.text:
+                    yield RunEvent(
+                        type="text_delta",
+                        item_id=item.id,
+                        content_index=content_index,
+                        protocol_event_type="response.output_text",
+                        content=block.text,
+                        **common,
+                    )
+        elif isinstance(item, ToolCallItem):
+            yield RunEvent(
+                type="tool_call_start",
+                item_id=item.id,
+                protocol_event_type="tool_call.completed",
+                tool_call_id=item.call_id,
+                tool_name=item.name,
+                arguments=item.arguments,
+                metadata={"raw_arguments": item.arguments_raw},
+                **common,
+            )
+    usage = _protocol_usage_dict(response.usage)
+    yield RunEvent(
+        type="usage",
+        usage=usage,
+        protocol_event_type="usage.updated",
+        **common,
+    )
+    response_payload = response.model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
+    if response.status in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+        yield RunEvent(
+            type="done",
+            usage=usage,
+            protocol_event_type="response.completed",
+            metadata={
+                "model": response.model,
+                "response_id": response.id,
+                "provider_response_id": response.provider_response_id,
+                "provider_response": response_payload,
+                **response.metadata,
+            },
+            **common,
+        )
     else:
-        yield from _events_for_response(provider.chat(request))
+        yield RunEvent(
+            type="error",
+            error=_protocol_error(response.error),
+            protocol_event_type=f"response.{response.status}",
+            metadata={"provider_response": response_payload},
+            **common,
+        )
+
+
+def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEvent]:
+    common = {
+        "event_id": event.event_id,
+        "sequence": event.sequence,
+        "run_sequence": event.run_sequence,
+        "request_id": event.request_id,
+        "response_id": event.response_id,
+        "item_id": event.item_id or "",
+        "content_index": event.content_index,
+        "protocol_event_type": str(event.type),
+    }
+    metadata = {"protocol_data": event.data} if event.data else {}
+    if event.type == StreamEventType.OUTPUT_TEXT_DELTA and event.delta:
+        yield RunEvent(type="text_delta", content=event.delta, metadata=metadata, **common)
+    elif event.type in {
+        StreamEventType.REASONING_SUMMARY_DELTA,
+        StreamEventType.REASONING_CONTENT_DELTA,
+    } and event.delta:
+        yield RunEvent(
+            type="reasoning_delta", content=event.delta, metadata=metadata, **common
+        )
+    elif event.type == StreamEventType.TOOL_CALL_COMPLETED:
+        item = event.item if isinstance(event.item, ToolCallItem) else None
+        arguments = item.arguments if item is not None else event.data.get("arguments", {})
+        yield RunEvent(
+            type="tool_call_start",
+            tool_call_id=(item.call_id if item is not None else event.call_id or ""),
+            tool_name=(item.name if item is not None else event.name or ""),
+            arguments=arguments if isinstance(arguments, dict) else {"_value": arguments},
+            metadata={
+                **metadata,
+                "raw_arguments": item.arguments_raw if item is not None else None,
+            },
+            **common,
+        )
+    elif event.type == StreamEventType.USAGE_UPDATED and event.usage is not None:
+        yield RunEvent(
+            type="usage", usage=_protocol_usage_dict(event.usage), metadata=metadata, **common
+        )
+    elif event.type == StreamEventType.ERROR:
+        yield RunEvent(
+            type="error", error=_protocol_error(event.error), metadata=metadata, **common
+        )
+    elif event.type in {
+        StreamEventType.RESPONSE_COMPLETED,
+        StreamEventType.RESPONSE_INCOMPLETE,
+        StreamEventType.RESPONSE_FAILED,
+        StreamEventType.RESPONSE_CANCELLED,
+    }:
+        response = event.response
+        if response is None:
+            yield RunEvent(
+                type="error",
+                error={
+                    "message": "Provider 终态事件缺少完整 response",
+                    "exception_type": "ProviderProtocolError",
+                    "phase": "provider",
+                },
+                metadata=metadata,
+                **common,
+            )
+            return
+        payload = response.model_dump(mode="json", by_alias=True, exclude_none=True)
+        terminal_metadata = {
+            **metadata,
+            **response.metadata,
+            "model": response.model,
+            "response_id": response.id,
+            "provider_response_id": response.provider_response_id,
+            "provider_response": payload,
+        }
+        if response.status in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+            yield RunEvent(
+                type="done",
+                usage=_protocol_usage_dict(response.usage),
+                metadata=terminal_metadata,
+                **common,
+            )
+        else:
+            yield RunEvent(
+                type="error",
+                error=_protocol_error(response.error),
+                metadata=terminal_metadata,
+                **common,
+            )
+
+
+def _provider_events(
+    provider: Any,
+    chat_request: ChatRequest,
+    protocol_request: KemoRequest,
+) -> Iterator[RunEvent]:
+    native_stream = getattr(provider, "stream", None)
+    native_create = getattr(provider, "create", None)
+    if chat_request.stream and callable(native_stream):
+        for protocol_event in native_stream(protocol_request):
+            if not isinstance(protocol_event, ProviderStreamEvent):
+                raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
+            yield from _run_events_for_protocol_event(protocol_event)
+        return
+    if not chat_request.stream and callable(native_create):
+        response = native_create(protocol_request)
+        if not isinstance(response, KemoResponse):
+            raise EngineError("Provider create() 必须返回 KemoResponse")
+        yield from _events_for_protocol_response(response)
+        return
+    # 兼容尚未迁移的 Provider 和测试 Mock；统一请求仍已在 Run 中完成编译。
+    legacy_request = ChatRequest(
+        model=chat_request.model,
+        messages=[
+            {
+                key: copy.deepcopy(value)
+                for key, value in message.items()
+                if not key.startswith("_")
+            }
+            for message in chat_request.messages
+        ],
+        stream=chat_request.stream,
+        tools=copy.deepcopy(chat_request.tools),
+        temperature=chat_request.temperature,
+        max_tokens=chat_request.max_tokens,
+        extra=copy.deepcopy(chat_request.extra),
+    )
+    events = (
+        provider.chat_stream(legacy_request)
+        if legacy_request.stream
+        else _events_for_response(provider.chat(legacy_request))
+    )
+    for event in events:
+        event.request_id = event.request_id or protocol_request.request_id
+        event.protocol_event_type = event.protocol_event_type or f"legacy.{event.type}"
+        yield event
 
 
 def _assistant_tool_message(text: str, calls: list[ToolCall]) -> dict[str, Any]:
@@ -222,7 +585,7 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
     )
 
 
-def iter_request_events(
+def _iter_request_events_impl(
     request: dict[str, Any],
     *,
     root: Path | None = None,
@@ -235,10 +598,13 @@ def iter_request_events(
     run_started = time.monotonic()
     try:
         user = _required_text(request, "user")
-        prompt_value = request.get("prompt", "")
-        prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
-        if not prompt and not bool(request.get("compress_only", False)):
-            raise EngineError("请求字段 'prompt' 必须是非空字符串")
+        compress_only_requested = bool(request.get("compress_only", False))
+        content_blocks = (
+            [] if compress_only_requested else _request_content_blocks(request)
+        )
+        if not content_blocks and not compress_only_requested:
+            raise EngineError("请求必须包含非空 prompt 或 content[]")
+        prompt = _content_display(content_blocks)
         source = _required_text(request, "source")
         session_id = _required_text(request, "session_id")
         base = (root or project_root()).resolve()
@@ -311,7 +677,9 @@ def iter_request_events(
             )
             compress_only = bool(request.get("compress_only", False))
             current_user_message = (
-                None if compress_only else {"role": "user", "content": prompt}
+                None
+                if compress_only
+                else {"role": "user", "content": _content_for_message(content_blocks)}
             )
             context_policy = ContextPolicy.from_config(config)
             force_compress = bool(request.get("compress", False) or compress_only)
@@ -420,7 +788,9 @@ def iter_request_events(
             guidance_channel = request.get("_guidance_queue")
             consumed_guidance: list[str] = []
             run_id = str(request.get("run_id") or "")
-            usage_total = dict(summary_usage)
+            protocol_parent_request_id: str | None = None
+            provider_responses: list[dict[str, Any]] = []
+            usage_total = copy.deepcopy(summary_usage)
             if summary_usage.get("total_tokens", 0):
                 yield RunEvent(
                     type="usage",
@@ -469,13 +839,29 @@ def iter_request_events(
                     tools=active_tool_schemas,
                     max_tokens=request_max_tokens,
                 )
+                protocol_request = chat_request_to_kemo(chat_request).model_copy(
+                    update={
+                        "request_id": f"req_{uuid.uuid4().hex}",
+                        "parent_request_id": protocol_parent_request_id,
+                        "attempt": 1,
+                        "metadata": {
+                            "user": user,
+                            "source": source,
+                            "session_id": session_id,
+                            "run_id": run_id,
+                            "iteration": iteration,
+                            "window": window_path.name,
+                            "prompt_hash": prompt_bundle.diagnostics.get("hash"),
+                        },
+                    }
+                )
                 iteration_text: list[str] = []
                 iteration_reasoning: list[str] = []
                 calls: list[ToolCall] = []
                 iteration_done: RunEvent | None = None
                 iteration_usage: Usage | None = None
 
-                for event in _provider_events(provider, chat_request):
+                for event in _provider_events(provider, chat_request, protocol_request):
                     if cancel_event is not None and cancel_event.is_set():
                         return
                     if event.type == "text_delta":
@@ -515,6 +901,10 @@ def iter_request_events(
                     iteration_usage = _usage_from_dict(iteration_done.usage)
                 _merge_usage(usage_total, iteration_usage)
                 final_metadata = dict(iteration_done.metadata)
+                provider_response = final_metadata.get("provider_response")
+                if isinstance(provider_response, dict):
+                    provider_responses.append(copy.deepcopy(provider_response))
+                protocol_parent_request_id = protocol_request.request_id
 
                 if not calls:
                     pending_guidance = _drain_guidance(guidance_channel)
@@ -699,6 +1089,18 @@ def iter_request_events(
             )
             window["think"]["rounds"].append({"round": round_number, "content": reasoning})
             window["tool"]["rounds"].append({"round": round_number, "calls": tool_records})
+            append_round_items(
+                window,
+                round_number=round_number,
+                user_content=[
+                    block.model_dump(mode="json", exclude_none=True)
+                    for block in content_blocks
+                ],
+                reasoning=reasoning,
+                text=text,
+                tool_records=tool_records,
+                provider_responses=provider_responses,
+            )
             window["data"]["rounds"] = round_number
             round_metrics = window["data"].setdefault("round_metrics", [])
             if not isinstance(round_metrics, list):
@@ -712,6 +1114,7 @@ def iter_request_events(
                     "tool_calls": len(tool_records),
                     "guidance": list(consumed_guidance),
                     "tool_pause": copy.deepcopy(tool_pause),
+                    "provider_responses": copy.deepcopy(provider_responses),
                 }
             )
             window["data"]["context"] = {
@@ -803,6 +1206,35 @@ def iter_request_events(
             raise
         except BaseException as exc:
             yield error_event(exc, phase="run")
+
+
+def iter_request_events(
+    request: dict[str, Any],
+    *,
+    root: Path | None = None,
+    provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
+    tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+    cancel_event: threading.Event | None = None,
+) -> Iterator[RunEvent]:
+    """Expose a task-wide ordered event stream over per-Provider sequences."""
+
+    run_id = str(request.get("run_id") or "")
+    for run_sequence, event in enumerate(
+        _iter_request_events_impl(
+            request,
+            root=root,
+            provider_factory=provider_factory,
+            tool_registry_factory=tool_registry_factory,
+            cancel_event=cancel_event,
+        )
+    ):
+        event.event_id = event.event_id or f"run_evt_{uuid.uuid4().hex}"
+        event.run_sequence = run_sequence
+        if event.sequence is None:
+            event.sequence = run_sequence
+        if run_id:
+            event.metadata.setdefault("run_id", run_id)
+        yield event
 
 
 async def stream_request(

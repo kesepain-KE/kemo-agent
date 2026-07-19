@@ -330,3 +330,49 @@ class OpenAIChatProvider:
         finally:
             response.close()
             response.close()
+
+    # Unified protocol adapter surface.  Legacy chat/chat_stream remain for
+    # subagents and third-party tests while Run can migrate independently.
+    def validate(self, request):
+        from provider.protocol.validation import validate_request
+
+        validate_request(request)
+
+    def capabilities(self, model: str):
+        from provider.protocol.models import ModelCapabilities
+
+        return ModelCapabilities(
+            model=model,
+            input_modalities=["text", "image"],
+            output_modalities=["text"],
+            streaming=True,
+            reasoning={
+                "supported": True,
+                "efforts": ["low", "medium", "high"],
+                "summary": False,
+                "persisted_state": False,
+            },
+            tools={
+                "function_calling": True,
+                "parallel_calls": True,
+                "multimodal_results": False,
+            },
+        )
+
+    def create(self, request):
+        from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
+
+        self.validate(request)
+        chat_request = kemo_request_to_chat(request.model_copy(update={"stream": False}))
+        return chat_response_to_kemo(self.chat(chat_request), request)
+
+    def stream(self, request):
+        from provider.adapters.compat import kemo_request_to_chat, legacy_stream_to_protocol
+
+        self.validate(request)
+        chat_request = kemo_request_to_chat(request.model_copy(update={"stream": True}))
+        return legacy_stream_to_protocol(
+            self.chat_stream(chat_request),
+            request,
+            capabilities=self.capabilities(request.model),
+        )

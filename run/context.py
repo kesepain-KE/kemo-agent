@@ -164,6 +164,107 @@ def _text_rounds(messages: Any) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def _content_value(content: Any) -> str | list[dict[str, Any]]:
+    blocks = content if isinstance(content, list) else []
+    if blocks and all(
+        isinstance(block, dict) and block.get("type") == "text" for block in blocks
+    ):
+        return "".join(str(block.get("text") or "") for block in blocks)
+    return copy.deepcopy(blocks)
+
+
+def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] | None:
+    container = window.get("items")
+    raw_items = container.get("items") if isinstance(container, dict) else None
+    if not isinstance(raw_items, list) or not raw_items:
+        return None
+    by_round: dict[int, list[dict[str, Any]]] = {}
+    inferred_round = 0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        try:
+            round_number = int(metadata.get("round"))
+        except (TypeError, ValueError):
+            if raw.get("type") == "message" and raw.get("role") == "user":
+                inferred_round += 1
+            round_number = max(1, inferred_round)
+        inferred_round = max(inferred_round, round_number)
+        by_round.setdefault(round_number, []).append(copy.deepcopy(raw))
+
+    result: list[list[dict[str, Any]]] = []
+    for round_number in sorted(by_round):
+        items = by_round[round_number]
+        messages: list[dict[str, Any]] = []
+        pending_reasoning: dict[str, Any] | None = None
+        index = 0
+        while index < len(items):
+            item = items[index]
+            kind = item.get("type")
+            if kind == "reasoning":
+                pending_reasoning = item
+                index += 1
+                continue
+            if kind == "message" and item.get("role") in {"user", "assistant"}:
+                message: dict[str, Any] = {
+                    "role": item["role"],
+                    "content": _content_value(item.get("content")),
+                    "_kemo_message": item,
+                }
+                if pending_reasoning is not None and item["role"] == "assistant":
+                    message["_kemo_reasoning"] = pending_reasoning
+                    pending_reasoning = None
+                messages.append(message)
+                index += 1
+                continue
+            if kind == "tool_call":
+                calls: list[dict[str, Any]] = []
+                while index < len(items) and items[index].get("type") == "tool_call":
+                    call = items[index]
+                    calls.append(
+                        {
+                            "id": str(call.get("call_id") or ""),
+                            "type": "function",
+                            "function": {
+                                "name": str(call.get("name") or "unknown_tool"),
+                                "arguments": _stable_json(call.get("arguments") or {}),
+                            },
+                        }
+                    )
+                    index += 1
+                message = {"role": "assistant", "content": None, "tool_calls": calls}
+                if pending_reasoning is not None:
+                    message["_kemo_reasoning"] = pending_reasoning
+                    pending_reasoning = None
+                messages.append(message)
+                continue
+            if kind == "tool_result":
+                content = item.get("content")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(item.get("call_id") or ""),
+                        "name": str(item.get("name") or "unknown_tool"),
+                        "content": _stable_json(content),
+                    }
+                )
+                index += 1
+                continue
+            index += 1
+        if pending_reasoning is not None:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "_kemo_reasoning": pending_reasoning,
+                }
+            )
+        if messages:
+            result.append(messages)
+    return result or None
+
+
 def _compact_result(value: Any, limit: int) -> str:
     rendered = _stable_json(value)
     if len(rendered) <= limit:
@@ -226,7 +327,8 @@ def _tool_iteration_messages(
 
 
 def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[RoundGroup]:
-    text_groups = _text_rounds((window.get("text") or {}).get("messages"))
+    item_groups = _item_round_messages(window)
+    text_groups = item_groups or _text_rounds((window.get("text") or {}).get("messages"))
     think_by_round = _round_lookup((window.get("think") or {}).get("rounds"))
     tool_by_round = _round_lookup((window.get("tool") or {}).get("rounds"))
     total = len(text_groups)
@@ -236,6 +338,29 @@ def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[Ro
         records = tool.get("calls", []) if isinstance(tool, dict) else []
         is_recent = index > total - policy.recent_tool_rounds
         provider_messages: list[dict[str, Any]] = []
+        if item_groups is not None:
+            provider_messages = copy.deepcopy(raw_group)
+            if not is_recent:
+                for message in provider_messages:
+                    if message.get("role") == "tool":
+                        message["content"] = _compact_result(
+                            message.get("content"), policy.older_tool_result_chars
+                        )
+            raw_text_messages = [
+                {key: copy.deepcopy(value) for key, value in message.items() if not key.startswith("_")}
+                for message in raw_group
+                if message.get("role") in {"user", "assistant"}
+            ]
+            groups.append(
+                RoundGroup(
+                    number=index,
+                    messages=provider_messages,
+                    raw_text_messages=raw_text_messages,
+                    think=think_by_round.get(index),
+                    tool=tool,
+                )
+            )
+            continue
         user_messages = [item for item in raw_group if item.get("role") == "user"]
         assistant_messages = [item for item in raw_group if item.get("role") == "assistant"]
         other_messages = [
