@@ -44,7 +44,6 @@ CONFIG = {
     },
     "tools": {"enabled": True, "timeout": 5},
     "task_plan": {"auto_accept": False, "max_steps": 10},
-    "agents": {"n8_task_plan_max_steps": 10},
 }
 
 

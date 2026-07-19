@@ -41,13 +41,8 @@ def _root(*users: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
 def _config(bindings: list[dict] | None = None, *, cron: bool = False) -> dict:
     return {
         "schema_version": 1,
-        "message": {
-            "max_workers": 4,
-            "dedupe_max_entries": 100,
-            "bindings": bindings or [],
-            "transports": {},
-        },
-        "runtime_host": {"start_cron": cron, "shutdown_timeout": 1},
+        "message": {"max_workers": 4},
+        "runtime_host": {"enable_background_scheduler": cron},
         "cron": {"enabled": cron, "poll_interval": 1},
     }
 
@@ -346,6 +341,10 @@ class FakeCron:
         self.running = False
 
 
+class FakeMaintenance(FakeCron):
+    pass
+
+
 class HostTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary, self.root = _root("alice")
@@ -361,13 +360,35 @@ class HostTests(unittest.TestCase):
         return RuntimeHost(
             self.root,
             config=config,
+            message_config={
+                "bindings": [
+                    {
+                        "platform": "mock",
+                        "external_user_id": "ext-1",
+                        "internal_user": "alice",
+                    }
+                ],
+                "transports": {},
+            },
             registry=registry,
             cron_scheduler=fake_cron or FakeCron(),
+            maintenance_scheduler=FakeMaintenance(),
             provider_factory=lambda cfg: None,
             tool_registry_factory=lambda root, user: ToolRegistry({}),
             router=MessageRouter(
                 self.root,
-                IdentityResolver.from_config(self.root, config),
+                IdentityResolver.from_config(
+                    self.root,
+                    {
+                        "bindings": [
+                            {
+                                "platform": "mock",
+                                "external_user_id": "ext-1",
+                                "internal_user": "alice",
+                            }
+                        ]
+                    },
+                ),
                 registry,
                 event_source=_done_events,
                 tool_registry_factory=lambda root, user: ToolRegistry({}),
@@ -381,10 +402,23 @@ class HostTests(unittest.TestCase):
         host.start()
         self.assertTrue(host.running)
         self.assertEqual(cron.started, 1)
+        self.assertEqual(host.maintenance.started, 1)
         host.stop()
         host.stop()
         self.assertEqual(host.state, "stopped")
         self.assertEqual(cron.stopped, 1)
+        self.assertEqual(host.maintenance.stopped, 1)
+
+    def test_background_switch_disables_cron_and_maintenance(self) -> None:
+        cron = FakeCron()
+        host = self._host(cron=False, fake_cron=cron)
+        host.start()
+        try:
+            self.assertEqual(cron.started, 0)
+            self.assertEqual(host.maintenance.started, 0)
+            self.assertEqual(host.status()["components"]["background"]["state"], "stopped")
+        finally:
+            host.stop()
 
     def test_transport_start_failure_isolated(self) -> None:
         transport = MockTransport(fail_start=True)

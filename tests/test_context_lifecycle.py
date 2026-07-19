@@ -76,13 +76,13 @@ class ContextLifecycleTests(unittest.TestCase):
         policy = ContextPolicy.from_config(
             {
                 "agents": {
-                    "n1_recent_rounds_before_tool_compression": 2,
-                    "n2_max_rounds": 8,
-                    "n3_rounds_after_compression": 3,
-                    "n4_token_limit": 1000,
-                    "n5_token_compression_ratio": 0.6,
+                    "conserved_rounds": 2,
+                    "max_rounds": 8,
+                    "rounds_after_compression": 3,
+                    "token_limit": 1000,
+                    "token_compression_ratio": 0.6,
                 },
-                "history": {"older_tool_log_max_chars": 80},
+                "history": {"recent_full_rounds": 2},
             }
         )
         self.assertEqual(policy.input_budget, 600)
@@ -90,7 +90,7 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(policy.recent_tool_rounds, 2)
         with self.assertRaises(ValueError):
             ContextPolicy.from_config(
-                {"agents": {"n2_max_rounds": 2, "n3_rounds_after_compression": 3}}
+                {"agents": {"max_rounds": 2, "rounds_after_compression": 3}}
             )
 
     def test_round_threshold_keeps_whole_latest_rounds_without_mutating_history(self) -> None:
@@ -103,9 +103,9 @@ class ContextLifecycleTests(unittest.TestCase):
             system_message={"role": "system", "content": "system"},
             current_user_message={"role": "user", "content": "current"},
         )
-        self.assertEqual([item.number for item in selected.kept_rounds], [5, 6])
-        self.assertEqual([item.number for item in selected.removed_rounds], [1, 2, 3, 4])
-        self.assertEqual(selected.messages[1]["content"].split("-")[0], "u5")
+        self.assertEqual([item.number for item in selected.kept_rounds], [4, 5, 6])
+        self.assertEqual([item.number for item in selected.removed_rounds], [1, 2, 3])
+        self.assertEqual(selected.messages[1]["content"].split("-")[0], "u4")
         self.assertEqual(selected.messages[-1]["content"], "current")
         self.assertEqual(json.dumps(window, ensure_ascii=False, sort_keys=True), snapshot)
 
@@ -123,10 +123,11 @@ class ContextLifecycleTests(unittest.TestCase):
             system_message={"role": "system", "content": "S" * 20},
             current_user_message={"role": "user", "content": "当" * 600},
         )
-        self.assertEqual(selected.kept_rounds, [])
-        self.assertEqual(len(selected.removed_rounds), 4)
+        self.assertEqual([item.number for item in selected.kept_rounds], [2, 3, 4])
+        self.assertEqual(len(selected.removed_rounds), 1)
         self.assertTrue(selected.token_limit_triggered)
         self.assertTrue(selected.fixed_content_over_budget)
+        self.assertTrue(selected.recent_content_over_budget)
         self.assertEqual(selected.messages[-1]["content"], "当" * 600)
 
     def test_tool_messages_stay_as_assistant_call_plus_result_and_old_results_compact(self) -> None:
@@ -135,7 +136,7 @@ class ContextLifecycleTests(unittest.TestCase):
             recent_tool_rounds=1,
             max_rounds=100,
             token_limit=100000,
-            older_tool_log_max_chars=100,
+            older_tool_result_chars=100,
         )
         groups = build_round_groups(window, policy)
         for group in groups:

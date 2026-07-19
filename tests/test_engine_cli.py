@@ -44,21 +44,23 @@ class EngineAndCLITests(unittest.TestCase):
         (root / "agents.md").write_text("AGENTS", "utf-8")
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
         (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
+        provider = {
+            "type": "kemo",
+            "base_url": "http://127.0.0.1:1/v1",
+            "api_key_env": "TEST_KEMO_KEY",
+            "model": "mock-model",
+            "stream": False,
+        }
         (root / "config" / "global_config.json").write_text(
             json.dumps(
-                {
-                    "provider": {
-                        "type": "kemo",
-                        "base_url": "http://127.0.0.1:1/v1",
-                        "api_key_env": "TEST_KEMO_KEY",
-                        "model": "mock-model",
-                        "stream": False,
-                    }
-                }
+                {}
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "provider": provider}),
+            "utf-8",
+        )
         return temporary, root
 
     def test_engine_persists_rounds_and_injects_history(self) -> None:

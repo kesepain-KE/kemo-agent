@@ -13,6 +13,7 @@ from events import RunEvent
 from provider.schema import ChatResponse, Usage
 from run.config import load_config
 from run.engine import EngineError, context_status, handle_request, iter_request_events
+from run.kemo_graph import KemoGraphPromptContext
 from run.memory import MemoryStore
 from run.prompt import (
     PROMPT_SECTION_ORDER,
@@ -89,17 +90,23 @@ class PromptPipelineTests(unittest.TestCase):
                 "stream": False,
             },
             "tools": {"enabled": True, "max_iterations": 2, "timeout": 2},
-            "memory": {"extraction_enabled": False},
             "agents": {
-                "n1_recent_rounds_before_tool_compression": 3,
-                "n2_max_rounds": 30,
-                "n3_rounds_after_compression": 10,
-                "n4_token_limit": 120000,
-                "n5_token_compression_ratio": 0.6,
+                "conserved_rounds": 3,
+                "max_rounds": 30,
+                "rounds_after_compression": 10,
+                "token_limit": 120000,
+                "token_compression_ratio": 0.6,
             },
         }
-        (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        global_config = {key: value for key, value in config.items() if key != "provider"}
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(global_config),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "provider": config["provider"]}),
+            "utf-8",
+        )
         for tier in ("seven_days", "one_month", "half_year", "permanent"):
             folder = root / "users" / "alice" / "improve" / tier
             folder.mkdir(parents=True)
@@ -193,16 +200,76 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(build_prompt_bundle(root, "alice", config).sections, ())
         self.populate_all_sections(root)
         bundle = build_prompt_bundle(root, "alice", config)
-        self.assertEqual(tuple(section.name for section in bundle.sections), PROMPT_SECTION_ORDER)
+        self.assertEqual(
+            tuple(section.name for section in bundle.sections),
+            tuple(name for name in PROMPT_SECTION_ORDER if name != "kemo_graph"),
+        )
         self.assertEqual(bundle.sections[-1].name, "perception")
         self.assertEqual(bundle.text.count("[perception]"), 1)
 
+    def test_kemo_graph_replaces_direct_knowledge_and_memory_injection(self) -> None:
+        _, root, config = self.make_root()
+        self.populate_all_sections(root)
+        config["kemo_graph"] = {"enabled": True}
+
+        def graph_loader(*_args, **kwargs):
+            self.assertTrue(kwargs["replaces_knowledge"])
+            self.assertTrue(kwargs["replaces_memory"])
+            return KemoGraphPromptContext(
+                requested=True,
+                connected=True,
+                status="connected",
+                text="GRAPH_RETRIEVAL_RESULT",
+            )
+
+        bundle = build_prompt_bundle(
+            root,
+            "alice",
+            config,
+            graph_context_loader=graph_loader,
+        )
+        names = tuple(section.name for section in bundle.sections)
+        self.assertIn("kemo_graph", names)
+        self.assertNotIn("knowledge_index", names)
+        self.assertNotIn("permanent_memory", names)
+        self.assertNotIn("important_memory", names)
+        self.assertFalse(any(name.startswith("temporary_memory:") for name in names))
+        self.assertIn("GRAPH_RETRIEVAL_RESULT", bundle.text)
+        self.assertNotIn("INDEX", bundle.text)
+        self.assertNotIn("IMPORTANT", bundle.text)
+        self.assertEqual(bundle.memory_ids, ())
+        self.assertEqual(bundle.memory_files, ())
+
+    def test_plugin_whitelist_filters_prompt_manifests(self) -> None:
+        _, root, config = self.make_root()
+        self.write_plugin(root, "clock")
+        self.write_plugin(root, "weather")
+
+        unrestricted_bundle = build_prompt_bundle(root, "alice", config)
+        unrestricted_plugins = next(
+            section.content
+            for section in unrestricted_bundle.sections
+            if section.name == "plugins"
+        )
+        self.assertIn("clock", unrestricted_plugins)
+        self.assertIn("weather", unrestricted_plugins)
+
+        config["plugins"] = {"whitelist": ["clock"]}
+        filtered_bundle = build_prompt_bundle(root, "alice", config)
+        filtered_plugins = next(
+            section.content
+            for section in filtered_bundle.sections
+            if section.name == "plugins"
+        )
+        self.assertIn("clock", filtered_plugins)
+        self.assertNotIn("weather", filtered_plugins)
+
     def test_config_defaults_switches_limits_and_search_rejection(self) -> None:
         defaults = parse_prompt_settings({})
-        self.assertEqual(defaults.temporary_memory_limits["seven_days"], 3)
-        self.assertEqual(defaults.char_limits["knowledge_index"], 8000)
-        disabled = parse_prompt_settings({"prompt": {"include_user_soul": False}})
-        self.assertFalse(disabled.include_user_soul)
+        self.assertEqual(defaults.temporary_memory_limits["seven_days"], 100)
+        self.assertEqual(defaults.char_limits["task_plan"], 6000)
+        with self.assertRaisesRegex(PromptConfigError, "已移除"):
+            parse_prompt_settings({"prompt": {"include_user_soul": False}})
         with self.assertRaises(PromptConfigError):
             parse_prompt_settings({"prompt": {"char_limits": {"perception": -1}}})
         with self.assertRaisesRegex(PromptConfigError, "未知项"):
@@ -210,23 +277,19 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(PromptConfigError, "暂不支持"):
             parse_prompt_settings({"prompt": {"injection_mode": {"knowledge_index": "search"}}})
 
-    def test_user_prompt_override_deep_merges_and_include_switches_apply(self) -> None:
+    def test_user_prompt_override_deep_merges_and_base_sections_are_always_on(self) -> None:
         _, root, config = self.make_root()
         (root / "config" / "global_soul.md").write_text("GLOBAL", "utf-8")
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
         (root / "agents.md").write_text("AGENTS", "utf-8")
         (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
-        config["prompt"] = {"char_limits": {"knowledge_index": 100, "perception": 200}}
+        config["prompt"] = {"char_limits": {"perception": 200}}
         (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
         (root / "users" / "alice" / "user_config.json").write_text(
             json.dumps(
                 {
                     "prompt": {
-                        "include_global_soul": False,
-                        "include_user_soul": False,
-                        "include_agents_manual": False,
-                        "include_important_memory": False,
-                        "char_limits": {"knowledge_index": 7},
+                        "char_limits": {"task_plan": 7},
                     }
                 }
             ),
@@ -234,9 +297,13 @@ class PromptPipelineTests(unittest.TestCase):
         )
         merged = load_config("alice", root)
         settings = parse_prompt_settings(merged)
-        self.assertEqual(settings.char_limits["knowledge_index"], 7)
+        self.assertEqual(settings.char_limits["task_plan"], 7)
         self.assertEqual(settings.char_limits["perception"], 200)
-        self.assertEqual(build_prompt_bundle(root, "alice", merged).sections, ())
+        names = [section.name for section in build_prompt_bundle(root, "alice", merged).sections]
+        self.assertEqual(
+            names,
+            ["user_soul", "global_soul", "agents_manual", "important_memory"],
+        )
 
     def test_natural_sort_and_skill_description_boundary(self) -> None:
         self.assertLess(natural_path_key("file2.md"), natural_path_key("file10.md"))
@@ -300,7 +367,6 @@ class PromptPipelineTests(unittest.TestCase):
             {
                 "skills": {
                     "shared_whitelist": ["development/python", "missing/shared"],
-                    "user_whitelist": ["missing/user"],
                 },
                 "expand": {
                     "global_whitelist": ["keep", "missing/expand"],
@@ -315,7 +381,7 @@ class PromptPipelineTests(unittest.TestCase):
 
         self.assertIn("SHARED_KEEP", bundle.text)
         self.assertNotIn("SHARED_DROP", bundle.text)
-        self.assertNotIn("USER_DROP", bundle.text)
+        self.assertIn("USER_DROP", bundle.text)
         self.assertIn("GLOBAL_KEEP", bundle.text)
         self.assertNotIn("GLOBAL_DROP", bundle.text)
         self.assertIn("USER_EXPAND", bundle.text)
@@ -333,7 +399,7 @@ class PromptPipelineTests(unittest.TestCase):
             ["missing/shared"],
         )
         self.assertEqual(
-            diagnostics["skills"]["user"]["filtered"],
+            diagnostics["skills"]["user"]["selected"],
             ["private"],
         )
         self.assertEqual(
@@ -415,6 +481,7 @@ class PromptPipelineTests(unittest.TestCase):
             ],
         )
         config["prompt"] = {}
+        config["memory"] = {}
         config["memory"]["temporary_injection_limits"] = {"seven_days": 2}
         config["memory"]["important_memory_max_chars"] = 4
         (root / "users" / "alice" / "memory_temporary_important.md").write_text("IMPORTANT", "utf-8")
@@ -603,8 +670,8 @@ class PromptPipelineTests(unittest.TestCase):
     def test_fixed_prompt_over_budget_fails_before_provider(self) -> None:
         _, root, config = self.make_root()
         (root / "config" / "global_soul.md").write_text("X" * 1000, "utf-8")
-        config["agents"]["n4_token_limit"] = 40
-        config["agents"]["n5_token_compression_ratio"] = 0.5
+        config["agents"]["token_limit"] = 40
+        config["agents"]["token_compression_ratio"] = 0.5
         (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
         provider = CaptureProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):

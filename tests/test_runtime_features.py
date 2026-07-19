@@ -17,7 +17,7 @@ from events import RunEvent
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.engine import compress_context, context_status, handle_request, iter_request_events
 from run.history import find_window, load_window
-from run.tools import discover_tools, execute_tool
+from run.tools import apply_runtime_tool_policy, discover_tools, execute_tool
 
 
 class ScriptedProvider:
@@ -49,22 +49,23 @@ class RuntimeFeatureTests(unittest.TestCase):
             root / "users" / "alice" / "user_skills" / "user_create",
         ):
             path.mkdir(parents=True, exist_ok=True)
+        provider = {
+            "type": "kemo",
+            "base_url": "http://127.0.0.1:1/v1",
+            "api_key_env": "TEST_KEMO_KEY",
+            "model": "mock",
+            "stream": stream,
+        }
         (root / "config" / "global_config.json").write_text(
             json.dumps(
-                {
-                    "provider": {
-                        "type": "kemo",
-                        "base_url": "http://127.0.0.1:1/v1",
-                        "api_key_env": "TEST_KEMO_KEY",
-                        "model": "mock",
-                        "stream": stream,
-                    },
-                    "tools": {"enabled": True, "timeout": 2, "max_iterations": 4},
-                }
+                {"tools": {"enabled": True, "timeout": 2, "max_iterations": 4}}
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "provider": provider}),
+            "utf-8",
+        )
         project_agents = Path(__file__).resolve().parents[1] / "agents"
         shutil.copytree(project_agents, root / "agents")
         return temporary, root
@@ -93,7 +94,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         prefix = "async " if async_tool else ""
         await_line = "    await __import__('asyncio').sleep(0)\n" if async_tool else ""
         (directory / "tool.py").write_text(
-            f"{prefix}def run(value, *, context):\n{await_line}    return {{'value': value, 'source': '{source_value}', 'user': context['user'], 'knowledge_enabled': context.get('knowledge_enabled'), 'knowledge_scopes': context.get('knowledge_scopes')}}\n",
+            f"{prefix}def run(value, *, context):\n{await_line}    return {{'value': value, 'source': '{source_value}', 'user': context['user'], 'knowledge_scopes': context.get('knowledge_scopes')}}\n",
             "utf-8",
         )
 
@@ -125,6 +126,77 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(sync["source"], "sync")
         self.assertEqual(async_result["source"], "async")
 
+    def test_history_search_registration_obeys_memory_switch(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "history_search", "history")
+        self.write_tool(root / "plugins", "other_tool", "other")
+        registry = apply_runtime_tool_policy(
+            discover_tools(root, "alice"),
+            {"memory": {"history_read_enabled": False}},
+        )
+        self.assertEqual(set(registry.tools), {"other_tool"})
+        self.assertEqual(
+            {manifest.tool["name"] for manifest in registry.plugin_manifests},
+            {"other_tool"},
+        )
+
+    def test_plugin_whitelist_filters_registry_and_graph_replaces_knowledge_tool(self) -> None:
+        _, root = self.make_root()
+        for name in ("knowledge_search", "clock", "weather"):
+            self.write_tool(root / "plugins", name, name)
+
+        unrestricted = apply_runtime_tool_policy(
+            discover_tools(root, "alice"),
+            {"plugins": {"whitelist": []}},
+        )
+        self.assertEqual(
+            set(unrestricted.tools),
+            {"knowledge_search", "clock", "weather"},
+        )
+
+        filtered = apply_runtime_tool_policy(
+            discover_tools(root, "alice"),
+            {"plugins": {"whitelist": ["knowledge_search", "clock"]}},
+        )
+        self.assertEqual(set(filtered.tools), {"knowledge_search", "clock"})
+        self.assertEqual(
+            {manifest.tool["name"] for manifest in filtered.plugin_manifests},
+            {"knowledge_search", "clock"},
+        )
+
+        graph_replaced = apply_runtime_tool_policy(
+            discover_tools(root, "alice"),
+            {
+                "plugins": {"whitelist": []},
+                "kemo_graph": {"enabled": True},
+            },
+        )
+        self.assertNotIn("knowledge_search", graph_replaced.tools)
+        self.assertEqual(set(graph_replaced.tools), {"clock", "weather"})
+
+    def test_tavily_tool_is_exposed_only_when_api_key_is_available(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "web_search", "search")
+        self.write_tool(root / "plugins", "clock", "clock")
+
+        with patch.dict(os.environ, {"TAVILY_API_KEY": ""}, clear=False):
+            unavailable = apply_runtime_tool_policy(
+                discover_tools(root, "alice"),
+                {},
+            )
+        self.assertEqual(set(unavailable.tools), {"clock"})
+
+        with patch.dict(
+            os.environ,
+            {"TAVILY_API_KEY": "configured-for-test"},
+            clear=False,
+        ):
+            available = apply_runtime_tool_policy(
+                discover_tools(root, "alice"),
+                {},
+            )
+        self.assertEqual(set(available.tools), {"web_search", "clock"})
+
     def test_main_tool_context_receives_effective_knowledge_policy(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "policy_probe", "probe")
@@ -151,11 +223,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         user_config.write_text(
             json.dumps(
                 {
-                    "knowledge": {
-                        "enabled": True,
-                        "use_shared": False,
-                        "use_global": True,
-                    }
+                    "schema_version": 1,
+                    "provider": json.loads(user_config.read_text("utf-8"))["provider"],
+                    "knowledge": {"use_shared": False, "use_global": True}
                 }
             ),
             "utf-8",
@@ -175,7 +245,15 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
 
             user_config.write_text(
-                json.dumps({"knowledge": {"enabled": False}}),
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "provider": json.loads(user_config.read_text("utf-8"))[
+                            "provider"
+                        ],
+                        "knowledge": {"use_shared": True, "use_global": False},
+                    }
+                ),
                 "utf-8",
             )
             disabled_events = list(
@@ -201,10 +279,10 @@ class RuntimeFeatureTests(unittest.TestCase):
             for event in disabled_events
             if event.type == "tool_call_result"
         )
-        self.assertTrue(enabled_result["knowledge_enabled"])
+        self.assertNotIn("knowledge_enabled", enabled_result)
         self.assertEqual(enabled_result["knowledge_scopes"], ["user", "global"])
-        self.assertFalse(disabled_result["knowledge_enabled"])
-        self.assertEqual(disabled_result["knowledge_scopes"], [])
+        self.assertNotIn("knowledge_enabled", disabled_result)
+        self.assertEqual(disabled_result["knowledge_scopes"], ["user", "shared"])
 
     def test_tool_loop_and_transaction_commit(self) -> None:
         _, root = self.make_root()
@@ -355,6 +433,93 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
+
+    def test_max_per_round_commits_and_returns_confirmation_signal(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        global_path = root / "config" / "global_config.json"
+        config = json.loads(global_path.read_text("utf-8"))
+        config["tools"]["max_per_round"] = 1
+        global_path.write_text(json.dumps(config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("first", "lookup", {"value": "a"}),
+                        ToolCall("second", "lookup", {"value": "b"}),
+                    ],
+                    usage=Usage(),
+                )
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "soft-limit",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+        results = [event for event in events if event.type == "tool_call_result"]
+        self.assertEqual(
+            [event.metadata["status"] for event in results],
+            ["completed", "deferred"],
+        )
+        self.assertTrue(events[-1].metadata["awaiting_tool_confirmation"])
+        self.assertEqual(events[-1].metadata["tool_pause"]["limit"], 1)
+        window = load_window(find_window(root, "alice", "cli", "soft-limit"))
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(
+            [call["status"] for call in window["tool"]["rounds"][0]["calls"]],
+            ["completed", "deferred"],
+        )
+
+    def test_consecutive_failures_temporarily_remove_tool_schema(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "unstable", "plugin")
+        (root / "plugins" / "unstable" / "tool.py").write_text(
+            "def run(value, *, context):\n    raise RuntimeError('boom')\n",
+            "utf-8",
+        )
+        global_path = root / "config" / "global_config.json"
+        config = json.loads(global_path.read_text("utf-8"))
+        config["history"] = {"consecutive_tool_fail_limit": 2}
+        global_path.write_text(json.dumps(config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(text="", tool_calls=[ToolCall("f1", "unstable", {"value": "1"})]),
+                ChatResponse(text="", tool_calls=[ToolCall("f2", "unstable", {"value": "2"})]),
+                ChatResponse(text="", tool_calls=[ToolCall("f3", "unstable", {"value": "3"})]),
+                ChatResponse(text="changed approach"),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "failure-limit",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+        results = [event for event in events if event.type == "tool_call_result"]
+        self.assertEqual(
+            [event.metadata["status"] for event in results],
+            ["failed", "failed", "temporarily_unavailable"],
+        )
+        self.assertTrue(results[1].result["error"]["temporarily_unavailable"])
+        self.assertIsNone(provider.requests[2].tools)
+        self.assertEqual(events[-1].type, "done")
 
     def test_context_status_and_manual_compress_do_not_add_round(self) -> None:
         _, root = self.make_root()

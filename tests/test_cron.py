@@ -29,9 +29,10 @@ CONFIG = {
         "base_url": "http://127.0.0.1:1/v1",
         "api_key_env": "TEST_CRON_KEY",
         "model": "mock",
+        "stream": False,
     },
     "tools": {"enabled": True, "timeout": 5},
-    "cron": {"enabled": True, "poll_interval": 1, "auto_start": False},
+    "cron": {"enabled": True, "poll_interval": 1},
 }
 
 
@@ -61,7 +62,10 @@ def _make_root(users: list[str]) -> tuple[tempfile.TemporaryDirectory, Path]:
     (root / "agents.md").write_text("AGENTS", "utf-8")
     for user in users:
         (root / "users" / user / "task_cron").mkdir(parents=True)
-        (root / "users" / user / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / user / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "provider": CONFIG["provider"]}),
+            "utf-8",
+        )
     return temporary, root
 
 

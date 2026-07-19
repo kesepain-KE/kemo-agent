@@ -83,7 +83,6 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "api_key_env": "TEST_AGENT_KEY",
                 "model": "main-model",
             },
-            "agent_models": {"cheap": {"model": "cheap-model"}},
         }
 
     def runner(self, provider: MockProvider) -> AgentRunner:
@@ -117,7 +116,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         finally:
             object.__setattr__(definition, "enabled", True)
 
-    def test_runner_uses_explicit_input_and_model_profile(self) -> None:
+    def test_runner_uses_explicit_input_and_inherits_main_model(self) -> None:
         provider = MockProvider()
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
@@ -126,7 +125,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(result.data["narrative"], "summary")
         request = provider.requests[0]
-        self.assertEqual(request.model, "cheap-model")
+        self.assertEqual(request.model, "main-model")
         self.assertEqual(len(request.messages), 2)
         self.assertNotIn("main conversation", json.dumps(request.messages, ensure_ascii=False))
         self.assertEqual(json.loads(request.messages[1]["content"])["trigger"], "manual")

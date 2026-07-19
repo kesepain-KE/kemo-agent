@@ -17,8 +17,7 @@ from run.memory import MemoryStore
 TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
-    "half_year": {"days": 180, "upgrade_threshold": 60, "next": "permanent"},
-    "permanent": {"days": None, "upgrade_threshold": None, "next": None},
+    "half_year": {"days": 180, "upgrade_threshold": 60, "next": None},
 }
 
 
@@ -39,19 +38,23 @@ class MemoryEngineTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "config").mkdir()
         (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        provider = {
+            "type": "kemo",
+            "base_url": "http://127.0.0.1:1/v1",
+            "api_key_env": "TEST_MEMORY_KEY",
+            "model": "mock",
+            "stream": False,
+        }
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "provider": provider}),
+            "utf-8",
+        )
         (root / "config" / "global_config.json").write_text(
             json.dumps(
                 {
-                    "provider": {
-                        "type": "kemo", "base_url": "http://127.0.0.1:1/v1",
-                        "api_key_env": "TEST_MEMORY_KEY", "model": "mock",
-                    },
                     "tools": {"enabled": False},
                     "memory": {
                         "tiers": TIERS,
-                        "extraction_enabled": True,
-                        "injection_enabled": True,
                     },
                 }
             ),
@@ -67,8 +70,6 @@ class MemoryEngineTests(unittest.TestCase):
         config = {
             "memory": {
                 "tiers": TIERS,
-                "extraction_enabled": True,
-                "injection_enabled": True,
             }
         }
         store = MemoryStore(root, "alice", config)

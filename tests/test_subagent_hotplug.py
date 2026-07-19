@@ -285,13 +285,11 @@ class SubAgentHotPlugTests(unittest.TestCase):
         config.update(
             {
                 "knowledge": {
-                    "enabled": False,
                     "use_shared": False,
                     "use_global": False,
                 },
                 "skills": {
                     "shared_whitelist": ["main-denied"],
-                    "user_whitelist": ["main-denied"],
                 },
                 "expand": {
                     "global_whitelist": ["main-denied"],

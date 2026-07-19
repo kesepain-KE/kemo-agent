@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 from provider.factory import create_provider
 from provider.schema import ChatRequest, ProviderAuthError, ProviderError
-from run.config import deep_merge, load_config, provider_runtime_config
+from run.config import (
+    ConfigError,
+    deep_merge,
+    load_config,
+    provider_runtime_config,
+    resolve_capability_model,
+)
 from run.history import HistoryError, commit_window, get_or_create_window, load_window
 
 
@@ -108,11 +114,22 @@ class ConfigAndHistoryTests(unittest.TestCase):
         (root / "users" / "alice" / "history").mkdir(parents=True)
         (root / "users" / "bob" / "history").mkdir(parents=True)
         (root / "config" / "global_config.json").write_text(
-            json.dumps({"provider": {"type": "kemo", "timeout": 10}, "nested": {"a": 1, "b": 2}}),
+            json.dumps(
+                {
+                    "provider": {"type": "kemo", "model": "global-model"},
+                    "nested": {"a": 1, "b": 2},
+                }
+            ),
             "utf-8",
         )
         (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"provider": {"timeout": 30}, "nested": {"b": 9}}), "utf-8"
+            json.dumps(
+                {
+                    "provider": {"type": "openai", "model": "user-model"},
+                    "nested": {"b": 9},
+                }
+            ),
+            "utf-8",
         )
         (root / "users" / "bob" / "user_config.json").write_text("{}", "utf-8")
         return temporary, root
@@ -120,8 +137,18 @@ class ConfigAndHistoryTests(unittest.TestCase):
     def test_deep_user_override(self) -> None:
         _, root = self.make_root()
         config = load_config("alice", root)
-        self.assertEqual(config["provider"], {"type": "kemo", "timeout": 30})
+        self.assertEqual(
+            config["provider"],
+            {"type": "openai", "model": "user-model"},
+        )
         self.assertEqual(config["nested"], {"a": 1, "b": 9})
+
+    def test_global_provider_is_not_a_user_fallback(self) -> None:
+        _, root = self.make_root()
+        config = load_config("bob", root)
+        self.assertNotIn("provider", config)
+        with self.assertRaises(ConfigError):
+            provider_runtime_config(config)
 
     def test_dotenv_is_loaded_without_overriding_process_environment(self) -> None:
         _, root = self.make_root()
@@ -141,6 +168,30 @@ class ConfigAndHistoryTests(unittest.TestCase):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "runtime-secret")
         self.assertEqual(provider["base_url"], "https://api.openai.com/v1")
+        self.assertTrue(provider["stream"])
+        self.assertEqual(provider["timeout"], 120.0)
+
+    def test_inline_api_key_and_multimodal_model_precedence(self) -> None:
+        config = {
+            "provider": {
+                "type": "kemo",
+                "model": "chat-model",
+                "api_key": "inline-key",
+                "api_key_env": "UNIT_KEY",
+            },
+            "multimodal_models": {
+                "vision": "vision-model",
+                "image_generation": "",
+            },
+        }
+        with patch.dict(os.environ, {"UNIT_KEY": "environment-key"}, clear=False):
+            provider = provider_runtime_config(config)
+        self.assertEqual(provider["api_key"], "inline-key")
+        self.assertEqual(resolve_capability_model(config, "vision"), "vision-model")
+        self.assertEqual(
+            resolve_capability_model(config, "image_generation"),
+            "chat-model",
+        )
 
     def test_provider_base_url_environment_fallback_and_explicit_precedence(self) -> None:
         env = {

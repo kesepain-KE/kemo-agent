@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
-from run.config import load_config
 from run.cron_store import CronStore, normalize_task
 from run.history import commit_window, empty_window, load_window
 from run.task_plan_store import PlanStore, normalize_plan
@@ -113,11 +112,13 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
 
-    def test_auth_config_rejects_partial_or_unsigned_configuration(self) -> None:
+    def test_auth_config_rejects_partial_password_and_generates_session_secret(self) -> None:
         with self.assertRaisesRegex(WebAuthConfigError, "必须同时配置"):
             WebAuthConfig(username="alice")
-        with self.assertRaisesRegex(WebAuthConfigError, "SESSION_SECRET"):
-            WebAuthConfig(access_token="token")
+        generated = WebAuthConfig(access_token="token")
+        another = WebAuthConfig(access_token="token")
+        self.assertEqual(len(generated.session_secret), 64)
+        self.assertNotEqual(generated.session_secret, another.session_secret)
         disabled = WebAuthConfig()
         self.assertFalse(disabled.enabled)
         self.assertEqual(disabled.public_summary()["enabled"], False)
@@ -143,11 +144,13 @@ class WebBackendTests(unittest.TestCase):
                     "/api/chat",
                     json={"user": "alice", "session_id": "s1", "prompt": "hello"},
                 )
-                wrong = await client.post(
-                    "/api/auth/bootstrap", json={"token": "wrong"}
+                header_only = await client.get(
+                    "/api/users",
+                    headers={"Authorization": "Bearer token-secret"},
                 )
-                bootstrap = await client.post(
-                    "/api/auth/bootstrap", json={"token": "token-secret"}
+                wrong = await client.get("/api/auth/status?token=wrong")
+                bootstrap = await client.get(
+                    "/api/auth/status?token=token-secret"
                 )
                 allowed = await client.get("/api/users")
                 settings = await client.get("/api/users/alice/settings")
@@ -164,6 +167,7 @@ class WebBackendTests(unittest.TestCase):
                     "health": health,
                     "denied": denied,
                     "denied_chat": denied_chat,
+                    "header_only": header_only,
                     "wrong": wrong,
                     "bootstrap": bootstrap,
                     "allowed": allowed,
@@ -184,12 +188,14 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(result["denied_chat"].status_code, 401)
         self.assertTrue(result["denied_chat"].headers["content-type"].startswith("application/json"))
         self.assertIsNone(fake.cancel_event)
+        self.assertEqual(result["header_only"].status_code, 401)
         self.assertEqual(result["wrong"].status_code, 401)
         self.assertEqual(result["bootstrap"].status_code, 200)
         cookie = result["bootstrap"].headers["set-cookie"]
         self.assertIn("kemo_test_session=", cookie)
         self.assertIn("httponly", cookie.lower())
         self.assertIn("samesite=lax", cookie.lower())
+        self.assertIn("max-age=7200", cookie.lower())
         self.assertEqual(result["allowed"].status_code, 200)
         self.assertTrue(result["settings"].json()["authentication"]["enabled"])
         for secret in ("token-secret", "password-secret", "session-secret"):
@@ -200,110 +206,53 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(result["login"].status_code, 200)
         self.assertEqual(result["allowed_by_password"].status_code, 200)
 
-    def test_authenticated_config_edit_is_redacted_atomic_and_conflict_safe(self) -> None:
+    def test_user_config_api_is_redacted_and_read_only(self) -> None:
         _, root = self.make_root()
-        (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        user_config_path = root / "users" / "alice" / "user_config.json"
+        user_config_path.write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "provider": {
                         "type": "kemo",
                         "base_url": "http://127.0.0.1:8741/v1",
-                        "model": "global-model",
-                        "timeout": 120,
+                        "model": "old-model",
+                        "api_key": "disk-secret",
                         "stream": False,
                     },
-                    "tools": {"enabled": True, "max_iterations": 8, "timeout": 60},
                 }
             ),
             "utf-8",
         )
-        user_config_path = root / "users" / "alice" / "user_config.json"
-        user_config_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "provider": {"model": "old-model", "api_key": "disk-secret"},
-                }
-            ),
-            "utf-8",
-        )
+        original = user_config_path.read_bytes()
         app = create_app(
-            service=WebRunService(root, config_write_enabled=True),
-            auth_config=WebAuthConfig(
-                access_token="edit-token",
-                session_secret="session-secret",
-            ),
+            service=WebRunService(root),
+            auth_config=WebAuthConfig(access_token="view-token"),
         )
 
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 denied = await client.get("/api/users/alice/config/full")
-                await client.post("/api/auth/bootstrap", json={"token": "edit-token"})
+                await client.get("/api/auth/status?token=view-token")
                 loaded = await client.get("/api/users/alice/config/full")
-                payload = loaded.json()
-                candidate = payload["config"]
-                candidate["provider"]["model"] = "new-model"
-                saved = await client.put(
+                blocked = await client.put(
                     "/api/users/alice/config",
-                    json={"config": candidate, "etag": payload["etag"]},
+                    json={"config": {"schema_version": 1}},
                 )
-                stale = await client.put(
-                    "/api/users/alice/config",
-                    json={"config": candidate, "etag": payload["etag"]},
-                )
-                invalid_candidate = saved.json()["config"]
-                invalid_candidate["schema_version"] = 2
-                invalid = await client.put(
-                    "/api/users/alice/config",
-                    json={"config": invalid_candidate, "etag": saved.json()["etag"]},
-                )
-                return denied, loaded, saved, stale, invalid
+                return denied, loaded, blocked
 
-        denied, loaded, saved, stale, invalid = asyncio.run(invoke())
+        denied, loaded, blocked = asyncio.run(invoke())
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(loaded.status_code, 200)
-        self.assertTrue(loaded.json()["write_enabled"])
         self.assertEqual(loaded.json()["config"]["provider"]["api_key"], "***")
         self.assertNotIn("disk-secret", loaded.text)
-        self.assertEqual(saved.status_code, 200)
-        self.assertEqual(stale.status_code, 409)
-        self.assertEqual(invalid.status_code, 400)
-        stored = json.loads(user_config_path.read_text("utf-8"))
-        self.assertEqual(stored["provider"]["api_key"], "disk-secret")
-        self.assertEqual(stored["provider"]["model"], "new-model")
-        self.assertEqual(load_config("alice", root)["provider"]["model"], "new-model")
-
-    def test_config_write_stays_closed_without_web_authentication(self) -> None:
-        _, root = self.make_root()
-        (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "provider": {
-                        "type": "kemo",
-                        "base_url": "http://127.0.0.1:8741/v1",
-                        "model": "model",
-                    },
-                }
-            ),
-            "utf-8",
+        self.assertEqual(
+            set(loaded.json()),
+            {"user", "config", "redacted_paths"},
         )
-        path = root / "users" / "alice" / "user_config.json"
-        path.write_text('{"schema_version":1}', "utf-8")
-        app = create_app(service=WebRunService(root, config_write_enabled=True))
-        loaded = self.request(app, "GET", "/api/users/alice/config/full")
-        blocked = self.request(
-            app,
-            "PUT",
-            "/api/users/alice/config",
-            json={"config": loaded.json()["config"], "etag": loaded.json()["etag"]},
-        )
-        self.assertFalse(loaded.json()["write_enabled"])
-        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(blocked.status_code, 405)
+        self.assertEqual(user_config_path.read_bytes(), original)
 
     def test_cookie_names_isolate_web_instances(self) -> None:
         first = create_app(
@@ -329,9 +278,7 @@ class WebBackendTests(unittest.TestCase):
             async with httpx.AsyncClient(
                 transport=first_transport, base_url="http://test"
             ) as first_client:
-                login = await first_client.post(
-                    "/api/auth/bootstrap", json={"token": "token"}
-                )
+                login = await first_client.get("/api/auth/status?token=token")
                 cookie = first_client.cookies.get("instance_one")
             async with httpx.AsyncClient(
                 transport=second_transport, base_url="http://test"
@@ -753,35 +700,39 @@ class WebBackendTests(unittest.TestCase):
             json.dumps(
                 {
                     "schema_version": 1,
+                    "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
+                    "kemo_graph": {"enabled": True},
+                    "memory": {"history_read_enabled": True},
+                    "task_plan": {"auto_accept": False, "max_steps": 8},
+                    "cron": {"enabled": True},
+                    "agents": {"max_rounds": 30, "token_limit": 100000},
+                }
+            ),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
                     "provider": {
                         "type": "openai",
                         "base_url": "https://example.test/v1",
                         "model": "test-model",
                         "api_key": "super-secret",
-                        "timeout": 30,
                     },
-                    "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
                     "knowledge": {
-                        "enabled": True,
                         "use_shared": False,
                         "use_global": True,
-                        "max_items": 3,
-                        "max_chars": 2000,
                     },
                     "skills": {
                         "shared_whitelist": ["observer"],
-                        "user_whitelist": [],
                     },
                     "expand": {
                         "global_whitelist": [],
                         "shared_whitelist": [],
                     },
                     "perception": {"global_whitelist": ["runtime"]},
-                    "kemo_graph": {"enabled": True},
-                    "memory": {"extraction_enabled": True, "injection_enabled": True},
-                    "task_plan": {"auto_accept": False, "max_steps": 8},
-                    "cron": {"enabled": True, "auto_start": False},
-                    "agents": {"n4_token_limit": 100000},
+                    "plugins": {"whitelist": []},
                 }
             ),
             "utf-8",
@@ -949,7 +900,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["active_for_main_agent"] for item in knowledge.json()["documents"]],
-            [True, False, True],
+            [False, False, False],
         )
         self.assertEqual(
             knowledge.json()["source_policy"]["knowledge"]["effective_scopes"],
@@ -988,7 +939,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertNotIn('"project"', sense.text)
 
         prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
-        self.assertEqual(len(prompt.json()["sections"]), 14)
+        self.assertEqual(len(prompt.json()["sections"]), 15)
         self.assertNotIn("safe memory preview", prompt.text)
         self.assertIn("expand", prompt.json())
         memory = self.request(app, "GET", "/api/users/alice/memory/summary")

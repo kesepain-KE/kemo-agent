@@ -29,8 +29,7 @@ CONFIG = {
         "tiers": {
             "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
             "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
-            "half_year": {"days": 180, "upgrade_threshold": 60, "next": "permanent"},
-            "permanent": {"days": None, "upgrade_threshold": None, "next": None},
+            "half_year": {"days": 180, "upgrade_threshold": 60, "next": None},
         },
     }
 }
