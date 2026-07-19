@@ -78,6 +78,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 资源 | 路径 | 说明 |
 |------|------|------|
 | 全局配置 | `config/global_config.json` | 框架全局默认值 |
+| 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置 |
 | 全局人格 | `config/global_soul.md` | 安全底线，不可覆盖 |
 | 用户配置 | `users/<name>/user_config.json` | 覆盖全局配置 |
 | 用户人格 | `users/<name>/user_soul.md` | 用户偏好与风格 |
@@ -119,7 +120,9 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 ## 4. 用户配置结构
 
-用户配置文件 `users/<name>/user_config.json` 通过 `deep_merge` 覆盖全局配置 `config/global_config.json`。
+用户配置文件 `users/<name>/user_config.json` 覆盖全局配置 `config/global_config.json`。
+`provider`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins`
+是用户专属段，只从用户配置读取，不允许全局配置兜底；其他框架段按对象深合并。
 
 ### 字段说明
 
@@ -131,14 +134,16 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `task_plan` | object | 任务计划配置 |
 | `tools` | object | 工具开关、超时、最大循环次数 |
 | `history` | object | 历史保留策略 |
-| `prompt` | object | prompt 注入开关和字符上限 |
+| `prompt` | object | prompt 字符上限和注入模式；人格、手册和记忆基础段默认启用 |
 | `knowledge` | object | 知识库检索配置 |
-| `memory` | object | 记忆挡位、提取、注入配置 |
-| `agent_models` | object | 子代理模型档位 |
+| `skills` | object | 共享 Prompt 技能白名单；用户技能始终允许 |
+| `expand` | object | 全局/共享 Expand 白名单 |
+| `perception` | object | 全局感知模块白名单 |
+| `kemo_graph` | object | 知识与记忆 Prompt 来源替换器 |
+| `plugins` | object | 可执行插件白名单 |
+| `memory` | object | 记忆挡位、注入上限与历史读取工具开关 |
 | `agent_runtime` | object | 子代理运行时参数 |
 | `cron` | object | cron 调度配置 |
-| `web` | object | Web 服务配置 |
-| `message` | object | 消息路由配置 |
 | `agents` | object | 上下文管理参数（轮次/token 上限等） |
 
 ### 主智能体来源控制
@@ -147,17 +152,20 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 | 配置 | 语义 |
 |------|------|
-| `knowledge.enabled` | 总开关；false 时索引注入、正文搜索、`knowledge_search` 和未来图谱调用全部为空 |
-| `knowledge.use_shared` | 是否加入共享知识范围 |
-| `knowledge.use_global` | 是否加入全局知识范围；总开关开启时用户知识始终有效 |
+| `knowledge.use_shared` | 是否加入共享知识范围；知识管线默认启用 |
+| `knowledge.use_global` | 是否加入全局知识范围；用户知识始终有效 |
+| `plugins.whitelist` | 插件白名单；同时过滤 Provider 工具 schema 与插件 Prompt 清单 |
 | `skills.shared_whitelist` | 共享 Prompt 技能白名单 |
-| `skills.user_whitelist` | 当前用户 Prompt 技能白名单 |
 | `expand.global_whitelist` | 全局 Expand 白名单 |
 | `expand.shared_whitelist` | 共享 Expand 白名单；用户 Expand 始终按当前用户目录动态解析 |
 | `perception.global_whitelist` | `global_sense/` 直接子目录模块白名单 |
-| `kemo_graph.enabled` | 独立图谱项目连接请求；当前仅返回 `disabled` 或 `not_connected` |
+| `kemo_graph.enabled` | 启用图谱替换边界；替代适用的知识索引和全部记忆碎片直接注入 |
 
 主智能体白名单 `[]` 表示全量允许；非空数组按资源 ID 精确匹配。技能 ID 支持相对路径（如 `development/python`）。`"*"` 不属于主配置协议。
+
+`knowledge.enabled` 与 `skills.user_whitelist` 已从配置契约删除，继续提供会被判定为未知字段。
+`kemo_graph.enabled=true` 时不会自动启动外部项目；未建立连接接口时明确返回
+`not_connected`，并且不回退注入已被替换的原始知识或记忆内容。
 
 这些字段不控制子代理。子代理只服从各自 `agent-config.json`，不与主智能体策略求交集。
 
@@ -170,9 +178,9 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `api_key` | string | 用户独立密钥（优先读取），为空时读环境变量兜底 |
 | `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，openai 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
-| `timeout` | number | 请求超时秒数，默认 120 |
-| `stream` | bool | 是否流式输出 |
-| `headers` | object | 额外请求头 |
+| `stream` | bool | 是否流式输出，默认 true |
+
+Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
 
 ### multimodal_models 子字段（设计预留）
 
@@ -203,8 +211,12 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
 - 不重复执行已经产生副作用的工具调用（框架层有签名去重）。
-- 工具执行有超时限制（`tools.timeout`，默认 60 秒）。
+- 工具执行有超时限制（`tools.timeout`，默认 240 秒）。
 - 工具循环有最大次数限制（`tools.max_iterations`，默认 8 次）。
+- `tools.max_per_round` 是软上限；达到后提交已执行与延期调用的完整状态，
+  返回等待用户继续的信号。`null` 表示不限。
+- 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
+  Provider 工具 schema 中临时移除；其他工具穿插执行会重置连续失败计数。
 - 用户取消时立即停止，不继续执行后续工具调用。
 - 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout`，不注入主对话历史。
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
@@ -261,11 +273,12 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `agents.n1_recent_rounds_before_tool_compression` | 3 | 最近 N 轮保留完整工具日志 |
-| `agents.n2_max_rounds` | 30 | 最大保留轮次，超出触发压缩 |
-| `agents.n3_rounds_after_compression` | 10 | 压缩后保留的轮次数 |
-| `agents.n4_token_limit` | 120000 | token 上限 |
-| `agents.n5_token_compression_ratio` | 0.6 | 输入预算 = token_limit × ratio |
+| `agents.conserved_rounds` | 3 | 最近 N 轮保留完整工具日志 |
+| `history.recent_full_rounds` | 3 | 最近 N 轮完整历史不被摘要或移除 |
+| `agents.max_rounds` | 80 | 最大保留轮次，超出触发压缩 |
+| `agents.rounds_after_compression` | 20 | 压缩后保留的轮次数 |
+| `agents.token_limit` | 1000000 | token 上限 |
+| `agents.token_compression_ratio` | 0.3 | 输入预算 = token_limit × ratio |
 
 - `input_budget = token_limit × compression_ratio`
 - `output_reserve = token_limit - input_budget`
@@ -286,7 +299,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - `think.json` 中的思考记录
 - `tool.json` 中的工具调用记录
 
-旧轮次的工具日志会被压缩到 `older_tool_log_max_chars`（默认 200 字符）。
+旧轮次工具结果使用代码内建字符上限压缩；该上限不再属于用户配置。
 
 ---
 
@@ -324,7 +337,7 @@ users/<user>/agents/<name>/
 └── agent-config.json
 ```
 
-- `agent.json` 固定使用 `schema_version: 2`，声明名称、描述、执行模式、模型档位、超时、输入/输出 JSON Schema 和写入策略。
+- `agent.json` 固定使用 `schema_version: 2`，声明名称、描述、执行模式、兼容用模型标签、超时、输入/输出 JSON Schema 和写入策略。子代理实际统一继承主模型，不再读取全局模型档位。
 - `agent-config.json` 是运行时强制授权，不是说明文档；它声明公开范围、调用方、插件工具白名单、技能/拓展白名单、知识范围和上下文继承策略。
 - 用户代理的执行器固定为 `builtin:llm`。用户代理目录出现任何 `.py` 文件都会拒绝加载，也不能覆盖内置代理名称。
 - 内置代理的 `executor.py` 只允许由同目录 `agent.json` 显式指定。
@@ -359,7 +372,7 @@ users/<user>/agents/<name>/
 - 计划状态机：pending → running → completed/failed/paused/aborted。
 - 每步完成或失败调用对应状态工具。
 - 计划暂停后等待用户继续，不自动恢复。
-- `task_plan.max_steps` 限制最大步骤数（默认 10）。
+- `task_plan.max_steps` 限制最大步骤数（默认 20）。
 
 ### 定时任务
 
@@ -367,6 +380,8 @@ users/<user>/agents/<name>/
 - 支持类型：`daily`（每日）、`once`（单次）、`recurring`（重复）。
 - `cron.enabled` 控制是否启用调度（默认 true）。
 - `cron.poll_interval` 控制轮询间隔（默认 30 秒）。
+- `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
+  自动管理 Cron、临时记忆生命周期、重要记忆审阅与上下文整理。
 - 任务到期后触发 `agents/time_plan` 子代理，传入 `cli.py` 执行。
 
 ---
@@ -380,17 +395,19 @@ system prompt 按以下固定顺序拼接：
 3. **运行手册** — `agents.md`（本文件）
 4. **插件提示词** — `plugins/*/SKILL.md` 的描述部分
 5. **技能提示词** — 注册全部共享/用户技能后，按主智能体白名单选择描述部分
-6. **知识库索引** — 按 `knowledge.enabled/use_shared/use_global` 选择用户 + 共享 + 全局索引
-7. **永久记忆** — `improve/permanent/`
-8. **临时重要记忆** — `memory_temporary_important.md`
-9. **临时记忆 half_year** — `improve/half_year/`
-10. **临时记忆 one_month** — `improve/one_month/`
-11. **临时记忆 seven_days** — `improve/seven_days/`
-12. **任务计划** — 当前活跃计划的描述
-13. **拓展数据** — 注册 global/shared/user 三层后，过滤 global/shared；当前用户 Expand 全量动态解析
-14. **感知文件** — `global_sense/<module>/**/*.md`，按模块白名单过滤且忽略根目录 Markdown
+6. **知识库索引** — 按 `knowledge.use_shared/use_global` 选择用户 + 共享 + 全局索引
+7. **kemo-graph** — 图谱替换结果或明确的未连接状态；未启用时省略
+8. **永久记忆** — `improve/permanent/`
+9. **临时重要记忆** — `memory_temporary_important.md`
+10. **临时记忆 half_year** — `improve/half_year/`
+11. **临时记忆 one_month** — `improve/one_month/`
+12. **临时记忆 seven_days** — `improve/seven_days/`
+13. **任务计划** — 当前活跃计划的描述
+14. **拓展数据** — 注册 global/shared/user 三层后，过滤 global/shared；当前用户 Expand 全量动态解析
+15. **感知文件** — `global_sense/<module>/**/*.md`，按模块白名单过滤且忽略根目录 Markdown
 
 每段有字符上限配置（`prompt.char_limits`）。知识正文不自动注入，只注入索引；需要正文时使用显式搜索机制或工具。
+图谱替换启用时，适用的知识索引与记忆段和 `kemo_graph` 段互斥，不能同时进入同一个 Prompt。
 
 ---
 
@@ -398,7 +415,7 @@ system prompt 按以下固定顺序拼接：
 
 - 每个请求属于明确的 `user`、`source` 和 `session_id`。
 - 同一用户可共享记忆和知识库，但不同来源与会话的对话历史互相隔离。
-- 不假设拥有未注入的其他会话内容；需要旧对话时使用历史搜索工具。
+- 不假设拥有未注入的其他会话内容；`memory.history_read_enabled=true` 时可使用历史搜索工具。
 - 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。
 - 会话级锁（`_session_lock`）保证同一 user/source/session_id 的请求串行执行。
 
@@ -419,7 +436,7 @@ system prompt 按以下固定顺序拼接：
 
 ### Provider 地址优先级
 
-1. 合并配置中的 `provider.base_url`
+1. 当前 `user_config.json` 中的 `provider.base_url`
 2. `KEMO_BASE_URL` / `OPENAI_BASE_URL`
 3. Provider 类型对应的内置默认地址
 
@@ -428,11 +445,13 @@ system prompt 按以下固定顺序拼接：
 ### Web 启动与认证
 
 - Web 监听参数优先级为：显式 CLI 参数 > `WEB_HOST` / `WEB_PORT` > `127.0.0.1:1357`。
-- `WEB_ACCESS_TOKEN` 启用 Token 认证；`WEB_USERNAME` 与 `WEB_PASSWORD` 必须同时配置。
-- 任一认证方式启用时必须配置 `WEB_SESSION_SECRET`；`WEB_SESSION_COOKIE_NAME` 用于多实例 Cookie 隔离。
+- `WEB_ACCESS_TOKEN` 启用 Token 认证；访问 URL 使用 `?token=...` 建立会话，Web 不读取 `Authorization: Bearer`。
+- `WEB_USERNAME` 与 `WEB_PASSWORD` 必须同时配置；它们表示 Web 页面使用者，与内部多用户目录无关。
+- `WEB_SESSION_SECRET` 为空时启动过程自动生成 64 字符随机密钥；签名会话默认有效期 2 小时。
+- `WEB_SESSION_COOKIE_NAME` 用于多实例 Cookie 隔离。
 - Web 使用 HttpOnly 签名会话 Cookie。未认证请求只能访问静态前端、`/api/health` 和 `/api/auth/*`，其余业务 API 统一返回 401。
 - Settings 和 Health 只返回认证状态，不返回 Token、用户名、密码、Session Secret 或 Cookie 内容。
-- `WEB_ALLOW_CONFIG_WRITE=true` 只在 Web 认证同时启用时开放用户配置写入；保存使用 ETag、防冲突校验和原子替换，脱敏占位符不会覆盖磁盘密钥。
+- Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
 - Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
 - 聊天请求使用高熵 `run_id`。运行中引导通过独立 guidance 队列提交，只在 Provider 完成或工具调用结束后的安全边界注入，不会中断正在阻塞的 Provider/工具函数。
 - 每轮历史在 `data.json.round_metrics` 保存 usage、缓存 Token、耗时、工具调用数和已消费 guidance；`tool.json` 的每次调用保存 `elapsed_ms`。
@@ -440,8 +459,14 @@ system prompt 按以下固定顺序拼接：
 ### 多模态
 
 - `MULTIMODAL_CAPABILITIES` 定义了支持的能力集合：vision、image generation/edit、audio ASR/TTS、speech_to_speech、video generation。
-- 多模态模型名通过 `multimodal_models` 配置（设计预留，源码尚未读取）。
+- 多模态模型名通过 `multimodal_models` 配置；专用模型为空时统一回退到 `provider.model`。
 - 不含 embedding 和 rerank。
+
+### 网络与插件环境
+
+- Provider 和基于标准库的 HTTP 请求自动遵循 `HTTP_PROXY` / `HTTPS_PROXY`；留空时直连。
+- TLS 证书校验始终使用系统默认安全策略，不再支持 `HTTP_VERIFY_SSL` 绕过。
+- `TAVILY_API_KEY` 为空时，运行时工具策略会移除 `web_search`；配置有效 Key 后才向 Provider 暴露该工具。
 
 ---
 

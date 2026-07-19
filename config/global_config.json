@@ -1,35 +1,26 @@
 {
   "schema_version": 1,
-  "provider": {
-    "type": "kemo",
-    "base_url": "http://127.0.0.1:8741/v1",
-    "api_key_env": "KEMO_API_KEY",
-    "model": "deepseek-deepseek-v4-pro",
-    "timeout": 120,
-    "stream": false
-  },
+
   "tools": {
     "enabled": true,
-    "timeout": 60,
-    "max_iterations": 8
+    "timeout": 240,
+    "max_iterations": 8,
+    "max_per_round": null
   },
+
   "history": {
     "schema_version": 1,
     "recent_full_rounds": 3,
-    "older_tool_log_max_chars": 200
+    "consecutive_tool_fail_limit": 5
   },
+
   "prompt": {
-    "include_global_soul": true,
-    "include_user_soul": true,
-    "include_agents_manual": true,
-    "include_important_memory": true,
     "char_limits": {
-      "knowledge_index": 8000,
-      "task_plan": 5000,
+      "task_plan": 6000,
       "perception": 8000,
-      "expand_data": 8000,
-      "skill_prompts": 4000,
-      "plugin_prompts": 4000
+      "expand_data": 10000,
+      "skill_prompts": 8000,
+      "plugin_prompts": 10000
     },
     "injection_mode": {
       "permanent_memory": "full",
@@ -43,40 +34,20 @@
       "perception": "full"
     }
   },
-  "knowledge": {
-    "enabled": true,
-    "use_shared": true,
-    "use_global": true,
-    "max_items": 4,
-    "max_chars": 4000,
-    "max_file_chars": 20000,
-    "minimum_score": 2
-  },
-  "skills": {
-    "shared_whitelist": [],
-    "user_whitelist": []
-  },
-  "expand": {
-    "shared_whitelist": [],
-    "global_whitelist": []
-  },
-  "perception": {
-    "global_whitelist": []
-  },
+
   "kemo_graph": {
     "enabled": false
   },
+
   "memory": {
     "storage_schema_version": 2,
     "temporary_injection_limits": {
-      "half_year": 3,
-      "one_month": 4,
-      "seven_days": 3
+      "half_year": 300,
+      "one_month": 200,
+      "seven_days": 100
     },
-    "important_memory_max_chars": 1500,
-    "extraction_enabled": true,
-    "injection_enabled": true,
-    "existing_candidates_for_extraction": 12,
+    "important_memory_max_chars": 2000,
+    "history_read_enabled": true,
     "tiers": {
       "seven_days": {
         "days": 7,
@@ -91,56 +62,40 @@
       "half_year": {
         "days": 180,
         "upgrade_threshold": 60,
-        "next": "permanent"
-      },
-      "permanent": {
-        "days": null,
-        "upgrade_threshold": null,
         "next": null
       }
     }
   },
-  "agent_models": {
-    "default": {},
-    "cheap": {},
-    "reasoning": {}
-  },
+
   "agent_runtime": {
     "queue_maxsize": 0,
-    "default_timeout": 120
+    "default_timeout": 600
   },
+
   "task_plan": {
-    "auto_accept": false,
-    "max_steps": 10
+    "max_steps": 20
   },
+
   "cron": {
     "enabled": true,
-    "poll_interval": 30,
-    "auto_start": false
+    "poll_interval": 30
   },
+
   "runtime_host": {
-    "start_cron": true,
-    "shutdown_timeout": 10
+    "enable_background_scheduler": true
   },
-  "web": {
-    "host": "127.0.0.1",
-    "port": 1478,
-    "log_level": "info"
-  },
+
   "message": {
-    "max_workers": 4,
-    "dedupe_max_entries": 2000,
-    "bindings": [],
-    "transports": {}
+    "max_workers": 8
   },
+
   "agents": {
-    "n1_recent_rounds_before_tool_compression": 3,
-    "n2_max_rounds": 30,
-    "n3_rounds_after_compression": 10,
-    "n4_token_limit": 120000,
-    "n5_token_compression_ratio": 0.6,
-    "n6_important_memory_review_hours": 6,
-    "n7_daily_memory_review_time": "03:00",
-    "n8_task_plan_max_steps": 10
+    "conserved_rounds": 3,
+    "max_rounds": 80,
+    "rounds_after_compression": 20,
+    "token_limit": 1000000,
+    "token_compression_ratio": 0.3,
+    "important_memory_review_hours": 3,
+    "daily_memory_review_time": "02:00"
   }
 }

@@ -82,11 +82,18 @@ cp .env.example .env
 |------|------|--------|
 | `KEMO_BASE_URL` | Kemo 网关地址 | — |
 | `KEMO_API_KEY` | Kemo 网关密钥 | — |
+| `KEMO_MODEL` | Kemo 兜底模型名 | — |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
 | `OPENAI_API_KEY` | OpenAI API 密钥 | — |
+| `OPENAI_MODEL` | OpenAI 兜底模型名 | — |
+| `HTTP_PROXY` / `HTTPS_PROXY` | Provider HTTP/HTTPS 代理 | 直连 |
+| `TAVILY_API_KEY` | `web_search` 插件密钥；为空时工具不可用 | — |
 | `WEB_HOST` | Web 监听地址 | `127.0.0.1` |
 | `WEB_PORT` | Web 监听端口 | `1357` |
-| `WEB_ACCESS_TOKEN` | Web 访问令牌（可选） | — |
+| `WEB_ACCESS_TOKEN` | Web URL `?token=` 访问令牌（可选） | — |
+| `WEB_USERNAME` / `WEB_PASSWORD` | Web 页面使用者的账号密码 | — |
+| `WEB_SESSION_SECRET` | Cookie 签名密钥；为空时自动生成 | 随机值 |
+| `WEB_SESSION_COOKIE_NAME` | Session Cookie 名称 | `kemo_agent_session` |
 
 ## 用法
 

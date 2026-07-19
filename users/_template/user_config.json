@@ -4,11 +4,10 @@
   "provider": {
     "type": "kemo",
     "base_url": "http://127.0.0.1:8741/v1",
+    "api_key": "",
     "api_key_env": "KEMO_API_KEY",
     "model": "",
-    "timeout": 120,
-    "stream": false,
-    "headers": {}
+    "stream": true
   },
 
   "multimodal_models": {
@@ -26,8 +25,7 @@
   },
 
   "skills": {
-    "shared_whitelist": [],
-    "user_whitelist": []
+    "shared_whitelist": []
   },
 
   "expand": {
@@ -40,12 +38,15 @@
   },
 
   "knowledge": {
-    "enabled": true,
     "use_shared": true,
     "use_global": true
   },
 
   "kemo_graph": {
     "enabled": false
+  },
+
+  "plugins": {
+    "whitelist": []
   }
 }
