@@ -56,7 +56,7 @@ class MessageRouter:
         transports: TransportRegistry,
         *,
         max_workers: int = 4,
-        dedupe_max_entries: int = 2000,
+        processed_message_limit: int = 2000,
         provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         event_source: Callable[..., Any] = iter_request_events,
@@ -67,7 +67,7 @@ class MessageRouter:
         self.resolver = resolver
         self.transports = transports
         self.max_workers = max(1, int(max_workers))
-        self.dedupe_max_entries = max(1, int(dedupe_max_entries))
+        self.processed_message_limit = max(1, int(processed_message_limit))
         self.provider_factory = provider_factory
         self.tool_registry_factory = tool_registry_factory
         self.event_source = event_source
@@ -113,7 +113,7 @@ class MessageRouter:
         source = f"message:{envelope.platform}"
         session_id = f"{envelope.chat_type}:{envelope.external_chat_id}"
         store = ProcessedMessageStore(
-            self.root, user, max_entries=self.dedupe_max_entries
+            self.root, user, max_entries=self.processed_message_limit
         )
         if not store.claim(envelope.dedupe_key):
             result = RouteResult(
@@ -188,6 +188,13 @@ class MessageRouter:
                 )
                 if done is not None:
                     text = str(done.metadata.get("text") or "").strip()
+                    if done.metadata.get("awaiting_tool_confirmation"):
+                        pause = done.metadata.get("tool_pause") or {}
+                        text = (
+                            "已达到本轮工具调用上限"
+                            f"（{pause.get('executed', 0)}/{pause.get('limit', 0)}），"
+                            "中间结果已保存。请回复“继续”后恢复执行。"
+                        )
             if not text:
                 text = "任务已完成。"
             outbound = OutboundMessage.reply(
@@ -196,7 +203,16 @@ class MessageRouter:
                 metadata={"user": user, "source": source, "session_id": session_id},
             )
             registered.transport.send(outbound)
-            result.status = "completed"
+            done = next(
+                (event for event in reversed(result.events) if event.type == "done"),
+                None,
+            )
+            result.status = (
+                "waiting_confirmation"
+                if done is not None
+                and done.metadata.get("awaiting_tool_confirmation")
+                else "completed"
+            )
             result.text = text
             result.outbound = outbound
             store.complete(envelope.dedupe_key, status="completed")

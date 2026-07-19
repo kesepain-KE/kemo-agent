@@ -66,7 +66,10 @@ class IdentityResolver:
 
     @classmethod
     def from_config(cls, root: Path, config: dict[str, Any]) -> "IdentityResolver":
-        message_config = config.get("message") or {}
+        message_config = config.get("message") if "message" in config else config
+        message_config = message_config or {}
+        if not isinstance(message_config, dict):
+            raise IdentityError("消息配置必须是对象")
         raw_bindings = message_config.get("bindings") or []
         if not isinstance(raw_bindings, list):
             raise IdentityError("message.bindings 必须是数组")
@@ -99,10 +102,4 @@ def filter_tool_registry(
     """Apply transport permission as an intersection over enabled user tools."""
     if allowed_tools is None:
         return registry
-    return ToolRegistry(
-        {
-            name: definition
-            for name, definition in registry.tools.items()
-            if name in allowed_tools and definition.enabled
-        }
-    )
+    return registry.selected(set(allowed_tools))

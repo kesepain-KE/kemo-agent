@@ -95,12 +95,7 @@ class OpenAIChatProvider:
         self.api_key = str(config["api_key"])
         self.model = str(config["model"])
         self.timeout = float(config.get("timeout", 120))
-        self.default_stream = bool(config.get("stream", False))
-        self.extra_headers = {
-            str(key): str(value)
-            for key, value in (config.get("headers") or {}).items()
-            if str(key).lower() not in {"authorization", "content-type"}
-        }
+        self.default_stream = bool(config.get("stream", True))
 
     def _url(self) -> str:
         return f"{self.base_url}/chat/completions"
@@ -111,7 +106,6 @@ class OpenAIChatProvider:
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if stream else "application/json",
         }
-        headers.update(self.extra_headers)
         return headers
 
     def _open(self, request: urllib.request.Request):

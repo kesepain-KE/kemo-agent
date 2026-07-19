@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 import json
-import os
 import re
-import ssl
 import urllib.error
 import urllib.request
 from typing import Any
@@ -14,7 +12,6 @@ from urllib.parse import urlsplit
 
 
 _MAX_RESPONSE_BYTES = 2_000_000
-_VERIFY_SSL = os.environ.get("HTTP_VERIFY_SSL", "1").strip().casefold() not in {"0", "false", "no", "off"}
 _READ_STRATEGIES = {"auto", "direct", "reader"}
 _READER_SERVICES = {"auto", "jina", "markdown_new", "defuddle"}
 _DEFAULT_WEB_READ_CHARS = 20_000
@@ -53,15 +50,6 @@ def _request_headers(headers: dict[str, Any] | None) -> dict[str, str]:
     return result
 
 
-def _ssl_context() -> ssl.SSLContext | None:
-    if _VERIFY_SSL:
-        return None
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
-
-
 def _read_limited(response: Any) -> tuple[bytes, bool]:
     raw = response.read(_MAX_RESPONSE_BYTES + 1)
     return raw[:_MAX_RESPONSE_BYTES], len(raw) > _MAX_RESPONSE_BYTES
@@ -83,7 +71,7 @@ def _open(
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw, truncated = _read_limited(response)
             return int(response.status), dict(response.headers), raw, truncated
     except urllib.error.HTTPError as exc:

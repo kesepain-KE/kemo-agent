@@ -29,9 +29,7 @@ def run(
         raise ValueError(f"未知知识范围：{', '.join(sorted(invalid))}")
     granted_raw = context.get("knowledge_scopes")
     granted = (
-        set()
-        if context.get("knowledge_enabled") is False
-        else set(granted_raw)
+        set(granted_raw)
         if isinstance(granted_raw, list)
         else {"user", "shared", "global"}
     )
