@@ -1,0 +1,151 @@
+"""Typed provider SSE events, framing and sequence validation."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from collections.abc import Iterable, Iterator
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import Field, model_validator
+
+from provider.protocol.enums import StreamEventType, TERMINAL_STREAM_EVENTS
+from provider.protocol.errors import StreamProtocolError
+from provider.protocol.models import (
+    Item,
+    KemoResponse,
+    ProtocolModel,
+    UnifiedError,
+    Usage,
+)
+
+
+class ProviderStreamEvent(ProtocolModel):
+    type: StreamEventType
+    event_id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex}")
+    sequence: int = Field(ge=0)
+    request_id: str
+    response_id: str
+    item_id: str | None = None
+    content_index: int | None = Field(default=None, ge=0)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data: dict[str, Any] = Field(default_factory=dict)
+    delta: str | None = None
+    item: Item | None = None
+    usage: Usage | None = None
+    response: KemoResponse | None = None
+    error: UnifiedError | None = None
+    call_id: str | None = None
+    name: str | None = None
+    run_id: str | None = None
+    run_sequence: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_terminal(self) -> "ProviderStreamEvent":
+        if self.type in {
+            StreamEventType.RESPONSE_COMPLETED,
+            StreamEventType.RESPONSE_INCOMPLETE,
+            StreamEventType.RESPONSE_FAILED,
+            StreamEventType.RESPONSE_CANCELLED,
+        } and self.response is None:
+            raise ValueError(f"{self.type} 必须包含完整 response")
+        if self.type == StreamEventType.ERROR and self.error is None:
+            raise ValueError("error 事件必须包含 error 对象")
+        return self
+
+    @property
+    def terminal(self) -> bool:
+        return self.type in TERMINAL_STREAM_EVENTS
+
+
+def encode_sse(event: ProviderStreamEvent) -> bytes:
+    payload = event.model_dump_json(by_alias=True, exclude_none=True)
+    return (
+        f"id: {event.event_id}\n"
+        f"event: {event.type}\n"
+        f"data: {payload}\n\n"
+    ).encode("utf-8")
+
+
+def iter_sse_payloads(lines: Iterable[bytes | str]) -> Iterator[tuple[str, str, str]]:
+    event_id = ""
+    event_name = "message"
+    data_lines: list[str] = []
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        line = line.rstrip("\r\n")
+        if not line:
+            if data_lines:
+                yield event_id, event_name, "\n".join(data_lines)
+            event_id = ""
+            event_name = "message"
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if not separator:
+            continue
+        value = value[1:] if value.startswith(" ") else value
+        if field == "id":
+            event_id = value
+        elif field == "event":
+            event_name = value
+        elif field == "data":
+            data_lines.append(value)
+    if data_lines:
+        yield event_id, event_name, "\n".join(data_lines)
+
+
+def parse_sse_events(lines: Iterable[bytes | str]) -> Iterator[ProviderStreamEvent]:
+    for event_id, event_name, payload in iter_sse_payloads(lines):
+        if payload == "[DONE]":
+            continue
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise StreamProtocolError("SSE data 不是有效 JSON", details={"data": payload[:500]}) from exc
+        if not isinstance(value, dict):
+            raise StreamProtocolError("SSE data 根节点必须是对象")
+        if event_id and "event_id" not in value:
+            value["event_id"] = event_id
+        if event_name != "message" and "type" not in value:
+            value["type"] = event_name
+        try:
+            yield ProviderStreamEvent.model_validate(value)
+        except Exception as exc:
+            raise StreamProtocolError(
+                f"统一流事件校验失败：{exc}",
+                details={"event": event_name, "data": value},
+            ) from exc
+
+
+class StreamSequenceGuard:
+    """Validate per-response ordering and de-duplicate event IDs."""
+
+    def __init__(self) -> None:
+        self._last_by_response: dict[str, int] = {}
+        self._event_ids: set[str] = set()
+        self._terminal: set[str] = set()
+
+    def accept(self, event: ProviderStreamEvent) -> bool:
+        if event.event_id in self._event_ids:
+            return False
+        if event.response_id in self._terminal:
+            raise StreamProtocolError(
+                f"终态后仍收到事件：{event.response_id}",
+                details={"event_id": event.event_id},
+            )
+        previous = self._last_by_response.get(event.response_id)
+        expected = 0 if previous is None else previous + 1
+        if event.sequence != expected:
+            raise StreamProtocolError(
+                f"sequence 不连续：期望 {expected}，收到 {event.sequence}",
+                details={"response_id": event.response_id},
+            )
+        self._event_ids.add(event.event_id)
+        self._last_by_response[event.response_id] = event.sequence
+        if event.terminal:
+            self._terminal.add(event.response_id)
+        return True
