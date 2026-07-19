@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
@@ -29,14 +30,19 @@ from provider.protocol.models import (
     Usage as ProtocolUsage,
 )
 from provider.protocol.streaming import ProviderStreamEvent
-from provider.schema import ChatRequest, ChatResponse, ToolCall, Usage
+from provider.schema import ChatRequest, ChatResponse, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
-from run.history import append_round_items, commit_window, prepare_window
+from run.history import (
+    append_round_items,
+    commit_window,
+    load_runtime_window,
+    prepare_window,
+    runtime_window_path,
+)
 from run.memory import MemoryStore
-from run.memory_pipeline import submit_memory_extraction
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from run.tools import (
@@ -51,6 +57,10 @@ from run.tools import (
 
 class EngineError(RuntimeError):
     """The run core rejected or failed a conversation request."""
+
+
+class ContextLengthExceededError(EngineError):
+    """The Provider rejected the request because its context is too large."""
 
 
 _SESSION_LOCKS: dict[tuple[str, str, str, str], threading.RLock] = {}
@@ -326,7 +336,44 @@ def _protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
     }
 
 
+def _is_context_length_exceeded(value: Any) -> bool:
+    if isinstance(value, ContextLengthExceededError):
+        return True
+    if isinstance(value, ProviderError):
+        if str(value.category).casefold() == "context_length_exceeded":
+            return True
+        return _is_context_length_exceeded(value.body) or (
+            "context_length_exceeded" in str(value).casefold()
+        )
+    if callable(getattr(value, "model_dump", None)):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        code = str(value.get("code") or "").casefold()
+        error_type = str(value.get("type") or value.get("category") or "").casefold()
+        try:
+            provider_status = int(value.get("provider_status"))
+        except (TypeError, ValueError):
+            provider_status = None
+        if code == "context_length_exceeded" or error_type == "context_length_exceeded":
+            return True
+        if code == "provider_bad_response" and provider_status == 400:
+            return True
+        return any(_is_context_length_exceeded(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_is_context_length_exceeded(item) for item in value)
+    return isinstance(value, str) and "context_length_exceeded" in value.casefold()
+
+
+def _raise_if_context_length_exceeded(value: Any) -> None:
+    if _is_context_length_exceeded(value):
+        raise ContextLengthExceededError(
+            "Provider 返回 context_length_exceeded，已触发运行时上下文压缩"
+        )
+
+
 def _events_for_protocol_response(response: KemoResponse) -> Iterator[RunEvent]:
+    if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+        _raise_if_context_length_exceeded(response.error)
     common = {
         "request_id": response.request_id,
         "response_id": response.id,
@@ -438,6 +485,7 @@ def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEv
             type="usage", usage=_protocol_usage_dict(event.usage), metadata=metadata, **common
         )
     elif event.type == StreamEventType.ERROR:
+        _raise_if_context_length_exceeded(event.error)
         yield RunEvent(
             type="error", error=_protocol_error(event.error), metadata=metadata, **common
         )
@@ -460,6 +508,8 @@ def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEv
                 **common,
             )
             return
+        if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+            _raise_if_context_length_exceeded(response.error)
         payload = response.model_dump(mode="json", by_alias=True, exclude_none=True)
         terminal_metadata = {
             **metadata,
@@ -585,6 +635,181 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
     )
 
 
+def _copy_committed_round_to_archive(
+    archive_window: dict[str, Any],
+    runtime_window: dict[str, Any],
+    round_number: int,
+) -> None:
+    """Append only the new raw round to archive, preserving older uncompressed data."""
+
+    archive_window["text"]["messages"].extend(
+        copy.deepcopy(runtime_window["text"]["messages"][-2:])
+    )
+    for section in ("think", "tool"):
+        source_rounds = (runtime_window.get(section) or {}).get("rounds", [])
+        target_rounds = archive_window.setdefault(section, {}).setdefault("rounds", [])
+        target_rounds.extend(
+            copy.deepcopy(
+                [
+                    item
+                    for item in source_rounds
+                    if isinstance(item, dict) and item.get("round") == round_number
+                ]
+            )
+        )
+    source_items = (runtime_window.get("items") or {}).get("items", [])
+    target_items = archive_window.setdefault("items", {}).setdefault("items", [])
+    target_items.extend(
+        copy.deepcopy(
+            [
+                item
+                for item in source_items
+                if isinstance(item, dict)
+                and isinstance(item.get("metadata"), dict)
+                and item["metadata"].get("round") == round_number
+            ]
+        )
+    )
+    runtime_data = runtime_window["data"]
+    archive_data = archive_window["data"]
+    archive_data["rounds"] = round_number
+    archive_data["round_metrics"] = copy.deepcopy(
+        runtime_data.get("round_metrics", [])
+    )
+    archive_data["token_usage"] = copy.deepcopy(runtime_data.get("token_usage", {}))
+    archive_data["context"] = copy.deepcopy(runtime_data.get("context", {}))
+
+
+def _round_item_data(window: dict[str, Any], round_number: int) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (window.get("items") or {}).get("items", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("round") == round_number
+    ]
+
+
+def _compress_per_round_tool_think(
+    *,
+    window: dict[str, Any],
+    conserved_rounds: int,
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Compress at most one newly unprotected round in the mutable temp mirror."""
+
+    think_rounds = (window.get("think") or {}).get("rounds", [])
+    tool_rounds = (window.get("tool") or {}).get("rounds", [])
+    think_by_number = {
+        int(item["round"]): item
+        for item in think_rounds
+        if isinstance(item, dict) and str(item.get("round", "")).isdigit()
+    }
+    tool_by_number = {
+        int(item["round"]): item
+        for item in tool_rounds
+        if isinstance(item, dict) and str(item.get("round", "")).isdigit()
+    }
+    latest_round = int((window.get("data") or {}).get("rounds", 0))
+    candidates = [
+        number
+        for number in sorted(set(think_by_number) | set(tool_by_number))
+        if latest_round - number > max(0, conserved_rounds)
+        and not bool((think_by_number.get(number) or {}).get("compressed"))
+        and not bool((tool_by_number.get(number) or {}).get("compressed"))
+    ]
+    if not candidates:
+        return {"compressed": False, "round": None}
+    round_number = candidates[0]
+    think_data = think_by_number.get(round_number)
+    tool_data = tool_by_number.get(round_number)
+    item_data = _round_item_data(window, round_number)
+    has_payload = bool(str((think_data or {}).get("content") or "").strip()) or bool(
+        (tool_data or {}).get("calls")
+    ) or any(item.get("type") in {"reasoning", "tool_call", "tool_result"} for item in item_data)
+    summary = ""
+    usage: dict[str, Any] = {}
+    if has_payload:
+        result = agent_runner.run(
+            "context_manage",
+            {
+                "previous_summary": None,
+                "rounds": [
+                    {
+                        "round": round_number,
+                        "think": copy.deepcopy(think_data),
+                        "tool": copy.deepcopy(tool_data),
+                        "items": copy.deepcopy(item_data),
+                    }
+                ],
+                "trigger": "tool_think_compress",
+            },
+            cancel_event=cancel_event,
+            max_tokens=512,
+        )
+        summary = str(result.data.get("narrative") or "").strip()
+        usage = dict(result.usage)
+    if think_data is not None:
+        think_data["content"] = summary
+        think_data["summary"] = summary
+        think_data["compressed"] = True
+    if tool_data is not None:
+        tool_data["calls"] = []
+        tool_data["compressed"] = True
+
+    items = (window.get("items") or {}).get("items", [])
+    rewritten: list[dict[str, Any]] = []
+    summary_written = False
+    for item in items if isinstance(items, list) else []:
+        metadata = item.get("metadata") if isinstance(item, dict) else None
+        same_round = isinstance(metadata, dict) and metadata.get("round") == round_number
+        if not same_round:
+            rewritten.append(item)
+            continue
+        kind = item.get("type")
+        if kind in {"tool_call", "tool_result"}:
+            continue
+        if kind == "reasoning":
+            if summary_written:
+                continue
+            replacement = copy.deepcopy(item)
+            replacement["content"] = summary
+            replacement["extensions"] = {
+                **(replacement.get("extensions") or {}),
+                "compressed": True,
+            }
+            rewritten.append(replacement)
+            summary_written = True
+            continue
+        if (
+            not summary_written
+            and summary
+            and kind == "message"
+            and item.get("role") == "assistant"
+        ):
+            rewritten.append(
+                {
+                    "id": f"rs_{uuid.uuid4().hex}",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": summary,
+                    "metadata": {"round": round_number, "history_source": "runtime_compression"},
+                    "extensions": {"compressed": True},
+                }
+            )
+            summary_written = True
+        rewritten.append(item)
+    if isinstance((window.get("items") or {}).get("items"), list):
+        window["items"]["items"] = rewritten
+    return {
+        "compressed": True,
+        "round": round_number,
+        "generated": has_payload,
+        "usage": usage,
+    }
+
+
 def _iter_request_events_impl(
     request: dict[str, Any],
     *,
@@ -626,7 +851,8 @@ def _iter_request_events_impl(
                 config=config,
                 provider_factory=provider_factory,
             )
-            window_path, window, _ = prepare_window(base, user, source, session_id)
+            window_path, archive_window, _ = prepare_window(base, user, source, session_id)
+            runtime_path, window = load_runtime_window(window_path, archive_window)
             tool_config = config.get("tools") or {}
             tools_enabled = bool(tool_config.get("enabled", True))
             registry = (
@@ -635,7 +861,7 @@ def _iter_request_events_impl(
                 else ToolRegistry({})
             )
             tool_schemas = registry.schemas() or None
-            tool_timeout = float(tool_config.get("timeout", 60))
+            tool_timeout = float(tool_config.get("timeout", 240))
             max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
             raw_max_per_round = tool_config.get("max_per_round")
             if raw_max_per_round is None:
@@ -660,9 +886,7 @@ def _iter_request_events_impl(
             failure_limit = raw_failure_limit
             failures = ConsecutiveToolFailureTracker(failure_limit)
 
-            memory_config = config.get("memory") or {}
             memory_store = MemoryStore(base, user, config)
-            memory_store.review_due()
             prompt_bundle = build_prompt_bundle(
                 base,
                 user,
@@ -709,18 +933,14 @@ def _iter_request_events_impl(
                 removed_before = [item.number for item in context_selection.removed_rounds]
                 if not removed_before:
                     break
-                summary_agent = (
-                    "token_condense"
-                    if context_selection.token_limit_triggered
-                    else "context_manage"
-                )
+                summary_agent = "context_manage"
                 summary_trigger = (
                     "token_limit"
                     if context_selection.token_limit_triggered
                     else ("manual" if force_compress else "round_limit")
                 )
                 summary_cache, summary_diagnostics = get_or_create_summary(
-                    cache_path=window_path / "context_summary.json",
+                    cache_path=runtime_path / "context_summary.json",
                     groups=context_selection.removed_rounds,
                     agent_runner=agent_runner,
                     agent_name=summary_agent,
@@ -771,7 +991,7 @@ def _iter_request_events_impl(
                         "context": context_stats,
                         "prompt": prompt_bundle.diagnostics,
                         "summary_cache": (
-                            str(window_path / "context_summary.json")
+                            str(runtime_path / "context_summary.json")
                             if summary_cache is not None
                             else None
                         ),
@@ -802,6 +1022,7 @@ def _iter_request_events_impl(
             completed = False
             tool_calls_this_round = 0
             tool_pause: dict[str, Any] | None = None
+            context_retry_count = 0
 
             for iteration in range(1, max_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
@@ -832,36 +1053,114 @@ def _iter_request_events_impl(
                     if configured_max_tokens is not None
                     else None
                 )
-                chat_request = ChatRequest(
-                    model=runtime_provider["model"],
-                    messages=messages,
-                    stream=stream,
-                    tools=active_tool_schemas,
-                    max_tokens=request_max_tokens,
-                )
-                protocol_request = chat_request_to_kemo(chat_request).model_copy(
-                    update={
-                        "request_id": f"req_{uuid.uuid4().hex}",
-                        "parent_request_id": protocol_parent_request_id,
-                        "attempt": 1,
-                        "metadata": {
-                            "user": user,
-                            "source": source,
-                            "session_id": session_id,
-                            "run_id": run_id,
-                            "iteration": iteration,
-                            "window": window_path.name,
-                            "prompt_hash": prompt_bundle.diagnostics.get("hash"),
-                        },
-                    }
-                )
+                while True:
+                    chat_request = ChatRequest(
+                        model=runtime_provider["model"],
+                        messages=messages,
+                        stream=stream,
+                        tools=active_tool_schemas,
+                        max_tokens=request_max_tokens,
+                    )
+                    protocol_request = chat_request_to_kemo(chat_request).model_copy(
+                        update={
+                            "request_id": f"req_{uuid.uuid4().hex}",
+                            "parent_request_id": protocol_parent_request_id,
+                            "attempt": context_retry_count + 1,
+                            "metadata": {
+                                "user": user,
+                                "source": source,
+                                "session_id": session_id,
+                                "run_id": run_id,
+                                "iteration": iteration,
+                                "window": window_path.name,
+                                "prompt_hash": prompt_bundle.diagnostics.get("hash"),
+                            },
+                        }
+                    )
+                    try:
+                        buffered_provider_events = list(
+                            _provider_events(provider, chat_request, protocol_request)
+                        )
+                        for buffered_event in buffered_provider_events:
+                            if buffered_event.type == "error":
+                                _raise_if_context_length_exceeded(buffered_event.error)
+                        break
+                    except BaseException as exc:
+                        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                            raise
+                        if (
+                            iteration != 1
+                            or context_retry_count >= 2
+                            or not _is_context_length_exceeded(exc)
+                        ):
+                            raise
+                        context_retry_count += 1
+                        divisor = 2**context_retry_count
+                        retry_policy = replace(
+                            context_policy,
+                            rounds_after_compression=max(
+                                context_policy.recent_full_rounds,
+                                context_policy.rounds_after_compression // divisor,
+                            ),
+                        )
+                        retry_selection = select_context(
+                            window=window,
+                            policy=retry_policy,
+                            system_message=system_message,
+                            current_user_message=current_user_message,
+                            tools=active_tool_schemas,
+                            force_compress=True,
+                        )
+                        if not retry_selection.removed_rounds:
+                            raise ContextLengthExceededError(
+                                "Provider 上下文超限，但没有可继续裁剪的历史轮次"
+                            ) from exc
+                        retry_events: list[RunEvent] = []
+                        summary_cache, retry_diagnostics = get_or_create_summary(
+                            cache_path=runtime_path / "context_summary.json",
+                            groups=retry_selection.removed_rounds,
+                            agent_runner=agent_runner,
+                            agent_name="context_manage",
+                            trigger="api_context_length",
+                            cancel_event=cancel_event,
+                            chunk_token_budget=max(256, retry_policy.input_budget // 2),
+                            max_tokens=min(4096, max(256, retry_policy.output_reserve)),
+                            response_hook=lambda raw: (
+                                _merge_usage(summary_usage, _usage_from_dict(raw)),
+                                _merge_usage(usage_total, _usage_from_dict(raw)),
+                            ),
+                            event_callback=retry_events.append,
+                        )
+                        if summary_cache is None:
+                            raise ContextLengthExceededError(
+                                "Provider 上下文超限，且 context_manage 摘要生成失败"
+                            ) from exc
+                        context_selection = select_context(
+                            window=window,
+                            policy=retry_policy,
+                            system_message=system_message,
+                            summary_message=build_summary_message(summary_cache),
+                            current_user_message=current_user_message,
+                            tools=active_tool_schemas,
+                            force_compress=True,
+                        )
+                        _ensure_fixed_content_fits(
+                            context_selection, system_message=system_message
+                        )
+                        messages = context_selection.messages
+                        context_stats = context_selection.stats()
+                        context_stats["summary"] = retry_diagnostics
+                        context_stats["summary_usage"] = summary_usage
+                        context_stats["api_context_retries"] = context_retry_count
+                        for retry_event in retry_events:
+                            yield retry_event
                 iteration_text: list[str] = []
                 iteration_reasoning: list[str] = []
                 calls: list[ToolCall] = []
                 iteration_done: RunEvent | None = None
                 iteration_usage: Usage | None = None
 
-                for event in _provider_events(provider, chat_request, protocol_request):
+                for event in buffered_provider_events:
                     if cancel_event is not None and cancel_event.is_set():
                         return
                     if event.type == "text_delta":
@@ -1124,7 +1423,37 @@ def _iter_request_events_impl(
                 ),
             }
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
-            commit_window(window_path, window)
+            _copy_committed_round_to_archive(archive_window, window, round_number)
+            tool_think_compression: dict[str, Any]
+            try:
+                tool_think_compression = _compress_per_round_tool_think(
+                    window=window,
+                    conserved_rounds=context_policy.recent_tool_rounds,
+                    agent_runner=agent_runner,
+                    cancel_event=cancel_event,
+                )
+                compression_usage = _usage_from_dict(
+                    tool_think_compression.get("usage") or {}
+                )
+                if compression_usage.total_tokens:
+                    _merge_usage(usage_total, compression_usage)
+                    _merge_usage(window["data"]["token_usage"], compression_usage)
+                    _merge_usage(
+                        archive_window["data"]["token_usage"], compression_usage
+                    )
+                    window["data"]["round_metrics"][-1]["usage"] = dict(usage_total)
+                    archive_window["data"]["round_metrics"][-1]["usage"] = dict(
+                        usage_total
+                    )
+            except Exception as exc:
+                tool_think_compression = {
+                    "compressed": False,
+                    "round": None,
+                    "error": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+            commit_window(window_path, archive_window)
+            commit_window(runtime_path, window)
 
                         # 仅对选择并实际发送到的记忆进行加权
                         # 主模型运行成功。  取消/失败的回合永远不会得到
@@ -1138,34 +1467,6 @@ def _iter_request_events_impl(
                     "message": str(exc),
                     "exception_type": type(exc).__name__,
                 }
-            memory_task_id = None
-            memory_error = None
-            if memory_config and tool_pause is None:
-                try:
-                    memory_task_id = submit_memory_extraction(
-                        root=base,
-                        user=user,
-                        config=config,
-                        user_text=prompt,
-                        assistant_text=text,
-                        tool_results=tool_records,
-                        source={
-                            "source": source,
-                            "session_id": session_id,
-                            "window": window_path.name,
-                            "round": round_number,
-                        },
-                        provider_factory=provider_factory,
-                    )
-                except Exception as exc:
-                                        # 内存是异步衍生的副作用。  主要
-                                        # 四文件历史事务已提交并且
-                                        # 不得因队列/子代理故障而回滚。
-                    memory_error = {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-
             final_metadata.update(
                 {
                     "text": text,
@@ -1183,14 +1484,16 @@ def _iter_request_events_impl(
                     "awaiting_tool_confirmation": tool_pause is not None,
                     "tool_pause": copy.deepcopy(tool_pause),
                     "context": context_stats,
+                    "tool_think_compression": tool_think_compression,
                     "prompt": prompt_bundle.diagnostics,
                     "memory": {
                         "injected_files": list(prompt_bundle.memory_files),
                         "weighted_files": memory_weighted_files,
                         "weight_error": memory_weight_error,
                         "injected_chars": _memory_injected_chars(prompt_bundle),
-                        "extraction_task_id": memory_task_id,
-                        "extraction_error": memory_error,
+                        "extraction_task_id": None,
+                        "extraction_error": None,
+                        "extraction_mode": "context_compression",
                     },
                     "knowledge": {
                         "documents": prompt_bundle.diagnostics["knowledge_documents"],
@@ -1302,7 +1605,12 @@ def context_status(
     session_id = _required_text(request, "session_id")
     base = (root or project_root()).resolve()
     config = load_config(user, base)
-    window_path, window, is_new = prepare_window(base, user, source, session_id)
+    window_path, archive_window, is_new = prepare_window(base, user, source, session_id)
+    runtime_path, window = (
+        (runtime_window_path(window_path), archive_window)
+        if is_new
+        else load_runtime_window(window_path, archive_window)
+    )
     tool_config = config.get("tools") or {}
     registry = (
         apply_runtime_tool_policy(tool_registry_factory(base, user), config)
@@ -1329,7 +1637,7 @@ def context_status(
         current_user_message=None,
         tools=registry.schemas() or None,
     )
-    cache_path = window_path / "context_summary.json"
+    cache_path = runtime_path / "context_summary.json"
     persisted = window.get("data", {}).get("context")
     return {
         "user": user,

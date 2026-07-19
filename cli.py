@@ -80,10 +80,6 @@ def discover_user(explicit_user: str | None, root: Path | None = None, *, intera
     if explicit_user and explicit_user.strip():
         return explicit_user.strip()
 
-    env_user = os.getenv("KEMO_USER", "").strip()
-    if env_user:
-        return env_user
-
     users_dir = (root or _project_root()) / "users"
     if users_dir.is_dir():
         candidates = sorted(
@@ -446,6 +442,8 @@ def _interactive_command(
         if created.get("auto_accept"):
             print("auto_accept 已开启，可使用 /plan-approve 立即执行。", file=stdout)
         else:
+            if created.get("reminder"):
+                print(created["reminder"], file=stdout)
             print("使用 /plan-approve 批准执行。", file=stdout)
         return True, session_id
     if command == "/plan-show":
@@ -565,7 +563,7 @@ def _interactive_command(
         for item in tasks:
             print(
                 f"{item['task_id']} | {item.get('status', '?')} | "
-                f"{item.get('schedule', {}).get('type', '?')} | "
+                f"{item.get('type', '?')} | "
                 f"next={item.get('next_run_at', '')} | {item.get('title', '')}",
                 file=stdout,
             )
@@ -591,7 +589,7 @@ def _interactive_command(
         created = store.create(task)
         print(
             f"已创建定时任务：{created['task_id']} | {created['title']} | "
-            f"{created['schedule']['type']} | next={created['next_run_at']}",
+            f"{created['type']} | next={created['next_run_at']}",
             file=stdout,
         )
         return True, session_id
@@ -610,12 +608,10 @@ def _interactive_command(
             f"{task['task_id']} | {task['status']} | {task['title']}",
             file=stdout,
         )
-        print(f"调度：{task.get('schedule', {})}", file=stdout)
+        detail = task.get("time") if task.get("type") == "daily" else task.get("interval_seconds", "")
+        print(f"调度：{task.get('type', '')} {detail}", file=stdout)
         print(f"下一次执行：{task.get('next_run_at', '')}", file=stdout)
-        print(f"上次执行：{task.get('last_run_at', '')}", file=stdout)
-        print(f"执行次数：{task.get('run_count', 0)}", file=stdout)
-        if task.get("last_error"):
-            print(f"上次错误：{task['last_error'].get('message', '')}", file=stdout)
+        print(f"最近执行：{task.get('latest_run_at', '')}", file=stdout)
         return True, session_id
     if command == "/cron-pause":
         if not argument:
@@ -635,11 +631,10 @@ def _interactive_command(
             return True, session_id
         from run.cron_store import CronStore
         from cron.schedule import compute_next_run
-        from datetime import datetime, timezone
         store = CronStore(root, user)
         def _resume(t):
             t["status"] = "enabled"
-            t["next_run_at"] = compute_next_run(t["schedule"])
+            t["next_run_at"] = compute_next_run(t)
             return t
         try:
             store.update(argument, _resume)
@@ -671,12 +666,7 @@ def _interactive_command(
             result = execute_cron_task(
                 root=root, user=user, task_id=argument, config=config,
             )
-            print(
-                f"完成：{result.get('status', '?')} | "
-                f"result={bool(result.get('last_result'))} | "
-                f"error={bool(result.get('last_error'))}",
-                file=stdout,
-            )
+            print(f"完成：{result.get('status', '?')}", file=stdout)
         except Exception as exc:
             print(f"执行失败：{exc}", file=stdout)
         return True, session_id

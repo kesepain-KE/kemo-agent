@@ -16,7 +16,7 @@ from run.agent_runner import AgentRunner
 from run.context import RoundGroup, estimate_text_tokens
 
 
-SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_VERSION = 2
 SUMMARY_KEYS = (
     "facts",
     "requirements",
@@ -173,6 +173,7 @@ def get_or_create_summary(
 
     try:
         rolling: dict[str, Any] | None = None
+        memory_extractions: list[dict[str, Any]] = []
         chunks = _chunks(groups, max(256, chunk_token_budget))
         diagnostics["chunks"] = len(chunks)
         for chunk in chunks:
@@ -190,6 +191,9 @@ def get_or_create_summary(
                 max_tokens=max_tokens,
             )
             rolling = _normalise_summary(result.data)
+            memory_extraction = result.metadata.get("memory_extraction")
+            if isinstance(memory_extraction, dict):
+                memory_extractions.append(dict(memory_extraction))
             if response_hook is not None:
                 response_hook(result.usage)
         if rolling is None:
@@ -202,9 +206,11 @@ def get_or_create_summary(
             "covered_rounds": [group.number for group in groups],
             "created_at": _now(),
             "summary": rolling,
+            "memory_extractions": memory_extractions,
         }
         _atomic_write(cache_path, value)
         diagnostics["generated"] = True
+        diagnostics["memory_extractions"] = memory_extractions
         return value, diagnostics
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):

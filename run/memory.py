@@ -441,10 +441,74 @@ class MemoryStore:
         except FileNotFoundError:
             return
 
-    def _promote_location(self, location: MemoryLocation, target_tier: str, current: datetime) -> None:
+    def _promote_location(
+        self,
+        location: MemoryLocation,
+        target_tier: str,
+        current: datetime,
+        *,
+        merged_content: str | None = None,
+        target_filename: str | None = None,
+    ) -> None:
         if location.tier == "permanent" or target_tier not in TIERS:
             raise MemoryError(f"无效记忆晋升：{location.tier}→{target_tier}")
-        target_path = self.fragment_path(target_tier, location.filename)
+        target_name = normalize_memory_filename(target_filename or location.filename)
+        target_path = self.fragment_path(target_tier, target_name)
+        conflicting_locations = [
+            item
+            for item in self._locations(target_name)
+            if item.path != location.path and item.tier != target_tier
+        ]
+        if conflicting_locations:
+            tiers = ", ".join(item.tier for item in conflicting_locations)
+            raise MemoryError(f"晋升目标文件名已存在于其他层级：{target_name}（{tiers}）")
+        if merged_content is not None:
+            content = _normalise_text(merged_content)
+            if not content:
+                raise MemoryError("融合后的记忆内容不能为空")
+            if contains_sensitive_credential(content):
+                raise MemoryError("融合后的记忆包含疑似敏感凭据")
+            if not location.path.is_file():
+                raise MemoryError(f"晋升来源不存在：{location.path}")
+
+            source_index = self.load_index(location.tier)
+            if location.filename not in source_index:
+                raise MemoryError(f"晋升来源缺少索引：{location.path}")
+            source_meta = dict(source_index[location.filename])
+            target_index = (
+                self.load_index(target_tier) if target_tier != "permanent" else None
+            )
+            previous_target_index = (
+                {key: dict(value) for key, value in target_index.items()}
+                if target_index is not None
+                else None
+            )
+            previous_target = (
+                target_path.read_text("utf-8") if target_path.is_file() else None
+            )
+            try:
+                _atomic_text(target_path, content)
+                source_index.pop(location.filename)
+                self.write_index(location.tier, source_index)
+                if target_index is not None:
+                    target_index[target_name] = self._new_meta(
+                        target_tier,
+                        current,
+                    )
+                    self.write_index(target_tier, target_index)
+                location.path.unlink()
+            except Exception:
+                if previous_target is None:
+                    target_path.unlink(missing_ok=True)
+                else:
+                    _atomic_text(target_path, previous_target)
+                rollback_source = self.load_index(location.tier)
+                rollback_source[location.filename] = source_meta
+                self.write_index(location.tier, rollback_source)
+                if previous_target_index is not None:
+                    self.write_index(target_tier, previous_target_index)
+                raise
+            return
         if target_path.exists():
             raise MemoryError(f"晋升目标已存在同名记忆：{target_path}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,14 +521,14 @@ class MemoryStore:
         try:
             if target_tier != "permanent":
                 target_index = self.load_index(target_tier)
-                target_index[location.filename] = self._new_meta(target_tier, current)
+                target_index[target_name] = self._new_meta(target_tier, current)
                 self.write_index(target_tier, target_index)
             self.write_index(location.tier, source_index)
         except Exception:
             if target_tier != "permanent":
                 try:
                     rollback_index = self.load_index(target_tier)
-                    rollback_index.pop(location.filename, None)
+                    rollback_index.pop(target_name, None)
                     self.write_index(target_tier, rollback_index)
                 except Exception:
                     pass
@@ -538,8 +602,8 @@ class MemoryStore:
                     continue
                 if changed:
                     _atomic_text(location.path, content)
-                    if location.tier != "permanent":
-                        self._touch_temporary(location, current)
+                if location.tier != "permanent":
+                    self._touch_temporary(location, current)
                 updated.append(filename)
         return {"created": created, "updated": updated, "forgotten": forgotten, "rejected": rejected}
 
@@ -556,6 +620,7 @@ class MemoryStore:
             return [filename]
 
     def review_due(self, *, now: datetime | None = None) -> dict[str, list[str]]:
+        """Compatibility API; automatic lifecycle review is owned by cron.review_due."""
         current = now or utc_now()
         upgraded: list[str] = []
         deleted: list[str] = []

@@ -264,7 +264,7 @@ class AgentRunner:
         final_text = ""
         final_model = runtime["model"]
         max_iterations = definition.capabilities.max_tool_iterations
-        tool_timeout = float((self.config.get("tools") or {}).get("timeout", 60))
+        tool_timeout = float((self.config.get("tools") or {}).get("timeout", 240))
         raw_failure_limit = (self.config.get("history") or {}).get(
             "consecutive_tool_fail_limit", 5
         )
@@ -341,6 +341,7 @@ class AgentRunner:
                                 "user": self.user,
                                 "caller": "subagent",
                                 "agent": definition.name,
+                                "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
                                 "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
                             },

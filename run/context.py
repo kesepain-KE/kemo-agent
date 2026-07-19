@@ -35,12 +35,12 @@ class ContextPolicy:
                 0, int(agents.get("conserved_rounds", 3))
             ),
             recent_full_rounds=max(0, int(history.get("recent_full_rounds", 3))),
-            max_rounds=max(1, int(agents.get("max_rounds", 30))),
+            max_rounds=max(1, int(agents.get("max_rounds", 80))),
             rounds_after_compression=max(
-                1, int(agents.get("rounds_after_compression", 10))
+                1, int(agents.get("rounds_after_compression", 20))
             ),
-            token_limit=max(1, int(agents.get("token_limit", 120000))),
-            compression_ratio=float(agents.get("token_compression_ratio", 0.6)),
+            token_limit=max(1, int(agents.get("token_limit", 1000000))),
+            compression_ratio=float(agents.get("token_compression_ratio", 0.3)),
         )
         if not 0 < policy.compression_ratio < 1:
             raise ValueError("agents.token_compression_ratio 必须在 0 和 1 之间")

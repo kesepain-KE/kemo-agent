@@ -25,6 +25,7 @@ PROMPT_SECTION_ORDER = (
     "user_soul",
     "global_soul",
     "agents_manual",
+    "subagent_registry",
     "plugins",
     "skills",
     "knowledge_index",
@@ -44,7 +45,6 @@ DEFAULT_TEMPORARY_MEMORY_LIMITS = {
     "one_month": 200,
     "seven_days": 100,
 }
-KNOWLEDGE_INDEX_MAX_CHARS = 8000
 DEFAULT_CHAR_LIMITS = {
     "task_plan": 6000,
     "perception": 8000,
@@ -241,6 +241,38 @@ def _descriptor_section(
     )
 
 
+def _subagent_registry_section(root: Path) -> PromptSection | None:
+    # 延迟导入避免 schema -> prompt_sources -> prompt 的初始化环。
+    from agents._runtime.schema import discover_agents
+
+    definitions = [
+        definition
+        for definition in discover_agents(root).enabled_agents()
+        if definition.trigger_registration
+    ]
+    if not definitions:
+        return None
+    pieces = [
+        "以下子代理可供框架按注册条件调用。这里只提供注册摘要；"
+        "详细操作信息位于对应 trigger.md，调用前按需读取。"
+    ]
+    files: list[str] = []
+    for definition in definitions:
+        pieces.append(f"### {definition.name}\n{definition.trigger_registration}")
+        files.append(relative_path(definition.directory / definition.trigger_file, root))
+    content = "\n\n".join(pieces)
+    return PromptSection(
+        name="subagent_registry",
+        content=content,
+        source_files=tuple(files),
+        original_chars=len(content),
+        injected_chars=len(content),
+        original_items=len(definitions),
+        injected_items=len(definitions),
+        item_ids=tuple(definition.name for definition in definitions),
+    )
+
+
 def _section_diagnostic(section: PromptSection) -> dict[str, Any]:
     return {
         "mode": section.mode,
@@ -300,6 +332,9 @@ def build_prompt_bundle(
     section = _base_section(root, "agents_manual", root / "agents.md")
     if section:
         sections.append(section)
+    section = _subagent_registry_section(root)
+    if section:
+        sections.append(section)
 
     section = _descriptor_section(
         "plugins",
@@ -324,13 +359,11 @@ def build_prompt_bundle(
     knowledge = select_knowledge_index(
         root,
         user,
-        max_chars=(
-            0
+        scopes=(
+            ()
             if source_policy.kemo_graph_replaces_knowledge
-            else KNOWLEDGE_INDEX_MAX_CHARS
+            else source_policy.knowledge_scopes
         ),
-        mode=settings.injection_mode["knowledge_index"],
-        scopes=source_policy.knowledge_scopes,
     )
     if knowledge.text:
         sections.append(

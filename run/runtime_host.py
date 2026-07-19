@@ -7,7 +7,12 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from cron.scheduler import CronScheduler, recover_all
+from cron.scheduler import (
+    CronScheduler,
+    ensure_memory_maintenance_tasks,
+    ensure_memory_promotion_task,
+    recover_all,
+)
 from message.identity import IdentityResolver
 from message.router import MessageRouter, RouteResult
 from message.state import ProcessedMessageStore
@@ -19,7 +24,7 @@ from message.transport import (
     TransportRegistry,
 )
 from provider.factory import create_provider
-from run.config import read_json_object
+from run.config import load_config, read_json_object
 from run.maintenance import MaintenanceScheduler
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
@@ -101,7 +106,7 @@ class RuntimeHost:
             self.root,
             self.resolver,
             self.registry,
-            max_workers=int(runtime_message_config.get("max_workers", 4)),
+            max_workers=int(runtime_message_config.get("max_workers", 8)),
             processed_message_limit=DEFAULT_PROCESSED_MESSAGE_LIMIT,
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
@@ -168,6 +173,20 @@ class RuntimeHost:
         try:
             recover_all(self.root)
             self._recover_message_state()
+
+            if self.cron_enabled:
+                for user in list_users(self.root):
+                    user_config = load_config(user, self.root)
+                    ensure_memory_maintenance_tasks(
+                        self.root,
+                        user,
+                        user_config,
+                    )
+                    ensure_memory_promotion_task(
+                        self.root,
+                        user,
+                        user_config,
+                    )
 
             self._set_component("router", "starting")
             self.router.start()

@@ -86,7 +86,7 @@ def execute_plan(
             if bool(tool_config.get("enabled", True))
             else ToolRegistry({})
         )
-    tool_timeout = float((cfg.get("tools") or {}).get("timeout", 60))
+    tool_timeout = float((cfg.get("tools") or {}).get("timeout", 240))
 
     store = PlanStore(root, user)
 

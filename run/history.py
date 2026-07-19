@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -409,6 +410,8 @@ def load_window(directory: Path) -> dict[str, Any]:
             raise HistoryError(f"历史窗口尚未完成提交：{directory}")
         window = {name: _read_json(path) for name, path in paths.items() if name != "data"}
         window["data"] = data
+
+
         if not isinstance(window["text"], dict) or not isinstance(window["text"].get("messages"), list):
             raise HistoryError(f"text.json schema 无效：{directory}")
         items_path = directory / "items.json"
@@ -421,6 +424,29 @@ def load_window(directory: Path) -> dict[str, Any]:
             # v1 四文件历史在内存中无损升级；下一次成功提交时再双写 items.json。
             window["items"] = synthesize_items(window)
         return window
+
+
+def runtime_window_path(archive_directory: Path) -> Path:
+    """Return the mutable runtime mirror for one immutable archive window."""
+
+    return archive_directory.parent / "temp" / archive_directory.name
+
+
+def load_runtime_window(
+    archive_directory: Path,
+    archive_window: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Load the temp runtime mirror, falling back to a copy of the archive."""
+
+    runtime_directory = runtime_window_path(archive_directory)
+    if (runtime_directory / "data.json").is_file():
+        try:
+            return runtime_directory, load_window(runtime_directory)
+        except HistoryError:
+            # A damaged derived mirror must never make the immutable archive unusable.
+            pass
+    source = archive_window if archive_window is not None else load_window(archive_directory)
+    return runtime_directory, copy.deepcopy(source)
 
 
 def find_window(root: Path, user: str, source: str, session_id: str) -> Path | None:
@@ -464,6 +490,7 @@ def get_or_create_window(root: Path, user: str, source: str, session_id: str) ->
     directory, window, is_new = prepare_window(root, user, source, session_id)
     if is_new:
         commit_window(directory, window)
+        commit_window(runtime_window_path(directory), copy.deepcopy(window))
     return directory, window
 
 
@@ -544,6 +571,14 @@ def rename_session(root: Path, user: str, source: str, session_id: str, title: s
             data["title"] = title
             # A cosmetic rename must not affect chronological session ordering.
             _atomic_write_json(data_path, data)
+        runtime_directory = runtime_window_path(directory)
+        runtime_data_path = runtime_directory / "data.json"
+        if runtime_data_path.is_file():
+            with _lock(runtime_directory):
+                runtime_data = _read_json(runtime_data_path)
+                if isinstance(runtime_data, dict) and runtime_data.get("complete") is True:
+                    runtime_data["title"] = title
+                    _atomic_write_json(runtime_data_path, runtime_data)
     return len(directories)
 
 
@@ -554,6 +589,10 @@ def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
     for directory in directories:
         with _lock(directory):
             shutil.rmtree(directory)
+        runtime_directory = runtime_window_path(directory)
+        if runtime_directory.is_dir():
+            with _lock(runtime_directory):
+                shutil.rmtree(runtime_directory)
     return len(directories)
 
 
@@ -565,13 +604,19 @@ def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
     for directory, _ in entries:
         with _lock(directory):
             shutil.rmtree(directory)
+        runtime_directory = runtime_window_path(directory)
+        if runtime_directory.is_dir():
+            with _lock(runtime_directory):
+                shutil.rmtree(runtime_directory)
     return len(session_ids), len(entries)
 
 
 def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
     existing = find_window(root, user, source, session_id)
     directory = existing or user_dir(user, root) / "history" / _window_name()
-    commit_window(directory, empty_window(user, source, session_id))
+    window = empty_window(user, source, session_id)
+    commit_window(directory, window)
+    commit_window(runtime_window_path(directory), copy.deepcopy(window))
     return directory
 
 

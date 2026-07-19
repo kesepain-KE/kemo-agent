@@ -179,7 +179,7 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
-            "timeout": 120.0,
+            "timeout": float(provider.get("timeout", 120.0)),
             "stream": bool(provider.get("stream", True)),
         }
     )

@@ -174,6 +174,9 @@ def _validate_plan(data: dict[str, Any], *, tool_names: set[str] | None = None) 
     auto_accept = data.get("auto_accept")
     if not isinstance(auto_accept, bool):
         raise PlanValidationError("auto_accept 必须是布尔值")
+    reminder = data.get("reminder", "")
+    if not isinstance(reminder, str):
+        raise PlanValidationError("reminder 必须是字符串")
     revision = data.get("revision")
     if not isinstance(revision, int) or revision < 1:
         raise PlanValidationError("revision 必须是正整数")
@@ -199,6 +202,11 @@ def normalize_plan(
     session_id: str = "default",
     steps: list[dict[str, Any]],
     auto_accept: bool = False,
+    reminder: str = "",
+    status: str = "pending",
+    revision: int = 1,
+    created_at: str | None = None,
+    current_step: str | None = None,
     tool_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build a fully validated plan dict ready for storage."""
@@ -228,12 +236,17 @@ def normalize_plan(
         "user": user,
         "source": source,
         "session_id": session_id,
-        "status": "pending",
+        "status": status,
         "auto_accept": auto_accept,
-        "revision": 1,
-        "created_at": now,
+        "reminder": reminder,
+        "revision": revision,
+        "created_at": created_at or now,
         "updated_at": now,
-        "current_step": normalized_steps[0]["step_id"] if normalized_steps else "",
+        "current_step": (
+            current_step
+            if current_step is not None
+            else normalized_steps[0]["step_id"] if normalized_steps else ""
+        ),
         "steps": normalized_steps,
     }
     _validate_plan(plan, tool_names=tool_names)
@@ -254,6 +267,7 @@ class PlanStore:
 
     def create(self, plan: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
+            _validate_plan(plan)
             self._dir.mkdir(parents=True, exist_ok=True)
             plan_id = plan["plan_id"]
             path = self._path(plan_id)
@@ -271,6 +285,8 @@ class PlanStore:
                 data = json.loads(path.read_text("utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise PlanError(f"计划文件损坏：{plan_id}（{exc}）") from exc
+            if isinstance(data, dict):
+                data.setdefault("reminder", "")
             return data
 
     def list_plans(self) -> list[dict[str, Any]]:
@@ -282,6 +298,7 @@ class PlanStore:
                 try:
                     data = json.loads(path.read_text("utf-8"))
                     if isinstance(data, dict) and "plan_id" in data:
+                        data.setdefault("reminder", "")
                         plans.append(data)
                 except (OSError, json.JSONDecodeError):
                     continue
@@ -297,6 +314,7 @@ class PlanStore:
                 current = json.loads(path.read_text("utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise PlanError(f"计划文件损坏：{plan_id}（{exc}）") from exc
+            current.setdefault("reminder", "")
             updated = mutator(current)
             if not isinstance(updated, dict):
                 raise PlanError("mutator 必须返回 dict")
@@ -327,6 +345,7 @@ class PlanStore:
                     continue
                 if not isinstance(data, dict):
                     continue
+                data.setdefault("reminder", "")
                 changed = False
                 for step in data.get("steps", []):
                     if step.get("status") == "running":

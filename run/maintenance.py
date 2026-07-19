@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 
 from provider.factory import create_provider
 from run.agent_runner import AgentRunner
-from run.config import load_config
 from run.engine import compress_context, context_status
 from run.history import load_window
 from run.memory import MemoryStore, contains_sensitive_credential
@@ -114,9 +113,7 @@ class MaintenanceScheduler:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
-        self._next_important_review: dict[str, datetime] = {}
         self._next_context_review: dict[str, datetime] = {}
-        self._daily_review_dates: dict[str, str] = {}
         self._last_results: dict[str, Any] = {}
 
     @property
@@ -187,35 +184,7 @@ class MaintenanceScheduler:
         *,
         force: bool,
     ) -> dict[str, Any]:
-        config = load_config(user, self.root)
-        store = MemoryStore(self.root, user, config)
-        result: dict[str, Any] = {"memory_lifecycle": store.review_due(now=current)}
-        agents = config.get("agents") or {}
-
-        review_hours = agents.get("important_memory_review_hours", 3)
-        if isinstance(review_hours, bool) or not isinstance(review_hours, (int, float)):
-            raise MaintenanceError("agents.important_memory_review_hours 必须是正数")
-        review_hours = float(review_hours)
-        if review_hours <= 0:
-            raise MaintenanceError("agents.important_memory_review_hours 必须是正数")
-        next_important = self._next_important_review.setdefault(
-            user, current + timedelta(hours=review_hours)
-        )
-        if force or current >= next_important:
-            result["important_memory"] = self._review_important_memory(
-                user, config, store
-            )
-            self._next_important_review[user] = current + timedelta(hours=review_hours)
-
-        local = current.astimezone(BEIJING)
-        hour, minute = _parse_daily_time(agents.get("daily_memory_review_time", "02:00"))
-        daily_key = local.date().isoformat()
-        if (
-            (force or (local.hour, local.minute) >= (hour, minute))
-            and self._daily_review_dates.get(user) != daily_key
-        ):
-            result["daily_memory_review"] = store.review_due(now=current)
-            self._daily_review_dates[user] = daily_key
+        result: dict[str, Any] = {}
 
         next_context = self._next_context_review.setdefault(
             user, current + CONTEXT_REVIEW_INTERVAL
@@ -231,6 +200,7 @@ class MaintenanceScheduler:
         config: dict[str, Any],
         store: MemoryStore,
     ) -> dict[str, Any]:
+        """Deprecated compatibility helper; important memory now runs via cron."""
         temporary = [
             item
             for tier in ("half_year", "one_month", "seven_days")

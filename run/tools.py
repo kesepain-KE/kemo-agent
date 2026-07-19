@@ -189,8 +189,6 @@ def apply_runtime_tool_policy(
     names = set(registry.tools)
     if not source_policy.plugins.unrestricted:
         names &= set(source_policy.plugins.names)
-    if source_policy.kemo_graph_replaces_knowledge:
-        names.discard("knowledge_search")
     if not os.getenv("TAVILY_API_KEY", "").strip():
         names.discard("web_search")
     if not history_read_enabled:

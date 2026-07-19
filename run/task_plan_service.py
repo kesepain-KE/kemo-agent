@@ -1,8 +1,8 @@
-"""任务计划生成服务：通过AgentRunner调用task_plan子代理。"""
+"""Task-plan generation service backed by the task_plan subagent."""
 
 from __future__ import annotations
 
-import json
+import copy
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,12 +10,21 @@ from provider.factory import create_provider
 from run.agent_runner import AgentRunError, AgentRunner
 from run.config import load_config
 from run.memory import MemoryStore
-from run.task_plan_store import (
-    PlanConflictError,
-    PlanValidationError,
-    normalize_plan,
-)
+from run.task_plan_store import PlanValidationError, normalize_plan
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
+
+
+EDITABLE_PLAN_STATUSES = frozenset({"pending", "approved", "paused"})
+_PROTECTED_COMPLETED_FIELDS = (
+    "step_id",
+    "title",
+    "description",
+    "status",
+    "depends_on",
+    "tool_name",
+    "tool_arguments",
+    "critical",
+)
 
 
 class PlanGenerationError(RuntimeError):
@@ -23,15 +32,104 @@ class PlanGenerationError(RuntimeError):
 
 
 class PlanSkipped(PlanGenerationError):
-    """The sub-agent decided a plan is unnecessary."""
-    pass
+    """The subagent decided a plan is unnecessary."""
 
 
 def _tool_summary(registry: ToolRegistry, max_tools: int = 50) -> list[dict[str, str]]:
-    tools: list[dict[str, str]] = []
-    for tool in registry.enabled_tools()[:max_tools]:
-        tools.append({"name": tool.name, "description": tool.description})
-    return tools
+    return [
+        {"name": tool.name, "description": tool.description}
+        for tool in registry.enabled_tools()[:max_tools]
+    ]
+
+
+def _safe_markdown_files(base: Path, *, recursive: bool) -> list[Path]:
+    if not base.is_dir() or base.is_symlink():
+        return []
+    candidates = base.rglob("SKILL.md") if recursive else base.glob("*/SKILL.md")
+    files: list[Path] = []
+    resolved_base = base.resolve()
+    for path in candidates:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            path.resolve().relative_to(resolved_base)
+        except (OSError, ValueError):
+            continue
+        relative = path.relative_to(base)
+        current = base
+        unsafe = False
+        for part in relative.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                unsafe = True
+                break
+        if not unsafe:
+            files.append(path)
+    return sorted(files, key=lambda item: item.relative_to(base).as_posix().casefold())
+
+
+def _render_markdown_files(root: Path, paths: list[Path]) -> str:
+    parts: list[str] = []
+    for path in paths:
+        try:
+            content = path.read_text("utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise PlanGenerationError(f"技能文件不可读：{path}（{exc}）") from exc
+        relative = path.relative_to(root).as_posix()
+        parts.append(f"## {relative}\n\n{content}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _collect_skills(root: Path, user: str) -> dict[str, str]:
+    """Collect complete plugin, shared, and current-user SKILL.md files."""
+    plugin_files = _safe_markdown_files(root / "plugins", recursive=False)
+    shared_files = _safe_markdown_files(root / "shared_skills", recursive=True)
+    user_files = _safe_markdown_files(
+        root / "users" / user / "user_skills",
+        recursive=True,
+    )
+    return {
+        "plugin_skills": _render_markdown_files(root, plugin_files),
+        "shared_skills": _render_markdown_files(root, shared_files),
+        "user_skills": _render_markdown_files(root, user_files),
+    }
+
+
+def _read_index(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        return ""
+    try:
+        return path.read_text("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise PlanGenerationError(f"知识库索引不可读：{path}（{exc}）") from exc
+
+
+def _collect_knowledge_indexes(root: Path, user: str) -> dict[str, str]:
+    """Read all three data_structure.md knowledge indexes without truncation."""
+    return {
+        "global_knowledge_index": _read_index(
+            root / "global_knowledge" / "data_structure.md"
+        ),
+        "shared_knowledge_index": _read_index(
+            root / "shared_knowledge" / "data_structure.md"
+        ),
+        "user_knowledge_index": _read_index(
+            root / "users" / user / "knowledge" / "data_structure.md"
+        ),
+    }
+
+
+def _planning_injections(root: Path, user: str) -> dict[str, str]:
+    skills = _collect_skills(root, user)
+    knowledge = _collect_knowledge_indexes(root, user)
+    return {
+        "plugin_skills": skills["plugin_skills"],
+        "shared_skills_text": skills["shared_skills"],
+        "user_skills_text": skills["user_skills"],
+        "global_knowledge_index": knowledge["global_knowledge_index"],
+        "shared_knowledge_index": knowledge["shared_knowledge_index"],
+        "user_knowledge_index": knowledge["user_knowledge_index"],
+    }
 
 
 def _relevant_memory(root: Path, user: str, config: dict[str, Any], goal: str) -> str:
@@ -53,6 +151,130 @@ def _relevant_memory(root: Path, user: str, config: dict[str, Any], goal: str) -
     return "以下是按文件名匹配的相关用户记忆，当前计划目标优先：\n" + "\n".join(lines)
 
 
+def _editable_plan(plan: dict[str, Any]) -> None:
+    status = plan.get("status")
+    if status not in EDITABLE_PLAN_STATUSES:
+        raise PlanGenerationError(
+            f"计划 {plan.get('plan_id')} 当前状态为 {status!r}，"
+            "只能编辑 pending/approved/paused 状态的计划"
+        )
+
+
+def _completed_steps(plan: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"step_id": str(step.get("step_id") or ""), "title": str(step.get("title") or "")}
+        for step in plan.get("steps", [])
+        if isinstance(step, dict) and step.get("status") == "completed"
+    ]
+
+
+def _protect_completed_steps(
+    existing_plan: dict[str, Any],
+    proposed_steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    protected = {
+        step["step_id"]: step
+        for step in existing_plan.get("steps", [])
+        if isinstance(step, dict) and step.get("status") == "completed"
+    }
+    if not protected:
+        return proposed_steps
+    output = copy.deepcopy(proposed_steps)
+    positions = {
+        step.get("step_id"): index
+        for index, step in enumerate(output)
+        if isinstance(step, dict)
+    }
+    for step_id, original in protected.items():
+        if step_id not in positions:
+            raise PlanGenerationError(f"已完成步骤 {step_id} 不得删除")
+        proposed = output[positions[step_id]]
+        for field in _PROTECTED_COMPLETED_FIELDS:
+            if field in proposed and proposed[field] != original.get(field):
+                raise PlanGenerationError(f"已完成步骤 {step_id} 的 {field} 不得修改")
+        output[positions[step_id]] = copy.deepcopy(original)
+    return output
+
+
+def _reminder(auto_accept: bool, action: str) -> str:
+    if auto_accept:
+        return ""
+    if action == "edit":
+        return "当前任务计划已修改，请让用户点击批准后执行"
+    return "当前任务计划已创建，请让用户点击批准后执行"
+
+
+def _runtime_tools(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    registry: ToolRegistry | None,
+) -> ToolRegistry:
+    if registry is not None:
+        return registry
+    tool_config = config.get("tools") or {}
+    if not bool(tool_config.get("enabled", True)):
+        return ToolRegistry({})
+    return apply_runtime_tool_policy(discover_tools(root, user), config)
+
+
+def _normalize_result(
+    *,
+    data: dict[str, Any],
+    goal: str,
+    user: str,
+    source: str,
+    session_id: str,
+    auto_accept: bool,
+    max_steps: int,
+    tool_names: set[str],
+    existing_plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected_action = "edit" if existing_plan is not None else "create"
+    action = data.get("action")
+    if action == "skip" and existing_plan is None:
+        raise PlanSkipped(str(data.get("message") or "问题过于简单，可以直接执行"))
+    if action != expected_action:
+        raise PlanGenerationError(
+            f"task_plan 子代理应返回 action={expected_action!r}，实际为 {action!r}"
+        )
+    steps = data.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise PlanGenerationError("task_plan 子代理未返回步骤列表")
+    if len(steps) > max_steps:
+        raise PlanGenerationError(f"步骤数量 {len(steps)} 超过最大限制 {max_steps}")
+    if existing_plan is not None:
+        steps = _protect_completed_steps(existing_plan, steps)
+
+    try:
+        return normalize_plan(
+            plan_id=existing_plan.get("plan_id") if existing_plan else None,
+            title=(
+                data.get("title")
+                or (existing_plan or {}).get("title")
+                or goal[:100]
+            ),
+            description=(
+                data.get("description")
+                or (existing_plan or {}).get("description")
+                or goal
+            ),
+            user=user,
+            source=(existing_plan or {}).get("source", source),
+            session_id=(existing_plan or {}).get("session_id", session_id),
+            steps=steps,
+            auto_accept=auto_accept,
+            reminder=_reminder(auto_accept, expected_action),
+            status=(existing_plan or {}).get("status", "pending"),
+            revision=int((existing_plan or {}).get("revision", 1)),
+            created_at=(existing_plan or {}).get("created_at"),
+            current_step=(existing_plan or {}).get("current_step"),
+            tool_names=tool_names,
+        )
+    except PlanValidationError as exc:
+        raise PlanGenerationError(f"计划校验失败：{exc}") from exc
+
+
 def generate_plan(
     *,
     root: Path,
@@ -66,80 +288,64 @@ def generate_plan(
     existing_plan: dict[str, Any] | None = None,
     edit_request: str | None = None,
 ) -> dict[str, Any]:
-    """Call the task_plan sub-agent to produce a structured plan draft, then
-    normalize and persist it.  Returns the stored plan dict.
-
-    Raises ``PlanSkipped`` when the sub-agent decides a plan is unnecessary.
-    Raises ``PlanGenerationError`` on sub-agent timeout, non-JSON output,
-    unknown tools, or invalid dependencies.
-    """
-    cfg = config or load_config(user, root)
-    if tool_registry is None:
-        tool_config = cfg.get("tools") or {}
-        tool_registry = (
-            apply_runtime_tool_policy(discover_tools(root, user), cfg)
-            if bool(tool_config.get("enabled", True))
-            else ToolRegistry({})
-        )
-    tool_names = set(tool_registry.tools.keys())
+    """Generate a normalized plan draft; persistence remains caller-owned."""
+    if existing_plan is not None:
+        _editable_plan(existing_plan)
+    cfg = config if config is not None else load_config(user, root)
+    registry = _runtime_tools(root, user, cfg, tool_registry)
+    tool_names = set(registry.tools)
     task_plan_config = cfg.get("task_plan") or {}
-    max_steps = int(task_plan_config.get("max_steps", 10))
-    auto_accept = bool(task_plan_config.get("auto_accept", False))
-
-    runner = AgentRunner(root, user, config=cfg, provider_factory=provider_factory)
-    memory_text = _relevant_memory(root, user, cfg, goal)
+    max_steps = int(task_plan_config.get("max_steps", 20))
+    auto_accept = (
+        bool(existing_plan.get("auto_accept", False))
+        if existing_plan is not None
+        else bool(task_plan_config.get("auto_accept", False))
+    )
+    action = "edit" if existing_plan is not None else "create"
+    memory_text = _relevant_memory(root, user, cfg, edit_request or goal)
+    injections = _planning_injections(root, user)
 
     input_data: dict[str, Any] = {
-        "action": "edit" if existing_plan is not None else "create",
+        "action": action,
         "goal": goal,
-        "available_tools": _tool_summary(tool_registry),
+        "available_tools": _tool_summary(registry),
+        "plugin_skills": injections["plugin_skills"],
+        "shared_skills_text": injections["shared_skills_text"],
+        "user_skills_text": injections["user_skills_text"],
+        "global_knowledge_index": injections["global_knowledge_index"],
+        "shared_knowledge_index": injections["shared_knowledge_index"],
+        "user_knowledge_index": injections["user_knowledge_index"],
         "max_steps": max_steps,
+        "auto_accept": auto_accept,
         "relevant_memory": memory_text,
     }
     if existing_plan is not None:
         input_data["existing_plan"] = existing_plan
+        input_data["completed_steps"] = _completed_steps(existing_plan)
     if edit_request is not None:
         input_data["edit_request"] = edit_request
 
     try:
-        result = runner.run("task_plan", input_data)
+        result = AgentRunner(
+            root,
+            user,
+            config=cfg,
+            provider_factory=provider_factory,
+        ).run("task_plan", input_data)
     except AgentRunError as exc:
         raise PlanGenerationError(f"task_plan 子代理执行失败：{exc}") from exc
 
-    data = result.data
-    action = data.get("action")
-
-    if action == "skip":
-        raise PlanSkipped(str(data.get("message") or "问题过于简单，可以直接执行"))
-
-    if action not in ("create", "edit"):
-        raise PlanGenerationError(f"task_plan 子代理返回未知 action：{action!r}")
-
-    steps = data.get("steps")
-    if not isinstance(steps, list) or len(steps) == 0:
-        raise PlanGenerationError("task_plan 子代理未返回步骤列表")
-
-        # 验证最大步数
-    if len(steps) > max_steps:
-        raise PlanGenerationError(
-            f"步骤数量 {len(steps)} 超过最大限制 {max_steps}"
-        )
-
-    try:
-        plan = normalize_plan(
-            title=data.get("title") or goal[:100],
-            description=data.get("description") or goal,
-            user=user,
-            source=source,
-            session_id=session_id,
-            steps=steps,
-            auto_accept=auto_accept,
-            tool_names=tool_names,
-        )
-    except PlanValidationError as exc:
-        raise PlanGenerationError(f"计划校验失败：{exc}") from exc
-
-    return plan
+    return _normalize_result(
+        data=result.data,
+        goal=goal,
+        user=user,
+        source=source,
+        session_id=session_id,
+        auto_accept=auto_accept,
+        max_steps=max_steps,
+        tool_names=tool_names,
+        existing_plan=existing_plan,
+    )
 
 
 def edit_plan(
@@ -152,62 +358,17 @@ def edit_plan(
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry: ToolRegistry | None = None,
 ) -> dict[str, Any]:
-    """Call the task_plan sub-agent to edit an existing plan."""
-    cfg = config or load_config(user, root)
-    if tool_registry is None:
-        tool_config = cfg.get("tools") or {}
-        tool_registry = (
-            apply_runtime_tool_policy(discover_tools(root, user), cfg)
-            if bool(tool_config.get("enabled", True))
-            else ToolRegistry({})
-        )
-    tool_names = set(tool_registry.tools.keys())
-    task_plan_config = cfg.get("task_plan") or {}
-    max_steps = int(task_plan_config.get("max_steps", 10))
-
-    runner = AgentRunner(root, user, config=cfg, provider_factory=provider_factory)
-    memory_text = _relevant_memory(root, user, cfg, edit_request)
-
-    input_data = {
-        "action": "edit",
-        "goal": plan.get("description") or plan.get("title", ""),
-        "available_tools": _tool_summary(tool_registry),
-        "max_steps": max_steps,
-        "existing_plan": plan,
-        "edit_request": edit_request,
-        "relevant_memory": memory_text,
-    }
-
-    try:
-        result = runner.run("task_plan", input_data)
-    except AgentRunError as exc:
-        raise PlanGenerationError(f"task_plan 子代理执行失败：{exc}") from exc
-
-    data = result.data
-    action = data.get("action")
-    if action not in ("create", "edit"):
-        raise PlanGenerationError(f"task_plan 子代理返回未知 action：{action!r}")
-
-    steps = data.get("steps")
-    if not isinstance(steps, list) or len(steps) == 0:
-        raise PlanGenerationError("task_plan 子代理未返回步骤列表")
-
-    if len(steps) > max_steps:
-        raise PlanGenerationError(
-            f"步骤数量 {len(steps)} 超过最大限制 {max_steps}"
-        )
-
-    try:
-        return normalize_plan(
-            plan_id=plan.get("plan_id"),
-            title=data.get("title") or plan.get("title", ""),
-            description=data.get("description") or plan.get("description", ""),
-            user=user,
-            source=plan.get("source", "cli"),
-            session_id=plan.get("session_id", "default"),
-            steps=steps,
-            auto_accept=plan.get("auto_accept", False),
-            tool_names=tool_names,
-        )
-    except PlanValidationError as exc:
-        raise PlanGenerationError(f"计划校验失败：{exc}") from exc
+    """Edit an eligible plan while preserving completed steps."""
+    _editable_plan(plan)
+    return generate_plan(
+        root=root,
+        user=user,
+        goal=str(plan.get("description") or plan.get("title") or ""),
+        source=str(plan.get("source") or "cli"),
+        session_id=str(plan.get("session_id") or "default"),
+        config=config,
+        provider_factory=provider_factory,
+        tool_registry=tool_registry,
+        existing_plan=plan,
+        edit_request=edit_request,
+    )
