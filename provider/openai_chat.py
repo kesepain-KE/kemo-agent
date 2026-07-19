@@ -1,8 +1,4 @@
-"""OpenAI 聊天完成兼容 HTTP 传输。
-
-相同的传输服务直接与 OpenAI 兼容的 API 和 Kemo 网关模式。
-Kemo 模式信任网关提供的准确使用；直接模式标记回退
-当上游省略使用时明确使用估计。"""
+"""Low-level OpenAI-compatible ``/chat/completions`` HTTP transport."""
 
 from __future__ import annotations
 
@@ -12,7 +8,7 @@ import math
 import socket
 import urllib.error
 import urllib.request
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable
 
 from events import RunEvent
 from provider.schema import (
@@ -20,7 +16,6 @@ from provider.schema import (
     ChatResponse,
     ProviderAuthError,
     ProviderError,
-    ProviderMode,
     ProviderTimeoutError,
     ToolCall,
     Usage,
@@ -88,9 +83,8 @@ def _messages_text(messages: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-class OpenAIChatProvider:
-    def __init__(self, config: dict[str, Any], mode: ProviderMode = "openai") -> None:
-        self.mode = mode
+class OpenAIChatTransport:
+    def __init__(self, config: dict[str, Any]) -> None:
         self.base_url = str(config["base_url"]).rstrip("/")
         self.api_key = str(config["api_key"])
         self.model = str(config["model"])
@@ -163,7 +157,7 @@ class OpenAIChatProvider:
                 completion_tokens=completion,
                 total_tokens=total,
                 estimated=False,
-                source="kemo_gateway" if self.mode == "kemo" else "provider",
+                source="provider",
                 extra=extras,
             )
         prompt = _estimate_tokens(_messages_text(request.messages))
@@ -329,50 +323,3 @@ class OpenAIChatProvider:
             )
         finally:
             response.close()
-            response.close()
-
-    # Unified protocol adapter surface.  Legacy chat/chat_stream remain for
-    # subagents and third-party tests while Run can migrate independently.
-    def validate(self, request):
-        from provider.protocol.validation import validate_request
-
-        validate_request(request)
-
-    def capabilities(self, model: str):
-        from provider.protocol.models import ModelCapabilities
-
-        return ModelCapabilities(
-            model=model,
-            input_modalities=["text", "image"],
-            output_modalities=["text"],
-            streaming=True,
-            reasoning={
-                "supported": True,
-                "efforts": ["low", "medium", "high"],
-                "summary": False,
-                "persisted_state": False,
-            },
-            tools={
-                "function_calling": True,
-                "parallel_calls": True,
-                "multimodal_results": False,
-            },
-        )
-
-    def create(self, request):
-        from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
-
-        self.validate(request)
-        chat_request = kemo_request_to_chat(request.model_copy(update={"stream": False}))
-        return chat_response_to_kemo(self.chat(chat_request), request)
-
-    def stream(self, request):
-        from provider.adapters.compat import kemo_request_to_chat, legacy_stream_to_protocol
-
-        self.validate(request)
-        chat_request = kemo_request_to_chat(request.model_copy(update={"stream": True}))
-        return legacy_stream_to_protocol(
-            self.chat_stream(chat_request),
-            request,
-            capabilities=self.capabilities(request.model),
-        )

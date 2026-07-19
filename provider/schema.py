@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Literal, Protocol
+from typing import Any, Iterable, Protocol
 
 from events import RunEvent
-
-
-ProviderMode = Literal["openai", "kemo"]
 
 
 class ProviderError(RuntimeError):
@@ -106,8 +103,7 @@ class ChatResponse:
     raw: dict[str, Any] | None = None
 
 
-class ChatProvider(Protocol):
-    mode: ProviderMode
+class ChatTransport(Protocol):
 
     def chat(self, request: ChatRequest) -> ChatResponse: ...
 

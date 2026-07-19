@@ -1,4 +1,4 @@
-"""Compatibility mapping between the legacy Chat schema and protocol v1."""
+"""Mapping between the standard Chat Completions schema and Kemo protocol v1."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from provider.schema import (
     ChatRequest,
     ChatResponse,
     ToolCall,
-    Usage as LegacyUsage,
+    Usage as ChatUsage,
 )
 
 
@@ -49,9 +49,20 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-def _legacy_usage(value: LegacyUsage) -> Usage:
+def _protocol_usage_from_chat(value: ChatUsage) -> Usage:
     extras = dict(value.extra or {})
-    cached = extras.get("cached_tokens")
+    cached = next(
+        (
+            extras.get(key)
+            for key in (
+                "cached_tokens",
+                "cached_prompt_tokens",
+                "cache_read_input_tokens",
+            )
+            if extras.get(key) is not None
+        ),
+        None,
+    )
     if cached is None and isinstance(extras.get("prompt_tokens_details"), dict):
         cached = extras["prompt_tokens_details"].get("cached_tokens")
     reasoning = extras.get("reasoning_tokens")
@@ -60,8 +71,6 @@ def _legacy_usage(value: LegacyUsage) -> Usage:
     mode = (
         MeasurementMode.ESTIMATED
         if value.estimated
-        else MeasurementMode.GATEWAY
-        if value.source == "kemo_gateway"
         else MeasurementMode.PROVIDER
     )
     return Usage(
@@ -80,8 +89,8 @@ def _legacy_usage(value: LegacyUsage) -> Usage:
     )
 
 
-def _chat_usage(value: Usage) -> LegacyUsage:
-    return LegacyUsage(
+def _chat_usage(value: Usage) -> ChatUsage:
+    return ChatUsage(
         prompt_tokens=int(value.input_tokens or 0),
         completion_tokens=int(value.output_tokens or 0),
         total_tokens=int(value.total_tokens or 0),
@@ -388,7 +397,7 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
         status=(ResponseStatus.REQUIRES_ACTION if response.tool_calls else ResponseStatus.COMPLETED),
         model=response.model or request.model,
         output=output,
-        usage=_legacy_usage(response.usage),
+        usage=_protocol_usage_from_chat(response.usage),
         provider_response_id=response.response_id or None,
         metadata={"finish_reason": response.finish_reason},
     )
@@ -417,7 +426,7 @@ def kemo_response_to_chat(response: KemoResponse) -> ChatResponse:
     )
 
 
-def legacy_stream_to_protocol(
+def chat_stream_to_protocol(
     events: Iterable[RunEvent],
     request: KemoRequest,
     *,

@@ -1,26 +1,17 @@
-"""Dual-surface Kemo provider: native protocol plus legacy chat fallback."""
+"""Native Kemo Provider transport with no Chat Completions fallback."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from provider.adapters.gateway import KemoGatewayAdapter
-from provider.openai_chat import OpenAIChatProvider
 
 
 class KemoGatewayProvider:
+    mode = "kemo"
+
     def __init__(self, config: dict[str, Any]) -> None:
-        self.mode = "kemo"
         self._native = KemoGatewayAdapter(config)
-        self._legacy = OpenAIChatProvider(config=config, mode="kemo")
-
-    # Legacy methods stay available for existing subagents and compatibility
-    # callers.  The main Run pipeline uses create/stream below.
-    def chat(self, request):
-        return self._legacy.chat(request)
-
-    def chat_stream(self, request):
-        return self._legacy.chat_stream(request)
 
     def create(self, request):
         return self._native.create(request)

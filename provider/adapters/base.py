@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
-from typing import Protocol
+from typing import Literal, Protocol
 
 from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
 from provider.protocol.streaming import ProviderStreamEvent
 
 
 class ProviderAdapter(Protocol):
+    mode: Literal["chat", "kemo"]
+
     def create(self, request: KemoRequest) -> KemoResponse: ...
 
     def stream(self, request: KemoRequest) -> Iterable[ProviderStreamEvent]: ...
