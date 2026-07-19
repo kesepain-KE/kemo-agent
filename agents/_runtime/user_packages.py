@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentManifestError, discover_agents
+from run.config import load_config
 from run.users import validate_user_name
 
 
@@ -53,8 +54,9 @@ def create_user_agent_package(
     if target.exists():
         raise UserAgentPackageError(f"用户子代理已存在：{name}")
     execution = str(definition.get("execution") or "sync")
-    model_profile = str(definition.get("model_profile") or "default")
-    timeout = definition.get("timeout", 120)
+    model_profile = "default"
+    runtime = load_config(user_name, base).get("agent_runtime") or {}
+    timeout = definition.get("timeout", runtime.get("default_timeout", 600))
     write_policy = str(definition.get("write_policy") or "none")
     agent_config = definition.get("agent_config")
     if agent_config is None:

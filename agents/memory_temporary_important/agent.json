@@ -11,6 +11,20 @@
   "timeout": 180,
   "execution": "background_serial",
   "write_policy": "user_memory",
-  "input_schema": {"type": "object", "additionalProperties": true},
-  "output_schema": {"type": "object", "additionalProperties": true}
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "temporary_memories": {"type": "array"},
+      "existing_important_memory": {"type": "string"},
+      "permanent_memories": {"type": "array"}
+    },
+    "required": ["temporary_memories", "existing_important_memory", "permanent_memories"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {"content": {"type": "string"}},
+    "required": ["content"],
+    "additionalProperties": false
+  }
 }

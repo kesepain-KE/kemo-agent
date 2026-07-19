@@ -9,7 +9,7 @@ from typing import Any
 from agents._runtime.schema import AgentDefinition
 from run.knowledge import select_knowledge_index
 from run.prompt_sources import SkillDescriptor, load_prompt_source_registry, truncate_chars
-from run.tools import ToolRegistry, discover_tools
+from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 
 class AgentCapabilityError(RuntimeError):
@@ -100,6 +100,7 @@ def build_agent_tool_registry(
     root: Path,
     user: str,
     definition: AgentDefinition,
+    config: dict[str, Any] | None = None,
 ) -> ToolRegistry:
     discovered = discover_tools(root, user)
     allowed = set(definition.capabilities.plugin_tools)
@@ -109,9 +110,10 @@ def build_agent_tool_registry(
         raise AgentCapabilityError(
             f"子代理 {definition.name} 工具白名单包含未知插件：{', '.join(unknown)}"
         )
+    runtime_registry = apply_runtime_tool_policy(discovered, config or {})
     selected = {
         name: tool
-        for name, tool in discovered.tools.items()
+        for name, tool in runtime_registry.tools.items()
         if name in allowed and name not in forbidden
     }
     if (
@@ -128,4 +130,4 @@ def build_agent_tool_registry(
         raise AgentCapabilityError(
             f"子代理 {definition.name} 允许知识正文检索但未授权 knowledge_search"
         )
-    return ToolRegistry(selected, discovered.plugin_manifests)
+    return runtime_registry.selected(set(selected))
