@@ -1,30 +1,6 @@
 {
-  "schema_version": 2,
   "name": "memory_temporary_important",
   "version": "1.0.0",
   "description": "巡检临时记忆并维护临时重要记忆热画像。",
-  "enabled": true,
-  "instruction": "AGENT.md",
-  "executor": "executor.py:execute",
-  "config": "agent-config.json",
-  "model_profile": "cheap",
-  "timeout": 180,
-  "execution": "background_serial",
-  "write_policy": "user_memory",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "temporary_memories": {"type": "array"},
-      "existing_important_memory": {"type": "string"},
-      "permanent_memories": {"type": "array"}
-    },
-    "required": ["temporary_memories", "existing_important_memory", "permanent_memories"],
-    "additionalProperties": false
-  },
-  "output_schema": {
-    "type": "object",
-    "properties": {"content": {"type": "string"}},
-    "required": ["content"],
-    "additionalProperties": false
-  }
+  "trigger": "trigger.md"
 }

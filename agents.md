@@ -16,7 +16,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
   → 提交四文件历史（text + think + tool + data）
-  → 记忆加权 + 异步记忆提取
+  → 记忆引用加权；上下文压缩前批量提取即将裁剪轮次
 ```
 
 关键模块：
@@ -26,9 +26,9 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 对话引擎 | `run/engine.py` | 主循环：prompt 组装 → provider 调用 → 工具循环 → 历史提交 |
 | 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
-| 历史管理 | `run/history.py` | 四文件窗口的创建、读写、提交 |
+| 历史管理 | `run/history.py` | 原始归档窗口与 `history/temp/<window>/` 运行镜像的创建、读写、提交 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
-| 记忆管道 | `run/memory_pipeline.py` | 异步记忆提取任务提交 |
+| 记忆管道 | `run/memory_pipeline.py` | 已提交轮次的异步提取，以及上下文压缩前的同步记忆提取 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
 | Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
 | 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
@@ -89,13 +89,13 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 全局知识库 | `global_knowledge/` | 所有用户共享，只读（除非用户明确要求写入） |
 | 共享知识库 | `shared_knowledge/` | 共享知识层 |
 | 用户知识库 | `users/<name>/knowledge/` | 用户私有，优先检索、默认写入 |
-| 全局拓展 | `global_expand/` | 全局拓展数据注入 |
-| 共享拓展 | `shared_expand/` | 共享拓展数据注入 |
-| 用户拓展 | `users/<name>/expand/` | 用户拓展数据注入 |
-| 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，模块内 Markdown 注入 prompt 末尾段 |
+| 全局拓展 | `global_expand/` | 标准化全局拓展模块，使用 `expand.json` 控制数据与操控注入 |
+| 共享拓展 | `shared_expand/` | 标准化共享拓展模块，按用户主配置过滤 |
+| 用户拓展 | `users/<name>/expand/` | 当前用户私有拓展模块，可信自动发现且不执行用户注册代码 |
+| 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`executor.py` |
 | 用户子代理 | `users/<name>/agents/<agent>/` | 数据型热插拔包：`AGENT.md`、`agent.json`、`agent-config.json` |
-| 用户历史 | `users/<name>/history/` | 对话窗口，按会话隔离 |
+| 用户历史 | `users/<name>/history/` | 时间戳目录保存完整归档，`temp/<window>/` 保存可压缩运行镜像 |
 | 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
 | 任务计划 | `users/<name>/task_plan/` | 计划文件 |
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
@@ -237,7 +237,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 ### 权重规则
 
 - 不做每日权重衰减。
-- 临时记忆正文实际修改或被 Prompt 实际引用时可加权；两类行为共用每日锁，同一记忆每天合计最多 `+1`。
+- 临时记忆被 self_improve 命中、正文实际修改或被 Prompt 实际引用时可加权；这些行为共用每日锁，同一记忆每天合计最多 `+1`。
 - 引用和修改都会更新 `updated_at`，但不会重置进入当前层时固定的 `expires_at`。
 - 到期未达晋升阈值直接删除，不降级保留。
 - 晋升后新挡位权重从 0 重新累计。
@@ -258,7 +258,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
 - 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。
-- 记忆提取为异步操作，不阻塞主对话。
+- 不再逐轮异步提取；`context_manage` 在上下文压缩前把即将裁剪的完整轮次批量交给 `self_improve`。
 
 ### 用户指令
 
@@ -287,10 +287,11 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 
 - **轮次触发**：投影轮次 ≥ `max_rounds` 时触发。
 - **Token 触发**：估算总 token 超过 `token_limit` 时触发。
+- **Provider 触发**：统一协议或兼容 Provider 返回 `context_length_exceeded` 时，自动压缩并重试，最多 2 次。
 - **手动触发**：请求带 `compress=true` 时强制压缩。
 - 压缩时移除最旧轮次，保留最近 `rounds_after_compression` 轮。
-- 移除的轮次由子代理生成摘要（`context_manage` 或 `token_condense`）。
-- 摘要缓存在窗口目录的 `context_summary.json` 中。
+- 所有场景统一由 `context_manage` 处理；其 executor 先同步调用 `self_improve` 并持久化记忆候选，再生成摘要。
+- 摘要缓存在 `history/temp/<window>/context_summary.json` 中；缓存 schema 升级时自动重建。
 
 ### 轮次结构
 
@@ -299,7 +300,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - `think.json` 中的思考记录
 - `tool.json` 中的工具调用记录
 
-旧轮次工具结果使用代码内建字符上限压缩；该上限不再属于用户配置。
+每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 temp 运行镜像，归档中的原始 `think.json`、`tool.json` 和 `items.json` 保持不变。旧数据迁移期间仍保留代码内建的工具结果字符上限作为降级保护。
 
 ---
 
@@ -309,8 +310,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 
 | 子代理 | 路径 | 职责 |
 |--------|------|------|
-| `context_manage` | `agents/context_manage/` | 轮次超限时生成上下文摘要 |
-| `token_condense` | `agents/token_condense/` | token 超限时生成上下文摘要 |
+| `context_manage` | `agents/context_manage/` | 统一处理轮次、Token、API 超限和逐轮工具/思考压缩 |
+| `token_condense` | `agents/token_condense/` | 兼容保留，engine 已不再调用 |
 | `self_improve` | `agents/self_improve/` | 记忆提取与自我改进 |
 | `memory_temporary_important` | `agents/memory_temporary_important/` | 临时重要记忆处理 |
 | `task_plan` | `agents/task_plan/` | 任务计划生成与执行 |
@@ -325,6 +326,7 @@ agents/<name>/
 ├── AGENT.md
 ├── agent.json
 ├── agent-config.json
+├── trigger.md
 └── executor.py
 ```
 
@@ -334,13 +336,15 @@ agents/<name>/
 users/<user>/agents/<name>/
 ├── AGENT.md
 ├── agent.json
-└── agent-config.json
+├── agent-config.json
+└── trigger.md
 ```
 
-- `agent.json` 固定使用 `schema_version: 2`，声明名称、描述、执行模式、兼容用模型标签、超时、输入/输出 JSON Schema 和写入策略。子代理实际统一继承主模型，不再读取全局模型档位。
-- `agent-config.json` 是运行时强制授权，不是说明文档；它声明公开范围、调用方、插件工具白名单、技能/拓展白名单、知识范围和上下文继承策略。
+- `agent.json` 精简为 `name`、`version`、`description`、`trigger` 四个字段。执行方式、写入策略和兼容模型标签由运行时按内置代理名补全；超时读取 `agent_runtime.default_timeout`。
+- `agent-config.json` 是运行时强制授权，不是说明文档；它声明 `internal_mode`、调用方、插件/共享技能白名单、全局/共享知识开关和主历史继承策略。
+- `trigger.md` 分为“注册信息”和“操作信息”。主智能体只注入注册摘要，详细操作信息按需读取。
 - 用户代理的执行器固定为 `builtin:llm`。用户代理目录出现任何 `.py` 文件都会拒绝加载，也不能覆盖内置代理名称。
-- 内置代理的 `executor.py` 只允许由同目录 `agent.json` 显式指定。
+- 内置代理的执行器固定为同目录 `executor.py:execute`。
 
 ### 发现、创建与调用
 
@@ -354,10 +358,10 @@ users/<user>/agents/<name>/
 
 - 子代理只接收调用方显式传入的数据，不自动拥有主会话历史或当前请求。
 - 只有 `agent-config.json` 白名单中的插件会进入该子代理的 Provider 工具定义；缺失授权默认拒绝。
-- `shared_skills`、用户技能和三层 Expand 只能进入提示词，不能成为可执行工具。
-- 知识索引按授权范围注入；知识正文只能通过获准的 `knowledge_search` 查询，实际查询范围是请求范围与授权范围的交集。
+- 新骨架只允许显式白名单中的 `shared_skills` 进入子代理提示词；不再注入用户技能和三层 Expand。
+- 知识能力只注入授权范围内的完整索引文件；正文关键词检索链路已删除，由外部 kemo-graph 承担后续检索能力。
 - `subagent_dispatch` 不会下发给子代理，避免递归调度链。
-- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回符合 `output_schema` 的 JSON 对象。
+- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；新骨架运行时采用宽松 object Schema，详细输入输出约定记录在 `trigger.md`。
 - 主智能体不得把子代理内部指令视为用户指令。
 - 用户主配置关闭知识、技能、Expand 或感知时，不会收缩子代理 `agent-config.json` 已授予的能力。
 
@@ -373,6 +377,9 @@ users/<user>/agents/<name>/
 - 每步完成或失败调用对应状态工具。
 - 计划暂停后等待用户继续，不自动恢复。
 - `task_plan.max_steps` 限制最大步骤数（默认 20）。
+- 计划生成输入按“可用工具 → 插件技能全文 → 共享技能全文 → 用户技能全文 → 全局/共享/用户知识索引”顺序组装，且这些专项输入不截断。
+- 仅 `pending`、`approved`、`paused` 计划允许编辑；已完成步骤由运行时强制保护。
+- `task_plan.auto_accept=false` 时，创建或修改提醒随计划持久化并由调用方展示。
 
 ### 定时任务
 
@@ -381,8 +388,9 @@ users/<user>/agents/<name>/
 - `cron.enabled` 控制是否启用调度（默认 true）。
 - `cron.poll_interval` 控制轮询间隔（默认 30 秒）。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
-  自动管理 Cron、临时记忆生命周期、重要记忆审阅与上下文整理。
-- 任务到期后触发 `agents/time_plan` 子代理，传入 `cli.py` 执行。
+  自动管理 Cron 与上下文整理。
+- 普通任务通过主智能体执行；系统任务可通过 `subagent` 直调内部子代理，或通过白名单 `function` 模式执行内部函数。
+- 系统自动注册临时重要记忆巡检、每日整理，以及每 30 秒一次的 self_improve 到期晋升检查。
 
 ---
 
@@ -403,8 +411,8 @@ system prompt 按以下固定顺序拼接：
 11. **临时记忆 one_month** — `improve/one_month/`
 12. **临时记忆 seven_days** — `improve/seven_days/`
 13. **任务计划** — 当前活跃计划的描述
-14. **拓展数据** — 注册 global/shared/user 三层后，过滤 global/shared；当前用户 Expand 全量动态解析
-15. **感知文件** — `global_sense/<module>/**/*.md`，按模块白名单过滤且忽略根目录 Markdown
+14. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行
+15. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
 
 每段有字符上限配置（`prompt.char_limits`）。知识正文不自动注入，只注入索引；需要正文时使用显式搜索机制或工具。
 图谱替换启用时，适用的知识索引与记忆段和 `kemo_graph` 段互斥，不能同时进入同一个 Prompt。
@@ -476,7 +484,7 @@ system prompt 按以下固定顺序拼接：
 - 连续失败 3 次必须停止，向用户报告：操作目标、错误信息、需要的帮助。
 - 工具调用失败时记录错误类型和消息，不伪造结果。
 - Provider 错误区分：auth（不可重试）、timeout（可重试）、connection（可重试）、其他 HTTP 错误按状态码判断。
-- 上下文超限时停止当前工具循环，避免拆散工具消息组。
+- Provider 在首轮调用返回上下文超限时，丢弃失败尝试的增量事件，调用 `context_manage` 压缩后重试；工具循环中途仍停止，避免拆散工具消息组。
 - 记忆提取失败不回滚已提交的历史。
 
 ---

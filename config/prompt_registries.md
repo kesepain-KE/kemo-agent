@@ -21,7 +21,7 @@ def register(registry) -> None:
 随后由 `agents/_runtime/user_resources.py` 解析当前调用用户：
 
 1. `users/<user>/user_skills/**/SKILL.md`
-2. `users/<user>/expand/<module>/inject.md`
+2. `users/<user>/expand/<module>/expand.json`
 
 用户目录不需要、也不允许通过 Python 注册模块接入。切换用户时会重新按目标用户目录解析，所以新增用户不需要修改项目静态注册表。
 
@@ -40,15 +40,18 @@ from pathlib import Path
 
 
 def register(registry) -> None:
-    base = Path(__file__).resolve().parent
-    registry.add_expand("global", "water", base / "water" / "inject.md")
+    registry.add_expand_root("global", Path(__file__).resolve().parent)
 ```
 
-静态 Expand 的 Scope 可为 `global` 或 `shared`。第二个参数是来源根目录的直接子模块名，第三个参数必须是该模块目录内的现有注入文件。
+静态 Expand 的 Scope 可为 `global` 或 `shared`，注册器只注册规定位置的根目录。根目录中的每个非隐藏直接子目录都是一个模块；用户层由可信解析器注册 `users/<user>/expand/`，不执行用户 Python。
 
-空静态 Expand 目录的 `register.py` 使用 `pass`。新增静态模块时增加 `registry.add_expand(...)` 调用。
+每个模块必须包含严格九字段 `expand.json`：`name`、`explain`、`open_input`、`input_data`、`input_health`、`start_update`、`open_control`、`start_expand`、`start_control`。未知字段、缺失字段、错误类型或路径逃逸都会令模块无效。
 
-用户 Expand 使用固定约定 `users/<user>/expand/<module>/inject.md`，可信解析器只选择直接子目录中的 `inject.md`，不执行用户代码。
+- `open_input=true` 且 `input_health=正常` 时，才注入 `input_data` 指定的 Markdown。
+- `open_control=true` 时，只提取 `start_control` 文件的 `## 注入层`；`## 操作层` 不进入 Prompt。
+- `input_health=异常` 只关闭数据注入，不影响结构有效模块的操控能力。
+- `start_update`、`start_expand` 和其他 Python 文件不会被注册器导入或自动执行。
+- 旧 `inject.md` 不再是注入来源；兼容 `add_expand(...)` 入口也必须服从同目录 `expand.json`。
 
 ## Skills 注册
 
@@ -76,13 +79,13 @@ def register(registry) -> None:
 
 仅允许 `global_sense/register.py` 注册感知根目录。
 
-`global_sense/` 的每个直接子目录都是一个独立感知模块；模块内部递归读取非隐藏 Markdown。根目录 Markdown、隐藏目录、`__pycache__` 与非 Markdown 文件不会注入。`perception.global_whitelist` 使用直接子目录名作为模块 ID。
+`global_sense/` 的每个直接子目录都是一个独立感知模块；必须由严格五字段 `sense.json` 的 `data_md` 指定唯一注入文件。其他 Markdown、Python、隐藏目录与根目录文件不会注入。`perception.global_whitelist` 使用直接子目录名作为模块 ID。
 
 ## 主智能体配置入口
 
 | 配置 | 行为 |
 |------|------|
-| `knowledge.enabled` | `false` 时知识索引、正文搜索、`knowledge_search` 与未来图谱调用全部为空 |
+| `knowledge.enabled` | 已移除；知识索引按用户配置的范围开关选择，正文检索由外部图谱能力负责 |
 | `knowledge.use_shared` | 控制共享知识是否进入有效范围 |
 | `knowledge.use_global` | 控制全局知识是否进入有效范围；用户知识在总开关开启时始终有效 |
 | `skills.shared_whitelist` | 共享 Prompt 技能过滤 |
@@ -97,6 +100,6 @@ def register(registry) -> None:
 - 注册目录必须与注册模块的规定位置严格一致。
 - 同一来源不得重复注册。
 - 注册模块缺少 `register()` 或执行失败时直接报错。
-- Expand 注册仍校验重复项、路径逃逸和缺失文件。
+- Expand 注册校验根目录、重复来源和模块目录边界；模块清单独立校验字段、后缀和路径逃逸。
 - 用户目录中的 `register.py` 不会被导入；用户资源只能按目录约定提供数据。
 - `registry.json` 不属于当前注册协议，任何层都不需要维护它。

@@ -1,60 +1,6 @@
 {
-  "schema_version": 2,
   "name": "self_improve",
   "version": "1.0.0",
   "description": "从显式传入的数据中提取、整理和升级记忆候选。",
-  "enabled": true,
-  "instruction": "AGENT.md",
-  "executor": "executor.py:execute",
-  "config": "agent-config.json",
-  "model_profile": "reasoning",
-  "timeout": 180,
-  "execution": "background_serial",
-  "write_policy": "user_memory",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "user_text": {"type": "string"},
-      "assistant_text": {"type": "string"},
-      "tool_results": {"type": "array"},
-      "source": {"type": "object"},
-      "existing_candidates": {"type": "array"}
-    },
-    "required": ["user_text", "assistant_text", "tool_results", "source", "existing_candidates"],
-    "additionalProperties": false
-  },
-  "output_schema": {
-    "type": "object",
-    "properties": {
-      "candidates": {
-        "type": "array",
-        "items": {
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "action": {"const": "upsert"},
-                "filename": {"type": "string", "minLength": 1, "maxLength": 20},
-                "content": {"type": "string", "minLength": 1},
-                "explicit": {"type": "boolean"}
-              },
-              "required": ["action", "filename", "content", "explicit"],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "action": {"const": "forget"},
-                "filename": {"type": "string", "minLength": 1, "maxLength": 20}
-              },
-              "required": ["action", "filename"],
-              "additionalProperties": false
-            }
-          ]
-        }
-      }
-    },
-    "required": ["candidates"],
-    "additionalProperties": false
-  }
+  "trigger": "trigger.md"
 }

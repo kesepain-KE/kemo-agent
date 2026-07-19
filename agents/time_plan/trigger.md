@@ -1,0 +1,77 @@
+# 注册信息
+
+- **名称**: time_plan
+- **触发**: 主智能体判断用户请求涉及定时任务时调用（`allowed_callers: ["main_agent"]`）
+- **职责**: 将自然语言定时要求解析为结构化定时任务草案（recurring / daily / once）
+- **模型**: default
+- **工具**: get_current_time（获取北京时间）
+
+# 操作信息
+
+## 调用方式
+
+由主智能体通过 `AgentRunner.run("time_plan", input_data)` 调用。
+
+## 三种任务类型
+
+### recurring — 重复间隔
+
+```json
+{ "type": "recurring", "interval_seconds": 3600 }
+```
+
+- `interval_seconds` ≥ 60
+- 用于"每隔 N 秒/分钟/小时"
+
+### daily — 每日固定时间
+
+```json
+{ "type": "daily", "time": "02:00" }
+```
+
+- `time` 格式 `HH:MM`，时区固定 `Asia/Shanghai`
+- 用于"每天 N 点"
+
+### once — 单次执行
+
+```json
+{ "type": "once" }
+```
+
+- `next_run_at` 由 `compute_next_run()` 根据当前时间 + 用户表述计算
+- 用于"在 xxx 时间执行一次"
+
+## 输入
+
+| 字段 | 说明 |
+|------|------|
+| `action` | `create` / `edit` / `delete` |
+| `user_request` | 用户自然语言 |
+| `current_time_beijing` | 当前北京时间 ISO |
+| `existing_task` | 编辑/删除时的现有任务 |
+| `edit_request` | 编辑时的修改要求 |
+
+## 输出
+
+```json
+{
+  "action": "create | edit | delete | skip",
+  "title": "任务标题",
+  "prompt": "自包含执行提示词",
+  "type": "recurring | daily | once",
+  "interval_seconds": 3600,
+  "time": "02:00",
+  "next_run_at": "2026-07-21T02:00:00+08:00",
+  "message": "skip 原因"
+}
+```
+
+## 注意事项
+
+- 所有时间使用北京时间（`Asia/Shanghai`）
+- 不直接执行、写文件或调用 CLI
+- 执行 prompt 必须自包含（cron 执行时无上下文）
+- `next_run_at` 由 `compute_next_run()` 确定性覆盖，子代理输出为参考
+- `interval_seconds` 最小 60 秒
+- 无法解析返回 `action=skip`
+- 继承主会话上下文

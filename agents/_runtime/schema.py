@@ -17,6 +17,40 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _EXECUTIONS = {"sync", "background_serial"}
 _WRITE_POLICIES = {"none", "derived_cache", "user_memory", "user_task"}
 _EXPOSURES = {"internal", "tool"}
+_COMPACT_MANIFEST_FIELDS = {"name", "version", "description", "trigger"}
+_LOOSE_OBJECT_SCHEMA = {"type": "object", "additionalProperties": True}
+_BUILTIN_DEFAULTS: dict[str, dict[str, str]] = {
+    "context_manage": {
+        "execution": "sync",
+        "write_policy": "derived_cache",
+        "model_profile": "cheap",
+    },
+    "token_condense": {
+        "execution": "sync",
+        "write_policy": "derived_cache",
+        "model_profile": "cheap",
+    },
+    "memory_temporary_important": {
+        "execution": "background_serial",
+        "write_policy": "user_memory",
+        "model_profile": "cheap",
+    },
+    "self_improve": {
+        "execution": "background_serial",
+        "write_policy": "user_memory",
+        "model_profile": "reasoning",
+    },
+    "task_plan": {
+        "execution": "background_serial",
+        "write_policy": "user_task",
+        "model_profile": "reasoning",
+    },
+    "time_plan": {
+        "execution": "background_serial",
+        "write_policy": "user_task",
+        "model_profile": "default",
+    },
+}
 
 
 class AgentError(RuntimeError):
@@ -51,7 +85,6 @@ class AgentCapabilities:
     knowledge_scopes: tuple[str, ...] = ()
     knowledge_index_enabled: bool = False
     knowledge_body_access: str = "none"
-    knowledge_max_index_chars: int = 0
     inherit_main_history: bool = False
     inherit_current_request: bool = False
 
@@ -76,6 +109,9 @@ class AgentDefinition:
     directory: Path
     manifest_path: Path
     config_path: Path | None
+    trigger_file: str = ""
+    trigger_content: str = ""
+    trigger_registration: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +163,7 @@ def _allow_list(container: Any, key: str, *, field: str, path: Path) -> tuple[st
     return _string_list(value, field=f"{field}.{key}", path=path)
 
 
-def _load_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
+def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
     if path is None:
         return AgentCapabilities()
     raw = _read_json_object(path, label="子代理能力配置")
@@ -164,12 +200,6 @@ def _load_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
     invalid_scopes = sorted(set(scopes) - {"global", "shared", "user"})
     if invalid_scopes:
         raise AgentManifestError(f"knowledge.scopes 包含未知范围：{', '.join(invalid_scopes)}")
-    body_access = str(knowledge.get("body_access") or "none").strip()
-    if body_access not in {"none", "search_tool"}:
-        raise AgentManifestError(f"knowledge.body_access 必须是 none 或 search_tool：{path}")
-    max_index_chars = knowledge.get("max_index_chars", 0)
-    if isinstance(max_index_chars, bool) or not isinstance(max_index_chars, int) or max_index_chars < 0:
-        raise AgentManifestError(f"knowledge.max_index_chars 必须是非负整数：{path}")
     context = raw.get("context") or {}
     if not isinstance(context, dict):
         raise AgentManifestError(f"context 必须是对象：{path}")
@@ -189,14 +219,229 @@ def _load_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
         user_expand=_allow_list(expand, "user", field="prompt_sources.expand", path=path),
         knowledge_scopes=scopes,
         knowledge_index_enabled=bool(knowledge.get("index_enabled", False)),
-        knowledge_body_access=body_access,
-        knowledge_max_index_chars=max_index_chars,
+        knowledge_body_access="none",
         inherit_main_history=inherit_history,
         inherit_current_request=inherit_request,
     )
 
 
-def _load_manifest(path: Path, *, source: Literal["builtin", "user"], root: Path) -> AgentDefinition:
+def _load_capabilities(path: Path) -> AgentCapabilities:
+    raw = _read_json_object(path, label="子代理能力配置")
+    if raw.get("schema_version") != 1:
+        raise AgentManifestError(f"agent-config schema_version 必须为 1：{path}")
+    internal_mode = raw.get("internal_mode", True)
+    global_knowledge = raw.get("global_knowledge", False)
+    shared_knowledge = raw.get("shared_knowledge", False)
+    inherit_main_history = raw.get("inherit_main_history", False)
+    boolean_fields = {
+        "internal_mode": internal_mode,
+        "global_knowledge": global_knowledge,
+        "shared_knowledge": shared_knowledge,
+        "inherit_main_history": inherit_main_history,
+    }
+    invalid_booleans = [name for name, value in boolean_fields.items() if not isinstance(value, bool)]
+    if invalid_booleans:
+        raise AgentManifestError(
+            f"{', '.join(invalid_booleans)} 必须是布尔值：{path}"
+        )
+    callers = _string_list(
+        raw.get("allowed_callers", []),
+        field="allowed_callers",
+        path=path,
+    )
+    tools_raw = raw.get("tools") or {}
+    if not isinstance(tools_raw, dict):
+        raise AgentManifestError(f"tools 必须是对象：{path}")
+    plugin_tools = _allow_list(
+        tools_raw.get("plugins"),
+        "allow",
+        field="tools.plugins",
+        path=path,
+    )
+    shared_skills = _allow_list(
+        tools_raw.get("shared_skills"),
+        "allow",
+        field="tools.shared_skills",
+        path=path,
+    )
+    max_iterations = tools_raw.get("max_iterations", 20)
+    if (
+        isinstance(max_iterations, bool)
+        or not isinstance(max_iterations, int)
+        or max_iterations < 1
+    ):
+        raise AgentManifestError(f"tools.max_iterations 必须是正整数：{path}")
+    scopes = tuple(
+        scope
+        for scope, enabled in (
+            ("global", global_knowledge),
+            ("shared", shared_knowledge),
+        )
+        if enabled
+    )
+    return AgentCapabilities(
+        exposure="internal" if internal_mode else "tool",
+        allowed_callers=callers,
+        plugin_tools=plugin_tools,
+        max_tool_iterations=max_iterations,
+        shared_skills=shared_skills,
+        user_skills=(),
+        global_expand=(),
+        shared_expand=(),
+        user_expand=(),
+        knowledge_scopes=scopes,
+        knowledge_index_enabled=bool(scopes),
+        knowledge_body_access="none",
+        inherit_main_history=inherit_main_history,
+        inherit_current_request=inherit_main_history,
+    )
+
+
+def _read_agent_timeout(root: Path) -> float:
+    try:
+        config_path = root / "config" / "global_config.json"
+        if config_path.is_file():
+            config = json.loads(config_path.read_text("utf-8-sig"))
+            value = (config.get("agent_runtime") or {}).get("default_timeout", 600)
+            timeout = float(value)
+            if timeout > 0:
+                return timeout
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return 600.0
+
+
+def _same_directory_file(value: Any, *, field: str, path: Path) -> str:
+    name = str(value or "").strip()
+    if not name or Path(name).name != name:
+        raise AgentManifestError(f"{field} 必须是清单同目录文件名：{path}")
+    return name
+
+
+def _read_required_package_text(path: Path, *, label: str) -> str:
+    try:
+        content = path.read_text("utf-8-sig").strip()
+    except (OSError, UnicodeError) as exc:
+        raise AgentManifestError(f"{label}不可读：{path}（{exc}）") from exc
+    if not content:
+        raise AgentManifestError(f"{label}为空：{path}")
+    return content
+
+
+def _trigger_registration(content: str, *, path: Path) -> str:
+    lines = content.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == "# 注册信息":
+            start = index + 1
+            break
+    if start is None:
+        raise AgentManifestError(f"trigger.md 缺少 '# 注册信息'：{path}")
+    selected: list[str] = []
+    for line in lines[start:]:
+        if line.startswith("# "):
+            break
+        selected.append(line)
+    registration = "\n".join(selected).strip()
+    if not registration:
+        raise AgentManifestError(f"trigger.md 注册信息为空：{path}")
+    return registration
+
+
+def _validate_executor(
+    directory: Path,
+    executor: str,
+    *,
+    source: Literal["builtin", "user"],
+    manifest_path: Path,
+) -> None:
+    if source == "user":
+        if executor != "builtin:llm":
+            raise AgentManifestError(f"用户子代理只能使用 builtin:llm 执行器：{manifest_path}")
+        python_files = [item for item in directory.rglob("*.py") if item.is_file()]
+        if python_files:
+            raise AgentManifestError(f"用户子代理目录不得包含 Python 文件：{python_files[0]}")
+        return
+    file_name, separator, function_name = executor.partition(":")
+    if (
+        not separator
+        or not file_name
+        or not function_name
+        or Path(file_name).name != file_name
+    ):
+        raise AgentManifestError(f"executor 必须是同目录 file.py:function：{manifest_path}")
+    executor_path = (directory / file_name).resolve()
+    try:
+        executor_path.relative_to(directory.resolve())
+    except ValueError as exc:
+        raise AgentManifestError(f"executor 不得跳出子代理目录：{manifest_path}") from exc
+    if not executor_path.is_file():
+        raise AgentManifestError(f"executor 文件不存在：{executor_path}")
+
+
+def _load_compact_manifest(
+    path: Path,
+    *,
+    source: Literal["builtin", "user"],
+    root: Path,
+) -> AgentDefinition:
+    raw = _read_json_object(path, label="子代理清单")
+    missing = sorted(_COMPACT_MANIFEST_FIELDS - set(raw))
+    unknown = sorted(set(raw) - _COMPACT_MANIFEST_FIELDS)
+    if missing:
+        raise AgentManifestError(f"子代理清单缺少字段 {', '.join(missing)}：{path}")
+    if unknown:
+        raise AgentManifestError(f"精简子代理清单包含未知字段 {', '.join(unknown)}：{path}")
+    name = str(raw["name"]).strip()
+    if not _NAME_RE.fullmatch(name):
+        raise AgentManifestError(f"子代理名称无效：{name!r}（{path}）")
+    if name != path.parent.name:
+        raise AgentManifestError(f"子代理名称必须与目录名一致：{name!r} != {path.parent.name!r}")
+    version = str(raw["version"]).strip()
+    description = str(raw["description"]).strip()
+    if not version or not description:
+        raise AgentManifestError(f"version 和 description 必须是非空字符串：{path}")
+    trigger_file = _same_directory_file(raw["trigger"], field="trigger", path=path)
+    trigger_path = path.parent / trigger_file
+    trigger_content = _read_required_package_text(trigger_path, label="子代理 trigger")
+    registration = _trigger_registration(trigger_content, path=trigger_path)
+    instruction_path = path.parent / "AGENT.md"
+    instruction = _read_required_package_text(instruction_path, label="子代理指令")
+    config_path = path.parent / "agent-config.json"
+    if not config_path.is_file():
+        raise AgentManifestError(f"子代理能力配置不存在：{config_path}")
+    defaults = _BUILTIN_DEFAULTS.get(name, {}) if source == "builtin" else {}
+    executor = "executor.py:execute" if source == "builtin" else "builtin:llm"
+    _validate_executor(path.parent, executor, source=source, manifest_path=path)
+    execution = defaults.get("execution", "sync")
+    write_policy = defaults.get("write_policy", "derived_cache")
+    model_profile = defaults.get("model_profile", "default")
+    return AgentDefinition(
+        name=name,
+        version=version,
+        description=description,
+        enabled=True,
+        instruction_file="AGENT.md",
+        instruction=instruction,
+        executor=executor,
+        model_profile=model_profile,
+        timeout=_read_agent_timeout(root),
+        execution=execution,
+        write_policy=write_policy,
+        input_schema=dict(_LOOSE_OBJECT_SCHEMA),
+        output_schema=dict(_LOOSE_OBJECT_SCHEMA),
+        capabilities=_load_capabilities(config_path),
+        source=source,
+        directory=path.parent,
+        manifest_path=path,
+        config_path=config_path,
+        trigger_file=trigger_file,
+        trigger_content=trigger_content,
+        trigger_registration=registration,
+    )
+
+
+def _load_legacy_manifest(path: Path, *, source: Literal["builtin", "user"], root: Path) -> AgentDefinition:
     raw = _read_json_object(path, label="子代理清单")
     schema_version = raw.get("schema_version")
     if schema_version not in {AGENT_SCHEMA_VERSION, _LEGACY_SCHEMA_VERSION}:
@@ -275,7 +520,7 @@ def _load_manifest(path: Path, *, source: Literal["builtin", "user"], root: Path
             raise AgentManifestError(f"executor 不得跳出子代理目录：{path}") from exc
         if not executor_path.is_file():
             raise AgentManifestError(f"executor 文件不存在：{executor_path}")
-    capabilities = _load_capabilities(config_path, legacy=legacy)
+    capabilities = _load_legacy_capabilities(config_path, legacy=legacy)
     return AgentDefinition(
         name=name,
         version=str(raw["version"]).strip(),
@@ -296,6 +541,18 @@ def _load_manifest(path: Path, *, source: Literal["builtin", "user"], root: Path
         manifest_path=path,
         config_path=config_path,
     )
+
+
+def _load_manifest(
+    path: Path,
+    *,
+    source: Literal["builtin", "user"],
+    root: Path,
+) -> AgentDefinition:
+    raw = _read_json_object(path, label="子代理清单")
+    if raw.get("schema_version") is None:
+        return _load_compact_manifest(path, source=source, root=root)
+    return _load_legacy_manifest(path, source=source, root=root)
 
 
 def _manifests(base: Path) -> tuple[Path, ...]:

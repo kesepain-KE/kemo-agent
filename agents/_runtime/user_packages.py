@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentManifestError, discover_agents
-from run.config import load_config
 from run.users import validate_user_name
 
 
@@ -42,8 +41,16 @@ def create_user_agent_package(
     instruction = str(definition.get("instruction") or "").strip()
     if not description or not instruction:
         raise UserAgentPackageError("description 和 instruction 必须是非空字符串")
-    input_schema = _object_schema(definition.get("input_schema"), "input_schema")
-    output_schema = _object_schema(definition.get("output_schema"), "output_schema")
+    input_schema = (
+        _object_schema(definition.get("input_schema"), "input_schema")
+        if definition.get("input_schema") is not None
+        else {"type": "object", "additionalProperties": True}
+    )
+    output_schema = (
+        _object_schema(definition.get("output_schema"), "output_schema")
+        if definition.get("output_schema") is not None
+        else {"type": "object", "additionalProperties": True}
+    )
     base = root.resolve()
     user_name = validate_user_name(user)
     if name in discover_agents(base).agents:
@@ -53,50 +60,72 @@ def create_user_agent_package(
     target = agents_dir / name
     if target.exists():
         raise UserAgentPackageError(f"用户子代理已存在：{name}")
-    execution = str(definition.get("execution") or "sync")
-    model_profile = "default"
-    runtime = load_config(user_name, base).get("agent_runtime") or {}
-    timeout = definition.get("timeout", runtime.get("default_timeout", 600))
-    write_policy = str(definition.get("write_policy") or "none")
     agent_config = definition.get("agent_config")
     if agent_config is None:
         agent_config = {
             "schema_version": 1,
-            "exposure": {"mode": "tool", "allowed_callers": ["main_agent"]},
-            "tools": {"plugins": {"allow": []}, "max_iterations": 1},
-            "prompt_sources": {
-                "skills": {"shared": [], "user": []},
-                "expand": {"global": [], "shared": [], "user": []},
+            "internal_mode": False,
+            "allowed_callers": ["main_agent"],
+            "tools": {
+                "plugins": {"allow": []},
+                "shared_skills": {"allow": []},
+                "max_iterations": 20,
             },
-            "knowledge": {
-                "scopes": [],
-                "index_enabled": False,
-                "body_access": "none",
-                "max_index_chars": 0,
-            },
-            "context": {
-                "inherit_main_history": False,
-                "inherit_current_request": False,
-            },
+            "global_knowledge": False,
+            "shared_knowledge": False,
+            "inherit_main_history": False,
         }
     if not isinstance(agent_config, dict):
         raise UserAgentPackageError("agent_config 必须是对象")
+    if "internal_mode" not in agent_config and "exposure" in agent_config:
+        exposure = agent_config.get("exposure") or {}
+        tools = agent_config.get("tools") or {}
+        prompts = agent_config.get("prompt_sources") or {}
+        skills = prompts.get("skills") or {}
+        knowledge = agent_config.get("knowledge") or {}
+        context = agent_config.get("context") or {}
+        scopes = knowledge.get("scopes") or []
+        agent_config = {
+            "schema_version": 1,
+            "internal_mode": str(exposure.get("mode") or "internal") != "tool",
+            "allowed_callers": exposure.get("allowed_callers") or [],
+            "tools": {
+                "plugins": (tools.get("plugins") or {"allow": []}),
+                "shared_skills": {"allow": skills.get("shared") or []},
+                "max_iterations": tools.get("max_iterations", 20),
+            },
+            "global_knowledge": "global" in scopes,
+            "shared_knowledge": "shared" in scopes,
+            "inherit_main_history": bool(
+                context.get("inherit_main_history", False)
+                or context.get("inherit_current_request", False)
+            ),
+        }
     manifest = {
-        "schema_version": 2,
         "name": name,
         "version": str(definition.get("version") or "1.0.0"),
         "description": description,
-        "enabled": True,
-        "instruction": "AGENT.md",
-        "executor": "builtin:llm",
-        "config": "agent-config.json",
-        "model_profile": model_profile,
-        "timeout": timeout,
-        "execution": execution,
-        "write_policy": write_policy,
-        "input_schema": input_schema,
-        "output_schema": output_schema,
+        "trigger": "trigger.md",
     }
+    trigger_condition = str(
+        definition.get("trigger_condition")
+        or f"当任务符合“{description}”且需要独立处理时"
+    ).strip()
+    trigger_content = (
+        "# 注册信息\n\n"
+        f"- **名称**: {name}\n"
+        f"- **触发**: {trigger_condition}\n"
+        f"- **职责**: {description}\n"
+        "- **模型**: default\n"
+        "\n# 操作信息\n\n"
+        "## 调用约定\n\n"
+        "仅处理调用方显式传入的数据，具体行为遵循同目录 `AGENT.md`。\n\n"
+        "## 输入参考\n\n```json\n"
+        + json.dumps(input_schema, ensure_ascii=False, indent=2)
+        + "\n```\n\n## 输出参考\n\n```json\n"
+        + json.dumps(output_schema, ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
     temporary = agents_dir / f".{name}.{uuid.uuid4().hex}.tmp"
     try:
         temporary.mkdir()
@@ -112,6 +141,7 @@ def create_user_agent_package(
             json.dumps(agent_config, ensure_ascii=False, indent=2) + "\n",
             "utf-8",
         )
+        (temporary / "trigger.md").write_text(trigger_content, "utf-8")
         os.replace(temporary, target)
         try:
             loaded = discover_agents(base, user_name).get(name)

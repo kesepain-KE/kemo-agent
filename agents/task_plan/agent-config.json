@@ -1,8 +1,13 @@
 {
   "schema_version": 1,
-  "exposure": {"mode": "tool", "allowed_callers": ["main_agent"]},
-  "tools": {"plugins": {"allow": ["knowledge_search"]}, "max_iterations": 3},
-  "prompt_sources": {"skills": {"shared": ["*"], "user": ["*"]}, "expand": {"global": ["*"], "shared": ["*"], "user": ["*"]}},
-  "knowledge": {"scopes": ["global", "shared", "user"], "index_enabled": true, "body_access": "search_tool", "max_index_chars": 8000},
-  "context": {"inherit_main_history": false, "inherit_current_request": false}
+  "internal_mode": true,
+  "allowed_callers": ["main_agent"],
+  "tools": {
+    "plugins": {"allow": []},
+    "shared_skills": {"allow": []},
+    "max_iterations": 20
+  },
+  "global_knowledge": true,
+  "shared_knowledge": true,
+  "inherit_main_history": true
 }
