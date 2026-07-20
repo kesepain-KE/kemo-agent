@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import os
@@ -403,6 +402,116 @@ class RuntimeFeatureTests(unittest.TestCase):
             window["data"]["round_metrics"][0]["guidance"],
             ["focus on the revised target"],
         )
+
+    def test_stream_deltas_are_forwarded_before_provider_exhausts(self) -> None:
+        _, root = self.make_root(stream=True)
+
+        class IncrementalProvider(ScriptedProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.resumed_after_first = False
+
+            def chat_stream(self, request):
+                self.requests.append(request)
+                yield RunEvent(type="text_delta", content="A")
+                self.resumed_after_first = True
+                yield RunEvent(type="text_delta", content="B")
+                yield RunEvent(
+                    type="usage",
+                    usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                )
+
+        provider = IncrementalProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            iterator = iter_request_events(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "incremental-stream",
+                    "prompt": "go",
+                    "stream": True,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+            first = next(iterator)
+            self.assertEqual((first.type, first.content), ("text_delta", "A"))
+            self.assertFalse(provider.resumed_after_first)
+            remaining = list(iterator)
+
+        self.assertTrue(provider.resumed_after_first)
+        self.assertEqual(
+            [(event.type, event.content) for event in remaining],
+            [("text_delta", "B"), ("usage", ""), ("done", "")],
+        )
+        window = load_window(find_window(root, "alice", "cli", "incremental-stream"))
+        self.assertEqual(window["text"]["messages"][-1]["content"], "AB")
+
+    def test_stream_tool_call_is_forwarded_before_provider_exhausts(self) -> None:
+        _, root = self.make_root(stream=True)
+        self.write_tool(root / "plugins", "lookup", "plugin")
+
+        class IncrementalToolProvider(ScriptedProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.resumed_after_call = False
+
+            def chat_stream(self, request):
+                self.requests.append(request)
+                yield RunEvent(
+                    type="tool_call_start",
+                    tool_call_id="call-live",
+                    tool_name="lookup",
+                    arguments={"value": "x"},
+                )
+                self.resumed_after_call = True
+                yield RunEvent(type="usage", usage={})
+
+        provider = IncrementalToolProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            iterator = iter_request_events(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "incremental-tool",
+                    "prompt": "go",
+                    "stream": True,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+            first = next(iterator)
+            self.assertEqual(first.type, "tool_call_start")
+            self.assertEqual(first.tool_call_id, "call-live")
+            self.assertFalse(provider.resumed_after_call)
+            iterator.close()
+        self.assertIsNone(find_window(root, "alice", "cli", "incremental-tool"))
+
+    def test_stream_without_done_yields_error_and_does_not_commit(self) -> None:
+        _, root = self.make_root(stream=True)
+
+        class EmptyStreamProvider:
+            def stream(self, request):
+                del request
+                return iter(())
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "missing-done",
+                        "prompt": "go",
+                        "stream": True,
+                    },
+                    root=root,
+                    provider_factory=lambda _: EmptyStreamProvider(),
+                )
+            )
+        self.assertEqual([event.type for event in events], ["error"])
+        self.assertIn("缺少 done 终态", events[0].error["message"])
+        self.assertIsNone(find_window(root, "alice", "cli", "missing-done"))
 
     def test_error_and_cancel_do_not_commit(self) -> None:
         _, root = self.make_root(stream=True)

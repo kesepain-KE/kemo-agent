@@ -168,13 +168,113 @@ class SubAgentHotPlugTests(unittest.TestCase):
         with self.assertRaises(AgentError):
             runner.run("custom", {})
 
-    def test_user_agents_are_isolated_and_python_is_rejected(self) -> None:
+    def test_user_agents_are_isolated_and_python_files_are_allowed(self) -> None:
         _, root, _ = self.make_root()
         directory = self.write_agent(root, "alice", "private")
         self.assertIn("private", discover_agents(root, "alice").agents)
         self.assertNotIn("private", discover_agents(root, "bob").agents)
-        (directory / "executor.py").write_text("raise RuntimeError('must not execute')", "utf-8")
-        with self.assertRaisesRegex(AgentManifestError, "不得包含 Python"):
+        (directory / "helper.py").write_text("VALUE = 'allowed'\n", "utf-8")
+        definition = discover_agents(root, "alice").get("private")
+        self.assertEqual(definition.executor, "builtin:llm")
+
+    def test_compact_user_agent_auto_detects_and_runs_executor(self) -> None:
+        _, root, config = self.make_root()
+        dispatch(
+            "create",
+            definition={
+                "name": "custom_executor",
+                "description": "runs user Python",
+                "instruction": "Return a structured answer.",
+                "input_schema": {"type": "object", "additionalProperties": True},
+                "output_schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            },
+            context={"root": str(root), "user": "alice"},
+        )
+        package = root / "users" / "alice" / "agents" / "custom_executor"
+        (package / "executor.py").write_text(
+            "from run.agent_runner import AgentRunResult\n\n"
+            "def execute(context, input_data):\n"
+            "    value = input_data.get('value', '')\n"
+            "    return AgentRunResult(\n"
+            "        agent=context.definition.name,\n"
+            "        data={'answer': f'custom:{value}'},\n"
+            "        raw_text='',\n"
+            "        usage={'total_tokens': 0},\n"
+            "        model='user-executor',\n"
+            "        metadata={'custom_executor': True},\n"
+            "    )\n",
+            "utf-8",
+        )
+
+        definition = discover_agents(root, "alice").get("custom_executor")
+        self.assertEqual(definition.source, "user")
+        self.assertEqual(definition.executor, "executor.py:execute")
+        result = AgentRunner(
+            root,
+            "alice",
+            config=config,
+            provider_factory=lambda _: self.fail("自定义 executor 不应调用 Provider"),
+        ).run("custom_executor", {"value": "ok"})
+        self.assertEqual(result.data, {"answer": "custom:ok"})
+        self.assertEqual(result.model, "user-executor")
+        self.assertTrue(result.metadata["custom_executor"])
+
+    def test_schema_v2_user_agent_can_explicitly_select_executor(self) -> None:
+        _, root, config = self.make_root()
+        package = self.write_agent(root, "alice", "legacy_executor")
+        manifest_path = package / "agent.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["executor"] = "executor.py:execute"
+        manifest_path.write_text(json.dumps(manifest), "utf-8")
+        (package / "executor.py").write_text(
+            "from run.agent_runner import AgentRunResult\n\n"
+            "def execute(context, input_data):\n"
+            "    return AgentRunResult(\n"
+            "        context.definition.name,\n"
+            "        {'answer': 'schema-v2'},\n"
+            "        '',\n"
+            "        {},\n"
+            "        'user-executor',\n"
+            "    )\n",
+            "utf-8",
+        )
+
+        definition = discover_agents(root, "alice").get("legacy_executor")
+        self.assertEqual(definition.executor, "executor.py:execute")
+        result = AgentRunner(
+            root,
+            "alice",
+            config=config,
+            provider_factory=lambda _: self.fail("自定义 executor 不应调用 Provider"),
+        ).run("legacy_executor", {})
+        self.assertEqual(result.data, {"answer": "schema-v2"})
+
+    def test_user_executor_still_enforces_schema_and_package_boundary(self) -> None:
+        _, root, _ = self.make_root()
+        package = self.write_agent(root, "alice", "invalid_executor")
+        manifest_path = package / "agent.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+
+        manifest["executor"] = "../outside.py:execute"
+        manifest_path.write_text(json.dumps(manifest), "utf-8")
+        (package.parent / "outside.py").write_text("def execute(context, input_data): pass\n", "utf-8")
+        with self.assertRaisesRegex(AgentManifestError, "同目录"):
+            discover_agents(root, "alice")
+
+        manifest["executor"] = "missing.py:execute"
+        manifest_path.write_text(json.dumps(manifest), "utf-8")
+        with self.assertRaisesRegex(AgentManifestError, "文件不存在"):
+            discover_agents(root, "alice")
+
+        manifest["schema_version"] = 1
+        manifest["executor"] = "builtin:llm"
+        manifest_path.write_text(json.dumps(manifest), "utf-8")
+        with self.assertRaisesRegex(AgentManifestError, "只支持 schema_version=2"):
             discover_agents(root, "alice")
 
     def test_dispatch_lists_only_public_agents(self) -> None:

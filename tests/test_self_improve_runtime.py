@@ -236,18 +236,16 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         )
 
     def test_promotion_system_task_registration_is_idempotent(self) -> None:
-        first = ensure_memory_promotion_task(self.root, "alice", CONFIG)
-        second = ensure_memory_promotion_task(self.root, "alice", CONFIG)
+        first = ensure_memory_promotion_task(self.root)
+        second = ensure_memory_promotion_task(self.root)
         self.assertEqual(first["task_id"], second["task_id"])
         self.assertEqual(first, second)
         self.assertEqual(second["type"], "recurring")
         self.assertEqual(second["interval_seconds"], 30)
-        self.assertEqual(second["system_key"], MEMORY_PROMOTION_SYSTEM_KEY)
-        self.assertEqual(second["exec_mode"], "function")
-        self.assertEqual(
-            json.loads(second["prompt"])["function"],
-            "cron.review_due.scan_and_promote",
-        )
+        self.assertEqual(second["task_id"], MEMORY_PROMOTION_SYSTEM_KEY)
+        self.assertEqual(second["exec_mode"], "system")
+        self.assertEqual(second["action"], "memory_promotion")
+        self.assertEqual(second["prompt"], "")
 
     def test_self_improve_executor_validates_trigger_specific_output(self) -> None:
         class Context:

@@ -36,6 +36,7 @@ from run.task_plan_service import (
     PlanSkipped,
     edit_plan,
     generate_plan,
+    persist_agent_result,
 )
 from run.tools import ToolRegistry
 
@@ -484,6 +485,36 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertEqual(plan["title"], "Test Plan")
         self.assertEqual(len(plan["steps"]), 1)
         self.assertEqual(plan["status"], "pending")
+
+    def test_subagent_result_is_persisted_for_web_plan_bubble(self) -> None:
+        _, root = _make_root(["alice"])
+        plan = persist_agent_result(
+            root=root,
+            user="alice",
+            input_data={"action": "create", "goal": "测试任务", "auto_accept": False},
+            result_data={
+                "action": "create",
+                "title": "测试任务计划",
+                "description": "测试任务",
+                "steps": [{
+                    "step_id": "step_1",
+                    "title": "检查结果",
+                    "description": "确认计划已落盘",
+                    "depends_on": [],
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                }],
+            },
+            source="web",
+            session_id="web-session",
+            config=CONFIG,
+        )
+        self.assertIsNotNone(plan)
+        stored = PlanStore(root, "alice").read(plan["plan_id"])
+        self.assertEqual(stored["session_id"], "web-session")
+        self.assertEqual(stored["status"], "pending")
+        self.assertEqual(stored["reminder"], "当前任务计划已创建，请让用户点击批准后执行")
 
     def test_generate_plan_skip(self) -> None:
         _, root = _make_root(["alice"])

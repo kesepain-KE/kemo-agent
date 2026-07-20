@@ -38,8 +38,8 @@ class FakeService:
     def users(self):
         return [{"name": "alice"}]
 
-    def sessions(self, user, *, source="web"):
-        return {"user": user, "source": source, "sessions": []}
+    def sessions(self, user, *, source="web", query=""):
+        return {"user": user, "source": source, "query": query, "sessions": []}
 
     def history(self, user, session_id, *, source="web"):
         return {"user": user, "source": source, "session_id": session_id, "messages": []}
@@ -599,6 +599,172 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(fake.seen["session_id"], "s1")
         self.assertTrue(fake.cancel_event.is_set())
 
+    def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1, "tools": {"enabled": True}}), "utf-8"
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "chat",
+                        "base_url": "https://example.test/v1",
+                        "model": "test",
+                        "api_key": "keep-secret",
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        app = create_app(service=WebRunService(root))
+
+        plan = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/plans",
+            json={
+                "title": "Web plan",
+                "description": "created by web",
+                "steps": [
+                    {
+                        "step_id": "step_1",
+                        "title": "First",
+                        "description": "Do first",
+                        "critical": True,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        plan_id = plan.json()["plan"]["plan_id"]
+        paused = self.request(
+            app,
+            "PUT",
+            f"/api/users/alice/tasks/plans/{plan_id}",
+            json={"revision": 1, "status": "paused"},
+        )
+        self.assertEqual(paused.json()["plan"]["status"], "paused")
+
+        cron = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/crons",
+            json={
+                "title": "Hourly",
+                "prompt": "run hourly",
+                "type": "recurring",
+                "interval_seconds": 3600,
+            },
+        )
+        self.assertEqual(cron.status_code, 200, cron.text)
+        too_fast = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/crons",
+            json={
+                "title": "Too fast",
+                "prompt": "x",
+                "type": "recurring",
+                "interval_seconds": 10,
+            },
+        )
+        self.assertEqual(too_fast.status_code, 400)
+
+        put_knowledge = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/knowledge/user/document?path=notes%2Fweb.md",
+            json={"content": "# Web knowledge"},
+        )
+        self.assertEqual(put_knowledge.status_code, 200, put_knowledge.text)
+        knowledge = self.request(
+            app,
+            "GET",
+            "/api/users/alice/knowledge/user/document?path=notes%2Fweb.md",
+        )
+        self.assertEqual(knowledge.json()["content"], "# Web knowledge")
+        escaped_knowledge = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/knowledge/user/document?path=..%2Fescape.md",
+            json={"content": "bad"},
+        )
+        self.assertEqual(escaped_knowledge.status_code, 400)
+
+        memory = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/memory/item?filename=web-memory.md",
+            json={"content": "remember this", "tier": "one_month"},
+        )
+        self.assertEqual(memory.status_code, 200, memory.text)
+        self.assertEqual(memory.json()["tier"], "one_month")
+        important = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/memory/important",
+            json={"content": "important context"},
+        )
+        self.assertEqual(important.status_code, 200, important.text)
+        deleted_important = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/memory/important",
+        )
+        self.assertEqual(deleted_important.status_code, 200, deleted_important.text)
+        self.assertTrue(deleted_important.json()["deleted"])
+
+        upload = self.request(
+            app,
+            "POST",
+            "/api/users/alice/files/file_upload/upload?path=folder%2Fnote.txt",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        moved = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/files/file_upload/move?path=folder%2Fnote.txt&new_path=renamed.txt",
+        )
+        self.assertTrue(moved.json()["moved"])
+        escaped_upload = self.request(
+            app,
+            "POST",
+            "/api/users/alice/files/file_upload/upload?path=..%2Fescape.txt",
+            files={"file": ("escape.txt", b"bad", "text/plain")},
+        )
+        self.assertEqual(escaped_upload.status_code, 400)
+
+        patched = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/config",
+            json={"changes": {"tools": {"enabled": False}}},
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        stored_config = json.loads(
+            (root / "users" / "alice" / "user_config.json").read_text("utf-8")
+        )
+        self.assertEqual(stored_config["provider"]["api_key"], "keep-secret")
+        self.assertFalse(stored_config["tools"]["enabled"])
+        rejected_placeholder = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/config",
+            json={"changes": {"provider": {"api_key": "***"}}},
+        )
+        self.assertEqual(rejected_placeholder.status_code, 400)
+        preferences = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/preferences",
+            json={"theme": "dark", "font_size": "large"},
+        )
+        self.assertEqual(preferences.json()["appearance"]["theme"], "dark")
+
     def test_startup_options_without_provider(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -914,6 +1080,8 @@ class WebBackendTests(unittest.TestCase):
         tasks = self.request(app, "GET", "/api/users/alice/tasks")
         self.assertEqual(len(tasks.json()["plans"]), 1)
         self.assertEqual(len(tasks.json()["cron_tasks"]), 1)
+        self.assertTrue(tasks.json()["cron_tasks"][0]["user_defined"])
+        self.assertFalse(WebRunService._cron_summary({"exec_mode": "system"})["user_defined"])
         self.assertNotIn("do not expose", tasks.text)
 
         knowledge = self.request(app, "GET", "/api/users/alice/knowledge")
@@ -970,6 +1138,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_source["data_md"], "sense.md")
         self.assertEqual(runtime_source["recent_update"], "2026-07-19 12:00:00")
         self.assertEqual(runtime_source["health"], "正常")
+        self.assertEqual(runtime_source["value_preview"], "runtime")
+        self.assertEqual(runtime_source["update_interval"], "")
         self.assertTrue(runtime_source["valid"])
         broken_source = next(item for item in sense.json()["sources"] if item["id"] == "broken")
         self.assertFalse(broken_source["enabled"])

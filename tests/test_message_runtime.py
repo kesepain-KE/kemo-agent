@@ -715,8 +715,9 @@ class HostTests(unittest.TestCase):
         self.assertTrue(host.running)
         self.assertEqual(cron.started, 1)
         self.assertEqual(host.maintenance.started, 1)
+        self.assertEqual(len(CronStore(self.root, "alice").list_tasks()), 0)
         self.assertEqual(
-            len(CronStore(self.root, "alice").list_tasks()),
+            len(CronStore(self.root, "__system__", system=True).list_tasks()),
             3,
         )
         host.stop()

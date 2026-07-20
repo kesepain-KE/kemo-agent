@@ -14,6 +14,7 @@ from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
 from cron.scheduler import (
     CronScheduler,
+    cleanup_old_system_tasks,
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
 )
@@ -50,12 +51,12 @@ class CronStoreTests(unittest.TestCase):
             {
                 "task_id", "title", "prompt", "user", "type",
                 "interval_seconds", "next_run_at", "latest_run_at",
-                "status", "created_at", "exec_mode", "system_key",
+                "status", "created_at", "exec_mode",
             },
         )
         self.assertTrue(created["created_at"].endswith("+08:00"))
         self.assertEqual(created["exec_mode"], "agent")
-        self.assertEqual(created["system_key"], "")
+        self.assertNotIn("system_key", created)
         updated = self.store.update(
             created["task_id"],
             lambda task: {**task, "title": "renamed"},
@@ -113,21 +114,37 @@ class CronStoreTests(unittest.TestCase):
         self.assertEqual(migrated["next_run_at"], "2026-07-20T09:00:00+08:00")
         self.assertEqual(migrated["latest_run_at"], "2026-07-19T09:00:00+08:00")
         self.assertEqual(migrated["exec_mode"], "agent")
-        self.assertEqual(migrated["system_key"], "")
+        self.assertNotIn("system_key", migrated)
         self.assertNotIn("schedule", migrated)
         self.assertEqual(json.loads(path.read_text("utf-8")), migrated)
 
     def test_previous_flat_schema_gains_execution_defaults(self) -> None:
         task = self._task()
         task.pop("exec_mode")
-        task.pop("system_key")
         directory = self.root / "users" / "alice" / "task_cron"
         directory.mkdir(parents=True)
         path = directory / f"{task['task_id']}.json"
         path.write_text(json.dumps(task, ensure_ascii=False), "utf-8")
         migrated = self.store.read(task["task_id"])
         self.assertEqual(migrated["exec_mode"], "agent")
-        self.assertEqual(migrated["system_key"], "")
+        self.assertNotIn("system_key", migrated)
+
+    def test_system_store_accepts_empty_user_and_prompt(self) -> None:
+        store = CronStore(self.root, "__system__", system=True)
+        task = normalize_task(
+            task_id="memory_promotion",
+            title="promotion",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=30,
+            next_run_at="2026-07-20T10:00:00+08:00",
+            exec_mode="system",
+            action="memory_promotion",
+        )
+        stored = store.create(task)
+        self.assertEqual(stored["action"], "memory_promotion")
+        self.assertTrue((self.root / "cron" / "task_cron_system" / "memory_promotion.json").is_file())
 
     def test_recover_running_uses_beijing_time(self) -> None:
         task = self.store.create(self._task(status="running"))
@@ -192,7 +209,7 @@ class CronServiceTests(unittest.TestCase):
         self.assertEqual(task["type"], "once")
         self.assertEqual(task["next_run_at"], "2026-07-20T09:00:00+08:00")
         self.assertEqual(task["exec_mode"], "agent")
-        self.assertEqual(task["system_key"], "")
+        self.assertNotIn("system_key", task)
         self.assertNotIn("schedule", task)
 
 
@@ -265,7 +282,6 @@ class ExecutorTests(unittest.TestCase):
     def test_subagent_mode_bypasses_main_agent(self) -> None:
         task = self._create(
             exec_mode="subagent",
-            system_key="memory_scan",
             prompt=json.dumps({
                 "subagent": "memory_temporary_important",
                 "input": {"trigger": "periodic_scan"},
@@ -294,7 +310,6 @@ class ExecutorTests(unittest.TestCase):
     def test_function_mode_uses_whitelisted_internal_function(self) -> None:
         task = self._create(
             exec_mode="function",
-            system_key="memory_promotion",
             prompt=json.dumps({"function": "cron.review_due.scan_and_promote"}),
         )
         with patch(
@@ -322,50 +337,51 @@ class SchedulerTests(unittest.TestCase):
         }
 
     def test_system_tasks_are_flat_idempotent_and_self_describing(self) -> None:
-        first = ensure_memory_maintenance_tasks(self.root, "alice", self.config)
-        promotion = ensure_memory_promotion_task(self.root, "alice", self.config)
-        second = ensure_memory_maintenance_tasks(self.root, "alice", self.config)
+        first = ensure_memory_maintenance_tasks(self.root, self.config)
+        promotion = ensure_memory_promotion_task(self.root)
+        second = ensure_memory_maintenance_tasks(self.root, self.config)
         self.assertEqual(first, second)
-        self.assertEqual(len(CronStore(self.root, "alice").list_tasks()), 3)
+        system_store = CronStore(self.root, "__system__", system=True)
+        self.assertEqual(len(system_store.list_tasks()), 3)
+        self.assertEqual(CronStore(self.root, "alice").list_tasks(), [])
         periodic = next(item for item in first if item["type"] == "recurring")
         daily = next(item for item in first if item["type"] == "daily")
         self.assertEqual(periodic["interval_seconds"], 10800)
         self.assertEqual(daily["time"], "03:15")
-        self.assertEqual(periodic["exec_mode"], "subagent")
-        self.assertEqual(json.loads(periodic["prompt"])["subagent"], "memory_temporary_important")
+        self.assertEqual(periodic["exec_mode"], "system")
+        self.assertEqual(periodic["action"], "periodic_scan")
+        self.assertEqual(periodic["prompt"], "")
+        self.assertEqual(periodic["user"], "")
         self.assertEqual(promotion["interval_seconds"], 30)
-        self.assertEqual(promotion["exec_mode"], "function")
-        self.assertEqual(
-            json.loads(promotion["prompt"])["function"],
-            "cron.review_due.scan_and_promote",
-        )
-        self.assertTrue(all(task["system_key"] for task in [*first, promotion]))
+        self.assertEqual(promotion["exec_mode"], "system")
+        self.assertEqual(promotion["action"], "memory_promotion")
+        self.assertTrue(all("system_key" not in task for task in [*first, promotion]))
 
-    def test_previous_title_based_system_task_is_adopted_without_duplicate(self) -> None:
-        store = CronStore(self.root, "alice")
-        previous = normalize_task(
-            title="临时重要记忆定时巡检",
-            prompt="old main-agent prompt",
-            user="alice",
-            type="recurring",
-            interval_seconds=10800,
-            next_run_at="2026-07-20T09:00:00+08:00",
-        )
-        previous.pop("exec_mode")
-        previous.pop("system_key")
+    def test_old_user_system_tasks_are_cleaned_before_new_tasks(self) -> None:
         directory = self.root / "users" / "alice" / "task_cron"
         directory.mkdir(parents=True)
-        (directory / f"{previous['task_id']}.json").write_text(
-            json.dumps(previous, ensure_ascii=False),
+        path = directory / "cron_1234abcd.json"
+        path.write_text(
+            json.dumps({
+                "task_id": "cron_1234abcd",
+                "title": "临时重要记忆定时巡检",
+                "prompt": "old",
+                "user": "alice",
+                "type": "recurring",
+                "interval_seconds": 10800,
+                "next_run_at": "2026-07-20T09:00:00+08:00",
+                "latest_run_at": "",
+                "status": "enabled",
+                "created_at": "2026-07-20T08:00:00+08:00",
+                "exec_mode": "subagent",
+                "system_key": "memory_temporary_important.periodic_scan",
+            }, ensure_ascii=False),
             "utf-8",
         )
-
-        ensured = ensure_memory_maintenance_tasks(self.root, "alice", self.config)
-        periodic = next(task for task in ensured if task["type"] == "recurring")
-        self.assertEqual(periodic["task_id"], previous["task_id"])
-        self.assertEqual(periodic["exec_mode"], "subagent")
-        self.assertTrue(periodic["system_key"])
-        self.assertEqual(len(store.list_tasks()), 2)
+        self.assertEqual(cleanup_old_system_tasks(self.root, "alice"), 1)
+        self.assertFalse(path.exists())
+        ensure_memory_maintenance_tasks(self.root, self.config)
+        self.assertEqual(CronStore(self.root, "alice").list_tasks(), [])
 
     def test_scan_executes_due_task(self) -> None:
         store = CronStore(self.root, "alice")
@@ -378,6 +394,30 @@ class SchedulerTests(unittest.TestCase):
             count = CronScheduler(self.root).scan_once()
         self.assertEqual(count, 1)
         execute.assert_called_once()
+
+    def test_scan_system_task_runs_for_every_user_then_advances_once(self) -> None:
+        for user in ("alice", "bob"):
+            (self.root / "users" / user).mkdir(parents=True)
+        store = CronStore(self.root, "__system__", system=True)
+        task = store.create(normalize_task(
+            task_id="memory_promotion",
+            title="promotion",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=30,
+            next_run_at=(datetime.now(BEIJING) - timedelta(seconds=1)).isoformat(),
+            exec_mode="system",
+            action="memory_promotion",
+        ))
+        with patch("cron.scheduler.execute_cron_task", return_value={"status": "completed"}) as execute:
+            count = CronScheduler(self.root).scan_once()
+        self.assertEqual(count, 2)
+        self.assertEqual({call.kwargs["user"] for call in execute.call_args_list}, {"alice", "bob"})
+        self.assertTrue(all(call.kwargs["system_task"]["task_id"] == task["task_id"] for call in execute.call_args_list))
+        advanced = store.read("memory_promotion")
+        self.assertTrue(advanced["latest_run_at"])
+        self.assertGreater(datetime.fromisoformat(advanced["next_run_at"]), datetime.now(BEIJING))
 
 
 if __name__ == "__main__":
