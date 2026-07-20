@@ -51,6 +51,48 @@ export const handlers = [
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({ user: 'kesepain', config: { schema_version: 1, provider: { model: 'test-model' } }, redacted_paths: [] })),
   http.get('/api/users/kesepain/prompt/sections', () => HttpResponse.json({ user: 'kesepain', total_chars: 120, sections: [{ name: 'user_soul', status: 'injected', original_items: 1, injected_items: 1, original_chars: 20, injected_chars: 20, truncated: false, source_files: ['users/kesepain/user_soul.md'] }], source_policy: sourcePolicy, source_selection: {}, expand: { global: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} }, shared: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} }, user: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} } } })),
   http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({ user: 'kesepain', summary: { total: 0, seven_days: 0, one_month: 0, half_year: 0, permanent: 0 }, items: [] })),
+  http.get('/api/users/kesepain/files/:scope', ({ params }) => HttpResponse.json({
+    user: 'kesepain',
+    scope: params.scope,
+    root: `users/kesepain/${params.scope}`,
+    summary: { total_files: 2, total_dirs: 1, total_size: 1152 },
+    tree: [
+      { type: 'directory', name: 'screenshots', relative_path: 'screenshots', children: [{ type: 'file', name: 'shot.png', relative_path: 'screenshots/shot.png', size: 1024, updated_at: 1, extension: '.png' }] },
+      { type: 'file', name: 'readme.txt', relative_path: 'readme.txt', size: 128, updated_at: 1, extension: '.txt' },
+    ],
+  })),
+  http.delete('/api/users/kesepain/files/:scope', ({ request, params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, path: new URL(request.url).searchParams.get('path'), deleted: true })),
+  http.get('/api/tmp', () => HttpResponse.json({ root: 'tmp', summary: { total_files: 1, total_dirs: 0, total_size: 64 }, tree: [{ type: 'file', name: 'cache.tmp', relative_path: 'cache.tmp', size: 64, updated_at: 1, extension: '.tmp' }] })),
+  http.delete('/api/tmp', ({ request }) => HttpResponse.json({ path: new URL(request.url).searchParams.get('path'), deleted: true })),
+  http.post('/api/users/kesepain/avatar', () => HttpResponse.json({ user: 'kesepain', avatar_path: 'users/kesepain/avatar/avatar.png', size: 68, format: 'image/png' })),
+  http.get('/api/users/kesepain/agents', () => HttpResponse.json({
+    user: 'kesepain', summary: { total: 1, enabled: 1, global: 1, user: 0 },
+    agents: [{ name: 'context_manage', description: '上下文管理子代理', enabled: true, source: 'global', execution: 'agent_runner', model_profile: 'default', exposure: 'internal', root: 'agents/context_manage', files: [{ name: 'AGENT.md', relative_path: 'AGENT.md', size: 128, updated_at: 1 }] }],
+  })),
+  http.get('/api/users/kesepain/message/status', () => HttpResponse.json({
+    user: 'kesepain',
+    bindings: [{ platform: 'onebot', external_user_id: '123456', internal_user: 'kesepain', chat_type: 'private', external_chat_id: null, match_priority: 3 }],
+    transports: [{ name: 'onebot_ws_01', platform: 'onebot', display_name: 'OneBot 正向 WebSocket', capabilities: ['receive_text', 'send_text'], state: 'running', bound_user: 'kesepain', allowed_tools: null, last_error: null, health: 'alive', last_check: '2026-07-20T12:00:00Z', last_message_at: null, latency_ms: 12, messages_received_today: 2, messages_sent_today: 1 }],
+    summary: { total_bindings: 1, total_transports: 1, running_transports: 1, stopped_transports: 0, error_transports: 0 }, issues: [],
+  })),
+  http.get('/api/users/kesepain/soul', () => HttpResponse.json({ user: 'kesepain', path: 'users/kesepain/user_soul.md', content: '# 用户人格', size: 12, updated_at: 1 })),
+  http.put('/api/users/kesepain/soul', async ({ request }) => {
+    const body = await request.json() as { content: string }
+    return HttpResponse.json({ user: 'kesepain', path: 'users/kesepain/user_soul.md', content: body.content, size: body.content.length, updated_at: 2 })
+  }),
+  http.get('/api/global-soul', () => HttpResponse.json({ path: 'config/global_soul.md', content: '# 全局人格', size: 12, updated_at: 1 })),
+  http.put('/api/global-soul', async ({ request }) => {
+    const body = await request.json() as { content: string }
+    return HttpResponse.json({ path: 'config/global_soul.md', content: body.content, size: body.content.length, updated_at: 2 })
+  }),
+  http.get('/api/users/kesepain/expand', () => HttpResponse.json({
+    user: 'kesepain', summary: { total: 1, global: 1, shared: 0, user: 0 },
+    expands: [
+      { scope: 'global', root: 'global_expand', items: [{ name: 'example', type: 'directory', relative_path: 'example', has_register: true, files: [{ name: 'expand.json', relative_path: 'example/expand.json', size: 64, updated_at: 1 }] }] },
+      { scope: 'shared', root: 'shared_expand', items: [] },
+      { scope: 'user', root: 'users/kesepain/expand', items: [] },
+    ],
+  })),
 ]
 
 export const server = setupServer(...handlers)
