@@ -25,6 +25,14 @@ function initialFor(username: string) {
   return username.trim().charAt(0).toUpperCase() || 'K'
 }
 
+function AvatarContent({ username, url, imageClassName }: { username: string; url?: string; imageClassName?: string }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [url])
+  return url && !failed
+    ? <img className={imageClassName} src={url} alt="" onError={() => setFailed(true)} />
+    : <>{initialFor(username)}</>
+}
+
 export function UserProfileCard({
   username = 'kesepain',
   userPath = 'users/kesepain',
@@ -39,7 +47,6 @@ export function UserProfileCard({
 }: UserProfileCardProps) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const initial = initialFor(username)
   const switchableUsers = users.filter((item) => item.username !== username)
 
   useEffect(() => {
@@ -74,7 +81,7 @@ export function UserProfileCard({
         onClick={() => setIsOpen((current) => !current)}
       >
         <span className={styles.avatar}>
-          {avatarUrl ? <img className={styles.avatarImage} src={avatarUrl} alt={`${username} 的头像`} /> : <span className={styles.avatarInitial}>{initial}</span>}
+          <span className={styles.avatarInitial}><AvatarContent username={username} url={avatarUrl} imageClassName={styles.avatarImage} /></span>
         </span>
         <span className={styles.userInfo}>
           <span className={styles.username}>{username}</span>
@@ -87,7 +94,7 @@ export function UserProfileCard({
 
       {isOpen && <div className={`${styles.menu} ${compact ? styles.compactMenu : ''}`} role="menu" aria-label="用户菜单">
         <div className={styles.menuIdentity}>
-          <span className={styles.menuAvatar}>{initial}</span>
+          <span className={styles.menuAvatar}><AvatarContent username={username} url={avatarUrl} /></span>
           <span><strong>{username}</strong><small>{userPath}</small></span>
           <Check size={15} aria-hidden="true" />
         </div>
@@ -105,7 +112,7 @@ export function UserProfileCard({
               key={item.username}
               onClick={() => runAndClose(() => onSelectUser?.(item.username))}
             >
-              <span className={styles.optionAvatar}>{item.avatarUrl ? <img src={item.avatarUrl} alt="" /> : initialFor(item.username)}</span>
+              <span className={styles.optionAvatar}><AvatarContent username={item.username} url={item.avatarUrl} /></span>
               <span><strong>{item.username}</strong><small>{item.userPath || `users/${item.username}`}</small></span>
             </button>)}
           </div>

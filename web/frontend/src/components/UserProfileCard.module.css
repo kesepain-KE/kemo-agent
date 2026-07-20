@@ -55,7 +55,7 @@
 
 .avatar { width: 46px; height: 46px; border-radius: 50%; }
 .avatarImage { width: 100%; height: 100%; object-fit: cover; }
-.avatarInitial { font-size: 1.12rem; font-weight: 620; line-height: 1; }
+.avatarInitial { width: 100%; height: 100%; display: grid; place-items: center; font-size: 1.12rem; font-weight: 620; line-height: 1; }
 
 .userInfo { min-width: 0; display: grid; gap: 2px; }
 .username,
@@ -115,6 +115,7 @@
 .menuIdentity strong { color: var(--text); font-size: .8125rem; }
 .menuIdentity small { margin-top: 2px; color: var(--muted); font-size: .6875rem; }
 .menuAvatar { width: 36px; height: 36px; border-radius: 50%; font-size: .8125rem; font-weight: 720; }
+.menuAvatar img { width: 100%; height: 100%; object-fit: cover; }
 
 .menuItem,
 .userOption {

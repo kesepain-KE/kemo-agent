@@ -1,11 +1,16 @@
 import { z } from 'zod'
 import type {
+  AgentsResponse,
   ApiErrorPayload,
   AuthStatusResponse,
+  AvatarUploadResponse,
   ConfigFullResponse,
+  ExpandsResponse,
+  FileDeleteResponse,
   HistoryResponse,
   KnowledgeResponse,
   MemorySummaryResponse,
+  MessageStatusResponse,
   OverviewResponse,
   PromptDiagnosticsResponse,
   RunEvent,
@@ -16,13 +21,17 @@ import type {
   SessionsResponse,
   SettingsResponse,
   SkillsResponse,
+  SoulResponse,
   TasksResponse,
+  TmpFilesResponse,
+  UserFilesResponse,
   UsersResponse,
 } from '../types/api'
 
 const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 export const AUTH_REQUIRED_EVENT = 'kemo-auth-required'
+export const AVATAR_UPDATED_EVENT = 'kemo-avatar-updated'
 
 export class ApiError extends Error {
   constructor(
@@ -193,6 +202,98 @@ export async function getPromptDiagnostics(user: string): Promise<PromptDiagnost
 
 export async function getMemorySummary(user: string): Promise<MemorySummaryResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
+}
+
+export async function getUserFiles(
+  user: string,
+  scope: 'file_upload' | 'download',
+): Promise<UserFilesResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}`)
+}
+
+export function getUserFileDownloadUrl(
+  user: string,
+  scope: 'file_upload' | 'download',
+  path: string,
+): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/files/${scope}/download?path=${encodeURIComponent(path)}`
+}
+
+export async function deleteUserFile(
+  user: string,
+  scope: 'file_upload' | 'download',
+  path: string,
+): Promise<FileDeleteResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/files/${scope}?path=${encodeURIComponent(path)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function getTmpFiles(): Promise<TmpFilesResponse> {
+  return requestJson('/api/tmp')
+}
+
+export async function deleteTmpFile(path: string): Promise<FileDeleteResponse> {
+  return requestJson(`/api/tmp?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+}
+
+export function getUserAvatarUrl(user: string, revision?: string | number): string {
+  const suffix = revision === undefined ? '' : `?v=${encodeURIComponent(String(revision))}`
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/avatar${suffix}`
+}
+
+export async function uploadUserAvatar(user: string, file: File): Promise<AvatarUploadResponse> {
+  const body = new FormData()
+  body.append('file', file)
+  const result = await requestJson<AvatarUploadResponse>(
+    `/api/users/${encodeURIComponent(user)}/avatar`,
+    { method: 'POST', body },
+  )
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(AVATAR_UPDATED_EVENT, { detail: { user } }))
+  }
+  return result
+}
+
+export async function getAgents(user: string): Promise<AgentsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/agents`)
+}
+
+export async function getMessageStatus(user: string): Promise<MessageStatusResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/message/status`)
+}
+
+export async function getUserSoul(user: string): Promise<SoulResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/soul`)
+}
+
+export async function updateUserSoul(user: string, content: string): Promise<SoulResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/soul`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+}
+
+export async function getGlobalSoul(): Promise<SoulResponse> {
+  return requestJson('/api/global-soul')
+}
+
+export async function updateGlobalSoul(content: string): Promise<SoulResponse> {
+  return requestJson('/api/global-soul', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+}
+
+export function getLogoUrl(): string {
+  return `${apiBase}/api/logo`
+}
+
+export async function getExpands(user: string): Promise<ExpandsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand`)
 }
 
 export interface StreamChatOptions {

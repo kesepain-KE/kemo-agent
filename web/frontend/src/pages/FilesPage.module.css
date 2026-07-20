@@ -1,0 +1,108 @@
+.areaTabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.areaTabs > button {
+  min-height: 64px;
+  padding: 10px 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-elevated);
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition: .16s ease;
+}
+
+.areaTabs > button:hover { border-color: var(--line-strong); color: var(--text); transform: translateY(-1px); }
+.areaTabs > button.active { border-color: var(--brand-line); background: var(--brand-soft); color: var(--brand); }
+.areaTabs span { min-width: 0; }
+.areaTabs strong, .areaTabs small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.areaTabs strong { color: var(--text); font-size: .8125rem; }
+.areaTabs small { margin-top: 3px; color: var(--muted); font-size: .6875rem; }
+
+.notice,
+.confirmBar {
+  min-height: 48px;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-2);
+  font-size: .75rem;
+}
+
+.notice { color: var(--green); background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 22%, var(--line)); }
+.notice button { border: 0; background: transparent; color: currentColor; cursor: pointer; font-size: 1rem; }
+.confirmBar > span:first-child { min-width: 0; }
+.confirmBar strong, .confirmBar small { display: block; }
+.confirmBar strong { color: var(--text); font-size: .8125rem; }
+.confirmBar small { margin-top: 3px; color: var(--muted); overflow-wrap: anywhere; }
+.confirmBar > span:last-child { display: flex; gap: 7px; flex: 0 0 auto; }
+.confirmBar button { height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text-2); cursor: pointer; }
+.confirmBar .dangerButton { border-color: color-mix(in srgb, var(--red) 30%, var(--line)); background: var(--red-soft); color: var(--red); }
+
+.filePanel { overflow: hidden; }
+.loading { min-height: 180px; display: grid; place-items: center; color: var(--muted); font-size: .8125rem; }
+.fileList { border-top: 1px solid var(--line); }
+.fileRow {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px 150px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.fileRow:last-child { border-bottom: 0; }
+.fileRow:hover { background: var(--surface-hover); }
+.fileRow.directory { background: color-mix(in srgb, var(--surface-2) 78%, transparent); }
+.fileIdentity { min-width: 0; padding-top: 8px; padding-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+.fileIdentity > span:last-child { min-width: 0; }
+.fileIdentity strong, .fileIdentity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fileIdentity strong { font-size: .8125rem; color: var(--text); }
+.fileIdentity small { margin-top: 3px; font-size: .6875rem; color: var(--muted); }
+.fileIcon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; background: var(--brand-soft); color: var(--brand); }
+.directory .fileIcon { background: var(--amber-soft); color: var(--amber); }
+.fileMeta { min-width: 0; padding: 0 8px; }
+.fileMeta b, .fileMeta small { display: block; color: var(--muted); font-size: .6875rem; font-weight: 600; }
+.fileMeta small { margin-top: 3px; color: var(--muted-2); }
+.fileActions { padding-right: 12px; display: flex; justify-content: flex-end; gap: 6px; }
+.fileActions a, .fileActions button {
+  height: 31px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: .6875rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.fileActions a:hover { border-color: var(--brand-line); color: var(--brand); }
+.fileActions button:hover { border-color: color-mix(in srgb, var(--red) 30%, var(--line)); color: var(--red); background: var(--red-soft); }
+.readonly { color: var(--muted-2); font-size: .6875rem; }
+
+@media (max-width: 900px) {
+  .fileRow { grid-template-columns: minmax(0, 1fr) 118px; }
+  .fileMeta { display: none; }
+}
+
+@media (max-width: 650px) {
+  .areaTabs { grid-template-columns: 1fr; }
+  .fileRow { grid-template-columns: minmax(0, 1fr) 82px; }
+  .fileActions span { display: none; }
+  .fileActions a, .fileActions button { width: 31px; padding: 0; justify-content: center; }
+  .confirmBar { align-items: flex-start; flex-direction: column; }
+}

@@ -457,6 +457,139 @@ export interface OverviewResponse {
   activities: ActivitySummary[]
 }
 
+export type FileTreeNode =
+  | {
+      type: 'directory'
+      name: string
+      relative_path: string
+      children: FileTreeNode[]
+    }
+  | {
+      type: 'file'
+      name: string
+      relative_path: string
+      size: number
+      updated_at: number
+      extension: string
+    }
+
+export interface FileTreeSummary {
+  total_files: number
+  total_dirs: number
+  total_size: number
+}
+
+export interface UserFilesResponse {
+  user: string
+  scope: 'file_upload' | 'download'
+  root: string
+  summary: FileTreeSummary
+  tree: FileTreeNode[]
+}
+
+export interface TmpFilesResponse {
+  root: 'tmp' | string
+  summary: FileTreeSummary
+  tree: FileTreeNode[]
+}
+
+export interface FileDeleteResponse {
+  user?: string
+  scope?: 'file_upload' | 'download'
+  path: string
+  deleted: boolean
+}
+
+export interface AvatarUploadResponse {
+  user: string
+  avatar_path: string
+  size: number
+  format: string
+}
+
+export interface InventoryFile {
+  name: string
+  relative_path: string
+  size: number
+  updated_at: number
+}
+
+export interface AgentsResponse {
+  user: string
+  summary: { total: number; enabled: number; global: number; user: number }
+  agents: Array<{
+    name: string
+    description: string
+    enabled: boolean
+    source: 'global' | 'user'
+    execution: string
+    model_profile: string
+    exposure: string
+    root: string
+    files: InventoryFile[]
+  }>
+}
+
+export interface MessageStatusResponse {
+  user: string
+  bindings: Array<{
+    platform: string
+    external_user_id: string
+    internal_user: string
+    chat_type: string | null
+    external_chat_id: string | null
+    match_priority: number
+  }>
+  transports: Array<{
+    name: string
+    platform: string
+    display_name: string
+    capabilities: string[]
+    state: 'running' | 'stopped' | 'error' | string
+    bound_user: string
+    allowed_tools: string[] | null
+    last_error: unknown
+    health: string
+    last_check: string | null
+    last_message_at: string | null
+    latency_ms: number | null
+    messages_received_today: number
+    messages_sent_today: number
+  }>
+  summary: {
+    total_bindings: number
+    total_transports: number
+    running_transports: number
+    stopped_transports: number
+    error_transports: number
+  }
+  issues: Array<{ name: string; error: string }>
+}
+
+export interface SoulResponse {
+  user?: string
+  path: string
+  content: string
+  size: number
+  updated_at: number
+}
+
+export interface ExpandsResponse {
+  user: string
+  summary: { total: number; global: number; shared: number; user: number }
+  expands: Array<{
+    scope: 'global' | 'shared' | 'user'
+    root: string
+    items: Array<{
+      name: string
+      type: 'directory'
+      relative_path: string
+      has_register: boolean
+      files: InventoryFile[]
+    }>
+  }>
+}
+
 export interface ApiErrorPayload {
   error?: {
     code?: string

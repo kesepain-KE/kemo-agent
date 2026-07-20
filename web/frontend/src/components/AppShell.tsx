@@ -9,12 +9,14 @@ import {
   ChevronLeft,
   CircleGauge,
   FileSearch,
+  FolderOpen,
   ListChecks,
   Menu,
   MessageSquarePlus,
   Moon,
   Search,
   Settings,
+  Shapes,
   Sun,
   Wrench,
   X,
@@ -24,11 +26,14 @@ import {
   deleteAllSessions,
   deleteSession,
   getHealth,
+  getLogoUrl,
   getOverview,
   getSessions,
+  getUserAvatarUrl,
   getUsers,
   logoutAuth,
   renameSession,
+  AVATAR_UPDATED_EVENT,
 } from '../api/client'
 import { formatDateTime, statusLabel } from './ModuleUi'
 import { SessionHistoryPanel } from './SessionHistoryPanel'
@@ -51,6 +56,8 @@ const navItems = [
   { path: '/knowledge', label: '知识库', icon: BookOpen },
   { path: '/skills', label: '技能', icon: Wrench },
   { path: '/sense', label: '全局感知', icon: BrainCircuit },
+  { path: '/files', label: '文件空间', icon: FolderOpen },
+  { path: '/runtime', label: '运行模块', icon: Shapes },
   { path: '/settings', label: '配置概览', icon: Settings },
 ]
 
@@ -60,6 +67,9 @@ const pageTitles: Record<string, string> = {
   '/knowledge': '知识库',
   '/skills': '技能',
   '/sense': '全局感知',
+  '/files': '文件空间',
+  '/runtime': '运行模块',
+  '/profile': '用户资料',
   '/settings': '配置概览',
 }
 
@@ -105,6 +115,7 @@ export function AppShell() {
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState('')
   const [logoutPending, setLogoutPending] = useState(false)
+  const [avatarRevision, setAvatarRevision] = useState(0)
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const commandInputRef = useRef<HTMLInputElement>(null)
@@ -145,6 +156,15 @@ export function AppShell() {
     if (commandOpen) requestAnimationFrame(() => commandInputRef.current?.focus())
     else setCommandQuery('')
   }, [commandOpen])
+
+  useEffect(() => {
+    const refreshAvatar = (event: Event) => {
+      const updatedUser = (event as CustomEvent<{ user?: string }>).detail?.user
+      if (!updatedUser || updatedUser === user) setAvatarRevision(Date.now())
+    }
+    window.addEventListener(AVATAR_UPDATED_EVENT, refreshAvatar)
+    return () => window.removeEventListener(AVATAR_UPDATED_EVENT, refreshAvatar)
+  }, [user])
 
   const withContext = (path: string, nextSession = sessionId) => {
     const next = new URLSearchParams()
@@ -225,6 +245,9 @@ export function AppShell() {
     { label: '查询文件知识库', detail: '用户层与全局层索引', shortcut: 'K', keywords: 'knowledge file search', action: () => navigate(withContext('/knowledge')) },
     { label: '查看技能注册表', detail: '工具与能力来源', shortcut: 'S', keywords: 'skills tools', action: () => navigate(withContext('/skills')) },
     { label: '查看全局感知', detail: '来源与注入闸门', shortcut: 'G', keywords: 'sense context source', action: () => navigate(withContext('/sense')) },
+    { label: '浏览文件空间', detail: '上传文件、生成产物与临时目录', shortcut: 'F', keywords: 'files upload download tmp', action: () => navigate(withContext('/files')) },
+    { label: '查看运行模块', detail: '子代理、外部消息与 Expand', shortcut: 'M', keywords: 'agents message expand runtime', action: () => navigate(withContext('/runtime')) },
+    { label: '编辑用户资料', detail: '头像、用户人格与全局人格', shortcut: 'P', keywords: 'profile avatar soul', action: () => navigate(withContext('/profile')) },
     { label: '打开运行状态', detail: '上下文、Provider 与能力计数', shortcut: 'R', keywords: 'runtime status context', action: () => ui.setDrawerOpen(true) },
     { label: '打开配置概览', detail: '脱敏运行配置镜像', shortcut: ',', keywords: 'settings config provider', action: () => navigate(withContext('/settings')) },
   ], [navigate, sessionId, user, ui])
@@ -246,7 +269,7 @@ export function AppShell() {
     <div className={`app ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-head">
-          <div className="brand-mark"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></div>
+          <div className="brand-mark"><img src={getLogoUrl()} width={571} height={568} alt="kemo-agent logo" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = '/kemo-agent.jpg' }} /></div>
           <div className="brand-copy"><strong>kemo-agent</strong><span>Personal Agent Runtime</span></div>
           <button className="sidebar-toggle" onClick={ui.toggleSidebar} aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'}><ChevronLeft size={16} /></button>
         </div>
@@ -275,11 +298,12 @@ export function AppShell() {
         <UserProfileCard
           username={user || '未选择用户'}
           userPath={user ? `users/${user}` : 'users/—'}
-          users={usersQuery.data?.users.map((item) => ({ username: item.name, userPath: `users/${item.name}` }))}
+          avatarUrl={user ? getUserAvatarUrl(user, avatarRevision) : undefined}
+          users={usersQuery.data?.users.map((item) => ({ username: item.name, userPath: `users/${item.name}`, avatarUrl: getUserAvatarUrl(item.name, avatarRevision) }))}
           compact={ui.sidebarCollapsed}
           logoutPending={logoutPending}
           onSelectUser={setUser}
-          onOpenProfile={() => navigate(settingsPath('users'))}
+          onOpenProfile={() => navigate(withContext('/profile'))}
           onOpenSettings={() => navigate(settingsPath('config'))}
           onLogout={authStatus?.enabled ? () => { void logout() } : undefined}
         />

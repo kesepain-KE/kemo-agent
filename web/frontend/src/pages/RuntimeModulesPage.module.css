@@ -1,0 +1,82 @@
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-2);
+}
+.tabs button { min-height: 38px; padding: 0 13px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: .75rem; font-weight: 700; cursor: pointer; }
+.tabs button:hover { color: var(--text); background: var(--surface-hover); }
+.tabs button.active { color: var(--brand); background: var(--surface-elevated); box-shadow: var(--shadow-soft); }
+.tabs b { min-width: 23px; height: 21px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: var(--surface-3); font-size: .625rem; }
+
+.cardGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.agentCard { overflow: hidden; }
+.definitionGrid { padding: 13px 15px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.definitionGrid span { min-width: 0; padding: 8px 9px; border-radius: 10px; background: var(--surface-2); }
+.definitionGrid small, .definitionGrid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.definitionGrid small { color: var(--muted); font-size: .625rem; }
+.definitionGrid strong { margin-top: 3px; color: var(--text); font-size: .71875rem; }
+.pathLine { margin: 0 15px 11px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: var(--surface); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .625rem; overflow-wrap: anywhere; }
+.fileDetails { border-top: 1px solid var(--line); }
+.fileDetails summary { min-height: 42px; padding: 0 15px; display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: .6875rem; cursor: pointer; list-style: none; }
+.fileDetails summary::-webkit-details-marker { display: none; }
+.fileDetails summary b { margin-left: auto; }
+.fileDetails > div { max-height: 180px; overflow: auto; border-top: 1px solid var(--line); }
+.fileDetails > div > span { min-height: 38px; padding: 6px 15px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); }
+.fileDetails code { color: var(--text-2); font-size: .625rem; overflow-wrap: anywhere; }
+.fileDetails small { flex: 0 0 auto; color: var(--muted-2); font-size: .59375rem; }
+
+.messageGrid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); gap: 12px; }
+.transportList, .bindingList { border-top: 1px solid var(--line); }
+.transportRow { min-height: 76px; padding: 11px 14px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); }
+.transportRow:last-child { border-bottom: 0; }
+.transportIcon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; background: var(--brand-soft); color: var(--brand); }
+.transportRow > span:nth-child(2) { min-width: 0; }
+.transportRow strong, .transportRow small, .transportRow em { display: block; }
+.transportRow strong { color: var(--text); font-size: .78125rem; }
+.transportRow small { margin-top: 2px; color: var(--muted); font-size: .625rem; }
+.transportRow em { margin-top: 4px; color: var(--muted-2); font-size: .59375rem; font-style: normal; overflow-wrap: anywhere; }
+.transportRow > span:nth-child(3) { text-align: right; }
+.transportRow p { grid-column: 2 / -1; margin: -3px 0 0; padding: 6px 8px; border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: .625rem; overflow-wrap: anywhere; }
+.bindingList > div { min-height: 56px; padding: 9px 13px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, auto) auto; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.bindingList > div:last-child { border-bottom: 0; }
+.bindingList strong, .bindingList small { display: block; }
+.bindingList strong { font-size: .75rem; }
+.bindingList small, .bindingList > div > span:last-child { margin-top: 2px; color: var(--muted); font-size: .625rem; }
+.bindingList code { padding: 4px 6px; border-radius: 7px; background: var(--surface-2); color: var(--text-2); font-size: .625rem; overflow-wrap: anywhere; }
+.issueList { margin-bottom: 12px; display: grid; gap: 6px; }
+.issueList span { padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--red) 24%, var(--line)); border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: .6875rem; }
+.issueList strong { margin-right: 7px; }
+
+.expandGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.expandScope { overflow: hidden; }
+.expandList { border-top: 1px solid var(--line); }
+.expandList details { border-bottom: 1px solid var(--line); }
+.expandList details:last-child { border-bottom: 0; }
+.expandList summary { min-height: 52px; padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; list-style: none; }
+.expandList summary::-webkit-details-marker { display: none; }
+.expandList summary > span { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.expandList summary > span:first-child { color: var(--brand); }
+.expandList summary strong { color: var(--text); font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.expandList summary b { color: var(--muted); font-size: .59375rem; white-space: nowrap; }
+.expandList details > div { padding: 6px 12px 10px; display: grid; gap: 5px; background: var(--surface-2); }
+.expandList details > div > span { display: flex; justify-content: space-between; gap: 8px; }
+.expandList code { color: var(--text-2); font-size: .59375rem; overflow-wrap: anywhere; }
+.expandList small { flex: 0 0 auto; color: var(--muted-2); font-size: .5625rem; }
+
+@media (max-width: 1120px) {
+  .cardGrid, .messageGrid { grid-template-columns: 1fr; }
+  .expandGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .tabs { overflow-x: auto; }
+  .tabs button { white-space: nowrap; }
+  .definitionGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .expandGrid { grid-template-columns: 1fr; }
+  .transportRow { grid-template-columns: 34px minmax(0, 1fr); }
+  .transportRow > span:nth-child(3) { grid-column: 2; text-align: left; }
+  .bindingList > div { grid-template-columns: 1fr; }
+}
