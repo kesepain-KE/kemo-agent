@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "internal_mode": true,
-  "allowed_callers": ["scheduler", "context_manage"],
+  "internal_mode": false,
+  "allowed_callers": ["main_agent", "scheduler", "context_manage"],
   "tools": {
     "plugins": {"allow": ["memory_manage", "skill_creater"]},
     "shared_skills": {"allow": []},

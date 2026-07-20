@@ -350,12 +350,7 @@ def _validate_executor(
     source: Literal["builtin", "user"],
     manifest_path: Path,
 ) -> None:
-    if source == "user":
-        if executor != "builtin:llm":
-            raise AgentManifestError(f"用户子代理只能使用 builtin:llm 执行器：{manifest_path}")
-        python_files = [item for item in directory.rglob("*.py") if item.is_file()]
-        if python_files:
-            raise AgentManifestError(f"用户子代理目录不得包含 Python 文件：{python_files[0]}")
+    if executor == "builtin:llm":
         return
     file_name, separator, function_name = executor.partition(":")
     if (
@@ -406,7 +401,8 @@ def _load_compact_manifest(
     if not config_path.is_file():
         raise AgentManifestError(f"子代理能力配置不存在：{config_path}")
     defaults = _BUILTIN_DEFAULTS.get(name, {}) if source == "builtin" else {}
-    executor = "executor.py:execute" if source == "builtin" else "builtin:llm"
+    executor_path = path.parent / "executor.py"
+    executor = "executor.py:execute" if executor_path.is_file() else "builtin:llm"
     _validate_executor(path.parent, executor, source=source, manifest_path=path)
     execution = defaults.get("execution", "sync")
     write_policy = defaults.get("write_policy", "derived_cache")
@@ -496,25 +492,9 @@ def _load_legacy_manifest(path: Path, *, source: Literal["builtin", "user"], roo
         config_path = path.parent / config_file
         if not config_path.is_file():
             raise AgentManifestError(f"子代理能力配置不存在：{config_path}")
-    if source == "user":
-        if legacy:
-            raise AgentManifestError(f"用户子代理只支持 schema_version=2：{path}")
-        if executor != "builtin:llm":
-            raise AgentManifestError(f"用户子代理只能使用 builtin:llm 执行器：{path}")
-        python_files = [item for item in path.parent.rglob("*.py") if item.is_file()]
-        if python_files:
-            raise AgentManifestError(f"用户子代理目录不得包含 Python 文件：{python_files[0]}")
-    elif executor != "builtin:llm":
-        file_name, separator, function_name = executor.partition(":")
-        if not separator or not file_name or not function_name or Path(file_name).name != file_name:
-            raise AgentManifestError(f"executor 必须是同目录 file.py:function：{path}")
-        executor_path = (path.parent / file_name).resolve()
-        try:
-            executor_path.relative_to(path.parent.resolve())
-        except ValueError as exc:
-            raise AgentManifestError(f"executor 不得跳出子代理目录：{path}") from exc
-        if not executor_path.is_file():
-            raise AgentManifestError(f"executor 文件不存在：{executor_path}")
+    if source == "user" and legacy:
+        raise AgentManifestError(f"用户子代理只支持 schema_version=2：{path}")
+    _validate_executor(path.parent, executor, source=source, manifest_path=path)
     capabilities = _load_legacy_capabilities(config_path, legacy=legacy)
     return AgentDefinition(
         name=name,

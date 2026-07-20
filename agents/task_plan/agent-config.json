@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "internal_mode": true,
+  "internal_mode": false,
   "allowed_callers": ["main_agent"],
   "tools": {
     "plugins": {"allow": []},

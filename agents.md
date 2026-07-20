@@ -95,7 +95,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 用户拓展 | `users/<name>/expand/` | 当前用户私有拓展模块，可信自动发现且不执行用户注册代码 |
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`executor.py` |
-| 用户子代理 | `users/<name>/agents/<agent>/` | 数据型热插拔包：`AGENT.md`、`agent.json`、`agent-config.json` |
+| 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、可选 `executor.py` |
 | 用户历史 | `users/<name>/history/` | 时间戳目录保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
 | 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
 | 任务计划 | `users/<name>/task_plan/` | 计划文件 |
@@ -342,28 +342,30 @@ agents/<name>/
 └── executor.py
 ```
 
-用户代理位于 `users/<user>/agents/<name>/`，只能是数据包：
+用户代理位于 `users/<user>/agents/<name>/`，可按需携带可信的自定义执行代码：
 
 ```text
 users/<user>/agents/<name>/
 ├── AGENT.md
 ├── agent.json
 ├── agent-config.json
-└── trigger.md
+├── trigger.md
+└── executor.py（可选）
 ```
 
 - `agent.json` 精简为 `name`、`version`、`description`、`trigger` 四个字段。执行方式、写入策略和兼容模型标签由运行时按内置代理名补全；超时读取 `agent_runtime.default_timeout`。
 - `agent-config.json` 是运行时强制授权，不是说明文档；它声明 `internal_mode`、调用方、插件/共享技能白名单、全局/共享知识开关和主历史继承策略。
 - `trigger.md` 分为“注册信息”和“操作信息”。主智能体只注入注册摘要，详细操作信息按需读取。
-- 用户代理的执行器固定为 `builtin:llm`。用户代理目录出现任何 `.py` 文件都会拒绝加载，也不能覆盖内置代理名称。
-- 内置代理的执行器固定为同目录 `executor.py:execute`。
+- 精简清单不显式声明执行器：同目录存在 `executor.py` 时自动使用 `executor.py:execute`，否则使用 `builtin:llm`；此规则对内置和用户代理一致。
+- 带 `schema_version: 2` 的完整清单遵循其 `executor` 字段。自定义执行器必须写成同目录 `file.py:function`，文件必须存在且不得通过路径跳出子代理目录；用户 schema v1 仍不支持。
+- 用户代理不能覆盖内置代理名称。自定义 executor 由 kemo-agent 进程直接导入执行，不提供代码沙箱，只能安装或编写可信本地代码。
 
 ### 发现、创建与调用
 
 - `discover_agents(root, user)` 每次调用都扫描 `agents/` 和 `users/<user>/agents/`，不缓存目录结果。
 - 因此新增、启用、禁用或删除用户代理后无需重启；长期存在的 `AgentRunner` 和后台 `AgentScheduler` 在执行前也会刷新注册表。
 - 主智能体只通过 `plugins/subagent_dispatch` 网关发现和调度公开代理。网关提供 `list`、`create`、`call`、`status`、`cancel`。
-- `create` 原子写入当前用户的数据型代理包；写入后立即用同一发现管线校验，失败会删除整个目标包。
+- `create` 原子写入当前用户的基础代理包；写入后立即用同一发现管线校验，失败会删除整个目标包。创建结果默认无 `executor.py`，因此使用 `builtin:llm`；之后可在包内添加可信 `executor.py`，下次发现时自动生效。
 - 更换用户时，发现管线重新解析该用户的 `agents/`、`user_skills/`、`expand/` 和知识索引，不依赖 `kesepain` 等静态用户名。
 
 ### 授权与执行规则

@@ -10,7 +10,9 @@
 
 ## 调用方式
 
-由引擎 `run/engine.py` 在上下文选择阶段自动调用。`allowed_callers: ["engine"]`，不可由主智能体或用户直接调用。
+由引擎 `run/engine.py` 在上下文选择阶段自动调用，也可由主智能体通过 `subagent_dispatch` 主动调用。
+
+`allowed_callers: ["main_agent", "engine"]`。
 
 ## 三种触发场景
 

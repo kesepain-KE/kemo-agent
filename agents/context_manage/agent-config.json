@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "internal_mode": true,
-  "allowed_callers": ["engine"],
+  "internal_mode": false,
+  "allowed_callers": ["main_agent", "engine"],
   "tools": {
     "plugins": {"allow": []},
     "shared_skills": {"allow": []},
