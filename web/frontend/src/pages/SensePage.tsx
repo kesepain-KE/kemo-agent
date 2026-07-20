@@ -75,7 +75,7 @@ export function SensePage() {
   return (
     <ModuleFrame
       kicker="System Capability / Global Sense"
-      title="全局感知"
+      title="感知"
       description="管理外部感知源、注册可注入数据，并展示用户过滤后进入系统提示词的真实结果。"
       actions={<>
         <button className="module-btn" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCw className={query.isFetching ? styles.spinning : ''} size={15} />刷新数据</button>

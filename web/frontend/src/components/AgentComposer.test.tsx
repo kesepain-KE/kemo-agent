@@ -44,4 +44,18 @@ describe('AgentComposer', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
     expect(onStop).toHaveBeenCalledTimes(1)
   })
+
+  it('通过隐藏文件选择器把用户选择的文件交给上传处理器', () => {
+    const onUploadFile = vi.fn()
+    const { container } = renderComposer({ onUploadFile })
+    const uploadButton = screen.getByRole('button', { name: '上传文件' })
+    expect(uploadButton).toBeEnabled()
+
+    fireEvent.click(uploadButton)
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')
+    const file = new File(['kemo upload'], 'browser-upload.txt', { type: 'text/plain' })
+    expect(input).not.toBeNull()
+    fireEvent.change(input!, { target: { files: [file] } })
+    expect(onUploadFile).toHaveBeenCalledWith(file)
+  })
 })

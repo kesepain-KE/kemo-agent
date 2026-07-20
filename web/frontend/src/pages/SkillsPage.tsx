@@ -34,7 +34,7 @@ export function SkillsPage() {
   return (
     <ModuleFrame
       kicker="Capability Registry"
-      title="技能中心"
+      title="工具与技能"
       description="分别展示可执行插件与 Prompt 技能库存；用户白名单只过滤主智能体的共享/用户技能，不改变注册结果。"
       actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />刷新注册表</button>}
     >

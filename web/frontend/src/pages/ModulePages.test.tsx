@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest'
 import { AppShell } from '../components/AppShell'
 import { FilesPage } from './FilesPage'
 import { KnowledgePage } from './KnowledgePage'
+import { MemoryPage } from './MemoryPage'
 import { ProfilePage } from './ProfilePage'
-import { RuntimeModulesPage } from './RuntimeModulesPage'
+import { AgentsPage, ExpandPage, MessagesPage, RuntimeModulesPage } from './RuntimeModulesPage'
+import { RuntimeStatusPage } from './RuntimeStatusPage'
 import { SensePage } from './SensePage'
 import { SettingsPage } from './SettingsPage'
 import { SkillsPage } from './SkillsPage'
@@ -15,9 +17,14 @@ import { TasksPage } from './TasksPage'
 const pages = [
   { path: 'tasks', element: <TasksPage /> },
   { path: 'knowledge', element: <KnowledgePage /> },
+  { path: 'memory', element: <MemoryPage /> },
+  { path: 'agents', element: <AgentsPage /> },
   { path: 'skills', element: <SkillsPage /> },
   { path: 'sense', element: <SensePage /> },
   { path: 'files', element: <FilesPage /> },
+  { path: 'messages', element: <MessagesPage /> },
+  { path: 'expand', element: <ExpandPage /> },
+  { path: 'status', element: <RuntimeStatusPage /> },
   { path: 'runtime', element: <RuntimeModulesPage /> },
   { path: 'profile', element: <ProfilePage /> },
   { path: 'settings', element: <SettingsPage /> },
@@ -43,12 +50,31 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('个人笔记')).toBeInTheDocument()
     expect(await screen.findByText('共享笔记')).toBeInTheDocument()
     expect(screen.getAllByText('共享层').length).toBeGreaterThan(0)
-    expect(screen.getByText('外接项目 · kemo-graph')).toBeInTheDocument()
+    expect(screen.getByText('编辑查看')).toBeInTheDocument()
+    expect(screen.queryByText('外接项目 · kemo-graph')).not.toBeInTheDocument()
+    expect(screen.queryByText('知识集合')).not.toBeInTheDocument()
+  })
+
+  it('知识页按层级搜索并在保存后提示刷新索引', async () => {
+    renderPage('knowledge')
+    await screen.findByText('个人笔记')
+    fireEvent.click(screen.getByRole('button', { name: '用户层' }))
+    const search = screen.getByPlaceholderText('用户层：搜索文件名或标题…')
+    fireEvent.change(search, { target: { value: '共享笔记' } })
+    expect(await screen.findByText('没有匹配的知识文件')).toBeInTheDocument()
+    fireEvent.change(search, { target: { value: '' } })
+    fireEvent.click(await screen.findByText('个人笔记'))
+    expect(await screen.findByRole('button', { name: '预览' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    expect(await screen.findByDisplayValue(/知识正文/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '保存编辑' }))
+    expect(await screen.findByText('当前知识文件已更新，请提醒智能体刷新索引')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '我知道了，不用刷新' })).toBeInTheDocument()
   })
 
   it('技能页展示注册工具和层级', async () => {
     renderPage('skills')
-    expect(await screen.findByRole('heading', { name: '技能中心' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '工具与技能' })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'clock' })).toBeInTheDocument()
     expect(screen.getAllByText('基础插件').length).toBeGreaterThan(0)
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
@@ -56,7 +82,7 @@ describe('V16 module pages', () => {
 
   it('感知页展示目录模块与主智能体过滤状态', async () => {
     renderPage('sense')
-    expect(await screen.findByRole('heading', { name: '全局感知' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '感知' })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: '运行时感知' })).toBeInTheDocument()
     expect(screen.getAllByText('1 个来源').length).toBeGreaterThan(0)
     expect(screen.getByText('数据注册')).toBeInTheDocument()
@@ -66,10 +92,10 @@ describe('V16 module pages', () => {
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
-  it('配置页提供可操作的外观设置和只读边界', async () => {
+  it('配置页提供可操作的外观设置和字段级编辑', async () => {
     renderPage('settings')
-    expect(await screen.findByRole('heading', { name: '配置概览' })).toBeInTheDocument()
-    expect(screen.getByText('默认只读')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
+    expect(screen.getByText('敏感字段脱敏')).toBeInTheDocument()
     expect(screen.getByText('界面主题')).toBeInTheDocument()
     expect(screen.getByText('72%')).toBeInTheDocument()
     expect(screen.getByText('88%')).toBeInTheDocument()
@@ -77,9 +103,9 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByText('Prompt 与 Expand'))
     expect(await screen.findByText('Prompt 注入诊断')).toBeInTheDocument()
     expect(await screen.findByText('user_soul')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('用户配置 JSON'))
+    fireEvent.click(screen.getByText('配置文件 JSON'))
     expect(await screen.findByLabelText('用户配置 JSON')).toBeInTheDocument()
-    expect(screen.getByText('只读模式')).toBeInTheDocument()
+    expect(screen.getByText('用户配置可编辑')).toBeInTheDocument()
   })
 
   it('文件空间浏览三类目录并执行二次确认删除', async () => {
@@ -106,9 +132,14 @@ describe('V16 module pages', () => {
     expect(screen.getByText('已注册')).toBeInTheDocument()
   })
 
+  it('新增独立栏目拥有各自页面', async () => {
+    renderPage('memory')
+    expect(await screen.findByRole('heading', { name: '记忆' })).toBeInTheDocument()
+  })
+
   it('用户资料读取并原子保存人格 Markdown', async () => {
     renderPage('profile')
-    expect(await screen.findByRole('heading', { name: '用户资料' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '身份与人格' })).toBeInTheDocument()
     const editor = await screen.findByLabelText('用户人格 Markdown')
     expect(editor).toHaveValue('# 用户人格')
     fireEvent.change(editor, { target: { value: '# 更新后的用户人格' } })

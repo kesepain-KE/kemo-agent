@@ -7,11 +7,16 @@ import type {
   ConfigFullResponse,
   ExpandsResponse,
   FileDeleteResponse,
+  FileMutationResponse,
   HistoryResponse,
+  ImportantMemoryResponse,
+  KnowledgeDocumentResponse,
   KnowledgeResponse,
+  MemoryItemResponse,
   MemorySummaryResponse,
   MessageStatusResponse,
   OverviewResponse,
+  PreferencesResponse,
   PromptDiagnosticsResponse,
   RunEvent,
   SenseResponse,
@@ -102,8 +107,9 @@ export async function getUsers(): Promise<UsersResponse> {
   return requestJson('/api/users')
 }
 
-export async function getSessions(user: string): Promise<SessionsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions`)
+export async function getSessions(user: string, query = ''): Promise<SessionsResponse> {
+  const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions${suffix}`)
 }
 
 export async function getHistory(user: string, sessionId: string): Promise<HistoryResponse> {
@@ -176,8 +182,58 @@ export async function getTasks(user: string): Promise<TasksResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks`)
 }
 
+export async function createPlan(user: string, plan: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(plan),
+  })
+}
+
+export async function updatePlan(user: string, planId: string, plan: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(plan),
+  })
+}
+
+export async function deletePlan(user: string, planId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' })
+}
+
+export async function createCron(user: string, task: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(task),
+  })
+}
+
+export async function updateCron(user: string, taskId: string, task: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(task),
+  })
+}
+
+export async function deleteCron(user: string, taskId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`, { method: 'DELETE' })
+}
+
 export async function getKnowledge(user: string): Promise<KnowledgeResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge`)
+}
+
+export async function getKnowledgeDocument(user: string, scope: string, path: string): Promise<KnowledgeDocumentResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`)
+}
+
+export async function putKnowledgeDocument(user: string, scope: string, path: string, content: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  })
+}
+
+export async function deleteKnowledgeDocument(user: string, scope: string, path: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+}
+
+export async function moveKnowledgeDocument(user: string, scope: string, path: string, newPath: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}&new_path=${encodeURIComponent(newPath)}`, { method: 'PATCH' })
 }
 
 export async function getSkills(user: string): Promise<SkillsResponse> {
@@ -196,12 +252,66 @@ export async function getUserConfig(user: string): Promise<ConfigFullResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/config/full`)
 }
 
+export async function patchUserConfig(user: string, changes: Record<string, unknown>): Promise<ConfigFullResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/config`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }),
+  })
+}
+
+export async function getGlobalConfig(): Promise<{ scope: string; config: Record<string, unknown>; redacted_paths: string[] }> {
+  return requestJson('/api/global-config')
+}
+
+export async function patchGlobalConfig(changes: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson('/api/global-config', {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }),
+  })
+}
+
+export async function getPreferences(user: string): Promise<PreferencesResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/preferences`)
+}
+
+export async function patchPreferences(user: string, changes: Partial<PreferencesResponse['appearance']>): Promise<PreferencesResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/preferences`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
+  })
+}
+
 export async function getPromptDiagnostics(user: string): Promise<PromptDiagnosticsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/prompt/sections`)
 }
 
 export async function getMemorySummary(user: string): Promise<MemorySummaryResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
+}
+
+export async function getMemoryItem(user: string, filename: string): Promise<MemoryItemResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?filename=${encodeURIComponent(filename)}`)
+}
+
+export async function putMemory(user: string, filename: string, content: string, tier?: string): Promise<MemoryItemResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?filename=${encodeURIComponent(filename)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, tier }),
+  })
+}
+
+export async function deleteMemory(user: string, filename: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+}
+
+export async function getImportantMemory(user: string): Promise<ImportantMemoryResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`)
+}
+
+export async function updateImportantMemory(user: string, content: string): Promise<ImportantMemoryResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  })
+}
+
+export async function deleteImportantMemory(user: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`, { method: 'DELETE' })
 }
 
 export async function getUserFiles(
@@ -230,12 +340,60 @@ export async function deleteUserFile(
   )
 }
 
+export async function uploadUserFile(user: string, scope: 'file_upload' | 'download', path: string, file: File): Promise<FileMutationResponse> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body })
+}
+
+export async function writeUserFileText(user: string, scope: 'file_upload' | 'download', path: string, content: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/text?path=${encodeURIComponent(path)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  })
+}
+
+export async function getUserFileText(user: string, scope: 'file_upload' | 'download', path: string): Promise<{ path: string; content: string; size: number }> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/text?path=${encodeURIComponent(path)}`)
+}
+
+export async function moveUserFile(user: string, scope: 'file_upload' | 'download', path: string, newPath: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/move?path=${encodeURIComponent(path)}&new_path=${encodeURIComponent(newPath)}`, { method: 'PATCH' })
+}
+
+export async function createUserDirectory(user: string, scope: 'file_upload' | 'download', path: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/directory?path=${encodeURIComponent(path)}`, { method: 'POST' })
+}
+
 export async function getTmpFiles(): Promise<TmpFilesResponse> {
   return requestJson('/api/tmp')
 }
 
 export async function deleteTmpFile(path: string): Promise<FileDeleteResponse> {
   return requestJson(`/api/tmp?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+}
+
+export async function uploadTmpFile(path: string, file: File): Promise<FileMutationResponse> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson(`/api/tmp/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body })
+}
+
+export async function writeTmpText(path: string, content: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/tmp/text?path=${encodeURIComponent(path)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  })
+}
+
+export async function getTmpText(path: string): Promise<{ path: string; content: string; size: number }> {
+  return requestJson(`/api/tmp/text?path=${encodeURIComponent(path)}`)
+}
+
+export async function moveTmpFile(path: string, newPath: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/tmp/move?path=${encodeURIComponent(path)}&new_path=${encodeURIComponent(newPath)}`, { method: 'PATCH' })
+}
+
+export async function createTmpDirectory(path: string): Promise<FileMutationResponse> {
+  return requestJson(`/api/tmp/directory?path=${encodeURIComponent(path)}`, { method: 'POST' })
 }
 
 export function getUserAvatarUrl(user: string, revision?: string | number): string {

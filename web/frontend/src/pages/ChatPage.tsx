@@ -16,12 +16,14 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { getHistory, streamChat, submitGuidance } from '../api/client'
+import { getHistory, getSense, getTasks, streamChat, submitGuidance, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import type { ShellOutletContext } from '../components/AppShell'
-import { formatDateTime, statusLabel } from '../components/ModuleUi'
+import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
+import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
-import type { ChatItem, HistoryResponse, RunEvent } from '../types/api'
+import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
+import type { ChatItem, CronTaskSummary, HistoryResponse, PlanSummary, RunEvent, SenseSourceSummary, SessionsResponse } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
 function createSessionId() {
@@ -95,21 +97,26 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     const result = event.result && typeof event.result === 'object' ? event.result as Record<string, unknown> : undefined
     const backendStatus = String(event.metadata?.status || '')
     const failed = Boolean(event.error) || backendStatus === 'failed' || result?.ok === false
+    const toolStatus: 'error' | 'success' = failed ? 'error' : 'success'
     const elapsedMs = event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms)
     const found = items.some((item) => item.kind === 'tool' && item.callId === event.tool_call_id)
-    if (!found) return insertCurrentRoundItem(
-      items,
-      {
-        id: eventId('tool'), kind: 'tool', callId: event.tool_call_id || eventId('call'), name: event.tool_name || '未知工具',
-        result: event.result, status: failed ? 'error' : 'success', elapsedMs,
-      },
-      (candidate) => candidate.kind === 'message' && candidate.role === 'assistant'
-        || candidate.kind === 'usage'
-        || candidate.kind === 'error',
+    const withTool = found ? items.map((item) => item.kind === 'tool' && item.callId === event.tool_call_id
+      ? { ...item, name: event.tool_name || item.name, result: event.result, status: toolStatus, elapsedMs }
+      : item) : insertCurrentRoundItem(
+        items,
+        { id: eventId('tool'), kind: 'tool', callId: event.tool_call_id || eventId('call'), name: event.tool_name || '未知工具', result: event.result, status: toolStatus, elapsedMs },
+        (candidate) => candidate.kind === 'message' && candidate.role === 'assistant' || candidate.kind === 'usage' || candidate.kind === 'error',
+      )
+    const plan = extractPlanSummary(event.result)
+    if (!plan) return withTool
+    if (withTool.some((item) => item.kind === 'task_plan' && item.plan.plan_id === plan.plan_id)) {
+      return withTool.map((item) => item.kind === 'task_plan' && item.plan.plan_id === plan.plan_id ? { ...item, plan } : item)
+    }
+    return insertCurrentRoundItem(
+      withTool,
+      { id: `task_plan_${plan.plan_id}`, kind: 'task_plan', plan },
+      (candidate) => candidate.kind === 'message' && candidate.role === 'assistant' || candidate.kind === 'usage' || candidate.kind === 'error',
     )
-    return items.map((item) => item.kind === 'tool' && item.callId === event.tool_call_id
-      ? { ...item, name: event.tool_name || item.name, result: event.result, status: failed ? 'error' : 'success', elapsedMs }
-      : item)
   }
   if (event.type === 'error') {
     return [
@@ -165,18 +172,15 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
         streaming: false,
       })
     }
-    trace?.tools.forEach((tool, toolIndex) => result.push({
-      id: `history_tool_${round}_${toolIndex}`,
-      kind: 'tool',
-      callId: tool.call_id || `history-call-${round}-${toolIndex + 1}`,
-      name: tool.name,
-      status: historyToolStatus(tool.status),
-      elapsedMs: tool.elapsed_ms,
-      argumentsText: tool.arguments_text,
-      argumentsTruncated: tool.arguments_truncated,
-      resultText: tool.result_text,
-      resultTruncated: tool.result_truncated,
-    }))
+    trace?.tools.forEach((tool, toolIndex) => {
+      result.push({ id: `history_tool_${round}_${toolIndex}`, kind: 'tool', callId: tool.call_id || `history-call-${round}-${toolIndex + 1}`, name: tool.name, status: historyToolStatus(tool.status), elapsedMs: tool.elapsed_ms, argumentsText: tool.arguments_text, argumentsTruncated: tool.arguments_truncated, resultText: tool.result_text, resultTruncated: tool.result_truncated })
+      if (!tool.result_truncated) {
+        try {
+          const plan = extractPlanSummary(JSON.parse(tool.result_text))
+          if (plan) result.push({ id: `history_task_plan_${plan.plan_id}_${round}`, kind: 'task_plan', plan })
+        } catch { /* historical tool output need not be JSON */ }
+      }
+    })
     result.push({ id: `history_${index}`, kind: 'message', role: 'assistant', content: message.content })
 
     const selected = metrics.get(round)
@@ -208,6 +212,78 @@ function greetingLabel() {
 
 function BookOpen_() { return <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z" /></svg> }
 
+function compactPlanAssistantText(content: string, hasPlanBubble: boolean) {
+  if (!hasPlanBubble) return content
+  const markers = ['以下是计划详情', '以下是计划的详细信息', '## 任务计划', '📋']
+  const cut = markers.map((marker) => content.indexOf(marker)).filter((index) => index >= 0).sort((left, right) => left - right)[0]
+  return cut === undefined ? content : content.slice(0, cut).trim() || '已创建任务计划，请在下方确认。'
+}
+
+function cronScheduleLabel(task: CronTaskSummary) {
+  if (task.type === 'daily') return `每天 ${task.time || '—'}`
+  if (task.type === 'once') return `单次 · ${formatDateTime(task.next_run_at)}`
+  if (task.type === 'recurring') {
+    const seconds = Number(task.interval_seconds || 0)
+    return seconds >= 3600 ? `每 ${Math.round(seconds / 3600)} 小时` : `每 ${Math.max(1, Math.round(seconds / 60))} 分钟`
+  }
+  return '未配置调度'
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+export function extractPlanSummary(value: unknown): PlanSummary | null {
+  let payload = objectValue(value)
+  const wrapped = objectValue(payload?.result)
+  if (payload?.ok === true && wrapped) payload = wrapped
+  const raw = objectValue(payload?.plan) || (payload?.plan_id ? payload : null)
+  if (!raw || typeof raw.plan_id !== 'string' || typeof raw.title !== 'string' || !Array.isArray(raw.steps)) return null
+  const steps = raw.steps.map((value) => objectValue(value)).filter((step): step is Record<string, unknown> => Boolean(step)).map((step) => ({
+    step_id: String(step.step_id || ''), title: String(step.title || ''), description: String(step.description || ''), status: String(step.status || 'pending'),
+    depends_on: Array.isArray(step.depends_on) ? step.depends_on.map(String) : [], critical: Boolean(step.critical ?? true), tool_name: String(step.tool_name || ''), started_at: String(step.started_at || ''), finished_at: String(step.finished_at || ''),
+  }))
+  const completed = steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length
+  return { plan_id: raw.plan_id, title: raw.title, description: String(raw.description || ''), status: String(raw.status || 'pending'), auto_accept: Boolean(raw.auto_accept), reminder: String(raw.reminder || ''), source: String(raw.source || ''), session_id: String(raw.session_id || ''), current_step: String(raw.current_step || ''), revision: Number(raw.revision || 1), created_at: String(raw.created_at || ''), updated_at: String(raw.updated_at || ''), progress: { completed, total: steps.length, percent: steps.length ? Math.round(completed * 100 / steps.length) : 0 }, steps }
+}
+
+function senseIconFor(source: SenseSourceSummary): SenseDataItem['icon'] {
+  const text = `${source.name} ${source.display_name}`.toLowerCase()
+  if (text.includes('温度') || text.includes('temperature')) return 'temperature'
+  if (text.includes('湿度') || text.includes('humidity')) return 'humidity'
+  if (text.includes('天气') || text.includes('weather')) return 'weather'
+  return 'radio'
+}
+
+export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
+  return [...tasks]
+    .filter((task) => task.user_defined)
+    .sort((left, right) => (left.next_run_at || left.created_at).localeCompare(right.next_run_at || right.created_at))
+    .map((task) => ({
+      id: task.task_id,
+      title: task.title,
+      schedule: cronScheduleLabel(task),
+      nextRun: formatDateTime(task.next_run_at),
+      enabled: task.status === 'enabled',
+      icon: task.type === 'daily' ? 'calendar' : task.type === 'recurring' ? 'alarm' : 'clipboard',
+    }))
+}
+
+export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataItem[] {
+  return [...sources]
+    .filter((source) => source.active_for_main_agent && source.status === 'active' && source.injected_items > 0)
+    .sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0))
+    .map((source) => ({
+      id: source.id,
+      name: source.display_name || source.name,
+      value: source.value_preview,
+      updateInterval: source.update_interval,
+      updatedAt: formatDateTime(source.recent_update || source.updated_at),
+      injected: true,
+      icon: senseIconFor(source),
+    }))
+}
+
 export function ChatPage() {
   const { user, sessionId, setSessionId, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
@@ -222,15 +298,38 @@ export function ChatPage() {
   const [activeRunId, setActiveRunId] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
+  const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
+  const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
   const [toolPause, setToolPause] = useState<{ limit: number; executed: number } | null>(null)
+  const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
+  const { data: sessionsCache } = useQuery<SessionsResponse>({
+    queryKey: ['sessions', user],
+    queryFn: async () => ({ user, source: 'web', sessions: [] }),
+    enabled: false,
+    staleTime: Infinity,
+  })
+  const hasCommitted = useMemo(() => {
+    if (!sessionId || !sessionsCache?.sessions) return false
+    return sessionsCache.sessions.some((session) => session.session_id === sessionId)
+  }, [sessionId, sessionsCache])
   const historyQuery = useQuery({
     queryKey: ['history', user, sessionId],
     queryFn: () => getHistory(user, sessionId),
-    enabled: Boolean(user && sessionId),
+    enabled: Boolean(user && sessionId && hasCommitted),
     retry: false,
+  })
+  const tasksQuery = useQuery({
+    queryKey: ['tasks', user],
+    queryFn: () => getTasks(user),
+    enabled: Boolean(user),
+  })
+  const senseQuery = useQuery({
+    queryKey: ['sense', user],
+    queryFn: () => getSense(user),
+    enabled: Boolean(user),
   })
 
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
@@ -255,6 +354,8 @@ export function ChatPage() {
     setCopiedItem('')
     setActiveRunId('')
     setToolPause(null)
+    setUploadFeedback(null)
+    setPlanOverrides({})
     abortRef.current?.abort()
     setRunning(false)
   }, [user, sessionId])
@@ -328,6 +429,17 @@ export function ChatPage() {
   }
 
   const stop = () => abortRef.current?.abort()
+  const uploadFile = async (file: File) => {
+    if (!user) return
+    setUploadFeedback({ tone: 'pending', text: `正在上传 ${file.name}…` })
+    try {
+      const result = await uploadUserFile(user, 'file_upload', file.name, file)
+      setUploadFeedback({ tone: 'success', text: `已上传 ${result.path || file.name} · ${formatBytes(result.size ?? file.size)}` })
+      await queryClient.invalidateQueries({ queryKey: ['user-files', user, 'file_upload'] })
+    } catch (error) {
+      setUploadFeedback({ tone: 'error', text: error instanceof Error ? `上传失败：${error.message}` : '上传失败' })
+    }
+  }
   const newConversation = () => {
     abortRef.current?.abort()
     setSessionId('')
@@ -361,6 +473,28 @@ export function ChatPage() {
   }
 
   const activePlan = overview?.active_plan
+  const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
+  const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
+  const changePlanStatus = async (plan: PlanSummary, status: 'approved' | 'paused' | 'cancelled') => {
+    try {
+      const response = await updatePlan(user, plan.plan_id, { revision: plan.revision, status })
+      const updated = extractPlanSummary(response.plan)
+      if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
+      await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+    } catch (error) {
+      setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '任务计划更新失败' }])
+    }
+  }
+  const planActions = (plan: PlanSummary) => ({
+    onToggleCollapse: () => setCollapsedPlans((current) => { const next = new Set(current); if (next.has(plan.plan_id)) next.delete(plan.plan_id); else next.add(plan.plan_id); return next }),
+    onReject: () => void changePlanStatus(plan, 'cancelled'),
+    onModify: () => navigate(`/tasks?user=${encodeURIComponent(user)}`),
+    onApprove: () => void changePlanStatus(plan, 'approved'),
+    onStop: () => void changePlanStatus(plan, 'paused'),
+    onRetry: () => void changePlanStatus(plan, 'approved'),
+  })
+  const renderedPlanIds = new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id))
+  const persistedSessionPlans = (tasksQuery.data?.plans || []).filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id))
   const userRoundCount = items.filter((item) => item.kind === 'message' && item.role === 'user').length
   const currentRound = Math.max(1, userRoundCount, Number(overview?.context.rounds || 0))
   const roundLimit = Math.max(1, Number(overview?.context.round_limit || 30))
@@ -370,7 +504,7 @@ export function ChatPage() {
   }
 
   return (
-    <div className={`view chat-view active${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
+    <div className={`view chat-view active${items.length === 0 ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
       <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
         {items.length === 0 && (!sessionId || !historyQuery.isLoading) && (
           <section className="welcome">
@@ -409,28 +543,37 @@ export function ChatPage() {
                 </button>
               ))}
             </div>
-            <article className="activity-card">
-              <div className="activity-head"><strong>最近活动</strong><span>当前用户</span></div>
-              {overview?.activities.slice(0, 4).map((activity, index) => <div className="activity-row" key={`${activity.type}:${activity.updated_at}:${index}`}><time>{formatDateTime(activity.updated_at)}</time><span><strong>{activity.title}</strong><small>{activity.detail}</small></span><b>{statusLabel(activity.status)}</b></div>)}
-              {!overview?.activities.length && <div className="activity-empty">暂无已提交活动；成功完成对话、计划或定时任务后会显示在这里。</div>}
-            </article>
+            <RecentActivityCard
+              className="welcome-recent-status"
+              scheduledTasks={recentTasks}
+              senseData={recentSenseData}
+              onViewAllTasks={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}
+              onViewAllSenseData={() => navigate(`/sense?user=${encodeURIComponent(user)}`)}
+              onTaskClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}
+              onSenseDataClick={() => navigate(`/sense?user=${encodeURIComponent(user)}`)}
+            />
           </section>
         )}
         {historyQuery.isLoading && <div className="center-state">正在加载历史…</div>}
         {historyQuery.isError && sessionId && liveItems.length === 0 && <div className="center-state error">该会话尚无已提交历史，可以直接发送第一条消息。</div>}
         <div className={`messages ${items.length ? 'show' : ''}`}>
           {items.length ? <div className="conversation-divider"><span>当前对话</span></div> : null}
-          {items.map((item) => {
+          {items.map((item, itemIndex) => {
             if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
             if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
             if (item.kind === 'usage') return <UsageCard key={item.id} item={item} />
+            if (item.kind === 'task_plan') {
+              const plan = planOverrides[item.plan.plan_id] || item.plan
+              return <TaskPlanBubble key={item.id} {...taskPlanFromSummary(plan)} collapsed={collapsedPlans.has(plan.plan_id)} {...planActions(plan)} />
+            }
             if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
             if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
+            const hasPlanBubble = items.slice(0, itemIndex).some((candidate) => candidate.kind === 'task_plan')
             return (
               <article key={item.id} className={`message ${item.role === 'assistant' ? 'ai' : 'user'}`}>
                 <div className="msg-avatar">{item.role === 'assistant' ? <img src="/kemo-agent.jpg" width={571} height={568} alt="" /> : <UserRound size={17} />}</div>
                 <div className="message-body">
-                  <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content || (item.streaming ? '…' : '')}</ReactMarkdown></div>
+                  <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}</ReactMarkdown></div>
                   <div className="message-actions">
                     {item.edited ? <span className="edited-label">编辑后重发</span> : null}
                     {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
@@ -441,6 +584,7 @@ export function ChatPage() {
               </article>
             )
           })}
+          {items.length > 0 && persistedSessionPlans.map((rawPlan) => { const plan = planOverrides[rawPlan.plan_id] || rawPlan; return <TaskPlanBubble key={`persisted_${plan.plan_id}`} {...taskPlanFromSummary(plan)} collapsed={collapsedPlans.has(plan.plan_id)} {...planActions(plan)} /> })}
         </div>
       </div>
       <div className="composer-zone">
@@ -452,6 +596,7 @@ export function ChatPage() {
           running={running}
           disabled={!user}
           conversationMenuOpen={conversationMenuOpen}
+          uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status">{uploadFeedback.text}<button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : null}
           notice={visibleToolPause ? <div className="edit-resend-banner"><span>本轮已执行 {visibleToolPause.executed}/{visibleToolPause.limit} 次工具调用，中间结果已保存。确认后可继续。</span><button type="button" onClick={() => { void send('继续执行上轮未完成的任务。') }}>继续</button></div> : editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
@@ -472,6 +617,7 @@ export function ChatPage() {
             </div>
           ) : null}
           onChange={setDraft}
+          onUploadFile={uploadFile}
           onOpenKnowledge={() => navigate(`/knowledge?user=${encodeURIComponent(user)}`)}
           onOpenSkills={() => navigate(`/skills?user=${encodeURIComponent(user)}`)}
           onOpenCommands={openCommandPanel}

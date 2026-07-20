@@ -13,8 +13,9 @@ export interface AgentComposerProps {
   conversationMenuOpen?: boolean
   conversationMenu?: ReactNode
   notice?: ReactNode
+  uploadFeedback?: ReactNode
   onChange: (value: string) => void
-  onUploadFile?: () => void
+  onUploadFile?: (file: File) => void
   onOpenKnowledge: () => void
   onOpenSkills: () => void
   onOpenCommands: () => void
@@ -33,6 +34,7 @@ export function AgentComposer({
   conversationMenuOpen = false,
   conversationMenu,
   notice,
+  uploadFeedback,
   onChange,
   onUploadFile,
   onOpenKnowledge,
@@ -43,6 +45,7 @@ export function AgentComposer({
   onStop,
 }: AgentComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const canSubmit = !disabled && value.trim().length > 0
 
   useEffect(() => {
@@ -65,10 +68,17 @@ export function AgentComposer({
       handleSubmit()
     }
   }
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.currentTarget.value = ''
+    if (file) onUploadFile?.(file)
+  }
 
   return (
     <section className={styles.composer} aria-label="消息输入区域">
       {notice}
+      {uploadFeedback}
+      <input ref={fileInputRef} type="file" hidden aria-hidden="true" onChange={handleFileChange} />
       <textarea
         ref={textareaRef}
         className={styles.input}
@@ -83,7 +93,7 @@ export function AgentComposer({
 
       <div className={styles.footer}>
         <div className={styles.tools}>
-          <ComposerIconButton label="上传文件" onClick={onUploadFile} disabled={disabled || !onUploadFile}>
+          <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || !onUploadFile}>
             <Paperclip />
           </ComposerIconButton>
           <ComposerIconButton label="打开知识库" onClick={onOpenKnowledge} disabled={disabled}>

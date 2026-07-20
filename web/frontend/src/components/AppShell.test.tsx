@@ -54,6 +54,20 @@ describe('AppShell navigation', () => {
     expect((await screen.findAllByText('kemo-agent')).length).toBeGreaterThan(0)
   })
 
+  it('未提交的会话不会请求 history API', async () => {
+    let historyRequests = 0
+    server.use(
+      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({ user: 'kesepain', source: 'web', sessions: [] })),
+      http.get('/api/users/kesepain/sessions/:sessionId/history', () => {
+        historyRequests += 1
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: 'web_uncommitted', messages: [], round_metrics: [], round_traces: [] })
+      }),
+    )
+    renderApp('/chat?user=kesepain&session=web_uncommitted')
+    await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
+    expect(historyRequests).toBe(0)
+  })
+
   it('顶部栏包含上下文窗口、字号、主题和运行状态控件', async () => {
     renderApp('/chat')
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))

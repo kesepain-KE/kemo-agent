@@ -121,6 +121,7 @@ svg{display:block}
   width:100%;height:43px;border:0;border-radius:12px;
   background:transparent;color:#787c8a;
   display:flex;align-items:center;gap:11px;padding:0 12px;
+  text-decoration:none;
   position:relative;transition:.16s;text-align:left;
 }
 .nav-btn:hover{background:var(--surface-2);color:#4c5060}
@@ -413,6 +414,11 @@ button:active{transform:translateY(1px)}
 }
 .app.sidebar-collapsed .sidebar-toggle:hover{background:#2a3040;border-color:#3a4051;color:#fff}
 .nav-section{gap:4px}
+.nav-scroll{min-height:0;overflow-y:auto;scrollbar-width:thin;padding-right:2px}
+.nav-group{display:grid;gap:4px}
+.nav-group + .nav-group{margin-top:7px}
+.nav-group-label{padding:3px 12px 2px;color:var(--muted-2);font-size:.56rem;font-weight:750;letter-spacing:.55px;text-transform:uppercase}
+.app.sidebar-collapsed .nav-group-label{display:none}
 .nav-btn{
   height:44px;
   border-radius:8px;

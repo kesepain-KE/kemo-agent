@@ -27,13 +27,21 @@ import styles from './RuntimeModulesPage.module.css'
 
 type RuntimeTab = 'agents' | 'messages' | 'expand'
 
-export function RuntimeModulesPage() {
+export function RuntimeModulesPage({ fixedTab }: { fixedTab?: RuntimeTab } = {}) {
   const { user } = useOutletContext<ShellOutletContext>()
-  const [tab, setTab] = useState<RuntimeTab>('agents')
+  const [selectedTab, setTab] = useState<RuntimeTab>('agents')
+  const tab = fixedTab ?? selectedTab
   const agentsQuery = useQuery({ queryKey: ['agents', user], queryFn: () => getAgents(user), enabled: Boolean(user) })
   const messageQuery = useQuery({ queryKey: ['message-status', user], queryFn: () => getMessageStatus(user), enabled: Boolean(user), refetchInterval: 30_000 })
   const expandQuery = useQuery({ queryKey: ['expands', user], queryFn: () => getExpands(user), enabled: Boolean(user) })
   const activeQuery = tab === 'agents' ? agentsQuery : tab === 'messages' ? messageQuery : expandQuery
+  const page = fixedTab === 'agents'
+    ? { kicker: 'Subagents', title: '子智能体', description: '查看内置子代理与当前用户的可信热插拔子代理。' }
+    : fixedTab === 'messages'
+      ? { kicker: 'External Messaging', title: '外部消息', description: '查看当前用户的身份绑定、传输插件、运行状态与错误。' }
+      : fixedTab === 'expand'
+        ? { kicker: 'Expand Modules', title: '拓展', description: '查看全局、共享与用户三层 Expand 注册库存。' }
+        : { kicker: 'Agents, Transports & Expand', title: '运行模块', description: '查看当前用户可见的子代理、外部消息身份与传输状态，以及三层 Expand 注册库存。' }
 
   const refreshAll = () => {
     void Promise.all([agentsQuery.refetch(), messageQuery.refetch(), expandQuery.refetch()])
@@ -41,23 +49,35 @@ export function RuntimeModulesPage() {
 
   return (
     <ModuleFrame
-      kicker="Agents, Transports & Expand"
-      title="运行模块"
-      description="查看当前用户可见的子代理、外部消息身份与传输状态，以及三层 Expand 注册库存。"
+      kicker={page.kicker}
+      title={page.title}
+      description={page.description}
       actions={<button className="module-btn" onClick={refreshAll}><RefreshCw size={15} />刷新运行模块</button>}
     >
       {activeQuery.isError && <ModuleError message="运行模块状态读取失败，请检查配置文件或 RuntimeHost 状态。" />}
-      <div className={styles.tabs} role="tablist" aria-label="运行模块分类">
+      {!fixedTab && <div className={styles.tabs} role="tablist" aria-label="运行模块分类">
         <button role="tab" aria-selected={tab === 'agents'} className={tab === 'agents' ? styles.active : ''} onClick={() => setTab('agents')}><Bot size={17} /><span>子代理</span><b>{agentsQuery.data?.summary.total ?? '—'}</b></button>
         <button role="tab" aria-selected={tab === 'messages'} className={tab === 'messages' ? styles.active : ''} onClick={() => setTab('messages')}><RadioTower size={17} /><span>外部消息</span><b>{messageQuery.data?.summary.total_transports ?? '—'}</b></button>
         <button role="tab" aria-selected={tab === 'expand'} className={tab === 'expand' ? styles.active : ''} onClick={() => setTab('expand')}><Boxes size={17} /><span>Expand</span><b>{expandQuery.data?.summary.total ?? '—'}</b></button>
-      </div>
+      </div>}
 
       {tab === 'agents' && <AgentInventory data={agentsQuery.data} />}
       {tab === 'messages' && <MessageInventory data={messageQuery.data} />}
       {tab === 'expand' && <ExpandInventory data={expandQuery.data} />}
     </ModuleFrame>
   )
+}
+
+export function AgentsPage() {
+  return <RuntimeModulesPage fixedTab="agents" />
+}
+
+export function MessagesPage() {
+  return <RuntimeModulesPage fixedTab="messages" />
+}
+
+export function ExpandPage() {
+  return <RuntimeModulesPage fixedTab="expand" />
 }
 
 function AgentInventory({ data }: { data: Awaited<ReturnType<typeof getAgents>> | undefined }) {

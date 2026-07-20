@@ -245,6 +245,72 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .scope-tag.user { background: var(--brand-soft); color: var(--brand); }
 .scope-tag.shared { background: color-mix(in srgb, var(--surface-3) 76%, #dceaff); color: color-mix(in srgb, var(--text) 62%, #3f68b8); }
 .scope-tag.global { background: var(--green-soft); color: var(--green); }
+.knowledge-header-actions { max-width: min(820px, 58vw); display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.knowledge-index-warning { color: var(--red); font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.knowledge-import-wrap { position: relative; }
+.knowledge-import-popover { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: 236px; padding: 8px; display: grid; gap: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--surface-elevated); box-shadow: var(--shadow-float); }
+.knowledge-import-popover strong { padding: 7px 9px 8px; color: var(--muted); font-size: .6875rem; }
+.knowledge-import-popover button { min-height: 40px; padding: 0 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text-2); font-size: .75rem; text-align: left; cursor: pointer; }
+.knowledge-import-popover button:hover { background: var(--brand-soft); color: var(--brand); }
+.knowledge-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.knowledge-layer-toolbar { overflow: visible; }
+.knowledge-grid-editor { grid-template-columns: minmax(0, 1.65fr) minmax(360px, .75fr); align-items: start; }
+.knowledge-grid-editor > .table-panel { min-width: 0; }
+.knowledge-grid-editor .module-table tbody tr { cursor: pointer; transition: background .14s ease; }
+.knowledge-grid-editor .module-table tbody tr.knowledge-row-selected { background: var(--brand-soft); }
+.knowledge-editor { min-width: 0; min-height: 0; position: sticky; top: 0; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; }
+.knowledge-grid-editor > .knowledge-editor { margin-top: 0; }
+.knowledge-editor > .panel-head,
+.knowledge-editor > .knowledge-editor-file,
+.knowledge-editor > .knowledge-editor-toolbar,
+.knowledge-editor > .knowledge-editor-footer { flex: 0 0 auto; }
+.knowledge-close-button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); cursor: pointer; }
+.knowledge-close-button:hover { background: var(--surface-hover); color: var(--text); }
+.knowledge-editor-empty { flex: 1 1 auto; min-height: 0; padding: 30px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted-2); text-align: center; }
+.knowledge-editor-empty svg { width: 48px; height: 48px; padding: 11px; border-radius: var(--radius-card); background: var(--brand-soft); color: var(--brand); }
+.knowledge-editor-empty strong { color: var(--text); font-size: .875rem; }
+.knowledge-editor-empty span { max-width: 250px; font-size: .75rem; line-height: 1.55; }
+.knowledge-editor-file { min-height: 72px; padding: 12px 14px; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--line); }
+.knowledge-file-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: var(--radius-control-lg); background: var(--brand-soft); color: var(--brand); font-size: .75rem; font-weight: 800; }
+.knowledge-editor-file > span:nth-child(2) { min-width: 0; }
+.knowledge-editor-file strong, .knowledge-editor-file small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-editor-file strong { color: var(--text); font-size: .8125rem; }
+.knowledge-editor-file small { margin-top: 4px; color: var(--muted-2); font-size: .6875rem; }
+.knowledge-editor-toolbar { min-height: 54px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 9px; border-bottom: 1px solid var(--line); }
+.knowledge-mode-switch { display: flex; align-items: center; gap: 5px; }
+.knowledge-mode-switch .module-btn.active { border-color: color-mix(in srgb, var(--brand) 30%, var(--line)); background: var(--brand-soft); color: var(--brand); }
+.knowledge-editor .module-error { margin: 9px 12px 0; }
+.knowledge-editor-content { flex: 1 1 0; min-height: 0; height: 0; margin: 0 12px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-control-lg); background: var(--surface-2); }
+.knowledge-markdown-editor { display: block; width: 100%; height: 100%; min-height: 0; max-height: none; padding: 16px; resize: none; overflow: auto; border: 0; outline: 0; background: var(--surface); color: var(--text); font: .75rem/1.75 var(--font-mono); tab-size: 2; }
+.knowledge-markdown-editor:read-only { background: var(--surface-2); color: var(--muted); }
+.knowledge-markdown-preview { width: 100%; height: 100%; min-height: 0; box-sizing: border-box; padding: 20px 22px 30px; overflow: auto; background: var(--surface); color: var(--text-2); font-size: .8125rem; line-height: 1.78; }
+.knowledge-markdown-preview > :first-child { margin-top: 0; }
+.knowledge-markdown-preview > :last-child { margin-bottom: 0; }
+.knowledge-markdown-preview h1, .knowledge-markdown-preview h2, .knowledge-markdown-preview h3 { margin: 1.1em 0 .55em; color: var(--text); line-height: 1.35; }
+.knowledge-markdown-preview h1 { padding-bottom: 9px; border-bottom: 1px solid var(--line); font-size: 1.25rem; }
+.knowledge-markdown-preview h2 { padding-bottom: 5px; border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); font-size: 1rem; }
+.knowledge-markdown-preview p { margin: .65em 0; }
+.knowledge-markdown-preview ul, .knowledge-markdown-preview ol { margin: .65em 0; padding-left: 1.5em; }
+.knowledge-markdown-preview li + li { margin-top: .3em; }
+.knowledge-markdown-preview blockquote { margin: 1em 0; padding: 8px 12px; border-left: 3px solid var(--brand); background: var(--brand-soft); color: var(--muted); }
+.knowledge-markdown-preview hr { margin: 1.3em 0; border: 0; border-top: 1px solid var(--line); }
+.knowledge-markdown-preview pre { padding: 11px; overflow: auto; border-radius: var(--radius-control); background: var(--surface-3); }
+.knowledge-markdown-preview code { font-family: var(--font-mono); }
+.knowledge-markdown-preview table { width: 100%; border-collapse: collapse; }
+.knowledge-markdown-preview th, .knowledge-markdown-preview td { padding: 7px; border: 1px solid var(--line); text-align: left; }
+.knowledge-editor-footer { min-height: 42px; padding: 0 14px; display: flex; align-items: center; gap: 12px; color: var(--muted-2); font-size: .6875rem; }
+.knowledge-editor-footer span:last-child { margin-left: auto; }
+@media (max-width: 1250px) {
+  .knowledge-grid-editor { grid-template-columns: minmax(0, 1fr) 370px; }
+  .knowledge-header-actions { max-width: 720px; }
+  .knowledge-editor-toolbar { align-items: stretch; flex-direction: column; }
+  .knowledge-editor-toolbar > .module-actions { justify-content: flex-end; }
+}
+@media (max-width: 1050px) {
+  .knowledge-header-actions { max-width: none; justify-content: flex-start; }
+  .knowledge-grid-editor { grid-template-columns: 1fr; }
+  .knowledge-editor { position: static; height: auto; }
+}
 .sense-bottom-grid { margin-top: 14px; }
 .decision-output { max-height: 240px; overflow: auto; color: var(--muted); font-family: var(--font-mono); font-size: .75rem; white-space: pre-wrap; }
 
@@ -358,6 +424,12 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .usage-card-body strong { color: var(--text); font-size: .8125rem; }
 .edit-resend-banner { margin: 0 8px 6px; padding: 7px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--line)); border-radius: 9px; background: var(--brand-soft); color: var(--brand); font-size: .6875rem; }
 .edit-resend-banner button { border: 0; background: transparent; color: inherit; font-weight: 800; cursor: pointer; }
+.upload-feedback { margin: 0 0 12px; padding: 9px 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); color: var(--muted); font-size: .75rem; }
+.upload-feedback.pending { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 28%, var(--line)); background: var(--brand-soft); }
+.upload-feedback.success { color: var(--green); border-color: color-mix(in srgb, var(--green) 28%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); }
+.upload-feedback.error { color: var(--red); border-color: color-mix(in srgb, var(--red) 28%, var(--line)); background: var(--red-soft); }
+.upload-feedback button { width: 24px; height: 24px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 7px; background: transparent; color: inherit; font-size: 1rem; line-height: 1; cursor: pointer; }
+.upload-feedback button:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 
 @media (max-width: 780px) {
   .usage-card { width: calc(100% - 39px); margin-left: 39px; }
@@ -367,10 +439,44 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
 /* Compact conversation workbench: one coherent reading column for messages,
    reasoning, tool activity and per-round usage instead of scattered blocks. */
-.chat-view { --conversation-width: 1120px; }
+.chat-view {
+  --conversation-width: 1120px;
+  --welcome-status-gap: 14px;
+}
 .chat-scroll {
   padding: 14px clamp(14px, 2vw, 30px) 226px;
   scrollbar-gutter: stable;
+}
+.chat-view.welcome-mode {
+  display: flex;
+  flex-direction: column;
+}
+.chat-view.welcome-mode .chat-scroll {
+  flex: 1 1 0;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+.chat-view.welcome-mode .welcome {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chat-view.welcome-mode .welcome-top,
+.chat-view.welcome-mode .active-task-card,
+.chat-view.welcome-mode .quick-start {
+  flex: 0 0 auto;
+}
+.chat-view.welcome-mode .welcome-recent-status {
+  flex: 0 1 auto;
+  margin-top: var(--welcome-status-gap);
+}
+.chat-view.welcome-mode .composer-zone {
+  position: relative;
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding-top: var(--welcome-status-gap);
 }
 .messages {
   width: min(var(--conversation-width), 100%);

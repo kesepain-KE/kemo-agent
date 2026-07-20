@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Bot, Database, RefreshCw, Wrench } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Bot, Database, RefreshCw, Save, Wrench } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
-import { getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig } from '../api/client'
+import { getGlobalConfig, getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig, patchGlobalConfig, patchPreferences, patchUserConfig } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
@@ -26,26 +26,49 @@ function sourceModeLabel(policy?: { mode: 'all' | 'allowlist'; names: string[] }
 
 const sourceLabels: Record<string, string> = { user: '用户', global: '全局', default: '默认' }
 
+function writableConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(writableConfig)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== '***').map(([key, item]) => [key, writableConfig(item)]))
+  return value
+}
+
+function parseConfigDraft(value: string): Record<string, unknown> {
+  const parsed = JSON.parse(value) as unknown
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('配置根节点必须是 JSON 对象')
+  return writableConfig(parsed) as Record<string, unknown>
+}
+
 function SettingRow({ title, description, control, source }: { title: string; description: string; control: React.ReactNode; source?: string }) {
   return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{sourceLabels[source] || source}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
 }
 
 export function SettingsPage() {
   const { user } = useOutletContext<ShellOutletContext>()
+  const client = useQueryClient()
   const [searchParams] = useSearchParams()
   const ui = useUiStore()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
   const query = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
   const configQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
+  const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: tab === 'config' })
   const promptQuery = useQuery({ queryKey: ['prompt-diagnostics', user], queryFn: () => getPromptDiagnostics(user), enabled: Boolean(user && tab === 'prompt') })
   const memoryQuery = useQuery({ queryKey: ['memory-summary', user], queryFn: () => getMemorySummary(user), enabled: Boolean(user && tab === 'memory') })
   const [configDraft, setConfigDraft] = useState('')
+  const [globalConfigDraft, setGlobalConfigDraft] = useState('')
+  const [configError, setConfigError] = useState('')
   const data = query.data
 
   useEffect(() => {
     if (configQuery.data) setConfigDraft(JSON.stringify(configQuery.data.config, null, 2))
   }, [configQuery.data])
+  useEffect(() => {
+    if (globalConfigQuery.data) setGlobalConfigDraft(JSON.stringify(globalConfigQuery.data.config, null, 2))
+  }, [globalConfigQuery.data])
+
+  const userConfigMutation = useMutation({ mutationFn: (changes: Record<string, unknown>) => patchUserConfig(user, changes), onSuccess: async () => { setConfigError(''); await Promise.all([client.invalidateQueries({ queryKey: ['user-config', user] }), client.invalidateQueries({ queryKey: ['settings', user] })]) }, onError: (error) => setConfigError(String(error)) })
+  const globalConfigMutation = useMutation({ mutationFn: patchGlobalConfig, onSuccess: async () => { setConfigError(''); await Promise.all([client.invalidateQueries({ queryKey: ['global-config'] }), client.invalidateQueries({ queryKey: ['settings', user] })]) }, onError: (error) => setConfigError(String(error)) })
+  const saveAppearance = (changes: { theme?: 'light' | 'dark'; font_size?: 'small' | 'medium' | 'large' }) => { void patchPreferences(user, changes) }
 
   useEffect(() => {
     if (isSettingsTab(requestedTab)) setTab(requestedTab)
@@ -54,14 +77,14 @@ export function SettingsPage() {
   return (
     <ModuleFrame
       kicker="Configuration Overview"
-      title="配置概览"
-      description="查看脱敏后的运行配置镜像；仅主题与字号在 Web 中可修改，其余设置仍由配置文件和专用流程维护。"
+      title="配置"
+      description="查看运行配置来源，并通过字段级更新安全修改用户配置、全局配置、Provider、来源权限和外观偏好。"
       actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />重新读取</button>}
     >
       {query.isError && <ModuleError />}
       <div className="observer-banner settings-observer-banner">
         <span className="observer-banner-icon">R</span>
-        <span><strong>默认只读</strong><small>接口不会返回 API Key、环境变量值、完整配置对象或内部路径。</small></span>
+        <span><strong>敏感字段脱敏</strong><small>保存时自动忽略未改动的 *** 占位符，避免覆盖真实凭据。</small></span>
         <span className="observer-badge">Schema v{data?.schema_version || '—'}</span>
       </div>
 
@@ -71,7 +94,7 @@ export function SettingsPage() {
             ['appearance', '外观与主题'], ['provider', '模型与 Provider'], ['users', '用户切换'],
             ['memory', '记忆与上下文'], ['permissions', '权限边界'], ['runtime', '运行限制'],
             ['prompt', 'Prompt 与 Expand'],
-            ['config', '用户配置 JSON'],
+            ['config', '配置文件 JSON'],
           ] as const).map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}><span>{label}</span><span>›</span></button>)}
         </nav>
 
@@ -82,8 +105,8 @@ export function SettingsPage() {
               <div className="setting-row theme-setting-row">
                 <span className="setting-copy"><strong>明暗主题</strong><span>高级白与高级黑共享相同的层级、边界和交互语义。</span></span>
                 <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
-                  <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => ui.setTheme('light')}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
-                  <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => ui.setTheme('dark')}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
+                  <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
+                  <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
                 </div>
               </div>
             </article>
@@ -91,7 +114,7 @@ export function SettingsPage() {
               <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，并同步适配顶部栏组件与间距。</span></div>
               <div className="setting-row font-setting-row">
                 <span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级同步缩放文字与关键控件，默认使用“中”。</span></span>
-                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => ui.setFontSize(size)}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div>
+                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div>
               </div>
             </article>
           </>}
@@ -148,7 +171,7 @@ export function SettingsPage() {
             <SettingRow title="Session Cookie" description="浏览器会话使用 HttpOnly 签名 Cookie" control={<StatusChip status={data?.authentication.session_cookie_configured ? 'enabled' : 'gray'}>{data?.authentication.session_cookie_configured ? '已配置' : '未启用'}</StatusChip>} />
             <SettingRow title="跨用户资源访问" description="路径参数必须对应已存在用户，历史按 user/source/session 隔离" control={<StatusChip status="enabled">已隔离</StatusChip>} />
             <SettingRow title="敏感配置返回" description="API Key、环境变量值与完整配置不会进入响应" control={<StatusChip status="enabled">已脱敏</StatusChip>} />
-            <SettingRow title="系统级修改" description="任务、配置、技能和来源页面默认只读" control={<StatusChip status="paused">Web 禁止</StatusChip>} />
+            <SettingRow title="系统级修改" description="当前 Web 认证主体可编辑配置；未来由超级管理员权限进一步收紧" control={<StatusChip status="enabled">已开放</StatusChip>} />
           </article>}
 
           {tab === 'runtime' && <>
@@ -195,18 +218,24 @@ export function SettingsPage() {
 
           {tab === 'config' && <>
             <article className="setting-section config-editor-section">
-              <div className="setting-section-head"><strong>users/{user}/user_config.json</strong><span>Web 仅展示脱敏镜像；配置修改必须直接通过本机文件和专用流程完成。</span></div>
-              <div className="config-write-banner locked">
-                <span><strong>只读模式</strong><small>Web 配置写入接口已移除，认证状态不会开放写权限。</small></span>
-                <StatusChip status="paused">不可写</StatusChip>
+              <div className="setting-section-head"><strong>users/{user}/user_config.json</strong><span>通过字段级 PATCH 原子更新；未修改的脱敏凭据保持原值。</span></div>
+              <div className="config-write-banner">
+                <span><strong>用户配置可编辑</strong><small>保存前执行 JSON 解析与合并配置校验。</small></span>
+                <StatusChip status="enabled">可写</StatusChip>
               </div>
               {configQuery.isError ? <div className="config-editor-error">用户配置读取失败。</div> : null}
-              <textarea className="config-json-editor" value={configDraft} readOnly spellCheck={false} aria-label="用户配置 JSON" />
+              <textarea className="config-json-editor" value={configDraft} onChange={(event) => setConfigDraft(event.target.value)} spellCheck={false} aria-label="用户配置 JSON" />
               <div className="config-editor-foot">
                 <span>脱敏字段：{configQuery.data?.redacted_paths.join('、') || '无'}；敏感值不会进入浏览器响应。</span>
-                <div><button className="module-btn" onClick={() => void configQuery.refetch()}>重新读取</button></div>
+                <div><button className="module-btn" onClick={() => void configQuery.refetch()}>重新读取</button><button className="module-btn primary" onClick={() => { try { setConfigError(''); userConfigMutation.mutate(parseConfigDraft(configDraft)) } catch (error) { setConfigError(String(error)) } }} disabled={userConfigMutation.isPending}><Save size={14} />保存用户配置</button></div>
               </div>
             </article>
+            <article className="setting-section config-editor-section">
+              <div className="setting-section-head"><strong>config/global_config.json</strong><span>当前阶段允许编辑；超级管理员面板上线后再收紧授权。</span></div>
+              <textarea className="config-json-editor" value={globalConfigDraft} onChange={(event) => setGlobalConfigDraft(event.target.value)} spellCheck={false} aria-label="全局配置 JSON" />
+              <div className="config-editor-foot"><span>脱敏字段：{globalConfigQuery.data?.redacted_paths.join('、') || '无'}。</span><div><button className="module-btn" onClick={() => void globalConfigQuery.refetch()}>重新读取</button><button className="module-btn primary" onClick={() => { try { setConfigError(''); globalConfigMutation.mutate(parseConfigDraft(globalConfigDraft)) } catch (error) { setConfigError(String(error)) } }} disabled={globalConfigMutation.isPending}><Save size={14} />保存全局配置</button></div></div>
+            </article>
+            {configError && <ModuleError message={configError} />}
           </>}
         </div>
       </div>

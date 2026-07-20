@@ -118,7 +118,7 @@ export function ProfilePage() {
   return (
     <ModuleFrame
       kicker="Identity & Soul"
-      title="用户资料"
+      title="身份与人格"
       description="管理当前用户头像和人格 Markdown；全局人格是所有用户共享的安全底线。"
       actions={<button className="module-btn" onClick={() => { void userSoulQuery.refetch(); void globalSoulQuery.refetch(); setAvatarRevision(Date.now()) }}><RefreshCw size={15} />重新读取</button>}
     >

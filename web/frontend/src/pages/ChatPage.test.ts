@@ -1,8 +1,50 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, isNearScrollBottom, reduceRunEvent } from './ChatPage'
-import type { ChatItem } from '../types/api'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, extractPlanSummary, isNearScrollBottom, reduceRunEvent } from './ChatPage'
+import type { ChatItem, CronTaskSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('task_plan 子代理结果生成独立任务计划气泡项', () => {
+    const event = {
+      type: 'tool_call_result' as const,
+      tool_call_id: 'call-plan',
+      tool_name: 'subagent_dispatch',
+      result: { ok: true, result: { plan: {
+        plan_id: 'plan_12345678', title: '测试任务计划', description: '测试', status: 'pending',
+        auto_accept: false, source: 'web', session_id: 's1', revision: 1,
+        steps: [{ step_id: 'step_1', title: '第一步', description: '执行', status: 'pending', depends_on: [], critical: true }],
+      } } },
+    }
+    const plan = extractPlanSummary(event.result)
+    expect(plan).toMatchObject({ plan_id: 'plan_12345678', title: '测试任务计划' })
+    const items = reduceRunEvent([], event)
+    expect(items.map((item) => item.kind)).toEqual(['tool', 'task_plan'])
+  })
+
+  it('最近活动只保留用户定时任务', () => {
+    const base: CronTaskSummary = {
+      task_id: 'user-task', title: '用户任务', user_defined: true, status: 'enabled', type: 'daily', time: '18:00',
+      next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never',
+    }
+    const items = buildScheduledTaskItems([base, { ...base, task_id: 'system-task', title: '系统维护', user_defined: false }])
+    expect(items.map((item) => item.title)).toEqual(['用户任务'])
+  })
+
+  it('最近活动只保留本轮实际注入的感知来源', () => {
+    const base: SenseSourceSummary = {
+      id: 'active', name: 'active', display_name: '运行时感知', description: '', layer: 'global', enabled: true,
+      active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-20 12:00:00',
+      health: '正常', valid: true, error: '', start_update: '', files: 1, registered_items: 1, injected_items: 1,
+      data_items: ['sense.md'], value_preview: 'CPU 23%', update_interval: '', updated_at: 1,
+    }
+    const items = buildSenseDataItems([
+      base,
+      { ...base, id: 'not-injected', injected_items: 0 },
+      { ...base, id: 'filtered', active_for_main_agent: false, status: 'filtered' },
+    ])
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ id: 'active', value: 'CPU 23%', injected: true })
+  })
+
   it('仅在视口接近底部时自动跟随流式输出', () => {
     expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 610, clientHeight: 300 })).toBe(true)
     expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 400, clientHeight: 300 })).toBe(false)

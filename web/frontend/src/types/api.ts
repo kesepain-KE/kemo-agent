@@ -135,6 +135,7 @@ export interface PlanStepSummary {
   title: string
   description: string
   status: string
+  depends_on: string[]
   critical: boolean
   tool_name: string
   started_at: string
@@ -146,6 +147,8 @@ export interface PlanSummary {
   title: string
   description: string
   status: string
+  auto_accept: boolean
+  reminder: string
   source: string
   session_id: string
   current_step: string
@@ -159,6 +162,7 @@ export interface PlanSummary {
 export interface CronTaskSummary {
   task_id: string
   title: string
+  user_defined: boolean
   status: string
   type: 'daily' | 'once' | 'recurring'
   time?: string
@@ -179,6 +183,15 @@ export interface TasksResponse {
   }
   plans: PlanSummary[]
   cron_tasks: CronTaskSummary[]
+  executions: Array<{
+    kind: 'plan_step' | 'cron' | string
+    task_id: string
+    title: string
+    status: string
+    updated_at: string
+    result?: unknown
+    error?: unknown
+  }>
 }
 
 export interface KnowledgeDocumentSummary {
@@ -225,6 +238,15 @@ export interface KnowledgeResponse {
   source_policy: MainAgentSourcePolicySummary
 }
 
+export interface KnowledgeDocumentResponse {
+  user: string
+  scope: 'user' | 'shared' | 'global' | string
+  relative_path: string
+  content: string
+  size: number
+  updated_at?: number
+}
+
 export interface SkillSummary {
   name: string
   description: string
@@ -269,6 +291,8 @@ export interface SenseSourceSummary {
   registered_items: number
   injected_items: number
   data_items: string[]
+  value_preview: string
+  update_interval: string
   updated_at: number
 }
 
@@ -408,6 +432,25 @@ export interface MemorySummaryResponse {
   }>
 }
 
+export interface MemoryItemResponse {
+  user: string
+  filename: string
+  content: string
+  tier: string
+  weight: number
+  updated_at: string
+  expires_at: string | null
+  last_weight_date?: string | null
+}
+
+export interface ImportantMemoryResponse {
+  user: string
+  path: string
+  content: string
+  size: number
+  updated_at?: string
+}
+
 export interface ActivitySummary {
   type: 'session' | 'plan' | 'cron' | string
   title: string
@@ -498,6 +541,23 @@ export interface FileDeleteResponse {
   scope?: 'file_upload' | 'download'
   path: string
   deleted: boolean
+}
+
+export interface FileMutationResponse {
+  user?: string
+  scope?: 'file_upload' | 'download'
+  root?: string
+  path?: string
+  new_path?: string
+  size?: number
+  updated?: boolean
+  created?: boolean
+  moved?: boolean
+}
+
+export interface PreferencesResponse {
+  user: string
+  appearance: { theme: 'light' | 'dark'; font_size: 'small' | 'medium' | 'large' }
 }
 
 export interface AvatarUploadResponse {
@@ -616,5 +676,6 @@ export type ChatItem =
       elapsedMs?: number
     }
   | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number }
+  | { id: string; kind: 'task_plan'; plan: PlanSummary }
   | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'error' }
   | { id: string; kind: 'error'; content: string }

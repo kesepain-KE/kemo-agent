@@ -10,6 +10,8 @@ import {
   CircleGauge,
   FileSearch,
   FolderOpen,
+  Brain,
+  RadioTower,
   ListChecks,
   Menu,
   MessageSquarePlus,
@@ -28,10 +30,12 @@ import {
   getHealth,
   getLogoUrl,
   getOverview,
+  getPreferences,
   getSessions,
   getUserAvatarUrl,
   getUsers,
   logoutAuth,
+  patchPreferences,
   renameSession,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
@@ -50,27 +54,52 @@ export interface ShellOutletContext {
   openCommandPanel: () => void
 }
 
-const navItems = [
-  { path: '/chat', label: '对话', icon: Bot },
-  { path: '/tasks', label: '任务', icon: ListChecks },
-  { path: '/knowledge', label: '知识库', icon: BookOpen },
-  { path: '/skills', label: '技能', icon: Wrench },
-  { path: '/sense', label: '全局感知', icon: BrainCircuit },
-  { path: '/files', label: '文件空间', icon: FolderOpen },
-  { path: '/runtime', label: '运行模块', icon: Shapes },
-  { path: '/settings', label: '配置概览', icon: Settings },
+const navGroups = [
+  {
+    label: '核心工作区',
+    items: [
+      { path: '/chat', label: '对话', icon: Bot },
+      { path: '/tasks', label: '任务', icon: ListChecks },
+      { path: '/knowledge', label: '知识库', icon: BookOpen },
+      { path: '/memory', label: '记忆', icon: Brain },
+    ],
+  },
+  {
+    label: '运行能力',
+    items: [
+      { path: '/agents', label: '子智能体', icon: Bot },
+      { path: '/skills', label: '工具与技能', icon: Wrench },
+      { path: '/sense', label: '感知', icon: BrainCircuit },
+      { path: '/expand', label: '拓展', icon: Shapes },
+    ],
+  },
+  {
+    label: '资源与系统',
+    items: [
+      { path: '/files', label: '文件空间', icon: FolderOpen },
+      { path: '/messages', label: '外部消息', icon: RadioTower },
+      { path: '/status', label: '运行状态', icon: Activity },
+      { path: '/settings', label: '配置', icon: Settings },
+      { path: '/profile', label: '身份与人格', icon: FileSearch },
+    ],
+  },
 ]
 
 const pageTitles: Record<string, string> = {
   '/chat': 'kemo-agent',
   '/tasks': '任务',
   '/knowledge': '知识库',
-  '/skills': '技能',
-  '/sense': '全局感知',
+  '/memory': '记忆',
+  '/agents': '子智能体',
+  '/skills': '工具与技能',
+  '/sense': '感知',
+  '/expand': '拓展',
   '/files': '文件空间',
+  '/messages': '外部消息',
+  '/status': '运行状态',
   '/runtime': '运行模块',
-  '/profile': '用户资料',
-  '/settings': '配置概览',
+  '/profile': '身份与人格',
+  '/settings': '配置',
 }
 
 const fontSizeLabels: Record<string, string> = { small: '小', medium: '中', large: '大' }
@@ -108,6 +137,12 @@ export function AppShell() {
     enabled: Boolean(user),
     refetchInterval: 30_000,
   })
+  const preferencesQuery = useQuery({
+    queryKey: ['preferences', user],
+    queryFn: () => getPreferences(user),
+    enabled: Boolean(user),
+    staleTime: 60_000,
+  })
 
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
@@ -124,6 +159,14 @@ export function AppShell() {
     document.documentElement.dataset.theme = ui.theme
     document.documentElement.dataset.fontSize = ui.fontSize
   }, [ui.theme, ui.fontSize])
+
+  useEffect(() => {
+    if (!preferencesQuery.data) return
+    ui.setTheme(preferencesQuery.data.appearance.theme)
+    ui.setFontSize(preferencesQuery.data.appearance.font_size)
+    // The store setters persist local cache; the API remains the source for new devices.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferencesQuery.data])
 
   useEffect(() => {
     const handler = (event: MouseEvent) => {
@@ -246,10 +289,12 @@ export function AppShell() {
     { label: '查看技能注册表', detail: '工具与能力来源', shortcut: 'S', keywords: 'skills tools', action: () => navigate(withContext('/skills')) },
     { label: '查看全局感知', detail: '来源与注入闸门', shortcut: 'G', keywords: 'sense context source', action: () => navigate(withContext('/sense')) },
     { label: '浏览文件空间', detail: '上传文件、生成产物与临时目录', shortcut: 'F', keywords: 'files upload download tmp', action: () => navigate(withContext('/files')) },
-    { label: '查看运行模块', detail: '子代理、外部消息与 Expand', shortcut: 'M', keywords: 'agents message expand runtime', action: () => navigate(withContext('/runtime')) },
+     { label: '查看子智能体', detail: '内置与用户子代理', shortcut: 'A', keywords: 'agents subagent', action: () => navigate(withContext('/agents')) },
+     { label: '查看外部消息', detail: '身份绑定与传输插件', shortcut: 'M', keywords: 'message transport', action: () => navigate(withContext('/messages')) },
+     { label: '查看拓展库存', detail: '三层 Expand 模块', shortcut: 'E', keywords: 'expand extensions', action: () => navigate(withContext('/expand')) },
     { label: '编辑用户资料', detail: '头像、用户人格与全局人格', shortcut: 'P', keywords: 'profile avatar soul', action: () => navigate(withContext('/profile')) },
-    { label: '打开运行状态', detail: '上下文、Provider 与能力计数', shortcut: 'R', keywords: 'runtime status context', action: () => ui.setDrawerOpen(true) },
-    { label: '打开配置概览', detail: '脱敏运行配置镜像', shortcut: ',', keywords: 'settings config provider', action: () => navigate(withContext('/settings')) },
+     { label: '打开运行状态', detail: '上下文、Provider 与后台组件', shortcut: 'R', keywords: 'runtime status context', action: () => navigate(withContext('/status')) },
+     { label: '打开配置', detail: 'Provider、权限、Prompt 与配置文件', shortcut: ',', keywords: 'settings config provider', action: () => navigate(withContext('/settings')) },
   ], [navigate, sessionId, user, ui])
   const filteredCommands = commands.filter((command) => `${command.label} ${command.detail} ${command.keywords}`.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase()))
 
@@ -273,14 +318,17 @@ export function AppShell() {
           <div className="brand-copy"><strong>kemo-agent</strong><span>Personal Agent Runtime</span></div>
           <button className="sidebar-toggle" onClick={ui.toggleSidebar} aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'}><ChevronLeft size={16} /></button>
         </div>
-        <nav className="nav-section">
-          {navItems.map(({ path, label, icon: Icon }) => {
-            const badge = path === '/tasks' ? overview?.counts.active_tasks : undefined
-            return <NavLink key={path} to={withContext(path)} className={({ isActive }) => `nav-btn ${isActive ? 'active' : ''}`}>
-              <span className="nav-icon"><Icon size={20} /></span><span className="nav-label">{label}</span>
-              {badge ? <span className="nav-badge">{badge}</span> : null}<span className="nav-tip">{label}</span>
-            </NavLink>
-          })}
+        <nav className="nav-section nav-scroll">
+          {navGroups.map((group) => <div className="nav-group" key={group.label}>
+            <span className="nav-group-label">{group.label}</span>
+            {group.items.map(({ path, label, icon: Icon }) => {
+              const badge = path === '/tasks' ? overview?.counts.active_tasks : undefined
+              return <NavLink key={path} to={withContext(path)} className={({ isActive }) => `nav-btn ${isActive ? 'active' : ''}`}>
+                <span className="nav-icon"><Icon size={20} /></span><span className="nav-label">{label}</span>
+                {badge ? <span className="nav-badge">{badge}</span> : null}<span className="nav-tip">{label}</span>
+              </NavLink>
+            })}
+          </div>)}
         </nav>
         <div className="sidebar-rule" />
         <SessionHistoryPanel
@@ -330,9 +378,9 @@ export function AppShell() {
             </div>
             <div className="font-size-wrap" ref={fontSizeRef}>
               <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size="1.181rem" strokeWidth={2.2} /></button>
-              {fontSizeMenuOpen && <div className="font-size-menu show" role="menu"><div className="font-size-menu-head"><strong>界面字号</strong><span>文字与顶部布局同步适配</span></div>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={`font-size-option ${ui.fontSize === size ? 'active' : ''}`} role="menuitem" onClick={() => { ui.setFontSize(size); setFontSizeMenuOpen(false) }}><span className={`font-sample ${size}`}>Aa</span><span><strong>{fontSizeLabels[size]}</strong><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></span><i>{ui.fontSize === size ? '✓' : ''}</i></button>)}</div>}
+              {fontSizeMenuOpen && <div className="font-size-menu show" role="menu"><div className="font-size-menu-head"><strong>界面字号</strong><span>文字与顶部布局同步适配</span></div>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={`font-size-option ${ui.fontSize === size ? 'active' : ''}`} role="menuitem" onClick={() => { ui.setFontSize(size); if (user) void patchPreferences(user, { font_size: size }); setFontSizeMenuOpen(false) }}><span className={`font-sample ${size}`}>Aa</span><span><strong>{fontSizeLabels[size]}</strong><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></span><i>{ui.fontSize === size ? '✓' : ''}</i></button>)}</div>}
             </div>
-            <button className="icon-btn theme-toggle-btn" onClick={() => ui.setTheme(ui.theme === 'dark' ? 'light' : 'dark')} aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'}>{ui.theme === 'dark' ? <Sun size="1.736rem" strokeWidth={2.1} /> : <Moon size="1.736rem" strokeWidth={2.1} />}</button>
+            <button className="icon-btn theme-toggle-btn" onClick={() => { const theme = ui.theme === 'dark' ? 'light' : 'dark'; ui.setTheme(theme); if (user) void patchPreferences(user, { theme }) }} aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'}>{ui.theme === 'dark' ? <Sun size="1.736rem" strokeWidth={2.1} /> : <Moon size="1.736rem" strokeWidth={2.1} />}</button>
             <button className="icon-btn" onClick={() => ui.setDrawerOpen(true)} aria-label="运行状态" title="运行状态"><Activity size="1.806rem" strokeWidth={2.1} /></button>
             <button className="icon-btn" onClick={() => setCommandOpen(true)} aria-label="命令面板" title="命令面板"><Search size="1.736rem" strokeWidth={2.1} /></button>
           </div>
