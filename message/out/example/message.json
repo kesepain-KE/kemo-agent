@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "machine_id": "msg_example_01",
+  "platform": "example",
+  "display_name": "Example 消息适配器",
+  "bound_user": "kesepain",
+  "modules": {
+    "input": "input.py",
+    "output": "output.py",
+    "detect": "detect.py"
+  },
+  "capabilities": [
+    "receive_text",
+    "send_text",
+    "receive_file",
+    "send_file"
+  ],
+  "allowed_tools": null,
+  "message_buffer": "message.md",
+  "files_dir": "files/",
+  "log_dir": "log/"
+}

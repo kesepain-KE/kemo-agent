@@ -62,33 +62,56 @@ class ProcessedMessageStore:
         return value
 
     def claim(self, key: str) -> bool:
+        return self.claim_many((key,))
+
+    def claim_many(self, keys: tuple[str, ...]) -> bool:
+        normalized = tuple(dict.fromkeys(str(key).strip() for key in keys if str(key).strip()))
+        if not normalized:
+            raise MessageStateError("消息幂等键不能为空")
         with self._lock:
             data = self._read()
             messages = data["messages"]
-            if key in messages:
+            if any(key in messages for key in normalized):
                 return False
             now = _now()
-            messages[key] = {
-                "status": "processing",
-                "claimed_at": now,
-                "updated_at": now,
-                "error": None,
-            }
-            self._trim(messages)
+            for key in normalized:
+                messages[key] = {
+                    "status": "processing",
+                    "claimed_at": now,
+                    "updated_at": now,
+                    "error": None,
+                }
+            self._trim(messages, protected=set(normalized))
             _atomic_write(self.path, data)
             return True
 
     def complete(self, key: str, *, status: str, error: dict[str, Any] | None = None) -> None:
+        self.complete_many((key,), status=status, error=error)
+
+    def complete_many(
+        self,
+        keys: tuple[str, ...],
+        *,
+        status: str,
+        error: dict[str, Any] | None = None,
+    ) -> None:
         if status not in {"completed", "failed"}:
             raise MessageStateError(f"终态无效：{status!r}")
+        normalized = tuple(dict.fromkeys(str(key).strip() for key in keys if str(key).strip()))
+        if not normalized:
+            raise MessageStateError("消息幂等键不能为空")
         with self._lock:
             data = self._read()
-            record = data["messages"].get(key)
-            if record is None:
-                raise MessageStateError(f"消息尚未领取：{key}")
-            record["status"] = status
-            record["updated_at"] = _now()
-            record["error"] = error
+            missing = [key for key in normalized if key not in data["messages"]]
+            if missing:
+                raise MessageStateError(f"消息尚未领取：{', '.join(missing)}")
+            now = _now()
+            for key in normalized:
+                record = data["messages"][key]
+                record["status"] = status
+                record["updated_at"] = now
+                record["error"] = error
+            self._trim(data["messages"])
             _atomic_write(self.path, data)
 
     def get(self, key: str) -> dict[str, Any] | None:
@@ -114,12 +137,18 @@ class ProcessedMessageStore:
                 _atomic_write(self.path, data)
         return recovered
 
-    def _trim(self, messages: dict[str, Any]) -> None:
+    def _trim(
+        self,
+        messages: dict[str, Any],
+        *,
+        protected: set[str] | None = None,
+    ) -> None:
         overflow = len(messages) - self.max_entries
         if overflow <= 0:
             return
+        protected_keys = protected or set()
         ordered = sorted(
-            messages,
+            (key for key in messages if key not in protected_keys),
             key=lambda key: str((messages.get(key) or {}).get("updated_at") or ""),
         )
         for key in ordered[:overflow]:

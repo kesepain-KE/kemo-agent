@@ -57,12 +57,17 @@ class MessageEnvelope:
         object.__setattr__(
             self, "external_chat_id", _required_text(self.external_chat_id, "external_chat_id")
         )
-        object.__setattr__(self, "text", _required_text(self.text, "text"))
+        if not isinstance(self.text, str):
+            raise MessageContractError("text 必须是字符串")
+        normalized_text = self.text.strip()
+        object.__setattr__(self, "text", normalized_text)
         object.__setattr__(self, "timestamp", _iso_timestamp(self.timestamp))
         if not isinstance(self.attachments, tuple) or not all(
             isinstance(item, dict) for item in self.attachments
         ):
             raise MessageContractError("attachments 必须是对象元组")
+        if not normalized_text and not self.attachments:
+            raise MessageContractError("text 和 attachments 不能同时为空")
         if not isinstance(self.metadata, dict):
             raise MessageContractError("metadata 必须是对象")
 
@@ -107,6 +112,7 @@ class OutboundMessage:
     chat_type: ChatType
     external_chat_id: str
     text: str
+    file_path: str = ""
     reply_to: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -118,7 +124,14 @@ class OutboundMessage:
         object.__setattr__(
             self, "external_chat_id", _required_text(self.external_chat_id, "external_chat_id")
         )
-        object.__setattr__(self, "text", _required_text(self.text, "text"))
+        if not isinstance(self.text, str) or not isinstance(self.file_path, str):
+            raise MessageContractError("text 和 file_path 必须是字符串")
+        text = self.text.strip()
+        file_path = self.file_path.strip()
+        if not text and not file_path:
+            raise MessageContractError("text 和 file_path 至少一个非空")
+        object.__setattr__(self, "text", text)
+        object.__setattr__(self, "file_path", file_path)
         if not isinstance(self.metadata, dict):
             raise MessageContractError("metadata 必须是对象")
 
@@ -128,6 +141,7 @@ class OutboundMessage:
         envelope: MessageEnvelope,
         text: str,
         *,
+        file_path: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> "OutboundMessage":
         return cls(
@@ -136,6 +150,7 @@ class OutboundMessage:
             chat_type=envelope.chat_type,
             external_chat_id=envelope.external_chat_id,
             text=text,
+            file_path=file_path,
             reply_to=envelope.message_id,
             metadata=dict(metadata or {}),
         )
@@ -147,6 +162,7 @@ class OutboundMessage:
             "chat_type": self.chat_type,
             "external_chat_id": self.external_chat_id,
             "text": self.text,
+            "file_path": self.file_path,
             "reply_to": self.reply_to,
             "metadata": dict(self.metadata),
         }

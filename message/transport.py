@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import threading
-from typing import Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from message.schema import MessageEnvelope, OutboundMessage
 
@@ -17,7 +17,7 @@ class TransportRegistrationError(TransportError):
     pass
 
 
-InboundCallback = Callable[[MessageEnvelope], None]
+InboundCallback = Callable[[MessageEnvelope], Any]
 ErrorCallback = Callable[[str, BaseException], None]
 
 
@@ -38,6 +38,7 @@ class Transport(Protocol):
 class TransportPolicy:
     allowed_tools: frozenset[str] | None = None
     capabilities: frozenset[str] = frozenset({"receive_text", "send_text"})
+    bound_user: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict | None) -> "TransportPolicy":
@@ -57,6 +58,7 @@ class TransportPolicy:
         return cls(
             allowed_tools=normalized,
             capabilities=frozenset(item.strip() for item in capabilities if item.strip()),
+            bound_user=(str(raw.get("bound_user") or "").strip() or None),
         )
 
 

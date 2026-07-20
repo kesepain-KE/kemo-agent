@@ -16,6 +16,7 @@ from message.transport import TransportRegistry
 from provider.factory import create_provider
 from run.engine import iter_request_events
 from run.tools import ToolRegistry, discover_tools
+from run.users import user_dir
 
 
 class MessageRouteError(RuntimeError):
@@ -109,13 +110,25 @@ class MessageRouter:
 
     def route(self, envelope: MessageEnvelope) -> RouteResult:
         """Synchronously route one message; normally called by the worker pool."""
-        user = self.resolver.resolve(envelope)
+        registered = self.transports.get(envelope.platform)
+        if registered.policy.bound_user:
+            user = registered.policy.bound_user
+            user_dir(user, self.root)
+        else:
+            user = self.resolver.resolve(envelope)
         source = f"message:{envelope.platform}"
         session_id = f"{envelope.chat_type}:{envelope.external_chat_id}"
         store = ProcessedMessageStore(
             self.root, user, max_entries=self.processed_message_limit
         )
-        if not store.claim(envelope.dedupe_key):
+        raw_dedupe_keys = envelope.metadata.get("dedupe_keys")
+        if isinstance(raw_dedupe_keys, list) and raw_dedupe_keys and all(
+            isinstance(item, str) and item.strip() for item in raw_dedupe_keys
+        ):
+            dedupe_keys = tuple(dict.fromkeys(item.strip() for item in raw_dedupe_keys))
+        else:
+            dedupe_keys = (envelope.dedupe_key,)
+        if not store.claim_many(dedupe_keys):
             result = RouteResult(
                 envelope=envelope,
                 user=user,
@@ -137,7 +150,6 @@ class MessageRouter:
         try:
             if self._stop_event.is_set():
                 raise MessageRouteError("宿主正在停止，不再处理新消息")
-            registered = self.transports.get(envelope.platform)
             policy = registered.policy
 
             def filtered_registry(root: Path, target_user: str) -> ToolRegistry:
@@ -151,6 +163,16 @@ class MessageRouter:
                 "session_id": session_id,
                 "stream": True,
             }
+            request_payload = getattr(registered.transport, "request_payload", None)
+            if callable(request_payload):
+                prepared = request_payload(envelope)
+                if not isinstance(prepared, dict):
+                    raise MessageRouteError("Transport request_payload() 必须返回对象")
+                request["prompt"] = str(prepared.get("prompt") or "")
+                content = prepared.get("content") or []
+                if not isinstance(content, list):
+                    raise MessageRouteError("Transport content 必须是数组")
+                request["content"] = content
             chunks: list[str] = []
             terminal_seen = False
             route_error: dict[str, Any] | None = None
@@ -200,7 +222,20 @@ class MessageRouter:
             outbound = OutboundMessage.reply(
                 envelope,
                 text,
-                metadata={"user": user, "source": source, "session_id": session_id},
+                metadata={
+                    "user": user,
+                    "source": source,
+                    "session_id": session_id,
+                    **(
+                        {
+                            "message_queue_token": envelope.metadata[
+                                "message_queue_token"
+                            ]
+                        }
+                        if envelope.metadata.get("message_queue_token")
+                        else {}
+                    ),
+                },
             )
             registered.transport.send(outbound)
             done = next(
@@ -215,7 +250,7 @@ class MessageRouter:
             )
             result.text = text
             result.outbound = outbound
-            store.complete(envelope.dedupe_key, status="completed")
+            store.complete_many(dedupe_keys, status="completed")
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -227,7 +262,7 @@ class MessageRouter:
             result.status = "failed"
             result.error = error
             try:
-                store.complete(envelope.dedupe_key, status="failed", error=error)
+                store.complete_many(dedupe_keys, status="failed", error=error)
             except Exception:
                 pass
             self._notify_error(envelope.platform, exc)
