@@ -6,12 +6,19 @@ import threading
 import unittest
 from pathlib import Path
 
-from provider.schema import ChatResponse, Usage
+from provider.schema import Usage
 from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
-from run.engine import _compress_per_round_tool_think
-from run.history import commit_window, empty_window, load_runtime_window, load_window, runtime_window_path
+from run.engine import _compress_per_round_tool_think, _copy_committed_round_to_archive
+from run.history import (
+    _trim_to_max_rounds,
+    commit_window,
+    empty_window,
+    load_runtime_window,
+    load_window,
+    runtime_window_path,
+)
 
 
 def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dict:
@@ -74,6 +81,155 @@ class SummaryRunner:
 
 
 class ContextLifecycleTests(unittest.TestCase):
+    def test_trim_to_max_rounds_keeps_latest_data_and_renumbers_workspace(self) -> None:
+        window = empty_window("alice", "cli", "session")
+        for number in range(1, 6):
+            window["text"]["messages"].extend(
+                [
+                    {"role": "user", "content": f"user-{number}"},
+                    {"role": "assistant", "content": f"assistant-{number}"},
+                ]
+            )
+            window["think"]["rounds"].append(
+                {"round": number, "content": f"think-{number}"}
+            )
+            window["tool"]["rounds"].append(
+                {"round": number, "calls": [{"name": f"tool-{number}"}]}
+            )
+            window["items"]["items"].append(
+                {
+                    "id": f"item-{number}",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"item-{number}"}],
+                    "metadata": {"round": number},
+                }
+            )
+            window["data"]["round_metrics"].append(
+                {"round": number, "usage": {"total_tokens": number}}
+            )
+        window["data"]["rounds"] = 5
+        window["data"]["context"] = {"summary": {"generated": True}}
+
+        trimmed = _trim_to_max_rounds(window, 2)
+
+        self.assertEqual(window["data"]["rounds"], 5)
+        self.assertEqual(
+            [item["content"] for item in trimmed["text"]["messages"]],
+            ["user-4", "assistant-4", "user-5", "assistant-5"],
+        )
+        self.assertEqual(
+            [(item["round"], item["content"]) for item in trimmed["think"]["rounds"]],
+            [(1, "think-4"), (2, "think-5")],
+        )
+        self.assertEqual(
+            [item["round"] for item in trimmed["tool"]["rounds"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            [item["metadata"]["round"] for item in trimmed["items"]["items"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            [item["round"] for item in trimmed["data"]["round_metrics"]],
+            [1, 2],
+        )
+        self.assertEqual(trimmed["data"]["rounds"], 2)
+        self.assertEqual(trimmed["data"]["context"]["round_offset"], 3)
+        self.assertTrue(trimmed["data"]["context"]["summary"]["generated"])
+
+    def test_archive_data_is_clean_and_runtime_restore_is_bounded(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        archive_path = Path(temporary.name) / "history" / "archive-window"
+        archive = empty_window("alice", "cli", "session")
+        for number in range(1, 6):
+            archive["text"]["messages"].extend(
+                [
+                    {"role": "user", "content": f"u{number}"},
+                    {"role": "assistant", "content": f"a{number}"},
+                ]
+            )
+            archive["think"]["rounds"].append(
+                {"round": number, "content": f"t{number}"}
+            )
+            archive["tool"]["rounds"].append({"round": number, "calls": []})
+            archive["items"]["items"].append(
+                {"id": f"i{number}", "metadata": {"round": number}}
+            )
+            archive["data"]["round_metrics"].append({"round": number})
+        archive["data"]["rounds"] = 5
+        archive["data"]["context"] = {"rounds_removed": 3}
+        archive["data"]["summary_cache"] = "must-not-archive"
+        commit_window(archive_path, archive)
+
+        raw_archive = json.loads((archive_path / "data.json").read_text("utf-8"))
+        self.assertEqual(
+            set(raw_archive),
+            {
+                "schema_version",
+                "user",
+                "source",
+                "session_id",
+                "title",
+                "created_at",
+                "updated_at",
+                "rounds",
+                "round_metrics",
+                "token_usage",
+                "complete",
+            },
+        )
+        self.assertNotIn("context", raw_archive)
+        self.assertNotIn("summary_cache", raw_archive)
+        runtime_path, runtime = load_runtime_window(
+            archive_path,
+            load_window(archive_path),
+            max_rounds=2,
+        )
+        self.assertEqual(runtime_path, runtime_window_path(archive_path))
+        self.assertEqual(runtime["data"]["rounds"], 2)
+        self.assertEqual(runtime["data"]["context"]["round_offset"], 3)
+        self.assertEqual(
+            [item["content"] for item in runtime["text"]["messages"]],
+            ["u4", "a4", "u5", "a5"],
+        )
+        commit_window(runtime_path, runtime)
+        raw_runtime = json.loads((runtime_path / "data.json").read_text("utf-8"))
+        self.assertIn("context", raw_runtime)
+
+    def test_archive_append_maps_local_temp_round_to_absolute_round(self) -> None:
+        archive = empty_window("alice", "cli", "session")
+        archive["data"]["rounds"] = 5
+        archive["data"]["round_metrics"] = [
+            {"round": number, "usage": {"total_tokens": number}}
+            for number in range(1, 6)
+        ]
+        runtime = empty_window("alice", "cli", "session")
+        runtime["text"]["messages"] = [
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        runtime["think"]["rounds"] = [{"round": 3, "content": "reason"}]
+        runtime["tool"]["rounds"] = [{"round": 3, "calls": []}]
+        runtime["items"]["items"] = [
+            {"id": "new-item", "metadata": {"round": 3}}
+        ]
+        runtime["data"]["rounds"] = 3
+        runtime["data"]["round_metrics"] = [
+            {"round": 3, "usage": {"total_tokens": 6}}
+        ]
+        runtime["data"]["context"] = {"round_offset": 3}
+
+        _copy_committed_round_to_archive(archive, runtime, 3, 6)
+
+        self.assertEqual(archive["data"]["rounds"], 6)
+        self.assertEqual(archive["data"]["round_metrics"][-1]["round"], 6)
+        self.assertEqual(archive["think"]["rounds"][-1]["round"], 6)
+        self.assertEqual(archive["tool"]["rounds"][-1]["round"], 6)
+        self.assertEqual(archive["items"]["items"][-1]["metadata"]["round"], 6)
+        self.assertNotIn("context", archive["data"])
+
     def test_policy_budget_and_invalid_values(self) -> None:
         policy = ContextPolicy.from_config(
             {

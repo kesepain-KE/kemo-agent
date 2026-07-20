@@ -5,7 +5,6 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 from events import RunEvent
@@ -15,7 +14,14 @@ from message.identity import (
     IdentityResolver,
     filter_tool_registry,
 )
-from message.router import MessageRouteError, MessageRouter
+from message.plugin import (
+    FileMessageTransport,
+    MessagePluginConfig,
+    MessagePluginError,
+    discover_message_plugins,
+    parse_message_buffer,
+)
+from message.router import MessageRouteError, MessageRouter, RouteResult
 from message.schema import MessageContractError, MessageEnvelope, OutboundMessage
 from message.state import ProcessedMessageStore
 from message.transport import (
@@ -73,6 +79,84 @@ def _done_events(request, **kwargs):
     yield RunEvent(type="done", metadata={"text": f"reply:{request['prompt']}"})
 
 
+def _write_file_plugin(
+    root: Path,
+    *,
+    name: str = "filedemo",
+    platform: str = "filedemo",
+    bound_user: str = "alice",
+) -> Path:
+    directory = root / "message" / "out" / name
+    (directory / "files").mkdir(parents=True)
+    (directory / "log").mkdir()
+    (directory / "message.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "machine_id": f"msg_{name}",
+                "platform": platform,
+                "display_name": name,
+                "bound_user": bound_user,
+                "modules": {
+                    "input": "input.py",
+                    "output": "output.py",
+                    "detect": "detect.py",
+                },
+                "capabilities": [
+                    "receive_text",
+                    "send_text",
+                    "receive_file",
+                    "send_file",
+                ],
+                "allowed_tools": [],
+                "message_buffer": "message.md",
+                "files_dir": "files/",
+                "log_dir": "log/",
+            }
+        ),
+        "utf-8",
+    )
+    (directory / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "health": "unknown",
+                "last_check": None,
+                "last_message_at": None,
+                "error": None,
+                "latency_ms": None,
+                "messages_received_today": 0,
+                "messages_sent_today": 0,
+            }
+        ),
+        "utf-8",
+    )
+    (directory / "message.md").write_text("", "utf-8")
+    (directory / "input.py").write_text(
+        "import threading\n"
+        "STOP = threading.Event()\n"
+        "def start(config, message_buffer, files_dir, state_path):\n"
+        "    STOP.clear()\n"
+        "    STOP.wait()\n"
+        "def stop():\n"
+        "    STOP.set()\n",
+        "utf-8",
+    )
+    (directory / "output.py").write_text(
+        "SENT = []\n"
+        "def send(message):\n"
+        "    SENT.append(dict(message))\n"
+        "    return True\n",
+        "utf-8",
+    )
+    (directory / "detect.py").write_text(
+        "def check(config, state):\n"
+        "    return {**state, 'health': 'healthy', 'error': None}\n",
+        "utf-8",
+    )
+    return directory
+
+
 class SchemaTests(unittest.TestCase):
     def test_envelope_normalizes_and_serializes(self) -> None:
         item = _envelope()
@@ -92,12 +176,37 @@ class SchemaTests(unittest.TestCase):
                 timestamp="2026-07-18T00:00:00",
             )
 
+    def test_attachment_only_message_is_valid(self) -> None:
+        item = MessageEnvelope(
+            message_id="m",
+            platform="mock",
+            chat_type="private",
+            external_user_id="u",
+            external_chat_id="c",
+            text="",
+            timestamp="2026-07-18T00:00:00+08:00",
+            attachments=({"path": "files/m.png"},),
+        )
+        self.assertEqual(item.text, "")
+
     def test_outbound_reply(self) -> None:
         inbound = _envelope()
         outbound = OutboundMessage.reply(inbound, "ok")
         self.assertEqual(outbound.platform, "mock")
         self.assertEqual(outbound.external_chat_id, "chat-1")
         self.assertEqual(outbound.reply_to, "m1")
+
+    def test_outbound_file_can_be_sent_without_text(self) -> None:
+        outbound = OutboundMessage(
+            message_id="out",
+            platform="mock",
+            chat_type="private",
+            external_chat_id="chat-1",
+            text="",
+            file_path="files/result.png",
+        )
+        self.assertEqual(outbound.text, "")
+        self.assertEqual(outbound.file_path, "files/result.png")
 
 
 class RegistryAndPermissionTests(unittest.TestCase):
@@ -130,6 +239,193 @@ class RegistryAndPermissionTests(unittest.TestCase):
             set(filter_tool_registry(registry, frozenset({"a", "c"})).tools),
             {"a"},
         )
+
+
+class FilePluginTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary, self.root = _root("alice")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = _write_file_plugin(self.root)
+
+    def test_parse_repeated_front_matter_and_preserve_markdown_rule(self) -> None:
+        messages = parse_message_buffer(
+            """---
+machine_id: msg_filedemo
+message_id: first
+chat_type: private
+external_user_id: "u1"
+external_chat_id: "c1"
+timestamp: 2026-07-18T14:30:25+08:00
+---
+
+第一段
+
+---
+
+仍是第一条正文
+
+---
+machine_id: msg_filedemo
+message_id: second
+chat_type: group
+external_user_id: "u2"
+external_chat_id: "g1"
+timestamp: 2026-07-18T14:31:25+08:00
+---
+
+第二段
+"""
+        )
+        self.assertEqual([item.message_id for item in messages], ["first", "second"])
+        self.assertIn("仍是第一条正文", messages[0].text)
+        self.assertEqual(messages[1].chat_type, "group")
+
+    def test_config_rejects_paths_outside_plugin(self) -> None:
+        config_path = self.directory / "message.json"
+        value = json.loads(config_path.read_text("utf-8"))
+        value["files_dir"] = "../outside"
+        config_path.write_text(json.dumps(value), "utf-8")
+        with self.assertRaisesRegex(MessagePluginError, "相对路径"):
+            MessagePluginConfig.load(self.root, self.directory)
+
+    def test_file_queue_batch_attachment_route_send_log_and_cleanup(self) -> None:
+        image = self.directory / "files" / "p1_0.png"
+        image.write_bytes(b"png-data")
+        text_file = self.directory / "files" / "p1_1.txt"
+        text_file.write_text("TEXT_ATTACHMENT", "utf-8")
+        config = MessagePluginConfig.load(self.root, self.directory)
+        transport = FileMessageTransport(
+            config,
+            poll_interval=60,
+            health_interval=60,
+            settle_interval=0.05,
+        )
+        received: list[MessageEnvelope] = []
+        errors: list[BaseException] = []
+        transport.start(received.append, lambda _name, exc: errors.append(exc))
+        self.addCleanup(transport.stop)
+        time.sleep(0.05)
+        (self.directory / "message.md").write_text(
+            f"""---
+machine_id: msg_filedemo
+message_id: p1
+chat_type: private
+external_user_id: "u1"
+external_chat_id: "c1"
+timestamp: 2026-07-18T14:30:25+08:00
+attachments:
+  - path: files/p1_0.png
+    name: screenshot.png
+    mime: image/png
+    size: {image.stat().st_size}
+  - path: files/p1_1.txt
+    name: note.txt
+    mime: text/plain
+    size: {text_file.stat().st_size}
+---
+
+请分析附件
+
+---
+machine_id: msg_filedemo
+message_id: g1
+chat_type: group
+external_user_id: "u2"
+external_chat_id: "group"
+timestamp: 2026-07-18T14:31:25+08:00
+---
+
+第一条群消息
+
+---
+machine_id: msg_filedemo
+message_id: g2
+chat_type: group
+external_user_id: "u3"
+external_chat_id: "group"
+timestamp: 2026-07-18T14:32:25+08:00
+---
+
+第二条群消息
+""",
+            "utf-8",
+        )
+
+        time.sleep(0.06)
+        self.assertEqual(transport.poll_once(), 2)
+        self.assertEqual(len(received), 2)
+        self.assertEqual((self.directory / "message.md").read_text("utf-8"), "")
+        group = next(item for item in received if item.chat_type == "group")
+        self.assertTrue(group.message_id.startswith("batch_"))
+        self.assertIn("第一条群消息", group.text)
+        self.assertIn("第二条群消息", group.text)
+        private = next(item for item in received if item.chat_type == "private")
+        payload = transport.request_payload(private)
+        self.assertEqual(payload["content"][0]["type"], "image")
+        self.assertEqual(payload["content"][0]["source"]["kind"], "inline_base64")
+        self.assertIn("TEXT_ATTACHMENT", payload["prompt"])
+
+        for envelope in received:
+            outbound = OutboundMessage.reply(
+                envelope,
+                "reply",
+                metadata={
+                    "message_queue_token": envelope.metadata["message_queue_token"]
+                },
+            )
+            transport.send(outbound)
+            transport.finalize(
+                RouteResult(
+                    envelope=envelope,
+                    user="alice",
+                    source=f"message:{envelope.platform}",
+                    session_id=f"{envelope.chat_type}:{envelope.external_chat_id}",
+                    status="completed",
+                    text="reply",
+                    outbound=outbound,
+                )
+            )
+
+        self.assertEqual(len(transport._output.SENT), 2)
+        group_output = next(
+            item for item in transport._output.SENT if item["chat_type"] == "group"
+        )
+        self.assertEqual(group_output["reply_to"], "g2")
+        self.assertFalse(image.exists())
+        self.assertFalse(text_file.exists())
+        self.assertFalse(list(self.directory.glob("*.processing.md")))
+        log = (self.directory / "log" / "2026-07-18.md").read_text("utf-8")
+        self.assertIn("请分析附件", log)
+        self.assertIn("screenshot.png", log)
+        state = json.loads((self.directory / "state.json").read_text("utf-8"))
+        self.assertEqual(state["messages_received_today"], 3)
+        self.assertEqual(state["messages_sent_today"], 2)
+        self.assertFalse(errors)
+
+    def test_discovery_reports_invalid_folder_without_hiding_valid_plugin(self) -> None:
+        (self.root / "message" / "out" / "broken").mkdir()
+        transports, issues = discover_message_plugins(self.root)
+        self.assertEqual([item.name for item in transports], ["filedemo"])
+        self.assertEqual([item.name for item in issues], ["broken"])
+
+    def test_bound_transport_routes_without_identity_binding(self) -> None:
+        registry = TransportRegistry()
+        transport = MockTransport()
+        registry.register(
+            transport,
+            TransportPolicy(bound_user="alice"),
+        )
+        transport.start(lambda envelope: None, lambda component, exc: None)
+        router = MessageRouter(
+            self.root,
+            IdentityResolver(self.root, []),
+            registry,
+            event_source=_done_events,
+            tool_registry_factory=lambda root, user: ToolRegistry({}),
+        )
+        result = router.route(_envelope(platform="mock"))
+        self.assertEqual(result.user, "alice")
+        self.assertEqual(result.status, "completed")
 
 
 class IdentityTests(unittest.TestCase):
@@ -177,6 +473,13 @@ class StateTests(unittest.TestCase):
         self.assertFalse(store.claim("mock:m1"))
         store.complete("mock:m1", status="completed")
         self.assertEqual(store.get("mock:m1")["status"], "completed")
+
+    def test_claim_many_is_atomic(self) -> None:
+        store = ProcessedMessageStore(self.root, "alice")
+        self.assertTrue(store.claim_many(("mock:m1", "mock:m2")))
+        store.complete_many(("mock:m1", "mock:m2"), status="completed")
+        self.assertFalse(store.claim_many(("mock:m2", "mock:m3")))
+        self.assertIsNone(store.get("mock:m3"))
 
     def test_recover_processing_without_replay(self) -> None:
         store = ProcessedMessageStore(self.root, "alice")
@@ -464,6 +767,96 @@ class HostTests(unittest.TestCase):
             host.start()
         self.assertEqual(host.state, "failed")
         self.assertFalse(host.router.running)
+
+    def test_folder_plugin_is_auto_discovered_started_and_stopped(self) -> None:
+        _write_file_plugin(self.root)
+        (self.root / "message" / "out" / "broken").mkdir()
+        registry = TransportRegistry()
+        config = _config(cron=False)
+        router = MessageRouter(
+            self.root,
+            IdentityResolver(self.root, []),
+            registry,
+            event_source=_done_events,
+            tool_registry_factory=lambda root, user: ToolRegistry({}),
+        )
+        host = RuntimeHost(
+            self.root,
+            config=config,
+            message_config={},
+            registry=registry,
+            cron_scheduler=FakeCron(),
+            maintenance_scheduler=FakeMaintenance(),
+            router=router,
+        )
+        self.assertIn("filedemo", registry.names())
+        self.assertEqual(
+            host.status()["components"]["message_plugin:broken"]["state"],
+            "failed",
+        )
+        host.start()
+        try:
+            component = host.status()["components"]["transport:filedemo"]
+            self.assertEqual(component["kind"], "message_plugin")
+            self.assertEqual(component["state"], "running")
+            transport = registry.get("filedemo").transport
+            self.assertTrue(transport.running)
+            (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
+                """---
+machine_id: msg_filedemo
+message_id: integrated
+chat_type: private
+external_user_id: "external"
+external_chat_id: "chat"
+timestamp: 2026-07-18T14:30:25+08:00
+---
+
+hello plugin
+""",
+                "utf-8",
+            )
+            deadline = time.time() + 4
+            while not transport._output.SENT and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(transport._output.SENT[0]["text"], "reply:hello plugin")
+            log = self.root / "message" / "out" / "filedemo" / "log" / "2026-07-18.md"
+            deadline = time.time() + 2
+            while not log.is_file() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertIn("hello plugin", log.read_text("utf-8"))
+            (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
+                """---
+machine_id: msg_filedemo
+message_id: integrated
+chat_type: group
+external_user_id: "external"
+external_chat_id: "group"
+timestamp: 2026-07-18T14:31:25+08:00
+---
+
+duplicate body
+
+---
+machine_id: msg_filedemo
+message_id: fresh
+chat_type: group
+external_user_id: "external"
+external_chat_id: "group"
+timestamp: 2026-07-18T14:32:25+08:00
+---
+
+fresh body
+""",
+                "utf-8",
+            )
+            deadline = time.time() + 4
+            while len(transport._output.SENT) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(len(transport._output.SENT), 2)
+            self.assertEqual(transport._output.SENT[1]["text"], "reply:fresh body")
+        finally:
+            host.stop()
+        self.assertFalse(registry.get("filedemo").transport.running)
 
 
 if __name__ == "__main__":

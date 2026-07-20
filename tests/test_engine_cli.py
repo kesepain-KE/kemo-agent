@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ from provider.protocol.models import (
     text_from_content,
 )
 from run.engine import handle_request
-from run.history import find_window, load_window
+from run.history import find_window, load_window, runtime_window_path
 
 
 class MockProvider:
@@ -87,7 +88,10 @@ class EngineAndCLITests(unittest.TestCase):
     def test_engine_persists_rounds_and_injects_history(self) -> None:
         _, root = self.make_root()
         seen: list = []
-        factory = lambda _: MockProvider(seen)
+
+        def factory(_):
+            return MockProvider(seen)
+
         request = {"user": "alice", "source": "cli", "session_id": "s1", "prompt": "one"}
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             first = handle_request(request, root=root, provider_factory=factory)
@@ -104,6 +108,84 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(window["data"]["rounds"], 2)
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 10)
         self.assertEqual(len(window["text"]["messages"]), 4)
+
+    def test_archive_is_unbounded_while_temp_is_bounded_and_recoverable(self) -> None:
+        _, root = self.make_root()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "agents": {
+                        "max_rounds": 2,
+                        "rounds_after_compression": 2,
+                    },
+                    "history": {"recent_full_rounds": 2},
+                }
+            ),
+            "utf-8",
+        )
+        seen: list = []
+
+        def factory(_):
+            return MockProvider(seen)
+
+        request = {
+            "user": "alice",
+            "source": "cli",
+            "session_id": "bounded-temp",
+            "prompt": "",
+        }
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for number in range(1, 5):
+                request["prompt"] = f"round-{number}"
+                handle_request(request, root=root, provider_factory=factory)
+
+            archive_path = find_window(root, "alice", "cli", "bounded-temp")
+            self.assertIsNotNone(archive_path)
+            assert archive_path is not None
+            temp_path = runtime_window_path(archive_path)
+            archive = load_window(archive_path)
+            temp = load_window(temp_path)
+
+            self.assertEqual(archive["data"]["rounds"], 4)
+            self.assertEqual(len(archive["text"]["messages"]), 8)
+            self.assertEqual(
+                [item["round"] for item in archive["data"]["round_metrics"]],
+                [1, 2, 3, 4],
+            )
+            self.assertNotIn("context", archive["data"])
+            self.assertEqual(temp["data"]["rounds"], 2)
+            self.assertEqual(len(temp["text"]["messages"]), 4)
+            self.assertEqual(
+                [item["content"] for item in temp["text"]["messages"]],
+                ["round-3", "reply:round-3", "round-4", "reply:round-4"],
+            )
+            self.assertEqual(temp["data"]["context"]["round_offset"], 2)
+
+            shutil.rmtree(temp_path)
+            request["prompt"] = "round-5"
+            handle_request(request, root=root, provider_factory=factory)
+
+        archive = load_window(archive_path)
+        temp = load_window(temp_path)
+        self.assertEqual(archive["data"]["rounds"], 5)
+        self.assertEqual(len(archive["text"]["messages"]), 10)
+        self.assertEqual(
+            [item["round"] for item in archive["data"]["round_metrics"]],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertEqual(
+            [item["round"] for item in archive["think"]["rounds"]],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertNotIn("context", archive["data"])
+        self.assertEqual(temp["data"]["rounds"], 2)
+        self.assertEqual(len(temp["text"]["messages"]), 4)
+        self.assertEqual(
+            [item["content"] for item in temp["text"]["messages"]],
+            ["round-4", "reply:round-4", "round-5", "reply:round-5"],
+        )
+        self.assertEqual(temp["data"]["context"]["round_offset"], 3)
 
     def test_provider_failure_does_not_create_window(self) -> None:
         _, root = self.make_root()
@@ -124,7 +206,9 @@ class EngineAndCLITests(unittest.TestCase):
     def test_cli_single_stdin_json_and_interactive_use_run_contract(self) -> None:
         _, root = self.make_root()
         seen: list = []
-        factory = lambda _: MockProvider(seen)
+
+        def factory(_):
+            return MockProvider(seen)
 
         def handler(request):
             return handle_request(request, root=root, provider_factory=factory)

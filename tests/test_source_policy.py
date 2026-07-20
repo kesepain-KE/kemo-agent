@@ -32,18 +32,23 @@ class SourcePolicyTests(unittest.TestCase):
         )
         self.assertEqual(user_only.knowledge_scopes, ("user",))
 
-    def test_graph_knowledge_switches_remove_only_their_own_scopes(self) -> None:
+    def test_graph_switches_preserve_scopes_and_report_replacements(self) -> None:
         fields_and_scopes = (
-            ("kemo_graph_user_knowledge", ("shared", "global")),
-            ("kemo_graph_shared_knowledge", ("user", "global")),
-            ("kemo_graph_global_knowledge", ("user", "shared")),
+            ("kemo_graph_user_knowledge", ("user",)),
+            ("kemo_graph_shared_knowledge", ("shared",)),
+            ("kemo_graph_global_knowledge", ("global",)),
         )
-        for field, expected_scopes in fields_and_scopes:
+        for field, replaced_scopes in fields_and_scopes:
             with self.subTest(field=field):
                 policy = MainAgentSourcePolicy.from_config(
                     {"kemo_graph": {field: True}}
                 )
-                self.assertEqual(policy.knowledge_scopes, expected_scopes)
+                self.assertEqual(
+                    policy.knowledge_scopes, ("user", "shared", "global")
+                )
+                self.assertEqual(
+                    policy.replaced_knowledge_scopes(), replaced_scopes
+                )
                 self.assertTrue(policy.kemo_graph_requested)
 
         combined = MainAgentSourcePolicy.from_config(
@@ -54,7 +59,18 @@ class SourcePolicyTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(combined.knowledge_scopes, ("shared",))
+        self.assertEqual(combined.knowledge_scopes, ("user", "shared", "global"))
+        self.assertEqual(combined.replaced_knowledge_scopes(), ("user", "global"))
+        self.assertEqual(combined.direct_knowledge_scopes(), ("shared",))
+
+        disabled_shared = MainAgentSourcePolicy.from_config(
+            {
+                "knowledge": {"use_shared": False},
+                "kemo_graph": {"kemo_graph_shared_knowledge": True},
+            }
+        )
+        self.assertEqual(disabled_shared.knowledge_scopes, ("user", "global"))
+        self.assertEqual(disabled_shared.replaced_knowledge_scopes(), ())
 
     def test_temporary_memory_switch_does_not_change_knowledge_scopes(self) -> None:
         policy = MainAgentSourcePolicy.from_config(
@@ -99,15 +115,17 @@ class SourcePolicyTests(unittest.TestCase):
                     MainAgentSourcePolicy.from_config(config)
 
     def test_public_graph_status_never_claims_connection(self) -> None:
-        disabled = MainAgentSourcePolicy.from_config({}).public_summary()["kemo_graph"]
-        requested = MainAgentSourcePolicy.from_config(
+        disabled_summary = MainAgentSourcePolicy.from_config({}).public_summary()
+        requested_summary = MainAgentSourcePolicy.from_config(
             {
                 "kemo_graph": {
                     "kemo_graph_shared_knowledge": True,
                     "kemo_graph_temporary_memory": True,
                 }
             }
-        ).public_summary()["kemo_graph"]
+        ).public_summary()
+        disabled = disabled_summary["kemo_graph"]
+        requested = requested_summary["kemo_graph"]
         self.assertEqual(disabled["status"], "disabled")
         self.assertEqual(requested["status"], "not_connected")
         self.assertFalse(requested["connected"])
@@ -115,6 +133,9 @@ class SourcePolicyTests(unittest.TestCase):
         self.assertTrue(requested["replacement_active"])
         self.assertTrue(requested["replaces_knowledge"])
         self.assertTrue(requested["replaces_temporary_memory"])
+        self.assertEqual(
+            requested_summary["knowledge"]["graph_replaced_scopes"], ["shared"]
+        )
         self.assertEqual(
             {
                 key: requested[key]
