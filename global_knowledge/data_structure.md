@@ -2,7 +2,7 @@
 
 kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说明；用户私有资料应放入 `users/<name>/knowledge/`。
 
-更新时间：2026-07-21（新增 kemo-graph 粒度化替换规划）
+更新时间：2026-07-21（编程规划文档已全部移交至开发文档目录）
 
 ## 文件清单
 
@@ -14,7 +14,6 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `全局配置文件.md` | 全局配置 `global_config.json` 全字段说明、覆盖规则、已移除项目清单 | 全局配置、global_config、provider、tools、memory、prompt |
 | `环境变量.md` | 环境变量 `.env` 全字段说明、优先级链、Web 认证方式 | 环境变量、env、Web、认证 |
 | `web-README.md` | Web 前端开发说明与构建指南 | web、前端、构建、开发 |
-| `kemo-graph粒度化替换-编程规划.md` | kemo_graph 拆分为 4 个独立开关（全局/共享/用户知识 + 临时记忆），粒度化替换控制 | kemo_graph、粒度化、替换、编程规划 |
 
 ## 设计文档迁移
 
@@ -39,6 +38,10 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `环境变量-编程适配方案.md` | 环境变量编程适配方案 |
 | `Kemo网关-统一Provider协议适配要求.md` | Kemo 网关统一 Provider 协议适配 |
 | `kemo-graph粒度化替换-编程规划.md` | kemo_graph 拆分为 4 个独立开关（全局/共享/用户知识 + 临时记忆），粒度化替换控制 |
+| `外部消息模块插件化-编程规划.md` | 外部消息模块 out/<platform>/ 文件夹级插件化设计、message.md 消息格式、接口契约 |
+| `kemo-graph粒度化替换-编程规划.md` | kemo_graph 拆分为 4 个独立开关（全局/共享/用户知识 + 临时记忆），粒度化替换控制 |
+| `历史存储双层架构微重构-编程规划.md` | 历史存储双层架构微重构：从 data.json 移除 context 字段、归档/temp 职责区分 |
+| `系统提示词拼接重构-编程规划.md` | 系统提示词拼接重构：subagent 拆为 global/user、knowledge_index 替换标注、kemo_graph 细分 6 子层 |
 
 ## 检索规则
 

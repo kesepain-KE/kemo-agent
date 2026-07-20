@@ -34,11 +34,11 @@ kemo-agent 是一个事件驱动的多用户智能体框架，当前版本 0.1.0
 - **记忆系统（v2）** — 四档文件型存储：seven_days → one_month → half_year → permanent。独立 `.md` 正文 + `data.json` 轻量索引，引用/修改触发加权，到期自动晋升或删除，无每日衰减
 - **工具系统** — 插件 `SKILL.md` 的 `## Tool` JSON 块作为唯一工具声明来源，`discover_plugin_manifests()` 自动发现
 - **上下文管理** — 整轮不可拆分，Token + 轮次双预算，多轮摘要循环至预算达标
-- **子代理** — 6 个内置子代理，用户可通过热插拔数据包扩展。独立授权、超时、取消信号，不自动继承主会话历史
+- **子代理** — 5 个内置子代理，用户可通过热插拔数据包扩展。独立授权、超时、取消信号，不自动继承主会话历史
 - **配置系统** — `global_config.json` + `user_config.json` 深合并，`.env` 仅做密钥兜底
 - **资源分层** — 用户级 > 共享级 > 全局级，覆盖知识库、技能、拓展与感知
 - **Web 界面** — FastAPI + React/TypeScript/Vite，流式聊天、知识浏览、任务管理
-- **消息路由** — 平台无关的消息路由核心，幂等去重，按 source+session_id 会话隔离
+- **消息路由** — 平台无关的消息路由核心；`message/out/<platform>/` 文件夹插件、Markdown 文件队列、附件分流、幂等去重与会话隔离
 - **定时调度** — 四层架构（存储→时间计算→原子执行→守护线程），daily/once/recurring
 
 ## 安装
@@ -140,7 +140,7 @@ kemo-agent/
 │   ├── prompt.py           # PromptBundle 编排
 │   ├── context.py          # 上下文选取
 │   ├── context_summary.py  # 摘要缓存
-│   ├── history.py          # 四文件历史管理
+│   ├── history.py          # 完整归档 + 有界 temp 工作区双层历史
 │   ├── memory.py           # 四档记忆引擎
 │   ├── memory_pipeline.py  # 异步记忆提取
 │   ├── memory_migrate.py   # 记忆迁移工具
@@ -183,7 +183,7 @@ kemo-agent/
 │   ├── memory_temporary_important/
 │   ├── task_plan/
 │   └── time_plan/
-├── message/                # 外部消息路由
+├── message/                # 外部消息路由核心 + out/ 文件夹平台插件
 ├── cron/                   # 定时调度
 ├── config/                 # 全局配置
 ├── global_knowledge/       # 全局知识库

@@ -15,7 +15,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → 上下文选择（轮次预算 + token 预算 + 压缩）
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
-  → 提交四文件历史（text + think + tool + data）
+  → 提交五文件历史（text + think + tool + items + data）
   → 记忆引用加权；上下文压缩前批量提取即将裁剪轮次
 ```
 
@@ -26,7 +26,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 对话引擎 | `run/engine.py` | 主循环：prompt 组装 → provider 调用 → 工具循环 → 历史提交 |
 | 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
-| 历史管理 | `run/history.py` | 原始归档窗口与 `history/temp/<window>/` 运行镜像的创建、读写、提交 |
+| 历史管理 | `run/history.py` | 用户可见完整归档与 `history/temp/<window>/` Provider 临时工作区的创建、裁剪、恢复和提交 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
 | 记忆管道 | `run/memory_pipeline.py` | 已提交轮次的异步提取，以及上下文压缩前的同步记忆提取 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
@@ -79,6 +79,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 |------|------|------|
 | 全局配置 | `config/global_config.json` | 框架全局默认值 |
 | 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置 |
+| 外部消息插件 | `message/out/<platform>/` | 文件夹级平台适配器、文件消息队列、附件、状态与日志 |
 | 全局人格 | `config/global_soul.md` | 安全底线，不可覆盖 |
 | 用户配置 | `users/<name>/user_config.json` | 覆盖全局配置 |
 | 用户人格 | `users/<name>/user_soul.md` | 用户偏好与风格 |
@@ -95,13 +96,21 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`executor.py` |
 | 用户子代理 | `users/<name>/agents/<agent>/` | 数据型热插拔包：`AGENT.md`、`agent.json`、`agent-config.json` |
-| 用户历史 | `users/<name>/history/` | 时间戳目录保存完整归档，`temp/<window>/` 保存可压缩运行镜像 |
+| 用户历史 | `users/<name>/history/` | 时间戳目录保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
 | 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
 | 任务计划 | `users/<name>/task_plan/` | 计划文件 |
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
 | 环境变量 | `.env` | 启动级参数和密钥兜底 |
+
+### 外部消息插件发现规则
+
+- RuntimeHost 启动时只扫描 `message/out/` 的直接子目录，并只加载 `message.json` 明确声明的 `input`、`output`、`detect` 三个模块；目录中的其他 Python 文件不会被核心自动执行。
+- `message.json.bound_user` 将整个平台插件绑定到一个现有内部用户；传统 Transport 仍使用 `config/message_config.json` 的外部身份映射。
+- `message.md` 是可恢复的文件队列。群聊中同一外部会话的累积消息合并为一次 Run；私聊逐条处理。
+- 附件必须位于插件的 `files_dir` 内。图片、音频和 PDF 转换为 Kemo Content Blocks；文本文件直接并入请求；视频和未知类型仅注入文件说明。
+- 每条终态结果写入 `log/YYYY-MM-DD.md`，随后删除本批次已处理附件；健康检测结果与收发计数写入 `state.json`。
 
 ### 插件发现规则
 
@@ -278,7 +287,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 |------|--------|------|
 | `agents.conserved_rounds` | 3 | 最近 N 轮保留完整工具日志 |
 | `history.recent_full_rounds` | 3 | 最近 N 轮完整历史不被摘要或移除 |
-| `agents.max_rounds` | 80 | 最大保留轮次，超出触发压缩 |
+| `agents.max_rounds` | 80 | temp 工作区及 Provider 上下文的轮次上限；不限制用户可见归档 |
 | `agents.rounds_after_compression` | 20 | 压缩后保留的轮次数 |
 | `agents.token_limit` | 1000000 | token 上限 |
 | `agents.token_compression_ratio` | 0.3 | 输入预算 = token_limit × ratio |
@@ -295,6 +304,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 压缩时移除最旧轮次，保留最近 `rounds_after_compression` 轮。
 - 所有场景统一由 `context_manage` 处理；其 executor 先同步调用 `self_improve` 并持久化记忆候选，再生成摘要。
 - 摘要缓存在 `history/temp/<window>/context_summary.json` 中；缓存 schema 升级时自动重建。
+- `history/<window>/` 始终保留完整原始记录，`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
 
 ### 轮次结构
 
@@ -303,7 +313,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - `think.json` 中的思考记录
 - `tool.json` 中的工具调用记录
 
-每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 temp 运行镜像，归档中的原始 `think.json`、`tool.json` 和 `items.json` 保持不变。旧数据迁移期间仍保留代码内建的工具结果字符上限作为降级保护。
+每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 temp 工作区，归档中的原始 `think.json`、`tool.json` 和 `items.json` 保持不变。旧数据迁移期间仍保留代码内建的工具结果字符上限作为降级保护。
 
 ---
 
@@ -403,21 +413,23 @@ system prompt 按以下固定顺序拼接：
 1. **用户人格** — `users/<name>/user_soul.md`
 2. **全局人格** — `config/global_soul.md`
 3. **运行手册** — `agents.md`（本文件）
-4. **插件提示词** — `plugins/*/SKILL.md` 的描述部分
-5. **技能提示词** — 注册全部共享/用户技能后，按主智能体白名单选择描述部分
-6. **知识库索引** — 按 `knowledge.use_shared/use_global` 选择用户 + 共享 + 全局索引
-7. **kemo-graph** — 图谱替换结果或明确的未连接状态；未启用时省略
-8. **永久记忆** — `improve/permanent/`
-9. **临时重要记忆** — `memory_temporary_important.md`
-10. **临时记忆 half_year** — `improve/half_year/`
-11. **临时记忆 one_month** — `improve/one_month/`
-12. **临时记忆 seven_days** — `improve/seven_days/`
-13. **任务计划** — 当前活跃计划的描述
-14. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行
-15. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
+4. **全局子代理注册** — `agents/<name>/trigger.md` 的注册信息
+5. **用户子代理注册** — `users/<name>/agents/<agent>/trigger.md` 的注册信息
+6. **插件提示词** — `plugins/*/SKILL.md` 的描述部分
+7. **技能提示词** — 注册全部共享/用户技能后，按主智能体白名单选择描述部分
+8. **知识库索引** — 按 `knowledge.use_shared/use_global` 选择用户 + 共享 + 全局索引
+9. **kemo-graph** — 六个独立图谱子层的检索结果或未连接状态
+10. **永久记忆** — `improve/permanent/`
+11. **临时重要记忆** — `memory_temporary_important.md`
+12. **临时记忆 half_year** — `improve/half_year/`
+13. **临时记忆 one_month** — `improve/one_month/`
+14. **临时记忆 seven_days** — `improve/seven_days/`
+15. **任务计划** — 当前活跃计划的描述
+16. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行
+17. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
 
 每段有字符上限配置（`prompt.char_limits`）。知识正文不自动注入，只注入索引；需要正文时使用显式搜索机制或工具。
-图谱替换按来源独立生效：启用某个知识层级开关时，仅该层级索引与 `kemo_graph` 段互斥；启用临时记忆开关时，仅三层临时记忆与其互斥。永久记忆和临时重要记忆始终保留。
+图谱替换按来源独立生效：被替换的知识索引和三层临时记忆仍保留固定 Prompt 段，但正文改为“已被知识图谱替代”；`kemo_graph` 按用户、共享、全局知识与半年、一月、七天记忆拆成六个子层逐项报告。未连接时不回退原始内容。永久记忆和临时重要记忆始终保留。
 
 ---
 
