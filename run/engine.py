@@ -1044,13 +1044,43 @@ def _iter_request_events_impl(
                             },
                         }
                     )
+                    iteration_text: list[str] = []
+                    iteration_reasoning: list[str] = []
+                    calls: list[ToolCall] = []
+                    iteration_done: RunEvent | None = None
+                    iteration_usage: Usage | None = None
                     try:
-                        buffered_provider_events = list(
-                            _provider_events(provider, protocol_request)
-                        )
-                        for buffered_event in buffered_provider_events:
-                            if buffered_event.type == "error":
-                                _raise_if_context_length_exceeded(buffered_event.error)
+                        for event in _provider_events(provider, protocol_request):
+                            if cancel_event is not None and cancel_event.is_set():
+                                return
+                            if event.type == "text_delta":
+                                iteration_text.append(event.content)
+                                yield event
+                            elif event.type == "reasoning_delta":
+                                iteration_reasoning.append(event.content)
+                                yield event
+                            elif event.type == "tool_call_start":
+                                calls.append(
+                                    ToolCall(
+                                        id=event.tool_call_id,
+                                        name=event.tool_name,
+                                        arguments=event.arguments or {},
+                                    )
+                                )
+                                yield event
+                            elif event.type == "usage":
+                                iteration_usage = _usage_from_dict(event.usage)
+                                yield RunEvent(
+                                    type="usage",
+                                    usage=event.usage,
+                                    metadata={"iteration": iteration},
+                                )
+                            elif event.type == "error":
+                                _raise_if_context_length_exceeded(event.error)
+                                yield event
+                                return
+                            elif event.type == "done":
+                                iteration_done = event
                         break
                     except BaseException as exc:
                         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
@@ -1121,50 +1151,14 @@ def _iter_request_events_impl(
                         context_stats["api_context_retries"] = context_retry_count
                         for retry_event in retry_events:
                             yield retry_event
-                iteration_text: list[str] = []
-                iteration_reasoning: list[str] = []
-                calls: list[ToolCall] = []
-                iteration_done: RunEvent | None = None
-                iteration_usage: Usage | None = None
-
-                for event in buffered_provider_events:
-                    if cancel_event is not None and cancel_event.is_set():
-                        return
-                    if event.type == "text_delta":
-                        iteration_text.append(event.content)
-                        all_text.append(event.content)
-                        yield event
-                    elif event.type == "reasoning_delta":
-                        iteration_reasoning.append(event.content)
-                        all_reasoning.append(event.content)
-                        yield event
-                    elif event.type == "tool_call_start":
-                        calls.append(
-                            ToolCall(
-                                id=event.tool_call_id,
-                                name=event.tool_name,
-                                arguments=event.arguments or {},
-                            )
-                        )
-                        yield event
-                    elif event.type == "usage":
-                        iteration_usage = _usage_from_dict(event.usage)
-                        yield RunEvent(
-                            type="usage",
-                            usage=event.usage,
-                            metadata={"iteration": iteration},
-                        )
-                    elif event.type == "error":
-                        yield event
-                        return
-                    elif event.type == "done":
-                        iteration_done = event
 
                 if iteration_done is None:
                     yield error_event(EngineError("Provider 事件流缺少 done 终态"), phase="provider")
                     return
                 if iteration_usage is None:
                     iteration_usage = _usage_from_dict(iteration_done.usage)
+                all_text.extend(iteration_text)
+                all_reasoning.extend(iteration_reasoning)
                 _merge_usage(usage_total, iteration_usage)
                 final_metadata = dict(iteration_done.metadata)
                 provider_response = final_metadata.get("provider_response")

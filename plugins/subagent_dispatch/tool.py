@@ -8,6 +8,7 @@ from run.agent_runner import AgentRunner
 from run.agent_service import get_agent_scheduler
 from run.agents import AgentError, discover_agents
 from run.config import load_config
+from run.task_plan_service import persist_agent_result
 
 
 def _public(root: Path, user: str):
@@ -54,10 +55,22 @@ def run(
         payload = input or {}
         if wait:
             result = AgentRunner(root, user, config=config).run(agent, payload)
+            plan = None
+            if agent == "task_plan" and isinstance(result.data, dict):
+                plan = persist_agent_result(
+                    root=root,
+                    user=user,
+                    input_data=payload,
+                    result_data=result.data,
+                    source=str(context.get("source") or "web"),
+                    session_id=str(context.get("session_id") or "web"),
+                    config=config,
+                )
             return {
                 "status": "completed",
                 "agent": result.agent,
                 "data": result.data,
+                "plan": plan,
                 "usage": result.usage,
                 "model": result.model,
             }

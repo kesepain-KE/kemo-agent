@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from cron.scheduler import (
     CronScheduler,
+    cleanup_old_system_tasks,
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
     recover_all,
@@ -29,7 +30,7 @@ from message.transport import (
     TransportRegistry,
 )
 from provider.factory import create_provider
-from run.config import load_config, read_json_object
+from run.config import read_json_object
 from run.maintenance import MaintenanceScheduler
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
@@ -212,22 +213,15 @@ class RuntimeHost:
             self._stop_event.clear()
 
         try:
+            if self.cron_enabled:
+                for user in list_users(self.root):
+                    cleanup_old_system_tasks(self.root, user)
             recover_all(self.root)
             self._recover_message_state()
 
             if self.cron_enabled:
-                for user in list_users(self.root):
-                    user_config = load_config(user, self.root)
-                    ensure_memory_maintenance_tasks(
-                        self.root,
-                        user,
-                        user_config,
-                    )
-                    ensure_memory_promotion_task(
-                        self.root,
-                        user,
-                        user_config,
-                    )
+                ensure_memory_maintenance_tasks(self.root, self.config)
+                ensure_memory_promotion_task(self.root)
 
             self._set_component("router", "starting")
             self.router.start()

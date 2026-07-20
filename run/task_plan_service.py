@@ -10,7 +10,7 @@ from provider.factory import create_provider
 from run.agent_runner import AgentRunError, AgentRunner
 from run.config import load_config
 from run.memory import MemoryStore
-from run.task_plan_store import PlanValidationError, normalize_plan
+from run.task_plan_store import PlanStore, PlanValidationError, normalize_plan
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 
@@ -372,3 +372,48 @@ def edit_plan(
         existing_plan=plan,
         edit_request=edit_request,
     )
+
+
+def persist_agent_result(
+    *,
+    root: Path,
+    user: str,
+    input_data: dict[str, Any],
+    result_data: dict[str, Any],
+    source: str = "web",
+    session_id: str = "web",
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Normalize and persist a task_plan agent response."""
+
+    action = result_data.get("action")
+    if action == "skip":
+        return None
+    if action not in {"create", "edit"}:
+        raise PlanGenerationError(f"task_plan 返回未知 action：{action!r}")
+    existing = input_data.get("existing_plan")
+    if action == "edit" and not isinstance(existing, dict):
+        raise PlanGenerationError("task_plan 编辑结果缺少 existing_plan")
+    if action == "create":
+        existing = None
+    cfg = config if config is not None else load_config(user, root)
+    registry = _runtime_tools(root, user, cfg, None)
+    task_plan_config = cfg.get("task_plan") or {}
+    auto_accept = bool(input_data.get("auto_accept", task_plan_config.get("auto_accept", False)))
+    max_steps = int(input_data.get("max_steps", task_plan_config.get("max_steps", 20)))
+    normalized = _normalize_result(
+        data=result_data,
+        goal=str(input_data.get("goal") or result_data.get("description") or ""),
+        user=user,
+        source=source,
+        session_id=session_id,
+        auto_accept=auto_accept,
+        max_steps=max_steps,
+        tool_names=set(registry.tools),
+        existing_plan=existing,
+    )
+    store = PlanStore(root, user)
+    if action == "create":
+        return store.create(normalized)
+    plan_id = str(existing.get("plan_id") or normalized.get("plan_id") or "")
+    return store.update(plan_id, lambda current: {**normalized, "plan_id": current["plan_id"]})
