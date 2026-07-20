@@ -1,4 +1,4 @@
-"""用户隔离的精简 cron 任务存储，支持旧格式自动迁移。"""
+"""用户与系统隔离的精简 cron 任务存储，支持旧格式自动迁移。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,14 @@ TASK_STATUSES = frozenset({
     "enabled", "paused", "running", "completed", "failed", "cancelled",
 })
 TASK_TYPES = frozenset({"once", "daily", "recurring"})
-EXEC_MODES = frozenset({"agent", "subagent", "function"})
+SYSTEM_EXEC_MODE = "system"
+EXEC_MODES = frozenset({"agent", "subagent", "function", SYSTEM_EXEC_MODE})
+SYSTEM_TASK_IDS = frozenset({
+    "memory_promotion",
+    "memory_periodic_scan",
+    "memory_daily_consolidate",
+})
+SYSTEM_TASK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
@@ -56,7 +63,9 @@ def _generate_task_id() -> str:
     return f"cron_{uuid.uuid4().hex[:8]}"
 
 
-def _task_dir(root: Path, user: str) -> Path:
+def _task_dir(root: Path, user: str, *, system: bool = False) -> Path:
+    if system:
+        return root / "cron" / "task_cron_system"
     return root / "users" / user / "task_cron"
 
 
@@ -94,13 +103,19 @@ def _beijing_iso(value: Any, *, field: str, allow_empty: bool = False) -> str:
     return parsed.astimezone(BEIJING).isoformat()
 
 
-def _validate_task(data: dict[str, Any]) -> None:
+def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
     if not isinstance(data, dict):
         raise CronValidationError("任务必须是 JSON 对象")
+    system_mode = bool(system) if system is not None else data.get("exec_mode") == SYSTEM_EXEC_MODE
     task_id = data.get("task_id")
-    if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
+    valid_task_id = (
+        isinstance(task_id, str)
+        and (TASK_ID_RE.fullmatch(task_id) or (system_mode and SYSTEM_TASK_ID_RE.fullmatch(task_id)))
+    )
+    if not valid_task_id:
         raise CronValidationError(f"task_id 无效：{task_id!r}")
-    for field in ("title", "prompt", "user"):
+    required_fields = ("title",) if system_mode else ("title", "prompt", "user")
+    for field in required_fields:
         if not isinstance(data.get(field), str) or not data[field].strip():
             raise CronValidationError(f"{field} 不能为空")
     task_type = data.get("type")
@@ -110,11 +125,16 @@ def _validate_task(data: dict[str, Any]) -> None:
     if status not in TASK_STATUSES:
         raise CronValidationError(f"任务状态无效：{status!r}")
     exec_mode = data.get("exec_mode")
-    if exec_mode not in EXEC_MODES:
+    if exec_mode not in (EXEC_MODES | {SYSTEM_EXEC_MODE}):
         raise CronValidationError(f"exec_mode 无效：{exec_mode!r}")
-    system_key = data.get("system_key")
-    if not isinstance(system_key, str):
-        raise CronValidationError("system_key 必须是字符串")
+    if system_mode and exec_mode != SYSTEM_EXEC_MODE:
+        raise CronValidationError("系统任务必须使用 system 执行模式")
+    if system_mode:
+        action = data.get("action")
+        if not isinstance(action, str) or not action.strip():
+            raise CronValidationError("系统任务需要非空 action")
+    elif exec_mode == SYSTEM_EXEC_MODE:
+        raise CronValidationError("system 执行模式只能用于系统任务")
     if task_type == "recurring":
         interval = data.get("interval_seconds")
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
@@ -152,8 +172,10 @@ def _validate_task(data: dict[str, Any]) -> None:
     allowed = {
         "task_id", "title", "prompt", "user", "type", "next_run_at",
         "latest_run_at", "status", "created_at",
-        "exec_mode", "system_key",
+        "exec_mode",
     }
+    if system_mode:
+        allowed.add("action")
     if task_type == "recurring":
         allowed.add("interval_seconds")
     elif task_type == "daily":
@@ -177,7 +199,7 @@ def normalize_task(
     status: str = "enabled",
     created_at: str = "",
     exec_mode: str = "agent",
-    system_key: str = "",
+    action: str | None = None,
 ) -> dict[str, Any]:
     """构造仅包含精简 schema 字段的任务。"""
     now = now_beijing()
@@ -200,8 +222,9 @@ def normalize_task(
         "status": status,
         "created_at": _beijing_iso(created_at or now, field="created_at"),
         "exec_mode": exec_mode,
-        "system_key": system_key,
     }
+    if exec_mode == SYSTEM_EXEC_MODE:
+        task["action"] = action or ""
     if type == "recurring":
         task["interval_seconds"] = 60 if interval_seconds is None else interval_seconds
     elif type == "daily":
@@ -220,11 +243,12 @@ def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]
     created_at = data.get("created_at") or now_beijing()
     interval = data.get("interval_seconds", schedule.get("interval_seconds"))
     time_value = data.get("time", schedule.get("time"))
+    old_system = bool(data.get("system_key")) or data.get("exec_mode") == SYSTEM_EXEC_MODE
     return normalize_task(
         task_id=data.get("task_id"),
         title=str(data.get("title") or "未命名定时任务"),
-        prompt=str(data.get("prompt") or "执行定时任务"),
-        user=str(data.get("user") or fallback_user),
+        prompt="" if old_system else str(data.get("prompt") or "执行定时任务"),
+        user="" if old_system else str(data.get("user") or fallback_user),
         type=task_type,
         interval_seconds=interval,
         time=time_value,
@@ -232,19 +256,32 @@ def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]
         latest_run_at=str(latest_run_at),
         status=status,
         created_at=str(created_at),
-        exec_mode=str(data.get("exec_mode") or "agent"),
-        system_key=str(data.get("system_key") or ""),
+        exec_mode=SYSTEM_EXEC_MODE if old_system else str(data.get("exec_mode") or "agent"),
+        action=str(data.get("action") or _legacy_system_action(data.get("system_key"), data.get("task_id"))) if old_system else None,
     )
+
+
+def _legacy_system_action(system_key: Any, task_id: Any) -> str:
+    key = str(system_key or "")
+    if key.endswith("periodic_scan"):
+        return "periodic_scan"
+    if key.endswith("daily_consolidate"):
+        return "daily_consolidate"
+    if key.endswith("memory_promotion"):
+        return "memory_promotion"
+    return str(task_id or "")
 
 
 class CronStore:
     """磁盘权威、按用户隔离的 cron 任务存储。"""
 
-    def __init__(self, root: Path, user: str) -> None:
+    def __init__(self, root: Path, user: str, *, system: bool = False) -> None:
         self.root = root.resolve()
         self.user = user
-        self._dir = _task_dir(self.root, self.user)
-        self._lock = _store_lock(self.root, self.user)
+        self._system = system
+        self._dir = _task_dir(self.root, self.user, system=self._system)
+        lock_user = f"system:{self.user}" if self._system else self.user
+        self._lock = _store_lock(self.root, lock_user)
 
     def _path(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
@@ -257,18 +294,19 @@ class CronStore:
         if not isinstance(data, dict):
             raise CronError(f"任务文件损坏：{path.stem}（根节点不是对象）")
         try:
-            _validate_task(data)
+            _validate_task(data, system=self._system)
             return data
         except CronValidationError:
             if not migrate:
                 raise
         migrated = _migrate_task(data, fallback_user=self.user)
+        _validate_task(migrated, system=self._system)
         _atomic_write(path, migrated)
         return migrated
 
     def create(self, task: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            _validate_task(task)
+            _validate_task(task, system=self._system)
             self._dir.mkdir(parents=True, exist_ok=True)
             path = self._path(task["task_id"])
             if path.exists():
@@ -288,7 +326,8 @@ class CronStore:
             if not self._dir.is_dir():
                 return []
             tasks: list[dict[str, Any]] = []
-            for path in sorted(self._dir.glob("cron_*.json"), key=lambda item: item.name):
+            pattern = "*.json" if self._system else "cron_*.json"
+            for path in sorted(self._dir.glob(pattern), key=lambda item: item.name):
                 try:
                     tasks.append(self._load(path))
                 except (CronError, CronValidationError):
@@ -308,7 +347,7 @@ class CronStore:
             updated = mutator(dict(current))
             if not isinstance(updated, dict):
                 raise CronError("mutator 必须返回 dict")
-            _validate_task(updated)
+            _validate_task(updated, system=self._system)
             _atomic_write(path, updated)
             return updated
 
@@ -326,7 +365,8 @@ class CronStore:
         with self._lock:
             if not self._dir.is_dir():
                 return recovered
-            for path in sorted(self._dir.glob("cron_*.json"), key=lambda item: item.name):
+            pattern = "*.json" if self._system else "cron_*.json"
+            for path in sorted(self._dir.glob(pattern), key=lambda item: item.name):
                 try:
                     data = self._load(path)
                 except (CronError, CronValidationError):
@@ -335,7 +375,7 @@ class CronStore:
                     continue
                 data["status"] = "enabled"
                 data["next_run_at"] = now_beijing()
-                _validate_task(data)
+                _validate_task(data, system=self._system)
                 _atomic_write(path, data)
                 recovered.append(str(data.get("task_id") or path.stem))
         return recovered

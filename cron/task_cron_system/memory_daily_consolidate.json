@@ -1,0 +1,14 @@
+{
+  "task_id": "memory_daily_consolidate",
+  "title": "临时重要记忆每日整理",
+  "prompt": "",
+  "user": "",
+  "type": "daily",
+  "next_run_at": "2026-07-21T02:00:00+08:00",
+  "latest_run_at": "",
+  "status": "enabled",
+  "created_at": "2026-07-20T20:59:10.106223+08:00",
+  "exec_mode": "system",
+  "action": "daily_consolidate",
+  "time": "02:00"
+}

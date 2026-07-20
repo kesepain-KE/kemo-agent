@@ -163,7 +163,6 @@ def edit_cron_task(
             status=str(task.get("status") or "enabled"),
             created_at=str(task.get("created_at") or ""),
             exec_mode=str(task.get("exec_mode") or "agent"),
-            system_key=str(task.get("system_key") or ""),
         )
     except CronValidationError as exc:
         raise CronGenerationError(f"任务校验失败：{exc}") from exc

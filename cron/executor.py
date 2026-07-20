@@ -174,6 +174,89 @@ def _execute_claimed_task(
     return _finish_task(store, task, failed=failed)
 
 
+def _execute_memory_promotion(
+    root: Path,
+    user: str,
+    *,
+    config: dict[str, Any],
+    provider_factory: Callable[[dict[str, Any]], Any],
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    from cron.review_due import scan_and_promote
+
+    return scan_and_promote(
+        root=root,
+        user=user,
+        config=config,
+        provider_factory=provider_factory,
+        cancel_event=cancel_event,
+    )
+
+
+def _execute_memory_review(
+    root: Path,
+    user: str,
+    *,
+    trigger: str,
+    config: dict[str, Any],
+    provider_factory: Callable[[dict[str, Any]], Any],
+    cancel_event: threading.Event | None,
+    task_id: str,
+) -> dict[str, Any]:
+    if cancel_event is not None and cancel_event.is_set():
+        return {"status": "cancelled", "action": trigger, "user": user}
+    result = AgentRunner(
+        root,
+        user,
+        config=config,
+        provider_factory=provider_factory,
+    ).run(
+        "memory_temporary_important",
+        {"trigger": trigger},
+        cancel_event=cancel_event,
+        task_id=task_id,
+    )
+    return {
+        "status": "completed",
+        "action": trigger,
+        "user": user,
+        "data": result.data if isinstance(getattr(result, "data", None), dict) else {},
+    }
+
+
+def _execute_system_task(
+    *,
+    root: Path,
+    user: str,
+    task: dict[str, Any],
+    config: dict[str, Any],
+    provider_factory: Callable[[dict[str, Any]], Any],
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    if task.get("exec_mode") != "system":
+        raise CronValidationError("system_task 必须使用 system 执行模式")
+    action = str(task.get("action") or task.get("task_id") or "")
+    if action == "memory_promotion":
+        return _execute_memory_promotion(
+            root,
+            user,
+            config=config,
+            provider_factory=provider_factory,
+            cancel_event=cancel_event,
+        )
+    if action in {"periodic_scan", "daily_consolidate"}:
+        return _execute_memory_review(
+            root,
+            user,
+            trigger=action,
+            config=config,
+            provider_factory=provider_factory,
+            cancel_event=cancel_event,
+            task_id=str(task.get("task_id") or action),
+        )
+    raise CronValidationError(f"未注册的系统 cron 动作：{action}")
+
+
 def execute_cron_task(
     *,
     root: Path,
@@ -183,9 +266,19 @@ def execute_cron_task(
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
+    system_task: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """根据 ``exec_mode`` 领取并执行一个 cron 任务。"""
     cfg = config if config is not None else load_config(user, root)
+    if system_task is not None:
+        return _execute_system_task(
+            root=root,
+            user=user,
+            task=system_task,
+            config=cfg,
+            provider_factory=provider_factory,
+            cancel_event=cancel_event,
+        )
     task = _claim_task(CronStore(root, user), task_id)
     return _execute_claimed_task(
         root=root,

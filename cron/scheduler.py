@@ -17,32 +17,17 @@ from run.tools import ToolRegistry, discover_tools
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
-MEMORY_PERIODIC_SYSTEM_KEY = "memory_temporary_important.periodic_scan"
-MEMORY_DAILY_SYSTEM_KEY = "memory_temporary_important.daily_consolidate"
-MEMORY_PROMOTION_SYSTEM_KEY = "self_improve.memory_promotion"
+MEMORY_PERIODIC_TASK_ID = "memory_periodic_scan"
+MEMORY_DAILY_TASK_ID = "memory_daily_consolidate"
+MEMORY_PROMOTION_TASK_ID = "memory_promotion"
+# 仅保留旧导入名，持久化 schema 已不再包含 system_key。
+MEMORY_PERIODIC_SYSTEM_KEY = MEMORY_PERIODIC_TASK_ID
+MEMORY_DAILY_SYSTEM_KEY = MEMORY_DAILY_TASK_ID
+MEMORY_PROMOTION_SYSTEM_KEY = MEMORY_PROMOTION_TASK_ID
 
 _PERIODIC_TITLE = "临时重要记忆定时巡检"
 _DAILY_TITLE = "临时重要记忆每日整理"
 _PROMOTION_TITLE = "记忆碎片到期晋升检查"
-
-
-def _subagent_prompt(trigger: str) -> str:
-    return json.dumps(
-        {
-            "subagent": "memory_temporary_important",
-            "input": {"trigger": trigger},
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
-def _promotion_prompt() -> str:
-    return json.dumps(
-        {"function": "cron.review_due.scan_and_promote"},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
 
 
 def _memory_task_specs(config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -64,22 +49,33 @@ def _memory_task_specs(config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 
     return (
         {
-            "key": MEMORY_PERIODIC_SYSTEM_KEY,
+            "task_id": MEMORY_PERIODIC_TASK_ID,
             "title": _PERIODIC_TITLE,
-            "prompt": _subagent_prompt("periodic_scan"),
             "type": "recurring",
             "interval_seconds": interval_seconds,
-            "exec_mode": "subagent",
+            "exec_mode": "system",
+            "action": "periodic_scan",
         },
         {
-            "key": MEMORY_DAILY_SYSTEM_KEY,
+            "task_id": MEMORY_DAILY_TASK_ID,
             "title": _DAILY_TITLE,
-            "prompt": _subagent_prompt("daily_consolidate"),
             "type": "daily",
             "time": daily_time,
-            "exec_mode": "subagent",
+            "exec_mode": "system",
+            "action": "daily_consolidate",
         },
     )
+
+
+def _promotion_spec() -> dict[str, Any]:
+    return {
+        "task_id": MEMORY_PROMOTION_TASK_ID,
+        "title": _PROMOTION_TITLE,
+        "type": "recurring",
+        "interval_seconds": 30,
+        "exec_mode": "system",
+        "action": "memory_promotion",
+    }
 
 
 def _same_schedule(task: dict[str, Any], spec: dict[str, Any]) -> bool:
@@ -96,7 +92,6 @@ def _reconcile_system_task(
     store: CronStore,
     current: dict[str, Any] | None,
     *,
-    user: str,
     spec: dict[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
@@ -112,15 +107,16 @@ def _reconcile_system_task(
         draft["next_run_at"] = compute_next_run(draft, after=now)
         return store.create(
             normalize_task(
+                task_id=spec["task_id"],
                 title=spec["title"],
-                prompt=spec["prompt"],
-                user=user,
+                prompt="",
+                user="",
                 type=spec["type"],
                 interval_seconds=spec.get("interval_seconds"),
                 time=spec.get("time"),
                 next_run_at=draft["next_run_at"],
                 exec_mode=spec["exec_mode"],
-                system_key=spec["key"],
+                action=spec["action"],
             )
         )
 
@@ -130,10 +126,8 @@ def _reconcile_system_task(
         inactive
         or schedule_changed
         or current.get("title") != spec["title"]
-        or current.get("prompt") != spec["prompt"]
-        or current.get("user") != user
         or current.get("exec_mode") != spec["exec_mode"]
-        or current.get("system_key") != spec["key"]
+        or current.get("action") != spec["action"]
     )
     if not changed:
         return current
@@ -141,11 +135,11 @@ def _reconcile_system_task(
     def mutate(task: dict[str, Any]) -> dict[str, Any]:
         task.update({
             "title": spec["title"],
-            "prompt": spec["prompt"],
-            "user": user,
+            "prompt": "",
+            "user": "",
             "type": spec["type"],
             "exec_mode": spec["exec_mode"],
-            "system_key": spec["key"],
+            "action": spec["action"],
         })
         task.pop("interval_seconds", None)
         task.pop("time", None)
@@ -164,24 +158,17 @@ def _reconcile_system_task(
 
 def ensure_memory_maintenance_tasks(
     root: Path,
-    user: str,
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """创建或校准两个临时重要记忆维护任务。"""
-    store = CronStore(root, user)
+    store = CronStore(root, "__system__", system=True)
     tasks = store.list_tasks()
-    by_key = {
-        task.get("system_key"): task
-        for task in tasks
-        if task.get("system_key")
-    }
-    by_title = {task.get("title"): task for task in tasks}
+    by_id = {task.get("task_id"): task for task in tasks}
     now = datetime.now(BEIJING)
     return [
         _reconcile_system_task(
             store,
-            by_key.get(spec["key"]) or by_title.get(spec["title"]),
-            user=user,
+            by_id.get(spec["task_id"]),
             spec=spec,
             now=now,
         )
@@ -191,39 +178,37 @@ def ensure_memory_maintenance_tasks(
 
 def ensure_memory_promotion_task(
     root: Path,
-    user: str,
-    config: dict[str, Any],
 ) -> dict[str, Any]:
     """创建或校准 30 秒一次的记忆晋升扫描任务。"""
-    del config
-    store = CronStore(root, user)
+    store = CronStore(root, "__system__", system=True)
     tasks = store.list_tasks()
-    current = next(
-        (
-            task
-            for task in tasks
-            if task.get("system_key") == MEMORY_PROMOTION_SYSTEM_KEY
-        ),
-        None,
-    ) or next(
-        (task for task in tasks if task.get("title") == _PROMOTION_TITLE),
-        None,
-    )
-    spec = {
-        "key": MEMORY_PROMOTION_SYSTEM_KEY,
-        "title": _PROMOTION_TITLE,
-        "prompt": _promotion_prompt(),
-        "type": "recurring",
-        "interval_seconds": 30,
-        "exec_mode": "function",
-    }
+    spec = _promotion_spec()
     return _reconcile_system_task(
         store,
-        current,
-        user=user,
+        next((task for task in tasks if task.get("task_id") == spec["task_id"]), None),
         spec=spec,
         now=datetime.now(BEIJING),
     )
+
+
+def cleanup_old_system_tasks(root: Path, user: str) -> int:
+    """删除旧版散落在用户目录、带有 system_key 的系统任务。"""
+    directory = root / "users" / user / "task_cron"
+    if not directory.is_dir():
+        return 0
+    deleted = 0
+    for path in directory.glob("cron_*.json"):
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("system_key"):
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                pass
+    return deleted
 
 
 class CronScheduler:
@@ -280,29 +265,66 @@ class CronScheduler:
 
         executed = 0
         now = datetime.now(BEIJING)
+        if not self._stop_event.is_set():
+            executed += self._scan_system_tasks(now)
         for user in list_users(self.root):
             if self._stop_event.is_set():
                 break
             try:
-                executed += self._scan_user(user, now)
+                executed += self._scan_user_tasks(user, now)
             except Exception as exc:
                 if self.on_error:
                     self.on_error(user, exc)
         return executed
 
-    def _scan_user(self, user: str, now: datetime) -> int:
+    def _scan_system_tasks(self, now: datetime) -> int:
+        from run.users import list_users
+
+        store = CronStore(self.root, "__system__", system=True)
+        executed = 0
+        for task in store.list_tasks():
+            if self._stop_event.is_set():
+                break
+            status = task.get("status", "")
+            if status not in {"enabled", "failed"}:
+                continue
+            if status == "enabled" and not is_due(str(task.get("next_run_at") or ""), now=now):
+                continue
+            task_id = str(task.get("task_id") or "")
+            for user in list_users(self.root):
+                if self._stop_event.is_set():
+                    break
+                try:
+                    result = execute_cron_task(
+                        root=self.root,
+                        user=user,
+                        task_id=task_id,
+                        provider_factory=self.provider_factory,
+                        tool_registry_factory=self.tool_registry_factory,
+                        cancel_event=self._stop_event,
+                        system_task=task,
+                    )
+                    executed += 1
+                    if self.on_task_executed:
+                        self.on_task_executed(user, task_id, result)
+                except Exception as exc:
+                    if self.on_error:
+                        self.on_error(user, exc)
+            try:
+                def advance(current: dict[str, Any]) -> dict[str, Any]:
+                    current["status"] = "enabled"
+                    current["latest_run_at"] = now.astimezone(BEIJING).isoformat()
+                    current["next_run_at"] = compute_next_run(current, after=now)
+                    return current
+                store.update(task_id, advance)
+            except Exception as exc:
+                if self.on_error:
+                    self.on_error("__system__", exc)
+        return executed
+
+    def _scan_user_tasks(self, user: str, now: datetime) -> int:
         store = CronStore(self.root, user)
-        tasks = sorted(
-            store.list_tasks(),
-            key=lambda task: (
-                0
-                if task.get("system_key") == MEMORY_PERIODIC_SYSTEM_KEY
-                or task.get("title") == _PERIODIC_TITLE
-                else 1,
-                str(task.get("next_run_at", "")),
-                str(task.get("task_id", "")),
-            ),
-        )
+        tasks = sorted(store.list_tasks(), key=lambda task: (str(task.get("next_run_at", "")), str(task.get("task_id", ""))))
         executed = 0
         for task in tasks:
             if self._stop_event.is_set():
@@ -347,4 +369,8 @@ def recover_all(root: Path) -> list[str]:
             recovered.extend(CronStore(root, user).recover_interrupted())
         except Exception:
             pass
+    try:
+        recovered.extend(CronStore(root, "__system__", system=True).recover_interrupted())
+    except Exception:
+        pass
     return recovered
