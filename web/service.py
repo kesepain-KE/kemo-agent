@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
 import queue
 import re
 import threading
@@ -16,6 +17,8 @@ import uuid
 from pydantic import TypeAdapter, ValidationError
 
 from events import RunEvent
+from message.identity import IdentityResolver
+from message.plugin import MessagePluginConfig, MessagePluginError
 from provider.protocol.models import (
     AudioContent,
     ContentBlock,
@@ -61,7 +64,16 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
 _CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
+_FILE_SCOPES = frozenset({"file_upload", "download"})
+_AVATAR_FORMATS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+_AVATAR_SEARCH_ORDER = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {"api_key", "access_token", "password", "session_secret", "authorization"}
 )
@@ -108,6 +120,145 @@ def _tool_text_preview(value: Any) -> tuple[str, bool]:
             rendered = str(value)
     truncated = len(rendered) > _TOOL_TEXT_LIMIT
     return rendered[:_TOOL_TEXT_LIMIT], truncated
+
+
+def _visible_children(directory: Path) -> list[Path]:
+    try:
+        children = [
+            item
+            for item in directory.iterdir()
+            if not item.name.startswith(".")
+            and item.name != "__pycache__"
+            and not item.is_symlink()
+            and not getattr(item, "is_junction", lambda: False)()
+        ]
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError:
+        return []
+    children.sort(
+        key=lambda item: (
+            0 if item.is_dir() else 1,
+            item.name.casefold(),
+            item.name,
+        )
+    )
+    return children
+
+
+def _directory_tree(directory: Path) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    summary = {"total_files": 0, "total_dirs": 0, "total_size": 0}
+
+    def visit(current: Path) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for item in _visible_children(current):
+            relative = item.relative_to(directory).as_posix()
+            try:
+                if item.is_dir():
+                    summary["total_dirs"] += 1
+                    result.append(
+                        {
+                            "type": "directory",
+                            "name": item.name,
+                            "relative_path": relative,
+                            "children": visit(item),
+                        }
+                    )
+                elif item.is_file():
+                    stat = item.stat()
+                    summary["total_files"] += 1
+                    summary["total_size"] += stat.st_size
+                    result.append(
+                        {
+                            "type": "file",
+                            "name": item.name,
+                            "relative_path": relative,
+                            "size": stat.st_size,
+                            "updated_at": stat.st_mtime,
+                            "extension": item.suffix.lower(),
+                        }
+                    )
+            except OSError:
+                continue
+        return result
+
+    return visit(directory), summary
+
+
+def _flat_files(directory: Path, *, relative_to: Path | None = None) -> list[dict[str, Any]]:
+    base = relative_to or directory
+    files: list[dict[str, Any]] = []
+
+    def visit(current: Path) -> None:
+        for item in _visible_children(current):
+            try:
+                if item.is_dir():
+                    visit(item)
+                elif item.is_file():
+                    stat = item.stat()
+                    files.append(
+                        {
+                            "name": item.name,
+                            "relative_path": item.relative_to(base).as_posix(),
+                            "size": stat.st_size,
+                            "updated_at": stat.st_mtime,
+                        }
+                    )
+            except OSError:
+                continue
+
+    visit(directory)
+    files.sort(key=lambda item: (str(item["relative_path"]).casefold(), item["relative_path"]))
+    return files
+
+
+def _safe_relative_target(directory: Path, value: Any) -> tuple[str, Path]:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidRequestError("path 必须是非空相对路径")
+    normalized = value.strip().replace("\\", "/")
+    pure = PurePosixPath(normalized)
+    if (
+        pure.is_absolute()
+        or Path(normalized).is_absolute()
+        or ".." in pure.parts
+        or "\x00" in normalized
+        or (pure.parts and ":" in pure.parts[0])
+    ):
+        raise InvalidRequestError("path 必须位于允许的目录内且不能包含 ..")
+    root = directory.resolve()
+    candidate = root.joinpath(*pure.parts)
+    target = candidate.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise InvalidRequestError("path 越出允许的目录") from None
+    return pure.as_posix(), candidate
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _image_media_type(data: bytes) -> str | None:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 @dataclass(slots=True)
@@ -312,6 +463,349 @@ class WebRunService:
             "user": name,
             "config": redacted,
             "redacted_paths": redacted_paths,
+        }
+
+    def _project_path(self, path: Path) -> str:
+        return path.resolve().relative_to(self.root).as_posix()
+
+    def _file_scope_root(self, user: Any, scope: Any) -> tuple[str, str, Path]:
+        name = self.require_user(user)
+        if not isinstance(scope, str) or scope not in _FILE_SCOPES:
+            raise InvalidRequestError(
+                "scope 只允许 file_upload 或 download"
+            )
+        return name, scope, self.root / "users" / name / scope
+
+    def files(self, user: Any, scope: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        tree, summary = _directory_tree(directory)
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "root": self._project_path(directory),
+            "summary": summary,
+            "tree": tree,
+        }
+
+    def file_download(self, user: Any, scope: Any, path: Any) -> Path:
+        _, _, directory = self._file_scope_root(user, scope)
+        _, target = _safe_relative_target(directory, path)
+        if target.is_symlink() or not target.is_file():
+            raise NotFoundError(f"文件不存在：{path}")
+        return target
+
+    def delete_file(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        relative, target = _safe_relative_target(directory, path)
+        if target.is_symlink() or not target.is_file():
+            raise NotFoundError(f"文件不存在：{relative}")
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise WebServiceError(f"文件删除失败：{relative}") from exc
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "path": relative,
+            "deleted": True,
+        }
+
+    def tmp_files(self) -> dict[str, Any]:
+        directory = self.root / "tmp"
+        tree, summary = _directory_tree(directory)
+        return {"root": "tmp", "summary": summary, "tree": tree}
+
+    def delete_tmp_file(self, path: Any) -> dict[str, Any]:
+        relative, target = _safe_relative_target(self.root / "tmp", path)
+        if target.is_symlink() or not target.is_file():
+            raise NotFoundError(f"临时文件不存在：{relative}")
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise WebServiceError(f"临时文件删除失败：{relative}") from exc
+        return {"path": relative, "deleted": True}
+
+    def _avatar_path(self, user: str) -> Path | None:
+        directory = self.root / "users" / user / "avatar"
+        if not directory.is_dir():
+            return None
+        candidates = {
+            item.suffix.casefold(): item
+            for item in _visible_children(directory)
+            if item.is_file() and item.stem.casefold() == "avatar"
+        }
+        for suffix in _AVATAR_SEARCH_ORDER:
+            path = candidates.get(suffix)
+            if path is not None:
+                return path
+        return None
+
+    def avatar(self, user: Any) -> Path | None:
+        name = self.require_user(user)
+        return self._avatar_path(name)
+
+    def save_avatar(
+        self,
+        user: Any,
+        data: Any,
+        content_type: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(data, bytes) or not data:
+            raise InvalidRequestError("头像文件不能为空")
+        if len(data) > AVATAR_MAX_BYTES:
+            raise InvalidRequestError("头像文件不能超过 5 MB")
+        declared = str(content_type or "").strip().casefold()
+        if declared == "image/jpg":
+            declared = "image/jpeg"
+        if declared not in _AVATAR_FORMATS:
+            raise InvalidRequestError("头像只支持 PNG、JPEG、GIF 或 WebP")
+        detected = _image_media_type(data)
+        if detected is None or detected != declared:
+            raise InvalidRequestError("头像文件内容与声明的图片格式不一致")
+        directory = self.root / "users" / name / "avatar"
+        target = directory / f"avatar{_AVATAR_FORMATS[detected]}"
+        _atomic_write(target, data)
+        for candidate in _visible_children(directory):
+            if (
+                candidate != target
+                and candidate.is_file()
+                and candidate.stem.casefold() == "avatar"
+                and candidate.suffix.casefold() in _AVATAR_SEARCH_ORDER
+            ):
+                try:
+                    candidate.unlink()
+                except OSError as exc:
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                    raise WebServiceError("旧头像清理失败") from exc
+        return {
+            "user": name,
+            "avatar_path": self._project_path(target),
+            "size": len(data),
+            "format": detected,
+        }
+
+    @staticmethod
+    def _validated_soul_content(content: Any) -> str:
+        if not isinstance(content, str) or not content.strip():
+            raise InvalidRequestError("content 必须是非空字符串")
+        if len(content) > 65_536:
+            raise InvalidRequestError("content 不能超过 65536 字符")
+        return content
+
+    def _soul_document(self, path: Path, *, user: str | None = None) -> dict[str, Any]:
+        if not path.is_file() or path.is_symlink():
+            label = "用户人格文件尚未创建" if user is not None else "全局人格文件不存在"
+            raise NotFoundError(label)
+        try:
+            content = path.read_text("utf-8")
+            stat = path.stat()
+        except (OSError, UnicodeError) as exc:
+            raise WebServiceError("人格文件不可读") from exc
+        result: dict[str, Any] = {
+            "path": self._project_path(path),
+            "content": content,
+            "size": stat.st_size,
+            "updated_at": stat.st_mtime,
+        }
+        if user is not None:
+            result = {"user": user, **result}
+        return result
+
+    def user_soul(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        return self._soul_document(
+            self.root / "users" / name / "user_soul.md",
+            user=name,
+        )
+
+    def update_user_soul(self, user: Any, content: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        path = self.root / "users" / name / "user_soul.md"
+        _atomic_write(path, self._validated_soul_content(content).encode("utf-8"))
+        return self._soul_document(path, user=name)
+
+    def global_soul(self) -> dict[str, Any]:
+        return self._soul_document(self.root / "config" / "global_soul.md")
+
+    def update_global_soul(self, content: Any) -> dict[str, Any]:
+        path = self.root / "config" / "global_soul.md"
+        _atomic_write(path, self._validated_soul_content(content).encode("utf-8"))
+        return self._soul_document(path)
+
+    def logo(self) -> Path | None:
+        path = self.root / "kemo-agent.jpg"
+        return path if path.is_file() and not path.is_symlink() else None
+
+    def agents(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        definitions = sorted(
+            discover_agents(self.root, name).agents.values(),
+            key=lambda item: (item.source, item.name.casefold(), item.name),
+        )
+        agents = [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "enabled": definition.enabled,
+                "source": "global" if definition.source == "builtin" else "user",
+                "execution": definition.execution,
+                "model_profile": definition.model_profile,
+                "exposure": definition.capabilities.exposure,
+                "root": self._project_path(definition.directory),
+                "files": _flat_files(definition.directory),
+            }
+            for definition in definitions
+        ]
+        return {
+            "user": name,
+            "summary": {
+                "total": len(agents),
+                "enabled": sum(item["enabled"] for item in agents),
+                "global": sum(item["source"] == "global" for item in agents),
+                "user": sum(item["source"] == "user" for item in agents),
+            },
+            "agents": agents,
+        }
+
+    def message_status(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        message_config = read_json_object(
+            self.root / "config" / "message_config.json",
+            allow_empty=True,
+        )
+        resolver = IdentityResolver.from_config(self.root, message_config)
+        bindings = [
+            {
+                "platform": binding.platform,
+                "external_user_id": binding.external_user_id,
+                "internal_user": binding.internal_user,
+                "chat_type": binding.chat_type,
+                "external_chat_id": binding.external_chat_id,
+                "match_priority": (
+                    2
+                    + (1 if binding.chat_type is not None else 0)
+                    + (2 if binding.external_chat_id is not None else 0)
+                ),
+            }
+            for binding in resolver.bindings
+            if binding.internal_user == name
+        ]
+        runtime = self._runtime_status()
+        components = runtime.get("components") or {}
+        transports: list[dict[str, Any]] = []
+        issues: list[dict[str, str]] = []
+        base = self.root / "message" / "out"
+        for directory in _visible_children(base):
+            if not directory.is_dir():
+                continue
+            try:
+                config = MessagePluginConfig.load(self.root, directory)
+                if config.bound_user != name:
+                    continue
+                try:
+                    state = read_json_object(config.state_path, allow_empty=True)
+                except Exception as exc:
+                    state = {}
+                    issues.append({"name": directory.name, "error": str(exc)})
+                component = components.get(f"transport:{config.platform}")
+                component = component if isinstance(component, dict) else {}
+                runtime_state = str(component.get("state") or "")
+                transport_state = (
+                    "running"
+                    if runtime_state == "running"
+                    else "error"
+                    if runtime_state == "failed" or state.get("health") == "dead"
+                    else "stopped"
+                )
+                last_error = component.get("last_error") or state.get("error")
+                transports.append(
+                    {
+                        "name": config.machine_id,
+                        "platform": config.platform,
+                        "display_name": config.display_name,
+                        "capabilities": sorted(config.capabilities),
+                        "state": transport_state,
+                        "bound_user": config.bound_user,
+                        "allowed_tools": (
+                            sorted(config.allowed_tools)
+                            if config.allowed_tools is not None
+                            else None
+                        ),
+                        "last_error": last_error,
+                        "health": str(state.get("health") or "unknown"),
+                        "last_check": state.get("last_check"),
+                        "last_message_at": state.get("last_message_at"),
+                        "latency_ms": state.get("latency_ms"),
+                        "messages_received_today": int(
+                            state.get("messages_received_today") or 0
+                        ),
+                        "messages_sent_today": int(
+                            state.get("messages_sent_today") or 0
+                        ),
+                    }
+                )
+            except MessagePluginError as exc:
+                issues.append({"name": directory.name, "error": str(exc)})
+        transports.sort(key=lambda item: (item["platform"], item["name"]))
+        return {
+            "user": name,
+            "bindings": bindings,
+            "transports": transports,
+            "summary": {
+                "total_bindings": len(bindings),
+                "total_transports": len(transports),
+                "running_transports": sum(
+                    item["state"] == "running" for item in transports
+                ),
+                "stopped_transports": sum(
+                    item["state"] == "stopped" for item in transports
+                ),
+                "error_transports": sum(
+                    item["state"] == "error" for item in transports
+                ),
+            },
+            "issues": issues,
+        }
+
+    def expands(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        scopes = (
+            ("global", self.root / "global_expand"),
+            ("shared", self.root / "shared_expand"),
+            ("user", self.root / "users" / name / "expand"),
+        )
+        expands = []
+        scope_counts: dict[str, int] = {}
+        for scope, directory in scopes:
+            items = []
+            for module in _visible_children(directory):
+                if not module.is_dir():
+                    continue
+                items.append(
+                    {
+                        "name": module.name,
+                        "type": "directory",
+                        "relative_path": module.name,
+                        "has_register": (module / "expand.json").is_file(),
+                        "files": _flat_files(module, relative_to=directory),
+                    }
+                )
+            scope_counts[scope] = len(items)
+            expands.append(
+                {
+                    "scope": scope,
+                    "root": self._project_path(directory),
+                    "items": items,
+                }
+            )
+        return {
+            "user": name,
+            "summary": {"total": sum(scope_counts.values()), **scope_counts},
+            "expands": expands,
         }
 
     def sessions(self, user: Any, *, source: Any = "web") -> dict[str, Any]:

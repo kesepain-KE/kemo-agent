@@ -472,10 +472,14 @@ system prompt 按以下固定顺序拼接：
 - `WEB_USERNAME` 与 `WEB_PASSWORD` 必须同时配置；它们表示 Web 页面使用者，与内部多用户目录无关。
 - `WEB_SESSION_SECRET` 为空时启动过程自动生成 64 字符随机密钥；签名会话默认有效期 2 小时。
 - `WEB_SESSION_COOKIE_NAME` 用于多实例 Cookie 隔离。
-- Web 使用 HttpOnly 签名会话 Cookie。未认证请求只能访问静态前端、`/api/health` 和 `/api/auth/*`，其余业务 API 统一返回 401。
+- Web 使用 HttpOnly 签名会话 Cookie。未认证请求只能访问静态前端、`/api/health`、`/api/logo` 和 `/api/auth/*`，其余业务 API 统一返回 401。
 - Settings 和 Health 只返回认证状态，不返回 Token、用户名、密码、Session Secret 或 Cookie 内容。
 - Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
-- Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
+- Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、消息插件状态、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
+- Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。
+- 用户人格和全局人格可通过受保护 Web API 原子更新；全局人格影响所有用户，当前唯一 Web 认证主体视为管理员。`user_config.json` 仍保持只读。
+- Web 前端的 `/files` 页面落地用户文件与 `tmp` 浏览、下载和二次确认删除；`/runtime` 页面落地子代理、外部消息状态与三层 Expand 库存；`/profile` 页面落地头像上传和用户/全局人格编辑。
+- 侧边栏品牌图使用公开 `/api/logo`，用户卡片头像使用受保护 `/api/users/{user}/avatar`；头像不存在或加载失败时回退首字母占位，不阻塞页面使用。
 - 聊天请求使用高熵 `run_id`。运行中引导通过独立 guidance 队列提交，只在 Provider 完成或工具调用结束后的安全边界注入，不会中断正在阻塞的 Provider/工具函数。
 - 每轮历史在 `data.json.round_metrics` 保存 usage、缓存 Token、耗时、工具调用数和已消费 guidance；`tool.json` 的每次调用保存 `elapsed_ms`。
 

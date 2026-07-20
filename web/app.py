@@ -8,9 +8,9 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -23,6 +23,7 @@ from web.auth import (
     WebAuthenticator,
 )
 from web.service import (
+    AVATAR_MAX_BYTES,
     InvalidRequestError,
     WebRunService,
     WebServiceError,
@@ -55,6 +56,10 @@ class GuidanceBody(BaseModel):
 
 class SessionRenameBody(BaseModel):
     title: str
+
+
+class SoulBody(BaseModel):
+    content: str
 
 
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
@@ -99,7 +104,10 @@ def create_app(
     @app.middleware("http")
     async def require_web_auth(request: Request, call_next):
         path = request.url.path
-        public = path == "/api/health" or path.startswith("/api/auth/")
+        public = (
+            path in {"/api/health", "/api/logo"}
+            or path.startswith("/api/auth/")
+        )
         query_token = request.query_params.get("token", "")
         if query_token:
             try:
@@ -189,6 +197,89 @@ def create_app(
     @app.get("/api/users")
     async def users() -> dict[str, Any]:
         return {"users": backend.users()}
+
+    @app.get("/api/users/{user}/files/{scope}")
+    async def files(user: str, scope: str) -> dict[str, Any]:
+        return backend.files(user, scope)
+
+    @app.get("/api/users/{user}/files/{scope}/download")
+    async def download_file(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+    ) -> FileResponse:
+        target = backend.file_download(user, scope, path)
+        return FileResponse(target, filename=target.name)
+
+    @app.delete("/api/users/{user}/files/{scope}")
+    async def delete_file(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.delete_file(user, scope, path)
+
+    @app.post("/api/users/{user}/avatar")
+    async def upload_avatar(
+        user: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        content_type = file.content_type
+        try:
+            data = await file.read(AVATAR_MAX_BYTES + 1)
+        finally:
+            await file.close()
+        return backend.save_avatar(user, data, content_type)
+
+    @app.get("/api/users/{user}/avatar")
+    async def avatar(user: str) -> Response:
+        target = backend.avatar(user)
+        if target is None:
+            return Response(status_code=204)
+        return FileResponse(target)
+
+    @app.get("/api/tmp")
+    async def tmp_files() -> dict[str, Any]:
+        return backend.tmp_files()
+
+    @app.delete("/api/tmp")
+    async def delete_tmp_file(path: str = Query(...)) -> dict[str, Any]:
+        return backend.delete_tmp_file(path)
+
+    @app.get("/api/users/{user}/agents")
+    async def agents(user: str) -> dict[str, Any]:
+        return backend.agents(user)
+
+    @app.get("/api/users/{user}/message/status")
+    async def message_status(user: str) -> dict[str, Any]:
+        return backend.message_status(user)
+
+    @app.get("/api/users/{user}/soul")
+    async def user_soul(user: str) -> dict[str, Any]:
+        return backend.user_soul(user)
+
+    @app.put("/api/users/{user}/soul")
+    async def update_user_soul(user: str, body: SoulBody) -> dict[str, Any]:
+        return backend.update_user_soul(user, body.content)
+
+    @app.get("/api/global-soul")
+    async def global_soul() -> dict[str, Any]:
+        return backend.global_soul()
+
+    @app.put("/api/global-soul")
+    async def update_global_soul(body: SoulBody) -> dict[str, Any]:
+        return backend.update_global_soul(body.content)
+
+    @app.get("/api/logo")
+    async def logo() -> Response:
+        target = backend.logo()
+        if target is None:
+            return Response(status_code=204)
+        return FileResponse(target, media_type="image/jpeg")
+
+    @app.get("/api/users/{user}/expand")
+    async def expands(user: str) -> dict[str, Any]:
+        return backend.expands(user)
 
     @app.get("/api/users/{user}/sessions")
     async def sessions(
