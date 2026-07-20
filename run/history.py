@@ -1,9 +1,14 @@
 
-"""会话窗口存储合约。
+"""会话窗口双层存储合约。
 
-窗口是一个带时间戳的目录，包含text.json、think.json、
-工具.json 和数据.json。  data.json 最后以``complete=true`` 提交；
-读者永远不会将部分编写的四文件集视为完整的。"""
+归档路径（history/<timestamp>/）保存用户可见的完整对话，不受轮次上限
+影响，也不允许上下文整理裁剪。临时工作区
+（history/temp/<timestamp>/）是上游 Provider 使用的可变上下文窗口，受
+agents.max_rounds 限制，允许保存压缩统计和局部轮号偏移。
+
+两层都包含 text.json、think.json、tool.json、items.json 和 data.json。
+data.json 最后以 complete=true 提交；读者不会把部分写入视为完整窗口。
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,21 @@ from run.users import user_dir
 
 SCHEMA_VERSION = 1
 ITEMS_SCHEMA_VERSION = 2
+_ARCHIVE_DATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "user",
+        "source",
+        "session_id",
+        "title",
+        "created_at",
+        "updated_at",
+        "rounds",
+        "round_metrics",
+        "token_usage",
+        "complete",
+    }
+)
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -369,10 +389,19 @@ def append_round_items(
 
 
 def commit_window(directory: Path, window: dict[str, Any]) -> None:
-    """Atomically replace history files and mark the transaction complete last."""
+    """Atomically commit an archive or mutable temp workspace.
+
+    Archive data.json is restricted to durable conversation metadata. Temp
+    commits may additionally persist context-management diagnostics.
+    """
 
     with _lock(directory):
         data = dict(window["data"])
+        is_runtime_workspace = directory.parent.name == "temp"
+        if not is_runtime_workspace:
+            data = {
+                key: value for key, value in data.items() if key in _ARCHIVE_DATA_FIELDS
+            }
         # 会话标题由独立的重命名 API 管理。运行中的请求可能持有一份较早
         # 加载的 window，因此提交对话内容时应保留磁盘上的最新标题。
         existing_data_path = directory / "data.json"
@@ -427,26 +456,136 @@ def load_window(directory: Path) -> dict[str, Any]:
 
 
 def runtime_window_path(archive_directory: Path) -> Path:
-    """Return the mutable runtime mirror for one immutable archive window."""
+    """Return the temp workspace path used to build upstream API context."""
 
     return archive_directory.parent / "temp" / archive_directory.name
+
+
+def _message_rounds(messages: Any) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for raw in messages if isinstance(messages, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        item = copy.deepcopy(raw)
+        if item.get("role") == "user" and current:
+            groups.append(current)
+            current = []
+        current.append(item)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _local_round(value: Any, removed: int) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number - removed if number > removed else None
+
+
+def _trim_to_max_rounds(
+    window: dict[str, Any], max_rounds: int
+) -> dict[str, Any]:
+    """Return a deep-copied temp workspace containing only the latest rounds.
+
+    Temp round numbers are local and remain contiguous. ``context.round_offset``
+    records how many archive rounds precede local round 1, allowing Engine to
+    append the next local round without losing the archive's absolute numbering.
+    """
+
+    result = copy.deepcopy(window)
+    if max_rounds <= 0:
+        return result
+    text = result.setdefault("text", {}).setdefault("messages", [])
+    groups = _message_rounds(text)
+    removed = max(0, len(groups) - max_rounds)
+    if removed <= 0:
+        return result
+
+    result["text"]["messages"] = [
+        message for group in groups[removed:] for message in group
+    ]
+    for section in ("think", "tool"):
+        kept: list[dict[str, Any]] = []
+        for raw in (result.get(section) or {}).get("rounds", []):
+            if not isinstance(raw, dict):
+                continue
+            number = _local_round(raw.get("round"), removed)
+            if number is None:
+                continue
+            item = copy.deepcopy(raw)
+            item["round"] = number
+            kept.append(item)
+        result.setdefault(section, {})["rounds"] = kept
+
+    kept_items: list[dict[str, Any]] = []
+    for raw in (result.get("items") or {}).get("items", []):
+        if not isinstance(raw, dict):
+            continue
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        number = _local_round(metadata.get("round"), removed)
+        if number is None:
+            continue
+        item = copy.deepcopy(raw)
+        item["metadata"] = {**metadata, "round": number}
+        kept_items.append(item)
+    result.setdefault("items", {"schema_version": ITEMS_SCHEMA_VERSION})[
+        "items"
+    ] = kept_items
+
+    data = result.setdefault("data", {})
+    kept_metrics: list[dict[str, Any]] = []
+    for raw in data.get("round_metrics", []):
+        if not isinstance(raw, dict):
+            continue
+        number = _local_round(raw.get("round"), removed)
+        if number is None:
+            continue
+        metric = copy.deepcopy(raw)
+        metric["round"] = number
+        kept_metrics.append(metric)
+    data["round_metrics"] = kept_metrics
+    data["rounds"] = len(groups) - removed
+    context = data.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    try:
+        previous_offset = int(context.get("round_offset", 0))
+    except (TypeError, ValueError):
+        previous_offset = 0
+    data["context"] = {
+        **context,
+        "round_offset": max(0, previous_offset) + removed,
+        "workspace_rounds": data["rounds"],
+    }
+    return result
 
 
 def load_runtime_window(
     archive_directory: Path,
     archive_window: dict[str, Any] | None = None,
+    *,
+    max_rounds: int = 80,
 ) -> tuple[Path, dict[str, Any]]:
-    """Load the temp runtime mirror, falling back to a copy of the archive."""
+    """Load temp workspace; restore only recent rounds when it is unavailable."""
 
     runtime_directory = runtime_window_path(archive_directory)
     if (runtime_directory / "data.json").is_file():
         try:
-            return runtime_directory, load_window(runtime_directory)
+            return runtime_directory, _trim_to_max_rounds(
+                load_window(runtime_directory), max_rounds
+            )
         except HistoryError:
-            # A damaged derived mirror must never make the immutable archive unusable.
+            # A damaged temp workspace must never make the archive unusable.
             pass
     source = archive_window if archive_window is not None else load_window(archive_directory)
-    return runtime_directory, copy.deepcopy(source)
+    restored = copy.deepcopy(source)
+    restored.setdefault("data", {}).pop("context", None)
+    return runtime_directory, _trim_to_max_rounds(restored, max_rounds)
 
 
 def find_window(root: Path, user: str, source: str, session_id: str) -> Path | None:

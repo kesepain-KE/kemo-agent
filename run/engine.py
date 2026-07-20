@@ -36,6 +36,7 @@ from run.config import load_config, project_root, provider_runtime_config
 from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import (
+    _trim_to_max_rounds,
     append_round_items,
     commit_window,
     load_runtime_window,
@@ -587,7 +588,8 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
 def _copy_committed_round_to_archive(
     archive_window: dict[str, Any],
     runtime_window: dict[str, Any],
-    round_number: int,
+    runtime_round_number: int,
+    archive_round_number: int,
 ) -> None:
     """Append only the new raw round to archive, preserving older uncompressed data."""
 
@@ -597,36 +599,48 @@ def _copy_committed_round_to_archive(
     for section in ("think", "tool"):
         source_rounds = (runtime_window.get(section) or {}).get("rounds", [])
         target_rounds = archive_window.setdefault(section, {}).setdefault("rounds", [])
-        target_rounds.extend(
-            copy.deepcopy(
-                [
-                    item
-                    for item in source_rounds
-                    if isinstance(item, dict) and item.get("round") == round_number
-                ]
-            )
-        )
+        for raw in source_rounds:
+            if not isinstance(raw, dict) or raw.get("round") != runtime_round_number:
+                continue
+            item = copy.deepcopy(raw)
+            item["round"] = archive_round_number
+            target_rounds.append(item)
     source_items = (runtime_window.get("items") or {}).get("items", [])
     target_items = archive_window.setdefault("items", {}).setdefault("items", [])
-    target_items.extend(
-        copy.deepcopy(
-            [
-                item
-                for item in source_items
-                if isinstance(item, dict)
-                and isinstance(item.get("metadata"), dict)
-                and item["metadata"].get("round") == round_number
-            ]
-        )
-    )
+    for raw in source_items:
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("metadata"), dict)
+            or raw["metadata"].get("round") != runtime_round_number
+        ):
+            continue
+        item = copy.deepcopy(raw)
+        item["metadata"] = {
+            **item["metadata"],
+            "round": archive_round_number,
+        }
+        target_items.append(item)
     runtime_data = runtime_window["data"]
     archive_data = archive_window["data"]
-    archive_data["rounds"] = round_number
-    archive_data["round_metrics"] = copy.deepcopy(
-        runtime_data.get("round_metrics", [])
+    archive_data["rounds"] = archive_round_number
+    archive_metrics = archive_data.setdefault("round_metrics", [])
+    if not isinstance(archive_metrics, list):
+        archive_metrics = []
+        archive_data["round_metrics"] = archive_metrics
+    runtime_metric = next(
+        (
+            item
+            for item in reversed(runtime_data.get("round_metrics", []))
+            if isinstance(item, dict) and item.get("round") == runtime_round_number
+        ),
+        None,
     )
+    if runtime_metric is not None:
+        metric = copy.deepcopy(runtime_metric)
+        metric["round"] = archive_round_number
+        archive_metrics.append(metric)
     archive_data["token_usage"] = copy.deepcopy(runtime_data.get("token_usage", {}))
-    archive_data["context"] = copy.deepcopy(runtime_data.get("context", {}))
+    archive_data.pop("context", None)
 
 
 def _round_item_data(window: dict[str, Any], round_number: int) -> list[dict[str, Any]]:
@@ -791,6 +805,7 @@ def _iter_request_events_impl(
     with _session_lock(base, user, source, session_id):
         try:
             config = load_config(user, base)
+            context_policy = ContextPolicy.from_config(config)
             source_policy = MainAgentSourcePolicy.from_config(config)
             runtime_provider = provider_runtime_config(config)
             provider = provider_factory(runtime_provider)
@@ -801,7 +816,11 @@ def _iter_request_events_impl(
                 provider_factory=provider_factory,
             )
             window_path, archive_window, _ = prepare_window(base, user, source, session_id)
-            runtime_path, window = load_runtime_window(window_path, archive_window)
+            runtime_path, window = load_runtime_window(
+                window_path,
+                archive_window,
+                max_rounds=context_policy.max_rounds,
+            )
             tool_config = config.get("tools") or {}
             tools_enabled = bool(tool_config.get("enabled", True))
             registry = (
@@ -854,7 +873,6 @@ def _iter_request_events_impl(
                 if compress_only
                 else {"role": "user", "content": _content_for_message(content_blocks)}
             )
-            context_policy = ContextPolicy.from_config(config)
             force_compress = bool(request.get("compress", False) or compress_only)
             context_selection = select_context(
                 window=window,
@@ -1237,7 +1255,9 @@ def _iter_request_events_impl(
                                             "session_id": session_id,
                                             "window": window_path.name,
                                             "tool_timeout": tool_timeout,
-                                            "knowledge_scopes": list(source_policy.knowledge_scopes),
+                                            "knowledge_scopes": list(
+                                                source_policy.direct_knowledge_scopes()
+                                            ),
                                         },
                                         timeout=tool_timeout,
                                         cancel_event=cancel_event,
@@ -1326,6 +1346,9 @@ def _iter_request_events_impl(
                 return
 
             round_number = int(window["data"].get("rounds", 0)) + 1
+            archive_round_number = int(
+                archive_window["data"].get("rounds", 0)
+            ) + 1
             round_elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
             text = "".join(all_text)
             reasoning = "".join(all_reasoning)
@@ -1367,12 +1390,19 @@ def _iter_request_events_impl(
             )
             window["data"]["context"] = {
                 **context_stats,
+                "round_offset": max(0, archive_round_number - round_number),
+                "workspace_rounds": round_number,
                 "summary_cache": (
                     "context_summary.json" if summary_cache is not None else None
                 ),
             }
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
-            _copy_committed_round_to_archive(archive_window, window, round_number)
+            _copy_committed_round_to_archive(
+                archive_window,
+                window,
+                round_number,
+                archive_round_number,
+            )
             tool_think_compression: dict[str, Any]
             try:
                 tool_think_compression = _compress_per_round_tool_think(
@@ -1402,7 +1432,10 @@ def _iter_request_events_impl(
                     "exception_type": type(exc).__name__,
                 }
             commit_window(window_path, archive_window)
-            commit_window(runtime_path, window)
+            commit_window(
+                runtime_path,
+                _trim_to_max_rounds(window, context_policy.max_rounds),
+            )
 
                         # 仅对选择并实际发送到的记忆进行加权
                         # 主模型运行成功。  取消/失败的回合永远不会得到
@@ -1554,11 +1587,16 @@ def context_status(
     session_id = _required_text(request, "session_id")
     base = (root or project_root()).resolve()
     config = load_config(user, base)
+    policy = ContextPolicy.from_config(config)
     window_path, archive_window, is_new = prepare_window(base, user, source, session_id)
     runtime_path, window = (
         (runtime_window_path(window_path), archive_window)
         if is_new
-        else load_runtime_window(window_path, archive_window)
+        else load_runtime_window(
+            window_path,
+            archive_window,
+            max_rounds=policy.max_rounds,
+        )
     )
     tool_config = config.get("tools") or {}
     registry = (
@@ -1574,7 +1612,6 @@ def context_status(
         plugin_manifests=registry.plugin_manifests,
         memory_store=memory_store,
     )
-    policy = ContextPolicy.from_config(config)
     selection = select_context(
         window=window,
         policy=policy,

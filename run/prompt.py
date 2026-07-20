@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from plugins.manifest import PluginManifest, discover_plugin_manifests
-from run.knowledge import select_knowledge_index
+from run.knowledge import KnowledgeIndexSelection, select_knowledge_index
 from run.kemo_graph import KemoGraphPromptContext, load_kemo_graph_prompt_context
 from run.memory import MemoryStore
 from run.prompt_sources import (
@@ -25,7 +25,8 @@ PROMPT_SECTION_ORDER = (
     "user_soul",
     "global_soul",
     "agents_manual",
-    "subagent_registry",
+    "global_subagent_registry",
+    "user_subagent_registry",
     "plugins",
     "skills",
     "knowledge_index",
@@ -241,36 +242,110 @@ def _descriptor_section(
     )
 
 
-def _subagent_registry_section(root: Path) -> PromptSection | None:
+def _subagent_registry_section(
+    root: Path,
+    *,
+    name: str,
+    definitions: Iterable[Any],
+    introduction: str,
+) -> PromptSection | None:
+    values = [definition for definition in definitions if definition.trigger_registration]
+    if not values:
+        return None
+    pieces = [introduction]
+    files: list[str] = []
+    for definition in values:
+        pieces.append(f"### {definition.name}\n{definition.trigger_registration}")
+        files.append(relative_path(definition.directory / definition.trigger_file, root))
+    content = "\n\n".join(pieces)
+    return PromptSection(
+        name=name,
+        content=content,
+        source_files=tuple(files),
+        original_chars=len(content),
+        injected_chars=len(content),
+        original_items=len(values),
+        injected_items=len(values),
+        item_ids=tuple(definition.name for definition in values),
+    )
+
+
+def _global_subagent_registry_section(root: Path) -> PromptSection | None:
     # 延迟导入避免 schema -> prompt_sources -> prompt 的初始化环。
     from agents._runtime.schema import discover_agents
 
     definitions = [
         definition
         for definition in discover_agents(root).enabled_agents()
-        if definition.trigger_registration
+        if definition.source == "builtin"
     ]
-    if not definitions:
-        return None
-    pieces = [
-        "以下子代理可供框架按注册条件调用。这里只提供注册摘要；"
-        "详细操作信息位于对应 trigger.md，调用前按需读取。"
-    ]
-    files: list[str] = []
-    for definition in definitions:
-        pieces.append(f"### {definition.name}\n{definition.trigger_registration}")
-        files.append(relative_path(definition.directory / definition.trigger_file, root))
-    content = "\n\n".join(pieces)
-    return PromptSection(
-        name="subagent_registry",
-        content=content,
-        source_files=tuple(files),
-        original_chars=len(content),
-        injected_chars=len(content),
-        original_items=len(definitions),
-        injected_items=len(definitions),
-        item_ids=tuple(definition.name for definition in definitions),
+    return _subagent_registry_section(
+        root,
+        name="global_subagent_registry",
+        definitions=definitions,
+        introduction=(
+            "以下框架内置子代理可按注册条件调用。这里只提供注册摘要；"
+            "详细操作信息位于对应 trigger.md，调用前按需读取。"
+        ),
     )
+
+
+def _user_subagent_registry_section(root: Path, user: str) -> PromptSection | None:
+    # 延迟导入避免 schema -> prompt_sources -> prompt 的初始化环。
+    from agents._runtime.schema import discover_agents
+
+    definitions = [
+        definition
+        for definition in discover_agents(root, user).enabled_agents()
+        if definition.source == "user"
+    ]
+    return _subagent_registry_section(
+        root,
+        name="user_subagent_registry",
+        definitions=definitions,
+        introduction=(
+            "以下当前用户自建子代理可按注册条件调用。这里只提供注册摘要；"
+            "详细操作信息位于对应 trigger.md，调用前按需读取。"
+        ),
+    )
+
+
+_KNOWLEDGE_REPLACEMENT_PATHS = {
+    "shared": "shared_knowledge/",
+    "global": "global_knowledge/",
+}
+
+
+def _knowledge_index_prompt(
+    selection: KnowledgeIndexSelection,
+    *,
+    user: str,
+    scopes: tuple[str, ...],
+    replaced_scopes: tuple[str, ...],
+) -> tuple[str, tuple[Path, ...], int]:
+    """Render full indexes while retaining explicit graph-replacement markers."""
+
+    replaced = set(replaced_scopes)
+    pieces: list[str] = []
+    injected_paths: list[Path] = []
+    injected_items = 0
+    for scope in scopes:
+        if scope in replaced:
+            base = _KNOWLEDGE_REPLACEMENT_PATHS.get(
+                scope, f"users/{user}/knowledge/"
+            )
+            pieces.append(f"# {base} 目录结构，已被知识图谱替代")
+            injected_items += 1
+            continue
+        for document in selection.documents:
+            if document.scope != scope:
+                continue
+            pieces.append(
+                f"[{document.scope}:{document.relative_path}]\n{document.content}"
+            )
+            injected_paths.append(document.path)
+            injected_items += 1
+    return "\n\n".join(pieces), tuple(injected_paths), injected_items
 
 
 def _section_diagnostic(section: PromptSection) -> dict[str, Any]:
@@ -339,7 +414,10 @@ def build_prompt_bundle(
     section = _base_section(root, "agents_manual", root / "agents.md")
     if section:
         sections.append(section)
-    section = _subagent_registry_section(root)
+    section = _global_subagent_registry_section(root)
+    if section:
+        sections.append(section)
+    section = _user_subagent_registry_section(root, user)
     if section:
         sections.append(section)
 
@@ -368,16 +446,23 @@ def build_prompt_bundle(
         user,
         scopes=source_policy.knowledge_scopes,
     )
-    if knowledge.text:
+    replaced_knowledge_scopes = source_policy.replaced_knowledge_scopes()
+    knowledge_text, knowledge_paths, knowledge_injected_items = _knowledge_index_prompt(
+        knowledge,
+        user=user,
+        scopes=source_policy.knowledge_scopes,
+        replaced_scopes=replaced_knowledge_scopes,
+    )
+    if knowledge_text:
         sections.append(
             PromptSection(
                 "knowledge_index",
-                knowledge.text,
-                tuple(relative_path(item.path, root) for item in knowledge.documents),
+                knowledge_text,
+                tuple(relative_path(path, root) for path in knowledge_paths),
                 original_chars=knowledge.original_chars,
-                injected_chars=knowledge.injected_chars,
+                injected_chars=len(knowledge_text),
                 original_items=knowledge.original_items,
-                injected_items=knowledge.injected_items,
+                injected_items=knowledge_injected_items,
                 truncated=knowledge.truncated,
                 mode=settings.injection_mode["knowledge_index"],
             )
@@ -391,8 +476,11 @@ def build_prompt_bundle(
                 tuple(relative_path(path, root) for path in graph_context.source_files),
                 original_chars=len(graph_context.text),
                 injected_chars=len(graph_context.text),
-                original_items=1,
-                injected_items=1,
+                original_items=sum(layer.enabled for layer in graph_context.layers),
+                injected_items=sum(
+                    layer.enabled and bool(layer.text.strip())
+                    for layer in graph_context.layers
+                ),
             )
         )
 
@@ -417,11 +505,11 @@ def build_prompt_bundle(
             settings.temporary_memory_limits["seven_days"],
         ),
     )
-    # 永久记忆始终注入；三层临时记忆受 kemo_graph 替换控制
-    if source_policy.kemo_graph_replaces_temporary_memory:
-        tier_specs = (tier_specs_all[0],)  # 只保留 permanent
-    else:
-        tier_specs = tier_specs_all
+    memory_replacement_labels = {
+        "half_year": "# 用户的临时重要记忆，遗忘周期6个月，已被知识图谱替代",
+        "one_month": "# 用户的临时重要记忆，遗忘周期一个月，已被知识图谱替代",
+        "seven_days": "# 用户的临时重要记忆，遗忘周期七天，已被知识图谱替代",
+    }
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
     memory_files: list[str] = []
@@ -430,7 +518,19 @@ def build_prompt_bundle(
         section_name,
         config_name,
         max_files,
-    ) in tier_specs:
+    ) in tier_specs_all:
+        if tier != "permanent" and source_policy.kemo_graph_replaces_temporary_memory:
+            content = memory_replacement_labels[tier]
+            tier_sections[section_name] = PromptSection(
+                section_name,
+                content,
+                original_chars=len(content),
+                injected_chars=len(content),
+                original_items=1,
+                injected_items=1,
+                mode=settings.injection_mode[config_name],
+            )
+            continue
         selection = store.select_tier_for_prompt(
             tier,
             max_files=max_files,
@@ -560,6 +660,7 @@ def build_prompt_bundle(
             {"scope": item.scope, "path": item.relative_path, "title": item.title}
             for item in knowledge.documents
         ],
+        "knowledge_replaced_scopes": list(replaced_knowledge_scopes),
         "source_policy": source_policy.public_summary(),
         "kemo_graph": graph_context.diagnostics(
             replaces_knowledge=replaces_knowledge,

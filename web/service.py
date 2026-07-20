@@ -627,7 +627,7 @@ class WebRunService:
                         "size": size,
                         "updated_at": updated_at,
                         "active_for_main_agent": scope
-                        in source_policy.knowledge_scopes,
+                        in source_policy.direct_knowledge_scopes(),
                     }
                 )
         return {

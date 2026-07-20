@@ -149,12 +149,10 @@ class MainAgentSourcePolicy:
             field="kemo_graph.kemo_graph_temporary_memory",
             default=False,
         )
-        scopes: list[str] = []
-        if not graph_user:
-            scopes.append("user")
-        if use_shared and not graph_shared:
+        scopes: list[str] = ["user"]
+        if use_shared:
             scopes.append("shared")
-        if use_global and not graph_global:
+        if use_global:
             scopes.append("global")
         graph_requested = any(
             (graph_global, graph_shared, graph_user, graph_memory)
@@ -190,6 +188,24 @@ class MainAgentSourcePolicy:
             kemo_graph_replaces_temporary_memory=graph_memory,
         )
 
+    def replaced_knowledge_scopes(self) -> tuple[str, ...]:
+        """Return enabled knowledge scopes whose file indexes graph replaces."""
+
+        replacements = {
+            "user": self.kemo_graph_user_knowledge,
+            "shared": self.kemo_graph_shared_knowledge,
+            "global": self.kemo_graph_global_knowledge,
+        }
+        return tuple(
+            scope for scope in self.knowledge_scopes if replacements.get(scope, False)
+        )
+
+    def direct_knowledge_scopes(self) -> tuple[str, ...]:
+        """Return enabled scopes still allowed to expose their local files."""
+
+        replaced = set(self.replaced_knowledge_scopes())
+        return tuple(scope for scope in self.knowledge_scopes if scope not in replaced)
+
     def public_summary(self) -> dict[str, Any]:
         graph_status = "not_connected" if self.kemo_graph_requested else "disabled"
         replaces_knowledge = any(
@@ -202,7 +218,9 @@ class MainAgentSourcePolicy:
         return {
             "knowledge": {
                 "enabled": True,
-                "effective_scopes": list(self.knowledge_scopes),
+                "configured_scopes": list(self.knowledge_scopes),
+                "effective_scopes": list(self.direct_knowledge_scopes()),
+                "graph_replaced_scopes": list(self.replaced_knowledge_scopes()),
             },
             "plugins": self.plugins.public_summary(),
             "skills": {

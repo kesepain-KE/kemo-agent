@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import threading
 from typing import Any, Callable
@@ -14,6 +14,11 @@ from cron.scheduler import (
     recover_all,
 )
 from message.identity import IdentityResolver
+from message.plugin import (
+    FileMessageTransport,
+    MessagePluginIssue,
+    discover_message_plugins,
+)
 from message.router import MessageRouter, RouteResult
 from message.state import ProcessedMessageStore
 from message.transport import (
@@ -86,6 +91,20 @@ class RuntimeHost:
         self.tool_registry_factory = tool_registry_factory
         self.on_result = on_result
         self.on_error = on_error
+        self._message_plugin_issues: list[MessagePluginIssue] = []
+        plugin_transports, discovery_issues = discover_message_plugins(self.root)
+        self._message_plugin_issues.extend(discovery_issues)
+        for transport in plugin_transports:
+            try:
+                self.registry.register(transport, transport.policy)
+            except Exception as exc:
+                self._message_plugin_issues.append(
+                    MessagePluginIssue(
+                        transport.config.directory.name,
+                        transport.config.directory,
+                        str(exc),
+                    )
+                )
 
         host_config = self.config.get("runtime_host") or {}
         runtime_message_config = self.config.get("message") or {}
@@ -102,17 +121,26 @@ class RuntimeHost:
         self._components: dict[str, ComponentStatus] = {}
 
         self.resolver = IdentityResolver.from_config(self.root, self.message_config)
-        self.router = router or MessageRouter(
-            self.root,
-            self.resolver,
-            self.registry,
-            max_workers=int(runtime_message_config.get("max_workers", 8)),
-            processed_message_limit=DEFAULT_PROCESSED_MESSAGE_LIMIT,
-            provider_factory=provider_factory,
-            tool_registry_factory=tool_registry_factory,
-            on_result=self._handle_result,
-            on_error=self._handle_error,
-        )
+        if router is None:
+            self.router = MessageRouter(
+                self.root,
+                self.resolver,
+                self.registry,
+                max_workers=int(runtime_message_config.get("max_workers", 8)),
+                processed_message_limit=DEFAULT_PROCESSED_MESSAGE_LIMIT,
+                provider_factory=provider_factory,
+                tool_registry_factory=tool_registry_factory,
+                on_result=self._handle_result,
+                on_error=self._handle_error,
+            )
+        else:
+            if self.on_result is None:
+                self.on_result = router.on_result
+            if self.on_error is None:
+                self.on_error = router.on_error
+            router.on_result = self._handle_result
+            router.on_error = self._handle_error
+            self.router = router
         self.cron = cron_scheduler or CronScheduler(
             self.root,
             poll_interval=float(cron_config.get("poll_interval", 30)),
@@ -137,7 +165,20 @@ class RuntimeHost:
         )
         for item in self.registry.items():
             self._components[f"transport:{item.transport.name}"] = ComponentStatus(
-                item.transport.name, "transport"
+                item.transport.name,
+                "message_plugin"
+                if isinstance(item.transport, FileMessageTransport)
+                else "transport",
+            )
+        for issue in self._message_plugin_issues:
+            self._components[f"message_plugin:{issue.name}"] = ComponentStatus(
+                issue.name,
+                "message_plugin",
+                state="failed",
+                last_error={
+                    "message": issue.error,
+                    "exception_type": "MessagePluginError",
+                },
             )
 
     @property
@@ -305,16 +346,18 @@ class RuntimeHost:
             self._set_component(key, "failed", exc)
             self._handle_error(name, exc)
 
-    def _accept_message(self, envelope) -> None:
-        if not self.running:
-            return
+    def _accept_message(self, envelope):
+        if self.state not in {"starting", "running"}:
+            return None
         try:
             future = self.router.submit(envelope)
             future.add_done_callback(
                 lambda item: self._future_done(envelope.platform, item)
             )
+            return future
         except Exception as exc:
             self._handle_error(envelope.platform, exc)
+            return None
 
     def _future_done(self, platform: str, future) -> None:
         try:
@@ -335,6 +378,13 @@ class RuntimeHost:
                 self._handle_error(f"message_state:{user}", exc)
 
     def _handle_result(self, result: RouteResult) -> None:
+        try:
+            registered = self.registry.get(result.envelope.platform)
+            finalize = getattr(registered.transport, "finalize", None)
+            if callable(finalize):
+                finalize(result)
+        except Exception as exc:
+            self._handle_error(result.envelope.platform, exc)
         if self.on_result is not None:
             try:
                 self.on_result(result)
