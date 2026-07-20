@@ -1,0 +1,11 @@
+{
+  "name": "本地摄像头视觉感知",
+  "explain": "用户私有摄像头视觉感知拓展，支持本地摄像头拍照、屏幕截图、视频帧提取。仅供当前用户使用。",
+  "open_input": true,
+  "input_data": "input_data.md",
+  "input_health": "正常",
+  "start_update": "data_update.py",
+  "open_control": true,
+  "start_expand": "start_expand.py",
+  "start_control": "expand_control.md"
+}

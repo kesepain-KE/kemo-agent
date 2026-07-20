@@ -2,7 +2,7 @@
 
 kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说明；用户私有资料应放入 `users/<name>/knowledge/`。
 
-更新时间：2026-07-21
+更新时间：2026-07-20
 
 ## 文件清单
 
@@ -11,10 +11,11 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `data_structure.md` | 本索引文件 | 索引、知识库 |
 | `子代理配置规范.md` | 子代理的 agent.json / agent-config.json / trigger.md 字段说明、5 个内置子代理一览、全局超时与生命周期 | 子代理、agent.json、agent-config、trigger、internal_mode、allowed_callers |
 | `用户目录结构.md` | 用户目录骨架、子目录职责、初始化机制、user_config.json 字段、记忆分层、历史窗口 | 用户、配置、记忆、历史 |
+| `系统定时任务独立目录-编程方案.md` | 将记忆晋升/巡检/每日整理三个系统定时任务从 `users/{user}/task_cron/` 迁移到 `cron/task_cron_system/`，两层扫描调度，退役 system_key 字段 | 系统定时任务、task_cron_system、CronStore、scheduler |
 | `全局配置文件.md` | 全局配置 `global_config.json` 全字段说明、覆盖规则、已移除项目清单 | 全局配置、global_config、provider、tools、memory、prompt |
 | `环境变量.md` | 环境变量 `.env` 全字段说明、优先级链、Web 认证方式 | 环境变量、env、Web、认证 |
 | `web-README.md` | Web 前端开发说明与构建指南 | web、前端、构建、开发 |
-| `流式输出缓冲修复-编程方案.md` | 修复 chat API 流式输出被 `list()` 全量缓冲的问题：新增 `_stream_provider_events` 辅助函数，直接迭代 Provider 生成器，text_delta 实时推 SSE，保留 context_length_exceeded 拦截 | 流式、streaming、SSE、缓冲、list |
+
 
 ## 设计文档迁移
 
@@ -45,6 +46,10 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `系统提示词拼接重构-编程规划.md` | 系统提示词拼接重构：subagent 拆为 global/user、knowledge_index 替换标注、kemo_graph 细分 6 子层 |
 | `Web前端补全API-编程规划.md` | 新增 15 条 API 编程规划：头像、文件浏览下载删除、tmp、子智能体、消息路由、人格、Logo、拓展（已落地至 web/app.py + web/service.py） |
 | `Web API 实际落地参考.md` | 36 条 API 实际落地参考文档，含全量请求/响应格式、安全约束、前端调用注意事项（已落地至 web/app.py + web/service.py） |
+| `流式输出缓冲修复-编程方案.md` | 修复 chat API 流式输出被 `list()` 全量缓冲的问题（已落地） |
+| `用户子代理解除executor限制-编程方案.md` | 删除 `_runtime/schema.py` 中对用户子代理的 3 处硬限制（已落地） |
+| `子代理审查修复-编程方案.md` | 修复 context_manage trigger.md 过时声明 + time_plan executor.py 加输入输出校验（已落地） |
+| `修复会话历史404-前端方案.md` | 前端 ChatPage 从 sessions 缓存判断会话是否已 commit，消除 uvicorn 404 日志（已落地） |
 
 ## 检索规则
 
