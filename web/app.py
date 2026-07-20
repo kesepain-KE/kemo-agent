@@ -62,6 +62,20 @@ class SoulBody(BaseModel):
     content: str
 
 
+class TextBody(BaseModel):
+    content: str
+
+
+class MemoryWriteBody(BaseModel):
+    content: str
+    tier: str | None = None
+
+
+class PreferencesBody(BaseModel):
+    theme: str | None = None
+    font_size: str | None = None
+
+
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "status": status}}
 
@@ -202,6 +216,49 @@ def create_app(
     async def files(user: str, scope: str) -> dict[str, Any]:
         return backend.files(user, scope)
 
+    @app.post("/api/users/{user}/files/{scope}/upload")
+    async def upload_file(
+        user: str,
+        scope: str,
+        file: UploadFile = File(...),
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        try:
+            data = await file.read(25 * 1024 * 1024 + 1)
+        finally:
+            await file.close()
+        return backend.save_file(user, scope, path, data)
+
+    @app.put("/api/users/{user}/files/{scope}/text")
+    async def write_file_text(
+        user: str,
+        scope: str,
+        body: TextBody,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.write_file_text(user, scope, path, body.content)
+
+    @app.get("/api/users/{user}/files/{scope}/text")
+    async def read_file_text(user: str, scope: str, path: str = Query(...)) -> dict[str, Any]:
+        return backend.read_file_text(user, scope, path)
+
+    @app.post("/api/users/{user}/files/{scope}/directory")
+    async def make_file_directory(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.make_directory(user, scope, path)
+
+    @app.patch("/api/users/{user}/files/{scope}/move")
+    async def move_file(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+        new_path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.move_file(user, scope, path, new_path)
+
     @app.get("/api/users/{user}/files/{scope}/download")
     async def download_file(
         user: str,
@@ -241,6 +298,33 @@ def create_app(
     @app.get("/api/tmp")
     async def tmp_files() -> dict[str, Any]:
         return backend.tmp_files()
+
+    @app.post("/api/tmp/upload")
+    async def upload_tmp_file(
+        file: UploadFile = File(...),
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        try:
+            data = await file.read(25 * 1024 * 1024 + 1)
+        finally:
+            await file.close()
+        return backend.save_tmp_file(path, data)
+
+    @app.put("/api/tmp/text")
+    async def write_tmp_text(path: str = Query(...), body: TextBody = ...) -> dict[str, Any]:
+        return backend.write_tmp_text(path, body.content)
+
+    @app.get("/api/tmp/text")
+    async def read_tmp_text(path: str = Query(...)) -> dict[str, Any]:
+        return backend.read_tmp_text(path)
+
+    @app.post("/api/tmp/directory")
+    async def make_tmp_directory(path: str = Query(...)) -> dict[str, Any]:
+        return backend.make_tmp_directory(path)
+
+    @app.patch("/api/tmp/move")
+    async def move_tmp_file(path: str = Query(...), new_path: str = Query(...)) -> dict[str, Any]:
+        return backend.move_tmp_file(path, new_path)
 
     @app.delete("/api/tmp")
     async def delete_tmp_file(path: str = Query(...)) -> dict[str, Any]:
@@ -285,8 +369,9 @@ def create_app(
     async def sessions(
         user: str,
         source: str = Query(default="web"),
+        query: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.sessions(user, source=source)
+        return backend.sessions(user, source=source, query=query)
 
     @app.delete("/api/users/{user}/sessions")
     async def delete_all_sessions(
@@ -331,9 +416,59 @@ def create_app(
     async def tasks(user: str) -> dict[str, Any]:
         return backend.tasks(user)
 
+    @app.post("/api/users/{user}/tasks/plans")
+    async def create_plan(user: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.create_plan(user, body)
+
+    @app.put("/api/users/{user}/tasks/plans/{plan_id}")
+    async def update_plan(user: str, plan_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.update_plan(user, plan_id, body)
+
+    @app.delete("/api/users/{user}/tasks/plans/{plan_id}")
+    async def delete_plan(user: str, plan_id: str) -> dict[str, Any]:
+        return backend.delete_plan(user, plan_id)
+
+    @app.post("/api/users/{user}/tasks/crons")
+    async def create_cron(user: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.create_cron(user, body)
+
+    @app.put("/api/users/{user}/tasks/crons/{task_id}")
+    async def update_cron(user: str, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.update_cron(user, task_id, body)
+
+    @app.delete("/api/users/{user}/tasks/crons/{task_id}")
+    async def delete_cron(user: str, task_id: str) -> dict[str, Any]:
+        return backend.delete_cron(user, task_id)
+
     @app.get("/api/users/{user}/knowledge")
     async def knowledge(user: str) -> dict[str, Any]:
         return backend.knowledge(user)
+
+    @app.get("/api/users/{user}/knowledge/{scope}/document")
+    async def knowledge_document(user: str, scope: str, path: str = Query(...)) -> dict[str, Any]:
+        return backend.knowledge_document(user, scope, path)
+
+    @app.put("/api/users/{user}/knowledge/{scope}/document")
+    async def update_knowledge_document(
+        user: str,
+        scope: str,
+        body: TextBody,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.put_knowledge_document(user, scope, path, body.content)
+
+    @app.delete("/api/users/{user}/knowledge/{scope}/document")
+    async def delete_knowledge_document(user: str, scope: str, path: str = Query(...)) -> dict[str, Any]:
+        return backend.delete_knowledge_document(user, scope, path)
+
+    @app.patch("/api/users/{user}/knowledge/{scope}/document")
+    async def move_knowledge_document(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+        new_path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.move_knowledge_document(user, scope, path, new_path)
 
     @app.get("/api/users/{user}/skills")
     async def skills(user: str) -> dict[str, Any]:
@@ -356,9 +491,57 @@ def create_app(
     async def memory_summary(user: str) -> dict[str, Any]:
         return backend.memory_summary(user)
 
+    @app.get("/api/users/{user}/memory/item")
+    async def memory_item(user: str, filename: str = Query(...)) -> dict[str, Any]:
+        return backend.memory_item(user, filename)
+
+    @app.put("/api/users/{user}/memory/item")
+    async def update_memory(
+        user: str,
+        body: MemoryWriteBody,
+        filename: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.put_memory(user, filename, body.content, body.tier)
+
+    @app.delete("/api/users/{user}/memory/item")
+    async def delete_memory(user: str, filename: str = Query(...)) -> dict[str, Any]:
+        return backend.delete_memory(user, filename)
+
+    @app.get("/api/users/{user}/memory/important")
+    async def important_memory(user: str) -> dict[str, Any]:
+        return backend.important_memory(user)
+
+    @app.put("/api/users/{user}/memory/important")
+    async def update_important_memory(user: str, body: TextBody) -> dict[str, Any]:
+        return backend.update_important_memory(user, body.content)
+
+    @app.delete("/api/users/{user}/memory/important")
+    async def delete_important_memory(user: str) -> dict[str, Any]:
+        return backend.delete_important_memory(user)
+
     @app.get("/api/users/{user}/config/full")
     async def full_config(user: str) -> dict[str, Any]:
         return backend.user_config(user)
+
+    @app.patch("/api/users/{user}/config")
+    async def patch_user_config(user: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.patch_user_config(user, body.get("changes", body))
+
+    @app.get("/api/global-config")
+    async def global_config() -> dict[str, Any]:
+        return backend.global_config()
+
+    @app.patch("/api/global-config")
+    async def patch_global_config(body: dict[str, Any]) -> dict[str, Any]:
+        return backend.patch_global_config(body.get("changes", body))
+
+    @app.get("/api/users/{user}/preferences")
+    async def preferences(user: str) -> dict[str, Any]:
+        return backend.preferences(user)
+
+    @app.patch("/api/users/{user}/preferences")
+    async def patch_preferences(user: str, body: PreferencesBody) -> dict[str, Any]:
+        return backend.patch_preferences(user, body.model_dump(exclude_none=True))
 
     @app.post("/api/runs/{run_id}/guidance")
     async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:

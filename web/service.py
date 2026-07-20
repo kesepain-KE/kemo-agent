@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 import queue
@@ -13,9 +14,11 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 import uuid
+from zoneinfo import ZoneInfo
 
 from pydantic import TypeAdapter, ValidationError
 
+from cron.schedule import compute_next_run
 from events import RunEvent
 from message.identity import IdentityResolver
 from message.plugin import MessagePluginConfig, MessagePluginError
@@ -33,7 +36,13 @@ from run.config import (
     read_json_object,
 )
 from run.context import estimate_text_tokens
-from run.cron_store import CronStore
+from run.cron_store import (
+    CronConflictError,
+    CronError,
+    CronNotFoundError,
+    CronStore,
+    normalize_task,
+)
 from run.engine import iter_request_events
 from run.history import (
     delete_all_sessions as delete_all_history_sessions,
@@ -45,7 +54,14 @@ from run.history import (
     runtime_window_path,
     session_messages,
 )
-from run.memory import MemoryStore
+from run.memory import (
+    TIERS,
+    MemoryError as RuntimeMemoryError,
+    MemoryStore,
+    contains_sensitive_credential,
+    normalize_memory_filename,
+    utc_now,
+)
 from run.prompt import (
     PROMPT_SECTION_ORDER,
     build_prompt_bundle,
@@ -53,7 +69,13 @@ from run.prompt import (
 )
 from run.prompt_sources import iter_files, load_prompt_source_registry
 from run.source_policy import MainAgentSourcePolicy
-from run.task_plan_store import PlanStore
+from run.task_plan_store import (
+    PlanConflictError,
+    PlanError,
+    PlanNotFoundError,
+    PlanStore,
+    normalize_plan,
+)
 from run.tools import apply_runtime_tool_policy, discover_tools
 from run.users import list_users
 
@@ -65,8 +87,16 @@ _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
+FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+TEXT_DOCUMENT_MAX_CHARS = 1_000_000
+IMPORTANT_MEMORY_MAX_HARD_CHARS = 65_536
 _CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
 _FILE_SCOPES = frozenset({"file_upload", "download"})
+_KNOWLEDGE_SCOPES = frozenset({"user", "shared", "global"})
+_KNOWLEDGE_SUFFIXES = frozenset({".md", ".txt", ".json"})
+_EDITABLE_TEXT_SUFFIXES = frozenset(
+    {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".log", ".py", ".js", ".ts", ".tsx", ".css", ".html"}
+)
 _AVATAR_FORMATS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -247,6 +277,52 @@ def _atomic_write(path: Path, data: bytes) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _reject_link_path(root: Path, target: Path) -> None:
+    """Reject existing symlink/junction components for every Web mutation."""
+
+    current = root.resolve()
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        raise InvalidRequestError("path 越出允许的目录") from None
+    for part in relative.parts:
+        current = current / part
+        if current.exists() and (
+            current.is_symlink() or getattr(current, "is_junction", lambda: False)()
+        ):
+            raise InvalidRequestError("Web 文件操作不允许符号链接或目录联接")
+
+
+def _validated_text(value: Any, *, field: str = "content", max_chars: int = TEXT_DOCUMENT_MAX_CHARS) -> str:
+    if not isinstance(value, str):
+        raise InvalidRequestError(f"{field} 必须是字符串")
+    if len(value) > max_chars:
+        raise InvalidRequestError(f"{field} 超过最大长度 {max_chars}")
+    return value
+
+
+def _contains_redacted_placeholder(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_redacted_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_redacted_placeholder(item) for item in value)
+    return value == _REDACTED
+
+
+def _merge_patch(target: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    result = dict(target)
+    for key, value in changes.items():
+        if not isinstance(key, str) or not key:
+            raise InvalidRequestError("配置字段名必须是非空字符串")
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_patch(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def _image_media_type(data: bytes) -> str | None:
@@ -465,6 +541,99 @@ class WebRunService:
             "redacted_paths": redacted_paths,
         }
 
+    def global_config(self) -> dict[str, Any]:
+        path = self.root / "config" / "global_config.json"
+        config = read_json_object(path)
+        redacted, redacted_paths = _redact_config(config)
+        return {
+            "scope": "global",
+            "config": redacted,
+            "redacted_paths": redacted_paths,
+        }
+
+    def _patch_config_document(
+        self,
+        path: Path,
+        changes: Any,
+        *,
+        user: str | None,
+    ) -> dict[str, Any]:
+        if not isinstance(changes, dict) or not changes:
+            raise InvalidRequestError("changes 必须是非空对象")
+        if _contains_redacted_placeholder(changes):
+            raise InvalidRequestError("不能把脱敏占位符 *** 写回配置")
+        current = read_json_object(path, allow_empty=user is not None)
+        updated = _merge_patch(current, changes)
+        encoded = (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        previous = path.read_bytes() if path.is_file() else None
+        _atomic_write(path, encoded)
+        try:
+            if user is not None:
+                load_config(user, self.root)
+            else:
+                # Validate the global document through one concrete user when possible.
+                available = self.users()
+                if available:
+                    load_config(available[0]["name"], self.root)
+        except Exception as exc:
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write(path, previous)
+            raise InvalidRequestError(f"配置校验失败：{exc}") from None
+        redacted, redacted_paths = _redact_config(updated)
+        response: dict[str, Any] = {
+            "config": redacted,
+            "redacted_paths": redacted_paths,
+            "updated": True,
+        }
+        if user is None:
+            response["scope"] = "global"
+        else:
+            response["user"] = user
+        return response
+
+    def patch_user_config(self, user: Any, changes: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        return self._patch_config_document(self._config_path(name), changes, user=name)
+
+    def patch_global_config(self, changes: Any) -> dict[str, Any]:
+        return self._patch_config_document(
+            self.root / "config" / "global_config.json",
+            changes,
+            user=None,
+        )
+
+    def preferences(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        path = self.root / "users" / name / "web_preferences.json"
+        value = read_json_object(path, allow_empty=True)
+        appearance = value.get("appearance") if isinstance(value.get("appearance"), dict) else {}
+        return {
+            "user": name,
+            "appearance": {
+                "theme": appearance.get("theme", "light"),
+                "font_size": appearance.get("font_size", "medium"),
+            },
+        }
+
+    def patch_preferences(self, user: Any, changes: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(changes, dict):
+            raise InvalidRequestError("appearance 必须是对象")
+        theme = changes.get("theme", self.preferences(name)["appearance"]["theme"])
+        font_size = changes.get(
+            "font_size", self.preferences(name)["appearance"]["font_size"]
+        )
+        if theme not in {"light", "dark"}:
+            raise InvalidRequestError("theme 只允许 light 或 dark")
+        if font_size not in {"small", "medium", "large"}:
+            raise InvalidRequestError("font_size 只允许 small、medium 或 large")
+        value = {"schema_version": 1, "appearance": {"theme": theme, "font_size": font_size}}
+        path = self.root / "users" / name / "web_preferences.json"
+        _atomic_write(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode())
+        return {"user": name, "appearance": value["appearance"], "updated": True}
+
     def _project_path(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
 
@@ -485,6 +654,92 @@ class WebRunService:
             "root": self._project_path(directory),
             "summary": summary,
             "tree": tree,
+        }
+
+    def _write_area_file(self, directory: Path, path: Any, data: bytes) -> dict[str, Any]:
+        if len(data) > FILE_UPLOAD_MAX_BYTES:
+            raise InvalidRequestError(
+                f"文件超过最大限制 {FILE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"
+            )
+        relative, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
+        if target.exists() and target.is_dir():
+            raise ConflictError(f"目标是目录：{relative}")
+        _atomic_write(target, data)
+        return {"path": relative, "size": len(data), "updated": True}
+
+    def save_file(self, user: Any, scope: Any, path: Any, data: bytes) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        result = self._write_area_file(directory, path, data)
+        return {"user": name, "scope": normalized_scope, **result}
+
+    def write_file_text(
+        self,
+        user: Any,
+        scope: Any,
+        path: Any,
+        content: Any,
+    ) -> dict[str, Any]:
+        text = _validated_text(content)
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        relative, target = _safe_relative_target(directory, path)
+        if target.suffix.lower() not in _EDITABLE_TEXT_SUFFIXES:
+            raise InvalidRequestError("该文件类型不允许通过文本编辑接口修改")
+        result = self._write_area_file(directory, relative, text.encode("utf-8"))
+        return {"user": name, "scope": normalized_scope, **result}
+
+    def read_file_text(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        relative, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
+        if target.suffix.lower() not in _EDITABLE_TEXT_SUFFIXES:
+            raise InvalidRequestError("该文件类型不允许通过文本读取接口打开")
+        if not target.is_file():
+            raise NotFoundError(f"文件不存在：{relative}")
+        try:
+            data = target.read_bytes()
+            if len(data) > TEXT_DOCUMENT_MAX_CHARS * 4:
+                raise InvalidRequestError("文本文件超过在线编辑大小限制")
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise InvalidRequestError("文件不是有效 UTF-8 文本") from None
+        return {"user": name, "scope": normalized_scope, "path": relative, "content": content, "size": len(data)}
+
+    def _make_area_directory(self, directory: Path, path: Any) -> dict[str, Any]:
+        relative, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
+        if target.exists():
+            raise ConflictError(f"目标已存在：{relative}")
+        target.mkdir(parents=True)
+        return {"path": relative, "created": True}
+
+    def make_directory(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            **self._make_area_directory(directory, path),
+        }
+
+    def _move_area_path(self, directory: Path, path: Any, new_path: Any) -> dict[str, Any]:
+        relative, source = _safe_relative_target(directory, path)
+        target_relative, target = _safe_relative_target(directory, new_path)
+        _reject_link_path(directory.resolve(), source)
+        _reject_link_path(directory.resolve(), target)
+        if not source.exists():
+            raise NotFoundError(f"文件或目录不存在：{relative}")
+        if target.exists():
+            raise ConflictError(f"目标已存在：{target_relative}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        return {"path": relative, "new_path": target_relative, "moved": True}
+
+    def move_file(self, user: Any, scope: Any, path: Any, new_path: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            **self._move_area_path(directory, path, new_path),
         }
 
     def file_download(self, user: Any, scope: Any, path: Any) -> Path:
@@ -514,6 +769,43 @@ class WebRunService:
         directory = self.root / "tmp"
         tree, summary = _directory_tree(directory)
         return {"root": "tmp", "summary": summary, "tree": tree}
+
+    def save_tmp_file(self, path: Any, data: bytes) -> dict[str, Any]:
+        return {"root": "tmp", **self._write_area_file(self.root / "tmp", path, data)}
+
+    def write_tmp_text(self, path: Any, content: Any) -> dict[str, Any]:
+        text = _validated_text(content)
+        directory = self.root / "tmp"
+        relative, target = _safe_relative_target(directory, path)
+        if target.suffix.lower() not in _EDITABLE_TEXT_SUFFIXES:
+            raise InvalidRequestError("该文件类型不允许通过文本编辑接口修改")
+        return {"root": "tmp", **self._write_area_file(directory, relative, text.encode())}
+
+    def read_tmp_text(self, path: Any) -> dict[str, Any]:
+        directory = self.root / "tmp"
+        relative, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
+        if target.suffix.lower() not in _EDITABLE_TEXT_SUFFIXES:
+            raise InvalidRequestError("该文件类型不允许通过文本读取接口打开")
+        if not target.is_file():
+            raise NotFoundError(f"文件不存在：{relative}")
+        data = target.read_bytes()
+        if len(data) > TEXT_DOCUMENT_MAX_CHARS * 4:
+            raise InvalidRequestError("文本文件超过在线编辑大小限制")
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise InvalidRequestError("文件不是有效 UTF-8 文本") from None
+        return {"root": "tmp", "path": relative, "content": content, "size": len(data)}
+
+    def make_tmp_directory(self, path: Any) -> dict[str, Any]:
+        return {"root": "tmp", **self._make_area_directory(self.root / "tmp", path)}
+
+    def move_tmp_file(self, path: Any, new_path: Any) -> dict[str, Any]:
+        return {
+            "root": "tmp",
+            **self._move_area_path(self.root / "tmp", path, new_path),
+        }
 
     def delete_tmp_file(self, path: Any) -> dict[str, Any]:
         relative, target = _safe_relative_target(self.root / "tmp", path)
@@ -808,13 +1100,52 @@ class WebRunService:
             "expands": expands,
         }
 
-    def sessions(self, user: Any, *, source: Any = "web") -> dict[str, Any]:
+    def sessions(
+        self,
+        user: Any,
+        *,
+        source: Any = "web",
+        query: Any = "",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
+        if not isinstance(query, str):
+            raise InvalidRequestError("query 必须是字符串")
+        normalized_query = query.strip().casefold()
+        sessions = list_sessions(self.root, name, normalized_source)
+        if normalized_query:
+            matched = []
+            for item in sessions:
+                searchable = " ".join(
+                    str(item.get(key) or "") for key in ("session_id", "title", "window")
+                ).casefold()
+                if normalized_query in searchable:
+                    matched.append(item)
+                    continue
+                directory = find_window(
+                    self.root,
+                    name,
+                    normalized_source,
+                    str(item.get("session_id") or ""),
+                )
+                if directory is None:
+                    continue
+                try:
+                    messages = session_messages(load_window(directory))
+                except (OSError, ValueError, TypeError):
+                    continue
+                if any(
+                    normalized_query in str(message.get("content") or "").casefold()
+                    for message in messages
+                    if isinstance(message, dict)
+                ):
+                    matched.append(item)
+            sessions = matched
         return {
             "user": name,
             "source": normalized_source,
-            "sessions": list_sessions(self.root, name, normalized_source),
+            "query": query.strip(),
+            "sessions": sessions,
         }
 
     def rename_session(
@@ -1025,6 +1356,7 @@ class WebRunService:
                     "title": str(item.get("title") or ""),
                     "description": str(item.get("description") or ""),
                     "status": str(item.get("status") or "pending"),
+                    "depends_on": [str(value) for value in (item.get("depends_on") or [])],
                     "critical": bool(item.get("critical", True)),
                     "tool_name": str(item.get("tool_name") or ""),
                     "started_at": str(item.get("started_at") or ""),
@@ -1037,6 +1369,8 @@ class WebRunService:
             "title": str(plan.get("title") or ""),
             "description": str(plan.get("description") or ""),
             "status": str(plan.get("status") or "pending"),
+            "auto_accept": bool(plan.get("auto_accept", False)),
+            "reminder": str(plan.get("reminder") or ""),
             "source": str(plan.get("source") or ""),
             "session_id": str(plan.get("session_id") or ""),
             "current_step": str(plan.get("current_step") or ""),
@@ -1056,6 +1390,7 @@ class WebRunService:
         summary = {
             "task_id": str(task.get("task_id") or ""),
             "title": str(task.get("title") or ""),
+            "user_defined": task.get("exec_mode") != "system",
             "status": str(task.get("status") or "enabled"),
             "type": str(task.get("type") or ""),
             "next_run_at": str(task.get("next_run_at") or ""),
@@ -1082,6 +1417,36 @@ class WebRunService:
         )
         active_statuses = {"approved", "running", "paused"}
         waiting_statuses = {"pending", "approved", "paused"}
+        executions: list[dict[str, Any]] = []
+        for plan in plans:
+            for step in plan.get("steps", []):
+                if not isinstance(step, dict) or not step.get("finished_at"):
+                    continue
+                executions.append(
+                    {
+                        "kind": "plan_step",
+                        "task_id": plan["plan_id"],
+                        "title": step.get("title", ""),
+                        "status": step.get("status", ""),
+                        "updated_at": step.get("finished_at", ""),
+                        "result": step.get("result"),
+                        "error": step.get("error"),
+                    }
+                )
+        for task in crons:
+            if task.get("latest_run_at"):
+                executions.append(
+                    {
+                        "kind": "cron",
+                        "task_id": task["task_id"],
+                        "title": task.get("title", ""),
+                        "status": task.get("last_state", task.get("status", "")),
+                        "updated_at": task.get("latest_run_at", ""),
+                        "result": None,
+                        "error": task.get("last_error"),
+                    }
+                )
+        executions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return {
             "user": name,
             "summary": {
@@ -1092,7 +1457,149 @@ class WebRunService:
             },
             "plans": plans,
             "cron_tasks": crons,
+            "executions": executions[:100],
         }
+
+    def create_plan(self, user: Any, payload: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("计划必须是对象")
+        try:
+            plan = normalize_plan(
+                plan_id=payload.get("plan_id"),
+                title=payload.get("title", ""),
+                description=payload.get("description", ""),
+                user=name,
+                source="web",
+                session_id=str(payload.get("session_id") or "web"),
+                steps=payload.get("steps") or [],
+                auto_accept=payload.get("auto_accept", False),
+                reminder=payload.get("reminder", ""),
+                status=payload.get("status", "pending"),
+                current_step=payload.get("current_step"),
+            )
+            stored = PlanStore(self.root, name).create(plan)
+        except (PlanError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划校验失败：{exc}") from None
+        return {"user": name, "plan": self._plan_summary(stored), "updated": True}
+
+    def update_plan(self, user: Any, plan_id: Any, payload: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("计划更新必须是对象")
+        expected = payload.get("revision")
+
+        def mutate(current: dict[str, Any]) -> dict[str, Any]:
+            if expected is not None and expected != current.get("revision"):
+                raise PlanConflictError("计划版本已变化，请重新读取后再保存")
+            updated = dict(current)
+            for key in (
+                "title",
+                "description",
+                "status",
+                "auto_accept",
+                "reminder",
+                "current_step",
+                "steps",
+            ):
+                if key in payload:
+                    updated[key] = payload[key]
+            updated["user"] = name
+            return updated
+
+        try:
+            stored = PlanStore(self.root, name).update(str(plan_id), mutate)
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except PlanConflictError as exc:
+            raise ConflictError(str(exc)) from None
+        except (PlanError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划校验失败：{exc}") from None
+        return {"user": name, "plan": self._plan_summary(stored), "updated": True}
+
+    def delete_plan(self, user: Any, plan_id: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not PlanStore(self.root, name).delete(str(plan_id)):
+            raise NotFoundError(f"计划不存在：{plan_id}")
+        return {"user": name, "plan_id": str(plan_id), "deleted": True}
+
+    def _cron_payload(
+        self,
+        user: str,
+        payload: dict[str, Any],
+        current: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = dict(current or {})
+        allowed = {
+            "title",
+            "prompt",
+            "type",
+            "interval_seconds",
+            "time",
+            "next_run_at",
+            "status",
+        }
+        source.update({key: value for key, value in payload.items() if key in allowed})
+        task_type = source.get("type")
+        interval = source.get("interval_seconds")
+        if task_type == "recurring" and (
+            isinstance(interval, bool) or not isinstance(interval, int) or interval < 60
+        ):
+            raise InvalidRequestError("recurring interval_seconds 必须是 ≥ 60 的整数")
+        try:
+            if task_type in {"daily", "recurring"}:
+                source["next_run_at"] = compute_next_run(source)
+            return normalize_task(
+                task_id=source.get("task_id"),
+                title=source.get("title", ""),
+                prompt=source.get("prompt", ""),
+                user=user,
+                type=task_type,
+                interval_seconds=interval,
+                time=source.get("time"),
+                next_run_at=source.get("next_run_at", ""),
+                latest_run_at=source.get("latest_run_at", ""),
+                status=source.get("status", "enabled"),
+                created_at=source.get("created_at", ""),
+                exec_mode=source.get("exec_mode", "agent"),
+            )
+        except (CronError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"定时任务校验失败：{exc}") from None
+
+    def create_cron(self, user: Any, payload: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("定时任务必须是对象")
+        task = self._cron_payload(name, payload)
+        try:
+            stored = CronStore(self.root, name).create(task)
+        except CronConflictError as exc:
+            raise ConflictError(str(exc)) from None
+        except CronError as exc:
+            raise InvalidRequestError(str(exc)) from None
+        return {"user": name, "cron_task": self._cron_summary(stored), "updated": True}
+
+    def update_cron(self, user: Any, task_id: Any, payload: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("定时任务更新必须是对象")
+        store = CronStore(self.root, name)
+        try:
+            stored = store.update(
+                str(task_id),
+                lambda current: self._cron_payload(name, payload, current),
+            )
+        except CronNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except CronError as exc:
+            raise InvalidRequestError(str(exc)) from None
+        return {"user": name, "cron_task": self._cron_summary(stored), "updated": True}
+
+    def delete_cron(self, user: Any, task_id: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not CronStore(self.root, name).delete(str(task_id)):
+            raise NotFoundError(f"定时任务不存在：{task_id}")
+        return {"user": name, "task_id": str(task_id), "deleted": True}
 
     def knowledge(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -1140,6 +1647,108 @@ class WebRunService:
             "documents": documents,
             "extensions": {"kemo_graph": policy_summary["kemo_graph"]["status"]},
             "source_policy": policy_summary,
+        }
+
+    def _knowledge_root(self, user: Any, scope: Any) -> tuple[str, Path]:
+        name = self.require_user(user)
+        if scope not in _KNOWLEDGE_SCOPES:
+            raise InvalidRequestError("scope 只允许 user、shared 或 global")
+        roots = {
+            "user": self.root / "users" / name / "knowledge",
+            "shared": self.root / "shared_knowledge",
+            "global": self.root / "global_knowledge",
+        }
+        return name, roots[scope]
+
+    def _knowledge_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
+        name, root = self._knowledge_root(user, scope)
+        relative, target = _safe_relative_target(root, path)
+        _reject_link_path(root.resolve(), target)
+        if Path(relative).suffix.lower() not in _KNOWLEDGE_SUFFIXES:
+            raise InvalidRequestError("知识文件只允许 .md、.txt 或 .json")
+        return name, str(scope), target
+
+    def knowledge_document(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+        if not target.is_file():
+            raise NotFoundError(f"知识文件不存在：{path}")
+        try:
+            content = target.read_text("utf-8")
+        except UnicodeDecodeError:
+            raise InvalidRequestError("知识文件不是有效 UTF-8 文本") from None
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "relative_path": target.relative_to(
+                self._knowledge_root(name, normalized_scope)[1]
+            ).as_posix(),
+            "content": content,
+            "size": len(content.encode("utf-8")),
+            "updated_at": target.stat().st_mtime,
+        }
+
+    def put_knowledge_document(
+        self,
+        user: Any,
+        scope: Any,
+        path: Any,
+        content: Any,
+    ) -> dict[str, Any]:
+        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+        text = _validated_text(content)
+        if target.suffix.lower() == ".json":
+            try:
+                json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise InvalidRequestError(f"JSON 知识文件格式无效：{exc.msg}") from None
+        _atomic_write(target, text.encode("utf-8"))
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "relative_path": target.relative_to(
+                self._knowledge_root(name, normalized_scope)[1]
+            ).as_posix(),
+            "size": len(text.encode("utf-8")),
+            "updated": True,
+            "index_refresh": "next_request",
+        }
+
+    def delete_knowledge_document(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+        if not target.is_file():
+            raise NotFoundError(f"知识文件不存在：{path}")
+        target.unlink()
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "relative_path": target.relative_to(
+                self._knowledge_root(name, normalized_scope)[1]
+            ).as_posix(),
+            "deleted": True,
+        }
+
+    def move_knowledge_document(
+        self,
+        user: Any,
+        scope: Any,
+        path: Any,
+        new_path: Any,
+    ) -> dict[str, Any]:
+        name, normalized_scope, source = self._knowledge_target(user, scope, path)
+        _, _, target = self._knowledge_target(user, scope, new_path)
+        if not source.is_file():
+            raise NotFoundError(f"知识文件不存在：{path}")
+        if target.exists():
+            raise ConflictError(f"知识文件已存在：{new_path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        root = self._knowledge_root(name, normalized_scope)[1]
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "relative_path": source.relative_to(root).as_posix(),
+            "new_relative_path": target.relative_to(root).as_posix(),
+            "moved": True,
         }
 
     def skills(self, user: Any) -> dict[str, Any]:
@@ -1251,6 +1860,11 @@ class WebRunService:
                     )
                 ),
                 "data_items": item["data_items"],
+                "value_preview": self._sense_value_preview(item),
+                # Sense modules currently have no required refresh interval
+                # in sense.json. Keep this explicit so clients can render a
+                # truthful fallback instead of inventing one.
+                "update_interval": "",
                 "updated_at": item["updated_at"],
             }
             for item in inventory
@@ -1294,6 +1908,27 @@ class WebRunService:
             "decisions": [],
             "source_policy": source_policy.public_summary(),
         }
+
+    def _sense_value_preview(self, item: dict[str, Any]) -> str:
+        """Return a bounded, presentation-safe preview of a sense data file."""
+
+        if not item.get("valid") or not item.get("data_md"):
+            return ""
+        path = self.root / str(item.get("root") or "") / str(item.get("name") or "") / str(item["data_md"])
+        try:
+            content = path.read_text("utf-8-sig")
+        except (OSError, UnicodeError):
+            return ""
+        lines: list[str] = []
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(">"):
+                continue
+            line = re.sub(r"^[-*]\s*", "", line)
+            lines.append(line)
+            if len(" · ".join(lines)) >= 160:
+                break
+        return " · ".join(lines)[:160]
 
     def settings(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -1415,6 +2050,133 @@ class WebRunService:
                 **{tier: sum(item["tier"] == tier for item in result) for tier in tiers},
             },
             "items": result,
+        }
+
+    def memory_item(self, user: Any, filename: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        try:
+            normalized = normalize_memory_filename(filename)
+            store = MemoryStore(self.root, name, load_config(name, self.root))
+            item = next(
+                (entry for entry in store.list_items() if entry["filename"] == normalized),
+                None,
+            )
+        except RuntimeMemoryError as exc:
+            raise InvalidRequestError(str(exc)) from None
+        if item is None:
+            raise NotFoundError(f"记忆不存在：{filename}")
+        return {"user": name, **item}
+
+    def put_memory(
+        self,
+        user: Any,
+        filename: Any,
+        content: Any,
+        tier: Any = None,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        text = _validated_text(content, max_chars=TEXT_DOCUMENT_MAX_CHARS)
+        if not text.strip():
+            raise InvalidRequestError("记忆内容不能为空")
+        if contains_sensitive_credential(text):
+            raise InvalidRequestError("记忆内容包含疑似敏感凭据，已拒绝写入")
+        try:
+            normalized = normalize_memory_filename(filename)
+            target_tier = tier if tier is not None else None
+            if target_tier is not None and target_tier not in TIERS:
+                raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
+            store = MemoryStore(self.root, name, load_config(name, self.root))
+            existing = store.locate(normalized)
+            if existing is not None and target_tier == "permanent":
+                result = store.upsert_candidates(
+                    [{"filename": normalized, "content": text, "explicit": True}]
+                )
+            else:
+                result = store.upsert_candidates(
+                    [{"filename": normalized, "content": text}]
+                )
+            if result.get("rejected"):
+                raise RuntimeMemoryError("记忆内容未通过运行时校验")
+            existing = store.locate(normalized)
+            if existing is not None and target_tier and target_tier != existing.tier:
+                if existing.tier == "permanent":
+                    raise RuntimeMemoryError("永久记忆不能降级到临时层")
+                rank = {tier_name: index for index, tier_name in enumerate(TIERS)}
+                if rank[target_tier] < rank[existing.tier]:
+                    raise RuntimeMemoryError("临时记忆只能向更长期层级晋升")
+                store._promote_location(existing, target_tier, utc_now())
+            item = next(
+                entry for entry in store.list_items() if entry["filename"] == normalized
+            )
+        except RuntimeMemoryError as exc:
+            raise InvalidRequestError(str(exc)) from None
+        return {"user": name, **item, "updated": True}
+
+    def delete_memory(self, user: Any, filename: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        try:
+            normalized = normalize_memory_filename(filename)
+            store = MemoryStore(self.root, name, load_config(name, self.root))
+            removed = store.forget(normalized)
+        except RuntimeMemoryError as exc:
+            raise InvalidRequestError(str(exc)) from None
+        if not removed:
+            raise NotFoundError(f"记忆不存在：{filename}")
+        return {"user": name, "filename": normalized, "deleted": True}
+
+    def important_memory(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        path = self.root / "users" / name / "memory_temporary_important.md"
+        if not path.is_file():
+            raise NotFoundError("临时重要记忆不存在")
+        content = path.read_text("utf-8")
+        return {
+            "user": name,
+            "path": f"users/{name}/memory_temporary_important.md",
+            "content": content,
+            "size": len(content.encode()),
+            "updated_at": datetime.fromtimestamp(
+                path.stat().st_mtime, timezone.utc
+            ).astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
+        }
+
+    def update_important_memory(self, user: Any, content: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        config = load_config(name, self.root)
+        configured_limit = int(
+            (config.get("memory") or {}).get(
+                "important_memory_max_chars", IMPORTANT_MEMORY_MAX_HARD_CHARS
+            )
+        )
+        text = _validated_text(
+            content,
+            max_chars=min(IMPORTANT_MEMORY_MAX_HARD_CHARS, max(1, configured_limit)),
+        )
+        if contains_sensitive_credential(text):
+            raise InvalidRequestError("临时重要记忆包含疑似敏感凭据，已拒绝写入")
+        path = self.root / "users" / name / "memory_temporary_important.md"
+        _atomic_write(path, text.encode("utf-8"))
+        return {
+            "user": name,
+            "path": f"users/{name}/memory_temporary_important.md",
+            "content": text,
+            "size": len(text.encode()),
+            "updated_at": datetime.fromtimestamp(
+                path.stat().st_mtime, timezone.utc
+            ).astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "updated": True,
+        }
+
+    def delete_important_memory(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        path = self.root / "users" / name / "memory_temporary_important.md"
+        if not path.is_file():
+            raise NotFoundError("临时重要记忆不存在")
+        path.unlink()
+        return {
+            "user": name,
+            "path": f"users/{name}/memory_temporary_important.md",
+            "deleted": True,
         }
 
     def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
