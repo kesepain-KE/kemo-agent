@@ -2,7 +2,7 @@
 
 kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说明；用户私有资料应放入 `users/<name>/knowledge/`。
 
-更新时间：2026-07-21（编程规划文档已全部移交至开发文档目录）
+更新时间：2026-07-21
 
 ## 文件清单
 
@@ -14,6 +14,7 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `全局配置文件.md` | 全局配置 `global_config.json` 全字段说明、覆盖规则、已移除项目清单 | 全局配置、global_config、provider、tools、memory、prompt |
 | `环境变量.md` | 环境变量 `.env` 全字段说明、优先级链、Web 认证方式 | 环境变量、env、Web、认证 |
 | `web-README.md` | Web 前端开发说明与构建指南 | web、前端、构建、开发 |
+| `流式输出缓冲修复-编程方案.md` | 修复 chat API 流式输出被 `list()` 全量缓冲的问题：新增 `_stream_provider_events` 辅助函数，直接迭代 Provider 生成器，text_delta 实时推 SSE，保留 context_length_exceeded 拦截 | 流式、streaming、SSE、缓冲、list |
 
 ## 设计文档迁移
 
@@ -42,6 +43,8 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `kemo-graph粒度化替换-编程规划.md` | kemo_graph 拆分为 4 个独立开关（全局/共享/用户知识 + 临时记忆），粒度化替换控制 |
 | `历史存储双层架构微重构-编程规划.md` | 历史存储双层架构微重构：从 data.json 移除 context 字段、归档/temp 职责区分 |
 | `系统提示词拼接重构-编程规划.md` | 系统提示词拼接重构：subagent 拆为 global/user、knowledge_index 替换标注、kemo_graph 细分 6 子层 |
+| `Web前端补全API-编程规划.md` | 新增 15 条 API 编程规划：头像、文件浏览下载删除、tmp、子智能体、消息路由、人格、Logo、拓展（已落地至 web/app.py + web/service.py） |
+| `Web API 实际落地参考.md` | 36 条 API 实际落地参考文档，含全量请求/响应格式、安全约束、前端调用注意事项（已落地至 web/app.py + web/service.py） |
 
 ## 检索规则
 
