@@ -29,6 +29,8 @@ desktop.ini
 *.bak
 *.tmp
 tmp_unstage_obsidian.txt
+tmp/
+!tmp/.gitkeep
 
 # Environment
 .env
@@ -55,10 +57,7 @@ web/frontend/output/
 users/*/
 !users/_template/
 
-# Ignore all files under _template, but keep directories and .gitkeep
-users/_template/**/*
-!users/_template/**/
-!users/_template/**/.gitkeep
+# _template is fully tracked — it's the skeleton for new users
 
 # Expand / Sense / Skills — only register.py is tracked
 global_expand/*
@@ -72,4 +71,4 @@ shared_skills/*
 
 # Message outbound — keep empty folder only
 message/out/*
-!important: message/out/.gitkeep
+!message/out/.gitkeep
