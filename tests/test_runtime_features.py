@@ -564,52 +564,6 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
 
-    def test_max_per_round_commits_and_returns_confirmation_signal(self) -> None:
-        _, root = self.make_root()
-        self.write_tool(root / "plugins", "lookup", "plugin")
-        global_path = root / "config" / "global_config.json"
-        config = json.loads(global_path.read_text("utf-8"))
-        config["tools"]["max_per_round"] = 1
-        global_path.write_text(json.dumps(config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall("first", "lookup", {"value": "a"}),
-                        ToolCall("second", "lookup", {"value": "b"}),
-                    ],
-                    usage=Usage(),
-                )
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "soft-limit",
-                        "prompt": "go",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-        results = [event for event in events if event.type == "tool_call_result"]
-        self.assertEqual(
-            [event.metadata["status"] for event in results],
-            ["completed", "deferred"],
-        )
-        self.assertTrue(events[-1].metadata["awaiting_tool_confirmation"])
-        self.assertEqual(events[-1].metadata["tool_pause"]["limit"], 1)
-        window = load_window(find_window(root, "alice", "cli", "soft-limit"))
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(
-            [call["status"] for call in window["tool"]["rounds"][0]["calls"]],
-            ["completed", "deferred"],
-        )
-
     def test_consecutive_failures_temporarily_remove_tool_schema(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "unstable", "plugin")

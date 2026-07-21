@@ -14,7 +14,7 @@ from plugins.memory_manage.memory_ops import (
     search_by_title,
 )
 from plugins.memory_manage.tool import run as run_memory_manage
-from run.memory import MemoryStore
+from run.memory import MemoryStore, utc_now
 from run.tools import discover_tools, validate_arguments
 
 
@@ -49,6 +49,7 @@ class MemoryManageTests(unittest.TestCase):
         filename = added["filename"]
         store = MemoryStore(self.root, "alice", self.config)
         self.assertIn(filename, store.load_index("seven_days"))
+        self.assertEqual(added["memory_ref"], f"seven_days:{filename}")
         self.assertEqual(
             search_by_title(
                 self.root, "alice", self.config, "seven_days", "editor"
@@ -85,6 +86,78 @@ class MemoryManageTests(unittest.TestCase):
         self.assertTrue(deleted["deleted"])
         self.assertNotIn(renamed, store.load_index("seven_days"))
         self.assertFalse(store.fragment_path("seven_days", renamed).exists())
+
+    def test_cross_tier_duplicates_can_be_read_renamed_deleted_and_repaired(self) -> None:
+        store = MemoryStore(self.root, "alice", self.config)
+        filename = "shared-device.md"
+        now = utc_now()
+        for tier in ("seven_days", "one_month", "half_year"):
+            path = store.fragment_path(tier, filename)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"content from {tier}", "utf-8")
+            store.write_index(tier, {filename: store._new_meta(tier, now)})
+        permanent_path = store.fragment_path("permanent", filename)
+        permanent_path.parent.mkdir(parents=True, exist_ok=True)
+        permanent_path.write_text("content from permanent", "utf-8")
+
+        self.assertEqual(
+            get_fragment(
+                self.root, "alice", self.config, "half_year", filename
+            )["content"],
+            "content from half_year",
+        )
+        self.assertEqual(
+            get_fragment(
+                self.root, "alice", self.config, "half_year", filename
+            )["memory_ref"],
+            f"half_year:{filename}",
+        )
+        self.assertEqual(
+            get_fragment(
+                self.root, "alice", self.config, "permanent", filename
+            )["content"],
+            "content from permanent",
+        )
+
+        renamed = edit_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "half_year",
+            filename,
+            "renamed half-year content",
+            new_filename="shared-device-half-year.md",
+        )["new_filename"]
+        self.assertNotIn(filename, store.load_index("half_year"))
+        self.assertIn(renamed, store.load_index("half_year"))
+        self.assertIn(filename, store.load_index("seven_days"))
+        self.assertIn(filename, store.load_index("one_month"))
+        self.assertTrue(permanent_path.is_file())
+
+        deleted = delete_fragment(
+            self.root, "alice", self.config, "one_month", filename
+        )
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["memory_ref"], f"one_month:{filename}")
+        self.assertTrue(deleted["index_removed"])
+        self.assertTrue(deleted["file_removed"])
+        self.assertFalse(deleted["repaired_orphan"])
+        self.assertNotIn(filename, store.load_index("one_month"))
+        self.assertIn(filename, store.load_index("seven_days"))
+        self.assertTrue(permanent_path.is_file())
+
+        orphan = "orphan.md"
+        index = store.load_index("seven_days")
+        index[orphan] = store._new_meta("seven_days", now)
+        store.write_index("seven_days", index)
+        repaired = delete_fragment(
+            self.root, "alice", self.config, "seven_days", orphan
+        )
+        self.assertTrue(repaired["deleted"])
+        self.assertTrue(repaired["index_removed"])
+        self.assertFalse(repaired["file_removed"])
+        self.assertTrue(repaired["repaired_orphan"])
+        self.assertNotIn(orphan, store.load_index("seven_days"))
 
     def test_permanent_and_important_documents_are_managed(self) -> None:
         permanent = add_fragment(
@@ -220,6 +293,10 @@ class MemoryManageTests(unittest.TestCase):
         self.assertEqual(len(listed["entries"]), 3)
         self.assertTrue(listed["truncated"])
         self.assertNotIn("content", listed["entries"][0])
+        self.assertEqual(
+            listed["entries"][0]["memory_ref"],
+            f"half_year:{listed['entries'][0]['filename']}",
+        )
         self.assertIsInstance(listed["entries"][0]["weight"], int)
         self.assertIsNotNone(listed["entries"][0]["expires_at"])
 
@@ -286,6 +363,9 @@ class MemoryManageTests(unittest.TestCase):
         self.assertTrue(content_result["truncated"])
         for match in content_result["matches"]:
             self.assertNotIn("content", match)
+            self.assertEqual(
+                match["memory_ref"], f"one_month:{match['filename']}"
+            )
             self.assertLessEqual(len(match["snippet"]), 80)
             self.assertIn("RaspberryPi", match["snippet"])
             self.assertTrue(match["snippet"].startswith("…"))
@@ -335,7 +415,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manifest_exposes_seven_actions_and_bounded_search_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.1.0")
+        self.assertEqual(tool.version, "1.2.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),

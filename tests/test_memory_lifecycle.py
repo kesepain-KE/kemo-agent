@@ -232,6 +232,37 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertIn("高权重正文", selection.text)
         self.assertTrue(selection.truncated)
 
+    def test_missing_indexed_fragment_is_skipped_and_reported(self) -> None:
+        missing = self.seed_temporary(
+            "seven_days",
+            "缺失正文",
+            content="即将被删除。",
+            weight=10,
+            expires_at=self.start + timedelta(days=7),
+        )
+        valid = self.seed_temporary(
+            "seven_days",
+            "有效正文",
+            content="仍可注入。",
+            weight=1,
+            expires_at=self.start + timedelta(days=7),
+        )
+        self.store.fragment_path("seven_days", missing).unlink()
+
+        with self.assertLogs("run.memory", level="WARNING") as captured:
+            selection = self.store.select_tier_for_prompt("seven_days", max_files=1)
+
+        issue = f"missing_file:seven_days/{missing}"
+        self.assertEqual(selection.selected_ids, (valid,))
+        self.assertEqual(selection.integrity_warnings, (issue,))
+        self.assertIn("仍可注入", selection.text)
+        self.assertTrue(selection.truncated)
+        self.assertTrue(any(issue in line for line in captured.output))
+        self.assertEqual(
+            [item["filename"] for item in self.store.load_tier("seven_days")],
+            [valid],
+        )
+
     def test_atomic_markdown_failure_leaves_existing_target(self) -> None:
         filename = self.add("原子写入", "原始内容。")
         path = self.store.fragment_path("seven_days", filename)

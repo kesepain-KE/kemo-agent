@@ -788,6 +788,34 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertTrue(temporary.truncated)
         self.assertEqual(important.content, "IMPO")
 
+    def test_missing_memory_body_does_not_block_prompt_and_is_diagnosed(self) -> None:
+        _, root, config = self.make_root()
+        self.write_memory(
+            root,
+            "half_year",
+            [
+                {"filename": "missing", "content": "MISSING", "weight": 10},
+                {"filename": "valid", "content": "VALID", "weight": 1},
+            ],
+        )
+        (root / "users" / "alice" / "improve" / "half_year" / "missing.md").unlink()
+        config["memory"] = {"temporary_injection_limits": {"half_year": 1}}
+
+        with self.assertLogs("run.memory", level="WARNING"):
+            bundle = build_prompt_bundle(root, "alice", config)
+
+        section = next(
+            item
+            for item in bundle.sections
+            if item.name == "temporary_memory:half_year"
+        )
+        self.assertEqual(section.item_ids, ("valid.md",))
+        self.assertIn("VALID", section.content)
+        self.assertEqual(
+            bundle.diagnostics["memory_integrity_warnings"],
+            ["missing_file:half_year/missing.md"],
+        )
+
     def test_plan_mapping_finished_omission_and_step_format(self) -> None:
         _, root, _ = self.make_root()
         directory = root / "users" / "alice" / "task_plan"

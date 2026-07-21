@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import tempfile
@@ -15,7 +16,13 @@ from unittest.mock import patch
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
 from run.cron_store import CronStore, normalize_task
-from run.history import commit_window, empty_window, load_window, runtime_window_path
+from run.history import (
+    commit_window,
+    empty_window,
+    load_window,
+    runtime_window_path,
+    synthesize_items,
+)
 from run.prompt import PROMPT_SECTION_ORDER
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
@@ -649,6 +656,137 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(observed["root"], root.resolve())
 
+    def test_session_undo_last_round_updates_archive_and_runtime(self) -> None:
+        _, root = self.make_root()
+        window = empty_window("alice", "web", "s1")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "retry me"},
+            {"role": "assistant", "content": "partial answer"},
+        ]
+        window["think"]["rounds"] = [
+            {"round": 1, "content": "think one"},
+            {"round": 2, "content": "think two"},
+        ]
+        window["tool"]["rounds"] = [
+            {"round": 1, "calls": []},
+            {"round": 2, "calls": [{"id": "call-2", "name": "demo"}]},
+        ]
+        window["data"]["rounds"] = 2
+        window["data"]["round_metrics"] = [
+            {
+                "round": 1,
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                    "estimated": False,
+                },
+            },
+            {
+                "round": 2,
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 4,
+                    "total_tokens": 24,
+                    "estimated": False,
+                },
+            },
+        ]
+        window["data"]["token_usage"] = {
+            "prompt_tokens": 30,
+            "completion_tokens": 6,
+            "total_tokens": 36,
+            "estimated": False,
+        }
+        window["items"] = synthesize_items(window)
+        archive_path = root / "users" / "alice" / "history" / "window-1"
+        commit_window(archive_path, window)
+        runtime_path = runtime_window_path(archive_path)
+        runtime_window = copy.deepcopy(window)
+        runtime_window["data"]["context"] = {
+            "round_offset": 0,
+            "workspace_rounds": 2,
+        }
+        commit_window(runtime_path, runtime_window)
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/s1/undo-last-round",
+            json={"expected_round": 2, "prompt": "retry me"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["rolled_back"])
+        self.assertEqual(response.json()["remaining_rounds"], 1)
+        self.assertEqual(response.json()["content"], [{"type": "text", "text": "retry me"}])
+        for path in (archive_path, runtime_path):
+            rolled_back = load_window(path)
+            self.assertEqual(rolled_back["data"]["rounds"], 1)
+            self.assertEqual(
+                rolled_back["text"]["messages"],
+                [
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                ],
+            )
+            self.assertEqual([item["round"] for item in rolled_back["think"]["rounds"]], [1])
+            self.assertEqual([item["round"] for item in rolled_back["tool"]["rounds"]], [1])
+            self.assertTrue(all(
+                (item.get("metadata") or {}).get("round") == 1
+                for item in rolled_back["items"]["items"]
+            ))
+            self.assertEqual(rolled_back["data"]["token_usage"]["total_tokens"], 12)
+            self.assertNotIn("context", rolled_back["data"])
+
+        interrupted = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/s1/undo-last-round",
+            json={"expected_round": 2, "prompt": "retry me"},
+        )
+        self.assertEqual(interrupted.status_code, 200, interrupted.text)
+        self.assertFalse(interrupted.json()["rolled_back"])
+        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
+
+    def test_session_undo_last_round_rejects_stale_or_active_requests(self) -> None:
+        _, root = self.make_root()
+        window = empty_window("alice", "web", "s1")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        window["think"]["rounds"] = [{"round": 1, "content": "think"}]
+        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
+        window["data"]["rounds"] = 1
+        window["items"] = synthesize_items(window)
+        archive_path = root / "users" / "alice" / "history" / "window-1"
+        commit_window(archive_path, window)
+        service = WebRunService(root)
+        app = create_app(service=service)
+
+        stale = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/s1/undo-last-round",
+            json={"expected_round": 1, "prompt": "different"},
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
+
+        service._active_runs["run_busy_undo"] = ActiveRun("run_busy_undo", "alice", "s1")
+        active = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/s1/undo-last-round",
+            json={"expected_round": 1, "prompt": "question"},
+        )
+        self.assertEqual(active.status_code, 409)
+        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
+
     def test_delete_all_sessions_is_scoped_and_reports_counts(self) -> None:
         _, root = self.make_root()
         for directory, session_id in (
@@ -906,6 +1044,25 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(memory.status_code, 200, memory.text)
         self.assertEqual(memory.json()["tier"], "one_month")
+        self.assertEqual(memory.json()["memory_ref"], "one_month:web-memory.md")
+        fetched_memory = self.request(
+            app,
+            "GET",
+            "/api/users/alice/memory/item?tier=one_month&filename=web-memory.md",
+        )
+        self.assertEqual(fetched_memory.status_code, 200, fetched_memory.text)
+        self.assertEqual(fetched_memory.json()["content"], "remember this")
+        self.assertEqual(
+            fetched_memory.json()["memory_ref"], "one_month:web-memory.md"
+        )
+        deleted_memory = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/memory/item?tier=one_month&filename=web-memory.md",
+        )
+        self.assertEqual(deleted_memory.status_code, 200, deleted_memory.text)
+        self.assertTrue(deleted_memory.json()["deleted"])
+        self.assertEqual(deleted_memory.json()["tier"], "one_month")
         important = self.request(
             app,
             "PUT",
