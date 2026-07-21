@@ -21,6 +21,7 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 | `task_time工具优化-编程方案.md` | task_time 工具优化：新增 get action、list 加 query 过滤、SKILL.md 写入 time_plan 管道硬性调用规则（自然语言必须走 time_plan → task_time）、同步 time_plan trigger.md | task_time、优化、get、query、time_plan、管道、调用规则 |
 | `sense_creater工具创建-编程方案.md` | sense_creater 工具从零创建：3 个 action（list/create/validate）、四步创建流程、原子写入 3 文件（sense.json/sense.md/data_update.py）、模板骨架、指令型 SKILL.md、与 expand_creater 对比 | sense_creater、创建、四步流程、感知模块、sense |
 | `web_search工具优化-编程方案.md` | web_search 工具 SKILL.md 优化（不改 tool.py）：使用决策表、参数速查、5 个典型示例、返回字段解读（content_truncated/truncated）、指令型引导 | web_search、优化、SKILL.md、决策表、示例、Tavily |
+| `Markdown渲染增强-编程方案.md` | kemo-agent Web 前端 Markdown 渲染增强方案：从 votx-agent 对齐（数学公式/换行/净化/链接/表格/URL安全/任务列表）+ 超越（语法高亮/Mermaid图表/Emoji短码/图片保留）。新建 MarkdownMessage 组件，含完整实现代码、CSS、测试要点、依赖清单 | Markdown、渲染、KaTeX、Mermaid、语法高亮、Emoji、react-markdown、前端 |
 
 
 ## 设计文档迁移
@@ -28,7 +29,7 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 编程规划和方案文档已迁移至 `开发临时目录/开发文档/`：
 
 | 文件 | 用途 |
-|------|------|
+| `配置页面栏目设计方案.md` | Web 配置页面 6 栏目重新设计方案：外观、模型、用户切换、记忆与上下文、权限边界、运行限制。各栏目控件、对应配置字段及来源（user_config / global_config / localStorage） | 配置页面、UI、栏目、设计、config ||------|------|
 | `token_condense废弃-编程规划.md` | 删除 token_condense 子代理，统一压缩由 context_manage 处理 |
 | `方案实装缺陷清单.md` | 全量方案核查后确认的 3 个未完成项目 |
 | `子代理骨架适配-编程规划.md` | 新旧 agent.json / agent-config.json 字段映射 |
