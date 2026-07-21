@@ -905,7 +905,19 @@ class FileMessageTransport:
                     f"  - 附件：{attachment.name} "
                     f"({attachment.mime}, {attachment.size} bytes)\n"
                 )
-            pieces.append(f"\n**出站**：{outbound}\n\n---\n\n")
+            pieces.append(f"\n**出站**：{outbound}\n")
+            if result.outbound is not None and result.outbound.file_path:
+                outbound_path = Path(result.outbound.file_path)
+                try:
+                    display_path = outbound_path.resolve().relative_to(
+                        self.config.root
+                    ).as_posix()
+                except (OSError, ValueError):
+                    display_path = outbound_path.name
+                pieces.append(
+                    f"  - 出站附件：{outbound_path.name} ({display_path})\n"
+                )
+            pieces.append("\n---\n\n")
             log_file = self.config.log_path / f"{timestamp.date().isoformat()}.md"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with log_file.open("a", encoding="utf-8") as handle:

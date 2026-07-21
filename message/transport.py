@@ -117,6 +117,14 @@ class TransportRegistry:
         with self._lock:
             return list(self._items)
 
+    def unregister(self, name: str) -> RegisteredTransport:
+        key = name.strip().lower()
+        with self._lock:
+            item = self._items.pop(key, None)
+            if item is None:
+                raise TransportRegistrationError(f"未知 Transport：{key}")
+            return item
+
 
 class MockTransport:
     """In-memory transport used by tests and local routing diagnostics."""
