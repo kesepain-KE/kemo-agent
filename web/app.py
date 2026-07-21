@@ -59,6 +59,11 @@ class SessionRenameBody(BaseModel):
     title: str
 
 
+class SessionUndoLastRoundBody(BaseModel):
+    expected_round: int = Field(ge=1)
+    prompt: str = Field(min_length=1, max_length=1_000_000)
+
+
 class SoulBody(BaseModel):
     content: str
 
@@ -464,6 +469,22 @@ def create_app(
             source=source,
         )
 
+    @app.post("/api/users/{user}/sessions/{session_id}/undo-last-round")
+    async def undo_last_round(
+        user: str,
+        session_id: str,
+        body: SessionUndoLastRoundBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.undo_last_round,
+            user,
+            session_id,
+            body.expected_round,
+            body.prompt,
+            source=source,
+        )
+
     @app.get("/api/users/{user}/sessions/{session_id}/history")
     async def history(
         user: str,
@@ -617,8 +638,12 @@ def create_app(
         return backend.memory_summary(user)
 
     @app.get("/api/users/{user}/memory/item")
-    async def memory_item(user: str, filename: str = Query(...)) -> dict[str, Any]:
-        return backend.memory_item(user, filename)
+    async def memory_item(
+        user: str,
+        tier: str = Query(...),
+        filename: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.memory_item(user, tier, filename)
 
     @app.put("/api/users/{user}/memory/item")
     async def update_memory(
@@ -629,8 +654,12 @@ def create_app(
         return backend.put_memory(user, filename, body.content, body.tier)
 
     @app.delete("/api/users/{user}/memory/item")
-    async def delete_memory(user: str, filename: str = Query(...)) -> dict[str, Any]:
-        return backend.delete_memory(user, filename)
+    async def delete_memory(
+        user: str,
+        tier: str = Query(...),
+        filename: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.delete_memory(user, tier, filename)
 
     @app.get("/api/users/{user}/memory/important")
     async def important_memory(user: str) -> dict[str, Any]:

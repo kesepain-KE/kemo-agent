@@ -50,6 +50,7 @@ from run.cron_store import (
 )
 from run.engine import compress_context, iter_request_events
 from run.history import (
+    HistoryError,
     delete_all_sessions as delete_all_history_sessions,
     delete_session as delete_history_session,
     find_window,
@@ -58,6 +59,7 @@ from run.history import (
     rename_session as rename_history_session,
     runtime_window_path,
     session_messages,
+    undo_last_round as undo_history_last_round,
 )
 from run.memory import (
     TIERS,
@@ -144,7 +146,6 @@ _CONFIG_SOURCE_PATHS = (
     "provider.stream",
     "tools.enabled",
     "tools.max_iterations",
-    "tools.max_per_round",
     "tools.timeout",
     "memory.history_read_enabled",
     "memory.temporary_injection_limits.half_year",
@@ -2036,6 +2037,48 @@ class WebRunService:
             "context": dict(context),
         }
 
+    def undo_last_round(
+        self,
+        user: Any,
+        session_id: Any,
+        expected_round: Any,
+        prompt: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        if isinstance(expected_round, bool) or not isinstance(expected_round, int):
+            raise InvalidRequestError("expected_round 必须是正整数")
+        if expected_round < 1:
+            raise InvalidRequestError("expected_round 必须是正整数")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise InvalidRequestError("prompt 不能为空")
+        with self._active_runs_lock:
+            if any(
+                active.user == name and active.session_id == normalized_session
+                for active in self._active_runs.values()
+            ):
+                raise ConflictError("会话仍在运行，确认上一轮结束后再重新发送")
+            try:
+                result = undo_history_last_round(
+                    self.root,
+                    name,
+                    normalized_source,
+                    normalized_session,
+                    expected_round=expected_round,
+                    expected_prompt=prompt,
+                )
+            except HistoryError as exc:
+                raise ConflictError(str(exc)) from exc
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            **result,
+        }
+
     def delete_all_sessions(
         self,
         user: Any,
@@ -2092,11 +2135,6 @@ class WebRunService:
                             for value in item.get("guidance", [])
                             if isinstance(value, str)
                         ] if isinstance(item.get("guidance"), list) else [],
-                        "tool_pause": (
-                            dict(item["tool_pause"])
-                            if isinstance(item.get("tool_pause"), dict)
-                            else None
-                        ),
                     }
                 )
         reasoning_by_round: dict[int, str] = {}
@@ -3117,7 +3155,6 @@ class WebRunService:
                 "task_plan_steps": int(task_plan.get("max_steps") or 10),
                 "tool_iterations": int(tools.get("max_iterations") or 8),
                 "tool_timeout": float(tools.get("timeout") or 60),
-                "tool_max_per_round": tools.get("max_per_round"),
                 "memory_items": sum(
                     int(temporary_memory_limits.get(tier, default))
                     for tier, default in (
@@ -3172,6 +3209,7 @@ class WebRunService:
             content = str(item.get("content") or "")
             result.append(
                 {
+                    "memory_ref": f"{item.get('tier')}:{item.get('filename')}",
                     "filename": str(item.get("filename") or ""),
                     "tier": str(item.get("tier") or ""),
                     "weight": int(item.get("weight") or 0),
@@ -3191,20 +3229,34 @@ class WebRunService:
             "items": result,
         }
 
-    def memory_item(self, user: Any, filename: Any) -> dict[str, Any]:
+    def memory_item(self, user: Any, tier: Any, filename: Any) -> dict[str, Any]:
         name = self.require_user(user)
         try:
             normalized = normalize_memory_filename(filename)
+            target_tier = str(tier or "")
+            if target_tier not in TIERS:
+                raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
             store = MemoryStore(self.root, name, load_config(name, self.root))
-            item = next(
-                (entry for entry in store.list_items() if entry["filename"] == normalized),
-                None,
+            location = store.locate_in_tier(target_tier, normalized)
+            item = (
+                store._entry(
+                    location,
+                    store.load_index(target_tier).get(location.filename)
+                    if target_tier != "permanent"
+                    else None,
+                )
+                if location is not None
+                else None
             )
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
         if item is None:
-            raise NotFoundError(f"记忆不存在：{filename}")
-        return {"user": name, **item}
+            raise NotFoundError(f"记忆不存在：{target_tier}/{normalized}")
+        return {
+            "user": name,
+            "memory_ref": f"{item['tier']}:{item['filename']}",
+            **item,
+        }
 
     def put_memory(
         self,
@@ -3225,43 +3277,88 @@ class WebRunService:
             if target_tier is not None and target_tier not in TIERS:
                 raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
             store = MemoryStore(self.root, name, load_config(name, self.root))
-            existing = store.locate(normalized)
-            if existing is not None and target_tier == "permanent":
-                result = store.upsert_candidates(
-                    [{"filename": normalized, "content": text, "explicit": True}]
-                )
+            scoped_existing = (
+                store.locate_in_tier(target_tier, normalized)
+                if target_tier is not None
+                else None
+            )
+            if scoped_existing is not None:
+                if not scoped_existing.path.is_file():
+                    raise RuntimeMemoryError(
+                        f"记忆索引指向不存在的文件：{scoped_existing.path}"
+                    )
+                previous = scoped_existing.path.read_bytes()
+                _atomic_write(scoped_existing.path, text.encode("utf-8"))
+                try:
+                    if scoped_existing.indexed:
+                        store._touch_temporary(scoped_existing, utc_now())
+                except Exception:
+                    _atomic_write(scoped_existing.path, previous)
+                    raise
+                existing = scoped_existing
             else:
-                result = store.upsert_candidates(
-                    [{"filename": normalized, "content": text}]
-                )
-            if result.get("rejected"):
-                raise RuntimeMemoryError("记忆内容未通过运行时校验")
-            existing = store.locate(normalized)
-            if existing is not None and target_tier and target_tier != existing.tier:
-                if existing.tier == "permanent":
-                    raise RuntimeMemoryError("永久记忆不能降级到临时层")
-                rank = {tier_name: index for index, tier_name in enumerate(TIERS)}
-                if rank[target_tier] < rank[existing.tier]:
-                    raise RuntimeMemoryError("临时记忆只能向更长期层级晋升")
-                store._promote_location(existing, target_tier, utc_now())
-            item = next(
-                entry for entry in store.list_items() if entry["filename"] == normalized
+                existing = store.locate(normalized)
+                if existing is not None and target_tier == "permanent":
+                    result = store.upsert_candidates(
+                        [{"filename": normalized, "content": text, "explicit": True}]
+                    )
+                else:
+                    result = store.upsert_candidates(
+                        [{"filename": normalized, "content": text}]
+                    )
+                if result.get("rejected"):
+                    raise RuntimeMemoryError("记忆内容未通过运行时校验")
+                existing = store.locate(normalized)
+                if existing is not None and target_tier and target_tier != existing.tier:
+                    if existing.tier == "permanent":
+                        raise RuntimeMemoryError("永久记忆不能降级到临时层")
+                    rank = {tier_name: index for index, tier_name in enumerate(TIERS)}
+                    if rank[target_tier] < rank[existing.tier]:
+                        raise RuntimeMemoryError("临时记忆只能向更长期层级晋升")
+                    store._promote_location(existing, target_tier, utc_now())
+                    existing = store.locate_in_tier(target_tier, normalized)
+            if existing is None:
+                raise RuntimeMemoryError(f"记忆写入后无法定位：{normalized}")
+            item = store._entry(
+                existing,
+                store.load_index(existing.tier).get(existing.filename)
+                if existing.indexed
+                else None,
             )
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
-        return {"user": name, **item, "updated": True}
+        return {
+            "user": name,
+            "memory_ref": f"{item['tier']}:{item['filename']}",
+            **item,
+            "updated": True,
+        }
 
-    def delete_memory(self, user: Any, filename: Any) -> dict[str, Any]:
+    def delete_memory(self, user: Any, tier: Any, filename: Any) -> dict[str, Any]:
         name = self.require_user(user)
         try:
             normalized = normalize_memory_filename(filename)
+            target_tier = str(tier or "")
+            if target_tier not in TIERS:
+                raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
             store = MemoryStore(self.root, name, load_config(name, self.root))
-            removed = store.forget(normalized)
+            location = store.locate_in_tier(target_tier, normalized)
+            if location is None:
+                raise NotFoundError(f"记忆不存在：{target_tier}/{normalized}")
+            file_existed = location.path.is_file()
+            store._delete_location(location)
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
-        if not removed:
-            raise NotFoundError(f"记忆不存在：{filename}")
-        return {"user": name, "filename": normalized, "deleted": True}
+        return {
+            "user": name,
+            "tier": target_tier,
+            "memory_ref": f"{target_tier}:{location.filename}",
+            "filename": location.filename,
+            "deleted": True,
+            "index_removed": location.indexed,
+            "file_removed": file_existed,
+            "repaired_orphan": location.indexed and not file_existed,
+        }
 
     def important_memory(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
