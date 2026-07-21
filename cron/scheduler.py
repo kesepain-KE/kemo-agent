@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +29,79 @@ MEMORY_PROMOTION_SYSTEM_KEY = MEMORY_PROMOTION_TASK_ID
 _PERIODIC_TITLE = "临时重要记忆定时巡检"
 _DAILY_TITLE = "临时重要记忆每日整理"
 _PROMOTION_TITLE = "记忆碎片到期晋升检查"
+
+
+def _system_result_summary(result: Any) -> dict[str, Any]:
+    """Keep system-cron diagnostics useful without persisting prompt bodies."""
+
+    if not isinstance(result, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("status", "action", "model", "requested"):
+        value = result.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[key] = value
+    for key in ("created", "updated", "forgotten", "rejected", "deleted", "applied"):
+        value = result.get(key)
+        if isinstance(value, list):
+            summary[key] = [str(item) for item in value[:100]]
+    promotions = result.get("promotions")
+    if isinstance(promotions, list):
+        summary["promotions"] = [
+            {
+                name: item.get(name)
+                for name in ("from_tier", "to_tier", "filename", "merged_with", "skill_created")
+                if name in item
+            }
+            for item in promotions[:100]
+            if isinstance(item, dict)
+        ]
+    nested = result.get("data")
+    if isinstance(nested, dict):
+        nested_summary = _system_result_summary(nested)
+        if nested_summary:
+            summary["data"] = nested_summary
+    return summary
+
+
+def _append_system_execution(
+    root: Path,
+    *,
+    user: str,
+    task_id: str,
+    executed_at: datetime,
+    duration_ms: int,
+    result: dict[str, Any] | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """Append one bounded, user-scoped system-cron execution record."""
+
+    status = "failed" if error is not None else str((result or {}).get("status") or "completed")
+    if status == "completed":
+        status = "success"
+    record = {
+        "schema_version": 1,
+        "executed_at": executed_at.astimezone(BEIJING).isoformat(),
+        "user": user,
+        "task_id": task_id,
+        "status": status,
+        "duration_ms": max(0, int(duration_ms)),
+        "result": _system_result_summary(result),
+        "error": (
+            {"type": type(error).__name__, "message": str(error)}
+            if error is not None
+            else None
+        ),
+    }
+    directory = root / "cron" / "task_cron_system" / "log"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{executed_at.astimezone(BEIJING):%Y-%m-%d}.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        # Diagnostics persistence must never stop the scheduler itself.
+        return
 
 
 def _memory_task_specs(config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -294,6 +368,8 @@ class CronScheduler:
             for user in list_users(self.root):
                 if self._stop_event.is_set():
                     break
+                started_at = datetime.now(BEIJING)
+                started = time.monotonic()
                 try:
                     result = execute_cron_task(
                         root=self.root,
@@ -305,9 +381,25 @@ class CronScheduler:
                         system_task=task,
                     )
                     executed += 1
+                    _append_system_execution(
+                        self.root,
+                        user=user,
+                        task_id=task_id,
+                        executed_at=started_at,
+                        duration_ms=round((time.monotonic() - started) * 1000),
+                        result=result,
+                    )
                     if self.on_task_executed:
                         self.on_task_executed(user, task_id, result)
                 except Exception as exc:
+                    _append_system_execution(
+                        self.root,
+                        user=user,
+                        task_id=task_id,
+                        executed_at=started_at,
+                        duration_ms=round((time.monotonic() - started) * 1000),
+                        error=exc,
+                    )
                     if self.on_error:
                         self.on_error(user, exc)
             try:

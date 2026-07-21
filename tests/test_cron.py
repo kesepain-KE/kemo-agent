@@ -418,6 +418,17 @@ class SchedulerTests(unittest.TestCase):
         advanced = store.read("memory_promotion")
         self.assertTrue(advanced["latest_run_at"])
         self.assertGreater(datetime.fromisoformat(advanced["next_run_at"]), datetime.now(BEIJING))
+        log_path = (
+            self.root
+            / "cron"
+            / "task_cron_system"
+            / "log"
+            / f"{datetime.now(BEIJING):%Y-%m-%d}.jsonl"
+        )
+        records = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
+        self.assertEqual({record["user"] for record in records}, {"alice", "bob"})
+        self.assertTrue(all(record["task_id"] == "memory_promotion" for record in records))
+        self.assertTrue(all(record["status"] == "success" for record in records))
 
 
 if __name__ == "__main__":
