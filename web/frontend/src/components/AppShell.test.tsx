@@ -78,7 +78,7 @@ describe('AppShell navigation', () => {
     await screen.findByRole('button', { name: '停止生成' })
     await chatStarted
 
-    fireEvent.click(screen.getByRole('link', { name: /^配置 配置$/ }))
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
     const userRow = await screen.findByRole('button', { name: '切换到用户 reviewer' })
     expect(userRow).toBeDisabled()
@@ -87,13 +87,13 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '切换当前用户' }))
     expect(screen.getByRole('menuitem', { name: /reviewer/ })).toBeDisabled()
 
-    fireEvent.click(screen.getByRole('link', { name: /^对话 对话$/ }))
+    fireEvent.click(screen.getByRole('link', { name: /^对话$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '停止生成' }))
     expect(chatSignal?.aborted).toBe(true)
 
     releaseChat()
     await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
-    fireEvent.click(screen.getByRole('link', { name: /^配置 配置$/ }))
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
     expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
   })
@@ -195,10 +195,27 @@ describe('AppShell navigation', () => {
 
   it('对话操作菜单提供保存新建、清空、压缩和重新生成', async () => {
     let compressionCalled = false
+    let undoBody: Record<string, unknown> | null = null
+    let chatBody: Record<string, unknown> | null = null
+    let historyMessages = [
+      { role: 'user', content: '上一条问题' },
+      { role: 'assistant', content: '上一条回答' },
+    ]
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return new Response(
+        'event: text_delta\ndata: {"type":"text_delta","content":"重新生成的回答"}\n\n'
+        + 'event: done\ndata: {"type":"done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
     server.use(
       http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
         user: 'kesepain', source: 'web', session_id: 's1',
-        messages: [{ role: 'user', content: '上一条问题' }, { role: 'assistant', content: '上一条回答' }],
+        messages: historyMessages,
         round_metrics: [], round_traces: [],
       })),
       http.post('/api/users/kesepain/sessions/s1/compress', () => {
@@ -207,6 +224,15 @@ describe('AppShell navigation', () => {
           user: 'kesepain', source: 'web', session_id: 's1', requested: true,
           compressed: true, rounds_removed: 2, summary_cache_exists: true,
           context: { rounds_removed: 2 },
+        })
+      }),
+      http.post('/api/users/kesepain/sessions/s1/undo-last-round', async ({ request }) => {
+        undoBody = await request.json() as Record<string, unknown>
+        historyMessages = []
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', found: true,
+          rolled_back: true, round: 1, remaining_rounds: 0, prompt: '上一条问题',
+          content: [{ type: 'text', text: '上一条问题' }],
         })
       }),
     )
@@ -227,7 +253,15 @@ describe('AppShell navigation', () => {
     const regenerate = screen.getByRole('menuitem', { name: /重新发送一次消息/ })
     await waitFor(() => expect(regenerate).toBeEnabled())
     fireEvent.click(regenerate)
-    await waitFor(() => expect(screen.getAllByText('上一条问题').length).toBeGreaterThan(1))
+    await waitFor(() => expect(undoBody).toEqual({ expected_round: 1, prompt: '上一条问题' }))
+    await waitFor(() => expect(chatBody).toMatchObject({
+      session_id: 's1',
+      prompt: '',
+      content: [{ type: 'text', text: '上一条问题' }],
+    }))
+    await screen.findByText('重新生成的回答')
+    expect(screen.queryByText('上一条回答')).not.toBeInTheDocument()
+    expect(screen.getAllByText('上一条问题')).toHaveLength(1)
   })
 
   it('清空当前对话会删除归档并进入新对话', async () => {
@@ -400,9 +434,15 @@ describe('AppShell navigation', () => {
     })))
     renderApp('/chat?user=kesepain')
 
+    expect(screen.queryByText('Personal Agent Runtime')).not.toBeInTheDocument()
     expect(await screen.findByRole('button', { name: /全部删除/ })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '收缩侧边栏' }))
 
     await waitFor(() => expect(screen.queryByRole('button', { name: /全部删除/ })).not.toBeInTheDocument())
+    const expandButton = screen.getByRole('button', { name: '展开侧边栏' })
+    expect(screen.getAllByAltText('kemo-agent logo').length).toBeGreaterThan(0)
+    expect(screen.getByRole('link', { name: '身份与人格' })).toHaveAttribute('title', '身份与人格')
+    fireEvent.click(expandButton)
+    expect(screen.getByRole('button', { name: '收缩侧边栏' })).toBeInTheDocument()
   })
 })

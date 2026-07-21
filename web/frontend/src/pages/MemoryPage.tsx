@@ -54,7 +54,7 @@ function toRows(summary: MemorySummaryResponse | undefined, important: Important
   const rows = (summary?.items || []).map((item) => {
     const tier = item.tier as MemoryTier
     return {
-      key: keyFor(tier, item.filename),
+      key: item.memory_ref || keyFor(tier, item.filename),
       filename: item.filename,
       tier,
       title: titleFor(item.filename, item.preview),
@@ -107,7 +107,7 @@ export function MemoryPage() {
   const rows = useMemo(() => toRows(summary.data, important.data), [summary.data, important.data])
   const selected = rows.find((row) => row.key === selectedKey)
   const selectedRegular = Boolean(selected && selected.tier !== 'important')
-  const item = useQuery({ queryKey: ['memory-item', user, selected?.filename], queryFn: () => getMemoryItem(user, selected!.filename), enabled: Boolean(user && selectedRegular && selected) })
+  const item = useQuery({ queryKey: ['memory-item', user, selected?.tier, selected?.filename], queryFn: () => getMemoryItem(user, selected!.tier, selected!.filename), enabled: Boolean(user && selectedRegular && selected) })
   const detailContent = selected?.tier === 'important' ? important.data?.content : item.data?.content
 
   useEffect(() => {
@@ -140,14 +140,14 @@ export function MemoryPage() {
   const invalidateMemory = async () => {
     await client.invalidateQueries({ queryKey: ['memory-summary', user] })
     await client.invalidateQueries({ queryKey: ['memory-important', user] })
-    if (selected) await client.invalidateQueries({ queryKey: ['memory-item', user, selected.filename] })
+    if (selected) await client.invalidateQueries({ queryKey: ['memory-item', user, selected.tier, selected.filename] })
   }
   const save = useMutation<unknown, Error>({
     mutationFn: () => selected?.tier === 'important' ? updateImportantMemory(user, draft) : putMemory(user, selected!.filename, draft, selected!.tier),
     onSuccess: async () => { setOriginal(draft); await invalidateMemory() },
   })
   const remove = useMutation({
-    mutationFn: () => pendingDelete?.tier === 'important' ? deleteImportantMemory(user) : deleteMemory(user, pendingDelete!.filename),
+    mutationFn: () => pendingDelete?.tier === 'important' ? deleteImportantMemory(user) : deleteMemory(user, pendingDelete!.tier, pendingDelete!.filename),
     onSuccess: async () => { setPendingDelete(null); setSelectedKey(''); await invalidateMemory() },
   })
   const create = useMutation({

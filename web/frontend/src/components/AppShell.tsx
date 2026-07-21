@@ -334,7 +334,7 @@ export function AppShell() {
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-head">
           <div className="brand-mark"><img src={getLogoUrl()} width={571} height={568} alt="kemo-agent logo" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = '/kemo-agent.jpg' }} /></div>
-          <div className="brand-copy"><strong>kemo-agent</strong><span>Personal Agent Runtime</span></div>
+          <div className="brand-copy"><strong>kemo-agent</strong></div>
           <button className="sidebar-toggle" onClick={ui.toggleSidebar} aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'}><ChevronLeft size={16} /></button>
         </div>
         <nav className="nav-section nav-scroll">
@@ -342,7 +342,7 @@ export function AppShell() {
             <span className="nav-group-label">{group.label}</span>
             {group.items.map(({ path, label, icon: Icon }) => {
               const badge = path === '/tasks' ? overview?.counts.active_tasks : undefined
-              return <NavLink key={path} to={withContext(path)} className={({ isActive }) => `nav-btn ${isActive ? 'active' : ''}`}>
+              return <NavLink key={path} to={withContext(path)} aria-label={label} title={ui.sidebarCollapsed ? label : undefined} className={({ isActive }) => `nav-btn ${isActive ? 'active' : ''}`}>
                 <span className="nav-icon"><Icon size={20} /></span><span className="nav-label">{label}</span>
                 {badge ? <span className="nav-badge">{badge}</span> : null}<span className="nav-tip">{label}</span>
               </NavLink>

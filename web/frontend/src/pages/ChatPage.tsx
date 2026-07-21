@@ -14,12 +14,11 @@ import {
   UserRound,
   Zap,
 } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { compressSession, deleteSession, getHistory, getSense, getTasks, streamChat, submitGuidance, updatePlan, uploadUserFile } from '../api/client'
+import { compressSession, deleteSession, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import type { ShellOutletContext } from '../components/AppShell'
+import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
@@ -220,6 +219,14 @@ export function compactPlanAssistantText(content: string, hasPlanBubble: boolean
   return cut === undefined ? content : '任务计划已创建，请在发送框上方查看并确认。'
 }
 
+export function dropLastLiveRound(items: ChatItem[]) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.kind === 'message' && item.role === 'user') return items.slice(0, index)
+  }
+  return items
+}
+
 const terminalPlanStatuses = new Set(['completed', 'rejected', 'cancelled'])
 
 export function selectDockedPlan(plans: PlanSummary[]) {
@@ -317,18 +324,18 @@ export function ChatPage() {
   const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
   const [copiedItem, setCopiedItem] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
-  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | ''>('')
+  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
-  const [toolPause, setToolPause] = useState<{ limit: number; executed: number } | null>(null)
   const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
   const locallyCommittedSessionRef = useRef('')
   const historyHandoffSessionRef = useRef('')
+  const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
   const hasCommitted = useMemo(() => {
     if (!sessionId) return false
@@ -354,32 +361,21 @@ export function ChatPage() {
 
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
   const handoffReady = historyHandoffSessionRef.current === sessionId && Boolean(historyQuery.data)
-  const items = [...historyItems, ...(handoffReady ? [] : liveItems)]
-  const persistedToolPause = useMemo(() => {
-    const metric = historyQuery.data?.round_metrics.at(-1)
-    if (!metric?.tool_pause || metric.tool_pause.reason !== 'max_per_round') return null
-    return {
-      limit: Number(metric.tool_pause.limit || 0),
-      executed: Number(metric.tool_pause.executed || 0),
-    }
-  }, [historyQuery.data])
-  const visibleToolPause = running
-    ? null
-    : toolPause ?? (liveItems.length === 0 ? persistedToolPause : null)
-
+  const visibleLiveItems = handoffReady ? [] : liveItems
+  const items = [...historyItems, ...visibleLiveItems]
   useEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return
     conversationKeyRef.current = conversationKey
     if (historyHandoffSessionRef.current === sessionId) return
     historyHandoffSessionRef.current = ''
+    lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
     setLiveItems([])
     setEditingSource(null)
     setEditedSources(new Set())
     setCopiedItem('')
     setActiveRunId('')
-    setToolPause(null)
     setUploadFeedback(null)
     setConversationBusy('')
     setConversationFeedback(null)
@@ -409,13 +405,16 @@ export function ChatPage() {
     else element.scrollTop = element.scrollHeight
   }, [items.length, liveItems, running])
 
-  const send = async (promptOverride?: string) => {
+  const send = async (
+    promptOverride?: string,
+    options: { sessionId?: string; content?: Array<Record<string, unknown>> } = {},
+  ) => {
     const prompt = (promptOverride ?? draft).trim()
     if (!prompt || !user || running) return
-    const activeSession = sessionId || createSessionId()
+    const activeSession = options.sessionId || sessionId || createSessionId()
+    lastAttemptSessionRef.current = activeSession
     const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
     setDraft('')
-    setToolPause(null)
     setRunning(true)
     setActiveRunId(runId)
     setConversationMenuOpen(false)
@@ -432,18 +431,12 @@ export function ChatPage() {
       await streamChat({
         user,
         sessionId: activeSession,
-        prompt,
+        prompt: options.content?.length ? '' : prompt,
+        content: options.content,
         runId,
         signal: controller.signal,
         onEvent: (event) => {
           setLiveItems((current) => reduceRunEvent(current, event))
-          if (event.type === 'done' && event.metadata?.awaiting_tool_confirmation) {
-            const pause = event.metadata.tool_pause as Record<string, unknown> | undefined
-            setToolPause({
-              limit: Number(pause?.limit || 0),
-              executed: Number(pause?.executed || 0),
-            })
-          }
         },
       })
       await refreshSessions()
@@ -571,10 +564,36 @@ export function ChatPage() {
 
   const activePlan = overview?.active_plan
   const lastUserMessage = [...items].reverse().find((item) => item.kind === 'message' && item.role === 'user')
-  const regenerateLastResponse = () => {
+  const regenerateLastResponse = async () => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
+    const prompt = lastUserMessage.content
+    const targetSession = sessionId || lastAttemptSessionRef.current
+    const persistedRounds = (historyQuery.data?.messages || []).filter((item) => item.role === 'user').length
+    const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
+    const expectedRound = persistedRounds + liveRounds
+    if (expectedRound < 1) return
+    setConversationBusy('retry')
     setConversationFeedback(null)
-    void send(lastUserMessage.content)
+    try {
+      const undo = targetSession
+        ? await undoLastRound(user, targetSession, expectedRound, prompt)
+        : null
+      setLiveItems((current) => dropLastLiveRound(current))
+      if (sessionId) {
+        await queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+      }
+      await send(prompt, {
+        sessionId: targetSession || undefined,
+        content: undo?.content?.length ? undo.content : undefined,
+      })
+    } catch (error) {
+      setConversationFeedback({
+        tone: 'error',
+        text: error instanceof Error ? error.message : '撤销上一轮并重新发送失败',
+      })
+    } finally {
+      setConversationBusy('')
+    }
   }
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
   const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
@@ -695,7 +714,12 @@ export function ChatPage() {
               <article key={item.id} className={`message ${item.role === 'assistant' ? 'ai' : 'user'}`}>
                 <div className="msg-avatar">{item.role === 'assistant' ? <img src="/kemo-agent.jpg" width={571} height={568} alt="" /> : <UserRound size={17} />}</div>
                 <div className="message-body">
-                  <div className="bubble"><ReactMarkdown remarkPlugins={[remarkGfm]}>{compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}</ReactMarkdown></div>
+                  <div className="bubble">
+                    <MarkdownMessage
+                      content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
+                      streaming={Boolean(item.streaming)}
+                    />
+                  </div>
                   <div className="message-actions">
                     {item.edited ? <span className="edited-label">编辑后重发</span> : null}
                     {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
@@ -721,14 +745,14 @@ export function ChatPage() {
         ) : null}
         <AgentComposer
           value={draft}
-          placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : visibleToolPause ? '已暂停工具调用；可点击继续或输入新的指令…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+          placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
           currentRound={currentRound}
           roundLimit={roundLimit}
           running={running}
           disabled={!user}
           conversationMenuOpen={conversationMenuOpen}
           uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status">{uploadFeedback.text}<button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : null}
-          notice={visibleToolPause ? <div className="edit-resend-banner"><span>本轮已执行 {visibleToolPause.executed}/{visibleToolPause.limit} 次工具调用，中间结果已保存。确认后可继续。</span><button type="button" onClick={() => { void send('继续执行上轮未完成的任务。') }}>继续</button></div> : editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
+          notice={editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
               <div className="conversation-menu-head">对话操作</div>
@@ -744,9 +768,9 @@ export function ChatPage() {
                 <span className="conversation-action-icon"><Zap size={16} /></span>
                 <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在执行 Token 压缩…' : '使用 Token 压缩法整理当前上下文'}</span></span>
               </button>
-              <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={regenerateLastResponse}>
+              <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={() => void regenerateLastResponse()}>
                 <span className="conversation-action-icon"><RotateCcw size={16} /></span>
-                <span className="conversation-action-copy"><strong>重新发送一次消息</strong><span>重新提交上一条用户消息并生成新回复</span></span>
+                <span className="conversation-action-copy"><strong>重新发送一次消息</strong><span>撤销上一轮后重放原消息，不增加对话轮数</span></span>
               </button>
               {conversationFeedback ? <div className={`conversation-menu-status ${conversationFeedback.tone}`} role="status">{conversationFeedback.text}</div> : null}
               <div className="conversation-menu-foot">每次打开新网页都会创建新对话，可通过打开历史对话接续对话。</div>

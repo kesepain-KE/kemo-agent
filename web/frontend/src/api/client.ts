@@ -28,6 +28,7 @@ import type {
   SessionDeleteAllResponse,
   SessionDeleteResponse,
   SessionCompressResponse,
+  SessionUndoLastRoundResponse,
   SessionRenameResponse,
   SessionsResponse,
   SettingsResponse,
@@ -159,6 +160,22 @@ export async function compressSession(
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/compress`,
     { method: 'POST' },
+  )
+}
+
+export async function undoLastRound(
+  user: string,
+  sessionId: string,
+  expectedRound: number,
+  prompt: string,
+): Promise<SessionUndoLastRoundResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/undo-last-round`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_round: expectedRound, prompt }),
+    },
   )
 }
 
@@ -363,8 +380,8 @@ export async function getMemorySummary(user: string): Promise<MemorySummaryRespo
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
 }
 
-export async function getMemoryItem(user: string, filename: string): Promise<MemoryItemResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?filename=${encodeURIComponent(filename)}`)
+export async function getMemoryItem(user: string, tier: string, filename: string): Promise<MemoryItemResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?tier=${encodeURIComponent(tier)}&filename=${encodeURIComponent(filename)}`)
 }
 
 export async function putMemory(user: string, filename: string, content: string, tier?: string): Promise<MemoryItemResponse> {
@@ -373,8 +390,8 @@ export async function putMemory(user: string, filename: string, content: string,
   })
 }
 
-export async function deleteMemory(user: string, filename: string): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+export async function deleteMemory(user: string, tier: string, filename: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?tier=${encodeURIComponent(tier)}&filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
 }
 
 export async function getImportantMemory(user: string): Promise<ImportantMemoryResponse> {

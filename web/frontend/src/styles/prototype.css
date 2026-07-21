@@ -1630,3 +1630,57 @@ button,select,.select-like,.role-chip,.state-pill,.status-chip,.policy-value{min
   .task-plan-record-progress{display:none}
   .task-plan-record button{grid-column:2/4;justify-self:start}
 }
+
+/* Sidebar brand: the expanded state emphasizes the product name; the collapsed
+   state swaps the logo for the expand control in the same visual position. */
+.brand-copy strong{
+  font-size:1.125rem;
+  line-height:1.2;
+  font-weight:780;
+  letter-spacing:-.2px;
+}
+.app.sidebar-collapsed .sidebar-head{
+  position:relative;
+  height:44px;
+  min-height:44px;
+  flex-direction:row;
+  justify-content:center;
+  gap:0;
+  padding:0;
+  margin-bottom:12px;
+}
+.app.sidebar-collapsed .brand-mark{
+  transition:opacity .16s ease,transform .16s ease;
+  pointer-events:none;
+}
+.app.sidebar-collapsed .sidebar-toggle{
+  position:absolute;
+  inset:0;
+  width:42px;
+  height:42px;
+  margin:auto;
+  flex:0 0 42px;
+  opacity:0;
+  border:1px solid var(--line);
+  border-radius:11px;
+  background:var(--surface-2);
+  color:var(--muted);
+  box-shadow:none;
+  transition:opacity .16s ease,background .16s ease,border-color .16s ease,color .16s ease;
+}
+.app.sidebar-collapsed .sidebar-head:hover .brand-mark,
+.app.sidebar-collapsed .sidebar-head:has(.sidebar-toggle:focus-visible) .brand-mark{
+  opacity:0;
+  transform:scale(.92);
+}
+.app.sidebar-collapsed .sidebar-head:hover .sidebar-toggle,
+.app.sidebar-collapsed .sidebar-toggle:focus-visible{
+  opacity:1;
+}
+.app.sidebar-collapsed .nav-scroll{
+  overflow-x:hidden;
+  padding-right:0;
+}
+.app.sidebar-collapsed .nav-tip{
+  display:none!important;
+}

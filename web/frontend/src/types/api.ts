@@ -100,6 +100,18 @@ export interface SessionCompressResponse {
   context: Record<string, unknown>
 }
 
+export interface SessionUndoLastRoundResponse {
+  user: string
+  source: 'web'
+  session_id: string
+  found: boolean
+  rolled_back: boolean
+  round: number
+  remaining_rounds: number
+  prompt: string
+  content: Array<Record<string, unknown>>
+}
+
 export interface SessionDeleteAllResponse {
   user: string
   source: 'web'
@@ -119,11 +131,6 @@ export interface HistoryResponse {
     elapsed_ms: number
     tool_calls: number
     guidance: string[]
-    tool_pause?: {
-      reason?: string
-      limit?: number
-      executed?: number
-    } | null
   }>
   round_traces: Array<{
     round: number
@@ -417,7 +424,6 @@ export interface SettingsResponse {
     task_plan_steps: number
     tool_iterations: number
     tool_timeout: number
-    tool_max_per_round: number | null
     memory_items: number
     memory_chars: number
   }
@@ -476,6 +482,7 @@ export interface MemorySummaryResponse {
   user: string
   summary: { total: number; seven_days: number; one_month: number; half_year: number; permanent: number }
   items: Array<{
+    memory_ref: string
     filename: string
     tier: string
     weight: number
@@ -488,6 +495,7 @@ export interface MemorySummaryResponse {
 
 export interface MemoryItemResponse {
   user: string
+  memory_ref: string
   filename: string
   content: string
   tier: string
