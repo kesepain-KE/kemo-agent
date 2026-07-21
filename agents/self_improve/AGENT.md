@@ -21,7 +21,7 @@
 
 ## 二、输入来源
 
-**唯一路径**：context_manage 裁剪旧轮次后，将批量对话数据传入。
+支持三种入口：context_manage 批量提取、cron 晋升决策、主智能体手动审阅。
 
 ```
 context_manage 裁剪 N 轮
@@ -29,7 +29,19 @@ context_manage 裁剪 N 轮
     → 分解为微记忆碎片 → 全量匹配 → 写入/更新/晋升
 ```
 
-不再接收逐轮单条输入。`submit_memory_extraction()` 管线废弃。
+不再接收旧的逐轮自动提取输入。`submit_memory_extraction()` 管线废弃。
+
+主智能体手动调用时使用：
+
+```json
+{
+  "trigger": "manual_review",
+  "request": "用户要求执行的记忆搜索、审阅或整理操作"
+}
+```
+
+手动模式使用 `memory_manage` 搜索相关记忆，返回 `candidates`。执行器会自动将
+候选写入 `MemoryStore`；纯搜索允许返回空 `candidates`，并在其他输出字段中说明结果。
 
 ---
 

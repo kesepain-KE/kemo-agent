@@ -1,7 +1,7 @@
 # 注册信息
 
 - **名称**: memory_temporary_important
-- **触发**: 由 cron 模块调度 — ① `recurring` 每隔 `agents.important_memory_review_hours`（默认 3h）定时巡检 ② `daily` 每天 `agents.daily_memory_review_time`（默认 02:00 北京时间）每日整理
+- **触发**: 三路 — ① cron 模块 `recurring` 每隔 `agents.important_memory_review_hours`（默认 3h）定时巡检 ② cron 模块 `daily` 每天 `agents.daily_memory_review_time`（默认 02:00 北京时间）每日整理 ③ 主智能体通过 `subagent_dispatch` 主动唤起（用户要求手动触发临时重要记忆巡检时）
 - **职责**: 操作 A（periodic_scan）：通过 memory_manage 插件自行读取三层全量临时记忆 → 筛选重要碎片 → 去重永久 → 写入热画像 → 删除已提取源碎片；操作 B（daily_consolidate）：读取热画像 → 整合优化 → 超限压缩
 - **模型**: cheap
 - **工具**: memory_manage（用于自行读取全量记忆、删除碎片、更新 data.json）
@@ -10,7 +10,12 @@
 
 ## 调用方式
 
-由 cron 模块 `CronScheduler` 通过 `exec_mode: "subagent"` 直接调 `AgentRunner.run("memory_temporary_important", ...)`。不经过主智能体。
+三路均可调用：
+
+| 调用方 | 路径 | 说明 |
+|--------|------|------|
+| cron `CronScheduler` | `AgentRunner.run()` 直调，`exec_mode: "subagent"` | 按 schedule 自动触发 periodic_scan / daily_consolidate |
+| 主智能体 | `subagent_dispatch` 工具（`allowed_callers: ["main_agent"]`） | 用户手动要求触发巡检或每日整理时主动调用 |
 
 两个 cron 任务通过 `trigger` 字段区分：
 

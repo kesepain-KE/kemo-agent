@@ -1,7 +1,7 @@
 # 注册信息
 
 - **名称**: self_improve
-- **触发**: 两种模式 — ① context_manage 裁剪旧轮次后传入批量对话（`trigger: "context_compression"`） ② cron 模块 `review_due` 任务发现达标碎片后唤起（`trigger: "memory_promotion"`）
+- **触发**: 三种模式 — ① context_manage 裁剪旧轮次后传入批量对话（`trigger: "context_compression"`） ② cron 模块 `review_due` 任务发现达标碎片后唤起（`trigger: "memory_promotion"`） ③ 主智能体通过 `subagent_dispatch` 主动唤起（`trigger: "manual_review"`）
 - **职责**: 提取新微记忆碎片 → 增量权重（每天最多+1） → 碎片融合 → 层间晋升 → 工作记忆创建技能
 - **模型**: reasoning
 - **工具**: memory_manage（只读搜索记忆）、skill_creater（180d→permanent 工作记忆时创建技能）
@@ -14,8 +14,9 @@
 |---------|--------|------|
 | `context_compression` | context_manage（内部直调） | 上下文压缩前传入即将裁剪的完整批量轮次 |
 | `memory_promotion` | cron `review_due` 任务 | 发现到期且权重达标的碎片后唤起 |
+| `manual_review` | 主智能体（通过 `subagent_dispatch`） | 用户主动要求审阅/整理/搜索记忆时，手动唤起记忆提取与审阅 |
 
-## 两种模式
+## 三种模式
 
 ### 模式一：碎片提取与更新（trigger = `"context_compression"`）
 
@@ -51,6 +52,20 @@
     3. 升级到 permanent
     4. 不是 → 直接升到 permanent
 ```
+
+### 模式三：主智能体手动审阅（trigger = `"manual_review"`）
+
+```text
+输入: { trigger: "manual_review", request: "用户的具体审阅/整理/搜索要求" }
+
+流程:
+  1. 按 request 使用 memory_manage 搜索和读取相关记忆
+  2. 返回 candidates[]；纯搜索时允许返回空数组并在其他输出字段中说明结果
+  3. executor 将 upsert / forget 候选统一写入 MemoryStore
+  4. 返回 memory_update 元数据，报告 created / updated / forgotten / rejected
+```
+
+`request` 必须是非空字符串。手动模式不执行层间晋升；晋升仍只走 `memory_promotion`。
 
 ## 晋升阈值（来自 global_config → memory.tiers）
 

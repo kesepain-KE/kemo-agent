@@ -399,6 +399,9 @@ users/<user>/agents/<name>/
 
 - cron 任务存储在 `users/<name>/task_cron/`。
 - 支持类型：`daily`（每日）、`once`（单次）、`recurring`（重复）。
+- 用户用自然语言创建定时任务时，主智能体必须先调用 `time_plan` 生成自包含提示词和结构化调度参数，再调用 `task_time create`；不得直接猜测时间参数。
+- 用户用自然语言编辑任务时，必须先用 `task_time get` 读取现有任务，再调用 `time_plan` 解析修改要求，最后调用 `task_time update`；删除前也必须先核对任务。
+- 只有内部程序或 API 已经确定完整调度参数时，才能直接调用 `task_time create/update`。
 - `cron.enabled` 控制是否启用调度（默认 true）。
 - `cron.poll_interval` 控制轮询间隔（默认 30 秒）。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主

@@ -75,3 +75,13 @@
 - `interval_seconds` 最小 60 秒
 - 无法解析返回 `action=skip`
 - 继承主会话上下文
+
+## 主智能体硬性调用规则
+
+`task_time` 插件与 `time_plan` 子代理遵循以下双向约定：
+
+- **time_plan 的职责**：接收自然语言，输出 `title`、自包含 `prompt`、`type` 及对应调度参数组成的结构化草案。
+- **task_time 的职责**：接收由 `time_plan` 解析或由程序确定的结构化参数，并持久化到 `CronStore`。
+- **主智能体的职责**：识别需求类型；用户自然语言创建或修改定时任务时先调用 `time_plan`，再把输出交给 `task_time`；只有程序已经确定完整参数时才可直接调用 `task_time`。
+
+编辑已有任务时，应先用 `task_time get` 读取当前任务，并把现有任务和修改要求交给 `time_plan`。主智能体不得绕过 `time_plan`，自行猜测 `type`、`time`、`interval_seconds` 或 `next_run_at`。

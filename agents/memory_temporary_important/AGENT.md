@@ -11,6 +11,8 @@
 ### 触发条件
 
 每隔 `global_config.json → agents.important_memory_review_hours`（默认 3）小时触发一次。
+主智能体也可以在用户明确要求手动巡检时，通过 `subagent_dispatch` 传入
+`{"trigger": "periodic_scan"}` 主动触发。
 
 ### 输入
 
@@ -52,6 +54,8 @@
 ### 触发条件
 
 每天到达 `global_config.json → agents.daily_memory_review_time`（默认 `"02:00"`，北京时间）时触发。
+主智能体也可以在用户明确要求立即整理临时重要记忆时，通过 `subagent_dispatch`
+传入 `{"trigger": "daily_consolidate"}` 主动触发。
 
 ### 流程
 
