@@ -831,17 +831,6 @@ def _iter_request_events_impl(
             tool_schemas = registry.schemas() or None
             tool_timeout = float(tool_config.get("timeout", 240))
             max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
-            raw_max_per_round = tool_config.get("max_per_round")
-            if raw_max_per_round is None:
-                max_per_round = None
-            elif (
-                isinstance(raw_max_per_round, bool)
-                or not isinstance(raw_max_per_round, int)
-                or raw_max_per_round < 1
-            ):
-                raise EngineError("tools.max_per_round 必须是正整数或 null")
-            else:
-                max_per_round = raw_max_per_round
             raw_failure_limit = (config.get("history") or {}).get(
                 "consecutive_tool_fail_limit", 5
             )
@@ -987,8 +976,6 @@ def _iter_request_events_impl(
             seen_calls: dict[str, dict[str, Any]] = {}
             final_metadata: dict[str, Any] = {}
             completed = False
-            tool_calls_this_round = 0
-            tool_pause: dict[str, Any] | None = None
             context_retry_count = 0
 
             for iteration in range(1, max_iterations + 1):
@@ -1194,105 +1181,73 @@ def _iter_request_events_impl(
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     duplicate = False
                     tool_started = time.monotonic()
-                    if (
-                        max_per_round is not None
-                        and tool_calls_this_round >= max_per_round
-                    ):
+                    if failures.is_unavailable(call.name):
                         result_payload = {
                             "ok": False,
                             "error": {
                                 "message": (
-                                    f"本轮最多执行 {max_per_round} 次工具调用；"
-                                    "该调用尚未执行，等待用户确认继续"
+                                    f"工具 {call.name} 已连续失败 {failure_limit} 次，"
+                                    "本轮暂时不可用；请更换工具或调整方案"
                                 ),
-                                "exception_type": "ToolCallDeferred",
-                                "awaiting_user_confirmation": True,
+                                "exception_type": "ToolTemporarilyUnavailable",
+                                "consecutive_failures": failure_limit,
+                                "temporarily_unavailable": True,
                             },
                         }
-                        status = "deferred"
-                        tool_pause = {
-                            "reason": "max_per_round",
-                            "limit": max_per_round,
-                            "executed": tool_calls_this_round,
-                        }
+                        status = "temporarily_unavailable"
                     else:
-                        tool_calls_this_round += 1
-                        if failures.is_unavailable(call.name):
-                            result_payload = {
-                                "ok": False,
-                                "error": {
-                                    "message": (
-                                        f"工具 {call.name} 已连续失败 {failure_limit} 次，"
-                                        "本轮暂时不可用；请更换工具或调整方案"
-                                    ),
-                                    "exception_type": "ToolTemporarilyUnavailable",
-                                    "consecutive_failures": failure_limit,
-                                    "temporarily_unavailable": True,
-                                },
-                            }
-                            status = "temporarily_unavailable"
+                        duplicate = signature in seen_calls
+                        if duplicate:
+                            result_payload = copy.deepcopy(seen_calls[signature])
+                            status = "duplicate_reused"
                         else:
-                            duplicate = signature in seen_calls
-                            if duplicate:
-                                result_payload = copy.deepcopy(seen_calls[signature])
-                                status = "duplicate_reused"
-                            else:
-                                try:
-                                    definition = registry.get(call.name)
-                                    result = execute_tool(
-                                        definition,
-                                        call.arguments,
-                                        context={
-                                            "root": str(base),
-                                            "user": user,
-                                            "source": source,
-                                            "session_id": session_id,
-                                            "window": window_path.name,
-                                            "tool_timeout": tool_timeout,
-                                            "knowledge_scopes": list(
-                                                source_policy.direct_knowledge_scopes()
-                                            ),
-                                        },
-                                        timeout=tool_timeout,
-                                        cancel_event=cancel_event,
-                                    )
-                                    result_payload = {"ok": True, "result": result}
-                                    status = "completed"
-                                except BaseException as exc:
-                                    if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
-                                        raise
-                                    result_payload = {
-                                        "ok": False,
-                                        "error": {
-                                            "message": str(exc),
-                                            "exception_type": type(exc).__name__,
-                                        },
-                                    }
-                                    status = "failed"
-                                seen_calls[signature] = copy.deepcopy(result_payload)
-                            failure_count = failures.record(
-                                call.name,
-                                succeeded=bool(result_payload.get("ok")),
-                            )
-                            if failure_count >= failure_limit:
-                                result_payload["error"].update(
-                                    {
-                                        "consecutive_failures": failure_count,
-                                        "temporarily_unavailable": True,
-                                        "instruction": (
-                                            "请更换工具或调整方案，不要继续重试该工具"
+                            try:
+                                definition = registry.get(call.name)
+                                result = execute_tool(
+                                    definition,
+                                    call.arguments,
+                                    context={
+                                        "root": str(base),
+                                        "user": user,
+                                        "source": source,
+                                        "session_id": session_id,
+                                        "window": window_path.name,
+                                        "tool_timeout": tool_timeout,
+                                        "knowledge_scopes": list(
+                                            source_policy.direct_knowledge_scopes()
                                         ),
-                                    }
+                                    },
+                                    timeout=tool_timeout,
+                                    cancel_event=cancel_event,
                                 )
-                        if (
-                            max_per_round is not None
-                            and tool_calls_this_round >= max_per_round
-                        ):
-                            tool_pause = {
-                                "reason": "max_per_round",
-                                "limit": max_per_round,
-                                "executed": tool_calls_this_round,
-                            }
+                                result_payload = {"ok": True, "result": result}
+                                status = "completed"
+                            except BaseException as exc:
+                                if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                                    raise
+                                result_payload = {
+                                    "ok": False,
+                                    "error": {
+                                        "message": str(exc),
+                                        "exception_type": type(exc).__name__,
+                                    },
+                                }
+                                status = "failed"
+                            seen_calls[signature] = copy.deepcopy(result_payload)
+                        failure_count = failures.record(
+                            call.name,
+                            succeeded=bool(result_payload.get("ok")),
+                        )
+                        if failure_count >= failure_limit:
+                            result_payload["error"].update(
+                                {
+                                    "consecutive_failures": failure_count,
+                                    "temporarily_unavailable": True,
+                                    "instruction": (
+                                        "请更换工具或调整方案，不要继续重试该工具"
+                                    ),
+                                }
+                            )
                     elapsed_ms = max(0, round((time.monotonic() - tool_started) * 1000))
                     record = {
                         "id": call.id,
@@ -1329,9 +1284,6 @@ def _iter_request_events_impl(
                 pending_guidance = _drain_guidance(guidance_channel)
                 _append_guidance(messages, pending_guidance)
                 consumed_guidance.extend(pending_guidance)
-                if tool_pause is not None:
-                    completed = True
-                    break
 
             if not completed:
                 yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
@@ -1378,7 +1330,6 @@ def _iter_request_events_impl(
                     "elapsed_ms": round_elapsed_ms,
                     "tool_calls": len(tool_records),
                     "guidance": list(consumed_guidance),
-                    "tool_pause": copy.deepcopy(tool_pause),
                     "provider_responses": copy.deepcopy(provider_responses),
                 }
             )
@@ -1457,8 +1408,6 @@ def _iter_request_events_impl(
                     "elapsed_ms": round_elapsed_ms,
                     "run_id": run_id,
                     "guidance_count": len(consumed_guidance),
-                    "awaiting_tool_confirmation": tool_pause is not None,
-                    "tool_pause": copy.deepcopy(tool_pause),
                     "context": context_stats,
                     "tool_think_compression": tool_think_compression,
                     "prompt": prompt_bundle.diagnostics,
