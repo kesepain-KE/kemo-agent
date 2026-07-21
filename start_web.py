@@ -256,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     service = WebRunService(
         root,
         runtime_status_provider=host.status if host is not None else None,
+        message_health_checker=host.check_message_transport if host is not None else None,
+        message_transport_remover=host.remove_message_transport if host is not None else None,
     )
     app = create_app(root=root, service=service, auth_config=auth_config)
 

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import threading
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -74,6 +75,14 @@ class MemoryWriteBody(BaseModel):
 class PreferencesBody(BaseModel):
     theme: str | None = None
     font_size: str | None = None
+
+
+class SkillToggleBody(BaseModel):
+    enabled: bool
+
+
+class TmpDeleteManyBody(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=10_000)
 
 
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
@@ -330,13 +339,33 @@ def create_app(
     async def delete_tmp_file(path: str = Query(...)) -> dict[str, Any]:
         return backend.delete_tmp_file(path)
 
+    @app.post("/api/tmp/delete-many")
+    async def delete_tmp_files(body: TmpDeleteManyBody) -> dict[str, Any]:
+        return backend.delete_tmp_files(body.paths)
+
+    @app.delete("/api/tmp/all")
+    async def delete_all_tmp_files() -> dict[str, Any]:
+        return backend.delete_all_tmp_files()
+
     @app.get("/api/users/{user}/agents")
     async def agents(user: str) -> dict[str, Any]:
         return backend.agents(user)
 
+    @app.delete("/api/users/{user}/agents/{agent}")
+    async def delete_user_agent(user: str, agent: str) -> dict[str, Any]:
+        return backend.delete_user_agent(user, agent)
+
     @app.get("/api/users/{user}/message/status")
     async def message_status(user: str) -> dict[str, Any]:
         return backend.message_status(user)
+
+    @app.post("/api/users/{user}/message/modules/{module_name}/check")
+    async def check_message_module(user: str, module_name: str) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.check_message_module, user, module_name)
+
+    @app.delete("/api/users/{user}/message/modules/{module_name}")
+    async def delete_message_module(user: str, module_name: str) -> dict[str, Any]:
+        return backend.delete_message_module(user, module_name)
 
     @app.get("/api/users/{user}/soul")
     async def user_soul(user: str) -> dict[str, Any]:
@@ -364,6 +393,31 @@ def create_app(
     @app.get("/api/users/{user}/expand")
     async def expands(user: str) -> dict[str, Any]:
         return backend.expands(user)
+
+    @app.post("/api/users/{user}/expand/{scope}/{module_name}/refresh")
+    async def refresh_expand_module(
+        user: str, scope: str, module_name: str
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.refresh_expand_module, user, scope, module_name
+        )
+
+    @app.patch("/api/users/{user}/expand/{scope}/{module_name}/enabled")
+    async def set_expand_module_enabled(
+        user: str,
+        scope: str,
+        module_name: str,
+        body: SkillToggleBody,
+    ) -> dict[str, Any]:
+        return backend.set_expand_module_enabled(
+            user, scope, module_name, body.enabled
+        )
+
+    @app.delete("/api/users/{user}/expand/{scope}/{module_name}")
+    async def delete_expand_module(
+        user: str, scope: str, module_name: str
+    ) -> dict[str, Any]:
+        return backend.delete_expand_module(user, scope, module_name)
 
     @app.get("/api/users/{user}/sessions")
     async def sessions(
@@ -474,9 +528,60 @@ def create_app(
     async def skills(user: str) -> dict[str, Any]:
         return backend.skills(user)
 
+    @app.get("/api/users/{user}/skills/{category}/document")
+    async def skill_document(user: str, category: str, name: str = Query(...)) -> dict[str, Any]:
+        return backend.skill_document(user, category, name)
+
+    @app.put("/api/users/{user}/skills/{category}/document")
+    async def update_skill_document(
+        user: str,
+        category: str,
+        body: TextBody,
+        name: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.put_skill_document(user, category, name, body.content)
+
+    @app.delete("/api/users/{user}/skills/{category}")
+    async def delete_skill(user: str, category: str, name: str = Query(...)) -> dict[str, Any]:
+        return backend.delete_skill(user, category, name)
+
+    @app.patch("/api/users/{user}/skills/{category}/enabled")
+    async def set_skill_enabled(
+        user: str,
+        category: str,
+        body: SkillToggleBody,
+        name: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.set_skill_enabled(user, category, name, body.enabled)
+
+    @app.get("/api/users/{user}/skills/{category}/download")
+    async def download_skill(user: str, category: str, name: str = Query(...)) -> Response:
+        filename, data = backend.skill_archive(user, category, name)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+
     @app.get("/api/users/{user}/sense")
     async def sense(user: str) -> dict[str, Any]:
         return backend.sense(user)
+
+    @app.post("/api/users/{user}/sense/{module_name}/refresh")
+    async def refresh_sense_module(user: str, module_name: str) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.refresh_sense_module, user, module_name)
+
+    @app.patch("/api/users/{user}/sense/{module_name}/enabled")
+    async def set_sense_module_enabled(
+        user: str,
+        module_name: str,
+        body: SkillToggleBody,
+    ) -> dict[str, Any]:
+        return backend.set_sense_module_enabled(user, module_name, body.enabled)
+
+    @app.delete("/api/users/{user}/sense/{module_name}")
+    async def delete_sense_module(user: str, module_name: str) -> dict[str, Any]:
+        return backend.delete_sense_module(user, module_name)
 
     @app.get("/api/users/{user}/settings")
     async def settings(user: str) -> dict[str, Any]:

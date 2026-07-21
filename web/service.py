@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from dataclasses import dataclass, field
@@ -10,10 +11,14 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import queue
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable, Iterator
 import uuid
+import zipfile
 from zoneinfo import ZoneInfo
 
 from pydantic import TypeAdapter, ValidationError
@@ -21,7 +26,7 @@ from pydantic import TypeAdapter, ValidationError
 from cron.schedule import compute_next_run
 from events import RunEvent
 from message.identity import IdentityResolver
-from message.plugin import MessagePluginConfig, MessagePluginError
+from message.plugin import FileMessageTransport, MessagePluginConfig, MessagePluginError
 from provider.protocol.models import (
     AudioContent,
     ContentBlock,
@@ -76,13 +81,14 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
-from run.tools import apply_runtime_tool_policy, discover_tools
+from run.tools import discover_tools
 from run.users import list_users
 
 
 _SESSION_RE = re.compile(r"^[^\x00-\x1f]{1,128}$")
 _SESSION_TITLE_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
@@ -94,6 +100,30 @@ _CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
 _FILE_SCOPES = frozenset({"file_upload", "download"})
 _KNOWLEDGE_SCOPES = frozenset({"user", "shared", "global"})
 _KNOWLEDGE_SUFFIXES = frozenset({".md", ".txt", ".json"})
+_SKILL_CATEGORIES = frozenset({"builtin", "shared", "agent_generated", "user_created"})
+_EDITABLE_SKILL_CATEGORIES = frozenset({"agent_generated", "user_created"})
+_EXPAND_SCOPES = frozenset({"global", "shared", "user"})
+_EXPAND_INJECTION_HEADING = re.compile(r"^##\s+注入层\s*$", re.MULTILINE)
+_EXPAND_OPERATION_HEADING = re.compile(r"^##\s+操作层\s*$", re.MULTILINE)
+_MESSAGE_LOG_HEADING = re.compile(
+    r"(?m)^##\s+(?P<timestamp>[^|\r\n]+?)\s*\|\s*(?P<chat_type>[^|\r\n]+?)\s*\|\s*(?P<chat_id>[^\r\n]+?)\s*$"
+)
+_MESSAGE_LOG_INBOUND = re.compile(
+    r"\*\*入站\*\*：(?P<content>.*?)(?=\n\s*-\s*附件：|\n\*\*出站\*\*：|\n---|\Z)",
+    re.DOTALL,
+)
+_MESSAGE_LOG_OUTBOUND = re.compile(
+    r"\*\*出站\*\*：(?P<content>.*?)(?=\n\s*-\s*出站附件：|\n---|\Z)",
+    re.DOTALL,
+)
+_MESSAGE_LOG_ATTACHMENT = re.compile(
+    r"(?m)^\s*-\s*附件：(?P<name>.+?)\s+\((?P<mime>[^,]+),\s*(?P<size>\d+)\s+bytes\)\s*$"
+)
+_MESSAGE_LOG_OUTBOUND_ATTACHMENT = re.compile(
+    r"(?m)^\s*-\s*出站附件：(?P<name>.+?)\s+\((?P<path>[^\r\n]+)\)\s*$"
+)
+_BEIJING = ZoneInfo("Asia/Shanghai")
+_MESSAGE_LOG_LIMIT = 500
 _EDITABLE_TEXT_SUFFIXES = frozenset(
     {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".log", ".py", ".js", ".ts", ".tsx", ".css", ".html"}
 )
@@ -240,6 +270,23 @@ def _flat_files(directory: Path, *, relative_to: Path | None = None) -> list[dic
     visit(directory)
     files.sort(key=lambda item: (str(item["relative_path"]).casefold(), item["relative_path"]))
     return files
+
+
+def _agent_registration_value(content: str, label: str) -> str:
+    pattern = re.compile(
+        rf"^\s*-\s*\*\*{re.escape(label)}\*\*\s*[:：]\s*(.+?)\s*$",
+        re.MULTILINE,
+    )
+    match = pattern.search(content or "")
+    return match.group(1).strip() if match else ""
+
+
+def _reject_tree_links(directory: Path) -> None:
+    for current, directories, files in os.walk(directory, topdown=True, followlinks=False):
+        for name in [*directories, *files]:
+            path = Path(current) / name
+            if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                raise InvalidRequestError("用户子代理目录不能包含符号链接或目录联接")
 
 
 def _safe_relative_target(directory: Path, value: Any) -> tuple[str, Path]:
@@ -406,10 +453,14 @@ class WebRunService:
         *,
         event_source: Callable[..., Iterator[RunEvent]] = iter_request_events,
         runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
+        message_health_checker: Callable[[str, str], dict[str, Any]] | None = None,
+        message_transport_remover: Callable[[str, str], None] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.event_source = event_source
         self.runtime_status_provider = runtime_status_provider
+        self.message_health_checker = message_health_checker
+        self.message_transport_remover = message_transport_remover
         self._active_runs: dict[str, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
 
@@ -808,14 +859,64 @@ class WebRunService:
         }
 
     def delete_tmp_file(self, path: Any) -> dict[str, Any]:
-        relative, target = _safe_relative_target(self.root / "tmp", path)
-        if target.is_symlink() or not target.is_file():
-            raise NotFoundError(f"临时文件不存在：{relative}")
-        try:
-            target.unlink()
-        except OSError as exc:
-            raise WebServiceError(f"临时文件删除失败：{relative}") from exc
-        return {"path": relative, "deleted": True}
+        result = self.delete_tmp_files([path])
+        return {"path": result["deleted_paths"][0], "deleted": True}
+
+    def delete_tmp_files(self, paths: Any) -> dict[str, Any]:
+        if not isinstance(paths, list) or not paths:
+            raise InvalidRequestError("paths 必须是非空数组")
+        if len(paths) > 10_000:
+            raise InvalidRequestError("单次最多删除 10000 个临时文件")
+
+        directory = self.root / "tmp"
+        root = directory.resolve()
+        validated: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+        for value in paths:
+            relative, target = _safe_relative_target(directory, value)
+            if relative in seen:
+                continue
+            _reject_link_path(root, target)
+            if target.is_symlink() or not target.is_file():
+                raise NotFoundError(f"临时文件不存在：{relative}")
+            seen.add(relative)
+            validated.append((relative, target))
+
+        deleted_paths: list[str] = []
+        for relative, target in validated:
+            try:
+                target.unlink()
+            except OSError as exc:
+                raise WebServiceError(f"临时文件删除失败：{relative}") from exc
+            deleted_paths.append(relative)
+
+        self._prune_empty_tmp_directories()
+        return {
+            "deleted_paths": deleted_paths,
+            "deleted_count": len(deleted_paths),
+        }
+
+    def delete_all_tmp_files(self) -> dict[str, Any]:
+        directory = self.root / "tmp"
+        paths = [item["relative_path"] for item in _flat_files(directory)]
+        if not paths:
+            self._prune_empty_tmp_directories()
+            return {"deleted_paths": [], "deleted_count": 0}
+        return self.delete_tmp_files(paths)
+
+    def _prune_empty_tmp_directories(self) -> None:
+        directory = self.root / "tmp"
+        if not directory.is_dir():
+            return
+        for current, directories, _ in os.walk(directory, topdown=False, followlinks=False):
+            for name in directories:
+                candidate = Path(current) / name
+                if candidate.is_symlink() or getattr(candidate, "is_junction", lambda: False)():
+                    continue
+                try:
+                    candidate.rmdir()
+                except OSError:
+                    continue
 
     def _avatar_path(self, user: str) -> Path | None:
         directory = self.root / "users" / user / "avatar"
@@ -941,9 +1042,16 @@ class WebRunService:
         agents = [
             {
                 "name": definition.name,
+                "version": definition.version,
                 "description": definition.description,
                 "enabled": definition.enabled,
                 "source": "global" if definition.source == "builtin" else "user",
+                "trigger": (
+                    _agent_registration_value(definition.trigger_registration, "触发")
+                    or "未声明独立触发条件"
+                ),
+                "rules": definition.instruction,
+                "executor": definition.executor,
                 "execution": definition.execution,
                 "model_profile": definition.model_profile,
                 "exposure": definition.capabilities.exposure,
@@ -961,6 +1069,238 @@ class WebRunService:
                 "user": sum(item["source"] == "user" for item in agents),
             },
             "agents": agents,
+        }
+
+    def delete_user_agent(self, user: Any, agent: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(agent, str) or not _AGENT_NAME_RE.fullmatch(agent.strip()):
+            raise InvalidRequestError("agent 必须是有效的子代理名称")
+        agent_name = agent.strip()
+        definition = discover_agents(self.root, name).agents.get(agent_name)
+        if definition is None or definition.source != "user":
+            raise NotFoundError(f"用户子代理不存在：{agent_name}")
+
+        directory = (self.root / "users" / name / "agents").resolve()
+        target = definition.directory.resolve()
+        try:
+            target.relative_to(directory)
+        except ValueError:
+            raise InvalidRequestError("用户子代理路径越出允许目录") from None
+        _reject_link_path(directory, definition.directory)
+        _reject_tree_links(definition.directory)
+
+        tombstone = directory / f"_{agent_name}.{uuid.uuid4().hex}.deleting"
+        try:
+            os.replace(definition.directory, tombstone)
+            shutil.rmtree(tombstone)
+        except OSError as exc:
+            if tombstone.exists() and not definition.directory.exists():
+                try:
+                    os.replace(tombstone, definition.directory)
+                except OSError:
+                    pass
+            raise WebServiceError(f"用户子代理删除失败：{agent_name}") from exc
+        return {
+            "user": name,
+            "name": agent_name,
+            "path": f"users/{name}/agents/{agent_name}",
+            "deleted": True,
+        }
+
+    def _message_module_directory(
+        self, user: Any, module_name: Any
+    ) -> tuple[str, str, Path, MessagePluginConfig]:
+        name = self.require_user(user)
+        if not isinstance(module_name, str) or not module_name.strip():
+            raise InvalidRequestError("module_name 必须是非空字符串")
+        logical_name = module_name.strip()
+        pure = PurePosixPath(logical_name.replace("\\", "/"))
+        if (
+            len(pure.parts) != 1
+            or pure.name in {".", "..", "__pycache__"}
+            or pure.name.startswith(".")
+            or "\x00" in logical_name
+            or ":" in logical_name
+        ):
+            raise InvalidRequestError("消息模块名称必须是 message/out 下的直接目录名")
+        base = (self.root / "message" / "out").resolve()
+        target = base / logical_name
+        if not target.is_dir():
+            raise NotFoundError(f"消息模块不存在：{logical_name}")
+        if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+            raise InvalidRequestError("消息模块目录不能是符号链接或目录联接")
+        try:
+            target.resolve().relative_to(base)
+        except ValueError:
+            raise InvalidRequestError("消息模块路径越出 message/out") from None
+        try:
+            config = MessagePluginConfig.load(self.root, target)
+        except MessagePluginError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+        if config.bound_user != name:
+            raise NotFoundError(f"当前用户未绑定消息模块：{logical_name}")
+        return name, logical_name, target, config
+
+    @staticmethod
+    def _message_log_text(value: str) -> str:
+        return " ".join(value.strip().split())
+
+    def _message_logs(
+        self, config: MessagePluginConfig
+    ) -> tuple[list[dict[str, Any]], bool, int]:
+        entries: list[dict[str, Any]] = []
+        log_files = [
+            item
+            for item in _visible_children(config.log_path)
+            if item.is_file() and item.suffix.casefold() == ".md"
+        ]
+        log_files.sort(key=lambda item: (item.name.casefold(), item.name), reverse=True)
+        files_root = config.files_path.relative_to(self.root).as_posix()
+        for log_file in log_files:
+            try:
+                content = log_file.read_text("utf-8-sig")
+            except (OSError, UnicodeError):
+                continue
+            headings = list(_MESSAGE_LOG_HEADING.finditer(content))
+            for index, heading in enumerate(headings):
+                block_end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
+                block = content[heading.end():block_end]
+                timestamp = heading.group("timestamp").strip()
+                common = {
+                    "timestamp": timestamp,
+                    "chat_type": heading.group("chat_type").strip(),
+                    "chat_id": heading.group("chat_id").strip(),
+                    "source": log_file.relative_to(self.root).as_posix(),
+                }
+                inbound = _MESSAGE_LOG_INBOUND.search(block)
+                if inbound:
+                    inbound_text = self._message_log_text(inbound.group("content"))
+                    if inbound_text and inbound_text != "[仅附件]":
+                        entries.append({
+                            **common,
+                            "id": f"{config.directory.name}:{log_file.name}:{index}:receive",
+                            "direction": "receive",
+                            "kind": "text",
+                            "content": inbound_text,
+                            "file_path": None,
+                            "success": True,
+                        })
+                for attachment_index, attachment in enumerate(_MESSAGE_LOG_ATTACHMENT.finditer(block)):
+                    attachment_name = self._message_log_text(attachment.group("name"))
+                    entries.append({
+                        **common,
+                        "id": f"{config.directory.name}:{log_file.name}:{index}:file:{attachment_index}",
+                        "direction": "receive",
+                        "kind": "file",
+                        "content": attachment_name,
+                        "file_path": f"{files_root}/{attachment_name}",
+                        "mime": attachment.group("mime").strip(),
+                        "size": int(attachment.group("size")),
+                        "success": True,
+                    })
+                outbound = _MESSAGE_LOG_OUTBOUND.search(block)
+                if outbound:
+                    outbound_text = self._message_log_text(outbound.group("content"))
+                    if outbound_text:
+                        failed = outbound_text.startswith("处理失败：")
+                        entries.append({
+                            **common,
+                            "id": f"{config.directory.name}:{log_file.name}:{index}:send",
+                            "direction": "send",
+                            "kind": "system" if failed else "text",
+                            "content": outbound_text,
+                            "file_path": None,
+                            "success": not failed,
+                        })
+                for attachment_index, attachment in enumerate(
+                    _MESSAGE_LOG_OUTBOUND_ATTACHMENT.finditer(block)
+                ):
+                    entries.append({
+                        **common,
+                        "id": f"{config.directory.name}:{log_file.name}:{index}:send-file:{attachment_index}",
+                        "direction": "send",
+                        "kind": "file",
+                        "content": self._message_log_text(attachment.group("name")),
+                        "file_path": attachment.group("path").strip(),
+                        "success": True,
+                    })
+        entries.sort(key=lambda item: (str(item["timestamp"]), str(item["id"])), reverse=True)
+        truncated = len(entries) > _MESSAGE_LOG_LIMIT
+        today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
+        today_count = sum(
+            str(item.get("timestamp") or "").startswith(today) for item in entries
+        )
+        return entries[:_MESSAGE_LOG_LIMIT], truncated, today_count
+
+    def _message_transport_item(
+        self,
+        config: MessagePluginConfig,
+        directory: Path,
+        components: dict[str, Any],
+        issues: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        try:
+            state = read_json_object(config.state_path, allow_empty=True)
+        except Exception as exc:
+            state = {}
+            issues.append({"name": directory.name, "error": str(exc)})
+        component = components.get(f"transport:{config.platform}")
+        component = component if isinstance(component, dict) else {}
+        runtime_state = str(component.get("state") or "")
+        health = str(state.get("health") or "unknown")
+        transport_state = (
+            "running"
+            if runtime_state == "running"
+            else "error"
+            if runtime_state == "failed" or health in {"dead", "degraded"}
+            else "stopped"
+        )
+        connection_status = (
+            "connected"
+            if health == "healthy"
+            else "error"
+            if health in {"dead", "degraded"} or transport_state == "error"
+            else "disconnected"
+        )
+        logs, logs_truncated, today_logs = self._message_logs(config)
+        temporary_files = _flat_files(config.files_path, relative_to=self.root)
+        return {
+            "id": directory.name,
+            "name": config.machine_id,
+            "platform": config.platform,
+            "display_name": config.display_name,
+            "description": f"{config.display_name}，负责 {config.platform} 平台的文本与文件消息传输。",
+            "capabilities": sorted(config.capabilities),
+            "state": transport_state,
+            "connection_status": connection_status,
+            "bound_user": config.bound_user,
+            "allowed_tools": (
+                sorted(config.allowed_tools) if config.allowed_tools is not None else None
+            ),
+            "last_error": component.get("last_error") or state.get("error"),
+            "health": health,
+            "last_check": state.get("last_check"),
+            "last_message_at": state.get("last_message_at"),
+            "latency_ms": state.get("latency_ms"),
+            "messages_received_today": int(state.get("messages_received_today") or 0),
+            "messages_sent_today": int(state.get("messages_sent_today") or 0),
+            "path": directory.relative_to(self.root).as_posix(),
+            "files_path": config.files_path.relative_to(self.root).as_posix(),
+            "log_path": config.log_path.relative_to(self.root).as_posix(),
+            "message_buffer": config.buffer_path.relative_to(self.root).as_posix(),
+            "modules": dict(config.modules),
+            "api_imported": True,
+            "polling_interval": "1s",
+            "health_interval": "30s",
+            "file_relay_enabled": bool(
+                {"receive_file", "send_file"}.intersection(config.capabilities)
+            ),
+            "log_rotation": "每日轮换",
+            "temporary_file_count": len(temporary_files),
+            "temporary_file_bytes": sum(int(item["size"]) for item in temporary_files),
+            "today_log_count": today_logs,
+            "logs": logs,
+            "logs_truncated": logs_truncated,
         }
 
     def message_status(self, user: Any) -> dict[str, Any]:
@@ -986,8 +1326,8 @@ class WebRunService:
             for binding in resolver.bindings
             if binding.internal_user == name
         ]
-        runtime = self._runtime_status()
-        components = runtime.get("components") or {}
+        components = self._runtime_status().get("components") or {}
+        components = components if isinstance(components, dict) else {}
         transports: list[dict[str, Any]] = []
         issues: list[dict[str, str]] = []
         base = self.root / "message" / "out"
@@ -998,50 +1338,16 @@ class WebRunService:
                 config = MessagePluginConfig.load(self.root, directory)
                 if config.bound_user != name:
                     continue
-                try:
-                    state = read_json_object(config.state_path, allow_empty=True)
-                except Exception as exc:
-                    state = {}
-                    issues.append({"name": directory.name, "error": str(exc)})
-                component = components.get(f"transport:{config.platform}")
-                component = component if isinstance(component, dict) else {}
-                runtime_state = str(component.get("state") or "")
-                transport_state = (
-                    "running"
-                    if runtime_state == "running"
-                    else "error"
-                    if runtime_state == "failed" or state.get("health") == "dead"
-                    else "stopped"
-                )
-                last_error = component.get("last_error") or state.get("error")
                 transports.append(
-                    {
-                        "name": config.machine_id,
-                        "platform": config.platform,
-                        "display_name": config.display_name,
-                        "capabilities": sorted(config.capabilities),
-                        "state": transport_state,
-                        "bound_user": config.bound_user,
-                        "allowed_tools": (
-                            sorted(config.allowed_tools)
-                            if config.allowed_tools is not None
-                            else None
-                        ),
-                        "last_error": last_error,
-                        "health": str(state.get("health") or "unknown"),
-                        "last_check": state.get("last_check"),
-                        "last_message_at": state.get("last_message_at"),
-                        "latency_ms": state.get("latency_ms"),
-                        "messages_received_today": int(
-                            state.get("messages_received_today") or 0
-                        ),
-                        "messages_sent_today": int(
-                            state.get("messages_sent_today") or 0
-                        ),
-                    }
+                    self._message_transport_item(config, directory, components, issues)
                 )
             except MessagePluginError as exc:
-                issues.append({"name": directory.name, "error": str(exc)})
+                try:
+                    raw = read_json_object(directory / "message.json", allow_empty=True)
+                except Exception:
+                    raw = {}
+                if raw.get("bound_user") == name:
+                    issues.append({"name": directory.name, "error": str(exc)})
         transports.sort(key=lambda item: (item["platform"], item["name"]))
         return {
             "user": name,
@@ -1050,40 +1356,194 @@ class WebRunService:
             "summary": {
                 "total_bindings": len(bindings),
                 "total_transports": len(transports),
-                "running_transports": sum(
-                    item["state"] == "running" for item in transports
+                "running_transports": sum(item["state"] == "running" for item in transports),
+                "stopped_transports": sum(item["state"] == "stopped" for item in transports),
+                "error_transports": sum(item["state"] == "error" for item in transports),
+                "connected_transports": sum(
+                    item["connection_status"] == "connected" for item in transports
                 ),
-                "stopped_transports": sum(
-                    item["state"] == "stopped" for item in transports
-                ),
-                "error_transports": sum(
-                    item["state"] == "error" for item in transports
-                ),
+                "temporary_files": sum(item["temporary_file_count"] for item in transports),
+                "today_logs": sum(item["today_log_count"] for item in transports),
             },
             "issues": issues,
         }
 
+    def check_message_module(self, user: Any, module_name: Any) -> dict[str, Any]:
+        name, logical_name, _, config = self._message_module_directory(user, module_name)
+        try:
+            if self.message_health_checker is not None:
+                try:
+                    state = self.message_health_checker(config.platform, name)
+                except Exception:
+                    state = FileMessageTransport(config).check_health()
+            else:
+                state = FileMessageTransport(config).check_health()
+        except Exception as exc:
+            raise WebServiceError(f"消息模块连接检测失败：{logical_name}（{exc}）") from exc
+        refreshed = self.message_status(name)
+        transport = next(
+            (item for item in refreshed["transports"] if item["id"] == logical_name),
+            None,
+        )
+        return {
+            "user": name,
+            "module": logical_name,
+            "checked": True,
+            "state": state,
+            "transport": transport,
+        }
+
+    def delete_message_module(self, user: Any, module_name: Any) -> dict[str, Any]:
+        name, logical_name, target, config = self._message_module_directory(user, module_name)
+        _reject_tree_links(target)
+        relative_path = target.relative_to(self.root).as_posix()
+        tombstone = target.parent / f".{logical_name}.{uuid.uuid4().hex}.deleting"
+        try:
+            os.replace(target, tombstone)
+            if self.message_transport_remover is not None:
+                self.message_transport_remover(config.platform, name)
+            shutil.rmtree(tombstone)
+        except Exception as exc:
+            if tombstone.exists() and not target.exists():
+                try:
+                    os.replace(tombstone, target)
+                except OSError:
+                    pass
+            raise WebServiceError(f"消息模块删除失败：{logical_name}") from exc
+        return {
+            "user": name,
+            "module": logical_name,
+            "platform": config.platform,
+            "path": relative_path,
+            "deleted": True,
+        }
+
     def expands(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
-        scopes = (
-            ("global", self.root / "global_expand"),
-            ("shared", self.root / "shared_expand"),
-            ("user", self.root / "users" / name / "expand"),
+        config = load_config(name, self.root)
+        source_policy = MainAgentSourcePolicy.from_config(config)
+        prompt_settings = parse_prompt_settings(config)
+        registry = load_prompt_source_registry(self.root, name)
+        selection = registry.select_expand(
+            max_chars=prompt_settings.char_limits["expand_data"],
+            mode=prompt_settings.injection_mode["expand_data"],
+            allow={
+                "global": source_policy.global_expand.selector(),
+                "shared": source_policy.shared_expand.selector(),
+                "user": None,
+            },
         )
-        expands = []
+        diagnostics = registry.selection_diagnostics().get("expand") or {}
+        scope_roots = {
+            "global": self.root / "global_expand",
+            "shared": self.root / "shared_expand",
+            "user": self.root / "users" / name / "expand",
+        }
+        expands: list[dict[str, Any]] = []
         scope_counts: dict[str, int] = {}
-        for scope, directory in scopes:
-            items = []
-            for module in _visible_children(directory):
-                if not module.is_dir():
-                    continue
+        injection_cursor = 0
+        has_injection_piece = False
+        for scope in ("global", "shared", "user"):
+            directory = scope_roots[scope]
+            scope_diagnostics = diagnostics.get(scope) or {}
+            discovered = list(scope_diagnostics.get("discovered") or [])
+            discovered_set = set(discovered)
+            for module_dir in _visible_children(directory):
+                if module_dir.is_dir() and module_dir.name not in discovered_set:
+                    discovered.append(module_dir.name)
+                    discovered_set.add(module_dir.name)
+            selected = set(scope_diagnostics.get("selected") or [])
+            health_status = scope_diagnostics.get("health_status") or {}
+            items: list[dict[str, Any]] = []
+            for module_name in discovered:
+                module = directory / module_name
+                health = health_status.get(module_name) or {
+                    "name": module_name,
+                    "valid": False,
+                    "input_health": "异常",
+                    "error": "模块未进入运行时注册表",
+                }
+                module_path_safe = (
+                    module.is_dir()
+                    and not module.is_symlink()
+                    and not getattr(module, "is_junction", lambda: False)()
+                )
+                if module_path_safe:
+                    try:
+                        module.resolve().relative_to(directory.resolve())
+                    except ValueError:
+                        module_path_safe = False
+                if not module_path_safe:
+                    health = {
+                        **health,
+                        "valid": False,
+                        "input_health": "异常",
+                        "error": "拓展模块目录不能是符号链接、目录联接或越界路径",
+                    }
+                files = _flat_files(module, relative_to=directory) if module_path_safe else []
+                valid = bool(health.get("valid"))
+                whitelisted = scope == "user" or module_name in selected
+                collected_markdown = self._read_expand_text(
+                    module, health.get("input_data")
+                )
+                control_document = self._read_expand_text(
+                    module, health.get("start_control")
+                )
+                control_injection, control_operation = self._expand_control_sections(
+                    control_document
+                )
+                module_piece = self._expand_prompt_piece(
+                    scope=scope,
+                    module_name=module_name,
+                    health=health,
+                    collected_markdown=collected_markdown,
+                    control_injection=control_injection,
+                ) if valid and module_name in selected else ""
+                injected_markdown = ""
+                if module_piece:
+                    piece_start = injection_cursor + (2 if has_injection_piece else 0)
+                    piece_end = piece_start + len(module_piece)
+                    if piece_start < len(selection.text):
+                        injected_markdown = selection.text[
+                            piece_start:min(piece_end, len(selection.text))
+                        ]
+                    injection_cursor = piece_end
+                    has_injection_piece = True
+                updated_at = max(
+                    (float(item.get("updated_at") or 0) for item in files),
+                    default=0.0,
+                )
                 items.append(
                     {
-                        "name": module.name,
+                        "id": f"{scope}:{module_name}",
+                        "scope": scope,
+                        "name": module_name,
+                        "display_name": health.get("name") or module_name,
+                        "description": health.get("explain") or "",
                         "type": "directory",
-                        "relative_path": module.name,
+                        "root": self._project_path(directory),
+                        "path": self._project_path(module),
+                        "relative_path": module_name,
                         "has_register": (module / "expand.json").is_file(),
-                        "files": _flat_files(module, relative_to=directory),
+                        "valid": valid,
+                        "error": health.get("error") or "",
+                        "whitelisted": whitelisted,
+                        "active_for_main_agent": valid and whitelisted,
+                        "input_health": health.get("input_health") or "异常",
+                        "open_input": bool(health.get("open_input")),
+                        "open_control": bool(health.get("open_control")),
+                        "input_data": health.get("input_data") or "",
+                        "start_update": health.get("start_update") or "",
+                        "start_expand": health.get("start_expand") or "",
+                        "start_control": health.get("start_control") or "",
+                        "control_document": control_document,
+                        "control_injection_markdown": control_injection,
+                        "control_operation_markdown": control_operation,
+                        "collected_markdown": collected_markdown,
+                        "injected_markdown": injected_markdown,
+                        "injected_tokens": estimate_text_tokens(injected_markdown),
+                        "files": files,
+                        "updated_at": updated_at,
                     }
                 )
             scope_counts[scope] = len(items)
@@ -1097,7 +1557,264 @@ class WebRunService:
         return {
             "user": name,
             "summary": {"total": sum(scope_counts.values()), **scope_counts},
+            "status_summary": {
+                "enabled": sum(
+                    item["active_for_main_agent"]
+                    for scope in expands
+                    for item in scope["items"]
+                ),
+                "healthy": sum(
+                    item["valid"] and item["input_health"] == "正常"
+                    for scope in expands
+                    for item in scope["items"]
+                ),
+                "invalid": sum(
+                    not item["valid"]
+                    for scope in expands
+                    for item in scope["items"]
+                ),
+            },
             "expands": expands,
+            "injection": {
+                "content": selection.text,
+                "source_files": list(selection.source_files),
+                "original_chars": selection.original_chars,
+                "injected_chars": selection.injected_chars,
+                "original_items": selection.original_items,
+                "injected_items": selection.injected_items,
+                "estimated_tokens": estimate_text_tokens(selection.text),
+                "truncated": selection.truncated,
+                "prompt_section": "expand_data",
+                "prompt_position": "System Prompt / Expand Data",
+            },
+            "source_policy": source_policy.public_summary(),
+        }
+
+    @staticmethod
+    def _read_expand_text(module_dir: Path, file_name: Any) -> str:
+        if not isinstance(file_name, str) or not file_name.strip():
+            return ""
+        normalized = file_name.strip()
+        if Path(normalized).name != normalized:
+            return ""
+        path = module_dir / normalized
+        if not path.is_file() or path.is_symlink():
+            return ""
+        try:
+            path.resolve().relative_to(module_dir.resolve())
+            return path.read_text("utf-8-sig").strip()
+        except (OSError, UnicodeError, ValueError):
+            return ""
+
+    @staticmethod
+    def _expand_control_sections(content: str) -> tuple[str, str]:
+        if not content:
+            return "", ""
+        injection_match = _EXPAND_INJECTION_HEADING.search(content)
+        operation_match = _EXPAND_OPERATION_HEADING.search(
+            content, injection_match.end() if injection_match else 0
+        )
+        injection = (
+            content[
+                injection_match.end():operation_match.start() if operation_match else len(content)
+            ].strip()
+            if injection_match
+            else ""
+        )
+        operation = content[operation_match.end():].strip() if operation_match else ""
+        return injection, operation
+
+    @staticmethod
+    def _expand_prompt_piece(
+        *,
+        scope: str,
+        module_name: str,
+        health: dict[str, Any],
+        collected_markdown: str,
+        control_injection: str,
+    ) -> str:
+        parts: list[str] = []
+        if (
+            health.get("open_input")
+            and health.get("input_health") == "正常"
+            and collected_markdown
+        ):
+            parts.append(f"## 数据采集\n{collected_markdown}")
+        if health.get("open_control") and control_injection:
+            parts.append(f"## 操控能力\n{control_injection}")
+        return f"[{scope}:{module_name}]\n" + "\n\n".join(parts) if parts else ""
+
+    def _expand_module_directory(
+        self, user: Any, scope: Any, module_name: Any
+    ) -> tuple[str, str, str, Path]:
+        name = self.require_user(user)
+        if not isinstance(scope, str) or scope not in _EXPAND_SCOPES:
+            raise InvalidRequestError("scope 只允许 global、shared 或 user")
+        if not isinstance(module_name, str) or not module_name.strip():
+            raise InvalidRequestError("module_name 必须是非空字符串")
+        logical_name = module_name.strip()
+        pure = PurePosixPath(logical_name.replace("\\", "/"))
+        if (
+            len(pure.parts) != 1
+            or pure.name in {".", "..", "__pycache__"}
+            or pure.name.startswith(".")
+            or "\x00" in logical_name
+            or ":" in logical_name
+        ):
+            raise InvalidRequestError("拓展模块名称必须是对应拓展层的直接目录名")
+        base = {
+            "global": self.root / "global_expand",
+            "shared": self.root / "shared_expand",
+            "user": self.root / "users" / name / "expand",
+        }[scope].resolve()
+        target = base / logical_name
+        if not target.is_dir():
+            raise NotFoundError(f"拓展模块不存在：{scope}:{logical_name}")
+        if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+            raise InvalidRequestError("拓展模块目录不能是符号链接或目录联接")
+        try:
+            target.resolve().relative_to(base)
+        except ValueError:
+            raise InvalidRequestError("拓展模块路径越出对应拓展目录") from None
+        return name, scope, logical_name, target
+
+    def refresh_expand_module(
+        self, user: Any, scope: Any, module_name: Any
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, target = self._expand_module_directory(
+            user, scope, module_name
+        )
+        module = next(
+            (
+                item
+                for group in self.expands(name)["expands"]
+                if group["scope"] == normalized_scope
+                for item in group["items"]
+                if item["name"] == logical_name
+            ),
+            None,
+        )
+        if not module or not module["valid"]:
+            raise InvalidRequestError(
+                f"拓展模块配置无效，无法更新：{module['error'] if module else logical_name}"
+            )
+        updater = target / str(module["start_update"])
+        if not updater.is_file():
+            raise NotFoundError(f"拓展模块更新入口不存在：{module['start_update']}")
+        if updater.is_symlink() or getattr(updater, "is_junction", lambda: False)():
+            raise InvalidRequestError("拓展模块更新入口不能是符号链接或目录联接")
+        try:
+            updater.resolve().relative_to(target.resolve())
+        except ValueError:
+            raise InvalidRequestError("拓展模块更新入口越出模块目录") from None
+        try:
+            completed = subprocess.run(
+                [sys.executable, updater.name],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WebServiceError(f"拓展模块更新超时：{normalized_scope}:{logical_name}") from exc
+        except OSError as exc:
+            raise WebServiceError(f"拓展模块更新入口执行失败：{normalized_scope}:{logical_name}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "未知错误").strip()[:1000]
+            raise WebServiceError(
+                f"拓展模块更新失败：{normalized_scope}:{logical_name}（{detail}）"
+            )
+        refreshed = self.expands(name)
+        refreshed_module = next(
+            (
+                item
+                for group in refreshed["expands"]
+                if group["scope"] == normalized_scope
+                for item in group["items"]
+                if item["name"] == logical_name
+            ),
+            None,
+        )
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            "updated": True,
+            "item": refreshed_module,
+            "injection": refreshed["injection"],
+        }
+
+    def set_expand_module_enabled(
+        self, user: Any, scope: Any, module_name: Any, enabled: Any
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, _ = self._expand_module_directory(
+            user, scope, module_name
+        )
+        if normalized_scope == "user":
+            raise InvalidRequestError("用户拓展始终可用，不支持白名单开关")
+        if not isinstance(enabled, bool):
+            raise InvalidRequestError("enabled 必须是布尔值")
+        inventory = self.expands(name)
+        group = next(
+            item for item in inventory["expands"] if item["scope"] == normalized_scope
+        )
+        current = next(
+            item for item in group["items"] if item["name"] == logical_name
+        )
+        if not current["valid"]:
+            raise InvalidRequestError("拓展模块配置无效，不能修改白名单")
+        candidates = {item["name"] for item in group["items"] if item["valid"]}
+        selected = {
+            item["name"]
+            for item in group["items"]
+            if item["valid"] and item["whitelisted"]
+        }
+        if enabled:
+            selected.add(logical_name)
+        else:
+            selected.discard(logical_name)
+        whitelist = [] if selected == candidates else sorted(selected) or ["__kemo_none__"]
+        self.patch_user_config(
+            name, {"expand": {f"{normalized_scope}_whitelist": whitelist}}
+        )
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            "enabled": enabled,
+            "whitelist": whitelist,
+        }
+
+    def delete_expand_module(
+        self, user: Any, scope: Any, module_name: Any
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, target = self._expand_module_directory(
+            user, scope, module_name
+        )
+        if normalized_scope != "user":
+            raise InvalidRequestError("只有用户拓展允许从当前页面删除")
+        _reject_tree_links(target)
+        relative_path = target.relative_to(self.root).as_posix()
+        tombstone = target.parent / f".{logical_name}.{uuid.uuid4().hex}.deleting"
+        try:
+            os.replace(target, tombstone)
+            shutil.rmtree(tombstone)
+        except OSError as exc:
+            if tombstone.exists() and not target.exists():
+                try:
+                    os.replace(tombstone, target)
+                except OSError:
+                    pass
+            raise WebServiceError(f"用户拓展删除失败：{logical_name}") from exc
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            "path": relative_path,
+            "deleted": True,
         }
 
     def sessions(
@@ -1755,8 +2472,7 @@ class WebRunService:
         name = self.require_user(user)
         config = load_config(name, self.root)
         source_policy = MainAgentSourcePolicy.from_config(config)
-        registry = apply_runtime_tool_policy(discover_tools(self.root, name), config)
-        layer_by_source = {"plugins": "core"}
+        registry = discover_tools(self.root, name)
         tools = []
         for tool in sorted(registry.tools.values(), key=lambda item: item.name.casefold()):
             tools.append(
@@ -1764,9 +2480,9 @@ class WebRunService:
                     "name": tool.name,
                     "description": tool.description,
                     "version": tool.version,
-                    "enabled": tool.enabled,
+                    "enabled": bool(tool.enabled and source_policy.plugins.allows(tool.name)),
                     "source": tool.source,
-                    "layer": layer_by_source.get(tool.source, "core"),
+                    "layer": "core",
                     "overrides": len(tool.overrides),
                 }
             )
@@ -1790,9 +2506,53 @@ class WebRunService:
                     "title": descriptor.title,
                     "description": descriptor.description,
                     "scope": descriptor.scope,
+                    "category": (
+                        "shared"
+                        if descriptor.scope == "shared"
+                        else "agent_generated"
+                        if logical_name == "agent_create" or logical_name.startswith("agent_create/")
+                        else "user_created"
+                    ),
+                    "path": descriptor.path.parent.relative_to(self.root).as_posix(),
                     "active_for_main_agent": allowed.allows(logical_name),
                 }
             )
+        items = [
+            {
+                "id": f"builtin:{tool['name']}",
+                "name": tool["name"],
+                "title": tool["name"],
+                "description": tool["description"],
+                "category": "builtin",
+                "version": tool["version"],
+                "enabled": tool["enabled"],
+                "editable": False,
+                "toggleable": True,
+                "downloadable": True,
+                "path": registry.tools[tool["name"]].directory.relative_to(self.root).as_posix(),
+            }
+            for tool in tools
+        ]
+        items.extend(
+            {
+                "id": f"{skill['category']}:{skill['name']}",
+                "name": skill["name"],
+                "title": skill["title"],
+                "description": skill["description"],
+                "category": skill["category"],
+                "version": "",
+                "enabled": skill["active_for_main_agent"],
+                "editable": skill["category"] in _EDITABLE_SKILL_CATEGORIES,
+                "toggleable": skill["category"] == "shared",
+                "downloadable": skill["category"] == "shared",
+                "path": skill["path"],
+            }
+            for skill in prompt_skills
+        )
+        category_counts = {
+            category: sum(item["category"] == category for item in items)
+            for category in _SKILL_CATEGORIES
+        }
         return {
             "user": name,
             "summary": {
@@ -1803,6 +2563,12 @@ class WebRunService:
                 "core": sum(item["layer"] == "core" for item in tools),
             },
             "tools": tools,
+            "catalog_summary": {
+                "total": len(items),
+                "enabled": sum(item["enabled"] for item in items),
+                **category_counts,
+            },
+            "items": items,
             "prompt_summary": {
                 "registered": len(prompt_skills),
                 "active": sum(item["active_for_main_agent"] for item in prompt_skills),
@@ -1812,6 +2578,135 @@ class WebRunService:
             "prompt_skills": prompt_skills,
             "source_policy": source_policy.public_summary(),
         }
+
+    def _skill_directory(self, user: Any, category: Any, skill_name: Any) -> tuple[str, str, str, Path]:
+        name = self.require_user(user)
+        normalized_category = str(category or "").strip()
+        if normalized_category not in _SKILL_CATEGORIES:
+            raise InvalidRequestError(f"技能分类无效：{category}")
+        logical_name = str(skill_name or "").strip().replace("\\", "/")
+        if normalized_category == "builtin":
+            registry = discover_tools(self.root, name)
+            tool = registry.tools.get(logical_name)
+            if tool is None:
+                raise NotFoundError(f"基础插件不存在：{logical_name}")
+            target = tool.directory
+            root = self.root / "plugins"
+        else:
+            root = (
+                self.root / "shared_skills"
+                if normalized_category == "shared"
+                else self.root / "users" / name / "user_skills"
+            )
+            relative, target = _safe_relative_target(root, logical_name)
+            logical_name = relative
+            if normalized_category == "agent_generated" and not (
+                logical_name == "agent_create" or logical_name.startswith("agent_create/")
+            ):
+                raise InvalidRequestError("智能体生成技能必须位于 agent_create 目录")
+            if normalized_category == "user_created" and (
+                logical_name == "agent_create" or logical_name.startswith("agent_create/")
+            ):
+                raise InvalidRequestError("智能体生成技能不能按用户自建技能管理")
+        _reject_link_path(root.resolve(), target)
+        if not target.is_dir() or not (target / "SKILL.md").is_file():
+            raise NotFoundError(f"技能不存在：{logical_name}")
+        return name, normalized_category, logical_name, target
+
+    def skill_document(self, user: Any, category: Any, skill_name: Any) -> dict[str, Any]:
+        name, normalized_category, logical_name, target = self._skill_directory(user, category, skill_name)
+        skill_file = target / "SKILL.md"
+        content = skill_file.read_text("utf-8")
+        return {
+            "user": name,
+            "category": normalized_category,
+            "name": logical_name,
+            "path": skill_file.relative_to(self.root).as_posix(),
+            "content": content,
+            "size": len(content.encode("utf-8")),
+            "updated_at": skill_file.stat().st_mtime,
+            "editable": normalized_category in _EDITABLE_SKILL_CATEGORIES,
+        }
+
+    def put_skill_document(self, user: Any, category: Any, skill_name: Any, content: Any) -> dict[str, Any]:
+        name, normalized_category, logical_name, target = self._skill_directory(user, category, skill_name)
+        if normalized_category not in _EDITABLE_SKILL_CATEGORIES:
+            raise InvalidRequestError("基础插件与共享技能只允许预览和下载")
+        text = _validated_text(content, field="content")
+        skill_file = target / "SKILL.md"
+        previous = skill_file.read_bytes()
+        _atomic_write(skill_file, text.encode("utf-8"))
+        try:
+            load_prompt_source_registry(self.root, name).select_skills()
+        except Exception as exc:
+            _atomic_write(skill_file, previous)
+            raise InvalidRequestError(f"技能文件校验失败：{exc}") from None
+        return self.skill_document(name, normalized_category, logical_name)
+
+    def delete_skill(self, user: Any, category: Any, skill_name: Any) -> dict[str, Any]:
+        name, normalized_category, logical_name, target = self._skill_directory(user, category, skill_name)
+        if normalized_category not in _EDITABLE_SKILL_CATEGORIES:
+            raise InvalidRequestError("基础插件与共享技能不允许从用户页面删除")
+        _reject_tree_links(target)
+        relative_path = target.relative_to(self.root).as_posix()
+        shutil.rmtree(target)
+        return {
+            "user": name,
+            "category": normalized_category,
+            "name": logical_name,
+            "path": relative_path,
+            "deleted": True,
+        }
+
+    def set_skill_enabled(self, user: Any, category: Any, skill_name: Any, enabled: Any) -> dict[str, Any]:
+        name, normalized_category, logical_name, _ = self._skill_directory(user, category, skill_name)
+        if normalized_category not in {"builtin", "shared"}:
+            raise InvalidRequestError("只有基础插件和共享技能支持白名单启用或禁用")
+        if not isinstance(enabled, bool):
+            raise InvalidRequestError("enabled 必须是布尔值")
+        inventory = self.skills(name)
+        candidates = {
+            item["name"]
+            for item in inventory["items"]
+            if item["category"] == normalized_category
+        }
+        selected = {
+            item["name"]
+            for item in inventory["items"]
+            if item["category"] == normalized_category and item["enabled"]
+        }
+        if enabled:
+            selected.add(logical_name)
+        else:
+            selected.discard(logical_name)
+        whitelist = [] if selected == candidates else sorted(selected) or ["__kemo_none__"]
+        changes = (
+            {"plugins": {"whitelist": whitelist}}
+            if normalized_category == "builtin"
+            else {"skills": {"shared_whitelist": whitelist}}
+        )
+        self.patch_user_config(name, changes)
+        return {
+            "user": name,
+            "category": normalized_category,
+            "name": logical_name,
+            "enabled": enabled,
+            "whitelist": whitelist,
+        }
+
+    def skill_archive(self, user: Any, category: Any, skill_name: Any) -> tuple[str, bytes]:
+        _, normalized_category, logical_name, target = self._skill_directory(user, category, skill_name)
+        if normalized_category not in {"builtin", "shared"}:
+            raise InvalidRequestError("用户技能请通过编辑器管理，不提供系统技能下载入口")
+        _reject_tree_links(target)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(target.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts or path.name.startswith("."):
+                    continue
+                archive.write(path, (Path(target.name) / path.relative_to(target)).as_posix())
+        filename = f"{Path(logical_name).name}.zip"
+        return filename, buffer.getvalue()
 
     def sense(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -1830,8 +2725,21 @@ class WebRunService:
             allow_modules=source_policy.global_perception.selector(),
         )
         injected_files = set(selection.source_files)
-        sources = [
-            {
+        sources: list[dict[str, Any]] = []
+        injection_cursor = 0
+        has_injection_piece = False
+        for item in inventory:
+            collected_markdown = self._sense_markdown(item)
+            injected_markdown = ""
+            if item["active"] and collected_markdown:
+                piece = f"[{item['name']}]\n{collected_markdown}"
+                piece_start = injection_cursor + (2 if has_injection_piece else 0)
+                piece_end = piece_start + len(piece)
+                if piece_start < len(selection.text):
+                    injected_markdown = selection.text[piece_start:min(piece_end, len(selection.text))]
+                injection_cursor = piece_end
+                has_injection_piece = True
+            sources.append({
                 "id": item["name"],
                 "name": item["name"],
                 "display_name": item["display_name"],
@@ -1842,6 +2750,7 @@ class WebRunService:
                 ),
                 "layer": "global",
                 "enabled": item["active"],
+                "whitelisted": item["selected"],
                 "active_for_main_agent": item["active"],
                 "status": item["status"],
                 "data_md": item["data_md"],
@@ -1861,14 +2770,15 @@ class WebRunService:
                 ),
                 "data_items": item["data_items"],
                 "value_preview": self._sense_value_preview(item),
+                "collected_markdown": collected_markdown,
+                "injected_markdown": injected_markdown,
+                "injected_tokens": estimate_text_tokens(injected_markdown),
                 # Sense modules currently have no required refresh interval
                 # in sense.json. Keep this explicit so clients can render a
                 # truthful fallback instead of inventing one.
                 "update_interval": "",
                 "updated_at": item["updated_at"],
-            }
-            for item in inventory
-        ]
+            })
         core_files = sum(item["files"] for item in inventory)
         preview_limit = 4000
         preview = selection.text[:preview_limit]
@@ -1901,6 +2811,7 @@ class WebRunService:
                 "truncated": selection.truncated,
                 "preview": preview,
                 "preview_truncated": len(selection.text) > preview_limit,
+                "content": selection.text,
                 "source_files": list(selection.source_files),
                 "prompt_section": "perception",
                 "prompt_position": "System Prompt / Global Sense",
@@ -1908,6 +2819,129 @@ class WebRunService:
             "decisions": [],
             "source_policy": source_policy.public_summary(),
         }
+
+    def _sense_module_directory(self, user: Any, module_name: Any) -> tuple[str, str, Path]:
+        name = self.require_user(user)
+        if not isinstance(module_name, str) or not module_name.strip():
+            raise InvalidRequestError("module_name 必须是非空字符串")
+        logical_name = module_name.strip()
+        pure = PurePosixPath(logical_name.replace("\\", "/"))
+        if (
+            len(pure.parts) != 1
+            or pure.name in {".", "..", "__pycache__"}
+            or pure.name.startswith(".")
+            or "\x00" in logical_name
+            or ":" in logical_name
+        ):
+            raise InvalidRequestError("感知模块名称必须是 global_sense 下的直接目录名")
+        base = (self.root / "global_sense").resolve()
+        target = base / logical_name
+        if not target.is_dir():
+            raise NotFoundError(f"感知模块不存在：{logical_name}")
+        if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+            raise InvalidRequestError("感知模块目录不能是符号链接或目录联接")
+        try:
+            target.resolve().relative_to(base)
+        except ValueError:
+            raise InvalidRequestError("感知模块路径越出 global_sense") from None
+        return name, logical_name, target
+
+    def refresh_sense_module(self, user: Any, module_name: Any) -> dict[str, Any]:
+        name, logical_name, target = self._sense_module_directory(user, module_name)
+        source = next(
+            (item for item in self.sense(name)["sources"] if item["id"] == logical_name),
+            None,
+        )
+        if not source or not source["valid"]:
+            raise InvalidRequestError(
+                f"感知模块配置无效，无法更新：{source['error'] if source else logical_name}"
+            )
+        updater = target / str(source["start_update"])
+        if not updater.is_file():
+            raise NotFoundError(f"感知模块更新入口不存在：{source['start_update']}")
+        if updater.is_symlink() or getattr(updater, "is_junction", lambda: False)():
+            raise InvalidRequestError("感知模块更新入口不能是符号链接或目录联接")
+        try:
+            completed = subprocess.run(
+                [sys.executable, updater.name],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WebServiceError(f"感知模块更新超时：{logical_name}") from exc
+        except OSError as exc:
+            raise WebServiceError(f"感知模块更新入口执行失败：{logical_name}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "未知错误").strip()[:1000]
+            raise WebServiceError(f"感知模块更新失败：{logical_name}（{detail}）")
+        refreshed = self.sense(name)
+        refreshed_source = next(
+            (item for item in refreshed["sources"] if item["id"] == logical_name),
+            None,
+        )
+        return {
+            "user": name,
+            "module": logical_name,
+            "updated": True,
+            "source": refreshed_source,
+            "injection": refreshed["injection"],
+        }
+
+    def set_sense_module_enabled(self, user: Any, module_name: Any, enabled: Any) -> dict[str, Any]:
+        name, logical_name, _ = self._sense_module_directory(user, module_name)
+        if not isinstance(enabled, bool):
+            raise InvalidRequestError("enabled 必须是布尔值")
+        sense = self.sense(name)
+        candidates = {item["id"] for item in sense["sources"]}
+        selected = {item["id"] for item in sense["sources"] if item["whitelisted"]}
+        if enabled:
+            selected.add(logical_name)
+        else:
+            selected.discard(logical_name)
+        whitelist = [] if selected == candidates else sorted(selected) or ["__kemo_none__"]
+        self.patch_user_config(name, {"perception": {"global_whitelist": whitelist}})
+        return {
+            "user": name,
+            "module": logical_name,
+            "enabled": enabled,
+            "whitelist": whitelist,
+        }
+
+    def delete_sense_module(self, user: Any, module_name: Any) -> dict[str, Any]:
+        name, logical_name, target = self._sense_module_directory(user, module_name)
+        _reject_tree_links(target)
+        relative_path = target.relative_to(self.root).as_posix()
+        tombstone = target.parent / f".{logical_name}.{uuid.uuid4().hex}.deleting"
+        try:
+            os.replace(target, tombstone)
+            shutil.rmtree(tombstone)
+        except OSError as exc:
+            if tombstone.exists() and not target.exists():
+                try:
+                    os.replace(tombstone, target)
+                except OSError:
+                    pass
+            raise WebServiceError(f"感知模块删除失败：{logical_name}") from exc
+        return {
+            "user": name,
+            "module": logical_name,
+            "path": relative_path,
+            "deleted": True,
+        }
+
+    def _sense_markdown(self, item: dict[str, Any]) -> str:
+        if not item.get("valid") or not item.get("data_md"):
+            return ""
+        path = self.root / str(item.get("root") or "") / str(item.get("name") or "") / str(item["data_md"])
+        try:
+            return path.read_text("utf-8-sig").strip()
+        except (OSError, UnicodeError):
+            return ""
 
     def _sense_value_preview(self, item: dict[str, Any]) -> str:
         """Return a bounded, presentation-safe preview of a sense data file."""
