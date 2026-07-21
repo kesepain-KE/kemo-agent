@@ -18,7 +18,7 @@ from typing import Any
 MEMORY_SCHEMA_VERSION = 2
 TIERS = ("seven_days", "one_month", "half_year", "permanent")
 TEMPORARY_TIERS = TIERS[:-1]
-FILENAME_MAX_CHARS = 20
+FILENAME_MAX_CHARS = 50
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
