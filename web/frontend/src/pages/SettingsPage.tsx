@@ -1,244 +1,583 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bot, Database, RefreshCw, Save, Wrench } from 'lucide-react'
+import { Check, ChevronDown, LockKeyhole, RefreshCw, Save } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
-import { getGlobalConfig, getMemorySummary, getPromptDiagnostics, getSettings, getUserConfig, patchGlobalConfig, patchPreferences, patchUserConfig } from '../api/client'
+import {
+  getGlobalConfig,
+  getSettings,
+  getUserConfig,
+  patchGlobalConfig,
+  patchPreferences,
+  patchUserConfig,
+} from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 
-type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'prompt' | 'config'
+type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime'
+type ProviderType = 'chat' | 'kemo'
+type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_generation'
 
-const settingsTabs = new Set<SettingsTab>(['appearance', 'provider', 'users', 'memory', 'permissions', 'runtime', 'prompt', 'config'])
+interface UserConfigDraft {
+  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean }
+  multimodal_models: Record<MultimodalKey, string>
+  knowledge: { use_shared: boolean; use_global: boolean }
+  kemo_graph: GraphDraft
+  skills: { shared_whitelist: string[] }
+  expand: { shared_whitelist: string[]; global_whitelist: string[] }
+  perception: { global_whitelist: string[] }
+  plugins: { whitelist: string[] }
+  task_plan: { auto_accept: boolean }
+}
+
+interface GraphDraft {
+  kemo_graph_global_knowledge: boolean
+  kemo_graph_shared_knowledge: boolean
+  kemo_graph_user_knowledge: boolean
+  kemo_graph_temporary_memory: boolean
+}
+
+interface GlobalConfigDraft {
+  agents: { token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
+  memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
+  kemo_graph: GraphDraft
+  tools: { timeout: number; max_iterations: number }
+  history: { consecutive_tool_fail_limit: number }
+  task_plan: { max_steps: number }
+  cron: { poll_interval: number }
+  agent_runtime: { default_timeout: number }
+}
+
+interface SaveRequest {
+  label: string
+  userChanges?: Record<string, unknown>
+  globalChanges?: Record<string, unknown>
+}
+
+const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
+  { id: 'appearance', label: '外观与主题' },
+  { id: 'provider', label: '模型与 Provider' },
+  { id: 'users', label: '用户切换' },
+  { id: 'memory', label: '记忆与上下文' },
+  { id: 'permissions', label: '权限边界' },
+  { id: 'runtime', label: '运行限制' },
+]
+
+const settingsTabIds = new Set<SettingsTab>(settingsTabs.map((item) => item.id))
+
+const multimodalFields: Array<{ key: MultimodalKey; label: string; description: string }> = [
+  { key: 'vision', label: '图片识别', description: '图片分析、OCR 与视觉理解模型' },
+  { key: 'image_generation', label: '图片生成', description: '文本生成图片的专用模型' },
+  { key: 'image_edit', label: '图片编辑', description: '图片修改、局部重绘与图生图模型' },
+  { key: 'audio_transcription', label: '语音识别', description: '音频转写与语音转文字模型' },
+  { key: 'speech_generation', label: '语音生成', description: '文本转语音模型' },
+  { key: 'speech_to_speech', label: '语音生语音', description: '语音到语音的转换模型' },
+  { key: 'video_generation', label: '视频生成', description: '文本或素材生成视频的模型' },
+]
+
+const graphFields: Array<{ key: keyof GraphDraft; label: string }> = [
+  { key: 'kemo_graph_global_knowledge', label: '图谱—全局知识库' },
+  { key: 'kemo_graph_shared_knowledge', label: '图谱—共享知识库' },
+  { key: 'kemo_graph_user_knowledge', label: '图谱—用户知识库' },
+  { key: 'kemo_graph_temporary_memory', label: '图谱—临时记忆' },
+]
 
 function isSettingsTab(value: string | null): value is SettingsTab {
-  return value !== null && settingsTabs.has(value as SettingsTab)
+  return value !== null && settingsTabIds.has(value as SettingsTab)
 }
 
-const credentialLabels: Record<string, string> = {
-  environment: '环境变量已配置', inline: '配置文件内联', missing: '凭据未检测到',
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
 
-function sourceModeLabel(policy?: { mode: 'all' | 'allowlist'; names: string[] }) {
-  if (!policy) return '—'
-  return policy.mode === 'all' ? '全量' : policy.names.join('、')
+function stringValue(value: unknown, fallback = '') {
+  return typeof value === 'string' ? value : fallback
 }
 
-const sourceLabels: Record<string, string> = { user: '用户', global: '全局', default: '默认' }
-
-function writableConfig(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(writableConfig)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== '***').map(([key, item]) => [key, writableConfig(item)]))
-  return value
+function numberValue(value: unknown, fallback: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-function parseConfigDraft(value: string): Record<string, unknown> {
-  const parsed = JSON.parse(value) as unknown
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('配置根节点必须是 JSON 对象')
-  return writableConfig(parsed) as Record<string, unknown>
+function booleanValue(value: unknown, fallback: boolean) {
+  return typeof value === 'boolean' ? value : fallback
 }
 
-function SettingRow({ title, description, control, source }: { title: string; description: string; control: React.ReactNode; source?: string }) {
-  return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{sourceLabels[source] || source}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
+function stringList(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function graphDraft(value: unknown): GraphDraft {
+  const item = record(value)
+  return {
+    kemo_graph_global_knowledge: booleanValue(item.kemo_graph_global_knowledge, false),
+    kemo_graph_shared_knowledge: booleanValue(item.kemo_graph_shared_knowledge, false),
+    kemo_graph_user_knowledge: booleanValue(item.kemo_graph_user_knowledge, false),
+    kemo_graph_temporary_memory: booleanValue(item.kemo_graph_temporary_memory, false),
+  }
+}
+
+function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
+  const provider = record(config.provider)
+  const multimodal = record(config.multimodal_models)
+  const knowledge = record(config.knowledge)
+  const skills = record(config.skills)
+  const expand = record(config.expand)
+  const perception = record(config.perception)
+  const plugins = record(config.plugins)
+  const taskPlan = record(config.task_plan)
+  return {
+    provider: {
+      type: provider.type === 'kemo' ? 'kemo' : 'chat',
+      model: stringValue(provider.model),
+      base_url: stringValue(provider.base_url),
+      api_key: stringValue(provider.api_key),
+      stream: booleanValue(provider.stream, true),
+    },
+    multimodal_models: {
+      vision: stringValue(multimodal.vision),
+      image_generation: stringValue(multimodal.image_generation),
+      image_edit: stringValue(multimodal.image_edit),
+      audio_transcription: stringValue(multimodal.audio_transcription),
+      speech_generation: stringValue(multimodal.speech_generation),
+      speech_to_speech: stringValue(multimodal.speech_to_speech),
+      video_generation: stringValue(multimodal.video_generation),
+    },
+    knowledge: {
+      use_shared: booleanValue(knowledge.use_shared, true),
+      use_global: booleanValue(knowledge.use_global, true),
+    },
+    kemo_graph: graphDraft(config.kemo_graph),
+    skills: { shared_whitelist: stringList(skills.shared_whitelist) },
+    expand: {
+      shared_whitelist: stringList(expand.shared_whitelist),
+      global_whitelist: stringList(expand.global_whitelist),
+    },
+    perception: { global_whitelist: stringList(perception.global_whitelist) },
+    plugins: { whitelist: stringList(plugins.whitelist) },
+    task_plan: { auto_accept: booleanValue(taskPlan.auto_accept, false) },
+  }
+}
+
+function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
+  const agents = record(config.agents)
+  const memory = record(config.memory)
+  const memoryLimits = record(memory.temporary_injection_limits)
+  const tools = record(config.tools)
+  const history = record(config.history)
+  const taskPlan = record(config.task_plan)
+  const cron = record(config.cron)
+  const agentRuntime = record(config.agent_runtime)
+  return {
+    agents: {
+      token_limit: numberValue(agents.token_limit, 1_000_000),
+      token_compression_ratio: numberValue(agents.token_compression_ratio, 0.3),
+      max_rounds: numberValue(agents.max_rounds, 80),
+      rounds_after_compression: numberValue(agents.rounds_after_compression, 20),
+    },
+    memory: { temporary_injection_limits: {
+      seven_days: numberValue(memoryLimits.seven_days, 100),
+      one_month: numberValue(memoryLimits.one_month, 200),
+      half_year: numberValue(memoryLimits.half_year, 300),
+    } },
+    kemo_graph: graphDraft(config.kemo_graph),
+    tools: {
+      timeout: numberValue(tools.timeout, 240),
+      max_iterations: numberValue(tools.max_iterations, 8),
+    },
+    history: { consecutive_tool_fail_limit: numberValue(history.consecutive_tool_fail_limit, 5) },
+    task_plan: { max_steps: numberValue(taskPlan.max_steps, 20) },
+    cron: { poll_interval: numberValue(cron.poll_interval, 30) },
+    agent_runtime: { default_timeout: numberValue(agentRuntime.default_timeout, 600) },
+  }
+}
+
+function SettingRow({ title, description, control, source }: { title: string; description: string; control: ReactNode; source?: 'user' | 'global' }) {
+  return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{source === 'user' ? '用户' : '全局'}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
+}
+
+function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (value: boolean) => void }) {
+  return <button type="button" role="switch" aria-label={label} aria-checked={checked} className={`config-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
+    <span>{checked ? '已开启' : '已关闭'}</span><i aria-hidden="true"><b /></i>
+  </button>
+}
+
+function ProviderSelect({ value, onChange }: { value: ProviderType; onChange: (value: ProviderType) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const options: Array<{ value: ProviderType; label: string; description: string }> = [
+    { value: 'chat', label: 'chat', description: '兼容 /v1/chat/completions' },
+    { value: 'kemo', label: 'kemo', description: '完整 Kemo Provider 协议' },
+  ]
+
+  useEffect(() => {
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnPointerDown)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [])
+
+  return <div className="config-select-wrap" ref={rootRef}>
+    <button
+      type="button"
+      className={`config-select-trigger ${open ? 'open' : ''}`}
+      role="combobox"
+      aria-label="Provider 类型"
+      aria-controls="provider-type-options"
+      aria-expanded={open}
+      aria-haspopup="listbox"
+      onClick={() => setOpen((current) => !current)}
+    >
+      <span><strong>{value}</strong><small>{value === 'chat' ? 'OpenAI Chat 兼容' : 'Kemo 原生协议'}</small></span><ChevronDown size={16} />
+    </button>
+    {open && <div className="config-select-popover" id="provider-type-options" role="listbox" aria-label="Provider 类型选项">
+      {options.map((option) => <button
+        type="button"
+        role="option"
+        aria-selected={value === option.value}
+        className={value === option.value ? 'active' : ''}
+        key={option.value}
+        onClick={() => { onChange(option.value); setOpen(false) }}
+      >
+        <span><strong>{option.label}</strong><small>{option.description}</small></span>{value === option.value ? <Check size={16} /> : <i />}
+      </button>)}
+    </div>}
+  </div>
+}
+
+function NumberInput({ label, value, min = 0, max, step = 1, onChange }: { label: string; value: number; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
+  return <input className="config-field config-number" type="number" aria-label={label} value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />
+}
+
+function TagInput({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
+  const [draft, setDraft] = useState('')
+  const commit = () => {
+    const additions = draft.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean)
+    if (additions.length) onChange(Array.from(new Set([...value, ...additions])))
+    setDraft('')
+  }
+  return <div className="config-tag-input" role="group" aria-label={label}>
+    {value.map((item) => <span className="config-tag" key={item}>{item}<button type="button" aria-label={`移除 ${item}`} onClick={() => onChange(value.filter((entry) => entry !== item))}>×</button></span>)}
+    <input
+      aria-label={`${label}输入`}
+      value={draft}
+      placeholder={value.length ? '继续添加…' : '留空表示全部允许'}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ',' || event.key === '，') {
+          event.preventDefault()
+          commit()
+        } else if (event.key === 'Backspace' && !draft && value.length) {
+          onChange(value.slice(0, -1))
+        }
+      }}
+    />
+  </div>
+}
+
+function ConfigSaveBar({ label, description, pending, saved, onSave }: { label: string; description: string; pending: boolean; saved: boolean; onSave: () => void }) {
+  return <div className="settings-savebar"><span><strong>{saved ? `${label.replace(/^保存/, '')} 已保存` : label}</strong><small>{description}</small></span><button className="module-btn primary" disabled={pending} onClick={onSave}><Save size={14} />{pending ? '保存中…' : label}</button></div>
 }
 
 export function SettingsPage() {
-  const { user } = useOutletContext<ShellOutletContext>()
+  const { user, chatRunning } = useOutletContext<ShellOutletContext>()
   const client = useQueryClient()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const ui = useUiStore()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
-  const query = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
-  const configQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
-  const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: tab === 'config' })
-  const promptQuery = useQuery({ queryKey: ['prompt-diagnostics', user], queryFn: () => getPromptDiagnostics(user), enabled: Boolean(user && tab === 'prompt') })
-  const memoryQuery = useQuery({ queryKey: ['memory-summary', user], queryFn: () => getMemorySummary(user), enabled: Boolean(user && tab === 'memory') })
-  const [configDraft, setConfigDraft] = useState('')
-  const [globalConfigDraft, setGlobalConfigDraft] = useState('')
-  const [configError, setConfigError] = useState('')
-  const data = query.data
+  const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
+  const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
+  const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: Boolean(user) })
+  const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
+  const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
+  const [initialApiKey, setInitialApiKey] = useState('')
+  const [formError, setFormError] = useState('')
+  const [savedLabel, setSavedLabel] = useState('')
 
   useEffect(() => {
-    if (configQuery.data) setConfigDraft(JSON.stringify(configQuery.data.config, null, 2))
-  }, [configQuery.data])
+    if (!userConfigQuery.data) return
+    const next = buildUserDraft(userConfigQuery.data.config)
+    setUserDraft(next)
+    setInitialApiKey(next.provider.api_key)
+  }, [userConfigQuery.data])
+
   useEffect(() => {
-    if (globalConfigQuery.data) setGlobalConfigDraft(JSON.stringify(globalConfigQuery.data.config, null, 2))
+    if (globalConfigQuery.data) setGlobalDraft(buildGlobalDraft(globalConfigQuery.data.config))
   }, [globalConfigQuery.data])
-
-  const userConfigMutation = useMutation({ mutationFn: (changes: Record<string, unknown>) => patchUserConfig(user, changes), onSuccess: async () => { setConfigError(''); await Promise.all([client.invalidateQueries({ queryKey: ['user-config', user] }), client.invalidateQueries({ queryKey: ['settings', user] })]) }, onError: (error) => setConfigError(String(error)) })
-  const globalConfigMutation = useMutation({ mutationFn: patchGlobalConfig, onSuccess: async () => { setConfigError(''); await Promise.all([client.invalidateQueries({ queryKey: ['global-config'] }), client.invalidateQueries({ queryKey: ['settings', user] })]) }, onError: (error) => setConfigError(String(error)) })
-  const saveAppearance = (changes: { theme?: 'light' | 'dark'; font_size?: 'small' | 'medium' | 'large' }) => { void patchPreferences(user, changes) }
 
   useEffect(() => {
     if (isSettingsTab(requestedTab)) setTab(requestedTab)
   }, [requestedTab])
 
-  return (
-    <ModuleFrame
-      kicker="Configuration Overview"
-      title="配置"
-      description="查看运行配置来源，并通过字段级更新安全修改用户配置、全局配置、Provider、来源权限和外观偏好。"
-      actions={<button className="module-btn" onClick={() => void query.refetch()}><RefreshCw size={15} />重新读取</button>}
-    >
-      {query.isError && <ModuleError />}
-      <div className="observer-banner settings-observer-banner">
-        <span className="observer-banner-icon">R</span>
-        <span><strong>敏感字段脱敏</strong><small>保存时自动忽略未改动的 *** 占位符，避免覆盖真实凭据。</small></span>
-        <span className="observer-badge">Schema v{data?.schema_version || '—'}</span>
+  const saveMutation = useMutation({
+    mutationFn: async ({ userChanges, globalChanges }: SaveRequest) => {
+      await Promise.all([
+        userChanges ? patchUserConfig(user, userChanges) : Promise.resolve(),
+        globalChanges ? patchGlobalConfig(globalChanges) : Promise.resolve(),
+      ])
+    },
+    onSuccess: async (_, request) => {
+      setFormError('')
+      setSavedLabel(request.label)
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['settings', user] }),
+        client.invalidateQueries({ queryKey: ['user-config', user] }),
+        client.invalidateQueries({ queryKey: ['global-config'] }),
+        client.invalidateQueries({ queryKey: ['overview', user] }),
+        client.invalidateQueries({ queryKey: ['runtime-status', user] }),
+      ])
+    },
+    onError: (error) => setFormError(String(error)),
+  })
+
+  const switchTab = (nextTab: SettingsTab) => {
+    setTab(nextTab)
+    setFormError('')
+  }
+
+  const switchUser = (nextUser: string) => {
+    if (chatRunning || nextUser === user) return
+    const next = new URLSearchParams(searchParams)
+    next.set('user', nextUser)
+    next.delete('session')
+    next.set('tab', 'users')
+    setSearchParams(next)
+  }
+
+  const saveAppearance = (changes: { theme?: 'light' | 'dark'; font_size?: 'small' | 'medium' | 'large' }) => {
+    void patchPreferences(user, changes)
+  }
+
+  const refreshAll = () => {
+    setSavedLabel('')
+    setFormError('')
+    void Promise.all([settingsQuery.refetch(), userConfigQuery.refetch(), globalConfigQuery.refetch()])
+  }
+
+  const submit = (request: SaveRequest, validationError = '') => {
+    if (validationError) {
+      setFormError(validationError)
+      return
+    }
+    setSavedLabel('')
+    setFormError('')
+    saveMutation.mutate(request)
+  }
+
+  const saveProvider = () => {
+    if (!userDraft) return
+    let validation = ''
+    if (!userDraft.provider.model.trim()) validation = '模型名称不能为空。'
+    else if (!userDraft.provider.base_url.trim()) validation = 'Base URL 不能为空。'
+    else {
+      try {
+        const url = new URL(userDraft.provider.base_url)
+        if (!['http:', 'https:'].includes(url.protocol)) validation = 'Base URL 只允许 http 或 https。'
+      } catch { validation = 'Base URL 格式不正确。' }
+    }
+    const provider: Record<string, unknown> = {
+      type: userDraft.provider.type,
+      model: userDraft.provider.model.trim(),
+      base_url: userDraft.provider.base_url.trim(),
+      stream: userDraft.provider.stream,
+    }
+    if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
+    submit({ label: '保存模型与 Provider', userChanges: { provider, multimodal_models: userDraft.multimodal_models } }, validation)
+  }
+
+  const saveMemory = () => {
+    if (!globalDraft) return
+    const { agents } = globalDraft
+    const memoryLimits = globalDraft.memory.temporary_injection_limits
+    const integers = [agents.token_limit, agents.max_rounds, agents.rounds_after_compression, memoryLimits.seven_days, memoryLimits.one_month, memoryLimits.half_year]
+    let validation = integers.every(Number.isInteger) ? '' : 'Token、轮次和记忆上限必须为整数。'
+    if (!validation && agents.token_limit <= 0) validation = 'Token 上限必须大于 0。'
+    if (!validation && (agents.token_compression_ratio <= 0 || agents.token_compression_ratio > 1)) validation = 'Token 压缩比例必须大于 0 且不超过 1。'
+    if (!validation && agents.max_rounds <= 0) validation = '最大对话轮次必须大于 0。'
+    if (!validation && (agents.rounds_after_compression < 0 || agents.rounds_after_compression > agents.max_rounds)) validation = '压缩后保留轮次必须介于 0 与最大对话轮次之间。'
+    if (!validation && Object.values(memoryLimits).some((value) => value < 0)) validation = '记忆注入上限不能小于 0。'
+    submit({ label: '保存记忆与上下文', globalChanges: { agents, memory: globalDraft.memory } }, validation)
+  }
+
+  const savePermissions = () => {
+    if (!userDraft || !globalDraft) return
+    submit({
+      label: '保存权限边界',
+      userChanges: {
+        knowledge: userDraft.knowledge,
+        kemo_graph: userDraft.kemo_graph,
+        skills: userDraft.skills,
+        expand: userDraft.expand,
+        perception: userDraft.perception,
+        plugins: userDraft.plugins,
+      },
+      globalChanges: { kemo_graph: globalDraft.kemo_graph },
+    })
+  }
+
+  const saveRuntime = () => {
+    if (!userDraft || !globalDraft) return
+    const values = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout]
+    const validation = values.every((value) => Number.isInteger(value) && value > 0) ? '' : '运行限制必须全部为大于 0 的整数。'
+    submit({
+      label: '保存运行限制',
+      userChanges: { task_plan: userDraft.task_plan },
+      globalChanges: {
+        tools: globalDraft.tools,
+        history: globalDraft.history,
+        task_plan: globalDraft.task_plan,
+        cron: globalDraft.cron,
+        agent_runtime: globalDraft.agent_runtime,
+      },
+    }, validation)
+  }
+
+  return <ModuleFrame
+    kicker="Configuration Overview"
+    title="配置"
+    description="通过结构化字段管理界面、Provider、上下文、权限和运行限制；敏感凭据始终脱敏。"
+    actions={<button className="module-btn" onClick={refreshAll}><RefreshCw size={15} />重新读取</button>}
+  >
+    {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
+    {formError ? <ModuleError message={formError} /> : null}
+    <div className="settings-layout">
+      <nav className="settings-nav" aria-label="配置分类">
+        {settingsTabs.map((item) => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => switchTab(item.id)}><span>{item.label}</span><span>›</span></button>)}
+      </nav>
+
+      <div className="settings-content">
+        {tab === 'appearance' ? <>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>界面主题</strong><span>只影响当前用户的 Web 外观，不修改智能体运行配置。</span></div>
+            <div className="setting-row theme-setting-row">
+              <span className="setting-copy"><strong>明暗主题</strong><span>高级白与高级黑使用相同层级和交互语义。</span></span>
+              <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
+                <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
+                <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
+              </div>
+            </div>
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>界面字号</strong><span>文字与顶部栏关键控件同步缩放。</span></div>
+            <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div></div>
+          </article>
+        </> : null}
+
+        {tab === 'provider' && userDraft ? <>
+          <ConfigSaveBar label="保存模型与 Provider" description="保存后从下一次 Run 开始使用，不对运行中的请求热切换协议。" pending={saveMutation.isPending} saved={savedLabel === '保存模型与 Provider'} onSave={saveProvider} />
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>核心连接</strong><span>Provider 类型只允许 chat 或 kemo；运行中不会跨协议自动回退。</span></div>
+            <SettingRow title="Provider 类型" description={userDraft.provider.type === 'chat' ? '标准 /v1/chat/completions，保证文本、工具和图片输入基线' : '原生 Kemo Provider，支持网关声明的完整能力'} source="user" control={<ProviderSelect value={userDraft.provider.type} onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, type: value } })} />} />
+            <SettingRow title="模型" description="主对话模型标识，可自由填写或修改" source="user" control={<input className="config-field" aria-label="模型" value={userDraft.provider.model} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, model: event.target.value } })} />} />
+            <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
+            <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
+            <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
+          </article>
+          <details className="setting-section settings-disclosure" open>
+            <summary><span><strong>多模态模型</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
+            <div>{multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.multimodal_models[field.key]} placeholder="未指定" onChange={(event) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: event.target.value } })} />} />)}</div>
+          </details>
+        </> : null}
+
+        {tab === 'users' ? <>
+          <article className="setting-section current-user-section">
+            <div className="setting-section-head"><strong>当前用户</strong><span>每个 Web 窗口只激活一个 users/&lt;user_id&gt; 目录。</span></div>
+            <div className="current-user-card"><span className="user-card-avatar">{user.slice(0, 1).toUpperCase()}</span><span><strong>{user}</strong><small>users/{user} · 当前配置、历史、知识与记忆空间</small></span><StatusChip status="enabled">已载入</StatusChip></div>
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>可切换用户</strong><span>逐行选择目标用户；切换后会清空当前会话选择，并重新读取目标用户的运行配置。</span></div>
+            {chatRunning && <div className="settings-user-lock" role="status"><LockKeyhole size={17} /><span><strong>对话运行中，暂不可切换</strong><small>请等待本轮结束，或先在对话页停止运行。</small></span></div>}
+            <div className="settings-user-list" aria-label="可切换用户列表">
+              {settingsQuery.data?.users.filter((name) => name !== user).map((name) => <button
+                type="button"
+                className="settings-user-row"
+                aria-label={`切换到用户 ${name}`}
+                disabled={chatRunning}
+                key={name}
+                onClick={() => switchUser(name)}
+              >
+                <span className="user-card-avatar">{name.slice(0, 1).toUpperCase()}</span>
+                <span><strong>{name}</strong><small>users/{name} · 点击切换到此用户空间</small></span>
+                <span className="settings-user-action">{chatRunning ? '已锁定' : '切换'}</span>
+              </button>)}
+              {!settingsQuery.data?.users.some((name) => name !== user) && <div className="settings-user-empty">当前没有其他可切换用户。</div>}
+            </div>
+          </article>
+        </> : null}
+
+        {tab === 'memory' && globalDraft ? <>
+          <ConfigSaveBar label="保存记忆与上下文" description="这些参数是全局默认值，将影响所有未覆盖对应字段的用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>上下文窗口</strong><span>控制 Token 预算、轮次上限和压缩后保留量。</span></div>
+            <SettingRow title="Token 上限" description="估算总量越过该值或 Provider 报超限时触发压缩" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
+            <SettingRow title="Token 压缩比例" description={`输入预算为 Token 上限的 ${Math.round(globalDraft.agents.token_compression_ratio * 100)}%`} source="global" control={<div className="config-range"><input type="range" aria-label="Token 压缩比例" min="0.05" max="1" step="0.05" value={globalDraft.agents.token_compression_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_compression_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.agents.token_compression_ratio * 100)}%</b></div>} />
+            <SettingRow title="最大对话轮次" description="限制 Provider 临时工作区，不限制用户可见完整归档" source="global" control={<NumberInput label="最大对话轮次" value={globalDraft.agents.max_rounds} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, max_rounds: value } })} />} />
+            <SettingRow title="压缩后保留轮次" description="压缩时保留最新的完整轮次" source="global" control={<NumberInput label="压缩后保留轮次" value={globalDraft.agents.rounds_after_compression} max={globalDraft.agents.max_rounds} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, rounds_after_compression: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>记忆注入上限</strong><span>按文件数量截断单次 Prompt，不限制磁盘中的记忆库存。</span></div>
+            <SettingRow title="周记忆上限" description="seven_days 层单次最多注入的文件数量" source="global" control={<NumberInput label="周记忆上限" value={globalDraft.memory.temporary_injection_limits.seven_days} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, seven_days: value } } })} />} />
+            <SettingRow title="月记忆上限" description="one_month 层单次最多注入的文件数量" source="global" control={<NumberInput label="月记忆上限" value={globalDraft.memory.temporary_injection_limits.one_month} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, one_month: value } } })} />} />
+            <SettingRow title="半年记忆上限" description="half_year 层单次最多注入的文件数量" source="global" control={<NumberInput label="半年记忆上限" value={globalDraft.memory.temporary_injection_limits.half_year} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, half_year: value } } })} />} />
+          </article>
+        </> : null}
+
+        {tab === 'permissions' && userDraft && globalDraft ? <>
+          <ConfigSaveBar label="保存权限边界" description="用户白名单与全局图谱底层开关会分别写入各自配置文件。" pending={saveMutation.isPending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>知识库开关</strong><span>用户知识库始终有效；以下开关控制额外知识层。</span></div>
+            <SettingRow title="使用共享知识库" description="将 shared_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_shared} label="使用共享知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_shared: value } })} />} />
+            <SettingRow title="使用全局知识库" description="将 global_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_global} label="使用全局知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_global: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>知识图谱—用户级选择</strong><span>控制当前用户希望由图谱替换的知识和临时记忆来源。</span></div>
+            {graphFields.map((field) => <SettingRow key={field.key} title={field.label} description="启用后不再回退注入对应的原始来源" source="user" control={<Toggle checked={userDraft.kemo_graph[field.key]} label={`${field.label}用户级`} onChange={(value) => setUserDraft({ ...userDraft, kemo_graph: { ...userDraft.kemo_graph, [field.key]: value } })} />} />)}
+          </article>
+          <article className="setting-section global-boundary-section">
+            <div className="setting-section-head"><strong>知识图谱—全局底层</strong><span>决定用户目录是否实际生成图谱数据；关闭后，即使用户级开关打开也不生效。</span></div>
+            {graphFields.map((field) => <SettingRow key={field.key} title={field.label} description="系统级图谱生成与连接闸门" source="global" control={<Toggle checked={globalDraft.kemo_graph[field.key]} label={`${field.label}全局底层`} onChange={(value) => setGlobalDraft({ ...globalDraft, kemo_graph: { ...globalDraft.kemo_graph, [field.key]: value } })} />} />)}
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>来源白名单</strong><span>输入资源 ID 后按 Enter 或逗号添加；空白名单表示全部允许。</span></div>
+            <SettingRow title="共享技能白名单" description="shared_skills 中允许进入主智能体 Prompt 的技能" source="user" control={<TagInput label="共享技能白名单" value={userDraft.skills.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, skills: { shared_whitelist: value } })} />} />
+            <SettingRow title="共享拓展白名单" description="shared_expand 中允许加载的模块" source="user" control={<TagInput label="共享拓展白名单" value={userDraft.expand.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, shared_whitelist: value } })} />} />
+            <SettingRow title="全局拓展白名单" description="global_expand 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
+            <SettingRow title="全局感知白名单" description="global_sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { global_whitelist: value } })} />} />
+            <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { whitelist: value } })} />} />
+          </article>
+        </> : null}
+
+        {tab === 'runtime' && userDraft && globalDraft ? <>
+          <ConfigSaveBar label="保存运行限制" description="运行限制属于全局默认；任务计划自动接受为当前用户偏好。" pending={saveMutation.isPending} saved={savedLabel === '保存运行限制'} onSave={saveRuntime} />
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>工具执行</strong><span>约束单轮工具循环的时间、次数与连续失败行为。</span></div>
+            <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
+            <SettingRow title="每轮最大工具调用" description="单轮 Provider 工具循环的最大迭代次数" source="global" control={<NumberInput label="每轮最大工具调用" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
+            <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>任务计划</strong><span>控制计划是否需要批准，以及单个计划的最大步骤数。</span></div>
+            <SettingRow title="自动接受任务计划" description="开启后跳过人工批准；只影响当前用户" source="user" control={<Toggle checked={userDraft.task_plan.auto_accept} label="自动接受任务计划" onChange={(value) => setUserDraft({ ...userDraft, task_plan: { auto_accept: value } })} />} />
+            <SettingRow title="任务计划最大步骤" description="单个计划允许生成的最大步骤数" source="global" control={<NumberInput label="任务计划最大步骤" value={globalDraft.task_plan.max_steps} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, task_plan: { max_steps: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>调度与超时</strong><span>控制 Cron 扫描频率和子代理默认执行期限。</span></div>
+            <SettingRow title="Cron 轮询间隔（秒）" description="统一后台调度器检查到期任务的频率" source="global" control={<NumberInput label="Cron 轮询间隔" value={globalDraft.cron.poll_interval} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { poll_interval: value } })} />} />
+            <SettingRow title="代理默认超时（秒）" description="未单独声明超时时，子代理使用的默认期限" source="global" control={<NumberInput label="代理默认超时" value={globalDraft.agent_runtime.default_timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { default_timeout: value } })} />} />
+          </article>
+        </> : null}
+
+        {(userConfigQuery.isLoading || globalConfigQuery.isLoading) && tab !== 'appearance' && tab !== 'users' ? <div className="settings-loading">正在读取结构化配置…</div> : null}
       </div>
-
-      <div className="settings-layout">
-        <nav className="settings-nav" aria-label="配置分类">
-          {([
-            ['appearance', '外观与主题'], ['provider', '模型与 Provider'], ['users', '用户切换'],
-            ['memory', '记忆与上下文'], ['permissions', '权限边界'], ['runtime', '运行限制'],
-            ['prompt', 'Prompt 与 Expand'],
-            ['config', '配置文件 JSON'],
-          ] as const).map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}><span>{label}</span><span>›</span></button>)}
-        </nav>
-
-        <div className="settings-content">
-          {tab === 'appearance' && <>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>界面主题</strong><span>侧边栏、工作区、浮层与控件使用统一语义色。</span></div>
-              <div className="setting-row theme-setting-row">
-                <span className="setting-copy"><strong>明暗主题</strong><span>高级白与高级黑共享相同的层级、边界和交互语义。</span></span>
-                <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
-                  <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
-                  <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
-                </div>
-              </div>
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>界面字号</strong><span>调整文字比例，并同步适配顶部栏组件与间距。</span></div>
-              <div className="setting-row font-setting-row">
-                <span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级同步缩放文字与关键控件，默认使用“中”。</span></span>
-                <div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div>
-              </div>
-            </article>
-          </>}
-
-          {tab === 'provider' && <>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>Provider 与基础 Chat API</strong><span>只展示路由元数据，不探测或调用模型。</span></div>
-              <SettingRow title="Provider 类型" description="当前合并配置中的适配器" source={data?.provenance['provider.type']} control={<span className="select-like">{data?.provider.type || '—'}</span>} />
-              <SettingRow title="模型" description="当前默认模型标识" source={data?.provenance['provider.model']} control={<span className="select-like wide">{data?.provider.model || '—'}</span>} />
-              <SettingRow title="兼容端点" description="仅显示配置的基础 URL" source={data?.provenance['provider.base_url']} control={<span className="select-like wide">{data?.provider.base_url || '—'}</span>} />
-              <SettingRow title="凭据状态" description="只返回来源状态，不返回变量名或值" control={<StatusChip status={data?.provider.credential_source === 'missing' ? 'missing' : 'configured'}>{credentialLabels[data?.provider.credential_source || 'missing']}</StatusChip>} />
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>调用参数</strong><span>Provider 运行时的只读镜像。</span></div>
-              <SettingRow title="请求超时" description="源码默认的单次 Provider 调用上限" control={<span className="value-pill">{data?.provider.timeout ?? '—'} 秒</span>} />
-              <SettingRow title="原生流式" description="Provider 配置中的 stream 开关；Web 自身仍使用 SSE" source={data?.provenance['provider.stream']} control={<StatusChip status={data?.provider.stream ? 'enabled' : 'paused'}>{data?.provider.stream ? '已开启' : '已关闭'}</StatusChip>} />
-            </article>
-          </>}
-
-          {tab === 'users' && <>
-            <article className="setting-section current-user-section">
-              <div className="setting-section-head"><strong>用户切换机制</strong><span>每个 Web 窗口只激活一个 users/&lt;user_id&gt; 目录，不并行运行多个智能体。</span></div>
-              <div className="current-user-card"><span className="user-card-avatar">{user.slice(0, 1).toUpperCase()}</span><span><strong>{user}</strong><small>users/{user} · 当前用户</small></span><StatusChip status="enabled">已载入</StatusChip></div>
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>可用用户</strong><span>切换操作位于左侧栏底部。</span></div>
-              <div className="user-space-list">{data?.users.map((name) => <div className="user-space-row" key={name}><span className="mini-avatar">{name.slice(0, 1).toUpperCase()}</span><span><strong>{name}</strong><small>users/{name}</small></span><StatusChip status={name === user ? 'enabled' : 'gray'}>{name === user ? '当前' : '可切换'}</StatusChip></div>)}</div>
-            </article>
-          </>}
-
-          {tab === 'memory' && <>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>上下文窗口</strong><span>历史窗口的真实 Token 使用量会显示在顶栏。</span></div>
-              <SettingRow title="Token 上限" description="达到限制前由上下文生命周期执行压缩" source={data?.provenance['agents.token_limit']} control={<span className="value-pill">{data?.limits.context_tokens.toLocaleString() || '—'}</span>} />
-              <SettingRow title="压缩比例" description="上下文压缩后的目标比例" source={data?.provenance['agents.token_compression_ratio']} control={<span className="value-pill">{data ? Math.round(data.limits.compression_ratio * 100) : '—'}%</span>} />
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>记忆管线</strong><span>记忆提取与注入为默认管线；历史读取工具单独受控。</span></div>
-              <SettingRow title="历史对话读取" description="控制 history_search 工具是否注册" source={data?.provenance['memory.history_read_enabled']} control={<StatusChip status={data?.features.history_read ? 'enabled' : 'paused'} />} />
-              <SettingRow title="记忆注入" description={`临时层最多 ${data?.limits.memory_items || '—'} 条；重要记忆 ${data?.limits.memory_chars || '—'} 字符；永久记忆全部注入`} control={<StatusChip status={data?.features.memory_injection ? 'enabled' : 'paused'} />} />
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>记忆库存</strong><span>只读预览；显示文件名、挡位权重和固定到期时间。</span></div>
-              <div className="memory-tier-strip">{(['seven_days', 'one_month', 'half_year', 'permanent'] as const).map((tier) => <span key={tier}><small>{tier}</small><strong>{memoryQuery.data?.summary[tier] ?? '—'}</strong></span>)}</div>
-              <div className="memory-observer-list">{memoryQuery.data?.items.map((item) => <div className="memory-observer-row" key={item.filename}><span><strong>{item.preview || item.filename}</strong><small>{item.tier} · {item.filename}</small></span><span><b>{item.tier === 'permanent' ? '永久' : `weight ${item.weight}`}</b><small>{item.expires_at ? `到期 ${item.expires_at}` : '全部注入'}</small></span></div>)}{memoryQuery.isSuccess && !memoryQuery.data.items.length ? <span className="drawer-empty">当前用户没有记忆条目。</span> : null}</div>
-            </article>
-          </>}
-
-          {tab === 'permissions' && <article className="setting-section">
-            <div className="setting-section-head"><strong>安全与数据边界</strong><span>Web Observer API 的固定策略。</span></div>
-            <SettingRow title="Web 访问控制" description="Token 或账号密码任一模式启用时，业务 API 需要签名会话" control={<StatusChip status={data?.authentication.enabled ? 'enabled' : 'gray'}>{data?.authentication.enabled ? '已启用' : '兼容开放'}</StatusChip>} />
-            <SettingRow title="Token 登录" description="仅显示认证模式状态，不返回访问令牌" control={<StatusChip status={data?.authentication.token_enabled ? 'enabled' : 'gray'}>{data?.authentication.token_enabled ? '可用' : '未配置'}</StatusChip>} />
-            <SettingRow title="账号密码登录" description="用户名和密码不会进入设置响应" control={<StatusChip status={data?.authentication.password_enabled ? 'enabled' : 'gray'}>{data?.authentication.password_enabled ? '可用' : '未配置'}</StatusChip>} />
-            <SettingRow title="Session Cookie" description="浏览器会话使用 HttpOnly 签名 Cookie" control={<StatusChip status={data?.authentication.session_cookie_configured ? 'enabled' : 'gray'}>{data?.authentication.session_cookie_configured ? '已配置' : '未启用'}</StatusChip>} />
-            <SettingRow title="跨用户资源访问" description="路径参数必须对应已存在用户，历史按 user/source/session 隔离" control={<StatusChip status="enabled">已隔离</StatusChip>} />
-            <SettingRow title="敏感配置返回" description="API Key、环境变量值与完整配置不会进入响应" control={<StatusChip status="enabled">已脱敏</StatusChip>} />
-            <SettingRow title="系统级修改" description="当前 Web 认证主体可编辑配置；未来由超级管理员权限进一步收紧" control={<StatusChip status="enabled">已开放</StatusChip>} />
-          </article>}
-
-          {tab === 'runtime' && <>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>功能开关</strong><span>当前用户合并配置中的运行能力。</span></div>
-              <SettingRow title="工具调用" description="Run 工具编排" source={data?.provenance['tools.enabled']} control={<StatusChip status={data?.features.tools ? 'enabled' : 'paused'}><Wrench size={12} />{data?.features.tools ? '已启用' : '已停用'}</StatusChip>} />
-              <SettingRow title="文件知识" description="默认启用；图谱替换模式下停止直接注入" control={<StatusChip status={data?.features.knowledge ? 'enabled' : 'paused'}><Database size={12} />{data?.features.knowledge ? '已启用' : '已停用'}</StatusChip>} />
-              <SettingRow title="任务计划自动接受" description="计划是否跳过人工批准" source={data?.provenance['task_plan.auto_accept']} control={<StatusChip status={data?.features.task_plan_auto_accept ? 'enabled' : 'paused'}><Bot size={12} />{data?.features.task_plan_auto_accept ? '已开启' : '需确认'}</StatusChip>} />
-              <SettingRow title="Cron 调度" description="Web 不启动调度器，只显示主宿主配置" source={data?.provenance['cron.enabled']} control={<StatusChip status={data?.features.cron ? 'enabled' : 'paused'}>{data?.features.cron ? '已启用' : '已停用'}</StatusChip>} />
-              <SettingRow title="统一后台调度" description="统一管理 Cron、记忆维护与上下文整理" source={data?.provenance['runtime_host.enable_background_scheduler']} control={<StatusChip status={data?.features.background_scheduler ? 'enabled' : 'paused'}>{data?.features.background_scheduler ? '已启用' : '已停用'}</StatusChip>} />
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>主智能体来源策略</strong><span>注册阶段保留完整库存，以下策略只在 Prompt 选择与知识检索阶段过滤。</span></div>
-              <SettingRow title="知识范围" description="知识默认启用；共享与全局范围由用户配置选择" control={<span className="value-pill">{data?.source_policy.knowledge.effective_scopes.join(' / ') || '无'}</span>} />
-              <SettingRow title="插件工具" description="空白名单表示加载全部插件" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.plugins)}</span>} />
-              <SettingRow title="共享 / 用户技能" description="空白名单表示全量启用" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.skills.shared)} / {sourceModeLabel(data?.source_policy.skills.user)}</span>} />
-              <SettingRow title="全局 / 共享 Expand" description="用户 Expand 始终按当前用户目录动态注册" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.expand.global)} / {sourceModeLabel(data?.source_policy.expand.shared)}</span>} />
-              <SettingRow title="全局感知模块" description="按 global_sense 直接子目录名过滤" control={<span className="value-pill">{sourceModeLabel(data?.source_policy.perception.global)}</span>} />
-              <SettingRow title="kemo-graph" description="启用后替换原始知识和记忆注入；不会自动启动外部项目" control={<StatusChip status={data?.source_policy.kemo_graph.status || 'disabled'}>{data?.source_policy.kemo_graph.status === 'not_connected' ? '替换已启用 / 未连接' : '未启用'}</StatusChip>} />
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>执行限制</strong><span>用于约束工具、知识和任务计划。</span></div>
-              <SettingRow title="工具迭代" description={`单次调用超时 ${data?.limits.tool_timeout || '—'} 秒`} source={data?.provenance['tools.max_iterations']} control={<span className="value-pill">{data?.limits.tool_iterations || '—'} 轮</span>} />
-              <SettingRow title="每轮工具软上限" description="达到后提交中间状态并等待用户继续" source={data?.provenance['tools.max_per_round']} control={<span className="value-pill">{data?.limits.tool_max_per_round ?? '不限'}</span>} />
-              <SettingRow title="任务步骤" description="单个计划最大步骤数" source={data?.provenance['task_plan.max_steps']} control={<span className="value-pill">{data?.limits.task_plan_steps || '—'} 步</span>} />
-              <SettingRow title="知识索引" description="完整注入三层 data_structure.md / index.md 等索引文件" control={<span className="value-pill">全量</span>} />
-            </article>
-          </>}
-
-          {tab === 'prompt' && <>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>Prompt 注入诊断</strong><span>不返回正文，只展示固定 15 段的体积、条目、截断和来源文件。</span></div>
-              <div className="prompt-total"><span>当前系统 Prompt</span><strong>{promptQuery.data?.total_chars.toLocaleString() ?? '—'} 字符</strong></div>
-              <div className="prompt-section-list">{promptQuery.data?.sections.map((section) => {
-                const percent = section.original_chars ? Math.min(100, Math.round(section.injected_chars * 100 / section.original_chars)) : 0
-                return <div className="prompt-section-row" key={section.name}><span><strong>{section.name}</strong><small>{section.injected_items}/{section.original_items} 项 · {section.source_files.join('、') || '无文件来源'}</small></span><span className="prompt-section-meter"><i style={{ width: `${percent}%` }} /></span><span><b>{section.injected_chars}/{section.original_chars}</b><StatusChip status={section.truncated ? 'warning' : section.status === 'injected' ? 'enabled' : 'gray'}>{section.truncated ? '已截断' : section.status === 'injected' ? '已注入' : '省略'}</StatusChip></span></div>
-              })}</div>
-            </article>
-            <article className="setting-section">
-              <div className="setting-section-head"><strong>Expand 注册与过滤</strong><span>注册库存与当前用户主智能体选择结果分开展示。</span></div>
-              <div className="expand-observer-grid">{Object.entries(promptQuery.data?.expand || {}).map(([scope, item]) => <div key={scope}><strong>{scope}</strong><span>发现 {item.discovered.length} · 选择 {item.selected.length} · 异常 {item.invalid?.length || 0}</span><small>已过滤：{item.filtered.join('、') || '无'}</small><small>异常模块：{item.invalid?.join('、') || '无'}</small><small>未匹配：{item.unmatched.join('、') || '无'}</small></div>)}</div>
-            </article>
-          </>}
-
-          {tab === 'config' && <>
-            <article className="setting-section config-editor-section">
-              <div className="setting-section-head"><strong>users/{user}/user_config.json</strong><span>通过字段级 PATCH 原子更新；未修改的脱敏凭据保持原值。</span></div>
-              <div className="config-write-banner">
-                <span><strong>用户配置可编辑</strong><small>保存前执行 JSON 解析与合并配置校验。</small></span>
-                <StatusChip status="enabled">可写</StatusChip>
-              </div>
-              {configQuery.isError ? <div className="config-editor-error">用户配置读取失败。</div> : null}
-              <textarea className="config-json-editor" value={configDraft} onChange={(event) => setConfigDraft(event.target.value)} spellCheck={false} aria-label="用户配置 JSON" />
-              <div className="config-editor-foot">
-                <span>脱敏字段：{configQuery.data?.redacted_paths.join('、') || '无'}；敏感值不会进入浏览器响应。</span>
-                <div><button className="module-btn" onClick={() => void configQuery.refetch()}>重新读取</button><button className="module-btn primary" onClick={() => { try { setConfigError(''); userConfigMutation.mutate(parseConfigDraft(configDraft)) } catch (error) { setConfigError(String(error)) } }} disabled={userConfigMutation.isPending}><Save size={14} />保存用户配置</button></div>
-              </div>
-            </article>
-            <article className="setting-section config-editor-section">
-              <div className="setting-section-head"><strong>config/global_config.json</strong><span>当前阶段允许编辑；超级管理员面板上线后再收紧授权。</span></div>
-              <textarea className="config-json-editor" value={globalConfigDraft} onChange={(event) => setGlobalConfigDraft(event.target.value)} spellCheck={false} aria-label="全局配置 JSON" />
-              <div className="config-editor-foot"><span>脱敏字段：{globalConfigQuery.data?.redacted_paths.join('、') || '无'}。</span><div><button className="module-btn" onClick={() => void globalConfigQuery.refetch()}>重新读取</button><button className="module-btn primary" onClick={() => { try { setConfigError(''); globalConfigMutation.mutate(parseConfigDraft(globalConfigDraft)) } catch (error) { setConfigError(String(error)) } }} disabled={globalConfigMutation.isPending}><Save size={14} />保存全局配置</button></div></div>
-            </article>
-            {configError && <ModuleError message={configError} />}
-          </>}
-        </div>
-      </div>
-    </ModuleFrame>
-  )
+    </div>
+  </ModuleFrame>
 }
