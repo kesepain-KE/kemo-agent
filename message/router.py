@@ -210,13 +210,6 @@ class MessageRouter:
                 )
                 if done is not None:
                     text = str(done.metadata.get("text") or "").strip()
-                    if done.metadata.get("awaiting_tool_confirmation"):
-                        pause = done.metadata.get("tool_pause") or {}
-                        text = (
-                            "已达到本轮工具调用上限"
-                            f"（{pause.get('executed', 0)}/{pause.get('limit', 0)}），"
-                            "中间结果已保存。请回复“继续”后恢复执行。"
-                        )
             if not text:
                 text = "任务已完成。"
             outbound = OutboundMessage.reply(
@@ -238,16 +231,7 @@ class MessageRouter:
                 },
             )
             registered.transport.send(outbound)
-            done = next(
-                (event for event in reversed(result.events) if event.type == "done"),
-                None,
-            )
-            result.status = (
-                "waiting_confirmation"
-                if done is not None
-                and done.metadata.get("awaiting_tool_confirmation")
-                else "completed"
-            )
+            result.status = "completed"
             result.text = text
             result.outbound = outbound
             store.complete_many(dedupe_keys, status="completed")
