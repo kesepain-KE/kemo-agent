@@ -22,10 +22,12 @@ import type {
   OverviewResponse,
   PreferencesResponse,
   PromptDiagnosticsResponse,
+  RuntimeStatusResponse,
   RunEvent,
   SenseResponse,
   SessionDeleteAllResponse,
   SessionDeleteResponse,
+  SessionCompressResponse,
   SessionRenameResponse,
   SessionsResponse,
   SettingsResponse,
@@ -150,6 +152,16 @@ export async function deleteSession(
   )
 }
 
+export async function compressSession(
+  user: string,
+  sessionId: string,
+): Promise<SessionCompressResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/compress`,
+    { method: 'POST' },
+  )
+}
+
 export async function deleteAllSessions(user: string): Promise<SessionDeleteAllResponse> {
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions`,
@@ -183,6 +195,11 @@ export async function logoutAuth(): Promise<{ authenticated: boolean }> {
 export async function getOverview(user: string, sessionId = ''): Promise<OverviewResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`)
+}
+
+export async function getRuntimeStatus(user: string, sessionId = ''): Promise<RuntimeStatusResponse> {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${query}`)
 }
 
 export async function getTasks(user: string): Promise<TasksResponse> {
