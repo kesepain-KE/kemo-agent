@@ -68,10 +68,6 @@ export function RuntimeModulesPage({ fixedTab }: { fixedTab?: RuntimeTab } = {})
   )
 }
 
-export function AgentsPage() {
-  return <RuntimeModulesPage fixedTab="agents" />
-}
-
 export function MessagesPage() {
   return <RuntimeModulesPage fixedTab="messages" />
 }

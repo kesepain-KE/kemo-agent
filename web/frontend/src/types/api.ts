@@ -257,16 +257,54 @@ export interface SkillSummary {
   overrides: number
 }
 
+export type SkillCategory = 'builtin' | 'shared' | 'agent_generated' | 'user_created'
+
+export interface SkillCatalogItem {
+  id: string
+  name: string
+  title: string
+  description: string
+  category: SkillCategory
+  version: string
+  enabled: boolean
+  editable: boolean
+  toggleable: boolean
+  downloadable: boolean
+  path: string
+}
+
+export interface SkillDocumentResponse {
+  user: string
+  category: SkillCategory
+  name: string
+  path: string
+  content: string
+  size: number
+  updated_at: number
+  editable: boolean
+}
+
 export interface SkillsResponse {
   user: string
   summary: { registered: number; enabled: number; user: number; shared: number; core: number }
   tools: SkillSummary[]
+  catalog_summary: {
+    total: number
+    enabled: number
+    builtin: number
+    shared: number
+    agent_generated: number
+    user_created: number
+  }
+  items: SkillCatalogItem[]
   prompt_summary: { registered: number; active: number; user: number; shared: number }
   prompt_skills: Array<{
     name: string
     title: string
     description: string
     scope: 'shared' | 'user'
+    category: 'shared' | 'agent_generated' | 'user_created'
+    path: string
     active_for_main_agent: boolean
   }>
   source_policy: MainAgentSourcePolicySummary
@@ -279,6 +317,7 @@ export interface SenseSourceSummary {
   description: string
   layer: 'user' | 'shared' | 'global' | string
   enabled: boolean
+  whitelisted: boolean
   active_for_main_agent: boolean
   status: 'active' | 'filtered' | 'invalid' | string
   data_md: string
@@ -292,6 +331,9 @@ export interface SenseSourceSummary {
   injected_items: number
   data_items: string[]
   value_preview: string
+  collected_markdown: string
+  injected_markdown: string
+  injected_tokens: number
   update_interval: string
   updated_at: number
 }
@@ -325,6 +367,7 @@ export interface SenseResponse {
     truncated: boolean
     preview: string
     preview_truncated: boolean
+    content: string
     source_files: string[]
     prompt_section: string
     prompt_position: string
@@ -543,6 +586,11 @@ export interface FileDeleteResponse {
   deleted: boolean
 }
 
+export interface TmpFilesDeleteResponse {
+  deleted_paths: string[]
+  deleted_count: number
+}
+
 export interface FileMutationResponse {
   user?: string
   scope?: 'file_upload' | 'download'
@@ -579,15 +627,76 @@ export interface AgentsResponse {
   summary: { total: number; enabled: number; global: number; user: number }
   agents: Array<{
     name: string
+    version: string
     description: string
     enabled: boolean
     source: 'global' | 'user'
+    trigger: string
+    rules: string
+    executor: string
     execution: string
     model_profile: string
     exposure: string
     root: string
     files: InventoryFile[]
   }>
+}
+
+export interface AgentDeleteResponse {
+  user: string
+  name: string
+  path: string
+  deleted: boolean
+}
+
+export interface MessageLogEntry {
+  id: string
+  direction: 'send' | 'receive'
+  kind: 'text' | 'file' | 'system'
+  timestamp: string
+  content: string
+  file_path: string | null
+  success: boolean
+  chat_type: string
+  chat_id: string
+  source: string
+  mime?: string
+  size?: number
+}
+
+export interface MessageTransportSummary {
+  id: string
+  name: string
+  platform: string
+  display_name: string
+  description: string
+  capabilities: string[]
+  state: 'running' | 'stopped' | 'error' | string
+  connection_status: 'connected' | 'disconnected' | 'error'
+  bound_user: string
+  allowed_tools: string[] | null
+  last_error: unknown
+  health: string
+  last_check: string | null
+  last_message_at: string | null
+  latency_ms: number | null
+  messages_received_today: number
+  messages_sent_today: number
+  path: string
+  files_path: string
+  log_path: string
+  message_buffer: string
+  modules: Record<string, string>
+  api_imported: boolean
+  polling_interval: string
+  health_interval: string
+  file_relay_enabled: boolean
+  log_rotation: string
+  temporary_file_count: number
+  temporary_file_bytes: number
+  today_log_count: number
+  logs: MessageLogEntry[]
+  logs_truncated: boolean
 }
 
 export interface MessageStatusResponse {
@@ -600,30 +709,34 @@ export interface MessageStatusResponse {
     external_chat_id: string | null
     match_priority: number
   }>
-  transports: Array<{
-    name: string
-    platform: string
-    display_name: string
-    capabilities: string[]
-    state: 'running' | 'stopped' | 'error' | string
-    bound_user: string
-    allowed_tools: string[] | null
-    last_error: unknown
-    health: string
-    last_check: string | null
-    last_message_at: string | null
-    latency_ms: number | null
-    messages_received_today: number
-    messages_sent_today: number
-  }>
+  transports: MessageTransportSummary[]
   summary: {
     total_bindings: number
     total_transports: number
     running_transports: number
     stopped_transports: number
     error_transports: number
+    connected_transports: number
+    temporary_files: number
+    today_logs: number
   }
   issues: Array<{ name: string; error: string }>
+}
+
+export interface MessageCheckResponse {
+  user: string
+  module: string
+  checked: boolean
+  state: Record<string, unknown>
+  transport: MessageTransportSummary | null
+}
+
+export interface MessageDeleteResponse {
+  user: string
+  module: string
+  platform: string
+  path: string
+  deleted: boolean
 }
 
 export interface SoulResponse {
@@ -634,20 +747,66 @@ export interface SoulResponse {
   updated_at: number
 }
 
+export type ExpandScope = 'global' | 'shared' | 'user'
+
+export interface ExpandModuleSummary {
+  id: string
+  scope: ExpandScope
+  name: string
+  display_name: string
+  description: string
+  type: 'directory'
+  root: string
+  path: string
+  relative_path: string
+  has_register: boolean
+  valid: boolean
+  error: string
+  whitelisted: boolean
+  active_for_main_agent: boolean
+  input_health: string
+  open_input: boolean
+  open_control: boolean
+  input_data: string
+  start_update: string
+  start_expand: string
+  start_control: string
+  control_document: string
+  control_injection_markdown: string
+  control_operation_markdown: string
+  collected_markdown: string
+  injected_markdown: string
+  injected_tokens: number
+  files: InventoryFile[]
+  updated_at: number
+}
+
 export interface ExpandsResponse {
   user: string
   summary: { total: number; global: number; shared: number; user: number }
+  status_summary: {
+    enabled: number
+    healthy: number
+    invalid: number
+  }
   expands: Array<{
-    scope: 'global' | 'shared' | 'user'
+    scope: ExpandScope
     root: string
-    items: Array<{
-      name: string
-      type: 'directory'
-      relative_path: string
-      has_register: boolean
-      files: InventoryFile[]
-    }>
+    items: ExpandModuleSummary[]
   }>
+  injection: {
+    content: string
+    source_files: string[]
+    original_chars: number
+    injected_chars: number
+    original_items: number
+    injected_items: number
+    estimated_tokens: number
+    truncated: boolean
+    prompt_section: string
+    prompt_position: string
+  }
+  source_policy: MainAgentSourcePolicySummary
 }
 
 export interface ApiErrorPayload {

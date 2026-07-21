@@ -1,12 +1,17 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppShell } from './AppShell'
 import { ChatPage } from '../pages/ChatPage'
 import { server } from '../test/server'
 import type { SessionSummary } from '../types/api'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 function renderApp(path = '/chat') {
   let currentSearch = new URL(path, 'http://test').search
@@ -67,6 +72,70 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
     expect(historyRequests).toBe(0)
   })
+
+  it('首轮提交在会话列表延迟刷新时不会回退欢迎页', async () => {
+    let committedSessionId = ''
+    let sessionRequests = 0
+    let chatRequests = 0
+    const interceptedFetch = globalThis.fetch
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      const body = JSON.parse(String(init?.body)) as { session_id: string }
+      committedSessionId = body.session_id
+      return new Response(
+        'event: text_delta\ndata: {"type":"text_delta","content":"流式回复"}\n\n'
+        + 'event: done\ndata: {"type":"done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    })
+    server.use(
+      http.get('/api/users/kesepain/sessions', async () => {
+        sessionRequests += 1
+        if (committedSessionId) await delay(120)
+        return HttpResponse.json({
+          user: 'kesepain',
+          source: 'web',
+          sessions: committedSessionId ? [session(committedSessionId, '首轮会话', 1)] : [],
+        })
+      }),
+      http.get('/api/users/kesepain/sessions/:sessionId/history', ({ params }) => HttpResponse.json({
+        user: 'kesepain',
+        source: 'web',
+        session_id: params.sessionId,
+        messages: [
+          { role: 'user', content: '首轮测试', round: 1 },
+          { role: 'assistant', content: '历史回复', round: 1 },
+        ],
+        round_metrics: [],
+        round_traces: [],
+      })),
+    )
+    const { getSearch } = renderApp('/chat?user=kesepain')
+    const welcomeText = /当前用户的配置、历史、知识、任务与技能运行态已载入/
+    await screen.findByText(welcomeText)
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '首轮测试' } })
+    const sendButton = screen.getByRole('button', { name: '发送' })
+    expect(sendButton).toBeEnabled()
+    fireEvent.click(sendButton)
+    await waitFor(() => expect(screen.queryByText(welcomeText)).not.toBeInTheDocument())
+
+    let welcomeReappeared = false
+    const observer = new MutationObserver(() => {
+      if (screen.queryByText(welcomeText)) welcomeReappeared = true
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    await waitFor(() => expect(chatRequests).toBe(1), { timeout: 2_000 })
+    await waitFor(() => expect(committedSessionId).toMatch(/^web_/), { timeout: 2_000 })
+    await waitFor(() => expect(sessionRequests).toBeGreaterThanOrEqual(2), { timeout: 2_000 })
+    await waitFor(() => expect(getSearch()).toContain('session=web_'), { timeout: 2_000 })
+    expect(await screen.findByText('历史回复', undefined, { timeout: 5_000 })).toBeInTheDocument()
+    observer.disconnect()
+
+    expect(welcomeReappeared).toBe(false)
+    expect(sessionRequests).toBeGreaterThanOrEqual(2)
+  }, 15_000)
 
   it('顶部栏包含上下文窗口、字号、主题和运行状态控件', async () => {
     renderApp('/chat')

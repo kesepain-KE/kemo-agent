@@ -1,11 +1,13 @@
 import { z } from 'zod'
 import type {
+  AgentDeleteResponse,
   AgentsResponse,
   ApiErrorPayload,
   AuthStatusResponse,
   AvatarUploadResponse,
   ConfigFullResponse,
   ExpandsResponse,
+  ExpandScope,
   FileDeleteResponse,
   FileMutationResponse,
   HistoryResponse,
@@ -14,6 +16,8 @@ import type {
   KnowledgeResponse,
   MemoryItemResponse,
   MemorySummaryResponse,
+  MessageCheckResponse,
+  MessageDeleteResponse,
   MessageStatusResponse,
   OverviewResponse,
   PreferencesResponse,
@@ -26,9 +30,12 @@ import type {
   SessionsResponse,
   SettingsResponse,
   SkillsResponse,
+  SkillCategory,
+  SkillDocumentResponse,
   SoulResponse,
   TasksResponse,
   TmpFilesResponse,
+  TmpFilesDeleteResponse,
   UserFilesResponse,
   UsersResponse,
 } from '../types/api'
@@ -240,8 +247,61 @@ export async function getSkills(user: string): Promise<SkillsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/skills`)
 }
 
+export async function getSkillDocument(user: string, category: SkillCategory, name: string): Promise<SkillDocumentResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}/document?name=${encodeURIComponent(name)}`)
+}
+
+export async function putSkillDocument(user: string, category: SkillCategory, name: string, content: string): Promise<SkillDocumentResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}/document?name=${encodeURIComponent(name)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  })
+}
+
+export async function deleteSkill(user: string, category: SkillCategory, name: string): Promise<{ user: string; category: SkillCategory; name: string; path: string; deleted: boolean }> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}?name=${encodeURIComponent(name)}`, { method: 'DELETE' })
+}
+
+export async function setSkillEnabled(user: string, category: SkillCategory, name: string, enabled: boolean): Promise<{ enabled: boolean }> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}/enabled?name=${encodeURIComponent(name)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }),
+  })
+}
+
+export function getSkillDownloadUrl(user: string, category: SkillCategory, name: string): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/skills/${category}/download?name=${encodeURIComponent(name)}`
+}
+
 export async function getSense(user: string): Promise<SenseResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/sense`)
+}
+
+export async function refreshSenseModule(user: string, moduleName: string): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/refresh`,
+    { method: 'POST' },
+  )
+}
+
+export async function setSenseModuleEnabled(
+  user: string,
+  moduleName: string,
+  enabled: boolean,
+): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/enabled`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  )
+}
+
+export async function deleteSenseModule(user: string, moduleName: string): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function getSettings(user: string): Promise<SettingsResponse> {
@@ -372,6 +432,18 @@ export async function deleteTmpFile(path: string): Promise<FileDeleteResponse> {
   return requestJson(`/api/tmp?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
 }
 
+export async function deleteTmpFiles(paths: string[]): Promise<TmpFilesDeleteResponse> {
+  return requestJson('/api/tmp/delete-many', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  })
+}
+
+export async function deleteAllTmpFiles(): Promise<TmpFilesDeleteResponse> {
+  return requestJson('/api/tmp/all', { method: 'DELETE' })
+}
+
 export async function uploadTmpFile(path: string, file: File): Promise<FileMutationResponse> {
   const body = new FormData()
   body.append('file', file)
@@ -418,8 +490,29 @@ export async function getAgents(user: string): Promise<AgentsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/agents`)
 }
 
+export async function deleteUserAgent(user: string, agent: string): Promise<AgentDeleteResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/agents/${encodeURIComponent(agent)}`,
+    { method: 'DELETE' },
+  )
+}
+
 export async function getMessageStatus(user: string): Promise<MessageStatusResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/message/status`)
+}
+
+export async function checkMessageModule(user: string, moduleName: string): Promise<MessageCheckResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/message/modules/${encodeURIComponent(moduleName)}/check`,
+    { method: 'POST' },
+  )
+}
+
+export async function deleteMessageModule(user: string, moduleName: string): Promise<MessageDeleteResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/message/modules/${encodeURIComponent(moduleName)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function getUserSoul(user: string): Promise<SoulResponse> {
@@ -452,6 +545,36 @@ export function getLogoUrl(): string {
 
 export async function getExpands(user: string): Promise<ExpandsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/expand`)
+}
+
+export async function refreshExpandModule(user: string, scope: ExpandScope, moduleName: string): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/refresh`,
+    { method: 'POST' },
+  )
+}
+
+export async function setExpandModuleEnabled(
+  user: string,
+  scope: ExpandScope,
+  moduleName: string,
+  enabled: boolean,
+): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/enabled`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  )
+}
+
+export async function deleteExpandModule(user: string, moduleName: string): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/expand/user/${encodeURIComponent(moduleName)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export interface StreamChatOptions {

@@ -42,13 +42,15 @@ import {
 import { formatDateTime, statusLabel } from './ModuleUi'
 import { SessionHistoryPanel } from './SessionHistoryPanel'
 import { UserProfileCard } from './UserProfileCard'
-import type { AuthStatusResponse, OverviewResponse } from '../types/api'
+import type { AuthStatusResponse, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 
 export interface ShellOutletContext {
   user: string
   sessionId: string
   setSessionId: (sessionId: string) => void
+  sessions: SessionsResponse['sessions']
+  refreshSessions: () => Promise<SessionsResponse | undefined>
   overview?: OverviewResponse
   refreshOverview: () => void
   openCommandPanel: () => void
@@ -230,6 +232,8 @@ export function AppShell() {
     setParams(next)
   }
 
+  const refreshSessions = async () => (await sessionsQuery.refetch()).data
+
   const renameHistorySession = async (targetSessionId: string, title: string) => {
     if (!user) throw new Error('当前没有可用用户')
     await renameSession(user, targetSessionId, title)
@@ -385,7 +389,7 @@ export function AppShell() {
             <button className="icon-btn" onClick={() => setCommandOpen(true)} aria-label="命令面板" title="命令面板"><Search size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, sessionId, setSessionId, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel: () => setCommandOpen(true) } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, sessionId, setSessionId, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel: () => setCommandOpen(true) } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

@@ -32,9 +32,9 @@ describe('reduceRunEvent', () => {
   it('最近活动只保留本轮实际注入的感知来源', () => {
     const base: SenseSourceSummary = {
       id: 'active', name: 'active', display_name: '运行时感知', description: '', layer: 'global', enabled: true,
-      active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-20 12:00:00',
+      whitelisted: true, active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-20 12:00:00',
       health: '正常', valid: true, error: '', start_update: '', files: 1, registered_items: 1, injected_items: 1,
-      data_items: ['sense.md'], value_preview: 'CPU 23%', update_interval: '', updated_at: 1,
+      data_items: ['sense.md'], value_preview: 'CPU 23%', collected_markdown: 'CPU 23%', injected_markdown: '[active]\nCPU 23%', injected_tokens: 5, update_interval: '', updated_at: 1,
     }
     const items = buildSenseDataItems([
       base,

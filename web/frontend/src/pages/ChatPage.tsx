@@ -23,7 +23,7 @@ import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
-import type { ChatItem, CronTaskSummary, HistoryResponse, PlanSummary, RunEvent, SenseSourceSummary, SessionsResponse } from '../types/api'
+import type { ChatItem, CronTaskSummary, HistoryResponse, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
 function createSessionId() {
@@ -285,7 +285,7 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, setSessionId, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, setSessionId, sessions, refreshSessions, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -305,16 +305,13 @@ export function ChatPage() {
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
-  const { data: sessionsCache } = useQuery<SessionsResponse>({
-    queryKey: ['sessions', user],
-    queryFn: async () => ({ user, source: 'web', sessions: [] }),
-    enabled: false,
-    staleTime: Infinity,
-  })
+  const locallyCommittedSessionRef = useRef('')
+  const historyHandoffSessionRef = useRef('')
   const hasCommitted = useMemo(() => {
-    if (!sessionId || !sessionsCache?.sessions) return false
-    return sessionsCache.sessions.some((session) => session.session_id === sessionId)
-  }, [sessionId, sessionsCache])
+    if (!sessionId) return false
+    return sessionId === locallyCommittedSessionRef.current
+      || sessions.some((session) => session.session_id === sessionId)
+  }, [sessionId, sessions])
   const historyQuery = useQuery({
     queryKey: ['history', user, sessionId],
     queryFn: () => getHistory(user, sessionId),
@@ -333,7 +330,8 @@ export function ChatPage() {
   })
 
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
-  const items = [...historyItems, ...liveItems]
+  const handoffReady = historyHandoffSessionRef.current === sessionId && Boolean(historyQuery.data)
+  const items = [...historyItems, ...(handoffReady ? [] : liveItems)]
   const persistedToolPause = useMemo(() => {
     const metric = historyQuery.data?.round_metrics.at(-1)
     if (!metric?.tool_pause || metric.tool_pause.reason !== 'max_per_round') return null
@@ -347,6 +345,8 @@ export function ChatPage() {
     : toolPause ?? (liveItems.length === 0 ? persistedToolPause : null)
 
   useEffect(() => {
+    if (historyHandoffSessionRef.current === sessionId) return
+    historyHandoffSessionRef.current = ''
     followOutputRef.current = true
     setLiveItems([])
     setEditingSource(null)
@@ -359,6 +359,12 @@ export function ChatPage() {
     abortRef.current?.abort()
     setRunning(false)
   }, [user, sessionId])
+
+  useEffect(() => {
+    if (historyHandoffSessionRef.current !== sessionId || !historyQuery.data) return
+    historyHandoffSessionRef.current = ''
+    setLiveItems([])
+  }, [historyQuery.data, sessionId])
 
   useEffect(() => {
     const prompt = searchParams.get('prompt')
@@ -413,8 +419,12 @@ export function ChatPage() {
           }
         },
       })
-      if (!sessionId) setSessionId(activeSession)
-      await queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+      await refreshSessions()
+      if (!sessionId) {
+        locallyCommittedSessionRef.current = activeSession
+        historyHandoffSessionRef.current = activeSession
+        setSessionId(activeSession)
+      }
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
       refreshOverview()
     } catch (error) {
