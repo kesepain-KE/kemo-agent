@@ -51,27 +51,13 @@ web/frontend/output/
 # Obsidian knowledge graph (local dev workspace, not tracked)
 开发临时目录/
 
-# User runtime data — only _template skeleton is tracked
-users/*/avatar/
-users/*/download/
-users/*/expand/
-users/*/file_upload/
-users/*/history/
-users/*/improve/
-users/*/improve_backup_v1_*/
-users/*/knowledge/
-users/*/agents/
-users/*/message_state/
-users/*/task_cron/
-users/*/task_plan/
-users/*/user_skills/
-users/*/user_config.json
-users/*/user_soul.md
-users/*/memory_temporary_important.md
-users/*/*.txt
-
-# Keep _template skeleton tracking (unignore)
+# User runtime data — only _template skeleton with .gitkeep
+users/*/
 !users/_template/
+
+# Ignore all files under _template, but keep directories and .gitkeep
+users/_template/**/*
+!users/_template/**/
 !users/_template/**/.gitkeep
 
 # Expand / Sense / Skills — only register.py is tracked
