@@ -47,6 +47,8 @@ def _important_path(root: Path, user: str) -> Path:
 
 def _important_entry(root: Path, user: str) -> list[dict[str, Any]]:
     path = _important_path(root, user)
+    if path.is_symlink():
+        raise MemoryError("临时重要记忆文件不能是符号链接")
     try:
         content = path.read_text("utf-8").strip()
     except FileNotFoundError:
@@ -72,25 +74,141 @@ def _tier_entries(root: Path, user: str, config: dict[str, Any], tier: str) -> l
     return MemoryStore(root, user, config).load_tier(tier)
 
 
+def _bounded_integer(value: int, *, field: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} 必须是整数")
+    return min(max(minimum, value), maximum)
+
+
+def _summary(item: dict[str, Any], tier: str) -> dict[str, Any]:
+    temporary = tier in TEMPORARY_TIERS
+    return {
+        "filename": item["filename"],
+        "weight": int(item.get("weight", 0)) if temporary else None,
+        "expires_at": item.get("expires_at") if temporary else None,
+    }
+
+
+def list_entries(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    tier: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    _validate_tier(tier)
+    normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
+    if tier == "important":
+        names = [IMPORTANT_FILENAME] if _important_entry(root, user) else []
+        entries = [
+            {"filename": filename, "weight": None, "expires_at": None}
+            for filename in names[:normalized_limit]
+        ]
+    elif tier == "permanent":
+        directory = MemoryStore(root, user, config).tier_dir("permanent")
+        names = sorted(
+            (
+                path.name
+                for path in directory.glob("*.md")
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=str.casefold,
+        ) if directory.is_dir() else []
+        entries = [
+            {"filename": filename, "weight": None, "expires_at": None}
+            for filename in names[:normalized_limit]
+        ]
+    else:
+        index = MemoryStore(root, user, config).load_index(tier)
+        names = sorted(index, key=str.casefold)
+        entries = [
+            {
+                "filename": filename,
+                "weight": int(index[filename].get("weight", 0)),
+                "expires_at": index[filename].get("expires_at"),
+            }
+            for filename in names[:normalized_limit]
+        ]
+    return {
+        "action": "list",
+        "tier": tier,
+        "entries": entries,
+        "total": len(names),
+        "truncated": len(names) > normalized_limit,
+    }
+
+
+def get_fragment(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    tier: str,
+    filename: str,
+) -> dict[str, Any]:
+    _validate_tier(tier)
+    if tier == "important":
+        if not isinstance(filename, str) or filename.strip().casefold() != IMPORTANT_FILENAME.casefold():
+            raise FileNotFoundError(f"记忆不存在：{tier}/{filename}")
+        normalized = IMPORTANT_FILENAME
+        entries = _important_entry(root, user)
+        if not entries:
+            raise FileNotFoundError(f"记忆不存在：{tier}/{IMPORTANT_FILENAME}")
+        item = entries[0]
+    else:
+        store = MemoryStore(root, user, config)
+        normalized = normalize_memory_filename(filename)
+        location = store.locate(normalized)
+        if location is None or location.tier != tier:
+            raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
+        if location.path.is_symlink():
+            raise MemoryError("记忆文件不能是符号链接")
+        item = store._entry(
+            location,
+            store.load_index(tier).get(location.filename)
+            if tier in TEMPORARY_TIERS
+            else None,
+        )
+        normalized = location.filename
+    return {
+        "action": "get",
+        "tier": tier,
+        "filename": normalized if tier != "important" else IMPORTANT_FILENAME,
+        "content": str(item.get("content") or ""),
+        "weight": int(item.get("weight", 0)) if tier in TEMPORARY_TIERS else None,
+        "expires_at": item.get("expires_at") if tier in TEMPORARY_TIERS else None,
+    }
+
+
 def search_by_title(
     root: Path,
     user: str,
     config: dict[str, Any],
     tier: str,
     query: str,
+    limit: int = 50,
+    case_sensitive: bool = False,
 ) -> dict[str, Any]:
-    needle = query.casefold().strip()
-    matches = [
-        {
-            "filename": item["filename"],
-            "tier": tier,
-            "weight": int(item.get("weight", 0)),
-            "expires_at": item.get("expires_at"),
-        }
-        for item in _tier_entries(root, user, config, tier)
-        if not needle or needle in Path(str(item["filename"])).stem.casefold()
-    ]
-    return {"action": "search_by_title", "tier": tier, "query": query, "matches": matches}
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 不能为空；列出全部记忆请使用 list action")
+    if not isinstance(case_sensitive, bool):
+        raise ValueError("case_sensitive 必须是布尔值")
+    normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
+    needle = query.strip()
+    comparison = needle if case_sensitive else needle.casefold()
+    all_matches = []
+    for item in _tier_entries(root, user, config, tier):
+        stem = Path(str(item["filename"])).stem
+        haystack = stem if case_sensitive else stem.casefold()
+        if comparison in haystack:
+            all_matches.append(_summary(item, tier))
+    return {
+        "action": "search_by_title",
+        "tier": tier,
+        "query": query,
+        "matches": all_matches[:normalized_limit],
+        "total_matches": len(all_matches),
+        "truncated": len(all_matches) > normalized_limit,
+    }
 
 
 def search_by_content(
@@ -99,28 +217,50 @@ def search_by_content(
     config: dict[str, Any],
     tier: str,
     query: str,
+    limit: int = 50,
+    context_chars: int = 240,
+    case_sensitive: bool = False,
 ) -> dict[str, Any]:
-    needle = query.casefold().strip()
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 不能为空；列出全部记忆请使用 list action")
+    if not isinstance(case_sensitive, bool):
+        raise ValueError("case_sensitive 必须是布尔值")
+    normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
+    normalized_context = _bounded_integer(
+        context_chars, field="context_chars", minimum=60, maximum=2000
+    )
+    needle = query.strip()
+    comparison = needle if case_sensitive else needle.casefold()
     matches: list[dict[str, Any]] = []
+    total_matches = 0
     for item in _tier_entries(root, user, config, tier):
         content = str(item.get("content") or "")
-        folded = content.casefold()
-        if needle and needle not in folded:
+        haystack = content if case_sensitive else content.casefold()
+        index = haystack.find(comparison)
+        if index < 0:
             continue
-        index = folded.find(needle) if needle else 0
-        start = max(0, index - 120)
-        end = min(len(content), max(index + len(needle) + 120, 240))
-        matches.append(
-            {
-                "filename": item["filename"],
-                "tier": tier,
-                "content": content if not needle else None,
-                "snippet": content[start:end],
-                "weight": int(item.get("weight", 0)),
-                "expires_at": item.get("expires_at"),
-            }
-        )
-    return {"action": "search_by_content", "tier": tier, "query": query, "matches": matches}
+        total_matches += 1
+        if len(matches) >= normalized_limit:
+            continue
+        match_end = index + len(needle)
+        body_budget = normalized_context
+        center = (index + match_end) // 2
+        start = max(0, min(len(content) - body_budget, center - body_budget // 2))
+        end = min(len(content), start + body_budget)
+        marker_chars = int(start > 0) + int(end < len(content))
+        body_budget = max(1, normalized_context - marker_chars)
+        start = max(0, min(len(content) - body_budget, center - body_budget // 2))
+        end = min(len(content), start + body_budget)
+        snippet = f"{'…' if start > 0 else ''}{content[start:end]}{'…' if end < len(content) else ''}"
+        matches.append({**_summary(item, tier), "snippet": snippet[:normalized_context]})
+    return {
+        "action": "search_by_content",
+        "tier": tier,
+        "query": query,
+        "matches": matches,
+        "total_matches": total_matches,
+        "truncated": total_matches > normalized_limit,
+    }
 
 
 def delete_fragment(

@@ -11,12 +11,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-_MAX_RESPONSE_BYTES = 2_000_000
+_DEFAULT_MAX_BYTES = 2_000_000
+_MIN_BYTES_LIMIT = 1_000
+_MAX_BYTES_LIMIT = 10_000_000
 _READ_STRATEGIES = {"auto", "direct", "reader"}
 _READER_SERVICES = {"auto", "jina", "markdown_new", "defuddle"}
 _DEFAULT_WEB_READ_CHARS = 20_000
 _MAX_WEB_READ_CHARS = 100_000
-_DEFAULT_TIMEOUT = 15
 _READER_URLS = {
     "jina": "https://r.jina.ai/{url}",
     "markdown_new": "https://markdown.new/{url}",
@@ -50,9 +51,12 @@ def _request_headers(headers: dict[str, Any] | None) -> dict[str, str]:
     return result
 
 
-def _read_limited(response: Any) -> tuple[bytes, bool]:
-    raw = response.read(_MAX_RESPONSE_BYTES + 1)
-    return raw[:_MAX_RESPONSE_BYTES], len(raw) > _MAX_RESPONSE_BYTES
+def _read_limited(
+    response: Any,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> tuple[bytes, bool]:
+    raw = response.read(max_bytes + 1)
+    return raw[:max_bytes], len(raw) > max_bytes
 
 
 def _open(
@@ -61,8 +65,9 @@ def _open(
     method: str,
     data: bytes | None = None,
     headers: dict[str, Any] | None = None,
-    timeout: float = _DEFAULT_TIMEOUT,
-) -> tuple[int, dict[str, str], bytes, bool]:
+    timeout: float,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> tuple[int, dict[str, str], bytes, bool, str | None]:
     value = _validate_url(url)
     request = urllib.request.Request(
         value,
@@ -72,13 +77,17 @@ def _open(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw, truncated = _read_limited(response)
-            return int(response.status), dict(response.headers), raw, truncated
+            raw, truncated = _read_limited(response, max_bytes)
+            return int(response.status), dict(response.headers), raw, truncated, None
     except urllib.error.HTTPError as exc:
-        raw, truncated = _read_limited(exc)
-        return int(exc.code), dict(exc.headers), raw, truncated
+        raw, truncated = _read_limited(exc, max_bytes)
+        return int(exc.code), dict(exc.headers or {}), raw, truncated, str(exc.reason)
     except urllib.error.URLError as exc:
         raise ConnectionError(f"连接失败: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ConnectionError(f"请求超时: {exc}") from exc
+    except OSError as exc:
+        raise ConnectionError(f"网络请求失败: {exc}") from exc
 
 
 def _header(headers: dict[str, str], name: str) -> str:
@@ -108,23 +117,67 @@ def _body(raw: bytes, content_type: str) -> Any:
     return text
 
 
-def _run_get(
+def _run_request(
     url: str,
+    *,
+    method: str,
+    body: str = "",
     headers: dict[str, Any] | None = None,
-    timeout: float = _DEFAULT_TIMEOUT,
-    **_kw: Any,
+    timeout: float,
+    max_bytes: int = 0,
 ) -> dict[str, Any]:
-    status, response_headers, raw, truncated = _open(
-        url, method="GET", headers=headers, timeout=timeout,
+    limit = max(
+        _MIN_BYTES_LIMIT,
+        min(max_bytes or _DEFAULT_MAX_BYTES, _MAX_BYTES_LIMIT),
     )
+    data = body.encode("utf-8") if method in {"POST", "PUT", "PATCH"} else None
+    try:
+        status, response_headers, raw, truncated, reason = _open(
+            url,
+            method=method,
+            data=data,
+            headers=headers,
+            timeout=timeout,
+            max_bytes=limit,
+        )
+    except ConnectionError as exc:
+        return _result(
+            False,
+            error=str(exc),
+            status=0,
+            url=url,
+            body="",
+            content_type="",
+            truncated=False,
+        )
     content_type = _header(response_headers, "content-type")
-    return _result(
-        200 <= status < 400,
+    ok = 200 <= status < 400
+    result = _result(
+        ok,
         status=status,
         url=url,
         body=_body(raw, content_type),
         content_type=content_type,
-        response_truncated=truncated,
+        truncated=truncated,
+    )
+    if not ok:
+        result["error"] = reason or f"HTTP {status}"
+    return result
+
+
+def _run_get(
+    url: str,
+    headers: dict[str, Any] | None = None,
+    timeout: float = 0,
+    max_bytes: int = 0,
+    **_kw: Any,
+) -> dict[str, Any]:
+    return _run_request(
+        url,
+        method="GET",
+        headers=headers,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
 
 
@@ -132,24 +185,69 @@ def _run_post(
     url: str,
     body: str = "",
     headers: dict[str, Any] | None = None,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float = 0,
+    max_bytes: int = 0,
     **_kw: Any,
 ) -> dict[str, Any]:
-    status, response_headers, raw, truncated = _open(
+    return _run_request(
         url,
         method="POST",
-        data=body.encode("utf-8"),
+        body=body,
         headers=headers,
         timeout=timeout,
+        max_bytes=max_bytes,
     )
-    content_type = _header(response_headers, "content-type")
-    return _result(
-        200 <= status < 400,
-        status=status,
-        url=url,
-        body=_body(raw, content_type),
-        content_type=content_type,
-        response_truncated=truncated,
+
+
+def _run_put(
+    url: str,
+    body: str = "",
+    headers: dict[str, Any] | None = None,
+    timeout: float = 0,
+    max_bytes: int = 0,
+    **_kw: Any,
+) -> dict[str, Any]:
+    return _run_request(
+        url,
+        method="PUT",
+        body=body,
+        headers=headers,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+
+
+def _run_delete(
+    url: str,
+    headers: dict[str, Any] | None = None,
+    timeout: float = 0,
+    max_bytes: int = 0,
+    **_kw: Any,
+) -> dict[str, Any]:
+    return _run_request(
+        url,
+        method="DELETE",
+        headers=headers,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+
+
+def _run_patch(
+    url: str,
+    body: str = "",
+    headers: dict[str, Any] | None = None,
+    timeout: float = 0,
+    max_bytes: int = 0,
+    **_kw: Any,
+) -> dict[str, Any]:
+    return _run_request(
+        url,
+        method="PATCH",
+        body=body,
+        headers=headers,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
 
 
@@ -185,25 +283,30 @@ def _extract_text(value: str) -> str:
     return "\n".join(lines)
 
 
-def _read_direct(url: str, max_chars: int, timeout: float) -> tuple[str, bool]:
-    status, headers, raw, response_truncated = _open(url, method="GET", timeout=timeout)
+def _read_direct(url: str, max_chars: int, timeout: float) -> tuple[str, bool, str]:
+    status, headers, raw, response_truncated, reason = _open(
+        url, method="GET", timeout=timeout,
+    )
     if not 200 <= status < 400:
-        raise ConnectionError(f"HTTP {status}")
+        raise ConnectionError(f"HTTP {status}: {reason or '请求失败'}")
     content_type = _header(headers, "content-type")
     decoded = _decode(raw, content_type)
     text = _extract_text(decoded) if "html" in content_type.casefold() or "<html" in decoded[:500].casefold() else decoded.strip()
     if len(text) < 40:
-        return "", response_truncated
-    return text[:max_chars], response_truncated or len(text) > max_chars
+        return "", response_truncated, content_type
+    return text[:max_chars], response_truncated or len(text) > max_chars, content_type
 
 
-def _read_reader(url: str, service: str, max_chars: int, timeout: float) -> tuple[str, bool]:
+def _read_reader(url: str, service: str, max_chars: int, timeout: float) -> tuple[str, bool, str]:
     reader_url = _READER_URLS[service].format(url=url)
-    status, headers, raw, response_truncated = _open(reader_url, method="GET", timeout=timeout)
+    status, headers, raw, response_truncated, reason = _open(
+        reader_url, method="GET", timeout=timeout,
+    )
     if not 200 <= status < 400:
-        raise ConnectionError(f"reader HTTP {status}")
-    text = _decode(raw, _header(headers, "content-type")).strip()
-    return text[:max_chars], response_truncated or len(text) > max_chars
+        raise ConnectionError(f"reader HTTP {status}: {reason or '请求失败'}")
+    content_type = _header(headers, "content-type")
+    text = _decode(raw, content_type).strip()
+    return text[:max_chars], response_truncated or len(text) > max_chars, content_type
 
 
 def _run_read(
@@ -211,7 +314,7 @@ def _run_read(
     strategy: str = "auto",
     reader_service: str = "auto",
     max_chars: int = 0,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float = 0,
     **_kw: Any,
 ) -> dict[str, Any]:
     value = _validate_url(url)
@@ -223,23 +326,39 @@ def _run_read(
     errors: list[str] = []
     if strategy in {"auto", "direct"}:
         try:
-            text, truncated = _read_direct(value, limit, timeout)
+            text, truncated, content_type = _read_direct(value, limit, timeout)
             if text:
-                return _result(True, url=value, text=text, chars=len(text), source="direct", truncated=truncated)
+                return _result(True, url=value, text=text, chars=len(text), source="direct", content_type=content_type, truncated=truncated)
         except Exception as exc:
             errors.append(f"direct: {exc}")
     if strategy in {"auto", "reader"}:
         service = "jina" if reader_service == "auto" else reader_service
         try:
-            text, truncated = _read_reader(value, service, limit, timeout)
+            text, truncated, content_type = _read_reader(value, service, limit, timeout)
             if text:
-                return _result(True, url=value, text=text, chars=len(text), source=f"reader:{service}", truncated=truncated)
+                return _result(True, url=value, text=text, chars=len(text), source=f"reader:{service}", content_type=content_type, truncated=truncated)
         except Exception as exc:
             errors.append(f"reader:{service}: {exc}")
-    return _result(False, url=value, error="；".join(errors) or "无法获取网页正文")
+    return _result(
+        False,
+        url=value,
+        error="；".join(errors) or "无法获取网页正文",
+        text="",
+        chars=0,
+        source="",
+        content_type="",
+        truncated=False,
+    )
 
 
-_ACTIONS = {"get": _run_get, "post": _run_post, "read": _run_read}
+_ACTIONS = {
+    "get": _run_get,
+    "post": _run_post,
+    "put": _run_put,
+    "delete": _run_delete,
+    "patch": _run_patch,
+    "read": _run_read,
+}
 
 
 def run(action: str, url: str, *, context: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -247,6 +366,9 @@ def run(action: str, url: str, *, context: dict[str, Any], **kwargs: Any) -> dic
     if handler is None:
         raise ValueError(f"未知 action: {action}，可选: {', '.join(sorted(_ACTIONS))}")
     requested_timeout = kwargs.pop("timeout", 0)
-    timeout = float(requested_timeout or context.get("tool_timeout") or _DEFAULT_TIMEOUT)
+    context_timeout = context.get("tool_timeout")
+    if context_timeout is None:
+        raise ValueError("tool_timeout 未在上下文中提供，请检查配置链路")
+    timeout = float(requested_timeout or context_timeout)
     kwargs["timeout"] = max(1.0, min(timeout, 3600.0))
     return handler(url=_validate_url(url), **kwargs)

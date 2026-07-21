@@ -9,6 +9,8 @@ from plugins.memory_manage.memory_ops import (
     add_fragment,
     delete_fragment,
     edit_fragment,
+    get_fragment,
+    list_entries,
     search_by_content,
     search_by_title,
 )
@@ -21,6 +23,9 @@ def run(
     filename: str | None = None,
     content: str | None = None,
     new_filename: str | None = None,
+    limit: int = 50,
+    context_chars: int = 240,
+    case_sensitive: bool = False,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -34,10 +39,22 @@ def run(
             "self_improve 只能用 memory_manage 搜索；候选和晋升由运行时原子持久化"
         )
     config = load_config(user, root)
+    if action == "list":
+        return list_entries(root, user, config, tier, limit=limit)
+    if action == "get":
+        if not filename:
+            raise ValueError("get 需要 filename")
+        return get_fragment(root, user, config, tier, filename)
     if action == "search_by_title":
-        return search_by_title(root, user, config, tier, query or "")
+        return search_by_title(
+            root, user, config, tier, query or "",
+            limit=limit, case_sensitive=case_sensitive,
+        )
     if action == "search_by_content":
-        return search_by_content(root, user, config, tier, query or "")
+        return search_by_content(
+            root, user, config, tier, query or "",
+            limit=limit, context_chars=context_chars, case_sensitive=case_sensitive,
+        )
     if action == "delete":
         if not filename:
             raise ValueError("delete 需要 filename")

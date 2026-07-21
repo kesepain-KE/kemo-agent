@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import locale
 import os
 import re
 import subprocess
@@ -25,7 +26,14 @@ def _now() -> float:
 
 
 def _decode_output(data: bytes) -> str:
-    for encoding in ("utf-8", "gbk", "latin-1"):
+    candidates = ["utf-8"]
+    try:
+        preferred = locale.getpreferredencoding(False)
+        if preferred and preferred.casefold() not in {"utf-8", "utf8"}:
+            candidates.append(preferred)
+    except Exception:
+        pass
+    for encoding in candidates:
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -144,6 +152,17 @@ def _resolve_cwd(value: str, root: Path) -> Path:
     return candidate
 
 
+def _resolve_path(value: str, cwd: Path) -> Path:
+    """解析相对 cwd 的文件系统路径，并兼容成对引号。"""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1]
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    return candidate.resolve()
+
+
 def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any] | None:
     parts = command.strip().split(maxsplit=1)
     name = parts[0].casefold()
@@ -189,6 +208,54 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
         output = "\n".join(f"[{index}] {item}" for index, item in enumerate(history[-50:], 1))
         return {"ok": True, "output": output or "(empty)", "exit_code": 0}
 
+    if name in {"cat", "type"}:
+        if not argument:
+            return {"ok": False, "output": f"{name}: 需要文件路径", "exit_code": 1}
+        target = _resolve_path(argument, cwd)
+        if not target.is_file():
+            return {"ok": False, "output": f"{name}: 文件不存在: {target}", "exit_code": 1}
+        try:
+            content = target.read_text("utf-8")
+        except UnicodeDecodeError:
+            content = _decode_output(target.read_bytes())
+        output, truncated = _truncate(content)
+        return {"ok": True, "output": output, "exit_code": 0, "truncated": truncated}
+
+    if name in {"ls", "dir"}:
+        target = _resolve_path(argument, cwd) if argument else cwd
+        if not target.is_dir():
+            return {"ok": False, "output": f"{name}: 目录不存在: {target}", "exit_code": 1}
+        entries = [child.name + ("/" if child.is_dir() else "") for child in sorted(target.iterdir())]
+        output, truncated = _truncate("\n".join(entries) or "(空目录)")
+        return {"ok": True, "output": output, "exit_code": 0, "truncated": truncated}
+
+    if name == "mkdir":
+        if not argument:
+            return {"ok": False, "output": "mkdir: 需要目录路径", "exit_code": 1}
+        target = _resolve_path(argument, cwd)
+        if target.exists():
+            return {"ok": False, "output": f"mkdir: 路径已存在: {target}", "exit_code": 1}
+        target.mkdir(parents=True, exist_ok=False)
+        return {"ok": True, "output": str(target), "exit_code": 0}
+
+    if name == "echo":
+        return {"ok": True, "output": argument, "exit_code": 0}
+
+    if name in {"rm", "del"}:
+        if not argument:
+            return {"ok": False, "output": f"{name}: 需要文件路径", "exit_code": 1}
+        target = _resolve_path(argument, cwd)
+        if not target.exists():
+            return {"ok": False, "output": f"{name}: 文件不存在: {target}", "exit_code": 1}
+        if target.is_dir():
+            return {
+                "ok": False,
+                "output": f"{name}: 目标是目录，请用专用工具或 shell 递归删除: {target}",
+                "exit_code": 1,
+            }
+        target.unlink()
+        return {"ok": True, "output": f"已删除: {target}", "exit_code": 0}
+
     return None
 
 
@@ -199,14 +266,30 @@ def _run_process(
     env_extra: dict[str, str],
     stdin: str,
     timeout: float,
+    shell_type: str = "auto",
 ) -> dict[str, Any]:
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
     environment.update(env_extra)
+    if shell_type == "cmd":
+        process_command: str | list[str] = ["cmd", "/c", command]
+        use_shell = False
+    elif shell_type == "powershell":
+        process_command = ["powershell", "-NoProfile", "-Command", command]
+        use_shell = False
+    elif shell_type == "bash":
+        process_command = ["bash", "-c", command]
+        use_shell = False
+    elif shell_type == "bash_login":
+        process_command = ["bash", "-l", "-c", command]
+        use_shell = False
+    else:
+        process_command = command
+        use_shell = True
     try:
         completed = subprocess.run(
-            command,
-            shell=True,
+            process_command,
+            shell=use_shell,
             cwd=str(cwd),
             env=environment,
             input=stdin.encode("utf-8") if stdin else None,
@@ -250,13 +333,16 @@ def _execute(
     stdin: str,
     timeout: float,
     session: dict[str, Any] | None,
+    shell_type: str = "auto",
+    chain_timeout_mode: str = "total",
 ) -> dict[str, Any]:
     commands, operators = _split_chain(command)
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if chain_timeout_mode == "total" else None
     results: list[dict[str, Any]] = []
     current_cwd = cwd
     stdin_used = False
     last: dict[str, Any] | None = None
+    runtime_state = session if session is not None else {"cwd": str(cwd), "env": environment, "history": []}
 
     for index, segment in enumerate(commands):
         if index:
@@ -266,15 +352,15 @@ def _execute(
             ):
                 results.append({"command": segment, "skipped": True, "operator": operator})
                 continue
-        remaining = deadline - time.monotonic()
+        remaining = timeout if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
             last = {"ok": False, "output": f"命令链超时 ({timeout:g}s)", "exit_code": -1, "timed_out": True}
         else:
-            builtin = _builtin(segment, session, current_cwd) if session is not None else None
+            builtin = _builtin(segment, runtime_state, current_cwd)
             if builtin is not None:
                 last = builtin
                 current_cwd = Path(str(builtin.get("cwd") or current_cwd))
-                environment.update(session.get("env", {}))
+                environment.update(runtime_state.get("env", {}))
             else:
                 last = _run_process(
                     segment,
@@ -282,6 +368,7 @@ def _execute(
                     env_extra=environment,
                     stdin=stdin if not stdin_used else "",
                     timeout=remaining,
+                    shell_type=shell_type,
                 )
                 stdin_used = True
         results.append({"command": segment, **last})
@@ -308,7 +395,6 @@ def _execute(
 
 
 def run(
-    action: str,
     command: str,
     working_dir: str = "",
     timeout: int = 0,
@@ -316,15 +402,22 @@ def run(
     env: dict[str, Any] | None = None,
     session_id: str = "",
     reset_session: bool = False,
+    shell_type: str = "auto",
+    chain_timeout_mode: str = "total",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    if action != "run_command":
-        raise ValueError("shell 仅支持 action=run_command")
     if not isinstance(command, str) or not command.strip():
         raise ValueError("command 不能为空")
+    if shell_type not in {"auto", "cmd", "powershell", "bash", "bash_login"}:
+        raise ValueError(f"不支持的 shell_type: {shell_type}")
+    if chain_timeout_mode not in {"total", "per_command"}:
+        raise ValueError(f"不支持的 chain_timeout_mode: {chain_timeout_mode}")
     root = Path(context.get("root") or Path.cwd()).resolve()
-    effective_timeout = float(timeout or context.get("tool_timeout") or 120)
+    context_timeout = context.get("tool_timeout")
+    if context_timeout is None:
+        raise ValueError("tool_timeout 未在上下文中提供，请检查配置链路")
+    effective_timeout = float(timeout or context_timeout)
     effective_timeout = max(1.0, min(effective_timeout, 3600.0))
     key = _session_key(context, root, session_id) if session_id else None
     if reset_session:
@@ -350,6 +443,8 @@ def run(
             stdin=stdin,
             timeout=effective_timeout,
             session=session,
+            shell_type=shell_type,
+            chain_timeout_mode=chain_timeout_mode,
         )
         if session is not None:
             history = session.setdefault("history", [])

@@ -7,6 +7,7 @@ from typing import Any
 
 from cron.schedule import compute_next_run
 from run.cron_store import CronConflictError, CronNotFoundError, CronStore, normalize_task
+from run.users import validate_user_name
 
 
 def _result(ok: bool, **fields: Any) -> dict[str, Any]:
@@ -56,17 +57,40 @@ def run(
     interval_seconds: int = 0,
     next_run_at: str = "",
     status: str = "",
+    query: str = "",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    root = Path(context["root"])
-    user = str(context["user"])
+    if not isinstance(context, dict) or not context.get("root") or not context.get("user"):
+        raise ValueError("工具上下文缺少 root 或 user")
+    root = Path(str(context["root"])).resolve()
+    try:
+        user = validate_user_name(str(context["user"]))
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
     store = CronStore(root, user)
 
     if action == "list":
         tasks = [_summary(task) for task in store.list_tasks()]
+        if not isinstance(query, str):
+            raise ValueError("list query 必须是字符串")
+        needle = query.strip().casefold()
+        if needle:
+            tasks = [
+                task
+                for task in tasks
+                if needle in str(task.get("title") or "").casefold()
+            ]
         active = sum(1 for task in tasks if task["status"] in {"enabled", "running"})
         return _result(True, tasks=tasks, total=len(tasks), active=active)
+
+    if action == "get":
+        if not task_id:
+            raise ValueError("get 需要 task_id")
+        try:
+            return _result(True, task=_summary(store.read(task_id)))
+        except CronNotFoundError:
+            return _result(False, error=f"任务不存在: {task_id}")
 
     if action == "create":
         if not title.strip() or not prompt.strip():
@@ -129,4 +153,4 @@ def run(
             return _result(False, error=f"任务不存在: {task_id}")
         return _result(True, task_id=task_id, deleted=True)
 
-    raise ValueError(f"未知 action: {action}，可选: create / list / update / delete")
+    raise ValueError(f"未知 action: {action}，可选: create / list / get / update / delete")
