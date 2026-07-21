@@ -451,6 +451,19 @@ def create_app(
     ) -> dict[str, Any]:
         return backend.delete_session(user, session_id, source=source)
 
+    @app.post("/api/users/{user}/sessions/{session_id}/compress")
+    async def compress_session(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.compress_session,
+            user,
+            session_id,
+            source=source,
+        )
+
     @app.get("/api/users/{user}/sessions/{session_id}/history")
     async def history(
         user: str,
@@ -465,6 +478,13 @@ def create_app(
         session_id: str = Query(default=""),
     ) -> dict[str, Any]:
         return backend.overview(user, session_id=session_id)
+
+    @app.get("/api/users/{user}/runtime/status")
+    async def runtime_status(
+        user: str,
+        session_id: str = Query(default=""),
+    ) -> dict[str, Any]:
+        return backend.runtime_status(user, session_id=session_id)
 
     @app.get("/api/users/{user}/tasks")
     async def tasks(user: str) -> dict[str, Any]:

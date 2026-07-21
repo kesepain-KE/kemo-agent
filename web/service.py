@@ -48,7 +48,7 @@ from run.cron_store import (
     CronStore,
     normalize_task,
 )
-from run.engine import iter_request_events
+from run.engine import compress_context, iter_request_events
 from run.history import (
     delete_all_sessions as delete_all_history_sessions,
     delete_session as delete_history_session,
@@ -204,6 +204,58 @@ def _visible_children(directory: Path) -> list[Path]:
         )
     )
     return children
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _usage_cache_tokens(usage: dict[str, Any]) -> int:
+    raw = usage.get("provider_raw")
+    values = raw if isinstance(raw, list) else [raw]
+    total = 0
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        direct = item.get("prompt_cache_hit_tokens")
+        details = item.get("prompt_tokens_details")
+        nested = details.get("cached_tokens") if isinstance(details, dict) else None
+        total += _nonnegative_int(direct if direct is not None else nested)
+    if total:
+        return total
+    details = usage.get("prompt_tokens_details")
+    return _nonnegative_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+
+
+def _provider_response_time(response: dict[str, Any]) -> datetime | None:
+    direct = _parse_datetime(response.get("created_at"))
+    if direct is not None:
+        return direct
+    timestamps = [
+        parsed
+        for item in response.get("output") or []
+        if isinstance(item, dict)
+        and (parsed := _parse_datetime(item.get("created_at"))) is not None
+    ]
+    return max(timestamps, default=None)
 
 
 def _directory_tree(directory: Path) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -452,12 +504,14 @@ class WebRunService:
         root: Path,
         *,
         event_source: Callable[..., Iterator[RunEvent]] = iter_request_events,
+        context_compressor: Callable[..., dict[str, Any]] = compress_context,
         runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
         message_health_checker: Callable[[str, str], dict[str, Any]] | None = None,
         message_transport_remover: Callable[[str, str], None] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.event_source = event_source
+        self.context_compressor = context_compressor
         self.runtime_status_provider = runtime_status_provider
         self.message_health_checker = message_health_checker
         self.message_transport_remover = message_transport_remover
@@ -1931,6 +1985,57 @@ class WebRunService:
             "deleted": True,
         }
 
+    def compress_session(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        directory = find_window(
+            self.root,
+            name,
+            normalized_source,
+            normalized_session,
+        )
+        if directory is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        with self._active_runs_lock:
+            if any(
+                active.user == name and active.session_id == normalized_session
+                for active in self._active_runs.values()
+            ):
+                raise ConflictError("会话正在运行，结束当前响应后再压缩")
+        try:
+            result = self.context_compressor(
+                {
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                },
+                root=self.root,
+            )
+        except WebServiceError:
+            raise
+        except Exception as exc:
+            raise WebServiceError("手动上下文压缩失败") from exc
+        context = result.get("context") if isinstance(result.get("context"), dict) else {}
+        rounds_removed = max(0, int(context.get("rounds_removed") or 0))
+        summary_cache = str(result.get("summary_cache") or "")
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "requested": True,
+            "compressed": bool(summary_cache or rounds_removed),
+            "rounds_removed": rounds_removed,
+            "summary_cache_exists": bool(summary_cache),
+            "context": dict(context),
+        }
+
     def delete_all_sessions(
         self,
         user: Any,
@@ -3213,6 +3318,508 @@ class WebRunService:
             "deleted": True,
         }
 
+    def _current_context_status(
+        self,
+        user: str,
+        session_id: str,
+        *,
+        token_limit: int,
+        round_limit: int,
+        configured_ratio: float,
+    ) -> dict[str, Any]:
+        empty = {
+            "selected": False,
+            "used_tokens": 0,
+            "max_tokens": token_limit,
+            "percent": 0.0,
+            "rounds": 0,
+            "round_limit": round_limit,
+            "compression_threshold": max(0, round(token_limit * configured_ratio)),
+            "source": "none",
+        }
+        if not session_id:
+            return empty
+        directory = find_window(self.root, user, "web", session_id)
+        if directory is None:
+            return empty
+        try:
+            archive = load_window(directory)
+        except Exception:
+            return empty
+        archive_data = archive.get("data") or {}
+        runtime_data: dict[str, Any] = {}
+        runtime_path = runtime_window_path(directory)
+        if runtime_path.is_dir():
+            try:
+                runtime_data = load_window(runtime_path).get("data") or {}
+            except Exception:
+                runtime_data = {}
+        context = runtime_data.get("context") or {}
+        used_tokens = _nonnegative_int(context.get("estimated_tokens_after"))
+        source = "runtime_estimate" if used_tokens else "none"
+        if not used_tokens:
+            metrics = archive_data.get("round_metrics") or []
+            for metric in reversed(metrics if isinstance(metrics, list) else []):
+                if not isinstance(metric, dict):
+                    continue
+                responses = metric.get("provider_responses") or []
+                for response in reversed(responses if isinstance(responses, list) else []):
+                    if not isinstance(response, dict):
+                        continue
+                    usage = response.get("usage") or {}
+                    if isinstance(usage, dict):
+                        used_tokens = _nonnegative_int(
+                            usage.get("input_tokens") or usage.get("prompt_tokens")
+                        )
+                    if used_tokens:
+                        source = "latest_provider_request"
+                        break
+                if used_tokens:
+                    break
+        if not used_tokens:
+            usage = archive_data.get("token_usage") or {}
+            if isinstance(usage, dict):
+                used_tokens = _nonnegative_int(
+                    usage.get("input_tokens") or usage.get("prompt_tokens")
+                )
+                source = "session_usage" if used_tokens else "none"
+        effective_limit = max(0, token_limit)
+        threshold = _nonnegative_int(context.get("input_budget")) or max(
+            0, round(effective_limit * configured_ratio)
+        )
+        return {
+            "selected": True,
+            "used_tokens": used_tokens,
+            "max_tokens": effective_limit,
+            "percent": round(used_tokens * 100 / effective_limit, 2) if effective_limit else 0.0,
+            "rounds": _nonnegative_int(archive_data.get("rounds")),
+            "round_limit": max(0, round_limit),
+            "compression_threshold": threshold,
+            "source": source,
+        }
+
+    def _today_token_statistics(self, user: str, *, now: datetime) -> dict[str, Any]:
+        today = now.astimezone(_BEIJING).date()
+        sent_tokens = 0
+        received_tokens = 0
+        cached_tokens = 0
+        request_count = 0
+        trend = [0 for _ in range(24)]
+        estimated = False
+        history = self.root / "users" / user / "history"
+
+        def add_usage(usage: dict[str, Any], occurred_at: datetime | None) -> None:
+            nonlocal sent_tokens, received_tokens, cached_tokens, request_count
+            sent = _nonnegative_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+            received = _nonnegative_int(
+                usage.get("output_tokens") or usage.get("completion_tokens")
+            )
+            sent_tokens += sent
+            received_tokens += received
+            cached_tokens += _usage_cache_tokens(usage)
+            request_count += 1
+            if occurred_at is not None:
+                trend[occurred_at.astimezone(_BEIJING).hour] += sent + received
+
+        for directory in _visible_children(history):
+            if not directory.is_dir() or directory.name == "temp":
+                continue
+            try:
+                data = load_window(directory).get("data") or {}
+            except Exception:
+                continue
+            fallback_time = _parse_datetime(data.get("updated_at"))
+            metrics = data.get("round_metrics") or []
+            metric_usage_found = False
+            for metric in metrics if isinstance(metrics, list) else []:
+                if not isinstance(metric, dict):
+                    continue
+                responses = metric.get("provider_responses") or []
+                response_found = False
+                response_has_timestamp = False
+                for response in responses if isinstance(responses, list) else []:
+                    if not isinstance(response, dict):
+                        continue
+                    occurred_at = _provider_response_time(response)
+                    response_has_timestamp = response_has_timestamp or occurred_at is not None
+                    if occurred_at is None or occurred_at.astimezone(_BEIJING).date() != today:
+                        continue
+                    usage = response.get("usage") or {}
+                    if not isinstance(usage, dict):
+                        continue
+                    add_usage(usage, occurred_at)
+                    response_found = True
+                    metric_usage_found = True
+                if response_found or response_has_timestamp:
+                    continue
+                usage = metric.get("usage") or {}
+                if (
+                    isinstance(usage, dict)
+                    and fallback_time is not None
+                    and fallback_time.astimezone(_BEIJING).date() == today
+                ):
+                    add_usage(usage, fallback_time)
+                    metric_usage_found = True
+                    estimated = True
+            if metric_usage_found:
+                continue
+            usage = data.get("token_usage") or {}
+            if (
+                isinstance(usage, dict)
+                and fallback_time is not None
+                and fallback_time.astimezone(_BEIJING).date() == today
+                and (_nonnegative_int(usage.get("total_tokens")) or usage)
+            ):
+                add_usage(usage, fallback_time)
+                estimated = True
+        total_tokens = sent_tokens + received_tokens
+        return {
+            "date": today.isoformat(),
+            "timezone": "Asia/Shanghai",
+            "sent_tokens": sent_tokens,
+            "received_tokens": received_tokens,
+            "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_rate": round(cached_tokens * 100 / sent_tokens, 2) if sent_tokens else 0.0,
+            "request_count": request_count,
+            "estimated": estimated,
+            "trend": trend,
+        }
+
+    def _system_cron_status(self, user: str, *, now: datetime) -> dict[str, Any]:
+        tasks = [
+            self._cron_summary(item)
+            for item in CronStore(self.root, "__system__", system=True).list_tasks()
+        ]
+        task_titles = {item["task_id"]: item["title"] for item in tasks}
+        log_path = (
+            self.root
+            / "cron"
+            / "task_cron_system"
+            / "log"
+            / f"{now.astimezone(_BEIJING):%Y-%m-%d}.jsonl"
+        )
+        executions: list[dict[str, Any]] = []
+        if log_path.is_file() and not log_path.is_symlink():
+            try:
+                lines = log_path.read_text("utf-8").splitlines()
+            except (OSError, UnicodeError):
+                lines = []
+            for index, line in enumerate(lines[-1000:]):
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict) or item.get("user") != user:
+                    continue
+                task_id = str(item.get("task_id") or "")
+                executions.append(
+                    {
+                        "id": f"{task_id}:{item.get('executed_at') or index}",
+                        "task_id": task_id,
+                        "title": task_titles.get(task_id, task_id),
+                        "executed_at": str(item.get("executed_at") or ""),
+                        "status": str(item.get("status") or "unknown"),
+                        "duration_ms": _nonnegative_int(item.get("duration_ms")),
+                        "result": item.get("result") if isinstance(item.get("result"), dict) else {},
+                        "error": item.get("error") if isinstance(item.get("error"), dict) else None,
+                        "source": "execution_log",
+                    }
+                )
+        executions.sort(key=lambda item: item["executed_at"], reverse=True)
+        if not executions:
+            for task in tasks:
+                if not task.get("latest_run_at"):
+                    continue
+                executions.append(
+                    {
+                        "id": f"{task['task_id']}:{task['latest_run_at']}",
+                        "task_id": task["task_id"],
+                        "title": task["title"],
+                        "executed_at": task["latest_run_at"],
+                        "status": "recorded",
+                        "duration_ms": 0,
+                        "result": {},
+                        "error": None,
+                        "source": "task_state",
+                    }
+                )
+            executions.sort(key=lambda item: item["executed_at"], reverse=True)
+        return {
+            "tasks": tasks,
+            "executions": executions[:100],
+            "tracking": "execution_log" if log_path.is_file() else "task_state",
+        }
+
+    def runtime_status(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_session = self.require_session_id(session_id) if session_id else ""
+        now = datetime.now(_BEIJING)
+        config = load_config(name, self.root)
+        settings = self.settings(name)
+        agents_config = config.get("agents") or {}
+        token_limit = _nonnegative_int(settings["limits"].get("context_tokens"))
+        round_limit = _nonnegative_int(settings["limits"].get("context_rounds"))
+        try:
+            compression_ratio = float(agents_config.get("token_compression_ratio") or 0.3)
+        except (TypeError, ValueError):
+            compression_ratio = 0.3
+        compression_ratio = min(1.0, max(0.0, compression_ratio))
+
+        bundle = build_prompt_bundle(self.root, name, config)
+        prompt_components = []
+        for section in bundle.sections:
+            empty = section.content.strip() in {"", "（无）"}
+            prompt_components.append(
+                {
+                    "id": section.name,
+                    "name": section.name,
+                    "state": (
+                        "empty" if empty else "truncated" if section.truncated else "injected"
+                    ),
+                    "chars": len(section.content),
+                    "tokens": estimate_text_tokens(section.content),
+                    "source_files": list(section.source_files),
+                    "injected_items": int(section.injected_items),
+                    "original_items": int(section.original_items),
+                }
+            )
+
+        sense_data = self.sense(name)
+        sense_components = [
+            {
+                "id": str(item.get("id") or item.get("name") or ""),
+                "name": str(item.get("display_name") or item.get("name") or ""),
+                "health": (
+                    "error"
+                    if not item.get("valid") or item.get("health") == "异常"
+                    else "healthy"
+                    if item.get("health") == "正常"
+                    else "warning"
+                ),
+                "state": (
+                    "error"
+                    if not item.get("valid")
+                    else "injected"
+                    if item.get("injected_markdown")
+                    else "loaded"
+                    if item.get("enabled")
+                    else "disabled"
+                ),
+                "description": str(item.get("error") or item.get("description") or ""),
+                "updated_at": item.get("updated_at"),
+            }
+            for item in sense_data.get("sources") or []
+            if isinstance(item, dict)
+        ]
+
+        expand_data = self.expands(name)
+        expand_components = []
+        for scope in expand_data.get("expands") or []:
+            if not isinstance(scope, dict):
+                continue
+            for item in scope.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                expand_components.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "name": str(item.get("display_name") or item.get("name") or ""),
+                        "scope": str(item.get("scope") or scope.get("scope") or ""),
+                        "health": (
+                            "error"
+                            if not item.get("valid") or item.get("input_health") == "异常"
+                            else "healthy"
+                            if item.get("input_health") == "正常"
+                            else "warning"
+                        ),
+                        "state": (
+                            "error"
+                            if not item.get("valid")
+                            else "injected"
+                            if item.get("injected_markdown")
+                            else "loaded"
+                            if item.get("active_for_main_agent")
+                            else "disabled"
+                        ),
+                        "description": str(item.get("error") or item.get("description") or ""),
+                        "updated_at": item.get("updated_at"),
+                    }
+                )
+
+        system_cron = self._system_cron_status(name, now=now)
+        promotion_by_file: dict[str, dict[str, Any]] = {}
+        for execution in system_cron["executions"]:
+            if execution.get("task_id") != "memory_promotion":
+                continue
+            result = execution.get("result") or {}
+            for promotion in result.get("promotions") or []:
+                if isinstance(promotion, dict) and promotion.get("filename"):
+                    promotion_by_file[str(promotion["filename"])] = promotion
+        promotion_tracking = system_cron["tracking"] == "execution_log"
+        memory_updates = []
+        store = MemoryStore(self.root, name, config)
+        for item in store.list_items():
+            updated = _parse_datetime(item.get("updated_at"))
+            if updated is None or updated.astimezone(_BEIJING).date() != now.date():
+                continue
+            promotion = promotion_by_file.get(str(item.get("filename") or ""))
+            memory_updates.append(
+                {
+                    "id": f"{item.get('tier')}:{item.get('filename')}",
+                    "filename": str(item.get("filename") or ""),
+                    "tier": str(item.get("tier") or ""),
+                    "weight": _nonnegative_int(item.get("weight")),
+                    "updated_at": str(item.get("updated_at") or ""),
+                    "upgraded": bool(promotion) if promotion_tracking else None,
+                    "from_tier": str((promotion or {}).get("from_tier") or ""),
+                    "to_tier": str((promotion or {}).get("to_tier") or ""),
+                }
+            )
+        important_path = self.root / "users" / name / "memory_temporary_important.md"
+        if important_path.is_file() and not important_path.is_symlink():
+            important_time = datetime.fromtimestamp(
+                important_path.stat().st_mtime, timezone.utc
+            ).astimezone(_BEIJING)
+            if important_time.date() == now.date():
+                memory_updates.append(
+                    {
+                        "id": "important:memory_temporary_important.md",
+                        "filename": "memory_temporary_important.md",
+                        "tier": "important",
+                        "weight": 0,
+                        "updated_at": important_time.isoformat(),
+                        "upgraded": None,
+                        "from_tier": "",
+                        "to_tier": "",
+                    }
+                )
+        memory_updates.sort(key=lambda item: item["updated_at"], reverse=True)
+
+        task_data = self.tasks(name)
+        current_plans = [
+            {
+                "id": item["plan_id"],
+                "kind": "plan",
+                "title": item["title"],
+                "status": item["status"],
+                "next_run_at": "",
+                "trigger": f"进度 {item['progress']['completed']} / {item['progress']['total']}",
+                "updated_at": item["updated_at"],
+            }
+            for item in task_data["plans"]
+            if item["status"] not in {"completed", "cancelled", "failed"}
+        ]
+        current_crons = []
+        for item in task_data["cron_tasks"]:
+            if item["status"] in {"completed", "cancelled"}:
+                continue
+            trigger = (
+                f"每日 {item.get('time')}"
+                if item.get("type") == "daily"
+                else f"每 {item.get('interval_seconds')} 秒"
+                if item.get("type") == "recurring"
+                else "单次执行"
+            )
+            current_crons.append(
+                {
+                    "id": item["task_id"],
+                    "kind": "cron",
+                    "title": item["title"],
+                    "status": item["status"],
+                    "next_run_at": item["next_run_at"],
+                    "trigger": trigger,
+                    "updated_at": item.get("latest_run_at") or item.get("created_at") or "",
+                }
+            )
+
+        message_data = self.message_status(name)
+        message_routes = [
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("display_name") or item.get("name") or ""),
+                "platform": str(item.get("platform") or ""),
+                "health": (
+                    "healthy"
+                    if item.get("connection_status") == "connected"
+                    else "error"
+                    if item.get("connection_status") == "error" or item.get("state") == "error"
+                    else "offline"
+                ),
+                "state": str(item.get("state") or "stopped"),
+                "latency_ms": item.get("latency_ms"),
+                "last_check": item.get("last_check"),
+                "description": str(item.get("health") or item.get("connection_status") or ""),
+            }
+            for item in message_data.get("transports") or []
+            if isinstance(item, dict)
+        ]
+
+        provider_config = config.get("provider") or {}
+        provider = settings["provider"]
+        context = self._current_context_status(
+            name,
+            normalized_session,
+            token_limit=token_limit,
+            round_limit=round_limit,
+            configured_ratio=compression_ratio,
+        )
+        return {
+            "schema_version": 1,
+            "generated_at": now.isoformat(),
+            "user": name,
+            "session_id": normalized_session,
+            "api": {
+                "type": provider["type"],
+                "base_url": provider["base_url"],
+                "model": provider["model"],
+                "thinking_effort": str(
+                    provider_config.get("thinking_effort")
+                    or provider_config.get("reasoning_effort")
+                    or "provider_default"
+                ),
+                "configured": bool(
+                    provider.get("configured")
+                    and provider.get("credential_source") != "missing"
+                ),
+                "credential_source": provider.get("credential_source"),
+            },
+            "context": context,
+            "tokens": self._today_token_statistics(name, now=now),
+            "prompt": {
+                "content": bundle.text,
+                "total_chars": len(bundle.text),
+                "estimated_tokens": estimate_text_tokens(bundle.text),
+                "components": prompt_components,
+            },
+            "components": {
+                "sense": sense_components,
+                "expand": expand_components,
+            },
+            "memory": {
+                "updated_today": len(memory_updates),
+                "upgraded_today": sum(item.get("upgraded") is True for item in memory_updates),
+                "upgrade_tracking": (
+                    "system_cron_log" if promotion_tracking else "not_available"
+                ),
+                "updates": memory_updates,
+            },
+            "tasks": {
+                "summary": task_data["summary"],
+                "items": sorted(
+                    [*current_plans, *current_crons],
+                    key=lambda item: item["updated_at"],
+                    reverse=True,
+                ),
+            },
+            "system_cron": system_cron,
+            "message_routes": {
+                "summary": message_data["summary"],
+                "routes": message_routes,
+            },
+            "runtime_host": self._runtime_status(),
+        }
+
     def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
         empty = {
             "exists": False,
@@ -3266,6 +3873,7 @@ class WebRunService:
         skill_data = self.skills(name)
         settings_data = self.settings(name)
         sessions = list_sessions(self.root, name, "web")
+        config = load_config(name, self.root)
 
         usage = {
             "prompt_tokens": 0,
@@ -3291,6 +3899,81 @@ class WebRunService:
         round_limit = int(settings_data["limits"]["context_rounds"])
         total_tokens = max(0, int(usage.get("total_tokens") or 0))
         percent = min(100, round(total_tokens * 100 / token_limit)) if token_limit > 0 else 0
+
+        agents_config = config.get("agents") or {}
+        try:
+            compression_ratio = float(agents_config.get("token_compression_ratio") or 0.3)
+        except (TypeError, ValueError):
+            compression_ratio = 0.3
+        compression_ratio = min(1.0, max(0.0, compression_ratio))
+        current_context = self._current_context_status(
+            name,
+            normalized_session,
+            token_limit=token_limit,
+            round_limit=round_limit,
+            configured_ratio=compression_ratio,
+        )
+        prompt_bundle = build_prompt_bundle(self.root, name, config)
+        system_prompt_tokens = estimate_text_tokens(prompt_bundle.text)
+        current_input_tokens = _nonnegative_int(current_context.get("used_tokens"))
+        context_tokens = max(0, current_input_tokens - system_prompt_tokens)
+        context_total_tokens = system_prompt_tokens + context_tokens
+        context_capacity = _nonnegative_int(current_context.get("max_tokens"))
+        context_window_percent = (
+            round(context_total_tokens * 100 / context_capacity, 2)
+            if context_capacity
+            else 0.0
+        )
+
+        archived_rounds = sum(
+            _nonnegative_int(item.get("rounds"))
+            for item in sessions
+            if item.get("session_id") != normalized_session
+        )
+        total_tool_calls = 0
+        for session in sessions:
+            stored_session_id = str(session.get("session_id") or "")
+            if not stored_session_id:
+                continue
+            directory = find_window(self.root, name, "web", stored_session_id)
+            if directory is None:
+                continue
+            try:
+                archive = load_window(directory)
+            except Exception:
+                continue
+            archive_data = archive.get("data") or {}
+            metrics = archive_data.get("round_metrics") or []
+            if isinstance(metrics, list) and metrics:
+                total_tool_calls += sum(
+                    _nonnegative_int(metric.get("tool_calls"))
+                    for metric in metrics
+                    if isinstance(metric, dict)
+                )
+                continue
+            item_container = archive.get("items") or {}
+            items = item_container.get("items") if isinstance(item_container, dict) else []
+            total_tool_calls += sum(
+                item.get("type") == "tool_call"
+                for item in (items or [])
+                if isinstance(item, dict)
+            )
+
+        sense_data = self.sense(name)
+        expand_data = self.expands(name)
+        message_data = self.message_status(name)
+        knowledge_documents = knowledge_data.get("documents") or []
+        enabled_knowledge = sum(
+            bool(item.get("active_for_main_agent"))
+            for item in knowledge_documents
+            if isinstance(item, dict)
+        )
+        knowledge_graph_status = str(
+            ((knowledge_data.get("extensions") or {}).get("kemo_graph") or "disabled")
+        )
+        skill_catalog = skill_data.get("catalog_summary") or {}
+        registered_tools = _nonnegative_int(skill_catalog.get("total"))
+        enabled_tools = _nonnegative_int(skill_catalog.get("enabled"))
 
         active_statuses = {"running", "approved", "paused"}
         active_plan = next(
@@ -3362,6 +4045,47 @@ class WebRunService:
                 "enabled_tools": skill_data["summary"]["enabled"],
                 "enabled_agents": len(agent_registry.enabled_agents()),
                 "active_tasks": task_data["summary"]["active_plans"] + task_data["summary"]["enabled_crons"],
+            },
+            "context_window": {
+                "tokens": {
+                    "system_prompt_tokens": system_prompt_tokens,
+                    "context_tokens": context_tokens,
+                    "total_tokens": context_total_tokens,
+                    "capacity_tokens": context_capacity,
+                    "percent": min(100.0, context_window_percent),
+                },
+                "conversation": {
+                    "foreground_rounds": _nonnegative_int(current_context.get("rounds")),
+                    "archived_rounds": archived_rounds,
+                    "total_tool_calls": total_tool_calls,
+                },
+                "tasks": {
+                    "active_plans": _nonnegative_int(task_data["summary"].get("active_plans")),
+                    "waiting_crons": _nonnegative_int(task_data["summary"].get("enabled_crons")),
+                },
+                "capabilities": {
+                    "tools_enabled": enabled_tools,
+                    "tools_disabled": max(0, registered_tools - enabled_tools),
+                    "agents_enabled": len(agent_registry.enabled_agents()),
+                },
+                "knowledge": {
+                    "enabled": enabled_knowledge,
+                    "disabled": max(0, len(knowledge_documents) - enabled_knowledge),
+                    "graph_enabled": knowledge_graph_status not in {"", "disabled", "unavailable"},
+                },
+                "messages": {
+                    "connected": _nonnegative_int(
+                        (message_data.get("summary") or {}).get("connected_transports")
+                    ),
+                },
+                "integrations": {
+                    "expands": _nonnegative_int(
+                        (expand_data.get("status_summary") or {}).get("enabled")
+                    ),
+                    "senses": _nonnegative_int(
+                        (sense_data.get("summary") or {}).get("enabled")
+                    ),
+                },
             },
             "agents": agents,
             "summary_cache": self._summary_cache_status(name, normalized_session),

@@ -72,6 +72,19 @@ class FakeService:
             "deleted_windows": 0,
         }
 
+    def compress_session(self, user, session_id, *, source="web"):
+        self.seen = {"user": user, "session_id": session_id, "source": source}
+        return {
+            "user": user,
+            "source": source,
+            "session_id": session_id,
+            "requested": True,
+            "compressed": True,
+            "rounds_removed": 2,
+            "summary_cache_exists": True,
+            "context": {"rounds_removed": 2},
+        }
+
     def settings(self, user):
         return {"user": user, "schema_version": 1}
 
@@ -602,6 +615,39 @@ class WebBackendTests(unittest.TestCase):
             self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code,
             404,
         )
+
+    def test_session_manual_compression_uses_runtime_compressor(self) -> None:
+        _, root = self.make_root()
+        commit_window(
+            root / "users" / "alice" / "history" / "window-1",
+            empty_window("alice", "web", "s1"),
+        )
+        observed: dict[str, Any] = {}
+
+        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
+            observed.update({"request": request, "root": root})
+            return {
+                "context": {"rounds_removed": 3},
+                "summary_cache": "context_summary.json",
+            }
+
+        app = create_app(
+            service=WebRunService(root, context_compressor=compressor)
+        )
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/s1/compress",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["compressed"])
+        self.assertEqual(response.json()["rounds_removed"], 3)
+        self.assertEqual(
+            observed["request"],
+            {"user": "alice", "source": "web", "session_id": "s1"},
+        )
+        self.assertEqual(observed["root"], root.resolve())
 
     def test_delete_all_sessions_is_scoped_and_reports_counts(self) -> None:
         _, root = self.make_root()
@@ -1286,6 +1332,48 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(overview.json()["summary_cache"]["covered_rounds"], [1])
         self.assertNotIn("must not be exposed", overview.text)
         self.assertEqual(overview.json()["runtime_host"]["state"], "running")
+        context_window = overview.json()["context_window"]
+        self.assertEqual(
+            context_window["tokens"]["total_tokens"],
+            context_window["tokens"]["system_prompt_tokens"]
+            + context_window["tokens"]["context_tokens"],
+        )
+        self.assertEqual(
+            context_window["tokens"]["capacity_tokens"],
+            overview.json()["context"]["limit"],
+        )
+        self.assertEqual(context_window["conversation"]["foreground_rounds"], 1)
+        self.assertEqual(context_window["conversation"]["archived_rounds"], 0)
+        self.assertEqual(context_window["conversation"]["total_tool_calls"], 0)
+        self.assertEqual(context_window["knowledge"]["enabled"], 1)
+        self.assertIsInstance(context_window["knowledge"]["graph_enabled"], bool)
+        self.assertIn("connected", context_window["messages"])
+        self.assertIn("expands", context_window["integrations"])
+        self.assertIn("senses", context_window["integrations"])
+
+        runtime_status = self.request(
+            app,
+            "GET",
+            "/api/users/alice/runtime/status?session_id=observer-session",
+        )
+        self.assertEqual(runtime_status.status_code, 200, runtime_status.text)
+        runtime_payload = runtime_status.json()
+        self.assertEqual(runtime_payload["user"], "alice")
+        self.assertEqual(runtime_payload["context"]["rounds"], 1)
+        self.assertEqual(runtime_payload["tokens"]["total_tokens"], 1500)
+        self.assertEqual(runtime_payload["tokens"]["request_count"], 1)
+        self.assertTrue(runtime_payload["prompt"]["content"])
+        self.assertEqual(
+            [item["id"] for item in runtime_payload["prompt"]["components"]],
+            list(PROMPT_SECTION_ORDER),
+        )
+        runtime_sense = next(
+            item for item in runtime_payload["components"]["sense"] if item["id"] == "runtime"
+        )
+        self.assertEqual(runtime_sense["name"], "runtime display")
+        self.assertEqual(len(runtime_payload["components"]["expand"]), 3)
+        self.assertEqual(runtime_payload["runtime_host"]["state"], "running")
+        self.assertNotIn("api_key", runtime_status.text)
 
         tasks = self.request(app, "GET", "/api/users/alice/tasks")
         self.assertEqual(len(tasks.json()["plans"]), 1)
