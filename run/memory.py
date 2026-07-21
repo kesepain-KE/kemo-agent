@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -40,6 +41,7 @@ _WINDOWS_RESERVED = {
 }
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
+LOGGER = logging.getLogger(__name__)
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
@@ -54,6 +56,12 @@ class MemoryError(RuntimeError):
 
 class MemoryConfigError(MemoryError):
     pass
+
+
+class MemoryIntegrityError(MemoryError):
+    def __init__(self, issue: str, message: str) -> None:
+        super().__init__(message)
+        self.issue = issue
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +92,7 @@ class TierPromptSelection:
     injected_items: int
     truncated: bool
     source_files: tuple[Path, ...]
+    integrity_warnings: tuple[str, ...] = ()
 
 
 def utc_now() -> datetime:
@@ -323,11 +332,50 @@ class MemoryStore:
             raise MemoryError(f"记忆文件名跨层重复：{normalize_memory_filename(filename)}（{tiers}）")
         return locations[0] if locations else None
 
+    def locate_in_tier(self, tier: str, filename: str) -> MemoryLocation | None:
+        """Locate one fragment by its composite identity without scanning other tiers.
+
+        Cross-tier duplicate filenames are an invalid storage state for normal writes, but
+        management and repair operations must still be able to address each copy exactly.
+        """
+
+        normalized = normalize_memory_filename(filename)
+        directory = self.tier_dir(tier)
+        if tier in TEMPORARY_TIERS:
+            matches = [
+                existing
+                for existing in self.load_index(tier)
+                if existing.casefold() == normalized.casefold()
+            ]
+            if len(matches) > 1:
+                raise MemoryError(f"记忆文件名在层内重复：{tier}/{normalized}")
+            if not matches:
+                return None
+            existing = matches[0]
+            return MemoryLocation(tier, existing, self.fragment_path(tier, existing), True)
+        if not directory.is_dir():
+            return None
+        matches = [
+            path
+            for path in directory.glob("*.md")
+            if path.is_file() and path.name.casefold() == normalized.casefold()
+        ]
+        if len(matches) > 1:
+            raise MemoryError(f"记忆文件名在层内重复：{tier}/{normalized}")
+        if not matches:
+            return None
+        path = matches[0]
+        return MemoryLocation(tier, path.name, path, False)
+
     def _entry(self, location: MemoryLocation, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             content = location.path.read_text("utf-8").strip()
         except FileNotFoundError as exc:
-            raise MemoryError(f"记忆索引指向不存在的文件：{location.path}") from exc
+            issue = f"missing_file:{location.tier}/{location.filename}"
+            raise MemoryIntegrityError(
+                issue,
+                f"记忆索引指向不存在的文件：{location.path}",
+            ) from exc
         except OSError as exc:
             raise MemoryError(f"记忆文件不可读：{location.path}（{exc}）") from exc
         if location.tier == "permanent":
@@ -351,6 +399,22 @@ class MemoryStore:
             **current_meta,
         }
 
+    def _entry_or_warning(
+        self,
+        location: MemoryLocation,
+        meta: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            return self._entry(location, meta), None
+        except MemoryIntegrityError as exc:
+            LOGGER.warning(
+                "跳过缺失正文的记忆索引：user=%s issue=%s path=%s",
+                self.user,
+                exc.issue,
+                location.path,
+            )
+            return None, exc.issue
+
     def load_tier(self, tier: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
         del now
         if tier == "permanent":
@@ -363,10 +427,15 @@ class MemoryStore:
                 if path.is_file()
             ]
         index = self.load_index(tier)
-        return [
-            self._entry(MemoryLocation(tier, filename, self.fragment_path(tier, filename), True), meta)
-            for filename, meta in index.items()
-        ]
+        entries: list[dict[str, Any]] = []
+        for filename, meta in index.items():
+            entry, _ = self._entry_or_warning(
+                MemoryLocation(tier, filename, self.fragment_path(tier, filename), True),
+                meta,
+            )
+            if entry is not None:
+                entries.append(entry)
+        return entries
 
     def load_all(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         return [item for tier in TIERS for item in self.load_tier(tier, now=now)]
@@ -709,15 +778,26 @@ class MemoryStore:
                     pair[0].casefold(),
                 ),
             )
-            if max_files is not None:
-                ordered = ordered[:max_files]
-            selected = [
-                self._entry(
-                    MemoryLocation(tier, filename, self.fragment_path(tier, filename), True),
-                    meta,
-                )
-                for filename, meta in ordered
-            ]
+            selected = []
+            integrity_warnings: list[str] = []
+            if max_files != 0:
+                for filename, meta in ordered:
+                    entry, warning = self._entry_or_warning(
+                        MemoryLocation(
+                            tier,
+                            filename,
+                            self.fragment_path(tier, filename),
+                            True,
+                        ),
+                        meta,
+                    )
+                    if warning is not None:
+                        integrity_warnings.append(warning)
+                        continue
+                    if entry is not None:
+                        selected.append(entry)
+                    if max_files is not None and len(selected) >= max_files:
+                        break
             original_items = len(index)
             all_paths = [self.fragment_path(tier, filename) for filename in index]
 
@@ -740,6 +820,7 @@ class MemoryStore:
             injected_items=len(selected),
             truncated=len(selected) < original_items,
             source_files=source_files,
+            integrity_warnings=tuple(integrity_warnings) if tier != "permanent" else (),
         )
 
     def mark_used(self, filenames: list[str], *, now: datetime | None = None) -> list[str]:

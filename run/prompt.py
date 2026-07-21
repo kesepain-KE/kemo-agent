@@ -513,6 +513,7 @@ def build_prompt_bundle(
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
     memory_files: list[str] = []
+    memory_integrity_warnings: list[str] = []
     for (
         tier,
         section_name,
@@ -536,6 +537,7 @@ def build_prompt_bundle(
             max_files=max_files,
             mode=settings.injection_mode[config_name],
         )
+        memory_integrity_warnings.extend(selection.integrity_warnings)
         memory_files.extend(f"{tier}/{filename}" for filename in selection.selected_ids)
         if tier != "permanent":
             memory_ids.extend(selection.selected_ids)
@@ -667,6 +669,7 @@ def build_prompt_bundle(
             replaces_memory=source_policy.kemo_graph_replaces_temporary_memory,
         ),
         "source_selection": registered_sources.selection_diagnostics(),
+        "memory_integrity_warnings": list(dict.fromkeys(memory_integrity_warnings)),
     }
     return PromptBundle(
         text=text,
