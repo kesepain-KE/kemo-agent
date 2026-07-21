@@ -4,55 +4,158 @@
   <img src="kemo-agent.jpg" alt="kemo-agent logo" width="200">
 </p>
 
-事件驱动的多用户智能体框架。
+<p align="center">
+  <strong>面向新一代个人智能基础设施的本地多用户 Agent Runtime。</strong>
+</p>
 
-[![版本](https://img.shields.io/badge/version-0.1.0--dev-blue)](https://github.com/kesepain-KE/kemo-agent)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![许可证](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+<p align="center">
+  以生命周期记忆为核心，统一编排上下文、子代理、工具、环境感知、外部扩展与跨平台交互，<br>
+  使智能体具备长期记忆、持续演化、复杂任务调度与现实世界连接能力。
+</p>
 
-## 目录
+<p align="center">
+  <a href="https://github.com/kesepain-KE/kemo-agent">
+    <img src="https://img.shields.io/badge/version-0.1.0--dev-blue" alt="version">
+  </a>
+  <a href="https://www.python.org/">
+    <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="python">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license">
+  </a>
+</p>
 
-- [背景](#背景)
-- [安装](#安装)
-- [用法](#用法)
-- [架构概览](#架构概览)
-- [相关项目](#相关项目)
-- [主要项目负责人](#主要项目负责人)
-- [参与贡献方式](#参与贡献方式)
-- [开源协议](#开源协议)
+> [!IMPORTANT]
+> kemo-agent 当前处于 `0.1.0-dev` 早期开发阶段。核心运行链路已基本闭环，但部分外部集成与用户扩展能力仍在建设中，暂不建议直接用于关键生产环境。
 
-## 背景
+---
 
-kemo-agent 是一个事件驱动的多用户智能体框架，当前版本 0.1.0-dev。
+## 项目定位
 
-框架围绕一次完整的智能体请求链路设计：从配置加载、Prompt 编排、上下文选取、Provider 调用、工具循环到历史提交与记忆更新。各模块独立演进，通过 17 段固定顺序的 PromptBundle 管线组装。
+kemo-agent 不是聊天前端，也不是对单一模型 API 的简单封装，而是一套面向长期运行的本地智能体基础设施。
 
-支持四种输入源：Web（SSE 流式）、CLI（交互式命令行）、外部消息路由（OneBot/Telegram/文件夹插件）、定时任务（Cron）。
+它围绕完整的 Agent 请求生命周期构建：
 
-### 主要模块
+```text
+配置加载
+→ Prompt 编排
+→ 上下文选取
+→ Provider 调用
+→ 工具循环
+→ 历史提交
+→ 记忆更新
+```
 
-- **对话引擎** — 事件驱动模型↔工具循环，会话锁串行隔离，工具签名去重，运行中引导注入，成功才提交历史，失败/取消不污染数据
-- **Prompt 编排** — 17 段固定顺序 PromptBundle，每段独立字符上限，顺序偏离即抛异常
-- **记忆系统（v2）** — 四档文件型存储：seven_days → one_month → half_year → permanent。独立 `.md` 正文 + `data.json` 轻量索引，引用/修改触发加权，到期自动晋升或删除，无每日衰减，有 v1→v2 迁移工具
-- **知识索引** — 三层双层架构（用户级 > 共享级 > 全局级），索引全量化 + 确定性注入，支持 kemo-graph 外部知识图谱替换（六子层开关，当前占位）
-- **工具系统** — 12 个内置插件，`SKILL.md` 的 `## Tool` JSON 块为唯一工具声明来源，`discover_plugin_manifests()` 自动发现
-- **上下文管理** — 双层历史（归档层完整无界 + temp 工作区有界裁剪），整轮不可拆分，Token + 轮次双预算，多轮摘要循环至预算达标
-- **子代理** — 5 个内置子代理，精简清单模式（`agent.json` 四字段 + `trigger.md`），用户可通过热插拔数据包扩展。独立授权、超时、取消信号
-- **配置系统** — `config/global_config.json` + `users/<user>/user_config.json` 深合并，`.env` 仅做密钥兜底。资源准入策略（SourcePolicy）白名单控制
-- **后台维护** — 独立于 Cron 的 MaintenanceScheduler，定期执行重要记忆审阅、每日记忆到期审核、活跃会话上下文压缩
-- **资源分层** — 用户级 > 共享级 > 全局级，覆盖知识库、技能、拓展与感知。感知/拓展已标准化为 `sense.json` / `expand.json` JSON 元数据驱动
-- **Web 界面** — FastAPI + React/TypeScript/Vite，13 个页面：流式聊天、任务计划、Cron 管理、知识库编辑、四层记忆管理、子代理管理、技能分类管理、感知/拓展 CRUD、文件空间、消息模块状态、运行时状态、用户配置
-- **消息路由** — 平台无关路由核心；传统 Transport + 文件夹插件（`message/out/<platform>/`）双路径，Markdown 文件队列、附件分流、多键幂等去重、会话隔离
-- **定时调度** — 四层架构（CronStore → schedule → executor → CronScheduler 守护线程），支持 daily/once/recurring，原子领取 + 持久化结果
-- **Provider 双模式** — `chat`（OpenAI 兼容 `/v1/chat/completions`）和 `kemo`（原生 Kemo 网关），统一 `KemoRequest`/`KemoResponse` 协议层，两种模式不互相回退
-- **统一事件协议** — `events.py` 定义 7 种 RunEvent（text_delta / reasoning_delta / tool_call_start / tool_call_result / usage / error / done），引擎与传输层共用
+同一个智能体可以同时通过 Web、CLI、外部消息平台与 Cron 定时任务接收请求。不同入口的会话上下文相互隔离，但共享同一套用户配置、记忆体系、知识资源与能力准入策略。
 
-## 安装
+kemo-agent 当前支持四类运行入口：
+
+- **Web**：基于 SSE 的流式交互与完整管理界面
+- **CLI**：本地交互式命令行
+- **Message Router**：面向 OneBot、Telegram 与文件夹消息插件的统一路由
+- **Cron**：持久化定时任务与后台自动执行
+
+---
+
+## 核心特性
+
+### 生命周期记忆
+
+kemo-agent 采用四档文件型记忆体系：
+
+```text
+seven_days → one_month → half_year → permanent
+```
+
+每条记忆以独立 Markdown 文件保存，临时层使用轻量 JSON 索引记录权重与到期时间。
+
+记忆不会按固定周期机械衰减。只有在后续对话中被引用或正文被修改时才会加权，同一自然日最多增加一次。达到晋升阈值后进入更长期档位；到期仍未达到阈值的内容会被删除。
+
+这种机制使长期记忆成为经过实际使用与时间筛选后留下的信息，而不是无限累积的对话垃圾。
+
+### 结构化 Prompt 编排
+
+系统提示词通过固定顺序的 17 段 `PromptBundle` 管线构建，而不是无约束地拼接字符串。
+
+每一段均支持：
+
+- 独立启用与禁用
+- 独立字符预算
+- 独立来源诊断
+- 截断状态记录
+- 缺失占位
+- 顺序一致性校验
+
+任何段落顺序偏离都会直接抛出异常，避免 Prompt 结构在长期迭代中静默漂移。
+
+### 多入口，同一运行时
+
+Web、CLI、消息路由与 Cron 共用同一套运行核心和事件协议。
+
+消息来源按照 `source + user + session_id` 进行会话隔离，避免不同入口的上下文相互污染；记忆、知识、配置与资源准入策略则在用户范围内共享。
+
+### 主智能体统一决策
+
+框架内置上下文压缩、记忆审阅、自我改进、任务规划和定时任务解析等子代理，但子代理不具备无约束的外部执行权限。
+
+主智能体负责最终决策、工具调用与任务边界控制；子代理作为受控的能力扩展参与运行。
+
+### 本地优先与数据可迁移
+
+对话历史、记忆、知识库、配置和用户文件均以开放格式保存在本地文件系统中：
+
+- Markdown：记忆、技能与注册信息
+- JSON：配置、索引与模块元数据
+- JSONL：对话历史
+
+数据可以直接查看、备份、迁移和版本管理，不依赖封闭数据库或远程托管平台。
+
+### 统一事件协议
+
+框架定义 7 种标准 `RunEvent`：
+
+```text
+text_delta
+reasoning_delta
+tool_call_start
+tool_call_result
+usage
+error
+done
+```
+
+对话引擎、CLI、Web SSE、消息路由和 Cron 执行共用同一套事件契约，从而避免不同传输层重复实现运行逻辑。
+
+---
+
+## 功能概览
+
+| 子系统 | 能力 |
+|---|---|
+| 对话引擎 | 模型与工具循环、会话锁、工具签名去重、运行中引导注入、失败回滚 |
+| Prompt 编排 | 17 段固定管线、独立预算、来源诊断、缺失占位与顺序校验 |
+| 记忆系统 | 四档生命周期、引用加权、到期晋升或删除、v1→v2 迁移 |
+| 上下文管理 | 完整归档层、有界 temp 工作区、Token/轮次双预算、多轮摘要 |
+| Provider | OpenAI Chat Completions 兼容模式与原生 Kemo 网关模式 |
+| 工具系统 | 12 个 `SKILL.md` 驱动插件，自动发现与统一执行 |
+| 子代理 | 5 个内置子代理，支持用户热插拔扩展 |
+| 知识系统 | 用户级、共享级、全局级三层知识索引 |
+| 感知与拓展 | JSON 元数据驱动，支持外部数据采集与能力扩展 |
+| 任务系统 | 结构化任务计划、审批、暂停、恢复与取消 |
+| Cron | daily / once / recurring，原子领取与持久化结果 |
+| 消息路由 | Transport 与文件夹插件双路径、身份映射、幂等去重 |
+| Web 管理端 | React + TypeScript + Vite，13 个管理页面 |
+| 后台维护 | 记忆审阅、到期审核、活跃会话上下文压缩 |
+
+---
+
+## 快速开始
 
 ### 环境要求
 
 - Python 3.11+
 - pip
+- Git
 
 ### 获取源码
 
@@ -72,11 +175,11 @@ pip install -r requirements.txt
 | 包 | 用途 |
 |---|---|
 | `fastapi` | Web 后端框架 |
-| `pydantic` | 数据校验 |
-| `uvicorn` | ASGI 服务器 |
-| `tavily-python` | 网络搜索 |
+| `pydantic` | 数据模型与参数校验 |
+| `uvicorn` | ASGI 服务运行器 |
+| `tavily-python` | 网络搜索能力 |
 
-### 配置
+### 初始化配置
 
 ```bash
 cp .env.example .env
@@ -85,255 +188,521 @@ cp .env.example .env
 关键环境变量：
 
 | 变量 | 说明 | 默认值 |
-|------|------|--------|
+|---|---|---|
 | `KEMO_BASE_URL` | Kemo 网关地址 | — |
 | `KEMO_API_KEY` | Kemo 网关密钥 | — |
-| `KEMO_MODEL` | Kemo 兜底模型名 | — |
+| `KEMO_MODEL` | Kemo 模式兜底模型 | — |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
-| `OPENAI_API_KEY` | OpenAI API 密钥 | — |
-| `OPENAI_MODEL` | OpenAI 兜底模型名 | — |
+| `OPENAI_API_KEY` | OpenAI 兼容 API 密钥 | — |
+| `OPENAI_MODEL` | Chat 模式兜底模型 | — |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Provider HTTP/HTTPS 代理 | 直连 |
-| `TAVILY_API_KEY` | `web_search` 插件密钥；为空时工具不可用 | — |
+| `TAVILY_API_KEY` | `web_search` 插件密钥 | — |
 | `WEB_HOST` | Web 监听地址 | `127.0.0.1` |
 | `WEB_PORT` | Web 监听端口 | `1357` |
-| `WEB_ACCESS_TOKEN` | Web URL `?token=` 访问令牌（可选） | — |
-| `WEB_USERNAME` / `WEB_PASSWORD` | Web 页面使用者的账号密码 | — |
-| `WEB_SESSION_SECRET` | Cookie 签名密钥；为空时自动生成 | 随机值 |
+| `WEB_ACCESS_TOKEN` | URL `?token=` 访问令牌 | — |
+| `WEB_USERNAME` / `WEB_PASSWORD` | Web 登录账号与密码 | — |
+| `WEB_SESSION_SECRET` | Cookie 签名密钥 | 自动生成 |
 | `WEB_SESSION_COOKIE_NAME` | Session Cookie 名称 | `kemo_agent_session` |
 
-Provider 只提供两种正式模式：`provider.type=chat` 连接最广泛的
-`/v1/chat/completions`，保证文本、工具循环和原生图片输入；`provider.type=kemo`
-连接完整 Kemo Provider，提供 Asset、音视频、媒体输出和更完整的生命周期能力。
-两种模式不会在请求失败后互相回退。
+---
 
-## 用法
+## Provider 模式
 
-### Web 服务
+kemo-agent 提供两种正式 Provider 模式，底层统一映射为 `KemoRequest` / `KemoResponse` 协议模型。
 
-```bash
-python start_web.py                  # 默认启动
-python start_web.py --port=8080      # 自定义端口
-python start_web.py --host=0.0.0.0   # 局域网访问
-python start_web.py --no-host        # 仅 Web API
+### `chat`
+
+连接标准 OpenAI Chat Completions 兼容接口：
+
+```text
+/v1/chat/completions
 ```
 
-启动后在浏览器打开 `http://127.0.0.1:1357`，前端提供聊天、任务、知识、记忆、子代理、技能、感知、拓展、文件、消息等管理页面。
+适用于文本生成、工具循环和原生图片输入等通用场景。
 
-### 命令行
+### `kemo`
+
+连接原生 Kemo 网关协议，提供：
+
+- Asset 生命周期管理
+- 多模态输入与输出
+- 音频、视频与媒体能力
+- 流式恢复
+- 更完整的使用量与资源信息
+
+两种模式保持明确边界，请求失败后不会自动互相回退。
+
+---
+
+## 使用方式
+
+### 启动 Web 服务
+
+```bash
+python start_web.py
+```
+
+常用参数：
+
+```bash
+python start_web.py --port=8080
+python start_web.py --host=0.0.0.0
+python start_web.py --no-host
+```
+
+默认访问地址：
+
+```text
+http://127.0.0.1:1357
+```
+
+Web 前端提供聊天、任务计划、Cron、知识库、记忆、子代理、技能、感知、拓展、文件、消息模块、运行时状态和用户配置等管理页面。
+
+### 启动 CLI
 
 ```bash
 python cli.py
 ```
 
-交互命令（24 个）：
+CLI 当前提供 24 个交互命令。
 
-- 会话：`/new` `/sessions` `/use` `/clear` `/history` `/status` `/compress`
-- 记忆：`/memory` `/remember` `/forget`
-- 任务计划：`/plans` `/plan` `/plan-show` `/plan-approve` `/plan-pause` `/plan-resume` `/plan-cancel`
-- 定时任务：`/crons` `/cron` `/cron-show` `/cron-pause` `/cron-resume` `/cron-cancel` `/cron-run` `/cron-start` `/cron-stop`
-- 退出：`/exit`
+#### 会话
 
-### 更新
+```text
+/new
+/sessions
+/use
+/clear
+/history
+/status
+/compress
+```
+
+#### 记忆
+
+```text
+/memory
+/remember
+/forget
+```
+
+#### 任务计划
+
+```text
+/plans
+/plan
+/plan-show
+/plan-approve
+/plan-pause
+/plan-resume
+/plan-cancel
+```
+
+#### 定时任务
+
+```text
+/crons
+/cron
+/cron-show
+/cron-pause
+/cron-resume
+/cron-cancel
+/cron-run
+/cron-start
+/cron-stop
+```
+
+#### 退出
+
+```text
+/exit
+```
+
+### 更新项目
 
 ```bash
 python update.py
 ```
 
+---
+
 ## 架构概览
 
-```
+```text
 kemo-agent/
-├── run/                    # 运行时核心
+├── run/                    # Agent Runtime 核心
 │   ├── engine.py           # 事件驱动对话引擎
 │   ├── prompt.py           # 17 段 PromptBundle 编排
-│   ├── context.py          # 上下文选取（双层历史 + 双预算）
-│   ├── context_summary.py  # 摘要缓存
-│   ├── history.py          # 完整归档 + 有界 temp 工作区双层历史
+│   ├── context.py          # 双层历史与双预算上下文选取
+│   ├── context_summary.py  # 摘要生成与缓存
+│   ├── history.py          # 完整归档 + 有界 temp 工作区
 │   ├── memory.py           # v2 四档文件型记忆引擎
 │   ├── memory_pipeline.py  # 异步记忆提取管线
-│   ├── memory_migrate.py   # v1→v2 记忆迁移工具
-│   ├── tools.py            # 工具发现、执行、去重
-│   ├── prompt_sources.py   # PromptSourceRegistry（感知/拓展/技能选择器 + SKILL.md 解析）
-│   ├── knowledge.py        # 知识检索（索引全量化）
-│   ├── kemo_graph.py       # 外部知识图谱替换边界（六子层，当前占位）
+│   ├── memory_migrate.py   # v1→v2 迁移工具
+│   ├── tools.py            # 工具发现、执行与去重
+│   ├── prompt_sources.py   # Prompt 资源注册与选择
+│   ├── knowledge.py        # 知识检索与索引注入
+│   ├── kemo_graph.py       # 外部知识图谱边界
 │   ├── source_policy.py    # 主智能体资源准入策略
-│   ├── maintenance.py      # 后台维护调度器（记忆审阅 + 上下文压缩 + 记忆生命周期）
-│   ├── agents.py           # 子代理清单加载入口
+│   ├── maintenance.py      # 后台维护调度器
+│   ├── agents.py           # 子代理清单加载
 │   ├── agent_runner.py     # 子代理执行器
 │   ├── agent_queue.py      # 子代理调度队列
 │   ├── agent_service.py    # 子代理注册与服务
-│   ├── task_plan_store.py  # 任务计划持久存储
+│   ├── task_plan_store.py  # 任务计划持久化
 │   ├── task_plan_service.py
 │   ├── task_plan_executor.py
 │   ├── cron_store.py       # 定时任务存储
-│   ├── runtime_host.py     # 后台宿主（Cron + Router + Transport 统一托管）
-│   ├── config.py           # 配置加载（双 JSON 深合并 + .env 注入）
-│   └── users.py            # 用户列表管理
-├── provider/               # LLM 适配层
-│   ├── factory.py          # create_provider() 路由
-│   ├── kemo_gateway.py     # 原生 Kemo 网关传输
-│   ├── adapters/           # chat_bridge（标准兼容）/ gateway / compat（协议转换）/ base（协议） 
-│   └── protocol/           # KemoRequest / KemoResponse / ContentBlock / ProviderStreamEvent
-├── web/                    # Web 模块
-│   ├── app.py              # FastAPI 后端（v1 API 契约）
-│   ├── service.py          # WebRunService 适配层
+│   ├── runtime_host.py     # Cron、Router 与 Transport 宿主
+│   ├── config.py           # 配置深合并与环境变量注入
+│   └── users.py            # 用户管理
+├── provider/               # LLM Provider 适配层
+│   ├── factory.py
+│   ├── kemo_gateway.py
+│   ├── adapters/
+│   └── protocol/
+├── web/                    # Web 管理端
+│   ├── app.py              # FastAPI API
+│   ├── service.py          # WebRunService
 │   ├── auth.py             # Session 认证
-│   └── frontend/           # React/TypeScript/Vite 前端（13 页面）
-├── plugins/                # 工具插件（12 个，全部 SKILL.md 驱动）
-│   ├── file/               # 文件读写/编辑/搜索/列目录
-│   ├── get_current_time/   # UTC/本地时间
-│   ├── history_search/     # 历史对话搜索
-│   ├── memory_manage/      # 记忆 CRUD（搜索/增删改）
-│   ├── network/            # HTTP 请求与网页读取
-│   ├── shell/              # 系统命令执行
-│   ├── subagent_dispatch/  # 子代理发现/调度/创建
-│   ├── task_time/          # Cron 定时任务 CRUD
-│   ├── web_search/         # Tavily 网络搜索
-│   ├── skill_creater/      # 用户技能热创建
-│   ├── expand_creater/     # 拓展模块热创建
-│   └── sense_creater/      # 感知模块热创建
-├── agents/                 # 内置子代理（5 个）
-│   ├── _runtime/           # 子代理运行时基础（schema / resources / user_resources）
-│   ├── context_manage/     # 上下文压缩与记忆提取编排
-│   ├── memory_temporary_important/  # 巡检临时记忆并维护热画像
-│   ├── self_improve/       # 提取微记忆碎片 / 增量权重 / 层间晋升 / 手动审阅
-│   ├── task_plan/          # 结构化任务计划草案生成
-│   └── time_plan/          # 自然语言→定时任务结构化调度参数
+│   └── frontend/           # React + TypeScript + Vite
+├── plugins/                # 12 个 SKILL.md 驱动插件
+├── agents/                 # 5 个内置子代理
 ├── message/                # 外部消息路由
-│   ├── router.py           # MessageRouter（RunEvent 聚合 + 出站发送）
-│   ├── identity.py         # IdentityResolver 身份映射
-│   ├── transport.py        # Transport 协议 / TransportRegistry
-│   ├── plugin.py           # FileMessageTransport 文件夹插件
-│   ├── state.py            # ProcessedMessageStore 幂等去重
-│   └── schema.py           # MessageEnvelope / OutboundMessage 契约
-├── cron/                   # 定时调度
-│   ├── scheduler.py        # CronScheduler 守护线程
-│   ├── executor.py         # 原子领取 + 执行 + 持久化
-│   ├── schedule.py         # 确定性 next_run_at 计算
-│   ├── service.py          # time_plan 子代理驱动的生成/编辑
-│   └── review_due.py       # 重要临时记忆定期审阅循环
-├── config/                 # 全局配置
-│   ├── global_config.json  # 全局默认值（tools/history/prompt/kemo_graph/memory/agents/cron/…）
-│   ├── global_soul.md      # 全局基座人格
-│   └── agents.md           # 智能体运行手册
-├── global_knowledge/       # 全局共享知识库
-├── global_sense/           # 全局感知（sense.json 元数据驱动）
-├── global_expand/          # 全局拓展（expand.json 元数据驱动）
+├── cron/                   # 定时任务调度
+├── config/                 # 全局配置与系统人格
+├── global_knowledge/       # 全局知识库
+├── global_sense/           # 全局感知
+├── global_expand/          # 全局拓展
 ├── shared_knowledge/       # 共享知识库
 ├── shared_skills/          # 共享技能
 ├── shared_expand/          # 共享拓展
-├── users/                  # 多用户数据（配置/人格/历史/记忆/知识库/技能/任务）
-│   └── _template/          # 用户模板
-├── events.py               # 统一事件协议（7 种 RunEvent）
-├── cli.py                  # 命令行入口（24 个交互命令）
+├── users/                  # 用户数据与用户资源
+├── events.py               # 统一事件协议
+├── cli.py                  # CLI 入口
 ├── start_web.py            # Web 启动入口
 ├── update.py               # 更新脚本
 └── version.json            # 版本清单
 ```
 
-### 核心链路
+### 核心运行链路
 
-```
-请求进入（Web/CLI/消息/Cron）
-→ 配置加载 → 会话锁（按 source+user+session_id 串行）
-→ 记忆到期审核（review_due：达标晋升/不达标删除）
-→ PromptBundle 构建（17 段）
-→ 上下文选择（双层历史 + Token/轮次双预算 + 多轮摘要循环）
-→ 模型→工具循环（去重 + 引导注入）
-→ 成功：提交历史 → 加权记忆 → 异步记忆提取
-→ 失败/取消：不写历史，不加权记忆
+```text
+请求进入（Web / CLI / Message / Cron）
+→ 加载全局与用户配置
+→ 获取 source + user + session_id 会话锁
+→ 执行到期记忆审核
+→ 构建 17 段 PromptBundle
+→ 选择上下文并执行预算压缩
+→ 进入模型与工具循环
+→ 成功：提交历史、更新权重、异步提取记忆
+→ 失败或取消：不写入历史，不更新记忆
 ```
 
-### PromptBundle 顺序（17 段）
+该提交策略保证失败请求不会污染长期数据。
+
+---
+
+## PromptBundle 管线
 
 | # | 段 | 来源 |
-|---|-----|------|
-| 1 | user_soul | `users/<name>/user_soul.md` |
-| 2 | global_soul | `config/global_soul.md` |
-| 3 | agents_manual | `config/agents.md` |
-| 4 | global_subagent_registry | 内置子代理注册摘要（`agents/*/trigger.md`） |
-| 5 | user_subagent_registry | 用户自建子代理注册摘要（`users/<name>/agents/*/trigger.md`） |
-| 6 | plugins | `plugins/*/SKILL.md` 描述 |
-| 7 | skills | 共享/用户技能 SKILL.md 描述 |
-| 8 | knowledge_index | 三层知识库索引（user → shared → global） |
-| 9 | kemo_graph | 六子层知识图谱检索（当前占位：已启用但未连接） |
-| 10 | permanent_memory | 全部注入，文件名自然排序 |
-| 11 | important_memory | `memory_temporary_important.md`，受字符上限控制 |
-| 12 | temporary_memory:half_year | 最多 3 条（weight 降序） |
-| 13 | temporary_memory:one_month | 最多 4 条 |
-| 14 | temporary_memory:seven_days | 最多 3 条 |
-| 15 | task_plan | 当前活跃任务计划 |
-| 16 | expand_data | 拓展模块数据采集 + 操控能力（global → shared → user） |
-| 17 | perception | 全局感知数据（`sense.json` 元数据驱动） |
+|---:|---|---|
+| 1 | `user_soul` | `users/<name>/user_soul.md` |
+| 2 | `global_soul` | `config/global_soul.md` |
+| 3 | `agents_manual` | `config/agents.md` |
+| 4 | `global_subagent_registry` | `agents/*/trigger.md` |
+| 5 | `user_subagent_registry` | `users/<name>/agents/*/trigger.md` |
+| 6 | `plugins` | `plugins/*/SKILL.md` |
+| 7 | `skills` | 共享与用户技能描述 |
+| 8 | `knowledge_index` | 用户级、共享级、全局级知识索引 |
+| 9 | `kemo_graph` | 外部知识图谱检索结果 |
+| 10 | `permanent_memory` | 永久记忆 |
+| 11 | `important_memory` | 临时重要记忆 |
+| 12 | `temporary_memory:half_year` | 半年记忆 |
+| 13 | `temporary_memory:one_month` | 一月记忆 |
+| 14 | `temporary_memory:seven_days` | 七天记忆 |
+| 15 | `task_plan` | 当前活跃任务计划 |
+| 16 | `expand_data` | 外部拓展数据与操作能力 |
+| 17 | `perception` | 环境感知数据 |
 
-### 记忆档位（v2 文件型）
+---
+
+## 记忆系统
+
+### 档位与晋升
 
 | 档位 | 有效期 | 晋升阈值 | 下一档 | Prompt 注入上限 |
-|------|--------|----------|--------|----------------|
-| seven_days | 7 天 | 3 | one_month | 最多 3 条 |
-| one_month | 30 天 | 10 | half_year | 最多 4 条 |
-| half_year | 180 天 | 60 | permanent | 最多 3 条 |
-| permanent | 无到期 | — | — | 全部注入 |
+|---|---:|---:|---|---:|
+| `seven_days` | 7 天 | 3 | `one_month` | 3 条 |
+| `one_month` | 30 天 | 10 | `half_year` | 4 条 |
+| `half_year` | 180 天 | 60 | `permanent` | 3 条 |
+| `permanent` | 永久 | — | — | 全量 |
 
-记忆加权规则：仅在被 Prompt 引用或正文被修改后加权，同一自然日最多 +1。无每日衰减，权重无上限。到期达标晋升后新档位权重归零。
+### 加权规则
 
-### 工具插件（12 个）
+- 仅在记忆被 Prompt 引用或正文被修改后加权
+- 同一自然日最多 `+1`
+- 不执行每日衰减
+- 权重不设固定上限
+- 晋升后新档位权重归零
+- 到期未达到阈值则删除
+
+### 文件结构
+
+- 临时记忆：独立 `.md` 正文 + `data.json` 轻量索引
+- 永久记忆：纯 Markdown 文件
+- 临时重要记忆：由后台子代理定期巡检并维护
+- 迁移工具：支持 v1→v2 一键转换
+
+---
+
+## 上下文管理
+
+kemo-agent 将历史划分为两个层级：
+
+### 归档层
+
+- 保存完整对话
+- 不受最大轮次限制
+- 不参与破坏性裁剪
+- 作为审计、回溯和摘要来源
+
+### temp 工作区
+
+- 受轮次和 Token 双预算限制
+- 只保留当前推理所需上下文
+- 裁剪后执行局部重编号
+- 保证完整轮次不被拆分
+
+摘要按 `source_hash` 命中缓存，避免对相同历史重复生成。单次压缩不足以满足预算时，引擎会循环压缩直至达到稳定状态。
+
+---
+
+## 工具系统
+
+工具由插件目录中的 `SKILL.md` 统一声明，插件描述和工具定义不再拆分到独立 JSON 文件。
+
+框架通过 `discover_plugin_manifests()` 自动扫描并装配插件。
 
 | 插件 | 功能 |
-|------|------|
-| `file` | 文件读写、编辑、搜索、列目录、复制、移动、删除 |
-| `get_current_time` | UTC/本地时间（默认北京时间） |
+|---|---|
+| `file` | 文件读写、编辑、搜索、复制、移动与删除 |
+| `get_current_time` | UTC 与本地时间查询 |
 | `history_search` | 用户历史对话搜索 |
-| `memory_manage` | 临时/永久记忆 CRUD，暴力搜索 |
-| `network` | HTTP 请求（GET/POST）与网页正文读取 |
-| `shell` | 系统命令执行（支持会话、环境变量、超时） |
-| `subagent_dispatch` | 子代理发现/同步调用/后台提交/状态查询/取消/四步创建流程 |
-| `task_time` | Cron 定时任务 CRUD（daily/once/recurring） |
-| `web_search` | Tavily 网络搜索（search/extract/crawl/map/research） |
-| `skill_creater` | 用户技能热创建/更新 |
-| `expand_creater` | 拓展模块热创建（list/create/validate） |
-| `sense_creater` | 感知模块热创建（list/create/validate） |
+| `memory_manage` | 临时与永久记忆 CRUD |
+| `network` | HTTP 请求与网页正文读取 |
+| `shell` | 系统命令执行、会话、环境变量与超时控制 |
+| `subagent_dispatch` | 子代理发现、调用、后台提交、查询、取消与创建 |
+| `task_time` | Cron 任务 CRUD |
+| `web_search` | Tavily 搜索、提取、爬取、映射与研究 |
+| `skill_creater` | 用户技能热创建与更新 |
+| `expand_creater` | 拓展模块热创建与校验 |
+| `sense_creater` | 感知模块热创建与校验 |
 
-### 内置子代理（5 个）
+---
 
-| 名称 | 触发方式 | 职责 |
-|------|---------|------|
+## 子代理体系
+
+| 子代理 | 触发方式 | 职责 |
+|---|---|---|
 | `context_manage` | 引擎自动 / 主智能体 | 上下文压缩与记忆提取编排 |
-| `memory_temporary_important` | Cron 定时 / 主智能体 | 巡检临时记忆并维护热画像 |
-| `self_improve` | 压缩/晋升/手动审阅（三模式） | 提取微记忆碎片、增量权重、层间晋升 |
-| `task_plan` | 主智能体工具调用 | 结构化任务计划草案生成 |
-| `time_plan` | 主智能体工具调用 | 自然语言→定时任务结构化调度参数 |
+| `memory_temporary_important` | Cron / 主智能体 | 巡检临时记忆并维护热画像 |
+| `self_improve` | 压缩、晋升、手动审阅 | 提取微记忆碎片、增量权重与层间晋升 |
+| `task_plan` | 主智能体工具调用 | 生成结构化任务计划草案 |
+| `time_plan` | 主智能体工具调用 | 将自然语言转换为定时调度参数 |
 
-### 资源层级
+子代理采用精简清单模式：
+
+```text
+agent.json
+trigger.md
+```
+
+用户可以通过热插拔数据包扩展自己的子代理。每个子代理均受独立授权、超时与取消信号约束。
+
+---
+
+## 资源分层
 
 | 资源 | 用户级 | 共享级 | 全局级 |
-|------|--------|--------|--------|
-| 知识库 (knowledge) | ✅ | ✅ | ✅ |
-| 技能 (skills) | ✅ | ✅ | — |
-| 拓展 (expand) | ✅ | ✅ | ✅ |
-| 感知 (perception) | — | — | ✅ |
+|---|:---:|:---:|:---:|
+| Knowledge | ✅ | ✅ | ✅ |
+| Skills | ✅ | ✅ | — |
+| Expand | ✅ | ✅ | ✅ |
+| Perception | — | — | ✅ |
 
-优先级：用户级 > 共享级 > 全局级。白名单由 `MainAgentSourcePolicy` 统一控制。
+资源解析优先级：
+
+```text
+用户级 > 共享级 > 全局级
+```
+
+实际可用范围由 `MainAgentSourcePolicy` 白名单统一控制。
+
+---
+
+## 消息路由
+
+消息模块提供两种接入路径。
+
+### Transport
+
+用于具备 SDK 或稳定协议的平台，例如：
+
+- OneBot
+- Telegram
+
+### 文件夹插件
+
+用于缺少 SDK 或需要跨进程解耦的平台，通过 Markdown 文件队列交换消息：
+
+```text
+message/out/<platform>/
+```
+
+消息路由同时提供：
+
+- 用户身份映射
+- 会话隔离
+- 附件分流
+- 多键幂等去重
+- 统一 `RunEvent` 聚合
+- 出站消息分发
+
+---
+
+## 定时任务与后台维护
+
+### Cron 调度
+
+Cron 采用四层结构：
+
+```text
+CronStore
+→ schedule
+→ executor
+→ CronScheduler
+```
+
+支持：
+
+- `daily`
+- `once`
+- `recurring`
+- 原子领取
+- 执行状态持久化
+- 暂停、恢复与取消
+- 手动立即运行
+
+### MaintenanceScheduler
+
+后台维护系统独立于 Cron，对智能体运行状态执行周期性维护：
+
+- 临时重要记忆审阅
+- 每日记忆到期审核
+- 活跃会话上下文压缩
+
+---
+
+## Web 管理端
+
+前端采用：
+
+```text
+React + TypeScript + Vite
+```
+
+后端采用：
+
+```text
+FastAPI
+```
+
+当前包含 13 个管理页面：
+
+1. 流式聊天
+2. 任务计划
+3. Cron 管理
+4. 知识库浏览与编辑
+5. 四层记忆管理
+6. 子代理管理
+7. 技能分类管理
+8. 感知模块管理
+9. 拓展模块管理
+10. 文件空间
+11. 消息模块状态
+12. 运行时状态
+13. 用户配置
+
+---
+
+## 当前状态
+
+当前版本：`0.1.0-dev`
+
+### 已完成
+
+- 配置加载与用户配置深合并
+- 17 段 PromptBundle 编排
+- 双层上下文与多轮摘要
+- Provider 双模式
+- 模型与工具循环
+- 历史提交与失败回滚
+- v2 文件型记忆系统
+- 5 个内置子代理
+- 12 个工具插件
+- 感知与拓展 JSON 元数据标准化
+- Web 端 13 页面基础管理闭环
+- 统一 RunEvent 事件协议
+
+### 建设中
+
+- kemo-graph 外部知识图谱实际接入
+- 共享层与用户层的扩展模板完善
+- OneBot 与 Telegram 平台客户端
+- 用户创建模块的完整实现
+- 面向更大规模部署的性能验证
+
+---
 
 ## 相关项目
 
-- [votx-agent](https://github.com/kesepain-KE/votx-agent) — 独立 Agent 框架
-- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api) — Kemo 网关适配器
+- [votx-agent](https://github.com/kesepain-KE/votx-agent)  
+  独立维护的 Agent 框架，与 kemo-agent 不存在继承关系。
 
-## 主要项目负责人
+- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)  
+  Kemo 网关适配器，为 Provider 的 `kemo` 模式提供原生协议支持。
+
+三个项目独立开发，通过 API 与协议进行通信。
+
+---
+
+## 主要维护者
 
 [@kesepain](https://github.com/kesepain-KE)
 
-## 参与贡献方式
+---
 
-项目处于早期开发阶段。欢迎提交 Issue 或 PR。
+## 参与贡献
+
+项目仍处于早期开发阶段，欢迎通过 Issue 和 Pull Request 参与讨论与改进。
+
+```bash
+git checkout -b feature/your-feature
+git commit -m "feat: describe your change"
+git push origin feature/your-feature
+```
+
+推荐流程：
 
 1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/xxx`)
-3. 提交更改 (`git commit -m '...'`)
-4. 推送到分支 (`git push origin feature/xxx`)
-5. 创建 Pull Request
+2. 创建功能分支
+3. 完成代码与文档修改
+4. 执行相关测试
+5. 提交 Pull Request
+
+---
 
 ## 开源协议
 
-[Apache License 2.0](LICENSE)
+本项目基于 [Apache License 2.0](LICENSE) 开源。
