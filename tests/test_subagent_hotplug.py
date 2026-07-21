@@ -288,6 +288,29 @@ class SubAgentHotPlugTests(unittest.TestCase):
             [],
         )
 
+    def test_builtin_agent_callers_match_documented_invocation_paths(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        registry = discover_agents(root)
+        expected = {
+            "context_manage": {"main_agent", "engine"},
+            "self_improve": {"main_agent", "scheduler", "context_manage"},
+            "memory_temporary_important": {"main_agent", "scheduler"},
+            "task_plan": {"main_agent"},
+            "time_plan": {"main_agent"},
+        }
+        for name, callers in expected.items():
+            definition = registry.get(name)
+            self.assertEqual(definition.capabilities.exposure, "tool")
+            self.assertEqual(set(definition.capabilities.allowed_callers), callers)
+
+        public_names = {item.name for item in registry.public_agents("main_agent")}
+        self.assertEqual(public_names, set(expected))
+        self.assertIn("manual_review", registry.get("self_improve").trigger_content)
+        self.assertIn(
+            "subagent_dispatch",
+            registry.get("memory_temporary_important").trigger_content,
+        )
+
     def test_dispatch_create_is_immediately_hot_plugged(self) -> None:
         _, root, _ = self.make_root()
         created = dispatch(

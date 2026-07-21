@@ -113,6 +113,164 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
 
+    def test_agents_expose_runtime_details_and_only_delete_user_layer(self) -> None:
+        _, root = self.make_root()
+        create_user_agent_package(
+            root,
+            "bob",
+            {
+                "name": "builtin_agent",
+                "version": "2.1.0",
+                "description": "global runtime agent",
+                "instruction": "Apply the global agent rules.",
+                "trigger_condition": "上下文达到全局阈值时",
+            },
+        )
+        (root / "agents").mkdir()
+        (root / "users" / "bob" / "agents" / "builtin_agent").replace(
+            root / "agents" / "builtin_agent"
+        )
+        create_user_agent_package(
+            root,
+            "alice",
+            {
+                "name": "custom_agent",
+                "version": "1.4.0",
+                "description": "user runtime agent",
+                "instruction": "Apply the user agent rules.",
+                "trigger_condition": "用户明确指定 custom_agent 时",
+            },
+        )
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(app, "GET", "/api/users/alice/agents")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["summary"], {"total": 2, "enabled": 2, "global": 1, "user": 1})
+        user_agent = next(item for item in payload["agents"] if item["name"] == "custom_agent")
+        self.assertEqual(user_agent["version"], "1.4.0")
+        self.assertEqual(user_agent["trigger"], "用户明确指定 custom_agent 时")
+        self.assertIn("Apply the user agent rules.", user_agent["rules"])
+        self.assertEqual(user_agent["executor"], "builtin:llm")
+
+        rejected = self.request(app, "DELETE", "/api/users/alice/agents/builtin_agent")
+        self.assertEqual(rejected.status_code, 404, rejected.text)
+        self.assertTrue((root / "agents" / "builtin_agent").is_dir())
+
+        deleted = self.request(app, "DELETE", "/api/users/alice/agents/custom_agent")
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["deleted"])
+        self.assertFalse((root / "users" / "alice" / "agents" / "custom_agent").exists())
+        self.assertEqual(
+            self.request(app, "DELETE", "/api/users/alice/agents/custom_agent").status_code,
+            404,
+        )
+
+    def test_skill_registry_management_respects_category_permissions_and_whitelists(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1, "tools": {"enabled": True, "timeout": 30}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "plugins": {"whitelist": []}, "skills": {"shared_whitelist": []}}),
+            "utf-8",
+        )
+        plugin = root / "plugins" / "clock"
+        plugin.mkdir(parents=True)
+        manifest = {
+            "name": "clock",
+            "description": "读取当前时间",
+            "input_schema": {"type": "object", "properties": {}},
+            "version": "1.0.0",
+            "enabled": True,
+            "entrypoint": "tool.py:run",
+        }
+        (plugin / "SKILL.md").write_text(
+            "# clock\n\n读取当前时间。\n\n## Tool\n\n```json\n"
+            + json.dumps(manifest, ensure_ascii=False)
+            + "\n```\n",
+            "utf-8",
+        )
+        (plugin / "tool.py").write_text("def run(*, context):\n    return {'ok': True}\n", "utf-8")
+
+        shared_root = root / "shared_skills"
+        shared_root.mkdir()
+        (shared_root / "register.py").write_text(
+            "from pathlib import Path\n\ndef register(registry):\n    registry.add_skills('shared', Path(__file__).resolve().parent)\n",
+            "utf-8",
+        )
+        shared = shared_root / "observer"
+        shared.mkdir()
+        (shared / "SKILL.md").write_text("# observer\n\n共享观察技能。\n", "utf-8")
+
+        agent_skill = root / "users" / "alice" / "user_skills" / "agent_create" / "generated"
+        agent_skill.mkdir(parents=True)
+        (agent_skill / "SKILL.md").write_text("# generated\n\n智能体生成技能。\n", "utf-8")
+        user_skill = root / "users" / "alice" / "user_skills" / "user_create" / "manual"
+        user_skill.mkdir(parents=True)
+        (user_skill / "SKILL.md").write_text("# manual\n\n用户自建技能。\n", "utf-8")
+
+        app = create_app(service=WebRunService(root))
+        listed = self.request(app, "GET", "/api/users/alice/skills")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        payload = listed.json()
+        self.assertEqual(payload["catalog_summary"]["total"], 4)
+        self.assertEqual(
+            {item["category"] for item in payload["items"]},
+            {"builtin", "shared", "agent_generated", "user_created"},
+        )
+
+        preview = self.request(
+            app,
+            "GET",
+            "/api/users/alice/skills/builtin/document?name=clock",
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertIn("读取当前时间", preview.json()["content"])
+        archive = self.request(
+            app,
+            "GET",
+            "/api/users/alice/skills/builtin/download?name=clock",
+        )
+        self.assertEqual(archive.status_code, 200, archive.text)
+        self.assertTrue(archive.content.startswith(b"PK"))
+
+        disabled = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/skills/builtin/enabled?name=clock",
+            json={"enabled": False},
+        )
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        stored = json.loads((root / "users" / "alice" / "user_config.json").read_text("utf-8"))
+        self.assertEqual(stored["plugins"]["whitelist"], ["__kemo_none__"])
+        refreshed = self.request(app, "GET", "/api/users/alice/skills").json()
+        self.assertFalse(next(item for item in refreshed["items"] if item["id"] == "builtin:clock")["enabled"])
+
+        updated = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/skills/user_created/document?name=user_create%2Fmanual",
+            json={"content": "# manual\n\n更新后的技能正文。\n"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertIn("更新后的技能正文", (user_skill / "SKILL.md").read_text("utf-8"))
+        rejected = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/skills/builtin?name=clock",
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        deleted = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/skills/user_created?name=user_create%2Fmanual",
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertFalse(user_skill.exists())
+
     def test_auth_config_rejects_partial_password_and_generates_session_secret(self) -> None:
         with self.assertRaisesRegex(WebAuthConfigError, "必须同时配置"):
             WebAuthConfig(username="alice")
@@ -919,6 +1077,11 @@ class WebBackendTests(unittest.TestCase):
             module = root / "global_sense" / module_name
             module.mkdir()
             (module / "sense.md").write_text(module_name, "utf-8")
+            (module / "data_update.py").write_text(
+                "from pathlib import Path\n"
+                f"Path('sense.md').write_text('{module_name} refreshed', encoding='utf-8')\n",
+                "utf-8",
+            )
             (module / "sense.json").write_text(
                 json.dumps(
                     {
@@ -954,6 +1117,53 @@ class WebBackendTests(unittest.TestCase):
             skill.mkdir()
             (skill / "SKILL.md").write_text(
                 f"# {skill_name}\n{skill_name} description", "utf-8"
+            )
+        expand_roots = {
+            "global": root / "global_expand",
+            "shared": root / "shared_expand",
+            "user": root / "users" / "alice" / "expand",
+        }
+        for scope, expand_root in expand_roots.items():
+            expand_root.mkdir(parents=True)
+            if scope != "user":
+                (expand_root / "register.py").write_text(
+                    "from pathlib import Path\n\n"
+                    "def register(registry):\n"
+                    f"    registry.add_expand_root('{scope}', Path(__file__).resolve().parent)\n",
+                    "utf-8",
+                )
+            module_name = {"global": "lights", "shared": "bridge", "user": "personal"}[scope]
+            module = expand_root / module_name
+            module.mkdir()
+            (module / "input_data.md").write_text(f"# {scope} data\nready", "utf-8")
+            (module / "expand_control.md").write_text(
+                "## 注入层\n\n可执行安全操作。\n\n"
+                "## 操作层\n\n### 触发场景\n用户明确请求时。\n\n"
+                "### 使用操作\n运行 start_expand.py。",
+                "utf-8",
+            )
+            (module / "data_update.py").write_text(
+                "from pathlib import Path\n"
+                f"Path('input_data.md').write_text('# {scope} data\\nrefreshed', encoding='utf-8')\n",
+                "utf-8",
+            )
+            (module / "start_expand.py").write_text("print('ok')\n", "utf-8")
+            (module / "expand.json").write_text(
+                json.dumps(
+                    {
+                        "name": f"{scope} display",
+                        "explain": f"{scope} extension",
+                        "open_input": True,
+                        "input_data": "input_data.md",
+                        "input_health": "正常",
+                        "start_update": "data_update.py",
+                        "open_control": True,
+                        "start_expand": "start_expand.py",
+                        "start_control": "expand_control.md",
+                    },
+                    ensure_ascii=False,
+                ),
+                "utf-8",
             )
         plugin = root / "plugins" / "clock"
         plugin.mkdir(parents=True)
@@ -1108,6 +1318,80 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(skills.json()["prompt_summary"]["registered"], 2)
         self.assertEqual(skills.json()["prompt_summary"]["active"], 1)
         self.assertNotIn("project", skills.text)
+
+        expands = self.request(app, "GET", "/api/users/alice/expand")
+        self.assertEqual(expands.status_code, 200)
+        self.assertEqual(expands.json()["summary"]["total"], 3)
+        self.assertEqual(expands.json()["status_summary"]["enabled"], 3)
+        self.assertEqual(expands.json()["status_summary"]["healthy"], 3)
+        self.assertEqual(expands.json()["injection"]["injected_items"], 3)
+        self.assertGreater(expands.json()["injection"]["estimated_tokens"], 0)
+        expand_items = {
+            item["id"]: item
+            for group in expands.json()["expands"]
+            for item in group["items"]
+        }
+        lights = expand_items["global:lights"]
+        self.assertEqual(lights["display_name"], "global display")
+        self.assertEqual(lights["collected_markdown"], "# global data\nready")
+        self.assertEqual(lights["control_injection_markdown"], "可执行安全操作。")
+        self.assertIn("用户明确请求时", lights["control_operation_markdown"])
+        self.assertIn("[global:lights]", lights["injected_markdown"])
+        self.assertTrue(lights["whitelisted"])
+        self.assertTrue(lights["open_control"])
+
+        refreshed_expand = self.request(
+            app, "POST", "/api/users/alice/expand/global/lights/refresh"
+        )
+        self.assertEqual(refreshed_expand.status_code, 200)
+        self.assertTrue(refreshed_expand.json()["updated"])
+        self.assertIn("refreshed", refreshed_expand.json()["item"]["collected_markdown"])
+
+        disabled_expand = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/expand/global/lights/enabled",
+            json={"enabled": False},
+        )
+        self.assertEqual(disabled_expand.status_code, 200)
+        self.assertEqual(disabled_expand.json()["whitelist"], ["__kemo_none__"])
+        self.assertFalse(
+            next(
+                item
+                for group in self.request(app, "GET", "/api/users/alice/expand").json()["expands"]
+                if group["scope"] == "global"
+                for item in group["items"]
+                if item["name"] == "lights"
+            )["whitelisted"]
+        )
+        enabled_expand = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/expand/global/lights/enabled",
+            json={"enabled": True},
+        )
+        self.assertEqual(enabled_expand.status_code, 200)
+        self.assertEqual(enabled_expand.json()["whitelist"], [])
+        self.assertEqual(
+            self.request(
+                app,
+                "PATCH",
+                "/api/users/alice/expand/user/personal/enabled",
+                json={"enabled": False},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.request(app, "DELETE", "/api/users/alice/expand/global/lights").status_code,
+            400,
+        )
+        deleted_expand = self.request(
+            app, "DELETE", "/api/users/alice/expand/user/personal"
+        )
+        self.assertEqual(deleted_expand.status_code, 200)
+        self.assertTrue(deleted_expand.json()["deleted"])
+        self.assertFalse((root / "users" / "alice" / "expand" / "personal").exists())
+
         sense = self.request(app, "GET", "/api/users/alice/sense")
         self.assertTrue(sense.json()["core_available"])
         self.assertEqual(
@@ -1139,6 +1423,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_source["recent_update"], "2026-07-19 12:00:00")
         self.assertEqual(runtime_source["health"], "正常")
         self.assertEqual(runtime_source["value_preview"], "runtime")
+        self.assertEqual(runtime_source["collected_markdown"], "runtime")
+        self.assertEqual(runtime_source["injected_markdown"], "[runtime]\nruntime")
+        self.assertTrue(runtime_source["whitelisted"])
         self.assertEqual(runtime_source["update_interval"], "")
         self.assertTrue(runtime_source["valid"])
         broken_source = next(item for item in sense.json()["sources"] if item["id"] == "broken")
@@ -1148,6 +1435,56 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("sense.json", broken_source["error"])
         self.assertNotIn("must not be injected", sense.text)
         self.assertNotIn('"project"', sense.text)
+        self.assertEqual(sense.json()["injection"]["content"], "[runtime]\nruntime")
+
+        refreshed = self.request(app, "POST", "/api/users/alice/sense/runtime/refresh")
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertTrue(refreshed.json()["updated"])
+        self.assertEqual(refreshed.json()["source"]["collected_markdown"], "runtime refreshed")
+
+        disabled_runtime = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/sense/runtime/enabled",
+            json={"enabled": False},
+        )
+        self.assertEqual(disabled_runtime.status_code, 200)
+        self.assertEqual(disabled_runtime.json()["whitelist"], ["__kemo_none__"])
+        self.assertEqual(
+            self.request(app, "GET", "/api/users/alice/sense").json()["summary"]["enabled"],
+            0,
+        )
+        reenabled_runtime = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/sense/runtime/enabled",
+            json={"enabled": True},
+        )
+        self.assertEqual(reenabled_runtime.status_code, 200)
+
+        enabled_network = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/sense/network/enabled",
+            json={"enabled": True},
+        )
+        self.assertEqual(enabled_network.status_code, 200)
+        self.assertTrue(enabled_network.json()["enabled"])
+        self.assertEqual(
+            self.request(app, "GET", "/api/users/alice/sense").json()["summary"]["enabled"],
+            2,
+        )
+        disabled_network = self.request(
+            app,
+            "PATCH",
+            "/api/users/alice/sense/network/enabled",
+            json={"enabled": False},
+        )
+        self.assertEqual(disabled_network.status_code, 200)
+        deleted_network = self.request(app, "DELETE", "/api/users/alice/sense/network")
+        self.assertEqual(deleted_network.status_code, 200)
+        self.assertTrue(deleted_network.json()["deleted"])
+        self.assertFalse((root / "global_sense" / "network").exists())
 
         prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
         self.assertEqual(len(prompt.json()["sections"]), len(PROMPT_SECTION_ORDER))

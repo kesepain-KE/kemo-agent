@@ -265,6 +265,31 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 {"trigger": "memory_promotion", "promotions": []},
             )
 
+    def test_manual_review_persists_candidates_for_main_agent_call(self) -> None:
+        class Context:
+            runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)
+
+            @staticmethod
+            def run_model(input_data):
+                return _result(candidates=[{
+                    "action": "upsert",
+                    "filename": "manual-review",
+                    "content": "用户偏好简洁的技术说明。",
+                    "explicit": False,
+                }])
+
+        result = execute_self_improve(
+            Context(),
+            {"trigger": "manual_review", "request": "整理用户表达偏好"},
+        )
+        location = MemoryStore(self.root, "alice", CONFIG).locate("manual-review")
+        self.assertIsNotNone(location)
+        self.assertEqual(location.tier, "seven_days")
+        self.assertEqual(result.metadata["memory_update"]["created"], ["manual-review.md"])
+
+        with self.assertRaisesRegex(AgentOutputError, "request"):
+            execute_self_improve(Context(), {"trigger": "manual_review"})
+
 
 class SkillCreaterTests(unittest.TestCase):
     def setUp(self) -> None:

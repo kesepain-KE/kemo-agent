@@ -8,11 +8,17 @@ from plugins.memory_manage.memory_ops import (
     add_fragment,
     delete_fragment,
     edit_fragment,
+    get_fragment,
+    list_entries,
     search_by_content,
     search_by_title,
 )
 from plugins.memory_manage.tool import run as run_memory_manage
 from run.memory import MemoryStore
+from run.tools import discover_tools, validate_arguments
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class MemoryManageTests(unittest.TestCase):
@@ -107,11 +113,16 @@ class MemoryManageTests(unittest.TestCase):
             "ignored",
             "# Hot profile\n\n- Alice",
         )
-        important = search_by_content(
-            self.root, "alice", self.config, "important", ""
-        )["matches"]
-        self.assertEqual(len(important), 1)
-        self.assertIn("Hot profile", important[0]["content"])
+        important = get_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "important",
+            "memory_temporary_important.md",
+        )
+        self.assertIn("Hot profile", important["content"])
+        self.assertIsNone(important["weight"])
+        self.assertIsNone(important["expires_at"])
         edit_fragment(
             self.root,
             "alice",
@@ -166,11 +177,20 @@ class MemoryManageTests(unittest.TestCase):
             run_memory_manage(
                 "search_by_title",
                 "seven_days",
-                query="",
+                query="missing",
                 context=context,
             )["matches"],
             [],
         )
+        with self.assertRaises(PermissionError):
+            run_memory_manage("list", "seven_days", context=context)
+        with self.assertRaises(PermissionError):
+            run_memory_manage(
+                "get",
+                "seven_days",
+                filename="blocked.md",
+                context=context,
+            )
         with self.assertRaises(PermissionError):
             run_memory_manage(
                 "add",
@@ -179,6 +199,169 @@ class MemoryManageTests(unittest.TestCase):
                 content="must be persisted by runtime",
                 context=context,
             )
+
+    def test_list_and_get_return_bounded_metadata_and_exact_content(self) -> None:
+        filenames = []
+        for index in range(4):
+            filenames.append(
+                add_fragment(
+                    self.root,
+                    "alice",
+                    self.config,
+                    "half_year",
+                    f"device {index}",
+                    f"Device {index} details",
+                )["filename"]
+            )
+        listed = list_entries(
+            self.root, "alice", self.config, "half_year", limit=3
+        )
+        self.assertEqual(listed["total"], 4)
+        self.assertEqual(len(listed["entries"]), 3)
+        self.assertTrue(listed["truncated"])
+        self.assertNotIn("content", listed["entries"][0])
+        self.assertIsInstance(listed["entries"][0]["weight"], int)
+        self.assertIsNotNone(listed["entries"][0]["expires_at"])
+
+        fetched = get_fragment(
+            self.root, "alice", self.config, "half_year", filenames[0]
+        )
+        self.assertEqual(fetched["content"], "Device 0 details")
+        self.assertEqual(fetched["filename"], filenames[0])
+        self.assertIsInstance(fetched["weight"], int)
+        routed = run_memory_manage(
+            "get",
+            "half_year",
+            filename=filenames[0],
+            context={"root": str(self.root), "user": "alice"},
+        )
+        self.assertEqual(routed["content"], "Device 0 details")
+
+        permanent = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            "stable profile",
+            "Permanent body",
+        )
+        permanent_list = list_entries(
+            self.root, "alice", self.config, "permanent"
+        )
+        self.assertIsNone(permanent_list["entries"][0]["weight"])
+        self.assertIsNone(permanent_list["entries"][0]["expires_at"])
+        permanent_get = get_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            permanent["filename"],
+        )
+        self.assertIsNone(permanent_get["weight"])
+        self.assertEqual(permanent_get["content"], "Permanent body")
+
+    def test_search_is_bounded_case_aware_and_never_returns_full_content(self) -> None:
+        long_body = "prefix " * 80 + "RaspberryPi" + " suffix" * 80
+        for index in range(5):
+            add_fragment(
+                self.root,
+                "alice",
+                self.config,
+                "one_month",
+                f"Device Profile {index}",
+                long_body,
+            )
+
+        content_result = search_by_content(
+            self.root,
+            "alice",
+            self.config,
+            "one_month",
+            "raspberrypi",
+            limit=3,
+            context_chars=80,
+        )
+        self.assertEqual(content_result["total_matches"], 5)
+        self.assertEqual(len(content_result["matches"]), 3)
+        self.assertTrue(content_result["truncated"])
+        for match in content_result["matches"]:
+            self.assertNotIn("content", match)
+            self.assertLessEqual(len(match["snippet"]), 80)
+            self.assertIn("RaspberryPi", match["snippet"])
+            self.assertTrue(match["snippet"].startswith("…"))
+            self.assertTrue(match["snippet"].endswith("…"))
+
+        self.assertEqual(
+            search_by_content(
+                self.root,
+                "alice",
+                self.config,
+                "one_month",
+                "raspberrypi",
+                case_sensitive=True,
+            )["total_matches"],
+            0,
+        )
+        title_result = search_by_title(
+            self.root,
+            "alice",
+            self.config,
+            "one_month",
+            "device profile",
+            limit=2,
+        )
+        self.assertEqual(title_result["total_matches"], 5)
+        self.assertEqual(len(title_result["matches"]), 2)
+        self.assertTrue(title_result["truncated"])
+        self.assertEqual(
+            search_by_title(
+                self.root,
+                "alice",
+                self.config,
+                "one_month",
+                "device profile",
+                case_sensitive=True,
+            )["total_matches"],
+            0,
+        )
+        with self.assertRaisesRegex(ValueError, "list action"):
+            search_by_content(
+                self.root, "alice", self.config, "one_month", ""
+            )
+        with self.assertRaisesRegex(ValueError, "list action"):
+            search_by_title(
+                self.root, "alice", self.config, "one_month", ""
+            )
+
+    def test_manifest_exposes_seven_actions_and_bounded_search_parameters(self) -> None:
+        tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
+        self.assertEqual(tool.version, "1.1.0")
+        schema = tool.input_schema
+        self.assertEqual(
+            set(schema["properties"]["action"]["enum"]),
+            {
+                "list",
+                "get",
+                "search_by_title",
+                "search_by_content",
+                "add",
+                "edit",
+                "delete",
+            },
+        )
+        for field in ("limit", "context_chars", "case_sensitive"):
+            self.assertIn(field, schema["properties"])
+        validate_arguments(
+            schema,
+            {
+                "action": "search_by_content",
+                "tier": "half_year",
+                "query": "树莓派",
+                "limit": 3,
+                "context_chars": 500,
+                "case_sensitive": False,
+            },
+        )
 
 
 if __name__ == "__main__":

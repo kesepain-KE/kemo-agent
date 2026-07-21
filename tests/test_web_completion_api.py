@@ -123,6 +123,51 @@ class WebCompletionApiTests(unittest.TestCase):
         )
         self.assertTrue(removed_tmp.json()["deleted"])
 
+    def test_tmp_batch_and_all_delete_validate_before_mutating(self) -> None:
+        _, root = self.make_root()
+        tmp = root / "tmp"
+        (tmp / "nested").mkdir()
+        (tmp / "nested" / "a.tmp").write_text("a", "utf-8")
+        (tmp / "nested" / "b.tmp").write_text("b", "utf-8")
+        app = create_app(service=WebRunService(root))
+
+        rejected = self.request(
+            app,
+            "POST",
+            "/api/tmp/delete-many",
+            json={"paths": ["nested/a.tmp", "../outside.tmp"]},
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertTrue((tmp / "nested" / "a.tmp").is_file())
+        self.assertTrue((tmp / "nested" / "b.tmp").is_file())
+
+        removed = self.request(
+            app,
+            "POST",
+            "/api/tmp/delete-many",
+            json={"paths": ["nested/a.tmp", "nested/b.tmp", "nested/a.tmp"]},
+        )
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertEqual(removed.json()["deleted_count"], 2)
+        self.assertEqual(
+            removed.json()["deleted_paths"],
+            ["nested/a.tmp", "nested/b.tmp"],
+        )
+        self.assertFalse((tmp / "nested").exists())
+
+        (tmp / "cache" / "deep").mkdir(parents=True)
+        (tmp / "cache" / "deep" / "one.log").write_text("1", "utf-8")
+        (tmp / "root.log").write_text("2", "utf-8")
+        removed_all = self.request(app, "DELETE", "/api/tmp/all")
+        self.assertEqual(removed_all.status_code, 200, removed_all.text)
+        self.assertEqual(removed_all.json()["deleted_count"], 2)
+        self.assertTrue(tmp.is_dir())
+        self.assertEqual(list(tmp.iterdir()), [])
+
+        empty = self.request(app, "DELETE", "/api/tmp/all")
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json(), {"deleted_paths": [], "deleted_count": 0})
+
     def test_avatar_upload_read_validation_and_public_logo(self) -> None:
         _, root = self.make_root()
         (root / "kemo-agent.jpg").write_bytes(b"logo")
