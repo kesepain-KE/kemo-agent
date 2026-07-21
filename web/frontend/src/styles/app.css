@@ -148,6 +148,58 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .drawer-activity small { margin-top: 2px; color: var(--muted-2); font-size: .6875rem; }
 .drawer-empty, .activity-empty { padding: 14px 4px; color: var(--muted-2); font-size: .75rem; text-align: center; }
 
+/* Context window drawer: seven real-data cards inside one independently scrolling rail. */
+.context-drawer-heading { min-width: 0; display: grid; gap: 3px; }
+.context-drawer-heading strong { color: var(--text); font-size: .9375rem; line-height: 1.2; }
+.context-drawer-heading span { max-width: 260px; overflow: hidden; color: var(--muted-2); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
+.context-drawer-body { overscroll-behavior: contain; scrollbar-gutter: stable; }
+.context-drawer-card {
+  margin: 0 0 11px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-soft);
+}
+.context-drawer-card:last-child { margin-bottom: 0; }
+.context-card-head { margin-bottom: 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.context-card-head > span { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--text); }
+.context-card-head svg { flex: 0 0 auto; color: var(--brand); }
+.context-card-head strong { overflow: hidden; font-size: .8125rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.context-card-head small { flex: 0 0 auto; color: var(--muted-2); font-size: .625rem; }
+.context-metric-grid { display: grid; gap: 7px; }
+.context-metric-grid.two-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.context-metric-grid.three-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.context-metric {
+  min-width: 0;
+  min-height: 62px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+}
+.context-metric.emphasized { border-color: var(--brand-line); background: var(--brand-soft); }
+.context-metric > span { display: block; overflow: hidden; color: var(--muted); font-size: .625rem; text-overflow: ellipsis; white-space: nowrap; }
+.context-metric > strong { margin-top: 6px; color: var(--text); font-size: 1.0625rem; line-height: 1; letter-spacing: -.02em; }
+.context-metric > small { margin-left: 4px; color: var(--muted-2); font-size: .5625rem; }
+.context-metric.status-metric > strong { display: block; margin-top: 9px; font-size: .75rem; letter-spacing: 0; }
+.context-metric .status-on { color: var(--green); }
+.context-metric .status-off { color: var(--muted-2); }
+.context-capacity { margin-top: 11px; }
+.context-capacity > div { margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: .625rem; }
+.context-capacity > div strong { color: var(--text-2); font-size: .6875rem; }
+.context-capacity-track { height: 7px; overflow: hidden; border-radius: 999px; background: var(--surface-3); display: block; }
+.context-capacity-track i { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--brand), var(--brand-2)); display: block; transition: width .24s ease; }
+.context-single-stat { min-height: 54px; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-2); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.context-single-stat > span { color: var(--muted); font-size: .6875rem; }
+.context-single-stat > strong { flex: 0 0 auto; color: var(--text); font-size: 1.125rem; }
+.context-single-stat > strong small { color: var(--muted-2); font-size: .625rem; font-weight: 600; }
+.context-drawer-card.compact-card .context-card-head { margin-bottom: 9px; }
+
+@media (max-width: 420px) {
+  .context-metric-grid.three-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .activity-row > span { min-width: 0; }
 .activity-row strong, .activity-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row strong { color: var(--text-2); font-size: .8125rem; font-weight: 600; }
@@ -258,6 +310,24 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .knowledge-grid-editor > .table-panel { min-width: 0; }
 .knowledge-grid-editor .module-table tbody tr { cursor: pointer; transition: background .14s ease; }
 .knowledge-grid-editor .module-table tbody tr.knowledge-row-selected { background: var(--brand-soft); }
+.panel-title .knowledge-collection-icon {
+  width: 20px;
+  height: 30px;
+  margin-top: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--brand);
+}
+.panel-title .knowledge-collection-icon svg { width: 17px; height: 17px; stroke-width: 1.9; }
+.table-main .knowledge-document-icon {
+  width: 20px;
+  height: 28px;
+  margin-top: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.knowledge-document-icon svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .knowledge-editor { min-width: 0; min-height: 0; position: sticky; top: 0; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; }
 .knowledge-grid-editor > .knowledge-editor { margin-top: 0; }
 .knowledge-editor > .panel-head,
@@ -268,10 +338,12 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .knowledge-close-button:hover { background: var(--surface-hover); color: var(--text); }
 .knowledge-editor-empty { flex: 1 1 auto; min-height: 0; padding: 30px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted-2); text-align: center; }
 .knowledge-editor-empty svg { width: 48px; height: 48px; padding: 11px; border-radius: var(--radius-card); background: var(--brand-soft); color: var(--brand); }
+.knowledge-editor-empty > svg { width: 28px; height: 28px; padding: 0; border-radius: 0; background: transparent; stroke-width: 1.9; }
 .knowledge-editor-empty strong { color: var(--text); font-size: .875rem; }
 .knowledge-editor-empty span { max-width: 250px; font-size: .75rem; line-height: 1.55; }
 .knowledge-editor-file { min-height: 72px; padding: 12px 14px; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--line); }
-.knowledge-file-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: var(--radius-control-lg); background: var(--brand-soft); color: var(--brand); font-size: .75rem; font-weight: 800; }
+.knowledge-file-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: var(--radius-control-lg); background: var(--brand-soft); color: var(--brand); }
+.knowledge-file-avatar svg { stroke-width: 1.9; }
 .knowledge-editor-file > span:nth-child(2) { min-width: 0; }
 .knowledge-editor-file strong, .knowledge-editor-file small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-editor-file strong { color: var(--text); font-size: .8125rem; }
@@ -319,6 +391,10 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
 .active-task-play { width: 36px; height: 36px; border-radius: var(--radius-control-lg); background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; }
 .conversation-action:disabled { opacity: .56; cursor: default; }
+.conversation-menu { width: 310px; }
+.conversation-menu-status { font-size: .6875rem; }
+.conversation-action.danger:hover:not(:disabled) { background: var(--red-soft); color: var(--red); }
+.conversation-action.danger:hover:not(:disabled) .conversation-action-icon { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
 .command-empty { padding: 28px; color: var(--muted-2); font-size: .8125rem; text-align: center; }
 .command-foot { padding: 9px 13px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: .6875rem; }
 
@@ -1096,4 +1172,13 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   .font-size-button strong { font-size: 1.0417rem; }
   .model-menu,
   .font-size-menu { top: 5rem; }
+}
+
+/* The composer now participates in flex layout, so the message pane no longer
+   needs the large bottom reservation used by the former absolute composer. */
+.chat-view:not(.welcome-mode) > .chat-scroll {
+  padding:14px clamp(14px,2vw,30px);
+}
+@media(max-width:780px){
+  .chat-view:not(.welcome-mode) > .chat-scroll{padding:10px}
 }
