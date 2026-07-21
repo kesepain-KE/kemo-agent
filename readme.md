@@ -318,7 +318,7 @@ kemo-agent/
 ## 相关项目
 
 - [votx-agent](https://github.com/kesepain-KE/votx-agent) — 独立 Agent 框架
-- [llm-adapter-kemo](https://github.com/kesepain-KE/llm-adapter-kemo) — LLM 适配器
+- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api) — Kemo 网关适配器
 
 ## 主要项目负责人
 
