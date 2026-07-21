@@ -3,8 +3,7 @@
   "tools": {
     "enabled": true,
     "timeout": 240,
-    "max_iterations": 8,
-    "max_per_round": null
+    "max_iterations": 80
   },
   "history": {
     "schema_version": 1,
