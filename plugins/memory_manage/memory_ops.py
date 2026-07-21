@@ -20,6 +20,10 @@ MANAGED_TIERS = frozenset((*TIERS, "important"))
 IMPORTANT_FILENAME = "memory_temporary_important.md"
 
 
+def _memory_ref(tier: str, filename: str) -> str:
+    return f"{tier}:{filename}"
+
+
 def _validate_tier(tier: str) -> str:
     if tier not in MANAGED_TIERS:
         raise ValueError(f"不支持的记忆层级：{tier}")
@@ -82,8 +86,10 @@ def _bounded_integer(value: int, *, field: str, minimum: int, maximum: int) -> i
 
 def _summary(item: dict[str, Any], tier: str) -> dict[str, Any]:
     temporary = tier in TEMPORARY_TIERS
+    filename = str(item["filename"])
     return {
-        "filename": item["filename"],
+        "memory_ref": _memory_ref(tier, filename),
+        "filename": filename,
         "weight": int(item.get("weight", 0)) if temporary else None,
         "expires_at": item.get("expires_at") if temporary else None,
     }
@@ -101,7 +107,12 @@ def list_entries(
     if tier == "important":
         names = [IMPORTANT_FILENAME] if _important_entry(root, user) else []
         entries = [
-            {"filename": filename, "weight": None, "expires_at": None}
+            {
+                "memory_ref": _memory_ref(tier, filename),
+                "filename": filename,
+                "weight": None,
+                "expires_at": None,
+            }
             for filename in names[:normalized_limit]
         ]
     elif tier == "permanent":
@@ -115,7 +126,12 @@ def list_entries(
             key=str.casefold,
         ) if directory.is_dir() else []
         entries = [
-            {"filename": filename, "weight": None, "expires_at": None}
+            {
+                "memory_ref": _memory_ref(tier, filename),
+                "filename": filename,
+                "weight": None,
+                "expires_at": None,
+            }
             for filename in names[:normalized_limit]
         ]
     else:
@@ -123,6 +139,7 @@ def list_entries(
         names = sorted(index, key=str.casefold)
         entries = [
             {
+                "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
                 "weight": int(index[filename].get("weight", 0)),
                 "expires_at": index[filename].get("expires_at"),
@@ -157,7 +174,7 @@ def get_fragment(
     else:
         store = MemoryStore(root, user, config)
         normalized = normalize_memory_filename(filename)
-        location = store.locate(normalized)
+        location = store.locate_in_tier(tier, normalized)
         if location is None or location.tier != tier:
             raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
         if location.path.is_symlink():
@@ -172,6 +189,9 @@ def get_fragment(
     return {
         "action": "get",
         "tier": tier,
+        "memory_ref": _memory_ref(
+            tier, normalized if tier != "important" else IMPORTANT_FILENAME
+        ),
         "filename": normalized if tier != "important" else IMPORTANT_FILENAME,
         "content": str(item.get("content") or ""),
         "weight": int(item.get("weight", 0)) if tier in TEMPORARY_TIERS else None,
@@ -275,15 +295,31 @@ def delete_fragment(
         path = _important_path(root, user)
         existed = path.is_file()
         path.unlink(missing_ok=True)
-        return {"action": "delete", "tier": tier, "filename": IMPORTANT_FILENAME, "deleted": existed}
+        return {
+            "action": "delete",
+            "tier": tier,
+            "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
+            "filename": IMPORTANT_FILENAME,
+            "deleted": existed,
+        }
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
     with store._lock:
-        location = store.locate(normalized)
+        location = store.locate_in_tier(tier, normalized)
         if location is None or location.tier != tier:
             return {"action": "delete", "tier": tier, "filename": normalized, "deleted": False}
+        file_existed = location.path.is_file()
         store._delete_location(location)
-    return {"action": "delete", "tier": tier, "filename": normalized, "deleted": True}
+    return {
+        "action": "delete",
+        "tier": tier,
+        "memory_ref": _memory_ref(tier, location.filename),
+        "filename": location.filename,
+        "deleted": True,
+        "index_removed": location.indexed,
+        "file_removed": file_existed,
+        "repaired_orphan": location.indexed and not file_existed,
+    }
 
 
 def add_fragment(
@@ -305,7 +341,12 @@ def add_fragment(
         if path.exists():
             raise FileExistsError("临时重要记忆文件已存在，请使用 edit")
         _atomic_text(path, body)
-        return {"action": "add", "tier": tier, "filename": IMPORTANT_FILENAME}
+        return {
+            "action": "add",
+            "tier": tier,
+            "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
+            "filename": IMPORTANT_FILENAME,
+        }
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
     with store._lock:
@@ -321,7 +362,12 @@ def add_fragment(
             except Exception:
                 path.unlink(missing_ok=True)
                 raise
-    return {"action": "add", "tier": tier, "filename": normalized}
+    return {
+        "action": "add",
+        "tier": tier,
+        "memory_ref": _memory_ref(tier, normalized),
+        "filename": normalized,
+    }
 
 
 def edit_fragment(
@@ -345,23 +391,31 @@ def edit_fragment(
         if not path.is_file():
             raise FileNotFoundError("临时重要记忆文件不存在")
         _atomic_text(path, body)
-        return {"action": "edit", "tier": tier, "filename": IMPORTANT_FILENAME}
+        return {
+            "action": "edit",
+            "tier": tier,
+            "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
+            "filename": IMPORTANT_FILENAME,
+        }
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
-    target_name = normalize_memory_filename(new_filename or normalized)
     with store._lock:
-        location = store.locate(normalized)
+        location = store.locate_in_tier(tier, normalized)
         if location is None or location.tier != tier:
             raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
-        if target_name != normalized and store.locate(target_name) is not None:
+        source_name = location.filename
+        target_name = normalize_memory_filename(new_filename or source_name)
+        if target_name.casefold() == source_name.casefold():
+            target_name = source_name
+        if target_name != source_name and store.locate(target_name) is not None:
             raise FileExistsError(f"目标记忆已存在：{target_name}")
         target_path = store.fragment_path(tier, target_name)
-        if target_name == normalized:
+        if target_name == source_name:
             previous = location.path.read_text("utf-8")
             _atomic_text(location.path, body)
             if tier in TEMPORARY_TIERS:
                 index = store.load_index(tier)
-                index[normalized]["updated_at"] = utc_now().isoformat()
+                index[source_name]["updated_at"] = utc_now().isoformat()
                 try:
                     store.write_index(tier, index)
                 except Exception:
@@ -371,7 +425,7 @@ def edit_fragment(
             _atomic_text(target_path, body)
             if tier in TEMPORARY_TIERS:
                 index = store.load_index(tier)
-                meta = dict(index.pop(normalized))
+                meta = dict(index.pop(source_name))
                 meta["updated_at"] = utc_now().isoformat()
                 index[target_name] = meta
                 try:
@@ -383,7 +437,8 @@ def edit_fragment(
     return {
         "action": "edit",
         "tier": tier,
-        "filename": normalized,
+        "memory_ref": _memory_ref(tier, target_name),
+        "filename": source_name,
         "new_filename": target_name,
     }
 
