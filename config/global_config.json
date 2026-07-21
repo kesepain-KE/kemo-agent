@@ -1,19 +1,16 @@
 {
   "schema_version": 1,
-
   "tools": {
     "enabled": true,
     "timeout": 240,
     "max_iterations": 8,
     "max_per_round": null
   },
-
   "history": {
     "schema_version": 1,
     "recent_full_rounds": 3,
     "consecutive_tool_fail_limit": 5
   },
-
   "prompt": {
     "char_limits": {
       "task_plan": 6000,
@@ -34,14 +31,12 @@
       "perception": "full"
     }
   },
-
   "kemo_graph": {
     "kemo_graph_global_knowledge": false,
     "kemo_graph_shared_knowledge": false,
     "kemo_graph_user_knowledge": false,
     "kemo_graph_temporary_memory": false
   },
-
   "memory": {
     "storage_schema_version": 2,
     "temporary_injection_limits": {
@@ -69,29 +64,23 @@
       }
     }
   },
-
   "agent_runtime": {
     "queue_maxsize": 0,
     "default_timeout": 600
   },
-
   "task_plan": {
     "max_steps": 20
   },
-
   "cron": {
     "enabled": true,
     "poll_interval": 30
   },
-
   "runtime_host": {
     "enable_background_scheduler": true
   },
-
   "message": {
     "max_workers": 8
   },
-
   "agents": {
     "conserved_rounds": 3,
     "max_rounds": 80,
