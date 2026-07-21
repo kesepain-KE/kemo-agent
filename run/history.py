@@ -477,6 +477,215 @@ def _message_rounds(messages: Any) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def _usage_from_round_metrics(metrics: Any) -> dict[str, Any]:
+    """Rebuild durable session usage after a committed round is removed."""
+
+    result: dict[str, Any] = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "estimated": False,
+    }
+    additive = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_prompt_tokens",
+        "cached_input_tokens",
+        "cache_miss_tokens",
+        "reasoning_tokens",
+        "visible_output_tokens",
+    )
+    for metric in metrics if isinstance(metrics, list) else []:
+        usage = metric.get("usage") if isinstance(metric, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        for key in additive:
+            try:
+                result[key] = int(result.get(key, 0)) + max(0, int(usage.get(key, 0)))
+            except (TypeError, ValueError):
+                continue
+        result["estimated"] = bool(result["estimated"] or usage.get("estimated"))
+        stages = usage.get("stages")
+        if isinstance(stages, list):
+            result.setdefault("stages", []).extend(copy.deepcopy(stages))
+        provider_raw = usage.get("provider_raw")
+        if isinstance(provider_raw, list):
+            result.setdefault("provider_raw", []).extend(copy.deepcopy(provider_raw))
+        elif isinstance(provider_raw, dict) and provider_raw:
+            result.setdefault("provider_raw", []).append(copy.deepcopy(provider_raw))
+        media = usage.get("media")
+        if isinstance(media, dict):
+            target_media = result.setdefault("media", {})
+            for key, value in media.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    target_media[key] = target_media.get(key, 0) + value
+        measurement = usage.get("measurement")
+        if isinstance(measurement, dict):
+            result["measurement"] = copy.deepcopy(measurement)
+    result["input_tokens"] = result["prompt_tokens"]
+    result["output_tokens"] = result["completion_tokens"]
+    cached = int(result.get("cached_prompt_tokens", 0))
+    missed = int(result.get("cache_miss_tokens", 0))
+    if cached or missed:
+        result["cache_hit_rate"] = round(cached / (cached + missed), 6)
+    return result
+
+
+def _remove_last_round(window: dict[str, Any], round_number: int) -> dict[str, Any]:
+    result = copy.deepcopy(window)
+    message_groups = _message_rounds((result.get("text") or {}).get("messages"))
+    if not message_groups or not any(
+        item.get("role") == "user" for item in message_groups[-1]
+    ):
+        raise HistoryError("最后一轮历史缺少用户消息，无法撤销")
+    result.setdefault("text", {})["messages"] = [
+        message for group in message_groups[:-1] for message in group
+    ]
+    for section in ("think", "tool"):
+        rounds = (result.get(section) or {}).get("rounds", [])
+        result.setdefault(section, {})["rounds"] = [
+            item
+            for item in rounds if isinstance(rounds, list) and isinstance(item, dict)
+            and item.get("round") != round_number
+        ]
+    raw_items = (result.get("items") or {}).get("items", [])
+    result.setdefault("items", {"schema_version": ITEMS_SCHEMA_VERSION})["items"] = [
+        item
+        for item in raw_items if isinstance(raw_items, list) and isinstance(item, dict)
+        and not (
+            isinstance(item.get("metadata"), dict)
+            and item["metadata"].get("round") == round_number
+        )
+    ]
+    data = result.setdefault("data", {})
+    metrics = data.get("round_metrics", [])
+    kept_metrics = [
+        item
+        for item in metrics if isinstance(metrics, list) and isinstance(item, dict)
+        and item.get("round") != round_number
+    ]
+    data["round_metrics"] = kept_metrics
+    data["rounds"] = max(0, round_number - 1)
+    data["token_usage"] = _usage_from_round_metrics(kept_metrics)
+    data.pop("context", None)
+    return result
+
+
+def undo_last_round(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    expected_round: int,
+    expected_prompt: str,
+) -> dict[str, Any]:
+    """Undo one exact committed round in archive and runtime history.
+
+    ``expected_round == current + 1`` represents a frontend-only interrupted
+    round and is intentionally a no-op. Other mismatches are rejected so a
+    stale browser cannot remove an unrelated successful round.
+    """
+
+    directory = find_window(root, user, source, session_id)
+    if directory is None:
+        if expected_round == 1:
+            return {
+                "found": False,
+                "rolled_back": False,
+                "round": expected_round,
+                "remaining_rounds": 0,
+                "prompt": expected_prompt,
+                "content": [],
+            }
+        raise HistoryError("会话轮次已发生变化，请刷新后重试")
+    runtime_directory = runtime_window_path(directory)
+    with _lock(directory), _lock(runtime_directory):
+        archive_original = load_window(directory)
+        current_round = int((archive_original.get("data") or {}).get("rounds", 0))
+        if expected_round == current_round + 1:
+            return {
+                "found": True,
+                "rolled_back": False,
+                "round": expected_round,
+                "remaining_rounds": current_round,
+                "prompt": expected_prompt,
+                "content": [],
+            }
+        if expected_round != current_round or current_round < 1:
+            raise HistoryError("会话轮次已发生变化，请刷新后重试")
+
+        groups = _message_rounds((archive_original.get("text") or {}).get("messages"))
+        last_group = groups[-1] if groups else []
+        user_message = next(
+            (item for item in last_group if item.get("role") == "user"), None
+        )
+        prompt = str((user_message or {}).get("content") or "")
+        if prompt.strip() != expected_prompt.strip():
+            raise HistoryError("最后一轮消息与重发目标不一致，请刷新后重试")
+
+        content: list[dict[str, Any]] = []
+        for item in reversed((archive_original.get("items") or {}).get("items", [])):
+            metadata = item.get("metadata") if isinstance(item, dict) else None
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("round") == current_round
+                and item.get("type") == "message"
+                and item.get("role") == "user"
+                and isinstance(item.get("content"), list)
+            ):
+                content = copy.deepcopy(item["content"])
+                break
+
+        archive_next = _remove_last_round(archive_original, current_round)
+        runtime_original: dict[str, Any] | None = None
+        if (runtime_directory / "data.json").is_file():
+            try:
+                runtime_original = load_window(runtime_directory)
+            except HistoryError:
+                runtime_original = None
+        if runtime_original is not None:
+            local_round = int((runtime_original.get("data") or {}).get("rounds", 0))
+            context = (runtime_original.get("data") or {}).get("context") or {}
+            try:
+                offset = max(0, int(context.get("round_offset", 0)))
+            except (TypeError, ValueError):
+                offset = 0
+            runtime_next = (
+                _remove_last_round(runtime_original, local_round)
+                if local_round > 0 and offset + local_round == current_round
+                else copy.deepcopy(archive_next)
+            )
+        else:
+            runtime_next = copy.deepcopy(archive_next)
+        runtime_next.setdefault("data", {}).pop("context", None)
+
+        try:
+            commit_window(directory, archive_next)
+            commit_window(runtime_directory, runtime_next)
+        except BaseException:
+            try:
+                commit_window(directory, archive_original)
+                if runtime_original is not None:
+                    commit_window(runtime_directory, runtime_original)
+                elif runtime_directory.is_dir():
+                    shutil.rmtree(runtime_directory)
+            except BaseException:
+                pass
+            raise
+        return {
+            "found": True,
+            "rolled_back": True,
+            "round": current_round,
+            "remaining_rounds": current_round - 1,
+            "prompt": prompt,
+            "content": content,
+        }
+
+
 def _local_round(value: Any, removed: int) -> int | None:
     try:
         number = int(value)
