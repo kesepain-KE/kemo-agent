@@ -6,16 +6,18 @@ export function ModuleFrame({
   title,
   description,
   actions,
+  className,
   children,
 }: {
   kicker: string
   title: string
   description: string
   actions?: ReactNode
+  className?: string
   children: ReactNode
 }) {
   return (
-    <div className="view module-view active">
+    <div className={`view module-view active ${className || ''}`}>
       <div className="module-shell">
         <div className="module-inner">
           <header className="module-header">

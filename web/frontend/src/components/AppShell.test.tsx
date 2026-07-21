@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppShell } from './AppShell'
 import { ChatPage } from '../pages/ChatPage'
+import { SettingsPage } from '../pages/SettingsPage'
 import { server } from '../test/server'
 import type { SessionSummary } from '../types/api'
 
@@ -27,6 +28,7 @@ function renderApp(path = '/chat') {
         <Routes>
           <Route path="/" element={<AppShell />}>
             <Route path="chat" element={<ChatPage />} />
+            <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -51,6 +53,49 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
     expect(screen.getByText(/当前用户的配置、历史、知识/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换当前用户' })).toBeInTheDocument()
+  })
+
+  it('对话运行期间同时锁定配置页与侧栏的用户切换', async () => {
+    let releaseChat!: () => void
+    let markChatStarted!: () => void
+    let chatSignal: AbortSignal | undefined
+    const chatGate = new Promise<void>((resolve) => { releaseChat = resolve })
+    const chatStarted = new Promise<void>((resolve) => { markChatStarted = resolve })
+    const interceptedFetch = globalThis.fetch
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatSignal = init?.signal || undefined
+      markChatStarted()
+      await chatGate
+      return new Response('event: done\ndata: {"type":"done"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    renderApp('/chat?user=kesepain')
+
+    await screen.findByText(/当前用户的配置、历史、知识/)
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '保持运行' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await screen.findByRole('button', { name: '停止生成' })
+    await chatStarted
+
+    fireEvent.click(screen.getByRole('link', { name: /^配置 配置$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
+    const userRow = await screen.findByRole('button', { name: '切换到用户 reviewer' })
+    expect(userRow).toBeDisabled()
+    expect(screen.getByText('对话运行中，暂不可切换')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '切换当前用户' }))
+    expect(screen.getByRole('menuitem', { name: /reviewer/ })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('link', { name: /^对话 对话$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '停止生成' }))
+    expect(chatSignal?.aborted).toBe(true)
+
+    releaseChat()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('link', { name: /^配置 配置$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
+    expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
   })
 
   it('从 URL 恢复用户与会话并加载历史空状态', async () => {
@@ -146,6 +191,83 @@ describe('AppShell navigation', () => {
     expect(screen.getByTitle('运行状态')).toBeInTheDocument()
     expect(screen.getByTitle('命令面板')).toBeInTheDocument()
     expect(await screen.findByTitle('查看当前 Provider')).toBeInTheDocument()
+  })
+
+  it('对话操作菜单提供保存新建、清空、压缩和重新生成', async () => {
+    let compressionCalled = false
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '上一条问题' }, { role: 'assistant', content: '上一条回答' }],
+        round_metrics: [], round_traces: [],
+      })),
+      http.post('/api/users/kesepain/sessions/s1/compress', () => {
+        compressionCalled = true
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', requested: true,
+          compressed: true, rounds_removed: 2, summary_cache_exists: true,
+          context: { rounds_removed: 2 },
+        })
+      }),
+    )
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('上一条回答')
+
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    expect(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /清空此对话/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /重新发送一次消息/ })).toBeInTheDocument()
+    expect(screen.getByText('每次打开新网页都会创建新对话，可通过打开历史对话接续对话。')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ }))
+    await waitFor(() => expect(compressionCalled).toBe(true))
+    expect(await screen.findByText('上下文压缩完成，已整理 2 轮历史。')).toBeInTheDocument()
+
+    const regenerate = screen.getByRole('menuitem', { name: /重新发送一次消息/ })
+    await waitFor(() => expect(regenerate).toBeEnabled())
+    fireEvent.click(regenerate)
+    await waitFor(() => expect(screen.getAllByText('上一条问题').length).toBeGreaterThan(1))
+  })
+
+  it('清空当前对话会删除归档并进入新对话', async () => {
+    let deletedSession = ''
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '待清空问题' }, { role: 'assistant', content: '待清空回答' }],
+        round_metrics: [], round_traces: [],
+      })),
+      http.delete('/api/users/kesepain/sessions/:sessionId', ({ params }) => {
+        deletedSession = String(params.sessionId)
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: params.sessionId, deleted: true })
+      }),
+    )
+    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('待清空回答')
+
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /清空此对话/ }))
+
+    await waitFor(() => expect(deletedSession).toBe('s1'))
+    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
+  })
+
+  it('上下文窗口抽屉展示七组真实聚合统计', async () => {
+    renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByTitle('查看上下文与运行状态'))
+
+    expect(screen.getByText('Token 占用概览')).toBeInTheDocument()
+    expect(screen.getByText('对话统计')).toBeInTheDocument()
+    expect(screen.getByText('任务与定时')).toBeInTheDocument()
+    expect(screen.getByText('工具与子智能体')).toBeInTheDocument()
+    expect(screen.getByText('知识库状态')).toBeInTheDocument()
+    expect(screen.getAllByText('外部消息').length).toBeGreaterThan(0)
+    expect(screen.getByText('拓展与感知')).toBeInTheDocument()
+    expect(screen.getAllByText('18.67%').length).toBeGreaterThan(0)
+    expect(screen.getByText('已启动')).toBeInTheDocument()
+    expect(document.querySelector('.context-drawer-body')).toHaveClass('drawer-body')
   })
 
   it('字号切换会同步更新文字与顶部布局比例', async () => {

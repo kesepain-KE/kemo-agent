@@ -15,6 +15,8 @@ export interface UserProfileCardProps {
   users?: UserProfileOption[]
   compact?: boolean
   logoutPending?: boolean
+  switchingDisabled?: boolean
+  switchingDisabledReason?: string
   onSelectUser?: (username: string) => void
   onOpenProfile?: () => void
   onOpenSettings?: () => void
@@ -40,6 +42,8 @@ export function UserProfileCard({
   users = [],
   compact = false,
   logoutPending = false,
+  switchingDisabled = false,
+  switchingDisabledReason = '当前暂不可切换用户',
   onSelectUser,
   onOpenProfile,
   onOpenSettings,
@@ -104,12 +108,15 @@ export function UserProfileCard({
         {switchableUsers.length > 0 && <>
           <div className={styles.divider} />
           <div className={styles.menuLabel}>切换用户</div>
+          {switchingDisabled && <div className={styles.switchingNotice} role="status">{switchingDisabledReason}</div>}
           <div className={styles.userOptions}>
             {switchableUsers.map((item) => <button
               type="button"
               className={styles.userOption}
               role="menuitem"
               key={item.username}
+              disabled={switchingDisabled}
+              aria-description={switchingDisabled ? switchingDisabledReason : undefined}
               onClick={() => runAndClose(() => onSelectUser?.(item.username))}
             >
               <span className={styles.optionAvatar}><AvatarContent username={item.username} url={item.avatarUrl} /></span>

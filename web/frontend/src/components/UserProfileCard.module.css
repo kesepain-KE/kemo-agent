@@ -140,9 +140,11 @@
 .menuItem:hover,
 .userOption:hover { background: var(--surface-hover); color: var(--text); }
 .menuItem:disabled { opacity: .55; cursor: wait; }
+.userOption:disabled { opacity: .52; cursor: not-allowed; background: transparent; color: var(--muted); }
 
 .divider { height: 1px; margin: 6px 5px; background: var(--line); }
 .menuLabel { padding: 3px 10px 6px; color: var(--muted-2); font-size: .625rem; font-weight: 760; letter-spacing: .55px; text-transform: uppercase; }
+.switchingNotice { margin: 0 4px 6px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--amber) 28%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--amber) 9%, var(--surface)); color: var(--muted); font-size: .65625rem; line-height: 1.45; }
 .userOptions { max-height: 190px; overflow-y: auto; }
 .userOption {
   min-height: 50px;
