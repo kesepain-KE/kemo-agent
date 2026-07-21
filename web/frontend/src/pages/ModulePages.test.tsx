@@ -59,6 +59,12 @@ describe('V16 module pages', () => {
         created_at: '2026-07-20T08:00:00+08:00', updated_at: '2026-07-20T09:00:00+08:00',
         progress: { completed: 1, total: 1, percent: 100 },
         steps: [{ step_id: 'step_1', title: '完成步骤', description: '', status: 'completed', depends_on: [], critical: false, tool_name: '', started_at: '', finished_at: '2026-07-20T09:00:00+08:00' }],
+      }, {
+        plan_id: 'plan_cancelled', title: '已取消的任务计划', description: '取消后允许删除', status: 'cancelled', auto_accept: false,
+        reminder: '', source: 'web', session_id: 's1', current_step: '', revision: 2,
+        created_at: '2026-07-20T08:00:00+08:00', updated_at: '2026-07-20T08:30:00+08:00',
+        progress: { completed: 0, total: 1, percent: 0 },
+        steps: [{ step_id: 'step_1', title: '未执行步骤', description: '', status: 'cancelled', depends_on: [], critical: false, tool_name: '', started_at: '', finished_at: '' }],
       }],
       cron_tasks: [
         { task_id: 'cron_enabled', title: '待执行定时任务', user_defined: true, status: 'enabled', type: 'daily', time: '08:00', next_run_at: '2026-07-22T08:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T08:00:00+08:00', last_state: 'never' },
@@ -69,6 +75,12 @@ describe('V16 module pages', () => {
     })))
     renderPage('tasks')
     await screen.findByText('较旧的任务计划')
+    const cancelledPlanCard = screen.getByText('已取消的任务计划').closest('article')!
+    expect(within(cancelledPlanCard).getByRole('button', { name: '删除' })).toBeInTheDocument()
+    expect(within(cancelledPlanCard).queryByRole('button', { name: '修改' })).not.toBeInTheDocument()
+    fireEvent.click(cancelledPlanCard)
+    expect(await screen.findByText('取消后允许删除')).toBeInTheDocument()
+    expect(screen.getByText('plan_cancelled')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '定时任务' }))
 
     expect(await screen.findByRole('heading', { name: '定时任务查看' })).toBeInTheDocument()
@@ -158,6 +170,43 @@ describe('V16 module pages', () => {
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
   })
 
+  it('运行状态页使用五个栏目并支持顶部摘要卡快捷切换', async () => {
+    renderPage('status')
+    expect(await screen.findByRole('heading', { name: '运行状态' })).toBeInTheDocument()
+
+    const sectionTabs = within(await screen.findByRole('tablist', { name: '运行状态栏目' }))
+    expect(sectionTabs.getByRole('tab', { name: '系统提示词上下文预览' })).toHaveAttribute('aria-selected', 'true')
+    expect(sectionTabs.getByRole('tab', { name: '今日 Token 情况' })).toBeInTheDocument()
+    expect(sectionTabs.getByRole('tab', { name: '用户 API 配置' })).toBeInTheDocument()
+    expect(sectionTabs.getByRole('tab', { name: '外部组件与消息路由' })).toBeInTheDocument()
+    expect(sectionTabs.getByRole('tab', { name: '调度与维护' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: '拼接组件状态' }))
+    expect(await screen.findByText('用户人格')).toBeInTheDocument()
+    expect(screen.getByText('users/kesepain/user_soul.md')).toBeInTheDocument()
+
+    fireEvent.click(sectionTabs.getByRole('tab', { name: '今日 Token 情况' }))
+    expect(await screen.findByText('327,845')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'API 配置，打开用户 API 配置栏目' }))
+    expect(sectionTabs.getByRole('tab', { name: '用户 API 配置' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('heading', { name: '用户 API 配置' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '外部消息路由，打开外部组件与消息路由栏目' }))
+    expect(sectionTabs.getByRole('tab', { name: '外部组件与消息路由' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByText('OneBot 正向 WebSocket')).toBeInTheDocument()
+
+    fireEvent.click(sectionTabs.getByRole('tab', { name: '调度与维护' }))
+    expect(screen.getByText('今日记忆更新与升级')).toBeInTheDocument()
+    expect(screen.getByText('系统及定时任务执行记录')).toBeInTheDocument()
+    expect(screen.getByText('记忆碎片到期晋升检查')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '对话轮次，打开系统提示词上下文预览栏目' }))
+    expect(sectionTabs.getByRole('tab', { name: '系统提示词上下文预览' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('button', { name: '对话轮次，打开系统提示词上下文预览栏目' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '刷新运行状态' })).toBeInTheDocument()
+  })
+
   it('子智能体页按全局与用户层查看详情并只允许删除用户子代理', async () => {
     let deleted = false
     const response = () => ({
@@ -193,20 +242,51 @@ describe('V16 module pages', () => {
     await waitFor(() => expect(screen.getByText('用户层暂无子智能体')).toBeInTheDocument())
   })
 
-  it('配置页提供可操作的外观设置和字段级编辑', async () => {
+  it('配置页使用六个纵向栏目并提供结构化字段编辑', async () => {
     renderPage('settings')
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
-    expect(screen.getByText('敏感字段脱敏')).toBeInTheDocument()
+    expect(screen.queryByText('结构化配置与敏感字段保护')).not.toBeInTheDocument()
     expect(screen.getByText('界面主题')).toBeInTheDocument()
     expect(screen.getByText('72%')).toBeInTheDocument()
     expect(screen.getByText('88%')).toBeInTheDocument()
     expect(screen.getByText('105%')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Prompt 与 Expand'))
-    expect(await screen.findByText('Prompt 注入诊断')).toBeInTheDocument()
-    expect(await screen.findByText('user_soul')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('配置文件 JSON'))
-    expect(await screen.findByLabelText('用户配置 JSON')).toBeInTheDocument()
-    expect(screen.getByText('用户配置可编辑')).toBeInTheDocument()
+    expect(screen.queryByText('Prompt 与 Expand')).not.toBeInTheDocument()
+    expect(screen.queryByText('配置文件 JSON')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider ›' }))
+    const providerSelect = await screen.findByRole('combobox', { name: 'Provider 类型' })
+    expect(providerSelect).toHaveTextContent('kemo')
+    expect(providerSelect).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(providerSelect)
+    expect(screen.getByRole('listbox', { name: 'Provider 类型选项' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /chat/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: /kemo/ }))
+    expect(screen.getByLabelText('模型')).toHaveValue('test-model')
+    expect(screen.getByLabelText('Base URL')).toHaveValue('http://127.0.0.1:8741')
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password')
+    expect(screen.getByRole('switch', { name: '流式输出' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('switch', { name: '流式输出' })).toHaveTextContent('已关闭')
+    expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+    expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '用户切换 ›' }))
+    expect(screen.queryByRole('combobox', { name: '可切换用户' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '记忆与上下文 ›' }))
+    expect(await screen.findByLabelText('Token 上限')).toHaveValue(1000000)
+    expect(screen.getByLabelText('Token 压缩比例')).toHaveValue('0.3')
+    expect(screen.getByLabelText('周记忆上限')).toHaveValue(100)
+
+    fireEvent.click(screen.getByRole('button', { name: '权限边界 ›' }))
+    expect(await screen.findByRole('switch', { name: '使用共享知识库' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByLabelText('插件白名单输入')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '运行限制 ›' }))
+    expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
+    expect(screen.getByRole('switch', { name: '自动接受任务计划' })).toHaveAttribute('aria-checked', 'false')
   })
 
   it('文件空间支持逐层目录、分区搜索与严格的区域操作权限', async () => {
@@ -296,6 +376,14 @@ describe('V16 module pages', () => {
     fireEvent.change(editor, { target: { value: '# 更新后的用户人格' } })
     fireEvent.click(screen.getByRole('button', { name: '保存用户人格' }))
     expect(await screen.findByText('用户人格已原子写入。')).toBeInTheDocument()
-    expect(screen.getByLabelText('全局人格 Markdown')).toHaveValue('# 全局人格')
+    expect(screen.getByRole('button', { name: '编辑用户人格' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下载用户人格' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '预览用户人格' }))
+    expect(screen.getByLabelText('用户人格 Markdown 预览')).toHaveTextContent('更新后的用户人格')
+    expect(screen.getByLabelText('全局人格 Markdown 预览')).toHaveTextContent('全局人格')
+    expect(screen.getByRole('button', { name: '下载全局人格' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('全局人格 Markdown')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /保存全局人格/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('全局安全边界')).not.toBeInTheDocument()
   })
 })

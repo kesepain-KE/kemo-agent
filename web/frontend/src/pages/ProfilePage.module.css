@@ -17,19 +17,28 @@
 .avatarControls > span { color: var(--brand); }
 .avatarControls .primaryButton, .editorFoot .primaryButton { border-color: var(--brand); background: var(--brand); color: #fff; }
 
-.editorGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.editorCard { overflow: hidden; }
-.editorCard textarea { width: calc(100% - 28px); min-height: 390px; margin: 14px; padding: 14px; resize: vertical; border: 1px solid var(--line); border-radius: 12px; outline: none; background: var(--surface-2); color: var(--text); font: .75rem/1.72 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.editorCard textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
-.warning { margin: 12px 14px 0; padding: 10px; display: flex; align-items: flex-start; gap: 8px; border: 1px solid color-mix(in srgb, var(--amber) 28%, var(--line)); border-radius: 10px; background: #fff7e9; color: var(--amber); }
-.warning svg { flex: 0 0 auto; margin-top: 1px; }
-.warning strong, .warning small { display: block; }
-.warning strong { font-size: .6875rem; }
-.warning small { margin-top: 2px; color: color-mix(in srgb, var(--amber) 76%, var(--text)); font-size: .59375rem; line-height: 1.45; }
+.editorGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 12px; }
+.editorCard { min-width: 0; overflow: hidden; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.editorGrid > .editorCard { margin-top: 0; }
+.editorToolbar { min-height: 52px; padding: 8px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.editorToolbar button { height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text-2); font-size: .6875rem; font-weight: 700; cursor: pointer; }
+.editorToolbar button:hover { border-color: var(--brand-line); background: var(--surface-hover); color: var(--brand); }
+.editorToolbar .activeTool { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+.soulSurface { box-sizing: border-box; width: calc(100% - 28px); height: 430px; min-height: 430px; margin: 0 14px 14px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; outline: none; overflow: auto; background: var(--surface-2); color: var(--text); }
+textarea.soulSurface { resize: none; font: .75rem/1.72 ui-monospace, SFMono-Regular, Consolas, monospace; }
+textarea.soulSurface:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.markdownPreview { font-size: .78125rem; line-height: 1.72; overflow-wrap: anywhere; }
+.markdownPreview > :first-child { margin-top: 0; }
+.markdownPreview > :last-child { margin-bottom: 0; }
+.markdownPreview h1, .markdownPreview h2, .markdownPreview h3 { margin: 1.15em 0 .55em; color: var(--text); line-height: 1.35; }
+.markdownPreview h1 { font-size: 1.25rem; }.markdownPreview h2 { font-size: 1.05rem; }.markdownPreview h3 { font-size: .9rem; }
+.markdownPreview p, .markdownPreview ul, .markdownPreview ol, .markdownPreview blockquote { margin: .65em 0; }
+.markdownPreview ul, .markdownPreview ol { padding-left: 1.55rem; }
+.markdownPreview code { padding: 2px 5px; border-radius: 5px; background: var(--surface-3); font: .72rem ui-monospace, SFMono-Regular, Consolas, monospace; }
+.markdownPreview pre { overflow: auto; padding: 12px; border-radius: 9px; background: var(--surface-3); }.markdownPreview pre code { padding: 0; background: transparent; }
+.markdownPreview blockquote { padding-left: 12px; border-left: 3px solid var(--brand-line); color: var(--muted); }
 .editorFoot { min-height: 58px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); }
 .editorFoot > span:first-child { min-width: 0; display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: .625rem; }
-.editorFoot .dangerButton, .confirmActions .dangerButton { border-color: color-mix(in srgb, var(--red) 35%, var(--line)); background: var(--red-soft); color: var(--red); }
-.confirmActions { display: flex; gap: 6px; flex: 0 0 auto; }
 
 @media (max-width: 1000px) {
   .profileCard { grid-template-columns: 76px 1fr; }
@@ -41,6 +50,6 @@
 @media (max-width: 620px) {
   .profileCard { grid-template-columns: 64px 1fr; padding: 14px; gap: 12px; }
   .avatarFrame { width: 64px; height: 64px; }
-  .editorCard textarea { min-height: 300px; }
+  .soulSurface { height: 320px; min-height: 320px; }
   .editorFoot { align-items: flex-start; flex-direction: column; }
 }

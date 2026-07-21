@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, FilePenLine, Globe2, RefreshCw, Save, ShieldAlert, UserRound } from 'lucide-react'
+import { Camera, Download, Eye, FilePenLine, Globe2, Pencil, RefreshCw, Save, UserRound } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useOutletContext } from 'react-router-dom'
 import {
   ApiError,
   getGlobalSoul,
   getUserAvatarUrl,
   getUserSoul,
-  updateGlobalSoul,
   updateUserSoul,
   uploadUserAvatar,
 } from '../api/client'
@@ -28,12 +29,10 @@ export function ProfilePage() {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [userDraft, setUserDraft] = useState('')
-  const [globalDraft, setGlobalDraft] = useState('')
   const [selectedAvatar, setSelectedAvatar] = useState<File | null>(null)
   const [avatarNotice, setAvatarNotice] = useState('')
   const [avatarFailed, setAvatarFailed] = useState(false)
   const [avatarRevision, setAvatarRevision] = useState(() => Date.now())
-  const [confirmGlobal, setConfirmGlobal] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
 
   const userSoulQuery = useQuery({
@@ -51,9 +50,6 @@ export function ProfilePage() {
   useEffect(() => {
     setUserDraft(userSoulQuery.data?.content || '')
   }, [user, userSoulQuery.data?.content])
-  useEffect(() => {
-    setGlobalDraft(globalSoulQuery.data?.content || '')
-  }, [globalSoulQuery.data?.content])
   useEffect(() => {
     setAvatarFailed(false)
     setAvatarRevision(Date.now())
@@ -81,15 +77,6 @@ export function ProfilePage() {
     },
     onError: (error) => setSaveNotice(error instanceof Error ? error.message : '用户人格保存失败'),
   })
-  const globalSoulMutation = useMutation({
-    mutationFn: updateGlobalSoul,
-    onSuccess: (result) => {
-      queryClient.setQueryData(['global-soul'], result)
-      setConfirmGlobal(false)
-      setSaveNotice('全局人格已原子写入，并将影响所有用户。')
-    },
-    onError: (error) => setSaveNotice(error instanceof Error ? error.message : '全局人格保存失败'),
-  })
 
   const chooseAvatar = (file: File | undefined) => {
     setAvatarNotice('')
@@ -113,7 +100,6 @@ export function ProfilePage() {
   const userMissing = isNotFound(userSoulQuery.error)
   const globalMissing = isNotFound(globalSoulQuery.error)
   const userChanged = userDraft !== (userSoulQuery.data?.content || '')
-  const globalChanged = globalDraft !== (globalSoulQuery.data?.content || '')
 
   return (
     <ModuleFrame
@@ -146,6 +132,8 @@ export function ProfilePage() {
           description={`users/${user}/user_soul.md`}
           draft={userDraft}
           onChange={setUserDraft}
+          editable
+          filename="user_soul.md"
           missing={userMissing}
           updatedAt={userSoulQuery.data?.updated_at}
           saving={userSoulMutation.isPending}
@@ -156,17 +144,10 @@ export function ProfilePage() {
           icon={<Globe2 size={16} />}
           title="全局人格"
           description="config/global_soul.md · 影响所有用户"
-          draft={globalDraft}
-          onChange={setGlobalDraft}
+          draft={globalSoulQuery.data?.content || ''}
+          filename="global_soul.md"
           missing={globalMissing}
           updatedAt={globalSoulQuery.data?.updated_at}
-          saving={globalSoulMutation.isPending}
-          changed={globalChanged}
-          dangerous
-          confirm={confirmGlobal}
-          onRequestSave={() => setConfirmGlobal(true)}
-          onCancel={() => setConfirmGlobal(false)}
-          onSave={() => globalSoulMutation.mutate(globalDraft)}
         />
       </div>
     </ModuleFrame>
@@ -179,39 +160,55 @@ function SoulEditor({
   description,
   draft,
   onChange,
+  editable = false,
+  filename,
   missing,
   updatedAt,
-  saving,
-  changed,
-  dangerous = false,
-  confirm = false,
-  onRequestSave,
-  onCancel,
+  saving = false,
+  changed = false,
   onSave,
 }: {
   icon: React.ReactNode
   title: string
   description: string
   draft: string
-  onChange: (value: string) => void
+  onChange?: (value: string) => void
+  editable?: boolean
+  filename: string
   missing: boolean
   updatedAt?: number
-  saving: boolean
-  changed: boolean
-  dangerous?: boolean
-  confirm?: boolean
-  onRequestSave?: () => void
-  onCancel?: () => void
-  onSave: () => void
+  saving?: boolean
+  changed?: boolean
+  onSave?: () => void
 }) {
+  const [mode, setMode] = useState<'edit' | 'preview'>(editable ? 'edit' : 'preview')
   const invalid = !draft.trim() || draft.length > MAX_SOUL_CHARS
+  const download = () => downloadMarkdown(filename, draft)
   return <article className={`panel ${styles.editorCard}`}>
     <div className="panel-head"><div className="panel-title"><span className="panel-title-icon">{icon}</span><span><strong>{title}</strong><span>{description}</span></span></div><StatusChip status={missing ? 'missing' : changed ? 'warning' : 'saved'}>{missing ? '尚未创建' : changed ? '有未保存修改' : '已同步'}</StatusChip></div>
-    {dangerous && <div className={styles.warning}><ShieldAlert size={15} /><span><strong>全局安全边界</strong><small>保存后立即成为所有用户的全局人格来源，请确认内容不削弱系统安全规则。</small></span></div>}
-    <textarea aria-label={`${title} Markdown`} value={draft} maxLength={MAX_SOUL_CHARS} spellCheck={false} placeholder={`输入${title} Markdown…`} onChange={(event) => onChange(event.target.value)} />
+    <div className={styles.editorToolbar} aria-label={`${title}操作`}>
+      {editable && <button type="button" className={mode === 'edit' ? styles.activeTool : ''} aria-label={`编辑${title}`} onClick={() => setMode('edit')}><Pencil size={14} />编辑</button>}
+      <button type="button" className={mode === 'preview' ? styles.activeTool : ''} aria-label={`预览${title}`} onClick={() => setMode('preview')}><Eye size={14} />预览</button>
+      <button type="button" aria-label={`下载${title}`} onClick={download}><Download size={14} />下载</button>
+    </div>
+    {editable && mode === 'edit'
+      ? <textarea className={styles.soulSurface} aria-label={`${title} Markdown`} value={draft} maxLength={MAX_SOUL_CHARS} spellCheck={false} placeholder={`输入${title} Markdown…`} onChange={(event) => onChange?.(event.target.value)} />
+      : <div className={`${styles.soulSurface} ${styles.markdownPreview}`} aria-label={`${title} Markdown 预览`}><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft || `*${title}暂无内容*`}</ReactMarkdown></div>}
     <div className={styles.editorFoot}>
       <span><FilePenLine size={13} />{draft.length.toLocaleString()} / {MAX_SOUL_CHARS.toLocaleString()} 字符 · {updatedAt ? `更新于 ${formatDateTime(updatedAt)}` : '尚无文件'}</span>
-      {!dangerous || !confirm ? <button type="button" className={dangerous ? styles.dangerButton : styles.primaryButton} disabled={!changed || invalid || saving} onClick={dangerous ? onRequestSave : onSave}><Save size={14} />{saving ? '正在保存…' : dangerous ? '审核并保存' : missing ? '创建人格文件' : '保存用户人格'}</button> : <span className={styles.confirmActions}><button type="button" onClick={onCancel}>取消</button><button type="button" className={styles.dangerButton} disabled={invalid || saving} onClick={onSave}>{saving ? '正在保存…' : '确认覆盖全局人格'}</button></span>}
+      {editable && <button type="button" className={styles.primaryButton} disabled={!changed || invalid || saving} onClick={onSave}><Save size={14} />{saving ? '正在保存…' : missing ? '创建人格文件' : '保存用户人格'}</button>}
     </div>
   </article>
+}
+
+function downloadMarkdown(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const objectUrl = typeof URL.createObjectURL === 'function' ? URL.createObjectURL(blob) : `data:text/markdown;charset=utf-8,${encodeURIComponent(content)}`
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  if (objectUrl.startsWith('blob:')) URL.revokeObjectURL(objectUrl)
 }
