@@ -4,19 +4,20 @@ import {
   CheckCircle2,
   Check,
   ChevronDown,
-  FileText,
   ListChecks,
-  Plus,
   Copy,
   Pencil,
+  RotateCcw,
+  Save,
   TimerReset,
+  Trash2,
   UserRound,
   Zap,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { getHistory, getSense, getTasks, streamChat, submitGuidance, updatePlan, uploadUserFile } from '../api/client'
+import { compressSession, deleteSession, getHistory, getSense, getTasks, streamChat, submitGuidance, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import type { ShellOutletContext } from '../components/AppShell'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
@@ -212,11 +213,32 @@ function greetingLabel() {
 
 function BookOpen_() { return <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z" /></svg> }
 
-function compactPlanAssistantText(content: string, hasPlanBubble: boolean) {
+export function compactPlanAssistantText(content: string, hasPlanBubble: boolean) {
   if (!hasPlanBubble) return content
-  const markers = ['以下是计划详情', '以下是计划的详细信息', '## 任务计划', '📋']
+  const markers = ['以下是计划详情', '以下是计划的详细信息', '新计划已生成', '任务计划已生成', '计划已生成', '计划包含', '计划 ID', '## 任务计划', '📋']
   const cut = markers.map((marker) => content.indexOf(marker)).filter((index) => index >= 0).sort((left, right) => left - right)[0]
-  return cut === undefined ? content : content.slice(0, cut).trim() || '已创建任务计划，请在下方确认。'
+  return cut === undefined ? content : '任务计划已创建，请在发送框上方查看并确认。'
+}
+
+const terminalPlanStatuses = new Set(['completed', 'rejected', 'cancelled'])
+
+export function selectDockedPlan(plans: PlanSummary[]) {
+  return [...plans].reverse().find((plan) => !terminalPlanStatuses.has(plan.status))
+}
+
+function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; docked: boolean; onOpen: () => void }) {
+  return (
+    <article className="task-plan-record" aria-label={`已创建任务计划：${plan.title}`}>
+      <span className="task-plan-record-icon"><ListChecks size={17} /></span>
+      <span className="task-plan-record-copy">
+        <small>已创建任务计划</small>
+        <strong>{plan.title}</strong>
+      </span>
+      <span className={`task-plan-record-status status-${plan.status}`}>{statusLabel(plan.status)}</span>
+      <span className="task-plan-record-progress">{plan.progress.completed}/{plan.progress.total}</span>
+      <button type="button" onClick={onOpen}>{docked ? '查看当前计划' : '任务中枢'}</button>
+    </article>
+  )
 }
 
 function cronScheduleLabel(task: CronTaskSummary) {
@@ -285,28 +307,29 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, setSessionId, sessions, refreshSessions, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, setSessionId, sessions, refreshSessions, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('')
   const [liveItems, setLiveItems] = useState<ChatItem[]>([])
-  const [running, setRunning] = useState(false)
   const [editingSource, setEditingSource] = useState<{ id: string; content: string } | null>(null)
   const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
   const [copiedItem, setCopiedItem] = useState('')
-  const [activeRunId, setActiveRunId] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
+  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | ''>('')
+  const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
   const [toolPause, setToolPause] = useState<{ limit: number; executed: number } | null>(null)
   const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
   const locallyCommittedSessionRef = useRef('')
   const historyHandoffSessionRef = useRef('')
+  const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
   const hasCommitted = useMemo(() => {
     if (!sessionId) return false
     return sessionId === locallyCommittedSessionRef.current
@@ -345,6 +368,9 @@ export function ChatPage() {
     : toolPause ?? (liveItems.length === 0 ? persistedToolPause : null)
 
   useEffect(() => {
+    const conversationKey = `${user}\u0000${sessionId}`
+    if (conversationKeyRef.current === conversationKey) return
+    conversationKeyRef.current = conversationKey
     if (historyHandoffSessionRef.current === sessionId) return
     historyHandoffSessionRef.current = ''
     followOutputRef.current = true
@@ -355,10 +381,11 @@ export function ChatPage() {
     setActiveRunId('')
     setToolPause(null)
     setUploadFeedback(null)
+    setConversationBusy('')
+    setConversationFeedback(null)
     setPlanOverrides({})
-    abortRef.current?.abort()
-    setRunning(false)
-  }, [user, sessionId])
+    abortChatRun()
+  }, [abortChatRun, user, sessionId])
 
   useEffect(() => {
     if (historyHandoffSessionRef.current !== sessionId || !historyQuery.data) return
@@ -400,7 +427,7 @@ export function ChatPage() {
     }])
     setEditingSource(null)
     const controller = new AbortController()
-    abortRef.current = controller
+    setChatAbortController(controller)
     try {
       await streamChat({
         user,
@@ -432,13 +459,13 @@ export function ChatPage() {
         setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
       }
     } finally {
-      abortRef.current = null
+      setChatAbortController(null)
       setActiveRunId('')
       setRunning(false)
     }
   }
 
-  const stop = () => abortRef.current?.abort()
+  const stop = abortChatRun
   const uploadFile = async (file: File) => {
     if (!user) return
     setUploadFeedback({ tone: 'pending', text: `正在上传 ${file.name}…` })
@@ -451,9 +478,69 @@ export function ChatPage() {
     }
   }
   const newConversation = () => {
-    abortRef.current?.abort()
+    abortChatRun()
     setSessionId('')
     setConversationMenuOpen(false)
+  }
+
+  const saveAndNewConversation = async () => {
+    if (running || conversationBusy) return
+    setConversationBusy('save')
+    setConversationFeedback(null)
+    try {
+      await refreshSessions()
+      newConversation()
+    } catch (error) {
+      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
+    } finally {
+      setConversationBusy('')
+    }
+  }
+
+  const clearConversation = async () => {
+    if (running || conversationBusy) return
+    if (sessionId && hasCommitted && !window.confirm('清空此对话将删除当前归档，并立即创建一个新对话。是否继续？')) return
+    setConversationBusy('clear')
+    setConversationFeedback(null)
+    try {
+      if (sessionId && hasCommitted) {
+        await deleteSession(user, sessionId)
+        queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
+        if (locallyCommittedSessionRef.current === sessionId) locallyCommittedSessionRef.current = ''
+        if (historyHandoffSessionRef.current === sessionId) historyHandoffSessionRef.current = ''
+        await refreshSessions()
+        refreshOverview()
+      }
+      newConversation()
+    } catch (error) {
+      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '清空当前对话失败' })
+    } finally {
+      setConversationBusy('')
+    }
+  }
+
+  const compressCurrentConversation = async () => {
+    if (running || conversationBusy) return
+    if (!sessionId || !hasCommitted) {
+      setConversationFeedback({ tone: 'error', text: '当前对话尚未归档，暂时无法压缩。' })
+      return
+    }
+    setConversationBusy('compress')
+    setConversationFeedback(null)
+    try {
+      const result = await compressSession(user, sessionId)
+      setConversationFeedback({
+        tone: 'success',
+        text: result.compressed
+          ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。`
+          : '当前上下文较短，暂时无需压缩。',
+      })
+      refreshOverview()
+    } catch (error) {
+      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '手动上下文压缩失败' })
+    } finally {
+      setConversationBusy('')
+    }
   }
 
   const editAndResend = (id: string, content: string) => {
@@ -483,6 +570,12 @@ export function ChatPage() {
   }
 
   const activePlan = overview?.active_plan
+  const lastUserMessage = [...items].reverse().find((item) => item.kind === 'message' && item.role === 'user')
+  const regenerateLastResponse = () => {
+    if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
+    setConversationFeedback(null)
+    void send(lastUserMessage.content)
+  }
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
   const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
   const changePlanStatus = async (plan: PlanSummary, status: 'approved' | 'paused' | 'cancelled') => {
@@ -503,8 +596,27 @@ export function ChatPage() {
     onStop: () => void changePlanStatus(plan, 'paused'),
     onRetry: () => void changePlanStatus(plan, 'approved'),
   })
+  const persistedPlans = tasksQuery.data?.plans || []
+  const persistedPlanById = new Map(persistedPlans.map((plan) => [plan.plan_id, plan]))
+  const resolvePlan = (plan: PlanSummary) => planOverrides[plan.plan_id] || persistedPlanById.get(plan.plan_id) || plan
   const renderedPlanIds = new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id))
-  const persistedSessionPlans = (tasksQuery.data?.plans || []).filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id))
+  const persistedSessionPlans = persistedPlans.filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id)).map(resolvePlan)
+  const renderedSessionPlans = items
+    .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
+    .map((item) => resolvePlan(item.plan))
+  const dockedPlan = selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
+  const revealPlan = (plan: PlanSummary) => {
+    if (plan.plan_id !== dockedPlan?.plan_id) {
+      navigate(`/tasks?user=${encodeURIComponent(user)}`)
+      return
+    }
+    setCollapsedPlans((current) => {
+      const next = new Set(current)
+      next.delete(plan.plan_id)
+      return next
+    })
+    window.requestAnimationFrame(() => composerPlanDockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+  }
   const userRoundCount = items.filter((item) => item.kind === 'message' && item.role === 'user').length
   const currentRound = Math.max(1, userRoundCount, Number(overview?.context.rounds || 0))
   const roundLimit = Math.max(1, Number(overview?.context.round_limit || 30))
@@ -534,7 +646,7 @@ export function ChatPage() {
                 <div className="snapshot-item"><strong>{overview?.counts.active_tasks ?? '—'} 个</strong><span>活动任务</span></div>
               </article>
             </div>
-            {activePlan && <article className={`active-task-card ${activeTaskOpen ? 'open' : ''}`}>
+            {activePlan && !dockedPlan && <article className={`active-task-card ${activeTaskOpen ? 'open' : ''}`}>
               <div className="active-task-main">
                 <span className="active-task-play"><ListChecks size={17} /></span>
                 <span className="active-task-copy"><small>{statusLabel(activePlan.status)} · 当前用户 {user}</small><strong>{activePlan.title}</strong><span>{activePlan.description}</span></span>
@@ -573,8 +685,8 @@ export function ChatPage() {
             if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
             if (item.kind === 'usage') return <UsageCard key={item.id} item={item} />
             if (item.kind === 'task_plan') {
-              const plan = planOverrides[item.plan.plan_id] || item.plan
-              return <TaskPlanBubble key={item.id} {...taskPlanFromSummary(plan)} collapsed={collapsedPlans.has(plan.plan_id)} {...planActions(plan)} />
+              const plan = resolvePlan(item.plan)
+              return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
             }
             if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
             if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
@@ -594,10 +706,19 @@ export function ChatPage() {
               </article>
             )
           })}
-          {items.length > 0 && persistedSessionPlans.map((rawPlan) => { const plan = planOverrides[rawPlan.plan_id] || rawPlan; return <TaskPlanBubble key={`persisted_${plan.plan_id}`} {...taskPlanFromSummary(plan)} collapsed={collapsedPlans.has(plan.plan_id)} {...planActions(plan)} /> })}
+          {items.length > 0 && persistedSessionPlans.map((plan) => <TaskPlanRecord key={`persisted_${plan.plan_id}`} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />)}
         </div>
       </div>
       <div className="composer-zone">
+        {dockedPlan ? (
+          <div className="composer-plan-dock" ref={composerPlanDockRef}>
+            <TaskPlanBubble
+              {...taskPlanFromSummary(dockedPlan)}
+              collapsed={collapsedPlans.has(dockedPlan.plan_id)}
+              {...planActions(dockedPlan)}
+            />
+          </div>
+        ) : null}
         <AgentComposer
           value={draft}
           placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : visibleToolPause ? '已暂停工具调用；可点击继续或输入新的指令…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
@@ -611,19 +732,24 @@ export function ChatPage() {
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
               <div className="conversation-menu-head">对话操作</div>
-              <button className="conversation-action" role="menuitem" onClick={newConversation}>
-                <span className="conversation-action-icon"><Plus size={16} /></span>
-                <span className="conversation-action-copy"><strong>创建新对话</strong><span>开启独立的上下文窗口</span></span>
+              <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void saveAndNewConversation() }}>
+                <span className="conversation-action-icon"><Save size={16} /></span>
+                <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在确认归档…' : '保留当前归档并开启新上下文'}</span></span>
               </button>
-              <button className="conversation-action" role="menuitem" disabled>
-                <span className="conversation-action-icon"><FileText size={16} /></span>
-                <span className="conversation-action-copy"><strong>自动保存已启用</strong><span>每轮成功后写入当前用户历史</span></span>
+              <button className="conversation-action danger" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void clearConversation() }}>
+                <span className="conversation-action-icon"><Trash2 size={16} /></span>
+                <span className="conversation-action-copy"><strong>清空此对话</strong><span>{conversationBusy === 'clear' ? '正在删除当前归档…' : '删除当前归档并创建新对话'}</span></span>
               </button>
-              <button className="conversation-action compress" role="menuitem" disabled>
+              <button className="conversation-action compress" role="menuitem" disabled={running || Boolean(conversationBusy) || !sessionId || !hasCommitted} onClick={() => { void compressCurrentConversation() }}>
                 <span className="conversation-action-icon"><Zap size={16} /></span>
-                <span className="conversation-action-copy"><strong>手动压缩待接入</strong><span>自动压缩仍由上下文生命周期处理</span></span>
+                <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在执行 Token 压缩…' : '使用 Token 压缩法整理当前上下文'}</span></span>
               </button>
-              <div className="conversation-menu-foot">成功响应自动保存 · 手动压缩 API 尚未开放</div>
+              <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={regenerateLastResponse}>
+                <span className="conversation-action-icon"><RotateCcw size={16} /></span>
+                <span className="conversation-action-copy"><strong>重新发送一次消息</strong><span>重新提交上一条用户消息并生成新回复</span></span>
+              </button>
+              {conversationFeedback ? <div className={`conversation-menu-status ${conversationFeedback.tone}`} role="status">{conversationFeedback.text}</div> : null}
+              <div className="conversation-menu-foot">每次打开新网页都会创建新对话，可通过打开历史对话接续对话。</div>
             </div>
           ) : null}
           onChange={setDraft}

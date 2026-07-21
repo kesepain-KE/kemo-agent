@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, extractPlanSummary, isNearScrollBottom, reduceRunEvent } from './ChatPage'
-import type { ChatItem, CronTaskSummary, SenseSourceSummary } from '../types/api'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, isNearScrollBottom, reduceRunEvent, selectDockedPlan } from './ChatPage'
+import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
-  it('task_plan 子代理结果生成独立任务计划气泡项', () => {
+  it('task_plan 子代理结果生成独立任务计划记录项', () => {
     const event = {
       type: 'tool_call_result' as const,
       tool_call_id: 'call-plan',
@@ -18,6 +18,22 @@ describe('reduceRunEvent', () => {
     expect(plan).toMatchObject({ plan_id: 'plan_12345678', title: '测试任务计划' })
     const items = reduceRunEvent([], event)
     expect(items.map((item) => item.kind)).toEqual(['tool', 'task_plan'])
+  })
+
+  it('发送框只停靠最新的非终态任务计划', () => {
+    const plan = (plan_id: string, status: string): PlanSummary => ({
+      plan_id, title: plan_id, description: '', status, auto_accept: false, reminder: '', source: 'web', session_id: 's1',
+      current_step: '', revision: 1, created_at: '', updated_at: '', progress: { completed: 0, total: 1, percent: 0 },
+      steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }],
+    })
+    expect(selectDockedPlan([plan('running-old', 'running'), plan('done', 'completed'), plan('pending-new', 'pending')])?.plan_id).toBe('pending-new')
+    expect(selectDockedPlan([plan('done', 'completed'), plan('cancelled', 'cancelled')])).toBeUndefined()
+  })
+
+  it('消息流中的计划详情压缩为轻量确认文本', () => {
+    expect(compactPlanAssistantText('新计划已生成：\n\n| 步骤 | 操作 |\n| --- | --- |', true)).toBe('任务计划已创建，请在发送框上方查看并确认。')
+    expect(compactPlanAssistantText('普通回复正文', true)).toBe('普通回复正文')
+    expect(compactPlanAssistantText('新计划已生成：完整步骤', false)).toBe('新计划已生成：完整步骤')
   })
 
   it('最近活动只保留用户定时任务', () => {

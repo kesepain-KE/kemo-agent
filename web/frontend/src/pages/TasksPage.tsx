@@ -22,7 +22,7 @@ type ExecutionRecord = {
 }
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
-const inspectable = (plan: PlanSummary) => ['pending', 'approved', 'completed'].includes(plan.status)
+const inspectable = (plan: PlanSummary) => ['pending', 'approved', 'completed', 'cancelled'].includes(plan.status)
 
 function Progress({ plan }: { plan: PlanSummary }) {
   const completed = plan.progress.completed
@@ -32,7 +32,7 @@ function Progress({ plan }: { plan: PlanSummary }) {
 function PlanCard({ plan, selected, onSelect, onModify, onPause, onDelete }: { plan: PlanSummary; selected: boolean; onSelect: () => void; onModify: () => void; onPause: () => void; onDelete: () => void }) {
   const canInspect = inspectable(plan)
   return <article className={`${styles.planCard} ${selected ? styles.selected : ''} ${!canInspect ? styles.runningCard : ''}`} onClick={() => canInspect && onSelect()} role={canInspect ? 'button' : undefined} tabIndex={canInspect ? 0 : -1}>
-    <header className={styles.planHeader}><div className={styles.planIdentity}><span className={`${styles.planAvatar} ${plan.status === 'running' ? styles.runningAvatar : ''} ${plan.status === 'completed' ? styles.completedAvatar : ''}`}>{plan.status === 'running' ? 'R' : 'P'}</span><div><h3>{plan.title}</h3><p>{plan.plan_id}<span>·</span>更新于 {formatDateTime(plan.updated_at)}</p></div></div><div className={styles.planActions}><StatusChip status={plan.status} />{['pending', 'approved', 'paused'].includes(plan.status) && <><button type="button" onClick={(event) => { event.stopPropagation(); onModify() }}><Pencil size={14} />修改</button><button type="button" onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button></>}{plan.status === 'running' && <button type="button" onClick={(event) => { event.stopPropagation(); onPause() }}><CirclePause size={15} />暂停</button>}{plan.status === 'completed' && <button type="button" onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button>}</div></header>
+    <header className={styles.planHeader}><div className={styles.planIdentity}><span className={`${styles.planAvatar} ${plan.status === 'running' ? styles.runningAvatar : ''} ${plan.status === 'completed' ? styles.completedAvatar : ''}`}>{plan.status === 'running' ? 'R' : 'P'}</span><div><h3>{plan.title}</h3><p>{plan.plan_id}<span>·</span>更新于 {formatDateTime(plan.updated_at)}</p></div></div><div className={styles.planActions}><StatusChip status={plan.status} />{['pending', 'approved', 'paused'].includes(plan.status) && <><button type="button" onClick={(event) => { event.stopPropagation(); onModify() }}><Pencil size={14} />修改</button><button type="button" onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button></>}{plan.status === 'running' && <button type="button" onClick={(event) => { event.stopPropagation(); onPause() }}><CirclePause size={15} />暂停</button>}{TERMINAL_STATUSES.has(plan.status) && <button type="button" onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button>}</div></header>
     <Progress plan={plan} />
     <div className={styles.stepChips}>{plan.steps.map((step, index) => <span key={step.step_id} className={`${styles.stepChip} ${step.status === 'running' ? styles.activeStep : ''} ${step.status === 'completed' ? styles.doneStep : ''}`}><b>{step.status === 'completed' ? <Check size={12} /> : index + 1}</b>{step.title}</span>)}</div>
   </article>
