@@ -27,6 +27,7 @@ from message.transport import (
     RegisteredTransport,
     Transport,
     TransportPolicy,
+    TransportRegistrationError,
     TransportRegistry,
 )
 from provider.factory import create_provider
@@ -202,6 +203,35 @@ class RuntimeHost:
                 transport.name, "transport"
             )
             return item
+
+    def check_message_transport(self, platform: str, bound_user: str) -> dict[str, Any]:
+        """Run an explicit health check for one user-bound folder transport."""
+
+        item = self.registry.get(platform)
+        transport = item.transport
+        if not isinstance(transport, FileMessageTransport):
+            raise RuntimeError(f"Transport 不是外部消息文件夹插件：{platform}")
+        if transport.config.bound_user != bound_user:
+            raise PermissionError("外部消息模块未绑定当前用户")
+        return transport.check_health()
+
+    def remove_message_transport(self, platform: str, bound_user: str) -> None:
+        """Stop and unregister one folder transport before its files are deleted."""
+
+        try:
+            item = self.registry.get(platform)
+        except TransportRegistrationError:
+            return
+        transport = item.transport
+        if not isinstance(transport, FileMessageTransport):
+            raise RuntimeError(f"Transport 不是外部消息文件夹插件：{platform}")
+        if transport.config.bound_user != bound_user:
+            raise PermissionError("外部消息模块未绑定当前用户")
+        transport.stop()
+        item.state = "stopped"
+        self.registry.unregister(platform)
+        with self._lock:
+            self._components.pop(f"transport:{platform}", None)
 
     def start(self) -> None:
         with self._lock:

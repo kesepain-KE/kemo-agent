@@ -48,6 +48,7 @@ _EXPAND_JSON_FIELDS = {
     "start_expand",
     "start_control",
 }
+_EXPAND_JSON_OPTIONAL_FIELDS = {"recent_update"}
 _EXPAND_HEALTH = {"正常", "异常"}
 _EXPAND_INJECTION_HEADING = re.compile(r"^##\s+注入层\s*$", re.MULTILINE)
 _EXPAND_OPERATION_HEADING = re.compile(r"^##\s+操作层\s*$", re.MULTILINE)
@@ -129,7 +130,7 @@ def _invalid_expand_meta(module_dir: Path, error: str, *, name: str = "") -> Exp
     )
 
 
-def _read_expand_meta(module_dir: Path) -> ExpandMeta:
+def read_expand_meta(module_dir: Path) -> ExpandMeta:
     """Read one standardized expand module without failing the whole registry."""
 
     json_path = module_dir / "expand.json"
@@ -142,7 +143,7 @@ def _read_expand_meta(module_dir: Path) -> ExpandMeta:
     if not isinstance(raw, dict):
         return _invalid_expand_meta(module_dir, "expand.json 根节点必须是对象")
     missing = sorted(_EXPAND_JSON_FIELDS - set(raw))
-    unknown = sorted(set(raw) - _EXPAND_JSON_FIELDS)
+    unknown = sorted(set(raw) - _EXPAND_JSON_FIELDS - _EXPAND_JSON_OPTIONAL_FIELDS)
     raw_name = raw.get("name")
     display_name = raw_name.strip() if isinstance(raw_name, str) else module_dir.name
     if missing:
@@ -189,6 +190,20 @@ def _read_expand_meta(module_dir: Path) -> ExpandMeta:
         return _invalid_expand_meta(
             module_dir, "input_health 必须是“正常”或“异常”", name=display_name
         )
+    recent_update = raw.get("recent_update")
+    if recent_update is not None:
+        if not isinstance(recent_update, str) or not recent_update.strip():
+            return _invalid_expand_meta(
+                module_dir, "recent_update 必须是非空字符串", name=display_name
+            )
+        try:
+            datetime.strptime(recent_update.strip(), _SENSE_TIME_FORMAT)
+        except ValueError:
+            return _invalid_expand_meta(
+                module_dir,
+                f"recent_update 必须符合 {_SENSE_TIME_FORMAT}",
+                name=display_name,
+            )
     file_fields = {
         "input_data": (raw["input_data"].strip(), ".md"),
         "start_update": (raw["start_update"].strip(), ".py"),
@@ -626,7 +641,7 @@ class PromptSourceRegistry:
             invalid: list[str] = []
             health_status: dict[str, dict[str, Any]] = {}
             for entry_scope, module, module_dir in scope_entries:
-                meta = _read_expand_meta(module_dir)
+                meta = read_expand_meta(module_dir)
                 health_status[module] = {
                     "name": meta.name,
                     "explain": meta.explain,
