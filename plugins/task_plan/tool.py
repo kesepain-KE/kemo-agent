@@ -57,6 +57,39 @@ def _step_by_id(plan: dict[str, Any], step_id: str) -> dict[str, Any] | None:
     )
 
 
+def _next_runnable_step(plan: dict[str, Any]) -> dict[str, Any] | None:
+    steps = [step for step in (plan.get("steps") or []) if isinstance(step, dict)]
+    by_id = {str(step.get("step_id") or ""): step for step in steps}
+    for step in steps:
+        if step.get("status") != "pending":
+            continue
+        dependencies = [str(value) for value in (step.get("depends_on") or [])]
+        if all(by_id.get(dependency, {}).get("status") == "completed" for dependency in dependencies):
+            return step
+    return None
+
+
+def _progress_payload(plan: dict[str, Any], *, completed_step_id: str = "") -> dict[str, Any]:
+    steps = [step for step in (plan.get("steps") or []) if isinstance(step, dict)]
+    completed = sum(step.get("status") == "completed" for step in steps)
+    remaining_steps = [
+        step for step in steps if step.get("status") not in _STEP_TERMINAL_STATUSES
+    ]
+    next_step = _next_runnable_step(plan) if plan.get("status") == "running" else None
+    completed_step = _step_by_id(plan, completed_step_id) if completed_step_id else None
+    return {
+        "completed_step": completed_step,
+        "progress": {
+            "completed": completed,
+            "total": len(steps),
+            "remaining": len(remaining_steps),
+        },
+        "next_step": next_step,
+        "remaining_steps": remaining_steps,
+        "plan_status": str(plan.get("status") or ""),
+    }
+
+
 def _auto_complete_check(store: PlanStore, plan_id: str) -> dict[str, Any]:
     plan = store.read(plan_id)
     steps = plan.get("steps") or []
@@ -77,6 +110,8 @@ def _step_done(
     plan_id: str,
     step_id: str,
     result_text: str,
+    *,
+    allow_paused: bool = False,
 ) -> dict[str, Any]:
     current = store.read(plan_id)
     step = _step_by_id(current, step_id)
@@ -86,7 +121,10 @@ def _step_done(
         return current
     if step.get("status") in {"failed", "skipped", "cancelled"}:
         raise ValueError(f"步骤 {step_id} 当前状态为 {step.get('status')!r}，无法完成")
-    if current.get("status") not in {"approved", "running", "paused"}:
+    allowed_statuses = {"approved", "running"}
+    if allow_paused:
+        allowed_statuses.add("paused")
+    if current.get("status") not in allowed_statuses:
         raise ValueError(
             f"计划 {plan_id} 当前状态为 {current.get('status')!r}，无法更新步骤"
         )
@@ -101,7 +139,7 @@ def _step_done(
             target["result"] = result_text
         target["finished_at"] = _now()
         plan["current_step"] = step_id
-        if plan.get("status") in {"approved", "paused"}:
+        if plan.get("status") == "approved":
             plan["status"] = "running"
         return plan
 
@@ -164,6 +202,14 @@ def run(
     selected_action = str(action or "").strip().casefold()
     if selected_action not in _ACTIONS:
         return _result(False, error=f"未知 action: {selected_action or action}")
+    if (
+        str(context.get("task_plan_mode") or "") == "executor_managed"
+        and selected_action in {"step_done", "step_fail"}
+    ):
+        return _result(
+            False,
+            error="当前计划步骤由框架执行器维护状态，请只报告执行结果，不要调用 step_done 或 step_fail",
+        )
 
     if selected_action == "list":
         plans = store.list_plans()
@@ -195,8 +241,21 @@ def run(
         if STEP_ID_RE.fullmatch(selected_step_id) is None:
             return _result(False, error=f"step_id 无效: {selected_step_id}")
         try:
-            plan = _step_done(store, selected_plan_id, selected_step_id, str(result or ""))
-            return _result(True, plan=plan)
+            plan = _step_done(
+                store,
+                selected_plan_id,
+                selected_step_id,
+                str(result or ""),
+                allow_paused=(
+                    str(context.get("task_plan_mode") or "") == "agent_managed"
+                    and str(context.get("task_plan_id") or "") == selected_plan_id
+                ),
+            )
+            return _result(
+                True,
+                plan=plan,
+                **_progress_payload(plan, completed_step_id=selected_step_id),
+            )
         except (PlanError, ValueError) as exc:
             return _result(False, error=str(exc))
 
@@ -209,7 +268,11 @@ def run(
             return _result(False, error=f"step_id 无效: {selected_step_id}")
         try:
             plan = _step_fail(store, selected_plan_id, selected_step_id, error_text)
-            return _result(True, plan=plan)
+            return _result(
+                True,
+                plan=plan,
+                **_progress_payload(plan, completed_step_id=selected_step_id),
+            )
         except (PlanError, ValueError) as exc:
             return _result(False, error=str(exc))
 
