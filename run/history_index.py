@@ -12,7 +12,7 @@ continues to be accepted during the migration period.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import copy
 import hashlib
 import json
@@ -30,6 +30,7 @@ INDEX_FILENAME = "data.json"
 INDEX_LOCK_FILENAME = ".data.index.lock"
 MEMORY_CLAIM_STALE_SECONDS = 15 * 60
 MEMORY_RETRY_DELAY_SECONDS = 30
+SUMMARY_CLAIM_STALE_SECONDS = 15 * 60
 _KEY_SEPARATOR = "\x1f"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
@@ -916,6 +917,146 @@ def update_title(
         if not isinstance(record, dict):
             return None
         record["title"] = title
+        record["title_source"] = "manual"
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
+def queue_summary(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Queue card metadata generation after a session is durably closed."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict):
+            return {"status": "skipped", "reason": "session_not_found", "rounds": 0}
+        target_round = max(0, int(record.get("last_committed_round") or record.get("rounds") or 0))
+        if record.get("lifecycle") != "closed":
+            return {"status": "skipped", "reason": "session_not_closed", "rounds": target_round}
+        if target_round < 1 or not record.get("archive_window"):
+            record["summary_status"] = "none"
+            record["summary_target_round"] = target_round
+            index["sessions"][key] = record
+            _write_index_unlocked(root, user, index)
+            return {"status": "skipped", "reason": "no_archive_rounds", "rounds": target_round}
+        completed_round = max(0, int(record.get("summary_completed_round") or 0))
+        if completed_round >= target_round and str(record.get("summary") or "").strip():
+            return {"status": "completed", "reason": "already_current", "rounds": target_round}
+        record["summary_status"] = "queued"
+        record["summary_target_round"] = target_round
+        record["summary_state_updated_at"] = _now()
+        for field in ("summary_claim_id", "summary_claimed_at", "summary_retry_at", "summary_error"):
+            record.pop(field, None)
+        index["sessions"][key] = record
+        _write_index_unlocked(root, user, index)
+        return {"status": "queued", "reason": "session_closed", "rounds": target_round}
+
+
+def claim_pending_summary(
+    root: Path,
+    user: str,
+    *,
+    worker_id: str | None = None,
+    stale_after_seconds: float = SUMMARY_CLAIM_STALE_SECONDS,
+) -> dict[str, Any] | None:
+    """Atomically lease one closed-session summary job."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        reconciled = _reconcile_unlocked(root, user, index)
+        now = datetime.now(timezone.utc)
+        candidates: list[tuple[str, str, dict[str, Any]]] = []
+        for key, record in index.setdefault("sessions", {}).items():
+            if not isinstance(record, dict) or record.get("lifecycle") != "closed":
+                continue
+            target_round = max(0, int(record.get("summary_target_round") or 0))
+            completed_round = max(0, int(record.get("summary_completed_round") or 0))
+            if target_round < 1 or completed_round >= target_round or not record.get("archive_window"):
+                continue
+            status = str(record.get("summary_status") or "none")
+            if status == "processing":
+                claimed_at = _timestamp(record.get("summary_claimed_at"))
+                if claimed_at is not None and (now - claimed_at).total_seconds() < max(1.0, stale_after_seconds):
+                    continue
+            elif status == "failed":
+                retry_at = _timestamp(record.get("summary_retry_at"))
+                if retry_at is not None and now < retry_at:
+                    continue
+            elif status != "queued":
+                continue
+            candidates.append((str(record.get("updated_at") or ""), str(key), record))
+        if not candidates:
+            if reconciled:
+                _write_index_unlocked(root, user, index)
+            return None
+        _, key, record = min(candidates, key=lambda item: (item[0], item[1]))
+        claim_id = worker_id or f"summary_{uuid.uuid4().hex}"
+        record["summary_status"] = "processing"
+        record["summary_claim_id"] = claim_id
+        record["summary_claimed_at"] = now.isoformat()
+        record["summary_state_updated_at"] = now.isoformat()
+        index["sessions"][key] = record
+        written = _write_index_unlocked(root, user, index)
+        result = copy.deepcopy(written["sessions"][key])
+        result["summary_claim_id"] = claim_id
+        return result
+
+
+def finish_summary_claim(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    claim_id: str,
+    title: str | None = None,
+    summary: str | None = None,
+    completed_round: int | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Finish a summary lease without allowing stale workers to overwrite data."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
+            return None
+        for field in ("summary_claim_id", "summary_claimed_at"):
+            record.pop(field, None)
+        now = datetime.now(timezone.utc)
+        if error is not None:
+            retry_count = max(0, int(record.get("summary_retry_count") or 0)) + 1
+            delay = 30 if retry_count == 1 else 120 if retry_count == 2 else 600
+            record["summary_status"] = "failed"
+            record["summary_retry_count"] = retry_count
+            record["summary_retry_at"] = (now + timedelta(seconds=delay)).isoformat()
+            record["summary_error"] = copy.deepcopy(error)
+        else:
+            normalized_title = str(title or "").strip()
+            normalized_summary = str(summary or "").strip()
+            if not normalized_title or not normalized_summary or completed_round is None:
+                return None
+            if not str(record.get("title") or "").strip() or record.get("title_source") == "auto":
+                record["title"] = normalized_title
+                record["title_source"] = "auto"
+            record["summary"] = normalized_summary
+            record["summary_status"] = "completed"
+            record["summary_completed_round"] = max(0, int(completed_round))
+            record["summary_updated_at"] = now.isoformat()
+            record["summary_retry_count"] = 0
+            record.pop("summary_retry_at", None)
+            record.pop("summary_error", None)
+        record["summary_state_updated_at"] = now.isoformat()
         index["sessions"][key] = record
         return _write_index_unlocked(root, user, index)["sessions"][key]
 

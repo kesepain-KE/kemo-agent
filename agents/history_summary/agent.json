@@ -1,0 +1,6 @@
+{
+  "name": "history_summary",
+  "version": "1.0.0",
+  "description": "为已关闭的完整历史对话生成卡片标题与短摘要。",
+  "trigger": "trigger.md"
+}

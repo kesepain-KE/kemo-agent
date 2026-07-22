@@ -18,7 +18,9 @@ from run.engine import _extract_round_memory, _session_lock, compress_context, c
 from run.history import commit_window, load_window
 from run.history_index import (
     claim_pending_memory,
+    claim_pending_summary,
     finish_memory_claim,
+    finish_summary_claim,
     history_directory,
 )
 from run.memory import (
@@ -35,10 +37,21 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
 IMPORTANT_MEMORY_INPUT_LIMIT = 200
 MEMORY_RECOVERY_ROUNDS_PER_SCAN = 2
+HISTORY_SUMMARY_CHUNK_CHARS = 48_000
+HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 512
 
 
 class MaintenanceError(RuntimeError):
     pass
+
+
+def _safe_agent_output_preview(error: BaseException) -> str:
+    raw_text = str(getattr(error, "raw_text", "") or "").strip()
+    if not raw_text:
+        return ""
+    if contains_sensitive_credential(raw_text):
+        return "[输出包含疑似敏感内容，已隐藏]"
+    return " ".join(raw_text.split())[:1000]
 
 
 def _parse_daily_time(value: Any) -> tuple[int, int]:
@@ -68,6 +81,69 @@ def _atomic_text(path: Path, content: str) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _message_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return str(value or "").strip()
+    parts = [
+        str(block.get("text") or "").strip()
+        for block in value
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _summary_rounds(window: dict[str, Any], target_round: int) -> list[dict[str, Any]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for raw in (window.get("text") or {}).get("messages", []):
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("role") == "user" and current:
+            groups.append(current)
+            current = []
+        current.append(raw)
+    if current:
+        groups.append(current)
+    result: list[dict[str, Any]] = []
+    for number, group in enumerate(groups[:target_round], start=1):
+        user_text = "\n".join(
+            text
+            for item in group
+            if item.get("role") == "user"
+            for text in [_message_text(item.get("content"))]
+            if text
+        )
+        assistant_text = "\n".join(
+            text
+            for item in group
+            if item.get("role") == "assistant"
+            for text in [_message_text(item.get("content"))]
+            if text
+        )
+        if user_text or assistant_text:
+            result.append({"round": number, "user": user_text, "assistant": assistant_text})
+    return result
+
+
+def _summary_chunks(rounds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+    for item in rounds:
+        size = len(json.dumps(item, ensure_ascii=False, default=str))
+        if current and current_chars + size > HISTORY_SUMMARY_CHUNK_CHARS:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(item)
+        current_chars += size
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _history_sessions(root: Path, user: str) -> list[dict[str, str]]:
@@ -197,6 +273,7 @@ class MaintenanceScheduler:
         force: bool,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
+            "history_summary": self._recover_pending_summary(user),
             "memory_recovery": self._recover_pending_memory(user),
         }
 
@@ -207,6 +284,109 @@ class MaintenanceScheduler:
             result["context"] = self._review_contexts(user)
             self._next_context_review[user] = current + CONTEXT_REVIEW_INTERVAL
         return result
+
+    def _recover_pending_summary(self, user: str) -> dict[str, Any]:
+        claim = claim_pending_summary(self.root, user)
+        if claim is None:
+            return {"claimed": 0, "processed": [], "failed": []}
+        source = str(claim.get("source") or "")
+        session_id = str(claim.get("session_id") or "")
+        archive_name = str(claim.get("archive_window") or "")
+        claim_id = str(claim.get("summary_claim_id") or "")
+        target_round = max(0, int(claim.get("summary_target_round") or 0))
+        identity = {"source": source, "session_id": session_id, "round": target_round}
+        try:
+            if (
+                not source
+                or not session_id
+                or not claim_id
+                or target_round < 1
+                or not archive_name
+                or Path(archive_name).name != archive_name
+            ):
+                raise MaintenanceError("历史摘要领取记录缺少有效会话身份")
+            archive_path = history_directory(self.root, user) / archive_name
+            with _session_lock(self.root, user, source, session_id):
+                window = load_window(archive_path)
+                data = window.get("data") or {}
+                if data.get("source") != source or data.get("session_id") != session_id:
+                    raise MaintenanceError("历史摘要领取记录与归档身份不一致")
+                archive_rounds = max(0, int(data.get("rounds") or 0))
+                if target_round > archive_rounds:
+                    raise MaintenanceError(
+                        f"历史摘要目标轮次 {target_round} 超过归档轮数 {archive_rounds}"
+                    )
+                rounds = _summary_rounds(window, target_round)
+            if not rounds:
+                raise MaintenanceError("历史摘要没有可用的用户或助手正文")
+            config = load_config(user, self.root)
+            runner = AgentRunner(
+                self.root,
+                user,
+                config=config,
+                provider_factory=self.provider_factory,
+            )
+            rolling: dict[str, str] | None = None
+            chunks = _summary_chunks(rounds)
+            for chunk in chunks:
+                if self._stop_event.is_set():
+                    raise MaintenanceError("历史摘要任务已取消")
+                result = runner.run(
+                    "history_summary",
+                    {
+                        "trigger": "session_closed",
+                        "session_id": session_id,
+                        "target_round": target_round,
+                        "previous_summary": rolling,
+                        "rounds": chunk,
+                    },
+                    cancel_event=self._stop_event,
+                    max_tokens=HISTORY_SUMMARY_MAX_OUTPUT_TOKENS,
+                )
+                rolling = {
+                    "title": str(result.data.get("title") or "").strip(),
+                    "summary": str(result.data.get("summary") or "").strip(),
+                }
+            if not rolling:
+                raise MaintenanceError("历史摘要结果为空")
+            finished = finish_summary_claim(
+                self.root,
+                user,
+                source,
+                session_id,
+                claim_id=claim_id,
+                title=rolling["title"],
+                summary=rolling["summary"],
+                completed_round=target_round,
+            )
+            if finished is None:
+                raise MaintenanceError("历史摘要领取已失效")
+            return {
+                "claimed": 1,
+                "processed": [{**identity, "status": "completed", "chunks": len(chunks)}],
+                "failed": [],
+            }
+        except Exception as exc:
+            error = {"message": str(exc), "exception_type": type(exc).__name__}
+            raw_output_preview = _safe_agent_output_preview(exc)
+            if raw_output_preview:
+                error["raw_output_preview"] = raw_output_preview
+            try:
+                finish_summary_claim(
+                    self.root,
+                    user,
+                    source,
+                    session_id,
+                    claim_id=claim_id,
+                    error=error,
+                )
+            except Exception as index_exc:
+                error["index_error"] = {
+                    "message": str(index_exc),
+                    "exception_type": type(index_exc).__name__,
+                }
+            self._report_error(f"maintenance:{user}:history_summary", exc)
+            return {"claimed": 1, "processed": [], "failed": [{**identity, "error": error}]}
 
     def _recover_pending_memory(self, user: str) -> dict[str, Any]:
         config = load_config(user, self.root)

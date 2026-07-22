@@ -1,0 +1,65 @@
+{
+  "input_schema": {
+    "type": "object",
+    "required": ["trigger", "session_id", "target_round", "rounds"],
+    "properties": {
+      "trigger": {
+        "type": "string",
+        "const": "session_closed"
+      },
+      "session_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "target_round": {
+        "type": "integer"
+      },
+      "previous_summary": {
+        "oneOf": [
+          {"type": "null"},
+          {
+            "type": "object",
+            "required": ["title", "summary"],
+            "properties": {
+              "title": {"type": "string"},
+              "summary": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "rounds": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["round", "user", "assistant"],
+          "properties": {
+            "round": {"type": "integer"},
+            "user": {"type": "string"},
+            "assistant": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": ["title", "summary"],
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 24
+      },
+      "summary": {
+        "type": "string",
+        "minLength": 30,
+        "maxLength": 120
+      }
+    },
+    "additionalProperties": false
+  }
+}

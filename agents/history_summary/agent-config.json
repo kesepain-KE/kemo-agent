@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "internal_mode": true,
+  "allowed_callers": ["scheduler"],
+  "tools": {
+    "plugins": {"allow": []},
+    "shared_skills": {"allow": []},
+    "max_iterations": 1
+  },
+  "global_knowledge": false,
+  "shared_knowledge": false,
+  "inherit_main_history": false
+}
