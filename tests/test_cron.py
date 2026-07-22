@@ -15,8 +15,10 @@ from cron.schedule import compute_next_run, is_due
 from cron.scheduler import (
     CronScheduler,
     cleanup_old_system_tasks,
+    ensure_expand_task,
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
+    ensure_perception_task,
 )
 from cron.service import generate_cron_task
 from run.cron_store import CronStore, CronValidationError, normalize_task
@@ -323,6 +325,102 @@ class ExecutorTests(unittest.TestCase):
         handled.assert_not_called()
         self.assertEqual(result["status"], "enabled")
 
+    def test_system_module_updates_support_update_and_main(self) -> None:
+        modules = (
+            ("global_sense", "sense.json", "update_entry", "update"),
+            ("global_sense", "sense.json", "main_entry", "main"),
+            ("global_expand", "expand.json", "expand_entry", "main"),
+        )
+        for parent, manifest, name, function_name in modules:
+            directory = self.root / parent / name
+            directory.mkdir(parents=True)
+            (directory / manifest).write_text(
+                json.dumps({"start_update": "data_update.py"}),
+                "utf-8",
+            )
+            (directory / "data_update.py").write_text(
+                "from pathlib import Path\n"
+                f"def {function_name}():\n"
+                "    Path(__file__).with_name('updated.txt').write_text('ok', 'utf-8')\n",
+                "utf-8",
+            )
+
+        sense = execute_cron_task(
+            root=self.root,
+            user="__system__",
+            task_id="perception_update",
+            config={},
+            system_task={
+                "task_id": "perception_update",
+                "exec_mode": "system",
+                "action": "perception_update",
+            },
+        )
+        expand = execute_cron_task(
+            root=self.root,
+            user="__system__",
+            task_id="expand_update",
+            config={},
+            system_task={
+                "task_id": "expand_update",
+                "exec_mode": "system",
+                "action": "expand_update",
+            },
+        )
+
+        self.assertEqual(sense["status"], "completed")
+        self.assertEqual(set(sense["updated"]), {"main_entry", "update_entry"})
+        self.assertEqual(expand["updated"], ["expand_entry"])
+        for parent, _, name, _ in modules:
+            self.assertEqual(
+                (self.root / parent / name / "updated.txt").read_text("utf-8"),
+                "ok",
+            )
+
+    def test_system_module_update_reports_unsafe_and_invalid_entries(self) -> None:
+        sense = self.root / "global_sense"
+        outside = self.root / "outside.py"
+        outside.write_text("def update():\n    raise AssertionError('must not run')\n", "utf-8")
+
+        escape = sense / "escape"
+        escape.mkdir(parents=True)
+        (escape / "sense.json").write_text(
+            json.dumps({"start_update": "../../outside.py"}),
+            "utf-8",
+        )
+        invalid = sense / "invalid_json"
+        invalid.mkdir()
+        (invalid / "sense.json").write_text("{", "utf-8")
+        missing_callable = sense / "missing_callable"
+        missing_callable.mkdir()
+        (missing_callable / "sense.json").write_text(
+            json.dumps({"start_update": "data_update.py"}),
+            "utf-8",
+        )
+        (missing_callable / "data_update.py").write_text("VALUE = 1\n", "utf-8")
+
+        result = execute_cron_task(
+            root=self.root,
+            user="__system__",
+            task_id="perception_update",
+            config={},
+            system_task={
+                "task_id": "perception_update",
+                "exec_mode": "system",
+                "action": "perception_update",
+            },
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            set(result["failed"]),
+            {"escape", "invalid_json", "missing_callable"},
+        )
+        reasons = {item["module"]: item["reason"] for item in result["errors"]}
+        self.assertIn("相对路径", reasons["escape"])
+        self.assertIn("有效的 sense.json", reasons["invalid_json"])
+        self.assertIn("update() 或 main()", reasons["missing_callable"])
+
 
 class SchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -333,16 +431,24 @@ class SchedulerTests(unittest.TestCase):
             "agents": {
                 "important_memory_review_hours": 3,
                 "daily_memory_review_time": "03:15",
-            }
+            },
+            "task_cron_system": {
+                "sense_update_rate": 5,
+                "expand_update_rate": 7,
+            },
         }
 
     def test_system_tasks_are_flat_idempotent_and_self_describing(self) -> None:
         first = ensure_memory_maintenance_tasks(self.root, self.config)
         promotion = ensure_memory_promotion_task(self.root)
+        perception = ensure_perception_task(self.root, self.config)
+        expand = ensure_expand_task(self.root, self.config)
         second = ensure_memory_maintenance_tasks(self.root, self.config)
+        self.assertEqual(perception, ensure_perception_task(self.root, self.config))
+        self.assertEqual(expand, ensure_expand_task(self.root, self.config))
         self.assertEqual(first, second)
         system_store = CronStore(self.root, "__system__", system=True)
-        self.assertEqual(len(system_store.list_tasks()), 3)
+        self.assertEqual(len(system_store.list_tasks()), 5)
         self.assertEqual(CronStore(self.root, "alice").list_tasks(), [])
         periodic = next(item for item in first if item["type"] == "recurring")
         daily = next(item for item in first if item["type"] == "daily")
@@ -355,7 +461,32 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(promotion["interval_seconds"], 30)
         self.assertEqual(promotion["exec_mode"], "system")
         self.assertEqual(promotion["action"], "memory_promotion")
-        self.assertTrue(all("system_key" not in task for task in [*first, promotion]))
+        self.assertEqual(perception["interval_seconds"], 5)
+        self.assertEqual(perception["action"], "perception_update")
+        self.assertEqual(expand["interval_seconds"], 7)
+        self.assertEqual(expand["action"], "expand_update")
+        self.assertTrue(
+            all("system_key" not in task for task in [*first, promotion, perception, expand])
+        )
+
+    def test_global_update_rates_default_fallback_and_recalibrate(self) -> None:
+        perception = ensure_perception_task(self.root, {})
+        expand = ensure_expand_task(
+            self.root,
+            {"task_cron_system": {"expand_update_rate": False}},
+        )
+        self.assertEqual(perception["interval_seconds"], 5)
+        self.assertEqual(expand["interval_seconds"], 5)
+
+        updated = ensure_perception_task(
+            self.root,
+            {"task_cron_system": {"sense_update_rate": 12}},
+        )
+        self.assertEqual(updated["interval_seconds"], 12)
+        self.assertGreater(
+            datetime.fromisoformat(updated["next_run_at"]),
+            datetime.now(BEIJING),
+        )
 
     def test_old_user_system_tasks_are_cleaned_before_new_tasks(self) -> None:
         directory = self.root / "users" / "alice" / "task_cron"
@@ -429,6 +560,49 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual({record["user"] for record in records}, {"alice", "bob"})
         self.assertTrue(all(record["task_id"] == "memory_promotion" for record in records))
         self.assertTrue(all(record["status"] == "success" for record in records))
+
+    def test_global_system_task_runs_once_and_keeps_diagnostics(self) -> None:
+        for user in ("alice", "bob"):
+            (self.root / "users" / user).mkdir(parents=True)
+        store = CronStore(self.root, "__system__", system=True)
+        task = store.create(normalize_task(
+            task_id="perception_update",
+            title="sense",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=5,
+            next_run_at=(datetime.now(BEIJING) - timedelta(seconds=1)).isoformat(),
+            exec_mode="system",
+            action="perception_update",
+        ))
+        result = {
+            "status": "partial",
+            "category": "sense",
+            "updated": ["good"],
+            "failed": ["bad"],
+            "errors": [{"module": "bad", "reason": "boom"}],
+        }
+        with patch("cron.scheduler.execute_cron_task", return_value=result) as execute:
+            count = CronScheduler(self.root).scan_once()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(execute.call_args.kwargs["user"], "__system__")
+        self.assertEqual(execute.call_args.kwargs["config"], {})
+        self.assertEqual(execute.call_args.kwargs["system_task"]["task_id"], task["task_id"])
+        log_path = (
+            self.root
+            / "cron"
+            / "task_cron_system"
+            / "log"
+            / f"{datetime.now(BEIJING):%Y-%m-%d}.jsonl"
+        )
+        record = json.loads(log_path.read_text("utf-8").splitlines()[-1])
+        self.assertEqual(record["user"], "__system__")
+        self.assertEqual(record["status"], "partial")
+        self.assertEqual(record["result"]["category"], "sense")
+        self.assertEqual(record["result"]["failed"], ["bad"])
+        self.assertEqual(record["result"]["errors"][0]["reason"], "boom")
 
 
 if __name__ == "__main__":

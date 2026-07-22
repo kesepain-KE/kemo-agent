@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
-from provider.factory import create_provider
+from provider.factory import create_provider, provider_semaphore_status
 from run.cron_store import CronStore, CronValidationError, normalize_task
 from run.tools import ToolRegistry, discover_tools
 
@@ -21,6 +21,8 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 MEMORY_PERIODIC_TASK_ID = "memory_periodic_scan"
 MEMORY_DAILY_TASK_ID = "memory_daily_consolidate"
 MEMORY_PROMOTION_TASK_ID = "memory_promotion"
+PERCEPTION_TASK_ID = "perception_update"
+EXPAND_TASK_ID = "expand_update"
 # 仅保留旧导入名，持久化 schema 已不再包含 system_key。
 MEMORY_PERIODIC_SYSTEM_KEY = MEMORY_PERIODIC_TASK_ID
 MEMORY_DAILY_SYSTEM_KEY = MEMORY_DAILY_TASK_ID
@@ -29,6 +31,9 @@ MEMORY_PROMOTION_SYSTEM_KEY = MEMORY_PROMOTION_TASK_ID
 _PERIODIC_TITLE = "临时重要记忆定时巡检"
 _DAILY_TITLE = "临时重要记忆每日整理"
 _PROMOTION_TITLE = "记忆碎片到期晋升检查"
+_PERCEPTION_TITLE = "全局感知模块数据采集"
+_EXPAND_TITLE = "全局拓展模块数据采集"
+_GLOBAL_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
 
 
 def _system_result_summary(result: Any) -> dict[str, Any]:
@@ -37,14 +42,27 @@ def _system_result_summary(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     summary: dict[str, Any] = {}
-    for key in ("status", "action", "model", "requested"):
+    for key in ("status", "action", "category", "model", "requested", "reason"):
         value = result.get(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
             summary[key] = value
-    for key in ("created", "updated", "forgotten", "rejected", "deleted", "applied"):
+    for key in (
+        "created", "updated", "failed", "forgotten", "rejected", "deleted", "applied"
+    ):
         value = result.get(key)
         if isinstance(value, list):
             summary[key] = [str(item) for item in value[:100]]
+    errors = result.get("errors")
+    if isinstance(errors, list):
+        summary["errors"] = [
+            {
+                name: str(item.get(name))
+                for name in ("module", "reason", "exception_type")
+                if item.get(name) is not None
+            }
+            for item in errors[:100]
+            if isinstance(item, dict)
+        ]
     promotions = result.get("promotions")
     if isinstance(promotions, list):
         summary["promotions"] = [
@@ -149,6 +167,38 @@ def _promotion_spec() -> dict[str, Any]:
         "interval_seconds": 30,
         "exec_mode": "system",
         "action": "memory_promotion",
+    }
+
+
+def _configured_update_rate(config: dict[str, Any], key: str) -> int:
+    task_cron = config.get("task_cron_system") or {}
+    if not isinstance(task_cron, dict):
+        return 5
+    rate = task_cron.get(key, 5)
+    if isinstance(rate, bool) or not isinstance(rate, int) or rate < 1:
+        return 5
+    return rate
+
+
+def _perception_spec(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": PERCEPTION_TASK_ID,
+        "title": _PERCEPTION_TITLE,
+        "type": "recurring",
+        "interval_seconds": _configured_update_rate(config, "sense_update_rate"),
+        "exec_mode": "system",
+        "action": "perception_update",
+    }
+
+
+def _expand_spec(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": EXPAND_TASK_ID,
+        "title": _EXPAND_TITLE,
+        "type": "recurring",
+        "interval_seconds": _configured_update_rate(config, "expand_update_rate"),
+        "exec_mode": "system",
+        "action": "expand_update",
     }
 
 
@@ -265,6 +315,34 @@ def ensure_memory_promotion_task(
     )
 
 
+def ensure_perception_task(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Create or recalibrate the global perception data update task."""
+
+    store = CronStore(root, "__system__", system=True)
+    tasks = store.list_tasks()
+    spec = _perception_spec(config)
+    return _reconcile_system_task(
+        store,
+        next((task for task in tasks if task.get("task_id") == spec["task_id"]), None),
+        spec=spec,
+        now=datetime.now(BEIJING),
+    )
+
+
+def ensure_expand_task(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Create or recalibrate the global expand data update task."""
+
+    store = CronStore(root, "__system__", system=True)
+    tasks = store.list_tasks()
+    spec = _expand_spec(config)
+    return _reconcile_system_task(
+        store,
+        next((task for task in tasks if task.get("task_id") == spec["task_id"]), None),
+        spec=spec,
+        now=datetime.now(BEIJING),
+    )
+
+
 def cleanup_old_system_tasks(root: Path, user: str) -> int:
     """删除旧版散落在用户目录、带有 system_key 的系统任务。"""
     directory = root / "users" / user / "task_cron"
@@ -293,6 +371,7 @@ class CronScheduler:
         root: Path,
         *,
         poll_interval: float = 30.0,
+        config: dict[str, Any] | None = None,
         provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         on_task_executed: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -300,6 +379,7 @@ class CronScheduler:
     ) -> None:
         self.root = root.resolve()
         self.poll_interval = poll_interval
+        self._config = config or {}
         self.provider_factory = provider_factory
         self.tool_registry_factory = tool_registry_factory
         self.on_task_executed = on_task_executed
@@ -307,6 +387,28 @@ class CronScheduler:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+
+    def _should_backoff(self) -> bool:
+        cron_config = self._config.get("cron") or {}
+        if not isinstance(cron_config, dict):
+            cron_config = {}
+        if not bool(cron_config.get("avoid_congestion", True)):
+            return False
+        raw_ratio = cron_config.get("congestion_threshold_ratio", 0.2)
+        if isinstance(raw_ratio, bool):
+            raw_ratio = 0.2
+        try:
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError):
+            ratio = 0.2
+        ratio = min(1.0, max(0.0, ratio))
+        status = provider_semaphore_status()
+        maximum = int(status.get("max_requests") or 0)
+        if maximum < 1:
+            return False
+        available = int(status.get("available_requests") or 0)
+        threshold = max(1, int(maximum * ratio))
+        return available < threshold
 
     def start(self) -> None:
         with self._lock:
@@ -365,20 +467,33 @@ class CronScheduler:
             if status == "enabled" and not is_due(str(task.get("next_run_at") or ""), now=now):
                 continue
             task_id = str(task.get("task_id") or "")
-            for user in list_users(self.root):
+            action = str(task.get("action") or task_id)
+            if action not in _GLOBAL_SYSTEM_ACTIONS and self._should_backoff():
+                continue
+            execution_users = (
+                ("__system__",)
+                if action in _GLOBAL_SYSTEM_ACTIONS
+                else tuple(list_users(self.root))
+            )
+            for user in execution_users:
                 if self._stop_event.is_set():
                     break
                 started_at = datetime.now(BEIJING)
                 started = time.monotonic()
                 try:
+                    execute_kwargs: dict[str, Any] = {
+                        "root": self.root,
+                        "user": user,
+                        "task_id": task_id,
+                        "provider_factory": self.provider_factory,
+                        "tool_registry_factory": self.tool_registry_factory,
+                        "cancel_event": self._stop_event,
+                        "system_task": task,
+                    }
+                    if user == "__system__":
+                        execute_kwargs["config"] = {}
                     result = execute_cron_task(
-                        root=self.root,
-                        user=user,
-                        task_id=task_id,
-                        provider_factory=self.provider_factory,
-                        tool_registry_factory=self.tool_registry_factory,
-                        cancel_event=self._stop_event,
-                        system_task=task,
+                        **execute_kwargs,
                     )
                     executed += 1
                     _append_system_execution(
@@ -426,6 +541,8 @@ class CronScheduler:
                 continue
             if status == "enabled" and not is_due(str(task.get("next_run_at") or ""), now=now):
                 continue
+            if self._should_backoff():
+                break
             try:
                 result = execute_cron_task(
                     root=self.root,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
 from datetime import datetime
@@ -224,6 +225,142 @@ def _execute_memory_review(
     }
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Return true for symbolic links and Windows directory junctions."""
+
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(callable(is_junction) and is_junction())
+    except OSError:
+        return True
+
+
+def _update_modules(modules_dir: Path, category: str) -> dict[str, Any]:
+    """Safely run each declared sense/expand updater in the current process."""
+
+    manifest_name = "sense.json" if category == "sense" else "expand.json"
+    if not modules_dir.is_dir():
+        return {
+            "status": "skipped",
+            "category": category,
+            "reason": f"{modules_dir.name} 目录不存在",
+            "updated": [],
+            "failed": [],
+            "errors": [],
+        }
+
+    updated: list[str] = []
+    failed: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    def reject(module: str, reason: str, exc: BaseException | None = None) -> None:
+        failed.append(module)
+        detail = {"module": module, "reason": reason}
+        if exc is not None:
+            detail["exception_type"] = type(exc).__name__
+        errors.append(detail)
+
+    for entry in sorted(modules_dir.iterdir(), key=lambda item: item.name):
+        if entry.name.startswith(".") or entry.name == "__pycache__":
+            continue
+        if _is_link_or_junction(entry):
+            reject(entry.name, "模块目录不能是符号链接或目录联接")
+            continue
+        if not entry.is_dir():
+            continue
+
+        manifest_path = entry / manifest_name
+        if not manifest_path.is_file():
+            continue
+        if _is_link_or_junction(manifest_path):
+            reject(entry.name, f"{manifest_name} 不能是符号链接或目录联接")
+            continue
+        try:
+            metadata = json.loads(manifest_path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            reject(entry.name, f"无法读取有效的 {manifest_name}: {exc}", exc)
+            continue
+        if not isinstance(metadata, dict):
+            reject(entry.name, f"{manifest_name} 顶层必须是 JSON 对象")
+            continue
+
+        start_update = metadata.get("start_update")
+        if not isinstance(start_update, str) or not start_update.strip():
+            reject(entry.name, f"{manifest_name} 缺少非空 start_update")
+            continue
+        relative = Path(start_update.strip())
+        if relative.is_absolute() or ".." in relative.parts:
+            reject(entry.name, "start_update 必须是模块目录内的相对路径")
+            continue
+
+        module_root = entry.resolve()
+        candidate = entry / relative
+        current = entry
+        unsafe_component = False
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if _is_link_or_junction(current):
+                unsafe_component = True
+                break
+        if unsafe_component:
+            reject(entry.name, "start_update 路径不能经过符号链接或目录联接")
+            continue
+
+        update_path = candidate.resolve()
+        try:
+            update_path.relative_to(module_root)
+        except ValueError:
+            reject(entry.name, "start_update 解析后越出模块目录")
+            continue
+        if not update_path.is_file():
+            reject(entry.name, f"start_update 文件不存在：{start_update}")
+            continue
+
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"__kemo_{category}_update__{entry.name}",
+                str(update_path),
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError("无法创建模块加载器")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            updater = getattr(module, "update", None)
+            if not callable(updater):
+                updater = getattr(module, "main", None)
+            if not callable(updater):
+                raise AttributeError("更新脚本必须提供可调用的 update() 或 main()")
+            updater()
+            updated.append(entry.name)
+        except Exception as exc:
+            reject(entry.name, str(exc), exc)
+
+    status = "completed" if not failed else ("partial" if updated else "failed")
+    return {
+        "status": status,
+        "category": category,
+        "updated": updated,
+        "failed": failed,
+        "errors": errors,
+    }
+
+
+def _execute_perception_update(root: Path) -> dict[str, Any]:
+    """Update every global perception module exactly once."""
+
+    return _update_modules(root / "global_sense", "sense")
+
+
+def _execute_expand_update(root: Path) -> dict[str, Any]:
+    """Update every global expand module exactly once."""
+
+    return _update_modules(root / "global_expand", "expand")
+
+
 def _execute_system_task(
     *,
     root: Path,
@@ -254,6 +391,10 @@ def _execute_system_task(
             cancel_event=cancel_event,
             task_id=str(task.get("task_id") or action),
         )
+    if action == "perception_update":
+        return _execute_perception_update(root)
+    if action == "expand_update":
+        return _execute_expand_update(root)
     raise CronValidationError(f"未注册的系统 cron 动作：{action}")
 
 
