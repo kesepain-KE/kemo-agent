@@ -168,6 +168,61 @@ class WebCompletionApiTests(unittest.TestCase):
         self.assertEqual(empty.status_code, 200, empty.text)
         self.assertEqual(empty.json(), {"deleted_paths": [], "deleted_count": 0})
 
+    def test_user_file_batch_and_all_delete_are_scoped_and_atomic(self) -> None:
+        _, root = self.make_root()
+        upload = root / "users" / "alice" / "file_upload"
+        download = root / "users" / "alice" / "download"
+        (upload / "nested").mkdir()
+        (upload / "nested" / "a.txt").write_text("a", "utf-8")
+        (upload / "nested" / "b.txt").write_text("b", "utf-8")
+        app = create_app(service=WebRunService(root))
+
+        rejected = self.request(
+            app,
+            "POST",
+            "/api/users/alice/files/file_upload/delete-many",
+            json={"paths": ["nested/a.txt", "../outside.txt"]},
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertTrue((upload / "nested" / "a.txt").is_file())
+        self.assertTrue((upload / "nested" / "b.txt").is_file())
+
+        removed = self.request(
+            app,
+            "POST",
+            "/api/users/alice/files/file_upload/delete-many",
+            json={"paths": ["nested/a.txt", "nested/b.txt", "nested/a.txt"]},
+        )
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertEqual(removed.json()["user"], "alice")
+        self.assertEqual(removed.json()["scope"], "file_upload")
+        self.assertEqual(removed.json()["deleted_count"], 2)
+        self.assertFalse((upload / "nested").exists())
+        self.assertTrue(upload.is_dir())
+
+        (download / "reports" / "daily").mkdir(parents=True)
+        (download / "reports" / "daily" / "one.md").write_text("1", "utf-8")
+        (download / "result.txt").write_text("2", "utf-8")
+        removed_all = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/files/download/all",
+        )
+        self.assertEqual(removed_all.status_code, 200, removed_all.text)
+        self.assertEqual(removed_all.json()["scope"], "download")
+        self.assertEqual(removed_all.json()["deleted_count"], 2)
+        self.assertTrue(download.is_dir())
+        self.assertEqual(list(download.iterdir()), [])
+
+        empty = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/files/download/all",
+        )
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json()["deleted_paths"], [])
+        self.assertEqual(empty.json()["deleted_count"], 0)
+
     def test_avatar_upload_read_validation_and_public_logo(self) -> None:
         _, root = self.make_root()
         (root / "kemo-agent.jpg").write_bytes(b"logo")

@@ -78,6 +78,14 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertEqual(first["plan"]["status"], "running")
         self.assertEqual(first["plan"]["steps"][0]["result"], "第一步已完成")
+        self.assertEqual(first["completed_step"]["step_id"], "step_1")
+        self.assertEqual(first["progress"], {"completed": 1, "total": 2, "remaining": 1})
+        self.assertEqual(first["next_step"]["step_id"], "step_2")
+        self.assertEqual(
+            [step["step_id"] for step in first["remaining_steps"]],
+            ["step_2"],
+        )
+        self.assertEqual(first["plan_status"], "running")
         revision = first["plan"]["revision"]
         repeated = run(
             action="step_done",
@@ -98,8 +106,59 @@ class TaskPlanPluginTests(unittest.TestCase):
         )
         self.assertTrue(completed["ok"])
         self.assertEqual(completed["plan"]["status"], "completed")
+        self.assertEqual(completed["progress"], {"completed": 2, "total": 2, "remaining": 0})
+        self.assertIsNone(completed["next_step"])
+        self.assertEqual(completed["remaining_steps"], [])
+        self.assertEqual(completed["plan_status"], "completed")
         self.assertTrue(
             all(step["status"] == "completed" for step in completed["plan"]["steps"])
+        )
+
+    def test_agent_managed_inflight_step_can_finish_after_pause_without_resuming(self) -> None:
+        plan = self.create_plan(status="running")
+        PlanStore(self.root, "alice").update(
+            plan["plan_id"], lambda current: {**current, "status": "paused"}
+        )
+
+        rejected = run(
+            action="step_done",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            result="普通调用不应修改暂停计划",
+            context=self.context,
+        )
+        self.assertFalse(rejected["ok"])
+
+        completed = run(
+            action="step_done",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            result="当前步骤在暂停后收尾完成",
+            context={
+                **self.context,
+                "task_plan_mode": "agent_managed",
+                "task_plan_id": plan["plan_id"],
+            },
+        )
+        self.assertTrue(completed["ok"])
+        self.assertEqual(completed["plan"]["status"], "paused")
+        self.assertEqual(completed["completed_step"]["status"], "completed")
+        self.assertIsNone(completed["next_step"])
+        self.assertEqual(completed["progress"]["remaining"], 1)
+
+    def test_executor_managed_mode_rejects_agent_step_state_writes(self) -> None:
+        plan = self.create_plan(status="running")
+        result = run(
+            action="step_done",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            context={**self.context, "task_plan_mode": "executor_managed"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("框架执行器维护状态", result["error"])
+        self.assertEqual(
+            PlanStore(self.root, "alice").read(plan["plan_id"])["steps"][0]["status"],
+            "pending",
         )
 
     def test_step_fail_stores_schema_error_and_pauses(self) -> None:

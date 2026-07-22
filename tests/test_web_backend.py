@@ -112,6 +112,16 @@ class FakeService:
         self.seen = {"user": user, "session_id": session_id, "prompt": prompt, "run_id": run_id}
         return iter(self.events)
 
+    def stream_plan(self, user, session_id, plan_id, *, cancel_event, run_id=""):
+        self.cancel_event = cancel_event
+        self.seen = {
+            "user": user,
+            "session_id": session_id,
+            "plan_id": plan_id,
+            "run_id": run_id,
+        }
+        return iter(self.events)
+
 
 class WebBackendTests(unittest.TestCase):
     def test_usage_cache_tokens_prefers_normalized_fields_and_preserves_zero(self) -> None:
@@ -1228,6 +1238,141 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(parsed[3][1]["result"], {"ok": True})
         self.assertEqual(fake.seen["session_id"], "s1")
         self.assertTrue(fake.cancel_event.is_set())
+
+    def test_plan_chat_route_starts_plan_stream_without_a_prompt(self) -> None:
+        fake = FakeService(events=[RunEvent(type="text_delta", content="执行中"), RunEvent(type="done")])
+        response = self.request(
+            create_app(service=fake),
+            "POST",
+            "/api/chat",
+            json={
+                "user": "alice",
+                "session_id": "s1",
+                "prompt": "",
+                "plan_id": "plan_12345678",
+                "run_id": "run_plan_123",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item[0] for item in self.parse_sse(response.text)], ["text_delta", "done"])
+        self.assertEqual(
+            fake.seen,
+            {
+                "user": "alice",
+                "session_id": "s1",
+                "plan_id": "plan_12345678",
+                "run_id": "run_plan_123",
+            },
+        )
+
+    def test_stream_plan_uses_one_agent_run_for_multiple_steps(self) -> None:
+        _, root = self.make_root()
+        store = PlanStore(root, "alice")
+        plan = store.create(
+            normalize_plan(
+                title="连续执行",
+                description="单轮完成两步",
+                user="alice",
+                source="web",
+                session_id="s1",
+                steps=[
+                    {
+                        "step_id": "step_1",
+                        "title": "第一步",
+                        "description": "执行第一步",
+                        "critical": True,
+                    },
+                    {
+                        "step_id": "step_2",
+                        "title": "第二步",
+                        "description": "执行第二步",
+                        "depends_on": ["step_1"],
+                        "critical": True,
+                    },
+                ],
+            )
+        )
+        requests: list[dict[str, Any]] = []
+
+        def source(request, **_kwargs):
+            requests.append(request)
+            context = {
+                "root": str(root),
+                "user": "alice",
+                "source": "web",
+                "task_plan_id": plan["plan_id"],
+                "task_plan_mode": request["_task_plan_mode"],
+            }
+            from plugins.task_plan.tool import run as run_task_plan_tool
+
+            for index in (1, 2):
+                result = run_task_plan_tool(
+                    action="step_done",
+                    plan_id=plan["plan_id"],
+                    step_id=f"step_{index}",
+                    result=f"步骤 {index} 完成",
+                    context=context,
+                )
+                yield RunEvent(
+                    type="tool_call_result",
+                    tool_call_id=f"call_{index}",
+                    tool_name="task_plan",
+                    result=result,
+                )
+            yield RunEvent(type="text_delta", content="全部完成")
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_plan(
+                "alice",
+                "s1",
+                plan["plan_id"],
+                cancel_event=threading.Event(),
+                run_id="run_plan_single",
+            )
+        )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["_task_plan_id"], plan["plan_id"])
+        self.assertEqual(requests[0]["_task_plan_mode"], "agent_managed")
+        self.assertIn("【任务计划连续执行】", requests[0]["prompt"])
+        self.assertEqual([event.type for event in events], ["tool_call_result", "tool_call_result", "text_delta", "done"])
+        stored = store.read(plan["plan_id"])
+        self.assertEqual(stored["status"], "completed")
+        self.assertTrue(all(step["status"] == "completed" for step in stored["steps"]))
+
+    def test_plan_pause_command_uses_latest_disk_state_without_revision(self) -> None:
+        _, root = self.make_root()
+        store = PlanStore(root, "alice")
+        plan = store.create(
+            normalize_plan(
+                title="可暂停计划",
+                description="验证无 revision 指令",
+                user="alice",
+                status="running",
+                steps=[
+                    {
+                        "step_id": "step_1",
+                        "title": "执行",
+                        "description": "执行中",
+                        "critical": True,
+                    }
+                ],
+            )
+        )
+        store.update(plan["plan_id"], lambda current: {**current, "current_step": "step_1"})
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/actions/pause",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["plan"]["status"], "paused")
+        self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
 
     def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
         _, root = self.make_root()
