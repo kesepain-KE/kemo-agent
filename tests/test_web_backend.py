@@ -627,6 +627,83 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(len(trace["tools"][0]["result_text"]), 5000)
         self.assertTrue(trace["tools"][0]["result_truncated"])
 
+    def test_history_paginates_complete_rounds_from_newest_to_oldest(self) -> None:
+        _, root = self.make_root()
+        window = empty_window("alice", "web", "s1")
+        for round_number in range(1, 46):
+            window["text"]["messages"].extend(
+                [
+                    {"role": "user", "content": f"question {round_number}"},
+                    {"role": "assistant", "content": f"answer {round_number}"},
+                ]
+            )
+            window["think"]["rounds"].append(
+                {"round": round_number, "content": f"reasoning {round_number}"}
+            )
+            window["data"]["round_metrics"].append(
+                {
+                    "round": round_number,
+                    "usage": {"total_tokens": round_number},
+                    "elapsed_ms": round_number,
+                    "tool_calls": 0,
+                    "guidance": [],
+                }
+            )
+        window["data"]["rounds"] = 45
+        commit_window(root / "users" / "alice" / "history" / "window-1", window)
+        app = create_app(service=WebRunService(root))
+
+        latest = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/s1/history?limit=20",
+        ).json()
+        self.assertEqual(len(latest["messages"]), 40)
+        self.assertEqual(latest["messages"][0]["content"], "question 26")
+        self.assertEqual(latest["messages"][-1]["content"], "answer 45")
+        self.assertEqual(
+            latest["pagination"],
+            {
+                "limit": 20,
+                "total_rounds": 45,
+                "first_round": 26,
+                "last_round": 45,
+                "has_more_before": True,
+                "next_before": 26,
+            },
+        )
+        self.assertEqual(
+            [item["round"] for item in latest["round_metrics"]],
+            list(range(26, 46)),
+        )
+        self.assertEqual(
+            [item["round"] for item in latest["round_traces"]],
+            list(range(26, 46)),
+        )
+
+        earlier = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/s1/history?limit=20&before=26",
+        ).json()
+        self.assertEqual(earlier["messages"][0]["content"], "question 6")
+        self.assertEqual(earlier["messages"][-1]["content"], "answer 25")
+        self.assertEqual(earlier["pagination"]["next_before"], 6)
+        self.assertTrue(earlier["pagination"]["has_more_before"])
+
+        oldest = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/s1/history?limit=20&before=6",
+        ).json()
+        self.assertEqual(oldest["messages"][0]["content"], "question 1")
+        self.assertEqual(oldest["messages"][-1]["content"], "answer 5")
+        self.assertFalse(oldest["pagination"]["has_more_before"])
+        self.assertIsNone(oldest["pagination"]["next_before"])
+
+        full = self.request(app, "GET", "/api/users/alice/sessions/s1/history").json()
+        self.assertEqual(len(full["messages"]), 90)
+
     def test_active_create_and_close_session_api_uses_durable_reservations(self) -> None:
         _, root = self.make_root()
         app = create_app(service=WebRunService(root))
@@ -1677,7 +1754,16 @@ class WebBackendTests(unittest.TestCase):
             app,
             "PATCH",
             "/api/users/alice/config",
-            json={"changes": {"tools": {"enabled": False}}},
+            json={
+                "changes": {
+                    "tools": {"enabled": False},
+                    "agent_models": {
+                        "default": "",
+                        "cheap": "summary-test-model",
+                        "reasoning": "",
+                    },
+                }
+            },
         )
         self.assertEqual(patched.status_code, 200, patched.text)
         stored_config = json.loads(
@@ -1685,6 +1771,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(stored_config["provider"]["api_key"], "keep-secret")
         self.assertFalse(stored_config["tools"]["enabled"])
+        self.assertEqual(stored_config["agent_models"]["cheap"], "summary-test-model")
         rejected_placeholder = self.request(
             app,
             "PATCH",

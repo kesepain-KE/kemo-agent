@@ -6,14 +6,145 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
+from run.agent_runner import AgentOutputError
 from run.history import commit_window, empty_window, load_window, queue_memory_extraction
-from run.history_index import close_session, find_record
+from run.history_index import close_session, find_record, queue_summary
 from run.maintenance import MaintenanceScheduler
 from run.memory import MemoryStore, normalize_memory_filename
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):
+    def test_closed_session_summary_is_generated_in_background(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        archive = root / "users" / "alice" / "history" / "conv_summary"
+        window = empty_window("alice", "web", "conv_summary")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "给历史对话增加后台摘要"},
+            {"role": "assistant", "content": "已设计后台任务和原子索引写回"},
+        ]
+        window["data"].update(
+            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
+        )
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "conv_summary")
+        queue_summary(root, "alice", "web", "conv_summary")
+
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.return_value = SimpleNamespace(
+                data={
+                    "title": "历史会话后台摘要功能",
+                    "summary": "关闭会话后异步生成可读标题和简短摘要，并安全写入历史索引。",
+                }
+            )
+            result = MaintenanceScheduler(root).scan_once()
+
+        summary_result = result["alice"]["history_summary"]
+        self.assertEqual(summary_result["claimed"], 1)
+        self.assertEqual(summary_result["processed"][0]["status"], "completed")
+        record = find_record(root, "alice", "web", "conv_summary")
+        self.assertEqual(record["title"], "历史会话后台摘要功能")
+        self.assertEqual(record["summary_status"], "completed")
+        self.assertIn("异步生成", record["summary"])
+        self.assertEqual(runner_type.return_value.run.call_args.kwargs["max_tokens"], 512)
+
+    def test_failed_summary_preserves_safe_output_preview(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        archive = root / "users" / "alice" / "history" / "conv_failed"
+        window = empty_window("alice", "web", "conv_failed")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "总结这段对话"},
+            {"role": "assistant", "content": "返回了一段无法解析的普通文本"},
+        ]
+        window["data"].update(
+            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
+        )
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "conv_failed")
+        queue_summary(root, "alice", "web", "conv_failed")
+
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.side_effect = AgentOutputError(
+                "子代理响应中没有 JSON 对象",
+                raw_text="第一行普通文本\n第二行仍不是 JSON",
+            )
+            result = MaintenanceScheduler(root).scan_once()
+
+        self.assertEqual(
+            result["alice"]["history_summary"]["failed"][0]["error"]["raw_output_preview"],
+            "第一行普通文本 第二行仍不是 JSON",
+        )
+        record = find_record(root, "alice", "web", "conv_failed")
+        self.assertEqual(record["summary_status"], "failed")
+        self.assertEqual(record["summary_retry_count"], 1)
+        self.assertTrue(record["summary_retry_at"])
+        self.assertEqual(
+            record["summary_error"]["raw_output_preview"],
+            "第一行普通文本 第二行仍不是 JSON",
+        )
+
+    def test_failed_summary_hides_sensitive_output_preview(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        archive = root / "users" / "alice" / "history" / "conv_sensitive"
+        window = empty_window("alice", "web", "conv_sensitive")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "总结这段对话"},
+            {"role": "assistant", "content": "摘要输出失败"},
+        ]
+        window["data"].update(
+            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
+        )
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "conv_sensitive")
+        queue_summary(root, "alice", "web", "conv_sensitive")
+
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.side_effect = AgentOutputError(
+                "子代理响应格式错误",
+                raw_text="api_key: test-secret-value",
+            )
+            MaintenanceScheduler(root).scan_once()
+
+        record = find_record(root, "alice", "web", "conv_sensitive")
+        self.assertEqual(
+            record["summary_error"]["raw_output_preview"],
+            "[输出包含疑似敏感内容，已隐藏]",
+        )
+
     def test_pending_committed_round_is_recovered_once(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

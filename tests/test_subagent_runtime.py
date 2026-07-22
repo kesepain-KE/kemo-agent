@@ -40,13 +40,26 @@ SUMMARY = {
 
 
 class MockProvider:
-    def __init__(self, *, text: str | None = None, delay: float = 0.0, order=None) -> None:
+    def __init__(
+        self,
+        *,
+        text: str | None = None,
+        texts: list[str] | None = None,
+        delay: float = 0.0,
+        order=None,
+    ) -> None:
         self.text = text if text is not None else json.dumps(SUMMARY)
+        self.texts = list(texts or [])
         self.delay = delay
         self.order = order
         self.requests = []
 
     def create(self, request):
+        response_text = (
+            self.texts[min(len(self.requests), len(self.texts) - 1)]
+            if self.texts
+            else self.text
+        )
         self.requests.append(request)
         payload = json.loads(text_from_content(request.input[0].content))
         if self.order is not None:
@@ -62,7 +75,7 @@ class MockProvider:
             output=[
                 MessageItem.text(
                     MessageRole.ASSISTANT,
-                    self.text,
+                    response_text,
                     phase=MessagePhase.FINAL_ANSWER,
                 )
             ],
@@ -118,6 +131,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             set(registry.agents),
             {
                 "context_manage",
+                "history_summary",
                 "memory_temporary_important",
                 "self_improve",
                 "task_plan",
@@ -137,6 +151,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
         task_definition = registry.get("task_plan")
         self.assertEqual(task_definition.capabilities.knowledge_scopes, ("global", "shared"))
         self.assertEqual(task_definition.capabilities.knowledge_body_access, "none")
+        summary_definition = registry.get("history_summary")
+        self.assertEqual(summary_definition.output_schema["required"], ["title", "summary"])
+        self.assertFalse(summary_definition.output_schema["additionalProperties"])
 
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -174,6 +191,73 @@ class SubAgentRuntimeTests(unittest.TestCase):
             json.dumps(request.model_dump(mode="json"), ensure_ascii=False),
         )
         self.assertEqual(json.loads(text_from_content(request.input[0].content))["trigger"], "manual")
+
+    def test_runner_uses_configured_subagent_model_profile(self) -> None:
+        provider = MockProvider()
+        config = {
+            **self.config,
+            "agent_models": {"cheap": "summary-model"},
+        }
+        runner = AgentRunner(
+            self.root,
+            "kesepain",
+            config=config,
+            provider_factory=lambda _: provider,
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            runner.run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        self.assertEqual(provider.requests[0].model, "summary-model")
+
+    def test_history_summary_repairs_non_json_output_once(self) -> None:
+        repaired = {
+            "title": "历史摘要格式自动修复",
+            "summary": "后台摘要在首次格式错误后自动修复，并生成稳定清晰的历史对话标题与内容说明。",
+        }
+        provider = MockProvider(
+            texts=[
+                "标题已经整理好了，但这次没有按照 JSON 格式输出。",
+                json.dumps(repaired, ensure_ascii=False),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_summary_test",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "请整理摘要", "assistant": "已经完成整理"}],
+                },
+                max_tokens=512,
+            )
+        self.assertEqual(result.data, repaired)
+        self.assertEqual(len(provider.requests), 2)
+        repair_payload = json.loads(text_from_content(provider.requests[1].input[0].content))
+        self.assertTrue(repair_payload["_format_repair"]["required"])
+        self.assertIn("没有按照 JSON", repair_payload["_format_repair"]["previous_output"])
+        self.assertEqual(provider.requests[1].generation.max_output_tokens, 512)
+
+    def test_history_summary_preserves_raw_output_after_failed_repair(self) -> None:
+        provider = MockProvider(texts=["first invalid", "second invalid"])
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            with self.assertRaises(AgentOutputError) as caught:
+                self.runner(provider).run(
+                    "history_summary",
+                    {
+                        "trigger": "session_closed",
+                        "session_id": "conv_summary_test",
+                        "target_round": 1,
+                        "previous_summary": None,
+                        "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+                    },
+                    max_tokens=512,
+                )
+        self.assertEqual(caught.exception.raw_text, "second invalid")
+        self.assertIn("JSON 修复失败", str(caught.exception))
 
     def test_runner_uses_loose_input_but_rejects_invalid_output_timeout_and_cancel(self) -> None:
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):

@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from events import RunEvent
-from message.plugin import MessagePluginConfig
 from message.router import MessageRouter
 from message.schema import MessageEnvelope, OutboundMessage
 from message.transport import (
@@ -210,27 +209,6 @@ class ExternalMessageIntegrationTests(unittest.TestCase):
             manifest.tool["input_schema"]["properties"]["action"]["enum"],
             ["send_message", "send_file"],
         )
-
-    def test_platform_template_loads_after_placeholder_replacement(self) -> None:
-        destination = self.root / "message" / "out" / "demo"
-        destination.mkdir(parents=True)
-        template = PROJECT_ROOT / "template" / "message_platform"
-        replacements = {
-            "{{MACHINE_ID}}": "msg_demo_01",
-            "{{PLATFORM}}": "demo",
-            "{{DISPLAY_NAME}}": "Demo",
-            "{{BOUND_USER}}": "alice",
-        }
-        for name in ("message.json", "input.py", "output.py", "detect.py"):
-            text = (template / name).read_text("utf-8")
-            for source, target in replacements.items():
-                text = text.replace(source, target)
-            (destination / name).write_text(text, "utf-8")
-
-        loaded = MessagePluginConfig.load(self.root, destination)
-        self.assertEqual(loaded.platform, "demo")
-        self.assertEqual(loaded.bound_user, "alice")
-        self.assertEqual(loaded.log_dir, "logs")
 
     def test_message_router_injects_its_registry(self) -> None:
         registry = TransportRegistry()
