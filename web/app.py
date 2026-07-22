@@ -624,8 +624,15 @@ def create_app(
         user: str,
         session_id: str,
         source: str = Query(default="web"),
+        limit: int | None = Query(default=None, ge=1, le=100),
+        before: int | None = Query(default=None, ge=1),
     ) -> dict[str, Any]:
-        return backend.history(user, session_id, source=source)
+        options: dict[str, Any] = {"source": source}
+        if limit is not None:
+            options["limit"] = limit
+        if before is not None:
+            options["before"] = before
+        return backend.history(user, session_id, **options)
 
     @app.get("/api/users/{user}/overview")
     async def overview(

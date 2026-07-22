@@ -132,7 +132,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 ## 4. 用户配置结构
 
 用户配置文件 `users/<name>/user_config.json` 覆盖全局配置 `config/global_config.json`。
-`provider`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins`
+`provider`、`agent_models`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins`
 是用户专属段，只从用户配置读取，不允许全局配置兜底；其他框架段按对象深合并。
 
 ### 字段说明
@@ -141,6 +141,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 |------|------|------|
 | `schema_version` | int | 配置结构版本号，当前固定为 1 |
 | `provider` | object | LLM 提供商配置 |
+| `agent_models` | object | 子代理 default、cheap、reasoning 三档专用模型；空值继承主模型 |
 | `provider_runtime` | object | 全来源共享的 Provider 请求并发上限与等待超时 |
 | `multimodal_models` | object | 多模态模型名（设计预留） |
 | `task_plan` | object | 任务计划配置 |
@@ -199,6 +200,11 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `stream` | bool | 是否流式输出，默认 true |
 
 Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
+
+### agent_models 子字段
+
+`default`、`cheap`、`reasoning` 分别用于普通、轻量和推理型子代理。任一字段留空时继承
+`provider.model`；历史对话摘要使用 `cheap` 档位。
 
 ### multimodal_models 子字段（设计预留）
 
@@ -335,6 +341,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 | `memory_temporary_important` | `agents/memory_temporary_important/` | 临时重要记忆处理 |
 | `task_plan` | `agents/task_plan/` | 任务计划生成与执行 |
 | `time_plan` | `agents/time_plan/` | 定时任务处理 |
+| `history_summary` | `agents/history_summary/` | 为已关闭历史对话生成卡片标题与摘要 |
 
 ### 包结构
 

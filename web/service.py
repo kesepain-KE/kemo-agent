@@ -80,6 +80,7 @@ from run.history import (
 )
 from run.history_index import (
     close_session as close_index_session,
+    queue_summary as queue_history_summary,
     find_record as find_index_record,
     get_or_reserve_active as get_or_reserve_index_session,
     new_conversation_id,
@@ -2267,6 +2268,11 @@ class WebRunService:
             "window": str(record.get("archive_window") or ""),
             "title": str(record.get("title") or ""),
             "summary": str(record.get("summary") or ""),
+            "summary_status": str(record.get("summary_status") or "none"),
+            "summary_target_round": int(record.get("summary_target_round") or 0),
+            "summary_completed_round": int(record.get("summary_completed_round") or 0),
+            "summary_retry_at": str(record.get("summary_retry_at") or ""),
+            "summary_retry_count": max(0, int(record.get("summary_retry_count") or 0)),
             "state": str(record.get("lifecycle") or "open"),
             "run_state": str(record.get("run_state") or "idle"),
             "chain": str(record.get("chain") or "interactive"),
@@ -2360,6 +2366,11 @@ class WebRunService:
                         "rounds": 0,
                         "processed_round": 0,
                     },
+                    "summary": {
+                        "status": "skipped",
+                        "reason": "session_in_use_by_other_clients",
+                        "rounds": max(0, int(record.get("rounds") or 0)),
+                    },
                     "session": self._index_session_payload(record),
                 }
             if any(
@@ -2381,6 +2392,15 @@ class WebRunService:
             )
         if record is None:
             raise NotFoundError(f"会话不存在：{normalized_session}")
+        summary = queue_history_summary(
+            self.root,
+            name,
+            normalized_source,
+            normalized_session,
+        )
+        record = find_index_record(
+            self.root, name, normalized_source, normalized_session
+        ) or record
         return {
             "user": name,
             "source": normalized_source,
@@ -2389,6 +2409,7 @@ class WebRunService:
             "deferred": False,
             "active_clients": 0,
             "memory": memory,
+            "summary": summary,
             "session": self._index_session_payload(record),
         }
 
@@ -2683,6 +2704,8 @@ class WebRunService:
         session_id: Any,
         *,
         source: Any = "web",
+        limit: int | None = None,
+        before: int | None = None,
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
@@ -2703,19 +2726,63 @@ class WebRunService:
                     "messages": [],
                     "round_metrics": [],
                     "round_traces": [],
+                    "pagination": {
+                        "limit": limit,
+                        "total_rounds": 0,
+                        "first_round": 0,
+                        "last_round": 0,
+                        "has_more_before": False,
+                        "next_before": None,
+                    },
                 }
             raise NotFoundError(f"会话不存在：{normalized_session}")
         window = load_window(directory)
+        raw_messages = (window.get("text") or {}).get("messages") or []
+        message_rounds: list[list[dict[str, Any]]] = []
+        current_round: list[dict[str, Any]] = []
+        for raw_message in raw_messages if isinstance(raw_messages, list) else []:
+            if not isinstance(raw_message, dict):
+                continue
+            if raw_message.get("role") == "user" and current_round:
+                message_rounds.append(current_round)
+                current_round = []
+            current_round.append(dict(raw_message))
+        if current_round:
+            message_rounds.append(current_round)
+
+        total_rounds = len(message_rounds)
+        end_round = total_rounds
+        if before is not None:
+            end_round = min(end_round, max(0, int(before) - 1))
+        start_round = 1 if end_round > 0 else 0
+        if limit is not None and end_round > 0:
+            start_round = max(1, end_round - max(1, int(limit)) + 1)
+        selected_messages = (
+            [
+                message
+                for group in message_rounds[start_round - 1 : end_round]
+                for message in group
+            ]
+            if start_round > 0
+            else []
+        )
+
+        def in_selected_page(round_number: int) -> bool:
+            return start_round > 0 and start_round <= round_number <= end_round
+
         raw_metrics = (window.get("data") or {}).get("round_metrics") or []
         round_metrics = []
         if isinstance(raw_metrics, list):
             for item in raw_metrics:
                 if not isinstance(item, dict):
                     continue
+                round_number = int(item.get("round") or 0)
+                if not in_selected_page(round_number):
+                    continue
                 usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
                 round_metrics.append(
                     {
-                        "round": int(item.get("round") or 0),
+                        "round": round_number,
                         "usage": dict(usage),
                         "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
                         "tool_calls": max(0, int(item.get("tool_calls") or 0)),
@@ -2733,7 +2800,7 @@ class WebRunService:
                 if not isinstance(item, dict):
                     continue
                 round_number = int(item.get("round") or 0)
-                if round_number > 0:
+                if in_selected_page(round_number):
                     reasoning_by_round[round_number] = str(item.get("content") or "")
 
         tools_by_round: dict[int, list[dict[str, Any]]] = {}
@@ -2743,7 +2810,9 @@ class WebRunService:
                 if not isinstance(item, dict):
                     continue
                 round_number = int(item.get("round") or 0)
-                if round_number <= 0 or not isinstance(item.get("calls"), list):
+                if not in_selected_page(round_number) or not isinstance(
+                    item.get("calls"), list
+                ):
                     continue
                 calls = []
                 for call in item["calls"]:
@@ -2786,11 +2855,17 @@ class WebRunService:
             "user": name,
             "source": normalized_source,
             "session_id": normalized_session,
-            "messages": session_messages(
-                self.root, name, normalized_source, normalized_session
-            ),
+            "messages": selected_messages,
             "round_metrics": round_metrics,
             "round_traces": round_traces,
+            "pagination": {
+                "limit": limit,
+                "total_rounds": total_rounds,
+                "first_round": start_round,
+                "last_round": end_round,
+                "has_more_before": start_round > 1,
+                "next_before": start_round if start_round > 1 else None,
+            },
         }
 
     @staticmethod
