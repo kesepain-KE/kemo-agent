@@ -42,13 +42,14 @@
   },
   "memory": {
     "storage_schema_version": 2,
-    "auto_extract_on_commit": true,
+    "auto_extract_on_commit": false,
+    "recovery_max_rounds_per_scan": 2,
     "temporary_injection_limits": {
-      "half_year": 300,
+      "half_year": 100,
       "one_month": 200,
-      "seven_days": 100
+      "seven_days": 300
     },
-    "important_memory_max_chars": 2000,
+    "important_memory_max_chars": 5000,
     "history_read_enabled": true,
     "tiers": {
       "seven_days": {

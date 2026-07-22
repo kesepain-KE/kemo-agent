@@ -80,6 +80,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 全局配置 | `config/global_config.json` | 框架全局默认值 |
 | 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置 |
 | 外部消息插件 | `message/out/<platform>/` | 文件夹级平台适配器、文件消息队列、附件、状态与日志 |
+| 外部消息附件 | `message/out/<platform>/files/` | 各平台消息模块的收发文件存放处。文件名保留原始名称（可能来自不同操作系统和设备），智能体在处理附件时应使用绝对路径。例：`message/out/telegram/files/` |
 | 全局人格 | `config/global_soul.md` | 安全底线，不可覆盖 |
 | 用户配置 | `users/<name>/user_config.json` | 覆盖全局配置 |
 | 用户人格 | `users/<name>/user_soul.md` | 用户偏好与风格 |
@@ -96,7 +97,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`executor.py` |
 | 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、可选 `executor.py` |
-| 用户历史 | `users/<name>/history/` | 时间戳目录保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
+| 用户历史 | `users/<name>/history/` | `data.json` 保存可重建会话索引；`conv_<uuid>/`（兼容旧时间戳目录）保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
 | 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
 | 任务计划 | `users/<name>/task_plan/` | 计划文件 |
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |

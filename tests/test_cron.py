@@ -242,8 +242,8 @@ class ExecutorTests(unittest.TestCase):
                 root=self.root, user="alice", task_id=task["task_id"], config={},
             )
         request = handled.call_args.args[0]
-        self.assertEqual(request["source"], "cron")
-        self.assertEqual(request["session_id"], "cron")
+        self.assertEqual(request["source"], f"background:cron:{task['task_id']}")
+        self.assertTrue(request["session_id"].startswith("conv_"))
         self.assertEqual(request["prompt"], "do work")
         self.assertEqual(result["status"], "enabled")
         self.assertTrue(result["latest_run_at"].endswith("+08:00"))

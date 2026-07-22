@@ -14,6 +14,7 @@ from run.agent_runner import AgentRunner
 from run.config import load_config
 from run.cron_store import CronError, CronStore, CronValidationError, now_beijing
 from run.engine import handle_request
+from run.history_index import new_conversation_id
 from run.tools import ToolRegistry, discover_tools
 
 
@@ -158,12 +159,15 @@ def _execute_claimed_task(
                 cancel_event=cancel_event,
             )
         else:
+            background_session_id = str(task.get("session_id") or "").strip()
+            if not background_session_id or background_session_id == "cron":
+                background_session_id = new_conversation_id()
             handle_request(
                 {
                     "user": task["user"],
                     "prompt": task["prompt"],
-                    "source": "cron",
-                    "session_id": "cron",
+                    "source": f"background:cron:{task_id}",
+                    "session_id": background_session_id,
                 },
                 root=root,
                 provider_factory=provider_factory,
