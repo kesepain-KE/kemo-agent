@@ -31,6 +31,8 @@ export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reas
   const [open, setOpen] = useState(item.streaming)
   const [copied, setCopied] = useState(false)
   const wasStreaming = useRef(item.streaming)
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  const followBodyRef = useRef(true)
 
   useEffect(() => {
     if (wasStreaming.current && !item.streaming) setOpen(false)
@@ -38,17 +40,37 @@ export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reas
     wasStreaming.current = item.streaming
   }, [item.streaming])
 
+  useEffect(() => {
+    const body = bodyRef.current
+    if (!body || !open || !item.streaming || !followBodyRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [item.content, item.streaming, open])
+
   const copy = async () => {
     await copyText(item.content)
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1200)
   }
+  const toggle = () => setOpen((value) => {
+    if (!value) followBodyRef.current = true
+    return !value
+  })
   return (
     <article className={`trace ${item.streaming ? 'streaming' : 'complete'} ${open ? 'open' : ''}`}>
-      <button className="trace-head" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+      <button className="trace-head" onClick={toggle} aria-expanded={open}>
         <span>{item.streaming ? '正在思考' : '思考过程'}</span><ChevronDown size={15} />
       </button>
-      <div className="trace-body">
+      <div
+        className="trace-body"
+        ref={bodyRef}
+        onScroll={(event) => {
+          const element = event.currentTarget
+          followBodyRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 32
+        }}
+      >
         <pre>{item.content || '等待内容…'}</pre>
         <div className="trace-body-actions">
           <button className="event-copy-btn" onClick={() => void copy()} disabled={!item.content} aria-label="复制思考过程">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? '已复制' : '复制'}</button>

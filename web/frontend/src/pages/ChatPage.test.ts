@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, isNearScrollBottom, reduceRunEvent, selectDockedPlan } from './ChatPage'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, reduceRunEvent, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
@@ -64,6 +64,29 @@ describe('reduceRunEvent', () => {
   it('仅在视口接近底部时自动跟随流式输出', () => {
     expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 610, clientHeight: 300 })).toBe(true)
     expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 400, clientHeight: 300 })).toBe(false)
+  })
+
+  it('把同一轮思考、工具、正文和统计组合到一个稳定的智能体回复容器', () => {
+    const items: ChatItem[] = [
+      { id: 'user-1', kind: 'message', role: 'user', content: '请检查' },
+      { id: 'reasoning-1', kind: 'reasoning', content: '分析中', streaming: true },
+      { id: 'tool-1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'running' },
+      { id: 'assistant-1', kind: 'message', role: 'assistant', content: '检查完成', streaming: true },
+      { id: 'usage-1', kind: 'usage', usage: { total_tokens: 12 } },
+    ]
+    const blocks = groupConversationItems(items)
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]).toMatchObject({ id: 'user-1', kind: 'user' })
+    expect(blocks[1]).toMatchObject({
+      id: 'assistant_turn_user-1_1',
+      kind: 'assistant',
+      items: [
+        { id: 'reasoning-1' },
+        { id: 'tool-1' },
+        { id: 'assistant-1' },
+        { id: 'usage-1' },
+      ],
+    })
   })
 
   it('流式合并正文和思考', () => {

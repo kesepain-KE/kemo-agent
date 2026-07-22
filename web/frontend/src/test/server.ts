@@ -29,6 +29,10 @@ export const handlers = [
     compressed: true, rounds_removed: 2, summary_cache_exists: true,
     context: { rounds_removed: 2 },
   })),
+  http.post('/api/users/kesepain/sessions/:sessionId/extract-memory', ({ params }) => HttpResponse.json({
+    status: 'completed', user: 'kesepain', source: 'web', session_id: params.sessionId,
+    round: 2, candidates: 1, extraction: { status: 'completed', candidate_count: 1 },
+  })),
   http.post('/api/users/kesepain/sessions/:sessionId/undo-last-round', async ({ params, request }) => {
     const body = await request.json() as { expected_round: number; prompt: string }
     return HttpResponse.json({
@@ -86,6 +90,11 @@ export const handlers = [
     system_cron: { tracking: 'execution_log', tasks: [], executions: [{ id: 'memory_promotion:1', task_id: 'memory_promotion', title: '记忆碎片到期晋升检查', executed_at: '2026-07-21T14:00:00+08:00', status: 'success', duration_ms: 1230, result: {}, error: null, source: 'execution_log' }] },
     message_routes: { summary: { total_bindings: 1, total_transports: 1, running_transports: 1, stopped_transports: 0, error_transports: 0, connected_transports: 1, temporary_files: 0, today_logs: 2 }, routes: [{ id: 'onebot', name: 'OneBot 正向 WebSocket', platform: 'onebot', health: 'healthy', state: 'running', latency_ms: 42, last_check: '2026-07-21T14:20:00+08:00', description: 'healthy' }] },
     runtime_host: { state: 'running', components: { cron: { name: 'cron', kind: 'scheduler', state: 'running' } } },
+    congestion: {
+      provider: { active_requests: 2, max_requests: 10, available_requests: 8, waiting_estimate: 0 },
+      web: { active_chats: 1, max_chats: 3, pending_chats: 0, max_pending: 5 },
+      message_router: { active_workers: 1, max_workers: 8, queued_messages: 0, max_queued: 20 },
+    },
   })),
   http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 1, completed_plans: 0 }, plans: [], cron_tasks: [{ task_id: 'daily-check', title: '每日检查', user_defined: true, status: 'enabled', type: 'daily', time: '18:00', next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never' }], executions: [] })),
   http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true, retrieval: { mode: 'index_only', full_index: true }, summary: { documents: 3, user_documents: 1, shared_documents: 1, global_documents: 1 }, documents: [{ scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true }, { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, active_for_main_agent: true }, { scope: 'global', relative_path: 'guide.md', title: '全局指南', size: 160, updated_at: 1, active_for_main_agent: true }], extensions: { kemo_graph: 'disabled' }, source_policy: sourcePolicy })),
@@ -167,8 +176,11 @@ export const handlers = [
       tools: { timeout: 240, max_iterations: 8 },
       history: { consecutive_tool_fail_limit: 5 },
       task_plan: { max_steps: 20 },
-      cron: { poll_interval: 30 },
-      agent_runtime: { default_timeout: 600 },
+      provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },
+      web: { max_concurrent_chats: 3, max_pending_chats: 5, pending_chat_timeout: 30 },
+      message: { max_workers: 8, max_queued_messages: 20 },
+      cron: { poll_interval: 30, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
+      agent_runtime: { default_timeout: 600, queue_maxsize: 50 },
     },
     redacted_paths: [],
   })),

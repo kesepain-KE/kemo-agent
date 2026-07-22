@@ -44,8 +44,11 @@ interface GlobalConfigDraft {
   tools: { timeout: number; max_iterations: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
-  cron: { poll_interval: number }
-  agent_runtime: { default_timeout: number }
+  provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number }
+  web: { max_concurrent_chats: number; max_pending_chats: number; pending_chat_timeout: number }
+  message: { max_workers: number; max_queued_messages: number }
+  cron: { poll_interval: number; avoid_congestion: boolean; congestion_threshold_ratio: number }
+  agent_runtime: { default_timeout: number; queue_maxsize: number }
 }
 
 interface SaveRequest {
@@ -165,6 +168,9 @@ function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
   const tools = record(config.tools)
   const history = record(config.history)
   const taskPlan = record(config.task_plan)
+  const providerRuntime = record(config.provider_runtime)
+  const web = record(config.web)
+  const message = record(config.message)
   const cron = record(config.cron)
   const agentRuntime = record(config.agent_runtime)
   return {
@@ -186,8 +192,28 @@ function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
     },
     history: { consecutive_tool_fail_limit: numberValue(history.consecutive_tool_fail_limit, 5) },
     task_plan: { max_steps: numberValue(taskPlan.max_steps, 20) },
-    cron: { poll_interval: numberValue(cron.poll_interval, 30) },
-    agent_runtime: { default_timeout: numberValue(agentRuntime.default_timeout, 600) },
+    provider_runtime: {
+      max_concurrent_requests: numberValue(providerRuntime.max_concurrent_requests, 10),
+      request_semaphore_timeout: numberValue(providerRuntime.request_semaphore_timeout, 300),
+    },
+    web: {
+      max_concurrent_chats: numberValue(web.max_concurrent_chats, 3),
+      max_pending_chats: numberValue(web.max_pending_chats, 5),
+      pending_chat_timeout: numberValue(web.pending_chat_timeout, 30),
+    },
+    message: {
+      max_workers: numberValue(message.max_workers, 8),
+      max_queued_messages: numberValue(message.max_queued_messages, 20),
+    },
+    cron: {
+      poll_interval: numberValue(cron.poll_interval, 30),
+      avoid_congestion: booleanValue(cron.avoid_congestion, true),
+      congestion_threshold_ratio: numberValue(cron.congestion_threshold_ratio, 0.2),
+    },
+    agent_runtime: {
+      default_timeout: numberValue(agentRuntime.default_timeout, 600),
+      queue_maxsize: numberValue(agentRuntime.queue_maxsize, 50),
+    },
   }
 }
 
@@ -426,8 +452,11 @@ export function SettingsPage() {
 
   const saveRuntime = () => {
     if (!userDraft || !globalDraft) return
-    const values = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout]
-    const validation = values.every((value) => Number.isInteger(value) && value > 0) ? '' : '运行限制必须全部为大于 0 的整数。'
+    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
+    const nonnegativeIntegers = [globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
+    let validation = positiveIntegers.every((value) => Number.isInteger(value) && value > 0) ? '' : '超时、轮询和并发上限必须为大于 0 的整数。'
+    if (!validation && !nonnegativeIntegers.every((value) => Number.isInteger(value) && value >= 0)) validation = '队列与等待槽上限必须为大于等于 0 的整数。'
+    if (!validation && (globalDraft.cron.congestion_threshold_ratio <= 0 || globalDraft.cron.congestion_threshold_ratio > 1)) validation = 'Cron 退避阈值必须大于 0 且不超过 1。'
     submit({
       label: '保存运行限制',
       userChanges: { task_plan: userDraft.task_plan },
@@ -437,6 +466,9 @@ export function SettingsPage() {
         task_plan: globalDraft.task_plan,
         cron: globalDraft.cron,
         agent_runtime: globalDraft.agent_runtime,
+        provider_runtime: globalDraft.provider_runtime,
+        web: globalDraft.web,
+        message: globalDraft.message,
       },
     }, validation)
   }
@@ -571,8 +603,26 @@ export function SettingsPage() {
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>调度与超时</strong><span>控制 Cron 扫描频率和子代理默认执行期限。</span></div>
-            <SettingRow title="Cron 轮询间隔（秒）" description="统一后台调度器检查到期任务的频率" source="global" control={<NumberInput label="Cron 轮询间隔" value={globalDraft.cron.poll_interval} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { poll_interval: value } })} />} />
-            <SettingRow title="代理默认超时（秒）" description="未单独声明超时时，子代理使用的默认期限" source="global" control={<NumberInput label="代理默认超时" value={globalDraft.agent_runtime.default_timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { default_timeout: value } })} />} />
+            <SettingRow title="Cron 轮询间隔（秒）" description="统一后台调度器检查到期任务的频率" source="global" control={<NumberInput label="Cron 轮询间隔" value={globalDraft.cron.poll_interval} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, poll_interval: value } })} />} />
+            <SettingRow title="代理默认超时（秒）" description="未单独声明超时时，子代理使用的默认期限" source="global" control={<NumberInput label="代理默认超时" value={globalDraft.agent_runtime.default_timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { ...globalDraft.agent_runtime, default_timeout: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>Provider 并发控制</strong><span>所有来源共享 Provider 总闸，工具执行期间不会占用槽位。</span></div>
+            <SettingRow title="最大并发请求数" description="同时访问 LLM API 的请求上限；超出后等待空闲槽位" source="global" control={<NumberInput label="最大并发请求数" value={globalDraft.provider_runtime.max_concurrent_requests} min={1} max={50} onChange={(value) => setGlobalDraft({ ...globalDraft, provider_runtime: { ...globalDraft.provider_runtime, max_concurrent_requests: value } })} />} />
+            <SettingRow title="信号量等待超时（秒）" description="等待 Provider 空闲的最长时间；超时后明确返回拥塞错误" source="global" control={<NumberInput label="信号量等待超时" value={globalDraft.provider_runtime.request_semaphore_timeout} min={1} max={600} onChange={(value) => setGlobalDraft({ ...globalDraft, provider_runtime: { ...globalDraft.provider_runtime, request_semaphore_timeout: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>Web 与消息并发</strong><span>限制单用户跨会话聊天数量和外部消息积压深度。</span></div>
+            <SettingRow title="单用户最大并发聊天" description="同一用户跨 session 的并发上限；超出后进入等待区" source="global" control={<NumberInput label="单用户最大并发聊天" value={globalDraft.web.max_concurrent_chats} min={1} max={20} onChange={(value) => setGlobalDraft({ ...globalDraft, web: { ...globalDraft.web, max_concurrent_chats: value } })} />} />
+            <SettingRow title="Web 排队槽位上限" description="并发已满后允许等待的请求数；再超出返回 503" source="global" control={<NumberInput label="Web 排队槽位上限" value={globalDraft.web.max_pending_chats} min={0} max={50} onChange={(value) => setGlobalDraft({ ...globalDraft, web: { ...globalDraft.web, max_pending_chats: value } })} />} />
+            <SettingRow title="Web 排队超时（秒）" description="排队等待的最长时间；超时返回 503 与 Retry-After" source="global" control={<NumberInput label="Web 排队超时" value={globalDraft.web.pending_chat_timeout} min={1} max={120} onChange={(value) => setGlobalDraft({ ...globalDraft, web: { ...globalDraft.web, pending_chat_timeout: value } })} />} />
+            <SettingRow title="消息路由队列上限" description="外部消息工作线程之外允许积压的数量；0 表示无界" source="global" control={<NumberInput label="消息路由队列上限" value={globalDraft.message.max_queued_messages} min={0} max={200} onChange={(value) => setGlobalDraft({ ...globalDraft, message: { ...globalDraft.message, max_queued_messages: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>子代理队列与 Cron 退避</strong><span>隔离用户级后台代理，并在 Provider 高负载时推迟重型定时任务。</span></div>
+            <SettingRow title="子代理队列上限" description="单用户 background_serial 子代理的最大等待数；0 表示无界" source="global" control={<NumberInput label="子代理队列上限" value={globalDraft.agent_runtime.queue_maxsize} min={0} max={200} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { ...globalDraft.agent_runtime, queue_maxsize: value } })} />} />
+            <SettingRow title="Cron 自动退避" description="Provider 繁忙时跳过本轮重型 Cron；感知和拓展采集仍执行" source="global" control={<Toggle checked={globalDraft.cron.avoid_congestion} label="Cron 自动退避" onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, avoid_congestion: value } })} />} />
+            <SettingRow title="退避触发阈值" description={`Provider 可用槽位低于 ${Math.round(globalDraft.cron.congestion_threshold_ratio * 100)}% 时触发`} source="global" control={<div className="config-range"><input type="range" aria-label="退避触发阈值" min="0.05" max="1" step="0.05" value={globalDraft.cron.congestion_threshold_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, congestion_threshold_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.cron.congestion_threshold_ratio * 100)}%</b></div>} />
           </article>
         </> : null}
 

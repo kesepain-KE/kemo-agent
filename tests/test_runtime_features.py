@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import cli
@@ -19,7 +20,14 @@ from provider.adapters.compat import (
     kemo_request_to_chat,
 )
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
-from run.engine import compress_context, context_status, handle_request, iter_request_events
+from run.agent_runner import AgentRunResult
+from run.engine import (
+    _extract_round_memory,
+    compress_context,
+    context_status,
+    handle_request,
+    iter_request_events,
+)
 from run.history import find_window, load_runtime_window, load_window
 from run.tools import apply_runtime_tool_policy, discover_tools, execute_tool
 
@@ -359,6 +367,115 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(done.usage["cached_prompt_tokens"], 2)
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
+
+    def test_completed_round_extracts_memory_after_history_commit(self) -> None:
+        _, root = self.make_root()
+        config_path = root / "config" / "global_config.json"
+        config = json.loads(config_path.read_text("utf-8"))
+        config["memory"] = {"auto_extract_on_commit": True}
+        config_path.write_text(json.dumps(config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[ChatResponse(text="记住这台设备。", usage=Usage())]
+        )
+        observed: dict[str, Any] = {}
+
+        def extract_after_commit(**kwargs):
+            observed.update(kwargs)
+            self.assertIsNotNone(find_window(root, "alice", "cli", "memory-round"))
+            return {
+                "status": "completed",
+                "candidate_count": 1,
+                "agent": "self_improve",
+                "usage": {},
+                "persisted": {"created": ["device.md"]},
+                "error": None,
+            }
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.engine._extract_round_memory", side_effect=extract_after_commit),
+        ):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "memory-round",
+                    "prompt": "我的设备是 J1900。",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(observed["round_number"], 1)
+        self.assertEqual(observed["prompt"], "我的设备是 J1900。")
+        self.assertEqual(result["memory"]["extraction_mode"], "round_commit")
+        self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
+
+    def test_extract_round_memory_persists_candidates_and_contains_failures(self) -> None:
+        _, root = self.make_root()
+        config = {"memory": {}}
+
+        class Runner:
+            def __init__(self, *, failure: Exception | None = None) -> None:
+                self.failure = failure
+                self.input_data: dict[str, Any] | None = None
+
+            def run(self, name, input_data, **kwargs):
+                del kwargs
+                if self.failure is not None:
+                    raise self.failure
+                self.input_data = input_data
+                return AgentRunResult(
+                    agent=name,
+                    data={
+                        "candidates": [
+                            {
+                                "action": "upsert",
+                                "filename": "device",
+                                "content": "用户设备为 J1900。",
+                                "explicit": False,
+                            }
+                        ]
+                    },
+                    raw_text="",
+                    usage={"total_tokens": 4},
+                    model="mock",
+                )
+
+        runner = Runner()
+        result = _extract_round_memory(
+            root=root,
+            user="alice",
+            config=config,
+            round_number=3,
+            prompt="我的设备是 J1900。",
+            text="已经了解。",
+            reasoning="",
+            tool_records=[],
+            agent_runner=runner,  # type: ignore[arg-type]
+            cancel_event=None,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(runner.input_data["source"], {"source": "round_commit", "round": 3})
+        self.assertTrue(
+            (root / "users" / "alice" / "improve" / "seven_days" / "device.md").is_file()
+        )
+
+        failed = _extract_round_memory(
+            root=root,
+            user="alice",
+            config=config,
+            round_number=4,
+            prompt="test",
+            text="test",
+            reasoning="",
+            tool_records=[],
+            agent_runner=Runner(failure=RuntimeError("extract failed")),  # type: ignore[arg-type]
+            cancel_event=None,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["exception_type"], "RuntimeError")
 
     def test_runtime_guidance_is_injected_at_tool_boundary_and_persisted(self) -> None:
         _, root = self.make_root()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,7 +36,9 @@ from provider.protocol.models import (
     VideoContent,
 )
 from run.agents import discover_agents
+from run.agent_runner import AgentRunner
 from run.config import (
+    ConfigError,
     USER_ONLY_SECTIONS,
     load_config,
     read_json_object,
@@ -48,7 +51,7 @@ from run.cron_store import (
     CronStore,
     normalize_task,
 )
-from run.engine import compress_context, iter_request_events
+from run.engine import _extract_round_memory, compress_context, iter_request_events
 from run.history import (
     HistoryError,
     delete_all_sessions as delete_all_history_sessions,
@@ -155,6 +158,15 @@ _CONFIG_SOURCE_PATHS = (
     "task_plan.auto_accept",
     "task_plan.max_steps",
     "cron.enabled",
+    "provider_runtime.max_concurrent_requests",
+    "provider_runtime.request_semaphore_timeout",
+    "web.max_concurrent_chats",
+    "web.max_pending_chats",
+    "web.pending_chat_timeout",
+    "message.max_queued_messages",
+    "agent_runtime.queue_maxsize",
+    "cron.avoid_congestion",
+    "cron.congestion_threshold_ratio",
     "runtime_host.enable_background_scheduler",
     "agents.max_rounds",
     "agents.token_limit",
@@ -449,6 +461,7 @@ class ActiveRun:
 class WebServiceError(RuntimeError):
     code = "internal_error"
     status = 500
+    headers: dict[str, str] | None = None
 
 
 class InvalidRequestError(WebServiceError):
@@ -464,6 +477,91 @@ class NotFoundError(WebServiceError):
 class ConflictError(WebServiceError):
     code = "conflict"
     status = 409
+
+
+class TooManyChatsError(WebServiceError):
+    code = "too_many_chats"
+    status = 503
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        self.headers = {"Retry-After": str(max(1, int(retry_after)))}
+
+
+class _UserChatGate:
+    """单用户聊天并发槽与有界等待区。"""
+
+    def __init__(
+        self,
+        max_concurrent: int,
+        max_pending: int,
+        pending_timeout: float,
+    ) -> None:
+        self.max_concurrent = max(1, int(max_concurrent))
+        self.max_pending = max(0, int(max_pending))
+        self.pending_timeout = max(1.0, float(pending_timeout))
+        self._semaphore = threading.BoundedSemaphore(self.max_concurrent)
+        self._pending_count = 0
+        self._active_count = 0
+        self._lock = threading.Lock()
+
+    def acquire(self, *, cancel_event: threading.Event | None = None) -> bool:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        if self._semaphore.acquire(blocking=False):
+            if cancel_event is not None and cancel_event.is_set():
+                self._semaphore.release()
+                return False
+            with self._lock:
+                self._active_count += 1
+            return True
+        with self._lock:
+            if self._pending_count >= self.max_pending:
+                return False
+            self._pending_count += 1
+        acquired = False
+        deadline = time.monotonic() + self.pending_timeout
+        try:
+            while not acquired:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                acquired = self._semaphore.acquire(timeout=min(0.1, remaining))
+            if cancel_event is not None and cancel_event.is_set():
+                self._semaphore.release()
+                acquired = False
+                return False
+            return acquired
+        finally:
+            with self._lock:
+                self._pending_count = max(0, self._pending_count - 1)
+                if acquired:
+                    self._active_count += 1
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active_count < 1:
+                raise RuntimeError("Web 聊天并发槽位重复释放")
+            self._active_count -= 1
+            self._semaphore.release()
+
+    def status(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "active_chats": self._active_count,
+                "max_chats": self.max_concurrent,
+                "pending_chats": self._pending_count,
+                "max_pending": self.max_pending,
+            }
+
+    def matches(self, max_concurrent: int, max_pending: int, pending_timeout: float) -> bool:
+        return (
+            self.max_concurrent == max(1, int(max_concurrent))
+            and self.max_pending == max(0, int(max_pending))
+            and self.pending_timeout == max(1.0, float(pending_timeout))
+        )
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -509,6 +607,7 @@ class WebRunService:
         runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
         message_health_checker: Callable[[str, str], dict[str, Any]] | None = None,
         message_transport_remover: Callable[[str, str], None] | None = None,
+        router_ref: Any | None = None,
     ) -> None:
         self.root = root.resolve()
         self.event_source = event_source
@@ -516,8 +615,60 @@ class WebRunService:
         self.runtime_status_provider = runtime_status_provider
         self.message_health_checker = message_health_checker
         self.message_transport_remover = message_transport_remover
+        self._router_ref = router_ref
         self._active_runs: dict[str, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
+        self._chat_gates: dict[str, _UserChatGate] = {}
+        self._chat_gates_lock = threading.Lock()
+
+    def _get_chat_gate(self, user: str) -> _UserChatGate:
+        try:
+            config = load_config(user, self.root)
+        except ConfigError:
+            # WebRunService 也用于最小化嵌入/测试环境；缺少完整配置时
+            # 维持既有行为并使用安全默认值，不能让并发层反向破坏启动。
+            config = {}
+        web_config = config.get("web") or {}
+        if not isinstance(web_config, dict):
+            web_config = {}
+        try:
+            max_concurrent = int(web_config.get("max_concurrent_chats", 3))
+        except (TypeError, ValueError):
+            max_concurrent = 3
+        try:
+            max_pending = int(web_config.get("max_pending_chats", 5))
+        except (TypeError, ValueError):
+            max_pending = 5
+        try:
+            pending_timeout = float(web_config.get("pending_chat_timeout", 30.0))
+        except (TypeError, ValueError):
+            pending_timeout = 30.0
+        if not math.isfinite(pending_timeout):
+            pending_timeout = 30.0
+        max_concurrent = max(1, max_concurrent)
+        max_pending = max(0, max_pending)
+        pending_timeout = max(1.0, pending_timeout)
+
+        with self._chat_gates_lock:
+            gate = self._chat_gates.get(user)
+            if gate is not None:
+                if gate.matches(max_concurrent, max_pending, pending_timeout):
+                    return gate
+                status = gate.status()
+                if status["active_chats"] or status["pending_chats"]:
+                    # 在途请求继续服从创建时的闸门，等完全空闲后再原子替换。
+                    return gate
+            gate = _UserChatGate(
+                max_concurrent=max_concurrent,
+                max_pending=max_pending,
+                pending_timeout=pending_timeout,
+            )
+            self._chat_gates[user] = gate
+            return gate
+
+    def chat_gate_status(self) -> dict[str, dict[str, int]]:
+        with self._chat_gates_lock:
+            return {user: gate.status() for user, gate in self._chat_gates.items()}
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "service": "kemo-agent-web", "version": 2}
@@ -2037,6 +2188,100 @@ class WebRunService:
             "context": dict(context),
         }
 
+    def extract_session_memory(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        """Extract memory candidates from the newest complete archived round."""
+
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        directory = find_window(
+            self.root,
+            name,
+            normalized_source,
+            normalized_session,
+        )
+        if directory is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        with self._active_runs_lock:
+            if any(
+                active.user == name and active.session_id == normalized_session
+                for active in self._active_runs.values()
+            ):
+                raise ConflictError("会话正在运行，结束当前响应后再提取记忆")
+
+        window = load_window(directory)
+        messages = (window.get("text") or {}).get("messages", [])
+        rounds = int((window.get("data") or {}).get("rounds", 0))
+        user_messages = [
+            message
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        assistant_messages = [
+            message
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        ]
+        if rounds < 1 or not user_messages or not assistant_messages:
+            return {
+                "status": "skipped",
+                "reason": "no_complete_round",
+                "user": name,
+                "source": normalized_source,
+                "session_id": normalized_session,
+                "round": rounds,
+                "candidates": 0,
+                "extraction": None,
+            }
+
+        think_rounds = (window.get("think") or {}).get("rounds", [])
+        reasoning = next(
+            (
+                str(item.get("content") or "")
+                for item in think_rounds
+                if isinstance(item, dict) and item.get("round") == rounds
+            ),
+            "",
+        )
+        tool_rounds = (window.get("tool") or {}).get("rounds", [])
+        tools = next(
+            (
+                item.get("calls", [])
+                for item in tool_rounds
+                if isinstance(item, dict) and item.get("round") == rounds
+            ),
+            [],
+        )
+        config = load_config(name, self.root)
+        runner = AgentRunner(self.root, name, config=config)
+        extraction = _extract_round_memory(
+            root=self.root,
+            user=name,
+            config=config,
+            round_number=rounds,
+            prompt=str(user_messages[-1].get("content") or ""),
+            text=str(assistant_messages[-1].get("content") or ""),
+            reasoning=reasoning,
+            tool_records=list(tools) if isinstance(tools, list) else [],
+            agent_runner=runner,
+            cancel_event=None,
+        )
+        return {
+            "status": str(extraction.get("status") or "completed"),
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "round": rounds,
+            "candidates": int(extraction.get("candidate_count") or 0),
+            "extraction": extraction,
+        }
+
     def undo_last_round(
         self,
         user: Any,
@@ -3121,6 +3366,10 @@ class WebRunService:
         temporary_memory_limits = memory.get("temporary_injection_limits") or {}
         task_plan = config.get("task_plan") or {}
         cron = config.get("cron") or {}
+        provider_runtime = config.get("provider_runtime") or {}
+        web_config = config.get("web") or {}
+        message_config = config.get("message") or {}
+        agent_runtime = config.get("agent_runtime") or {}
         runtime_host = config.get("runtime_host") or {}
         agents = config.get("agents") or {}
         return {
@@ -3164,6 +3413,14 @@ class WebRunService:
                     )
                 ),
                 "memory_chars": int(memory.get("important_memory_max_chars", 2000)),
+                "provider_max_concurrent": int(
+                    provider_runtime.get("max_concurrent_requests", 10)
+                ),
+                "web_max_chats": int(web_config.get("max_concurrent_chats", 3)),
+                "message_max_queued": int(
+                    message_config.get("max_queued_messages", 20)
+                ),
+                "agent_queue_maxsize": int(agent_runtime.get("queue_maxsize", 50)),
             },
             "users": [item["name"] for item in self.users()],
             "source_policy": source_policy.public_summary(),
@@ -3861,6 +4118,40 @@ class WebRunService:
             round_limit=round_limit,
             configured_ratio=compression_ratio,
         )
+        from provider.factory import provider_semaphore_status
+
+        try:
+            web_congestion = self._get_chat_gate(name).status()
+        except Exception:
+            web_congestion = {
+                "active_chats": 0,
+                "max_chats": 0,
+                "pending_chats": 0,
+                "max_pending": 0,
+            }
+        try:
+            message_congestion = (
+                self._router_ref.queue_status()
+                if self._router_ref is not None
+                else {
+                    "active_workers": 0,
+                    "max_workers": 0,
+                    "queued_messages": 0,
+                    "max_queued": 0,
+                }
+            )
+        except Exception:
+            message_congestion = {
+                "active_workers": 0,
+                "max_workers": 0,
+                "queued_messages": 0,
+                "max_queued": 0,
+            }
+        congestion = {
+            "provider": provider_semaphore_status(config),
+            "web": web_congestion,
+            "message_router": message_congestion,
+        }
         return {
             "schema_version": 1,
             "generated_at": now.isoformat(),
@@ -3915,6 +4206,7 @@ class WebRunService:
                 "routes": message_routes,
             },
             "runtime_host": self._runtime_status(),
+            "congestion": congestion,
         }
 
     def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
@@ -4212,9 +4504,18 @@ class WebRunService:
         normalized_run_id = (
             self.require_run_id(run_id) if run_id else f"run_{uuid.uuid4().hex}"
         )
+        gate = self._get_chat_gate(name)
+        if not gate.acquire(cancel_event=cancel_event):
+            if cancel_event.is_set():
+                raise ConflictError("聊天请求已取消")
+            raise TooManyChatsError(
+                "当前用户并发聊天或等待队列已满，请稍后重试",
+                retry_after=gate.pending_timeout,
+            )
         active = ActiveRun(normalized_run_id, name, normalized_session)
         with self._active_runs_lock:
             if normalized_run_id in self._active_runs:
+                gate.release()
                 raise ConflictError(f"run_id 已在使用：{normalized_run_id}")
             self._active_runs[normalized_run_id] = active
         request = {
@@ -4227,6 +4528,10 @@ class WebRunService:
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,
         }
+        if self._router_ref is not None:
+            transport_registry = getattr(self._router_ref, "transports", None)
+            if transport_registry is not None:
+                request["_transport_registry"] = transport_registry
                 # Run 生成器拥有线程仿射 RLock。  它的 next()/close()
                 # 因此，调用必须保留在一个专用工作线程上
                 # 在 asyncio.to_thread 工作线程之间跳转。
@@ -4272,7 +4577,13 @@ class WebRunService:
             name=f"web-run-{name}-{normalized_session}",
             daemon=True,
         )
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            with self._active_runs_lock:
+                self._active_runs.pop(normalized_run_id, None)
+            gate.release()
+            raise
 
         def events() -> Iterator[RunEvent]:
             try:
@@ -4289,5 +4600,6 @@ class WebRunService:
                 worker.join(timeout=1.0)
                 with self._active_runs_lock:
                     self._active_runs.pop(normalized_run_id, None)
+                gate.release()
 
         return events()

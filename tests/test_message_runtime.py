@@ -718,13 +718,29 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(CronStore(self.root, "alice").list_tasks()), 0)
         self.assertEqual(
             len(CronStore(self.root, "__system__", system=True).list_tasks()),
-            3,
+            5,
         )
         host.stop()
         host.stop()
         self.assertEqual(host.state, "stopped")
         self.assertEqual(cron.stopped, 1)
         self.assertEqual(host.maintenance.stopped, 1)
+
+    def test_runtime_host_cron_poll_honors_shortest_system_update_rate(self) -> None:
+        host = RuntimeHost(
+            self.root,
+            config={
+                "cron": {"enabled": True, "poll_interval": 30},
+                "task_cron_system": {
+                    "sense_update_rate": 5,
+                    "expand_update_rate": 8,
+                },
+            },
+            message_config={},
+            registry=TransportRegistry(),
+        )
+        self.assertEqual(host.cron.poll_interval, 5)
+        self.assertEqual(host.maintenance.poll_interval, 30)
 
     def test_background_switch_disables_cron_and_maintenance(self) -> None:
         cron = FakeCron()

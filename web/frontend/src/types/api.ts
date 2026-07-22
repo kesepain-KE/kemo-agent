@@ -100,6 +100,17 @@ export interface SessionCompressResponse {
   context: Record<string, unknown>
 }
 
+export interface SessionMemoryExtractionResponse {
+  status: 'completed' | 'failed' | 'skipped'
+  user: string
+  source: 'web'
+  session_id: string
+  round: number
+  candidates: number
+  reason?: string
+  extraction: Record<string, unknown> | null
+}
+
 export interface SessionUndoLastRoundResponse {
   user: string
   source: 'web'
@@ -733,6 +744,26 @@ export interface RuntimeStatusResponse {
   runtime_host: {
     state: string
     components: Record<string, { name?: string; kind?: string; state?: string; last_error?: unknown }>
+  }
+  congestion: {
+    provider: {
+      active_requests: number
+      max_requests: number
+      available_requests: number
+      waiting_estimate: number
+    }
+    web: {
+      active_chats: number
+      max_chats: number
+      pending_chats: number
+      max_pending: number
+    }
+    message_router: {
+      active_workers: number
+      max_workers: number
+      queued_messages: number
+      max_queued: number
+    }
   }
 }
 

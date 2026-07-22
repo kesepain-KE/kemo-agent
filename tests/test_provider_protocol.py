@@ -348,6 +348,43 @@ class UnifiedProtocolTests(unittest.TestCase):
         with self.assertRaises(CapabilityError):
             kemo_request_to_chat(unsupported)
 
+    def test_chat_bridge_skips_legacy_empty_native_reasoning(self) -> None:
+        chat = ChatRequest(
+            model="test",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "legacy answer",
+                    "_kemo_reasoning": {
+                        "id": "rs_empty",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "content": "",
+                        "summary": None,
+                        "provider_state": None,
+                        "metadata": {"round": 1},
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "content": "current answer",
+                    "_kemo_reasoning": {
+                        "id": "rs_valid",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": "valid summary",
+                        "metadata": {"round": 2},
+                    },
+                },
+            ],
+        )
+
+        request = chat_request_to_kemo(chat)
+
+        reasoning = [item for item in request.input if isinstance(item, ReasoningItem)]
+        self.assertEqual([item.id for item in reasoning], ["rs_valid"])
+        self.assertEqual(reasoning[0].summary, "valid summary")
+
     def test_gateway_native_json_and_sse_transport(self) -> None:
         request = make_request()
         response = make_response(request)

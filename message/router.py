@@ -23,6 +23,10 @@ class MessageRouteError(RuntimeError):
     pass
 
 
+class MessageQueueFullError(MessageRouteError):
+    """消息路由工作线程与等待队列均已满。"""
+
+
 @dataclass(slots=True)
 class RouteResult:
     envelope: MessageEnvelope
@@ -57,6 +61,7 @@ class MessageRouter:
         transports: TransportRegistry,
         *,
         max_workers: int = 4,
+        max_queued_messages: int = 20,
         processed_message_limit: int = 2000,
         provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
@@ -68,6 +73,7 @@ class MessageRouter:
         self.resolver = resolver
         self.transports = transports
         self.max_workers = max(1, int(max_workers))
+        self.max_queued_messages = max(0, int(max_queued_messages))
         self.processed_message_limit = max(1, int(processed_message_limit))
         self.provider_factory = provider_factory
         self.tool_registry_factory = tool_registry_factory
@@ -77,6 +83,14 @@ class MessageRouter:
         self._executor: ThreadPoolExecutor | None = None
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
+        self._pending_lock = threading.Lock()
+        self._outstanding_count = 0
+        self._active_count = 0
+        self._capacity = (
+            threading.BoundedSemaphore(self.max_workers + self.max_queued_messages)
+            if self.max_queued_messages > 0
+            else None
+        )
 
     @property
     def running(self) -> bool:
@@ -106,7 +120,66 @@ class MessageRouter:
             executor = self._executor
         if executor is None or self._stop_event.is_set():
             raise MessageRouteError("MessageRouter 未运行")
-        return executor.submit(self.route, envelope)
+        if self._capacity is not None and not self._capacity.acquire(blocking=False):
+            raise MessageQueueFullError(
+                f"消息路由队列已满（工作线程 {self.max_workers}，"
+                f"等待上限 {self.max_queued_messages}），请稍后重试"
+            )
+        ticket = {"started": False, "released": False}
+        with self._pending_lock:
+            self._outstanding_count += 1
+        try:
+            future = executor.submit(self._route_tracked, envelope, ticket)
+        except BaseException:
+            self._release_ticket(ticket, active=False)
+            raise
+        future.add_done_callback(lambda item: self._release_cancelled(item, ticket))
+        return future
+
+    def _route_tracked(
+        self,
+        envelope: MessageEnvelope,
+        ticket: dict[str, bool],
+    ) -> RouteResult:
+        with self._pending_lock:
+            ticket["started"] = True
+            self._active_count += 1
+        try:
+            return self.route(envelope)
+        finally:
+            self._release_ticket(ticket, active=True)
+
+    def _release_cancelled(
+        self,
+        future: Future[RouteResult],
+        ticket: dict[str, bool],
+    ) -> None:
+        if future.cancelled():
+            self._release_ticket(ticket, active=False)
+
+    def _release_ticket(self, ticket: dict[str, bool], *, active: bool) -> None:
+        release_capacity = False
+        with self._pending_lock:
+            if ticket["released"]:
+                return
+            ticket["released"] = True
+            if active:
+                self._active_count = max(0, self._active_count - 1)
+            self._outstanding_count = max(0, self._outstanding_count - 1)
+            release_capacity = self._capacity is not None
+        if release_capacity and self._capacity is not None:
+            self._capacity.release()
+
+    def queue_status(self) -> dict[str, int]:
+        with self._pending_lock:
+            active = self._active_count
+            queued = max(0, self._outstanding_count - active)
+        return {
+            "active_workers": active,
+            "max_workers": self.max_workers,
+            "queued_messages": queued,
+            "max_queued": self.max_queued_messages,
+        }
 
     def route(self, envelope: MessageEnvelope) -> RouteResult:
         """Synchronously route one message; normally called by the worker pool."""
@@ -162,6 +235,7 @@ class MessageRouter:
                 "source": source,
                 "session_id": session_id,
                 "stream": True,
+                "_transport_registry": self.transports,
             }
             request_payload = getattr(registered.transport, "request_payload", None)
             if callable(request_payload):

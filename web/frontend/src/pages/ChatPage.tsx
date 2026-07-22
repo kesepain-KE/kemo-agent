@@ -15,7 +15,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { compressSession, deleteSession, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
+import { compressSession, deleteSession, extractSessionMemory, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import type { ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -39,6 +39,43 @@ export function isNearScrollBottom(
   threshold = 96,
 ) {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold
+}
+
+export type ConversationBlock =
+  | { id: string; kind: 'user'; item: Extract<ChatItem, { kind: 'message' }> }
+  | { id: string; kind: 'assistant'; items: ChatItem[] }
+
+export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
+  const blocks: ConversationBlock[] = []
+  let activeAssistant: Extract<ConversationBlock, { kind: 'assistant' }> | null = null
+  let currentUserId = 'opening'
+  let assistantSequence = 0
+
+  const flushAssistant = () => {
+    if (!activeAssistant?.items.length) return
+    blocks.push(activeAssistant)
+    activeAssistant = null
+  }
+
+  for (const item of items) {
+    if (item.kind === 'message' && item.role === 'user') {
+      flushAssistant()
+      currentUserId = item.id
+      blocks.push({ id: item.id, kind: 'user', item })
+      continue
+    }
+    if (!activeAssistant) {
+      assistantSequence += 1
+      activeAssistant = {
+        id: `assistant_turn_${currentUserId}_${assistantSequence}`,
+        kind: 'assistant',
+        items: [],
+      }
+    }
+    activeAssistant.items.push(item)
+  }
+  flushAssistant()
+  return blocks
 }
 
 function insertCurrentRoundItem(
@@ -330,6 +367,7 @@ export function ChatPage() {
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
   const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
+  const [showFollowOutput, setShowFollowOutput] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
@@ -371,6 +409,7 @@ export function ChatPage() {
     historyHandoffSessionRef.current = ''
     lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
+    setShowFollowOutput(false)
     setLiveItems([])
     setEditingSource(null)
     setEditedSources(new Set())
@@ -419,6 +458,7 @@ export function ChatPage() {
     setActiveRunId(runId)
     setConversationMenuOpen(false)
     followOutputRef.current = true
+    setShowFollowOutput(false)
     if (editingSource) setEditedSources((current) => new Set(current).add(editingSource.id))
     setLiveItems((current) => [...current, {
       id: eventId('user'), kind: 'message', role: 'user', content: prompt,
@@ -481,6 +521,9 @@ export function ChatPage() {
     setConversationBusy('save')
     setConversationFeedback(null)
     try {
+      if (sessionId && hasCommitted) {
+        await extractSessionMemory(user, sessionId)
+      }
       await refreshSessions()
       newConversation()
     } catch (error) {
@@ -641,8 +684,20 @@ export function ChatPage() {
   const roundLimit = Math.max(1, Number(overview?.context.round_limit || 30))
   const handleChatScroll = () => {
     const element = scrollRef.current
-    if (element) followOutputRef.current = isNearScrollBottom(element)
+    if (!element) return
+    const following = isNearScrollBottom(element)
+    followOutputRef.current = following
+    setShowFollowOutput(!following)
   }
+  const resumeFollowingOutput = () => {
+    const element = scrollRef.current
+    if (!element) return
+    followOutputRef.current = true
+    setShowFollowOutput(false)
+    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    else element.scrollTop = element.scrollHeight
+  }
+  const conversationBlocks = groupConversationItems(items)
 
   return (
     <div className={`view chat-view active${items.length === 0 ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
@@ -699,39 +754,77 @@ export function ChatPage() {
         {historyQuery.isError && sessionId && liveItems.length === 0 && <div className="center-state error">该会话尚无已提交历史，可以直接发送第一条消息。</div>}
         <div className={`messages ${items.length ? 'show' : ''}`}>
           {items.length ? <div className="conversation-divider"><span>当前对话</span></div> : null}
-          {items.map((item, itemIndex) => {
-            if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
-            if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
-            if (item.kind === 'usage') return <UsageCard key={item.id} item={item} />
-            if (item.kind === 'task_plan') {
-              const plan = resolvePlan(item.plan)
-              return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
+          {conversationBlocks.map((block) => {
+            if (block.kind === 'user') {
+              const item = block.item
+              return (
+                <article key={block.id} className="message user">
+                  <div className="msg-avatar"><UserRound size={17} /></div>
+                  <div className="message-body">
+                    <div className="bubble"><MarkdownMessage content={item.content} streaming={Boolean(item.streaming)} /></div>
+                    <div className="message-actions">
+                      {item.edited ? <span className="edited-label">编辑后重发</span> : null}
+                      {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
+                      {!running ? <button onClick={() => editAndResend(item.id, item.content)} aria-label="编辑后重发"><Pencil size={12} />编辑重发</button> : null}
+                      <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
+                    </div>
+                  </div>
+                </article>
+              )
             }
-            if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
-            if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
-            const hasPlanBubble = items.slice(0, itemIndex).some((candidate) => candidate.kind === 'task_plan')
+
+            const assistantMessages = block.items.filter(
+              (item): item is Extract<ChatItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant',
+            )
+            const usageItems = block.items.filter(
+              (item): item is Extract<ChatItem, { kind: 'usage' }> => item.kind === 'usage',
+            )
+            const assistantText = assistantMessages.map((item) => item.content).filter(Boolean).join('\n\n')
+            const assistantCopyId = assistantMessages.at(-1)?.id || block.id
+            const hasPlanBubble = block.items.some((item) => item.kind === 'task_plan')
             return (
-              <article key={item.id} className={`message ${item.role === 'assistant' ? 'ai' : 'user'}`}>
-                <div className="msg-avatar">{item.role === 'assistant' ? <img src="/kemo-agent.jpg" width={571} height={568} alt="" /> : <UserRound size={17} />}</div>
-                <div className="message-body">
-                  <div className="bubble">
-                    <MarkdownMessage
-                      content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
-                      streaming={Boolean(item.streaming)}
-                    />
-                  </div>
-                  <div className="message-actions">
-                    {item.edited ? <span className="edited-label">编辑后重发</span> : null}
-                    {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
-                    {item.role === 'user' && !running ? <button onClick={() => editAndResend(item.id, item.content)} aria-label="编辑后重发"><Pencil size={12} />编辑重发</button> : null}
-                    <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
-                  </div>
+              <article key={block.id} className="assistant-turn">
+                <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
+                <div className="assistant-turn-content">
+                  {block.items.map((item) => {
+                    if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
+                    if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
+                    if (item.kind === 'usage') return null
+                    if (item.kind === 'task_plan') {
+                      const plan = resolvePlan(item.plan)
+                      return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
+                    }
+                    if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
+                    if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
+                    if (item.role !== 'assistant') return null
+                    return (
+                      <div key={item.id} className="assistant-response">
+                        <div className="bubble">
+                          <MarkdownMessage
+                            content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
+                            streaming={Boolean(item.streaming)}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {(usageItems.length > 0 || assistantMessages.length > 0) && (
+                    <div className="assistant-turn-footer">
+                      <div className="assistant-turn-usage">{usageItems.map((item) => <UsageCard key={item.id} item={item} />)}</div>
+                      {assistantMessages.length > 0 && (
+                        <button className="assistant-turn-copy" onClick={() => void copyMessage(assistantCopyId, assistantText)} disabled={!assistantText} aria-label="复制智能体回复">
+                          {copiedItem === assistantCopyId ? <Check size={13} /> : <Copy size={13} />}{copiedItem === assistantCopyId ? '已复制' : '复制'}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </article>
             )
           })}
           {items.length > 0 && persistedSessionPlans.map((plan) => <TaskPlanRecord key={`persisted_${plan.plan_id}`} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />)}
         </div>
+        {showFollowOutput && items.length > 0 ? <button className="chat-follow-output" type="button" onClick={resumeFollowingOutput}><ChevronDown size={15} />继续跟随最新回复</button> : null}
       </div>
       <div className="composer-zone">
         {dockedPlan ? (
@@ -758,7 +851,7 @@ export function ChatPage() {
               <div className="conversation-menu-head">对话操作</div>
               <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void saveAndNewConversation() }}>
                 <span className="conversation-action-icon"><Save size={16} /></span>
-                <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在确认归档…' : '保留当前归档并开启新上下文'}</span></span>
+                <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在提取记忆并确认归档…' : '保留当前归档并开启新上下文'}</span></span>
               </button>
               <button className="conversation-action danger" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void clearConversation() }}>
                 <span className="conversation-action-icon"><Trash2 size={16} /></span>

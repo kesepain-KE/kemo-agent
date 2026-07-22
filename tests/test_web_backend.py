@@ -92,6 +92,18 @@ class FakeService:
             "context": {"rounds_removed": 2},
         }
 
+    def extract_session_memory(self, user, session_id, *, source="web"):
+        self.seen = {"user": user, "session_id": session_id, "source": source}
+        return {
+            "status": "completed",
+            "user": user,
+            "source": source,
+            "session_id": session_id,
+            "round": 2,
+            "candidates": 1,
+            "extraction": {"status": "completed", "candidate_count": 1},
+        }
+
     def settings(self, user):
         return {"user": user, "schema_version": 1}
 
@@ -655,6 +667,65 @@ class WebBackendTests(unittest.TestCase):
             {"user": "alice", "source": "web", "session_id": "s1"},
         )
         self.assertEqual(observed["root"], root.resolve())
+
+    def test_session_memory_extraction_uses_latest_complete_round(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text("{}", "utf-8")
+        window = empty_window("alice", "web", "s1")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer one"},
+            {"role": "user", "content": "remember latest"},
+            {"role": "assistant", "content": "answer two"},
+        ]
+        window["think"]["rounds"] = [
+            {"round": 1, "content": "think one"},
+            {"round": 2, "content": "think two"},
+        ]
+        window["tool"]["rounds"] = [
+            {"round": 1, "calls": []},
+            {"round": 2, "calls": [{"name": "lookup", "status": "completed"}]},
+        ]
+        window["data"]["rounds"] = 2
+        commit_window(root / "users" / "alice" / "history" / "window-1", window)
+        observed: dict[str, Any] = {}
+
+        def extract(**kwargs):
+            observed.update(kwargs)
+            return {"status": "completed", "candidate_count": 2, "error": None}
+
+        with (
+            patch("web.service.AgentRunner", return_value=object()),
+            patch("web.service._extract_round_memory", side_effect=extract),
+        ):
+            response = self.request(
+                create_app(service=WebRunService(root)),
+                "POST",
+                "/api/users/alice/sessions/s1/extract-memory",
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["candidates"], 2)
+        self.assertEqual(observed["round_number"], 2)
+        self.assertEqual(observed["prompt"], "remember latest")
+        self.assertEqual(observed["text"], "answer two")
+        self.assertEqual(observed["reasoning"], "think two")
+        self.assertEqual(observed["tool_records"][0]["name"], "lookup")
+
+    def test_extract_memory_route_forwards_to_service(self) -> None:
+        fake = FakeService()
+        response = self.request(
+            create_app(service=fake),
+            "POST",
+            "/api/users/alice/sessions/s1/extract-memory",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["candidates"], 1)
+        self.assertEqual(
+            fake.seen,
+            {"user": "alice", "session_id": "s1", "source": "web"},
+        )
 
     def test_session_undo_last_round_updates_archive_and_runtime(self) -> None:
         _, root = self.make_root()
@@ -1530,6 +1601,13 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_sense["name"], "runtime display")
         self.assertEqual(len(runtime_payload["components"]["expand"]), 3)
         self.assertEqual(runtime_payload["runtime_host"]["state"], "running")
+        self.assertEqual(
+            set(runtime_payload["congestion"]),
+            {"provider", "web", "message_router"},
+        )
+        self.assertIn("active_requests", runtime_payload["congestion"]["provider"])
+        self.assertIn("active_chats", runtime_payload["congestion"]["web"])
+        self.assertIn("queued_messages", runtime_payload["congestion"]["message_router"])
         self.assertNotIn("api_key", runtime_status.text)
 
         tasks = self.request(app, "GET", "/api/users/alice/tasks")

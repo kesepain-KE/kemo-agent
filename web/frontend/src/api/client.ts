@@ -28,6 +28,7 @@ import type {
   SessionDeleteAllResponse,
   SessionDeleteResponse,
   SessionCompressResponse,
+  SessionMemoryExtractionResponse,
   SessionUndoLastRoundResponse,
   SessionRenameResponse,
   SessionsResponse,
@@ -159,6 +160,16 @@ export async function compressSession(
 ): Promise<SessionCompressResponse> {
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/compress`,
+    { method: 'POST' },
+  )
+}
+
+export async function extractSessionMemory(
+  user: string,
+  sessionId: string,
+): Promise<SessionMemoryExtractionResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/extract-memory`,
     { method: 'POST' },
   )
 }

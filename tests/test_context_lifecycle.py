@@ -54,8 +54,9 @@ def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dic
 
 
 class SummaryRunner:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, narrative: str = "compressed") -> None:
         self.fail = fail
+        self.narrative = narrative
         self.calls = 0
 
     def run(self, name, input_data, **kwargs):
@@ -69,7 +70,7 @@ class SummaryRunner:
             "unfinished": [],
             "tool_results": [],
             "entities": [],
-            "narrative": "compressed",
+            "narrative": self.narrative,
         }
         return AgentRunResult(
             agent=name,
@@ -406,6 +407,43 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(window["think"]["rounds"][0]["content"], "compressed")
         self.assertEqual(window["tool"]["rounds"][0]["calls"], [])
         self.assertFalse(window["think"]["rounds"][1].get("compressed", False))
+
+    def test_tool_think_compression_keeps_reasoning_when_summary_is_empty(self) -> None:
+        window = make_window(5, with_tools=True)
+        original_reasoning = {
+            "id": "rs_original",
+            "type": "reasoning",
+            "status": "completed",
+            "content": "original reasoning",
+            "metadata": {"round": 1},
+        }
+        window["items"] = {
+            "items": [
+                original_reasoning,
+                {
+                    "id": "msg_answer",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "answer"}],
+                    "metadata": {"round": 1},
+                },
+            ]
+        }
+
+        diagnostics = _compress_per_round_tool_think(
+            window=window,
+            conserved_rounds=2,
+            agent_runner=SummaryRunner(narrative=""),
+            cancel_event=None,
+        )
+
+        self.assertTrue(diagnostics["compressed"])
+        reasoning = next(
+            item for item in window["items"]["items"] if item.get("type") == "reasoning"
+        )
+        self.assertEqual(reasoning, original_reasoning)
+        self.assertNotEqual(reasoning.get("content"), "")
 
     def test_runtime_mirror_can_compress_without_mutating_archive(self) -> None:
         temporary = tempfile.TemporaryDirectory()

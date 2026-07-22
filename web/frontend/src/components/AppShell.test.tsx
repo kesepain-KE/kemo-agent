@@ -264,6 +264,36 @@ describe('AppShell navigation', () => {
     expect(screen.getAllByText('上一条问题')).toHaveLength(1)
   })
 
+  it('保存并创建新对话前先提取当前会话最后一轮记忆', async () => {
+    let extractedSession = ''
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [
+          { id: 'u1', role: 'user', content: '需要记住的内容' },
+          { id: 'a1', role: 'assistant', content: '已经记录' },
+        ],
+        round_metrics: [], round_traces: [],
+      })),
+      http.post('/api/users/kesepain/sessions/:sessionId/extract-memory', ({ params }) => {
+        extractedSession = String(params.sessionId)
+        return HttpResponse.json({
+          status: 'completed', user: 'kesepain', source: 'web',
+          session_id: params.sessionId, round: 1, candidates: 1,
+          extraction: { status: 'completed', candidate_count: 1 },
+        })
+      }),
+    )
+    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('已经记录')
+
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
+
+    await waitFor(() => expect(extractedSession).toBe('s1'))
+    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
+  })
+
   it('清空当前对话会删除归档并进入新对话', async () => {
     let deletedSession = ''
     vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -444,5 +474,35 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('link', { name: '身份与人格' })).toHaveAttribute('title', '身份与人格')
     fireEvent.click(expandButton)
     expect(screen.getByRole('button', { name: '收缩侧边栏' })).toBeInTheDocument()
+  })
+
+  it('运行限制展示并保存多层并发与反压配置', async () => {
+    const captured: { globalChanges?: Record<string, unknown> } = {}
+    server.use(
+      http.patch('/api/global-config', async ({ request }) => {
+        const payload = await request.json() as { changes: Record<string, unknown> }
+        captured.globalChanges = payload.changes
+        return HttpResponse.json({ scope: 'global', config: payload.changes, redacted_paths: [], updated: true })
+      }),
+    )
+    renderApp('/settings?user=kesepain&tab=runtime')
+
+    expect(await screen.findByText('Provider 并发控制')).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: '最大并发请求数' })).toHaveValue(10)
+    expect(screen.getByRole('spinbutton', { name: '单用户最大并发聊天' })).toHaveValue(3)
+    expect(screen.getByRole('spinbutton', { name: '消息路由队列上限' })).toHaveValue(20)
+    expect(screen.getByRole('spinbutton', { name: '子代理队列上限' })).toHaveValue(50)
+    expect(screen.getByRole('switch', { name: 'Cron 自动退避' })).toBeChecked()
+    expect(screen.getByRole('slider', { name: '退避触发阈值' })).toHaveValue('0.2')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '最大并发请求数' }), { target: { value: '12' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Web 排队槽位上限' }), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存运行限制' }))
+    await waitFor(() => expect(captured.globalChanges).toBeDefined())
+
+    const providerRuntime = captured.globalChanges?.provider_runtime as Record<string, unknown>
+    const web = captured.globalChanges?.web as Record<string, unknown>
+    expect(providerRuntime.max_concurrent_requests).toBe(12)
+    expect(web.max_pending_chats).toBe(7)
   })
 })

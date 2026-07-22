@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
@@ -178,6 +178,7 @@ def create_app(
         return JSONResponse(
             status_code=exc.status,
             content=_error_body(exc.code, str(exc), exc.status),
+            headers=exc.headers,
         )
 
     @app.exception_handler(WebAuthError)
@@ -469,6 +470,19 @@ def create_app(
             source=source,
         )
 
+    @app.post("/api/users/{user}/sessions/{session_id}/extract-memory")
+    async def extract_session_memory(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.extract_session_memory,
+            user,
+            session_id,
+            source=source,
+        )
+
     @app.post("/api/users/{user}/sessions/{session_id}/undo-last-round")
     async def undo_last_round(
         user: str,
@@ -704,20 +718,43 @@ def create_app(
     @app.post("/api/chat")
     async def chat(body: ChatBody, request: Request) -> StreamingResponse:
         cancel_event = threading.Event()
+        events: Iterator[RunEvent] | None = None
         try:
             content_options = {"content": body.content} if body.content else {}
-            events = backend.stream_chat(
-                body.user,
-                body.session_id,
-                body.prompt,
-                cancel_event=cancel_event,
-                run_id=body.run_id,
-                **content_options,
+            # stream_chat 可能在用户级并发闸前有界等待；放入工作线程，避免
+            # 一个用户的排队请求阻塞 FastAPI 事件循环和其他用户的 API。
+            chat_task = asyncio.create_task(
+                asyncio.to_thread(
+                    backend.stream_chat,
+                    body.user,
+                    body.session_id,
+                    body.prompt,
+                    cancel_event=cancel_event,
+                    run_id=body.run_id,
+                    **content_options,
+                )
             )
+            try:
+                events = await asyncio.shield(chat_task)
+            except asyncio.CancelledError:
+                cancel_event.set()
+                # shield 保留工作线程结果；若闸门刚好放行并返回生成器，必须
+                # 主动关闭它，避免客户端断开后泄漏 Web 并发槽位。
+                try:
+                    abandoned = await chat_task
+                except BaseException:
+                    pass
+                else:
+                    close = getattr(abandoned, "close", None)
+                    if callable(close):
+                        await asyncio.to_thread(close)
+                raise
         except WebServiceError:
             raise
         except Exception as exc:
             raise InvalidRequestError("无法创建聊天请求") from exc
+
+        assert events is not None
 
         async def generate():
             terminal = False
@@ -773,7 +810,7 @@ def create_app(
                 cancel_event.set()
                 close = getattr(iterator, "close", None)
                 if callable(close):
-                    close()
+                    await asyncio.to_thread(close)
 
         return StreamingResponse(
             generate(),
