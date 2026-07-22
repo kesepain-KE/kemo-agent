@@ -306,7 +306,11 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
         native_message = raw.get("_kemo_message")
         reasoning = str(raw.get("reasoning_content") or "")
         if isinstance(native_reasoning, dict):
-            items.append(ReasoningItem.model_validate(native_reasoning))
+            content = native_reasoning.get("content")
+            summary = native_reasoning.get("summary")
+            provider_state = native_reasoning.get("provider_state")
+            if content or summary or provider_state:
+                items.append(ReasoningItem.model_validate(native_reasoning))
         elif reasoning:
             items.append(ReasoningItem(id=_id("rs"), content=reasoning))
         if role in {"user", "assistant"} and raw.get("content") not in (None, ""):
