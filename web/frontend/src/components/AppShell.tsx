@@ -46,16 +46,20 @@ import {
   getUsers,
   logoutAuth,
   patchPreferences,
+  releaseSessionLease,
+  touchSessionLease,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
 import { UserProfileCard } from './UserProfileCard'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
+import { createSessionChannel, getPageClientId } from '../sessionClient'
 
 export interface ShellOutletContext {
   user: string
   sessionId: string
+  clientId: string
   chatRunning: boolean
   setChatRunning: (running: boolean) => void
   chatRunId: string
@@ -68,9 +72,11 @@ export interface ShellOutletContext {
   finishChatRun: (user: string, sessionId: string, committed: boolean) => void
   clearChatRun: (user: string, sessionId: string) => void
   setSessionId: (sessionId: string) => void
+  detachSession: () => void
+  notifySessionDeleted: (sessionId: string) => void
   sessions: SessionsResponse['sessions']
   refreshSessions: () => Promise<SessionsResponse | undefined>
-  createNewSession: () => Promise<void>
+  createNewSession: () => Promise<string | undefined>
   overview?: OverviewResponse
   refreshOverview: () => void
   openCommandPanel: () => void
@@ -192,6 +198,8 @@ export function AppShell() {
   const [params, setParams] = useSearchParams()
   const ui = useUiStore()
   const queryClient = useQueryClient()
+  const clientId = useMemo(() => getPageClientId(), [])
+  const [sessionTransitioning, setSessionTransitioning] = useState(false)
   const authStatus = queryClient.getQueryData<AuthStatusResponse>(['auth-status'])
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: getUsers })
   const healthQuery = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
@@ -203,9 +211,9 @@ export function AppShell() {
     enabled: Boolean(user),
   })
   const activeSessionQuery = useQuery({
-    queryKey: ['active-session', user],
-    queryFn: () => getActiveSession(user),
-    enabled: Boolean(user) && !sessionId,
+    queryKey: ['active-session', user, clientId],
+    queryFn: () => getActiveSession(user, clientId),
+    enabled: Boolean(user) && !sessionId && !sessionTransitioning,
     staleTime: 0,
   })
   const overviewQuery = useQuery({
@@ -235,9 +243,17 @@ export function AppShell() {
   const [chatRunId, setChatRunId] = useState('')
   const [chatRuns, setChatRuns] = useState<Record<string, ChatRunSnapshot>>({})
   const chatAbortControllerRef = useRef<AbortController | null>(null)
+  const locationRef = useRef(location)
+  const userRef = useRef(user)
+  const sessionIdRef = useRef(sessionId)
+  const sessionChannelRef = useRef<ReturnType<typeof createSessionChannel> | null>(null)
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const commandInputRef = useRef<HTMLInputElement>(null)
+
+  locationRef.current = location
+  userRef.current = user
+  sessionIdRef.current = sessionId
 
   const beginChatRun = useCallback((runUser: string, runSessionId: string, runId: string, historyUserMessages: number) => {
     const key = chatRunKey(runUser, runSessionId)
@@ -365,24 +381,92 @@ export function AppShell() {
     const next = new URLSearchParams(params)
     if (nextSession) next.set('session', nextSession)
     else next.delete('session')
+    if (nextSession) setSessionTransitioning(false)
     setParams(next)
+  }
+
+  const detachSession = () => {
+    setSessionTransitioning(true)
+    queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
+    setSessionId('')
+  }
+
+  const notifySessionDeleted = (deletedSessionId: string) => {
+    if (!user || !deletedSessionId) return
+    sessionChannelRef.current?.post({
+      type: 'session-deleted',
+      user,
+      sessionId: deletedSessionId,
+      clientId,
+    })
   }
 
   useEffect(() => {
     const active = activeSessionQuery.data?.session?.session_id
-    if (!sessionId && active) setSessionId(active)
-  }, [activeSessionQuery.data?.session?.session_id, sessionId])
+    if (!sessionId && !sessionTransitioning && active) setSessionId(active)
+  }, [activeSessionQuery.data?.session?.session_id, sessionId, sessionTransitioning])
+
+  useEffect(() => {
+    if (!user || !sessionId) return
+    let disposed = false
+    const touch = () => {
+      if (!disposed) void touchSessionLease(user, sessionId, clientId).catch(() => undefined)
+    }
+    touch()
+    const heartbeat = window.setInterval(touch, 15_000)
+    return () => {
+      disposed = true
+      window.clearInterval(heartbeat)
+      void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined)
+    }
+  }, [clientId, sessionId, user])
+
+  useEffect(() => {
+    const channel = createSessionChannel((event) => {
+      if (event.clientId === clientId || event.user !== userRef.current) return
+      queryClient.removeQueries({ queryKey: ['history', event.user, event.sessionId] })
+      void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
+      void queryClient.invalidateQueries({ queryKey: ['overview', event.user] })
+      if (sessionIdRef.current === event.sessionId) {
+        queryClient.removeQueries({ queryKey: ['active-session', event.user, clientId] })
+        setSessionTransitioning(false)
+        const current = locationRef.current
+        const next = new URLSearchParams(current.search)
+        next.delete('session')
+        navigate({ pathname: current.pathname, search: `?${next.toString()}`, hash: current.hash }, { replace: true })
+        setHistorySwitchError('当前对话已在另一个页面删除，已为本页面解除绑定。')
+      }
+    })
+    sessionChannelRef.current = channel
+    return () => {
+      sessionChannelRef.current = null
+      channel.close()
+    }
+  }, [clientId, navigate, queryClient])
 
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
 
   const createNewSession = async () => {
     if (!user || chatRunning) return
-    const result = await createSession(user)
-    await sessionsQuery.refetch()
-    const next = new URLSearchParams()
-    next.set('user', user)
-    next.set('session', result.session.session_id)
-    navigate(`/chat?${next.toString()}`)
+    const requestedUser = user
+    try {
+      const result = await createSession(requestedUser, clientId)
+      const current = locationRef.current
+      const next = new URLSearchParams(current.search)
+      const currentUser = next.get('user') || userRef.current
+      if (currentUser === requestedUser) {
+        next.set('user', requestedUser)
+        next.set('session', result.session.session_id)
+        setSessionTransitioning(false)
+        navigate({ pathname: current.pathname, search: `?${next.toString()}`, hash: current.hash }, { replace: true })
+      }
+      void sessionsQuery.refetch()
+      void overviewQuery.refetch()
+      return result.session.session_id
+    } catch (error) {
+      setSessionTransitioning(false)
+      throw error
+    }
   }
 
   const runCommand = (action: () => void) => {
@@ -423,7 +507,7 @@ export function AppShell() {
     try {
         const currentSession = sessionsQuery.data?.sessions.find((session) => session.session_id === sessionId)
         if (sessionId && currentSession?.state !== 'closed') {
-          await closeSession(user, sessionId)
+          await closeSession(user, sessionId, clientId)
         }
       await sessionsQuery.refetch()
       setHistoryDrawerOpen(false)
@@ -438,14 +522,15 @@ export function AppShell() {
   const deleteHistorySession = async (targetSessionId: string) => {
     if (!user) throw new Error('当前没有可用用户')
     if (chatRunning && targetSessionId === sessionId) throw new Error('当前对话正在运行，暂时不能删除')
-    await deleteSession(user, targetSessionId)
+    await deleteSession(user, targetSessionId, clientId)
+    notifySessionDeleted(targetSessionId)
     queryClient.removeQueries({ queryKey: ['history', user, targetSessionId] })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
       queryClient.invalidateQueries({ queryKey: ['overview', user] }),
     ])
     if (targetSessionId === sessionId) {
-      queryClient.removeQueries({ queryKey: ['active-session', user] })
+      queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
       setSessionId('')
     }
   }
@@ -455,7 +540,7 @@ export function AppShell() {
     if (chatRunning) throw new Error('当前对话正在运行，暂时不能删除全部历史对话')
     await deleteAllSessions(user)
     queryClient.removeQueries({ queryKey: ['history', user] })
-    queryClient.removeQueries({ queryKey: ['active-session', user] })
+    queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
       queryClient.invalidateQueries({ queryKey: ['overview', user] }),
@@ -593,7 +678,7 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, sessionId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

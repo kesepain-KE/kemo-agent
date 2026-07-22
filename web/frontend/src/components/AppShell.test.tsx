@@ -16,8 +16,11 @@ afterEach(() => {
 
 function renderApp(path = '/chat') {
   let currentSearch = new URL(path, 'http://test').search
+  let currentPathname = new URL(path, 'http://test').pathname
   function LocationProbe() {
-    currentSearch = useLocation().search
+    const location = useLocation()
+    currentSearch = location.search
+    currentPathname = location.pathname
     return null
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -34,7 +37,7 @@ function renderApp(path = '/chat') {
       </MemoryRouter>
     </QueryClientProvider>,
   )
-  return { getSearch: () => currentSearch, client }
+  return { getSearch: () => currentSearch, getPathname: () => currentPathname, client }
 }
 
 function session(id: string, title: string, index: number): SessionSummary {
@@ -456,6 +459,35 @@ describe('AppShell navigation', () => {
     expect(extractedSession).toBe('')
   })
 
+  it('保存新建期间可立即切换侧栏且新会话只更新当前页面参数', async () => {
+    let releaseClose!: () => void
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    server.use(
+      http.post('/api/users/kesepain/sessions/s1/close', async () => {
+        await closeGate
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', closed: true,
+          memory: { status: 'queued', reason: 'queued', rounds: 1, processed_round: 0 },
+          session: { ...session('s1', '旧对话', 1), state: 'closed' },
+        })
+      }),
+    )
+    const { getSearch, getPathname } = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
+
+    expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
+    expect(getPathname()).toBe('/settings')
+    expect(getSearch()).not.toContain('session=s1')
+
+    releaseClose()
+    await waitFor(() => expect(getSearch()).toContain('session=conv_new_session'))
+    expect(getPathname()).toBe('/settings')
+  })
+
   it('清空当前对话会删除归档并进入新对话', async () => {
     let deletedSession = ''
     vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -478,6 +510,28 @@ describe('AppShell navigation', () => {
 
     await waitFor(() => expect(deletedSession).toBe('s1'))
     await waitFor(() => expect(getSearch()).toBe('?user=kesepain&session=conv_new_session'))
+  })
+
+  it('其他页面仍在使用对话时清空返回 409 并恢复原会话', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '共享问题' }, { role: 'assistant', content: '共享回答' }],
+        round_metrics: [], round_traces: [],
+      })),
+      http.delete('/api/users/kesepain/sessions/s1', () => HttpResponse.json({
+        error: { code: 'conflict', message: '该对话正在其他页面中使用，暂时不能删除' },
+      }, { status: 409 })),
+    )
+    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('共享回答')
+
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /清空此对话/ }))
+
+    expect(await screen.findByText('该对话正在其他页面中使用，暂时不能删除')).toBeInTheDocument()
+    await waitFor(() => expect(getSearch()).toContain('session=s1'))
   })
 
   it('上下文窗口抽屉展示七组真实聚合统计', async () => {
