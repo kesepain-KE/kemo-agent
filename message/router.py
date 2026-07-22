@@ -15,6 +15,9 @@ from message.state import ProcessedMessageStore
 from message.transport import TransportRegistry
 from provider.factory import create_provider
 from run.engine import iter_request_events
+from run.history_index import (
+    get_or_reserve_active as get_or_reserve_history_session,
+)
 from run.tools import ToolRegistry, discover_tools
 from run.users import user_dir
 
@@ -190,7 +193,20 @@ class MessageRouter:
         else:
             user = self.resolver.resolve(envelope)
         source = f"message:{envelope.platform}"
-        session_id = f"{envelope.chat_type}:{envelope.external_chat_id}"
+        legacy_session_id = f"{envelope.chat_type}:{envelope.external_chat_id}"
+        active_key = (
+            f"message:{envelope.platform}:{envelope.chat_type}:"
+            f"{envelope.external_chat_id}"
+        )
+        active_record, _ = get_or_reserve_history_session(
+            self.root,
+            user,
+            source,
+            active_key,
+            preferred_session_id=legacy_session_id,
+            title=f"{envelope.platform} · {envelope.chat_type}",
+        )
+        session_id = str(active_record.get("session_id") or legacy_session_id)
         store = ProcessedMessageStore(
             self.root, user, max_entries=self.processed_message_limit
         )
@@ -235,6 +251,7 @@ class MessageRouter:
                 "source": source,
                 "session_id": session_id,
                 "stream": True,
+                "_history_active_key": active_key,
                 "_transport_registry": self.transports,
             }
             request_payload = getattr(registered.transport, "request_payload", None)

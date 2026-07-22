@@ -529,7 +529,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(first.status, "completed")
         self.assertEqual(first.text, "reply:hello")
         self.assertEqual(first.source, "message:mock")
-        self.assertEqual(first.session_id, "private:chat-1")
+        self.assertTrue(first.session_id.startswith("conv_"))
         self.assertEqual(len(self.transport.sent), 1)
         duplicate = router.route(_envelope())
         self.assertTrue(duplicate.duplicate)
@@ -546,13 +546,9 @@ class RouterTests(unittest.TestCase):
         router = self._router(source)
         router.route(_envelope("m1", chat_type="private", chat_id="u1"))
         router.route(_envelope("m2", chat_type="group", chat_id="g1"))
-        self.assertEqual(
-            seen,
-            [
-                ("alice", "message:mock", "private:u1"),
-                ("alice", "message:mock", "group:g1"),
-            ],
-        )
+        self.assertEqual([item[:2] for item in seen], [("alice", "message:mock")] * 2)
+        self.assertTrue(all(item[2].startswith("conv_") for item in seen))
+        self.assertNotEqual(seen[0][2], seen[1][2])
 
     def test_run_error_isolated(self) -> None:
         def failed(request, **kwargs):
@@ -584,9 +580,10 @@ class RouterTests(unittest.TestCase):
 
         def source(request, **kwargs):
             nonlocal active, max_active
-            if request["session_id"].endswith("parallel-1"):
+            binding = str(request.get("_history_active_key") or "")
+            if binding.endswith("parallel-1"):
                 barrier.wait(timeout=2)
-            elif request["session_id"].endswith("parallel-2"):
+            elif binding.endswith("parallel-2"):
                 barrier.wait(timeout=2)
             with lock:
                 active += 1
