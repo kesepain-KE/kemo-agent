@@ -41,7 +41,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 兼容入口 | `run/agents.py` | 转发子代理 schema 公共 API |
 | 任务计划 | `run/task_plan_store.py` | 计划创建、状态机、磁盘持久化 |
 | 定时任务 | `run/cron_store.py` | cron 任务 CRUD、校验 |
-| 运行时宿主 | `run/runtime_host.py` | Web + cron + 消息路由的统一宿主 |
+| 运行时宿主 | `run/runtime_host.py` | Web、cron、消息路由与任务计划调度的统一宿主 |
 | Provider | `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
 
 ---
