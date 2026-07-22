@@ -16,8 +16,6 @@ from run.agent_runner import AgentCancelledError, AgentRunResult, AgentRunner
 
 TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 _TERMINAL = {"completed", "failed", "cancelled"}
-_SENTINEL = object()
-_BACKGROUND_SERIAL_LOCK = threading.Lock()
 
 
 class AgentQueueError(RuntimeError):
@@ -93,6 +91,8 @@ class AgentScheduler:
         self._queue: queue.Queue[AgentTask | object] = queue.Queue(maxsize=max(0, maxsize))
         self._tasks: dict[str, AgentTask] = {}
         self._lock = threading.RLock()
+        self._serial_lock = threading.Lock()
+        self._enqueue_inflight = 0
         self._closed = False
         self._worker = threading.Thread(target=self._work, name=thread_name, daemon=True)
         self._worker.start()
@@ -107,7 +107,7 @@ class AgentScheduler:
         runtime = runner.config.get("agent_runtime") or {}
         return cls(
             runner,
-            maxsize=int(runtime.get("queue_maxsize", 0)),
+            maxsize=int(runtime.get("queue_maxsize", 50)),
             event_callback=event_callback,
         )
 
@@ -132,7 +132,7 @@ class AgentScheduler:
         model_override: str | None = None,
         max_tokens: int | None = None,
         result_handler: Callable[[AgentRunResult], None] | None = None,
-        block: bool = True,
+        block: bool = False,
         enqueue_timeout: float | None = None,
     ) -> str:
         registry = (
@@ -158,13 +158,26 @@ class AgentScheduler:
                 result_handler=result_handler,
             )
             self._tasks[task.id] = task
+            # 标记正在入队的提交者，使 close 后的工作线程不会在 put 真正
+            # 完成前退出；put 本身不能持有 _lock，否则阻塞入队会卡住关闭。
+            self._enqueue_inflight += 1
         try:
             self._queue.put(task, block=block, timeout=enqueue_timeout)
         except queue.Full as exc:
             with self._lock:
                 self._tasks.pop(task.id, None)
             raise AgentQueueError("子代理调度队列已满") from exc
-        self._emit(task, "queued")
+        except BaseException:
+            with self._lock:
+                self._tasks.pop(task.id, None)
+            raise
+        finally:
+            with self._lock:
+                self._enqueue_inflight = max(0, self._enqueue_inflight - 1)
+        with self._lock:
+            emit_queued = task.status == "queued"
+        if emit_queued:
+            self._emit(task, "queued")
         return task.id
 
     def get(self, task_id: str) -> dict[str, Any]:
@@ -207,45 +220,44 @@ class AgentScheduler:
 
     def close(self, *, wait: bool = True, cancel_pending: bool = False) -> None:
         with self._lock:
-            if self._closed:
-                if wait:
-                    self._worker.join()
-                return
-            self._closed = True
-            if cancel_pending:
-                for task in self._tasks.values():
-                    if task.status in {"queued", "running"}:
-                        task.cancel_event.set()
-                        if task.status == "queued":
-                            task.status = "cancelled"
-                            task.finished_at = datetime.now(timezone.utc).isoformat()
-                            task.error = {
-                                "message": "调度器关闭时取消",
-                                "exception_type": "AgentCancelledError",
-                            }
-                            task.done_event.set()
-                            self._emit(task, "cancelled")
-        self._queue.put(_SENTINEL)
+            if not self._closed:
+                self._closed = True
+                if cancel_pending:
+                    for task in self._tasks.values():
+                        if task.status in {"queued", "running"}:
+                            task.cancel_event.set()
+                            if task.status == "queued":
+                                task.status = "cancelled"
+                                task.finished_at = datetime.now(timezone.utc).isoformat()
+                                task.error = {
+                                    "message": "调度器关闭时取消",
+                                    "exception_type": "AgentCancelledError",
+                                }
+                                task.done_event.set()
+                                self._emit(task, "cancelled")
         if wait:
+            # join 不能持有 _lock；工作线程完成当前任务和退出检查都需要该锁。
             self._worker.join()
 
     def _work(self) -> None:
         while True:
-            item = self._queue.get()
             try:
-                if item is _SENTINEL:
-                    return
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                with self._lock:
+                    if self._closed and self._enqueue_inflight == 0:
+                        return
+                continue
+            try:
                 task = item
-                assert isinstance(task, AgentTask)
                 with self._lock:
                     if task.status == "cancelled":
                         continue
                     task.status = "running"
                     task.started_at = datetime.now(timezone.utc).isoformat()
                 try:
-                                        # 所有后台写入代理共享一个进程范围的通道，
-                                        # 即使调度程序对每个用户仍然是隔离的。
-                    with _BACKGROUND_SERIAL_LOCK:
+                    # 每个用户拥有独立 AgentScheduler；仅在本实例内串行写入。
+                    with self._serial_lock:
                         if task.cancel_event.is_set():
                             raise AgentCancelledError("子代理任务已取消")
                         result = self.runner.run(

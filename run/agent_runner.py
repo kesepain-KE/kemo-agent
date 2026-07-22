@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from events import RunEvent
-from provider.factory import create_provider
+from provider.factory import (
+    ProviderCongestionError,
+    create_provider,
+    provider_request_slot,
+)
 from provider.protocol.enums import MessageRole, ResponseStatus
 from provider.protocol.models import (
     JsonContent,
@@ -329,26 +333,35 @@ class AgentRunner:
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
             request_id = f"req_{uuid.uuid4().hex}"
             tool_schemas = context.tool_registry.schemas(exclude=failures.unavailable)
-            response = provider.create(
-                KemoRequest(
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    attempt=1,
-                    model=runtime["model"],
-                    stream=False,
-                    system_prompt=system,
-                    input=list(items),
-                    tools=self._tool_definitions(tool_schemas),
-                    generation={"max_output_tokens": context.max_tokens},
-                    metadata={
-                        "user": self.user,
-                        "source": "subagent",
-                        "agent": definition.name,
-                        "task_id": context.task_id,
-                        "iteration": iteration,
-                    },
-                )
-            )
+            try:
+                with provider_request_slot(
+                    self.config,
+                    cancel_event=context.cancel_event,
+                ):
+                    response = provider.create(
+                        KemoRequest(
+                            request_id=request_id,
+                            parent_request_id=parent_request_id,
+                            attempt=1,
+                            model=runtime["model"],
+                            stream=False,
+                            system_prompt=system,
+                            input=list(items),
+                            tools=self._tool_definitions(tool_schemas),
+                            generation={"max_output_tokens": context.max_tokens},
+                            metadata={
+                                "user": self.user,
+                                "source": "subagent",
+                                "agent": definition.name,
+                                "task_id": context.task_id,
+                                "iteration": iteration,
+                            },
+                        )
+                    )
+            except ProviderCongestionError as exc:
+                if context.cancel_event.is_set():
+                    raise AgentCancelledError(f"子代理 {definition.name} 已取消") from exc
+                raise
             if not isinstance(response, KemoResponse):
                 raise AgentRunError("Provider create() 必须返回 KemoResponse")
             response_ids.append(response.id)

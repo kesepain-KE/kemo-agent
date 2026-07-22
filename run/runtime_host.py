@@ -10,8 +10,10 @@ from typing import Any, Callable
 from cron.scheduler import (
     CronScheduler,
     cleanup_old_system_tasks,
+    ensure_expand_task,
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
+    ensure_perception_task,
     recover_all,
 )
 from message.identity import IdentityResolver
@@ -40,6 +42,38 @@ from run.users import list_users
 _HOST_STATES = frozenset({"stopped", "starting", "running", "stopping", "failed"})
 DEFAULT_SHUTDOWN_TIMEOUT = 10.0
 DEFAULT_PROCESSED_MESSAGE_LIMIT = 2000
+
+
+def _positive_seconds(value: Any, fallback: float) -> float:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return seconds if seconds >= 1 else fallback
+
+
+def _system_update_rate(config: dict[str, Any], key: str) -> float:
+    task_config = config.get("task_cron_system") or {}
+    if not isinstance(task_config, dict):
+        return 5.0
+    value = task_config.get(key, 5)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 5.0
+    return float(value)
+
+
+def _cron_poll_interval(config: dict[str, Any]) -> float:
+    """Poll often enough to honor the shortest global collection task."""
+
+    cron_config = config.get("cron") or {}
+    if not isinstance(cron_config, dict):
+        cron_config = {}
+    poll = _positive_seconds(cron_config.get("poll_interval", 30), 30.0)
+    sense = _system_update_rate(config, "sense_update_rate")
+    expand = _system_update_rate(config, "expand_update_rate")
+    return max(1.0, min(poll, sense, expand))
 
 
 @dataclass(slots=True)
@@ -129,6 +163,9 @@ class RuntimeHost:
                 self.resolver,
                 self.registry,
                 max_workers=int(runtime_message_config.get("max_workers", 8)),
+                max_queued_messages=int(
+                    runtime_message_config.get("max_queued_messages", 20)
+                ),
                 processed_message_limit=DEFAULT_PROCESSED_MESSAGE_LIMIT,
                 provider_factory=provider_factory,
                 tool_registry_factory=tool_registry_factory,
@@ -145,14 +182,15 @@ class RuntimeHost:
             self.router = router
         self.cron = cron_scheduler or CronScheduler(
             self.root,
-            poll_interval=float(cron_config.get("poll_interval", 30)),
+            poll_interval=_cron_poll_interval(self.config),
+            config=self.config,
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
         )
         self.maintenance = maintenance_scheduler or MaintenanceScheduler(
             self.root,
-            poll_interval=float(cron_config.get("poll_interval", 30)),
+            poll_interval=_positive_seconds(cron_config.get("poll_interval", 30), 30.0),
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
@@ -252,6 +290,8 @@ class RuntimeHost:
             if self.cron_enabled:
                 ensure_memory_maintenance_tasks(self.root, self.config)
                 ensure_memory_promotion_task(self.root)
+                ensure_perception_task(self.root, self.config)
+                ensure_expand_task(self.root, self.config)
 
             self._set_component("router", "starting")
             self.router.start()

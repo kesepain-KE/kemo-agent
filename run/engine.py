@@ -17,7 +17,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from events import RunEvent, error_event
 from provider.adapters.compat import chat_request_to_kemo
-from provider.factory import create_provider
+from provider.factory import (
+    ProviderCongestionError,
+    create_provider,
+    provider_request_slot,
+)
 from provider.protocol.enums import ResponseStatus, StreamEventType
 from provider.protocol.models import (
     ContentBlock,
@@ -736,6 +740,10 @@ def _compress_per_round_tool_think(
         if kind == "reasoning":
             if summary_written:
                 continue
+            if not summary:
+                rewritten.append(copy.deepcopy(item))
+                summary_written = True
+                continue
             replacement = copy.deepcopy(item)
             replacement["content"] = summary
             replacement["extensions"] = {
@@ -771,6 +779,78 @@ def _compress_per_round_tool_think(
         "generated": has_payload,
         "usage": usage,
     }
+
+
+def _extract_round_memory(
+    *,
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    round_number: int,
+    prompt: str,
+    text: str,
+    reasoning: str,
+    tool_records: list[dict[str, Any]],
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Extract and persist memory fragments from one completed round."""
+
+    round_data: dict[str, Any] = {
+        "round": round_number,
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": text},
+        ],
+    }
+    if reasoning:
+        round_data["think"] = {"content": reasoning}
+    if tool_records:
+        round_data["tools"] = [
+            {
+                "name": str(record.get("name") or ""),
+                "status": str(record.get("status") or ""),
+                "result": record.get("result"),
+            }
+            for record in tool_records
+            if isinstance(record, dict)
+        ]
+
+    source = {"source": "round_commit", "round": round_number}
+    try:
+        result = agent_runner.run(
+            "self_improve",
+            {
+                "trigger": "context_compression",
+                "rounds": [round_data],
+                "source": source,
+            },
+            cancel_event=cancel_event,
+        )
+        candidates = result.data.get("candidates")
+        if not isinstance(candidates, list):
+            raise EngineError("self_improve 输出缺少 candidates 数组")
+        persisted = MemoryStore(root, user, config).upsert_candidates(
+            candidates,
+            source=source,
+        )
+        return {
+            "status": "completed",
+            "candidate_count": len(candidates),
+            "agent": result.agent,
+            "usage": dict(result.usage),
+            "persisted": persisted,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "candidate_count": 0,
+            "error": {
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            },
+        }
 
 
 def _iter_request_events_impl(
@@ -1037,38 +1117,44 @@ def _iter_request_events_impl(
                     iteration_done: RunEvent | None = None
                     iteration_usage: Usage | None = None
                     try:
-                        for event in _provider_events(provider, protocol_request):
-                            if cancel_event is not None and cancel_event.is_set():
-                                return
-                            if event.type == "text_delta":
-                                iteration_text.append(event.content)
-                                yield event
-                            elif event.type == "reasoning_delta":
-                                iteration_reasoning.append(event.content)
-                                yield event
-                            elif event.type == "tool_call_start":
-                                calls.append(
-                                    ToolCall(
-                                        id=event.tool_call_id,
-                                        name=event.tool_name,
-                                        arguments=event.arguments or {},
+                        with provider_request_slot(config, cancel_event=cancel_event):
+                            for event in _provider_events(provider, protocol_request):
+                                if cancel_event is not None and cancel_event.is_set():
+                                    return
+                                if event.type == "text_delta":
+                                    iteration_text.append(event.content)
+                                    yield event
+                                elif event.type == "reasoning_delta":
+                                    iteration_reasoning.append(event.content)
+                                    yield event
+                                elif event.type == "tool_call_start":
+                                    calls.append(
+                                        ToolCall(
+                                            id=event.tool_call_id,
+                                            name=event.tool_name,
+                                            arguments=event.arguments or {},
+                                        )
                                     )
-                                )
-                                yield event
-                            elif event.type == "usage":
-                                iteration_usage = _usage_from_dict(event.usage)
-                                yield RunEvent(
-                                    type="usage",
-                                    usage=event.usage,
-                                    metadata={"iteration": iteration},
-                                )
-                            elif event.type == "error":
-                                _raise_if_context_length_exceeded(event.error)
-                                yield event
-                                return
-                            elif event.type == "done":
-                                iteration_done = event
+                                    yield event
+                                elif event.type == "usage":
+                                    iteration_usage = _usage_from_dict(event.usage)
+                                    yield RunEvent(
+                                        type="usage",
+                                        usage=event.usage,
+                                        metadata={"iteration": iteration},
+                                    )
+                                elif event.type == "error":
+                                    _raise_if_context_length_exceeded(event.error)
+                                    yield event
+                                    return
+                                elif event.type == "done":
+                                    iteration_done = event
                         break
+                    except ProviderCongestionError as exc:
+                        if cancel_event is not None and cancel_event.is_set():
+                            return
+                        yield error_event(exc, phase="provider")
+                        return
                     except BaseException as exc:
                         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                             raise
@@ -1213,6 +1299,9 @@ def _iter_request_events_impl(
                                         "session_id": session_id,
                                         "window": window_path.name,
                                         "tool_timeout": tool_timeout,
+                                        "transport_registry": request.get(
+                                            "_transport_registry"
+                                        ),
                                         "knowledge_scopes": list(
                                             source_policy.direct_knowledge_scopes()
                                         ),
@@ -1382,9 +1471,39 @@ def _iter_request_events_impl(
                 _trim_to_max_rounds(window, context_policy.max_rounds),
             )
 
-                        # 仅对选择并实际发送到的记忆进行加权
-                        # 主模型运行成功。  取消/失败的回合永远不会得到
-                        # 在这里，仅仅检索候选者被有意排除。
+            memory_config = config.get("memory") or {}
+            memory_extraction: dict[str, Any] = {
+                "status": "skipped",
+                "candidate_count": 0,
+                "reason": "auto_extract_on_commit_disabled",
+                "error": None,
+            }
+            if bool(memory_config.get("auto_extract_on_commit", False)):
+                try:
+                    memory_extraction = _extract_round_memory(
+                        root=base,
+                        user=user,
+                        config=config,
+                        round_number=archive_round_number,
+                        prompt=prompt,
+                        text=text,
+                        reasoning=reasoning,
+                        tool_records=tool_records,
+                        agent_runner=agent_runner,
+                        cancel_event=cancel_event,
+                    )
+                except Exception as exc:
+                    memory_extraction = {
+                        "status": "failed",
+                        "candidate_count": 0,
+                        "error": {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        },
+                    }
+
+            # 仅对选择并实际发送到主模型的记忆进行加权。取消或失败的
+            # 回合不会走到这里，仅被检索但未注入的候选也不会加权。
             memory_weighted_files: list[str] = []
             memory_weight_error = None
             try:
@@ -1418,7 +1537,8 @@ def _iter_request_events_impl(
                         "injected_chars": _memory_injected_chars(prompt_bundle),
                         "extraction_task_id": None,
                         "extraction_error": None,
-                        "extraction_mode": "context_compression",
+                        "extraction_mode": "round_commit",
+                        "round_extraction": memory_extraction,
                     },
                     "knowledge": {
                         "documents": prompt_bundle.diagnostics["knowledge_documents"],
