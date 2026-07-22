@@ -58,6 +58,7 @@ def _protocol_usage_from_chat(value: ChatUsage) -> Usage:
                 "cached_tokens",
                 "cached_prompt_tokens",
                 "cache_read_input_tokens",
+                "prompt_cache_hit_tokens",
             )
             if extras.get(key) is not None
         ),
@@ -86,6 +87,37 @@ def _protocol_usage_from_chat(value: ChatUsage) -> Usage:
             estimated_fields=(["input_tokens", "output_tokens", "total_tokens"] if value.estimated else []),
         ),
         provider_raw=extras,
+    )
+
+
+def _chat_usage_from_raw(raw: dict[str, Any]) -> ChatUsage:
+    """Normalize one Chat Completions usage object before protocol bridging."""
+
+    prompt_tokens = max(0, int(raw.get("prompt_tokens") or 0))
+    completion_tokens = max(0, int(raw.get("completion_tokens") or 0))
+    total_value = raw.get("total_tokens")
+    total_tokens = max(
+        0,
+        int(
+            total_value
+            if total_value is not None
+            else prompt_tokens + completion_tokens
+        ),
+    )
+    known = {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "estimated",
+        "source",
+    }
+    return ChatUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        estimated=bool(raw.get("estimated", False)),
+        source=str(raw.get("source") or "provider"),
+        extra={key: value for key, value in raw.items() if key not in known},
     )
 
 
@@ -523,16 +555,7 @@ def chat_stream_to_protocol(
             sequence += 1
         elif event.type == "usage":
             raw = event.usage or {}
-            usage = Usage(
-                input_tokens=raw.get("prompt_tokens"),
-                output_tokens=raw.get("completion_tokens"),
-                total_tokens=raw.get("total_tokens"),
-                measurement=Measurement(
-                    mode=(MeasurementMode.ESTIMATED if raw.get("estimated") else MeasurementMode.PROVIDER),
-                    exact=not bool(raw.get("estimated")),
-                ),
-                provider_raw=dict(raw),
-            )
+            usage = _protocol_usage_from_chat(_chat_usage_from_raw(dict(raw)))
             yield ProviderStreamEvent(
                 type=StreamEventType.USAGE_UPDATED,
                 sequence=sequence,

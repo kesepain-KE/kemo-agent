@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from events import RunEvent
 from provider.adapters.compat import (
     chat_request_to_kemo,
+    chat_stream_to_protocol,
     kemo_request_to_chat,
     kemo_response_to_chat,
 )
@@ -206,6 +207,67 @@ class UnifiedProtocolTests(unittest.TestCase):
             "utf-8",
         )
         return temporary, root
+
+    def test_chat_stream_usage_promotes_cache_and_reasoning_fields(self) -> None:
+        request = KemoRequest(
+            request_id="req_cache",
+            model="chat-model",
+            stream=True,
+            system_prompt="system",
+            input=[],
+        )
+        events = [
+            RunEvent(
+                type="usage",
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 4,
+                    "total_tokens": 104,
+                    "prompt_tokens_details": {"cached_tokens": 60},
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                },
+            ),
+            RunEvent(type="done"),
+        ]
+
+        converted = list(chat_stream_to_protocol(events, request))
+        usage_event = next(
+            event
+            for event in converted
+            if event.type == StreamEventType.USAGE_UPDATED
+        )
+        self.assertEqual(usage_event.usage.cached_input_tokens, 60)
+        self.assertEqual(usage_event.usage.reasoning_tokens, 3)
+        completed = converted[-1]
+        self.assertEqual(completed.response.usage.cached_input_tokens, 60)
+
+    def test_chat_stream_usage_promotes_prompt_cache_hit_alias(self) -> None:
+        request = KemoRequest(
+            request_id="req_cache_alias",
+            model="chat-model",
+            stream=True,
+            system_prompt="system",
+            input=[],
+        )
+        events = [
+            RunEvent(
+                type="usage",
+                usage={
+                    "prompt_tokens": 8,
+                    "completion_tokens": 1,
+                    "prompt_cache_hit_tokens": 5,
+                },
+            ),
+            RunEvent(type="done"),
+        ]
+
+        converted = list(chat_stream_to_protocol(events, request))
+        usage_event = next(
+            event
+            for event in converted
+            if event.type == StreamEventType.USAGE_UPDATED
+        )
+        self.assertEqual(usage_event.usage.cached_input_tokens, 5)
 
     def test_json_roundtrip_and_protocol_version_validation(self) -> None:
         request = make_request()
