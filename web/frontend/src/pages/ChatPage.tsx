@@ -428,7 +428,7 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, clientId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -580,6 +580,7 @@ export function ChatPage() {
       await streamChat({
         user,
         sessionId: activeSession,
+        clientId,
         prompt: options.content?.length ? '' : prompt,
         content: options.content,
         runId,
@@ -631,10 +632,17 @@ export function ChatPage() {
     if (running || conversationBusy) return
     setConversationBusy('save')
     setConversationFeedback(null)
+    const previousSessionId = sessionId
+    let previousSessionClosed = false
+    detachSession()
     try {
-      if (sessionId) await closeSession(user, sessionId)
+      if (previousSessionId) {
+        await closeSession(user, previousSessionId, clientId)
+        previousSessionClosed = true
+      }
       await newConversation()
     } catch (error) {
+      if (previousSessionId && !previousSessionClosed) setSessionId(previousSessionId)
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
     } finally {
       setConversationBusy('')
@@ -646,18 +654,25 @@ export function ChatPage() {
     if (sessionId && hasCommitted && !window.confirm('清空此对话将删除当前归档，并立即创建一个新对话。是否继续？')) return
     setConversationBusy('clear')
     setConversationFeedback(null)
+    const previousSessionId = sessionId
+    let previousSessionRemoved = false
+    detachSession()
     try {
-      if (sessionId && hasCommitted) {
-        await deleteSession(user, sessionId)
-        queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
-        if (locallyCommittedSessionRef.current === sessionId) locallyCommittedSessionRef.current = ''
-        await refreshSessions()
+      if (previousSessionId && hasCommitted) {
+        await deleteSession(user, previousSessionId, clientId)
+        previousSessionRemoved = true
+        notifySessionDeleted(previousSessionId)
+        queryClient.removeQueries({ queryKey: ['history', user, previousSessionId] })
+        if (locallyCommittedSessionRef.current === previousSessionId) locallyCommittedSessionRef.current = ''
+        void refreshSessions()
         refreshOverview()
-      } else if (sessionId) {
-        await closeSession(user, sessionId)
+      } else if (previousSessionId) {
+        await closeSession(user, previousSessionId, clientId)
+        previousSessionRemoved = true
       }
       await newConversation()
     } catch (error) {
+      if (previousSessionId && !previousSessionRemoved) setSessionId(previousSessionId)
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '清空当前对话失败' })
     } finally {
       setConversationBusy('')
@@ -846,6 +861,7 @@ export function ChatPage() {
       await streamChat({
         user,
         sessionId: activeSession,
+        clientId,
         prompt: '',
         planId: plan.plan_id,
         runId,
