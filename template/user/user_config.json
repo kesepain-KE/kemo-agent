@@ -10,6 +10,12 @@
     "stream": true
   },
 
+  "agent_models": {
+    "default": "",
+    "cheap": "",
+    "reasoning": ""
+  },
+
   "multimodal_models": {
     "vision": "",
     "image_generation": "",

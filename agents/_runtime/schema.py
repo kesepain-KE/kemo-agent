@@ -35,6 +35,11 @@ _BUILTIN_DEFAULTS: dict[str, dict[str, str]] = {
         "write_policy": "user_memory",
         "model_profile": "reasoning",
     },
+    "history_summary": {
+        "execution": "background_serial",
+        "write_policy": "derived_cache",
+        "model_profile": "cheap",
+    },
     "task_plan": {
         "execution": "background_serial",
         "write_policy": "user_task",
@@ -137,6 +142,26 @@ def _object_schema(value: Any, *, field: str, path: Path) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("type") != "object":
         raise AgentManifestError(f"{field} 必须是 object JSON Schema：{path}")
     return value
+
+
+def _load_package_schemas(directory: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load optional strict I/O schemas without expanding the compact manifest."""
+
+    path = directory / "schema.json"
+    if not path.is_file():
+        return dict(_LOOSE_OBJECT_SCHEMA), dict(_LOOSE_OBJECT_SCHEMA)
+    raw = _read_json_object(path, label="子代理输入输出 Schema")
+    allowed = {"input_schema", "output_schema"}
+    missing = sorted(allowed - set(raw))
+    unknown = sorted(set(raw) - allowed)
+    if missing:
+        raise AgentManifestError(f"子代理 Schema 缺少字段 {', '.join(missing)}：{path}")
+    if unknown:
+        raise AgentManifestError(f"子代理 Schema 包含未知字段 {', '.join(unknown)}：{path}")
+    return (
+        _object_schema(raw["input_schema"], field="input_schema", path=path),
+        _object_schema(raw["output_schema"], field="output_schema", path=path),
+    )
 
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -407,6 +432,7 @@ def _load_compact_manifest(
     execution = defaults.get("execution", "sync")
     write_policy = defaults.get("write_policy", "derived_cache")
     model_profile = defaults.get("model_profile", "default")
+    input_schema, output_schema = _load_package_schemas(path.parent)
     return AgentDefinition(
         name=name,
         version=version,
@@ -419,8 +445,8 @@ def _load_compact_manifest(
         timeout=_read_agent_timeout(root),
         execution=execution,
         write_policy=write_policy,
-        input_schema=dict(_LOOSE_OBJECT_SCHEMA),
-        output_schema=dict(_LOOSE_OBJECT_SCHEMA),
+        input_schema=input_schema,
+        output_schema=output_schema,
         capabilities=_load_capabilities(config_path),
         source=source,
         directory=path.parent,

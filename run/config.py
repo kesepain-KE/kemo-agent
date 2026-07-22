@@ -16,6 +16,7 @@ from typing import Any
 USER_ONLY_SECTIONS = frozenset(
     {
         "provider",
+        "agent_models",
         "multimodal_models",
         "knowledge",
         "skills",
@@ -35,6 +36,7 @@ MULTIMODAL_CAPABILITIES = frozenset(
         "video_generation",
     }
 )
+AGENT_MODEL_PROFILES = frozenset({"default", "cheap", "reasoning"})
 
 
 class ConfigError(RuntimeError):
@@ -185,6 +187,37 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     provider.pop("headers", None)
     return provider
+
+
+def resolve_agent_model(
+    config: dict[str, Any],
+    profile: str,
+    *,
+    model_override: str | None = None,
+) -> str:
+    """Resolve an optional per-profile subagent model, falling back to main."""
+
+    if model_override is not None and str(model_override).strip():
+        return str(model_override).strip()
+    normalized_profile = str(profile or "default").strip().casefold()
+    if normalized_profile not in AGENT_MODEL_PROFILES:
+        raise ConfigError(f"未知子代理模型档位：{normalized_profile!r}")
+    profiles = config.get("agent_models") or {}
+    if not isinstance(profiles, dict):
+        raise ConfigError("agent_models 必须是对象")
+    unknown = sorted(set(profiles) - AGENT_MODEL_PROFILES)
+    if unknown:
+        raise ConfigError("agent_models 包含未知项：" + ", ".join(unknown))
+    selected = str(profiles.get(normalized_profile) or "").strip()
+    if selected:
+        return selected
+    provider = config.get("provider") or {}
+    if not isinstance(provider, dict):
+        raise ConfigError("provider 必须是对象")
+    fallback = str(provider.get("model") or "").strip()
+    if not fallback:
+        raise ConfigError("子代理未配置专用模型，且 provider.model 为空")
+    return fallback
 
 
 def resolve_capability_model(config: dict[str, Any], capability: str) -> str:

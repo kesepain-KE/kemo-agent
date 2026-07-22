@@ -38,7 +38,7 @@ from agents._runtime.resources import (
     build_agent_tool_registry,
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
-from run.config import load_config, provider_runtime_config
+from run.config import load_config, provider_runtime_config, resolve_agent_model
 from run.tools import ConsecutiveToolFailureTracker, ToolRegistry, execute_tool
 
 
@@ -51,7 +51,9 @@ class AgentInputError(AgentRunError):
 
 
 class AgentOutputError(AgentRunError):
-    pass
+    def __init__(self, message: str, *, raw_text: str = "") -> None:
+        super().__init__(message)
+        self.raw_text = str(raw_text or "")
 
 
 class AgentTimeoutError(AgentRunError):
@@ -177,8 +179,14 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 def resolve_agent_provider_config(
     config: dict[str, Any], definition: AgentDefinition, *, model_override: str | None = None
 ) -> dict[str, Any]:
-    del definition, model_override
-    return provider_runtime_config(config)
+    runtime = provider_runtime_config(config)
+    runtime["model"] = resolve_agent_model(
+        config,
+        definition.model_profile,
+        model_override=model_override,
+    )
+    runtime["model_profile"] = definition.model_profile
+    return runtime
 
 
 @dataclass(slots=True)
@@ -456,11 +464,13 @@ class AgentRunner:
                 )
         else:
             raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
-        data = _parse_json_object(final_text)
         try:
+            data = _parse_json_object(final_text)
             validate_json_schema(data, definition.output_schema)
+        except AgentOutputError as exc:
+            raise AgentOutputError(str(exc), raw_text=final_text) from exc
         except AgentInputError as exc:
-            raise AgentOutputError(str(exc)) from exc
+            raise AgentOutputError(str(exc), raw_text=final_text) from exc
         return AgentRunResult(
             agent=definition.name,
             data=data,
