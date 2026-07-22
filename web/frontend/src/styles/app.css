@@ -1480,3 +1480,36 @@ button[aria-busy="true"] { cursor: progress; }
   .assistant-turn-copy { margin-left: auto; }
   .assistant-turn-content > .trace .trace-body { max-height: 50dvh; }
 }
+.route-error-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--text-primary);
+  background: var(--bg);
+}
+
+.route-error-card {
+  width: min(560px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px 16px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-float);
+}
+
+.route-error-icon { color: var(--danger); }
+.route-error-card strong { font-size: 1.05rem; }
+.route-error-card p { margin: 7px 0; overflow-wrap: anywhere; }
+.route-error-card small { color: var(--text-muted); }
+.route-error-card button {
+  grid-column: 2;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+}

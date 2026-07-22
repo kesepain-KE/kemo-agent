@@ -33,6 +33,20 @@ export const handlers = [
     user: 'kesepain', active_key: 'interactive:kesepain', created: true,
     session: { session_id: 'conv_new_session', conversation_id: 'conv_new_session', window: '', title: '', rounds: 0, updated_at: 'now', state: 'open', run_state: 'idle', chain: 'interactive' },
   })),
+  http.post('/api/users/kesepain/sessions/:sessionId/lease', async ({ params, request }) => {
+    const body = await request.json() as { client_id: string }
+    return HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: params.sessionId,
+      client_id: body.client_id, active_clients: 1, leased: true,
+    })
+  }),
+  http.post('/api/users/kesepain/sessions/:sessionId/lease/release', async ({ params, request }) => {
+    const body = await request.json() as { client_id: string }
+    return HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: params.sessionId,
+      client_id: body.client_id, active_clients: 0, released: true,
+    })
+  }),
   http.post('/api/users/kesepain/sessions/:sessionId/close', ({ params }) => HttpResponse.json({
     user: 'kesepain', source: 'web', session_id: params.sessionId, closed: true,
     session: { session_id: params.sessionId, window: 'w1', title: '', rounds: 2, updated_at: 'now', state: 'closed', run_state: 'idle', chain: 'interactive' },
