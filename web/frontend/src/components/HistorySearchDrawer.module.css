@@ -153,6 +153,7 @@
 .cardCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cardCopy strong { font-size: .8125rem; }
 .cardCopy span { margin-top: 4px; color: var(--muted); font-size: .6875rem; }
+.cardCopy .summaryFailed { color: var(--amber); }
 .cardCopy small { margin-top: 5px; color: var(--muted-2); font-size: .625rem; }
 
 .stateBadge { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .625rem; font-weight: 720; white-space: nowrap; }

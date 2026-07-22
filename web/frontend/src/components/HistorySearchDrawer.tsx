@@ -44,7 +44,11 @@ export function HistorySearchDrawer({
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const filteredSessions = useMemo(
     () => normalizedQuery
-      ? sessions.filter((session) => sessionDisplayName(session).toLocaleLowerCase().includes(normalizedQuery))
+      ? sessions.filter((session) => [
+          sessionDisplayName(session),
+          session.summary || '',
+          session.session_id,
+        ].join(' ').toLocaleLowerCase().includes(normalizedQuery))
       : sessions,
     [normalizedQuery, sessions],
   )
@@ -176,7 +180,13 @@ export function HistorySearchDrawer({
                 <span className={styles.cardIcon}>{switching ? <LoaderCircle className={styles.spinning} size={18} /> : <MessageSquareText size={18} />}</span>
                 <span className={styles.cardCopy}>
                   <strong>{displayName}</strong>
-                  {session.summary?.trim() ? <span>{session.summary}</span> : null}
+                  {session.summary?.trim()
+                    ? <span>{session.summary}</span>
+                    : ['queued', 'processing'].includes(session.summary_status || '')
+                      ? <span>正在生成摘要…</span>
+                      : session.summary_status === 'failed'
+                        ? <span className={styles.summaryFailed}>摘要生成失败，后台将自动重试</span>
+                      : null}
                   <small>{session.rounds} 轮 · {formatDateTime(session.updated_at)}</small>
                 </span>
                 <span className={`${styles.stateBadge} ${active ? styles.activeBadge : ''}`}>

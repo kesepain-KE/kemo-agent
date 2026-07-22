@@ -47,4 +47,35 @@ describe('HistorySearchDrawer', () => {
     await waitFor(() => expect(onDeleteAllSessions).toHaveBeenCalledTimes(1))
     expect(onSelectSession).not.toHaveBeenCalled()
   })
+
+  it('展示后台摘要状态并允许按摘要内容和 session ID 搜索', () => {
+    const summarized = [
+      {
+        session_id: 'conv_summary_123', window: 'w3', title: '会话隔离改造',
+        summary: '实现多标签页租约和后台会话切换。', summary_status: 'completed',
+        state: 'closed', rounds: 12, updated_at: '2026-07-23T08:00:00+00:00',
+      },
+      {
+        session_id: 'conv_pending_456', window: 'w4', title: '', summary: '',
+        summary_status: 'processing', state: 'closed', rounds: 2,
+        updated_at: '2026-07-23T09:00:00+00:00',
+      },
+      {
+        session_id: 'conv_failed_789', window: 'w5', title: '', summary: '',
+        summary_status: 'failed', summary_retry_count: 1,
+        summary_retry_at: '2026-07-23T09:05:00+00:00', state: 'closed', rounds: 4,
+        updated_at: '2026-07-23T09:01:00+00:00',
+      },
+    ]
+    render(<HistorySearchDrawer open sessions={summarized} activeSessionId="" onClose={() => undefined} onSelectSession={() => undefined} onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} />)
+
+    expect(screen.getByText('实现多标签页租约和后台会话切换。')).toBeInTheDocument()
+    expect(screen.getByText('正在生成摘要…')).toBeInTheDocument()
+    expect(screen.getByText('摘要生成失败，后台将自动重试')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '租约' } })
+    expect(screen.getByText('会话隔离改造')).toBeInTheDocument()
+    expect(screen.queryByText('正在生成摘要…')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: 'conv_pending_456' } })
+    expect(screen.getByText('正在生成摘要…')).toBeInTheDocument()
+  })
 })
