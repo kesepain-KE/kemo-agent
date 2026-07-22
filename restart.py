@@ -13,15 +13,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+LOG_PATH = ROOT / "tmp" / "restart.log"
 
 
 def _port_is_free(port: int) -> bool:
@@ -41,27 +44,24 @@ def _terminate_process(pid: int) -> None:
         raise ValueError("拒绝终止无效的父进程 PID")
     try:
         os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        if isinstance(exc, ProcessLookupError) or exc.errno == errno.ESRCH:
+            return
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 87:
+            return
+        raise
+
+
+def _force_terminate_process(pid: int) -> None:
+    """Force termination after a graceful Unix shutdown timed out."""
+
+    if sys.platform == "win32":
+        _terminate_process(pid)
+        return
+    try:
+        os.kill(pid, getattr(signal, "SIGKILL", 9))
     except ProcessLookupError:
         return
-
-
-def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _wait_for_process_exit(pid: int, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _process_exists(pid):
-            return
-        time.sleep(0.1)
-    raise TimeoutError(f"等待旧进程 {pid} 退出超时")
 
 
 def _wait_for_port(port: int, timeout: float = 20.0) -> None:
@@ -73,13 +73,46 @@ def _wait_for_port(port: int, timeout: float = 20.0) -> None:
     raise TimeoutError(f"等待端口 {port} 释放超时")
 
 
+def _port_is_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_started_process(
+    process: subprocess.Popen[bytes],
+    port: int,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(f"新实例启动失败，退出码 {return_code}")
+        if _port_is_listening(port):
+            return
+        time.sleep(0.2)
+    raise TimeoutError(f"等待新实例监听端口 {port} 超时")
+
+
+def _write_log(message: str) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] {message}\n")
+
+
 def _start_web(port: int) -> subprocess.Popen[bytes]:
     command = [sys.executable, str(ROOT / "start_web.py"), f"--port={port}"]
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = LOG_PATH.open("ab", buffering=0)
     kwargs: dict[str, object] = {
         "cwd": str(ROOT),
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": log_handle,
+        "stderr": subprocess.STDOUT,
         "close_fds": True,
     }
     if sys.platform == "win32":
@@ -89,7 +122,10 @@ def _start_web(port: int) -> subprocess.Popen[bytes]:
         )
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(command, **kwargs)
+    try:
+        return subprocess.Popen(command, **kwargs)
+    finally:
+        log_handle.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,14 +139,40 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.parent_pid is not None:
         time.sleep(max(0.0, args.response_delay))
+        _write_log(
+            f"收到重启请求 platform={sys.platform} parent_pid={args.parent_pid} port={args.port}"
+        )
         _terminate_process(args.parent_pid)
-        _wait_for_process_exit(args.parent_pid)
-
-    _wait_for_port(args.port)
+        try:
+            _wait_for_port(args.port, timeout=15.0)
+        except TimeoutError:
+            _write_log(f"旧端口 {args.port} 未及时释放，升级为强制终止")
+            _force_terminate_process(args.parent_pid)
+            _wait_for_port(args.port, timeout=10.0)
+    else:
+        _wait_for_port(args.port)
     process = _start_web(args.port)
-    print(f"[restart] 新实例已启动 pid={process.pid} port={args.port}")
+    _wait_for_started_process(process, args.port)
+    message = f"新实例已启动 pid={process.pid} port={args.port}"
+    _write_log(message)
+    print(f"[restart] {message}")
     return 0
 
 
+def _entrypoint() -> int:
+    try:
+        return main()
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        try:
+            _write_log(
+                f"重启失败：{type(exc).__name__}: {exc}\n{traceback.format_exc().rstrip()}"
+            )
+        except Exception:
+            pass
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entrypoint())
