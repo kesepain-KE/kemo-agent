@@ -107,6 +107,7 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
+from run.task_plan_executor import cancel_plan, pause_plan
 from run.tools import apply_runtime_tool_policy, discover_tools
 from run.users import list_users
 
@@ -1077,6 +1078,25 @@ class WebRunService:
             "deleted": True,
         }
 
+    def delete_files(self, user: Any, scope: Any, paths: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            **self._delete_area_files(directory, paths, item_label="文件"),
+        }
+
+    def delete_all_files(self, user: Any, scope: Any) -> dict[str, Any]:
+        name, normalized_scope, directory = self._file_scope_root(user, scope)
+        directory.mkdir(parents=True, exist_ok=True)
+        paths = [item["relative_path"] for item in _flat_files(directory)]
+        if not paths:
+            self._prune_empty_directories(directory)
+            result = {"deleted_paths": [], "deleted_count": 0}
+        else:
+            result = self._delete_area_files(directory, paths, item_label="文件")
+        return {"user": name, "scope": normalized_scope, **result}
+
     def tmp_files(self) -> dict[str, Any]:
         directory = self.root / "tmp"
         tree, summary = _directory_tree(directory)
@@ -1124,12 +1144,20 @@ class WebRunService:
         return {"path": result["deleted_paths"][0], "deleted": True}
 
     def delete_tmp_files(self, paths: Any) -> dict[str, Any]:
+        return self._delete_area_files(self.root / "tmp", paths, item_label="临时文件")
+
+    def _delete_area_files(
+        self,
+        directory: Path,
+        paths: Any,
+        *,
+        item_label: str,
+    ) -> dict[str, Any]:
         if not isinstance(paths, list) or not paths:
             raise InvalidRequestError("paths 必须是非空数组")
         if len(paths) > 10_000:
-            raise InvalidRequestError("单次最多删除 10000 个临时文件")
+            raise InvalidRequestError(f"单次最多删除 10000 个{item_label}")
 
-        directory = self.root / "tmp"
         root = directory.resolve()
         validated: list[tuple[str, Path]] = []
         seen: set[str] = set()
@@ -1139,7 +1167,7 @@ class WebRunService:
                 continue
             _reject_link_path(root, target)
             if target.is_symlink() or not target.is_file():
-                raise NotFoundError(f"临时文件不存在：{relative}")
+                raise NotFoundError(f"{item_label}不存在：{relative}")
             seen.add(relative)
             validated.append((relative, target))
 
@@ -1148,10 +1176,10 @@ class WebRunService:
             try:
                 target.unlink()
             except OSError as exc:
-                raise WebServiceError(f"临时文件删除失败：{relative}") from exc
+                raise WebServiceError(f"{item_label}删除失败：{relative}") from exc
             deleted_paths.append(relative)
 
-        self._prune_empty_tmp_directories()
+        self._prune_empty_directories(directory)
         return {
             "deleted_paths": deleted_paths,
             "deleted_count": len(deleted_paths),
@@ -1159,14 +1187,14 @@ class WebRunService:
 
     def delete_all_tmp_files(self) -> dict[str, Any]:
         directory = self.root / "tmp"
+        directory.mkdir(parents=True, exist_ok=True)
         paths = [item["relative_path"] for item in _flat_files(directory)]
         if not paths:
-            self._prune_empty_tmp_directories()
+            self._prune_empty_directories(directory)
             return {"deleted_paths": [], "deleted_count": 0}
         return self.delete_tmp_files(paths)
 
-    def _prune_empty_tmp_directories(self) -> None:
-        directory = self.root / "tmp"
+    def _prune_empty_directories(self, directory: Path) -> None:
         if not directory.is_dir():
             return
         for current, directories, _ in os.walk(directory, topdown=False, followlinks=False):
@@ -2785,6 +2813,29 @@ class WebRunService:
         if stored.get("status") == "approved" and self.plan_waker is not None:
             self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
+
+    def command_plan(self, user: Any, plan_id: Any, action: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_action = str(action or "").strip().casefold()
+        try:
+            if normalized_action == "pause":
+                stored = pause_plan(self.root, name, str(plan_id))
+            elif normalized_action == "cancel":
+                stored = cancel_plan(self.root, name, str(plan_id))
+            else:
+                raise InvalidRequestError("计划状态指令只允许 pause 或 cancel")
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except InvalidRequestError:
+            raise
+        except (PlanError, RuntimeError, ValueError) as exc:
+            raise ConflictError(str(exc)) from None
+        return {
+            "user": name,
+            "plan": self._plan_summary(stored),
+            "action": normalized_action,
+            "updated": True,
+        }
 
     def delete_plan(self, user: Any, plan_id: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -4749,6 +4800,8 @@ class WebRunService:
         cancel_event: threading.Event,
         run_id: Any = "",
         content: Any = None,
+        task_plan_id: str = "",
+        task_plan_mode: str = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
@@ -4786,6 +4839,9 @@ class WebRunService:
             "_guidance_queue": active.guidance,
             "_history_active_key": self._interactive_active_key(name),
         }
+        if task_plan_id:
+            request["_task_plan_id"] = task_plan_id
+            request["_task_plan_mode"] = task_plan_mode or "agent_managed"
         if self._router_ref is not None:
             transport_registry = getattr(self._router_ref, "transports", None)
             if transport_registry is not None:
@@ -4859,5 +4915,107 @@ class WebRunService:
                 with self._active_runs_lock:
                     self._active_runs.pop(normalized_run_id, None)
                 gate.release()
+
+        return events()
+
+    def stream_plan(
+        self,
+        user: Any,
+        session_id: Any,
+        plan_id: Any,
+        *,
+        cancel_event: threading.Event,
+        run_id: Any = "",
+    ) -> Iterator[RunEvent]:
+        name = self.require_user(user)
+        normalized_session = self.require_session_id(session_id)
+        normalized_plan_id = str(plan_id or "").strip()
+        store = PlanStore(self.root, name)
+
+        def claim(current: dict[str, Any]) -> dict[str, Any]:
+            status = str(current.get("status") or "")
+            if status not in {"pending", "approved", "paused"}:
+                raise ConflictError(
+                    f"计划 {normalized_plan_id} 当前状态为 {status!r}，无法开始执行"
+                )
+            return {**current, "status": "running"}
+
+        try:
+            plan = store.update(normalized_plan_id, claim)
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except ConflictError:
+            raise
+        except (PlanError, RuntimeError, ValueError) as exc:
+            raise ConflictError(str(exc)) from None
+
+        steps = [step for step in (plan.get("steps") or []) if isinstance(step, dict)]
+        by_id = {str(step.get("step_id") or ""): step for step in steps}
+        next_step = next(
+            (
+                step
+                for step in steps
+                if step.get("status") == "pending"
+                and all(
+                    by_id.get(str(dependency), {}).get("status") == "completed"
+                    for dependency in (step.get("depends_on") or [])
+                )
+            ),
+            None,
+        )
+        next_description = (
+            f"{next_step.get('step_id')} - {next_step.get('title', '')}："
+            f"{next_step.get('description', '')}"
+            if next_step is not None
+            else "请读取计划并确认剩余可执行步骤"
+        )
+        control_prompt = (
+            "【任务计划连续执行】\n"
+            f"计划 ID：{normalized_plan_id}\n"
+            f"起始步骤：{next_description}\n\n"
+            "这是用户批准后的单轮连续执行，不是新的用户提问。完整活跃计划已注入系统提示词。\n"
+            "请严格按依赖顺序逐步执行：每次只执行一个步骤；成功后立即调用 "
+            "task_plan(action=\"step_done\") 并写入结果摘要，失败时调用 step_fail。\n"
+            "step_done 返回 completed_step、progress、next_step 和 plan_status。"
+            "只要 plan_status=running 且 next_step 非空，就直接继续下一步，不要等待用户再次发送消息。\n"
+            "当返回 completed、paused、failed 或 cancelled，或 next_step 为空时停止执行并给出最终总结。"
+            "不得创建或编辑新的任务计划。"
+        )
+        try:
+            source_events = self.stream_chat(
+                name,
+                normalized_session,
+                control_prompt,
+                cancel_event=cancel_event,
+                run_id=run_id,
+                task_plan_id=normalized_plan_id,
+                task_plan_mode="agent_managed",
+            )
+        except BaseException:
+            current = store.read(normalized_plan_id)
+            if current.get("status") == "running":
+                store.update(normalized_plan_id, lambda value: {**value, "status": "paused"})
+            raise
+
+        def events() -> Iterator[RunEvent]:
+            try:
+                yield from source_events
+            finally:
+                close = getattr(source_events, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except BaseException:
+                        # 关闭底层生成器失败不能跳过计划状态收口。
+                        pass
+                try:
+                    current = store.read(normalized_plan_id)
+                    if current.get("status") == "running":
+                        store.update(
+                            normalized_plan_id,
+                            lambda value: {**value, "status": "paused"},
+                        )
+                except PlanError:
+                    pass
 
         return events()

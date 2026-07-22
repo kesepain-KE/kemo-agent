@@ -42,11 +42,12 @@ class ChatBody(BaseModel):
     prompt: str = ""
     content: list[dict[str, Any]] = Field(default_factory=list)
     run_id: str = ""
+    plan_id: str = ""
 
     @model_validator(mode="after")
     def require_input(self) -> "ChatBody":
-        if not self.prompt.strip() and not self.content:
-            raise ValueError("prompt 和 content 不能同时为空")
+        if not self.prompt.strip() and not self.content and not self.plan_id.strip():
+            raise ValueError("prompt、content 和 plan_id 不能同时为空")
         return self
 
 
@@ -91,7 +92,7 @@ class SkillToggleBody(BaseModel):
     enabled: bool
 
 
-class TmpDeleteManyBody(BaseModel):
+class DeleteManyBody(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=10_000)
 
 
@@ -339,6 +340,14 @@ def create_app(
     ) -> dict[str, Any]:
         return backend.delete_file(user, scope, path)
 
+    @app.post("/api/users/{user}/files/{scope}/delete-many")
+    async def delete_files(user: str, scope: str, body: DeleteManyBody) -> dict[str, Any]:
+        return backend.delete_files(user, scope, body.paths)
+
+    @app.delete("/api/users/{user}/files/{scope}/all")
+    async def delete_all_files(user: str, scope: str) -> dict[str, Any]:
+        return backend.delete_all_files(user, scope)
+
     @app.post("/api/users/{user}/avatar")
     async def upload_avatar(
         user: str,
@@ -394,7 +403,7 @@ def create_app(
         return backend.delete_tmp_file(path)
 
     @app.post("/api/tmp/delete-many")
-    async def delete_tmp_files(body: TmpDeleteManyBody) -> dict[str, Any]:
+    async def delete_tmp_files(body: DeleteManyBody) -> dict[str, Any]:
         return backend.delete_tmp_files(body.paths)
 
     @app.delete("/api/tmp/all")
@@ -602,6 +611,10 @@ def create_app(
     async def update_plan(user: str, plan_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return backend.update_plan(user, plan_id, body)
 
+    @app.post("/api/users/{user}/tasks/plans/{plan_id}/actions/{action}")
+    async def command_plan(user: str, plan_id: str, action: str) -> dict[str, Any]:
+        return backend.command_plan(user, plan_id, action)
+
     @app.delete("/api/users/{user}/tasks/plans/{plan_id}")
     async def delete_plan(user: str, plan_id: str) -> dict[str, Any]:
         return backend.delete_plan(user, plan_id)
@@ -788,17 +801,29 @@ def create_app(
             content_options = {"content": body.content} if body.content else {}
             # stream_chat 可能在用户级并发闸前有界等待；放入工作线程，避免
             # 一个用户的排队请求阻塞 FastAPI 事件循环和其他用户的 API。
-            chat_task = asyncio.create_task(
-                asyncio.to_thread(
-                    backend.stream_chat,
-                    body.user,
-                    body.session_id,
-                    body.prompt,
-                    cancel_event=cancel_event,
-                    run_id=body.run_id,
-                    **content_options,
+            if body.plan_id:
+                chat_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        backend.stream_plan,
+                        body.user,
+                        body.session_id,
+                        body.plan_id,
+                        cancel_event=cancel_event,
+                        run_id=body.run_id,
+                    )
                 )
-            )
+            else:
+                chat_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        backend.stream_chat,
+                        body.user,
+                        body.session_id,
+                        body.prompt,
+                        cancel_event=cancel_event,
+                        run_id=body.run_id,
+                        **content_options,
+                    )
+                )
             try:
                 events = await asyncio.shield(chat_task)
             except asyncio.CancelledError:
