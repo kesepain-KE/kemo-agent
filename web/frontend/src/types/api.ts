@@ -54,6 +54,8 @@ export interface ActiveSessionResponse {
   user: string
   active_key: string
   created: boolean
+  client_id?: string
+  active_clients?: number
   session: SessionSummary
 }
 
@@ -62,6 +64,8 @@ export interface SessionCloseResponse {
   source: 'web'
   session_id: string
   closed: boolean
+  deferred?: boolean
+  active_clients?: number
   memory: {
     status: 'queued' | 'skipped'
     reason: string

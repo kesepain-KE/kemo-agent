@@ -47,6 +47,7 @@ describe('parseSseFrames', () => {
     await streamChat({
       user: 'kesepain',
       sessionId: 's1',
+      clientId: 'web_client_test',
       prompt: '',
       planId: 'plan_12345678',
       runId: 'run_plan_123',
@@ -59,6 +60,7 @@ describe('parseSseFrames', () => {
       prompt: '',
       plan_id: 'plan_12345678',
       run_id: 'run_plan_123',
+      client_id: 'web_client_test',
     })
     expect(events).toEqual(['text_delta', 'done'])
   })

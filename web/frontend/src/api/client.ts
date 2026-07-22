@@ -134,21 +134,56 @@ export async function restartSystem(port: number): Promise<{ ok: boolean; port: 
   })
 }
 
-export async function getActiveSession(user: string): Promise<ActiveSessionResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/active`)
+export async function getActiveSession(user: string, clientId = ''): Promise<ActiveSessionResponse> {
+  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/active${suffix}`)
 }
 
-export async function createSession(user: string): Promise<ActiveSessionResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions`, { method: 'POST' })
+export async function createSession(user: string, clientId = ''): Promise<ActiveSessionResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: clientId }),
+  })
 }
 
 export async function closeSession(
   user: string,
   sessionId: string,
+  clientId = '',
 ): Promise<SessionCloseResponse> {
+  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
   return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/close`,
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/close${suffix}`,
     { method: 'POST' },
+  )
+}
+
+export async function touchSessionLease(user: string, sessionId: string, clientId: string): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/lease`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId }),
+    },
+  )
+}
+
+export async function releaseSessionLease(
+  user: string,
+  sessionId: string,
+  clientId: string,
+  keepalive = false,
+): Promise<void> {
+  await requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/lease/release`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId }),
+      keepalive,
+    },
   )
 }
 
@@ -176,9 +211,11 @@ export async function renameSession(
 export async function deleteSession(
   user: string,
   sessionId: string,
+  clientId = '',
 ): Promise<SessionDeleteResponse> {
+  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
   return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}`,
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}${suffix}`,
     { method: 'DELETE' },
   )
 }
@@ -679,6 +716,7 @@ export async function deleteExpandModule(user: string, moduleName: string): Prom
 export interface StreamChatOptions {
   user: string
   sessionId: string
+  clientId?: string
   prompt: string
   content?: Array<Record<string, unknown>>
   runId: string
@@ -732,6 +770,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       content: options.content ?? [],
       run_id: options.runId,
       plan_id: options.planId ?? '',
+      client_id: options.clientId ?? '',
     }),
     signal: options.signal,
   })
