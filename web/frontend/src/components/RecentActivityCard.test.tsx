@@ -5,10 +5,15 @@ import { RecentActivityCard } from './RecentActivityCard'
 describe('RecentActivityCard', () => {
   it('渲染真实任务和感知摘要', () => {
     render(<RecentActivityCard
-      scheduledTasks={[{ id: 't1', title: '每日检查', schedule: '每天 18:00', nextRun: '07/20 18:00', enabled: true }]}
+      scheduledTasks={[
+        { id: 't1', title: '每日检查', schedule: '每天 18:00', nextRun: '07/20 18:00', status: 'enabled' },
+        { id: 't2', title: '单次报告', schedule: '单次 · —', nextRun: '—', status: 'completed' },
+      ]}
       senseData={[{ id: 's1', name: '运行时感知', value: 'CPU 23%', updateInterval: '', updatedAt: '07/20 17:49', injected: true }]}
     />)
     expect(screen.getByText('每日检查')).toBeInTheDocument()
+    expect(screen.getByText('单次报告')).toBeInTheDocument()
+    expect(screen.getByText('已完成')).toBeInTheDocument()
     expect(screen.getByText('CPU 23%')).toBeInTheDocument()
     expect(screen.getByText('频率未声明')).toBeInTheDocument()
     expect(screen.getByText('已注入')).toBeInTheDocument()

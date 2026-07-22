@@ -258,6 +258,10 @@ describe('AppShell navigation', () => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
       chatBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      historyMessages = [
+        { role: 'user', content: '上一条问题' },
+        { role: 'assistant', content: '重新生成的回答' },
+      ]
       return new Response(
         'event: text_delta\ndata: {"type":"text_delta","content":"重新生成的回答"}\n\n'
         + 'event: done\ndata: {"type":"done"}\n\n',
@@ -318,6 +322,7 @@ describe('AppShell navigation', () => {
       content: [{ type: 'text', text: '上一条问题' }],
     }))
     await screen.findByText('重新生成的回答')
+    await waitFor(() => expect(screen.getAllByText('重新生成的回答')).toHaveLength(1))
     expect(screen.queryByText('上一条回答')).not.toBeInTheDocument()
     expect(screen.getAllByText('上一条问题')).toHaveLength(1)
   })

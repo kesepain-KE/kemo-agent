@@ -1,1 +1,49 @@
 .taskPlanBubble{--accent:#6558f5;--text:#292d38;position:relative;width:min(100%,900px);box-sizing:border-box;padding:18px 20px 15px;background:rgba(255,255,255,.98);border:1px solid rgba(113,101,246,.48);border-radius:20px;box-shadow:0 14px 34px rgba(50,53,75,.11),0 0 0 3px rgba(107,94,247,.045);color:var(--text);animation:taskPlanEnter 180ms ease-out}.header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.headerIdentity{display:flex;align-items:center;min-width:0;gap:13px}.planIcon{display:flex;align-items:center;justify-content:center;width:45px;height:45px;flex:0 0 45px;color:var(--accent);background:#f2f0ff;border-radius:15px}.headerText{min-width:0}.title{margin:0;overflow:hidden;font-size:18px;font-weight:700;line-height:1.35;text-overflow:ellipsis;white-space:nowrap}.description{margin:4px 0 0;color:#737b8c;font-size:13px;line-height:1.45}.headerMeta{display:flex;align-items:center;flex-shrink:0;gap:8px}.statusPill,.stepCountPill{display:inline-flex;align-items:center;justify-content:center;min-height:34px;box-sizing:border-box;padding:0 12px;border-radius:11px;color:#697183;background:#f4f4f8;font-size:13px;line-height:1;white-space:nowrap}.statusPill span{margin-right:6px;color:#858c9b}.statusPill_pending{color:var(--accent);background:#f2f0ff}.statusPill_running{color:#3979dc;background:#edf5ff}.statusPill_completed{color:#07936e;background:#eaf8f3}.statusPill_failed{color:#c94a55;background:#fff0f1}.statusPill_rejected,.statusPill_cancelled{color:#858b98;background:#f1f2f5}.iconButton{display:flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;color:#737b8b;background:#f6f6f9;border:0;border-radius:11px;cursor:pointer}.progressSection{margin-top:15px;padding:12px 14px;background:#fafafe;border:1px solid #e6e6ef;border-radius:13px}.progressHeader{display:flex;justify-content:space-between;margin-bottom:8px;color:#72798a;font-size:12px}.progressTrack{height:6px;overflow:hidden;background:#e6e6ef;border-radius:99px}.progressBar{height:100%;background:linear-gradient(90deg,#796cf8,#5e52ed);border-radius:inherit;transition:width 240ms ease}.stepList{display:flex;flex-direction:column;gap:7px;margin-top:15px}.stepRow{display:grid;grid-template-columns:34px minmax(58px,82px) minmax(0,1fr) auto;align-items:center;min-height:43px;box-sizing:border-box;gap:10px;padding:6px 12px 6px 8px;background:#fff;border:1px solid #e2e4ec;border-radius:12px}.stepNumber{display:flex;align-items:center;justify-content:center;width:27px;height:27px;color:var(--accent);background:#f0eeff;border-radius:10px;font-size:12px;font-weight:700}.stepId{overflow:hidden;font-size:13px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}.stepContent{min-width:0}.stepTitle{overflow:hidden;color:#626a7b;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}.stepDescription{margin-top:3px;overflow:hidden;color:#9ba1ae;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.stepMeta{display:flex;justify-content:flex-end;gap:8px;white-space:nowrap}.dependency,.stepStatusLabel{padding:5px 8px;color:#858c99;background:#f5f5f8;border-radius:8px;font-size:11px}.stepStatus_running{background:#fafaff;border-color:rgba(101,88,245,.28)}.stepStatus_completed .stepNumber{color:#078d69;background:#e8f7f1}.stepStatus_completed .stepTitle,.stepStatus_completed .stepId{color:#7d8593}.stepStatus_failed{background:#fffafa;border-color:rgba(209,77,88,.24)}.stepStatus_failed .stepNumber{color:#cf4c58;background:#fff0f1}.notice{display:flex;align-items:center;gap:9px;min-height:42px;box-sizing:border-box;margin-top:14px;padding:9px 13px;color:var(--accent);background:#f1efff;border-radius:11px;font-size:12px;line-height:1.45}.notice_running{color:#3979dc;background:#edf5ff}.notice_completed{color:#078e6a;background:#eaf8f3}.notice_failed{color:#c44854;background:#fff0f1}.notice_rejected,.notice_cancelled{color:#747b89;background:#f2f3f6}.actionBar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}.singleActionBar{grid-template-columns:1fr}.actionButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:40px;padding:0 18px;border-radius:11px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}.rejectButton{color:#cf4451;background:#fffafa;border:1px solid #ee8a92}.modifyButton{color:#5f6675;background:#fff;border:1px solid #dfe2eb}.approveButton{color:#fff;background:linear-gradient(135deg,#7367f8,#594cef);border:1px solid #6255ef}.stopButton{color:#c94a55;background:#fff5f5;border:1px solid #e58b92}.collapsedSummary{display:flex;align-items:center;gap:9px;margin-top:13px;padding:10px 12px;color:#697183;background:#fafafe;border:1px solid #e7e7ef;border-radius:11px;font-size:13px}.collapsedSummary strong{margin-left:auto}.loadingIcon{animation:taskSpin 1s linear infinite}.bottomPointer{position:absolute;bottom:-10px;left:50%;width:18px;height:18px;background:#fff;border-right:1px solid rgba(113,101,246,.48);border-bottom:1px solid rgba(113,101,246,.48);transform:translateX(-50%) rotate(45deg)}.collapsed .bottomPointer{display:none}@keyframes taskPlanEnter{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}@keyframes taskSpin{to{transform:rotate(360deg)}}@media(max-width:820px){.header{flex-direction:column}.headerMeta{width:100%;flex-wrap:wrap}.stepRow{grid-template-columns:32px minmax(56px,76px) minmax(0,1fr)}.stepMeta{grid-column:3;justify-content:flex-start}.actionBar{grid-template-columns:1fr}.bottomPointer{left:26%}}@media(prefers-reduced-motion:reduce){.taskPlanBubble{animation:none}.loadingIcon,.progressBar{animation:none;transition:none}}
+
+.noticeCopy {
+  min-width: 0;
+  flex: 1;
+}
+
+.pauseButton {
+  min-height: 30px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 1px solid #df747e;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .72);
+  color: #c4404d;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pauseButton:hover {
+  border-color: #cb4d59;
+  background: #fff;
+}
+
+.pauseButton:focus-visible {
+  outline: 3px solid rgba(201, 74, 85, .18);
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+  .notice_running {
+    flex-wrap: wrap;
+  }
+
+  .notice_running .noticeCopy {
+    min-width: calc(100% - 28px);
+  }
+
+  .notice_running .pauseButton {
+    margin-left: auto;
+  }
+}

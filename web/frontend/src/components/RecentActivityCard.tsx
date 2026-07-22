@@ -13,6 +13,7 @@ import {
 import styles from './RecentActivityCard.module.css'
 
 export type ScheduledTaskIcon = 'clipboard' | 'location' | 'calendar' | 'alarm'
+export type ScheduledTaskStatus = 'enabled' | 'running' | 'completed' | 'paused' | 'failed' | 'cancelled' | 'disabled'
 export type SenseDataIcon = 'temperature' | 'humidity' | 'weather' | 'radio'
 
 export interface ScheduledTaskItem {
@@ -20,7 +21,7 @@ export interface ScheduledTaskItem {
   title: string
   schedule: string
   nextRun: string
-  enabled: boolean
+  status: ScheduledTaskStatus
   icon?: ScheduledTaskIcon
 }
 
@@ -61,6 +62,16 @@ const senseIconMap: Record<SenseDataIcon, ReactNode> = {
   radio: <Radio size={19} strokeWidth={1.9} />,
 }
 
+const taskStatusMeta: Record<ScheduledTaskStatus, { label: string; className: string }> = {
+  enabled: { label: '已启用', className: styles.statusEnabled },
+  running: { label: '运行中', className: styles.statusRunning },
+  completed: { label: '已完成', className: styles.statusCompleted },
+  paused: { label: '已暂停', className: styles.statusDisabled },
+  failed: { label: '执行失败', className: styles.statusFailed },
+  cancelled: { label: '已取消', className: styles.statusDisabled },
+  disabled: { label: '已停用', className: styles.statusDisabled },
+}
+
 function cx(...classNames: Array<string | undefined | false>) {
   return classNames.filter(Boolean).join(' ')
 }
@@ -96,12 +107,14 @@ export function RecentActivityCard({
     <div className={styles.section}>
       <SectionHeader icon={<AlarmClock size={21} strokeWidth={1.9} />} title="定时任务" onViewAll={onViewAllTasks} />
       <div className={styles.list}>
-        {visibleTasks.length === 0 ? <EmptyState text="当前没有已配置的用户定时任务" /> : visibleTasks.map((task, index) => <button key={task.id} type="button" className={styles.taskRow} onClick={() => onTaskClick?.(task)}>
+        {visibleTasks.length === 0 ? <EmptyState text="当前没有已配置的用户定时任务" /> : visibleTasks.map((task, index) => {
+          const status = taskStatusMeta[task.status]
+          return <button key={task.id} type="button" className={styles.taskRow} onClick={() => onTaskClick?.(task)}>
           <span className={cx(styles.itemIcon, styles[`taskIcon${(index % 4) + 1}`])}>{taskIconMap[task.icon ?? 'clipboard']}</span>
           <span className={styles.taskMain}><strong className={styles.itemName}>{task.title}</strong><span className={styles.itemDescription}>{task.schedule}</span></span>
           <span className={styles.taskNextRun}><span className={styles.metadataLabel}>下次运行：</span><span className={styles.metadataValue}>{task.nextRun}</span></span>
-          <span className={cx(styles.statusPill, task.enabled ? styles.statusEnabled : styles.statusDisabled)}>{task.enabled ? '已启用' : '已停用'}</span>
-        </button>)}
+          <span className={cx(styles.statusPill, status.className)}>{status.label}</span>
+        </button>})}
       </div>
     </div>
     <div className={styles.section}>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, CheckCircle2, CirclePause, ClipboardList, Eye, Pencil, Play, RotateCcw, Send, TimerReset, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { deleteCron, deletePlan, getTasks, updateCron, updatePlan } from '../api/client'
+import { commandPlan, deleteCron, deletePlan, getTasks, updateCron } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { EmptyPanel, formatDateTime, MetricCard, ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import type { CronTaskSummary, PlanSummary, SessionsResponse } from '../types/api'
@@ -94,7 +94,7 @@ export function TasksPage() {
   })
   const data = query.data
   const refresh = () => client.invalidateQueries({ queryKey: ['tasks', user] })
-  const planUpdate = useMutation({ mutationFn: ({ id, status, revision }: { id: string; status: string; revision: number }) => updatePlan(user, id, { status, revision }), onSuccess: refresh })
+  const planPause = useMutation({ mutationFn: (id: string) => commandPlan(user, id, 'pause'), onSuccess: refresh })
   const planDelete = useMutation({ mutationFn: (id: string) => deletePlan(user, id), onSuccess: refresh })
   const cronUpdate = useMutation({ mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => updateCron(user, id, body), onSuccess: refresh })
   const cronDelete = useMutation({ mutationFn: (id: string) => deleteCron(user, id), onSuccess: refresh })
@@ -128,7 +128,7 @@ export function TasksPage() {
     {query.isError && <ModuleError />}
     <section className={styles.stats}><MetricCard label="活动计划" value={plans.length} detail="总创建计划" symbol={<ClipboardList size={16} />} /><MetricCard label="执行中" value={plans.filter((plan) => plan.status === 'running').length} detail="正在执行" symbol={<Play size={16} />} /><MetricCard label="已完成" value={plans.filter((plan) => plan.status === 'completed').length} detail="已完成计划" symbol={<CheckCircle2 size={16} />} tone="success" /></section>
     <div className="module-toolbar"><div className="module-tabs">{(['plans', 'cron', 'history'] as const).map((item) => <button key={item} className={`module-tab-btn ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>{item === 'plans' ? '任务计划' : item === 'cron' ? '定时任务' : '执行记录'}</button>)}</div><div className="toolbar-spacer" /></div>
-    {tab === 'plans' && <div className={styles.planLayout}><main className={`${styles.planList} ${plans.length ? styles.populatedList : ''}`}>{plans.length ? plans.map((plan) => <PlanCard key={plan.plan_id} plan={plan} selected={plan.plan_id === selectedPlanId} onSelect={() => setSelectedPlanId(plan.plan_id)} onModify={() => modify(plan)} onPause={() => planUpdate.mutate({ id: plan.plan_id, status: 'paused', revision: plan.revision })} onDelete={() => removePlan(plan)} />) : <EmptyPanel title="暂无任务计划" description="在对话中描述目标，kemo-agent 会生成计划草案并等待确认。" icon={<ClipboardList size={21} />} />}</main><PlanDetailPanel plan={selectedPlan} /></div>}
+    {tab === 'plans' && <div className={styles.planLayout}><main className={`${styles.planList} ${plans.length ? styles.populatedList : ''}`}>{plans.length ? plans.map((plan) => <PlanCard key={plan.plan_id} plan={plan} selected={plan.plan_id === selectedPlanId} onSelect={() => setSelectedPlanId(plan.plan_id)} onModify={() => modify(plan)} onPause={() => planPause.mutate(plan.plan_id)} onDelete={() => removePlan(plan)} />) : <EmptyPanel title="暂无任务计划" description="在对话中描述目标，kemo-agent 会生成计划草案并等待确认。" icon={<ClipboardList size={21} />} />}</main><PlanDetailPanel plan={selectedPlan} /></div>}
     {tab === 'cron' && <div className={styles.planLayout}><main className={`${styles.planList} ${cronTasks.length ? styles.populatedList : ''}`}>{cronTasks.length ? cronTasks.map((task) => <CronCard key={task.task_id} task={task} selected={task.task_id === selectedCronId} onSelect={() => setSelectedCronId(task.task_id)} onTogglePause={() => cronUpdate.mutate({ id: task.task_id, body: { status: task.status === 'paused' ? 'enabled' : 'paused' } })} onDelete={() => removeCron(task)} />) : <EmptyPanel title="暂无定时任务" description="当前用户没有可显示的定时任务。" icon={<TimerReset size={21} />} />}</main><CronDetailPanel task={selectedCron} /></div>}
     {tab === 'history' && <div className={styles.planLayout}><main className={`${styles.planList} ${history.length ? styles.populatedList : ''}`}>{history.length ? history.map((record) => <ExecutionCard key={record.key} record={record} selected={record.key === selectedHistoryKey} onSelect={() => setSelectedHistoryKey(record.key)} onDelete={() => removeHistory(record)} />) : <EmptyPanel title="暂无执行记录" description="已完成、失败或取消的任务计划和定时任务会出现在这里。" icon={<CheckCircle2 size={21} />} />}</main><ExecutionDetailPanel record={selectedHistory} /></div>}
   </ModuleFrame>

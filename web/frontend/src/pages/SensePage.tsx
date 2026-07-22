@@ -206,7 +206,7 @@ export function SensePage() {
     </section>
 
     <div className={styles.workspace}>
-      <section className={styles.panel} aria-label="感知模块列表">
+      <section className={`${styles.panel} ${styles.modulePanel}`} aria-label="感知模块列表">
         <header className={styles.panelHead}>
           <span><strong>感知模块</strong><small>全局层 · {sources.length} 个模块</small></span>
           {selectedModule && <button className={styles.overviewButton} type="button" onClick={() => setSelectedModuleId(null)}><X size={14} />查看全部注入</button>}
@@ -246,7 +246,9 @@ export function SensePage() {
               </article>
             })}
           </div>
-          : <EmptyPanel title="尚无全局感知模块" description="在 global_sense 下注册模块后，点击重新读取即可热发现。" icon={<Activity size={21} />} />}
+          : <div className={styles.moduleEmpty}>
+            <EmptyPanel title="尚无全局感知模块" description="在 global_sense 下注册模块后，点击重新读取即可热发现。" icon={<Activity size={21} />} />
+          </div>}
       </section>
 
       <aside className={`${styles.panel} ${styles.previewPanel}`} aria-label="感知模块查看">

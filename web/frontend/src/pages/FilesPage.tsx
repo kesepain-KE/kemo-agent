@@ -22,8 +22,10 @@ import {
 } from 'lucide-react'
 import { useOutletContext } from 'react-router-dom'
 import {
+  deleteAllUserFiles,
   deleteAllTmpFiles,
   deleteTmpFiles,
+  deleteUserFiles,
   getTmpFiles,
   getUserFileDownloadUrl,
   getUserFiles,
@@ -163,7 +165,7 @@ export function FilesPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedPath, setSelectedPath] = useState('')
-  const [selectedTmpPaths, setSelectedTmpPaths] = useState<Set<string>>(new Set())
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set())
   const [notice, setNotice] = useState('')
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null)
@@ -193,8 +195,8 @@ export function FilesPage() {
     })
   }, [allEntries, currentPath, normalizedSearch])
   const selectedEntry = allEntries.find((entry) => entry.relativePath === selectedPath) ?? null
-  const visibleTmpFiles = visibleEntries.filter((entry) => entry.type === 'file').map((entry) => entry.relativePath)
-  const allVisibleTmpSelected = Boolean(visibleTmpFiles.length) && visibleTmpFiles.every((path) => selectedTmpPaths.has(path))
+  const visibleFilePaths = visibleEntries.filter((entry) => entry.type === 'file').map((entry) => entry.relativePath)
+  const allVisibleSelected = Boolean(visibleFilePaths.length) && visibleFilePaths.every((path) => selectedPaths.has(path))
   const areaRoot = data?.root || areaLabels[area].detail.replace('<user>', user || '—')
 
   useEffect(() => {
@@ -237,15 +239,22 @@ export function FilesPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (request: DeleteRequest) => request.kind === 'all' ? deleteAllTmpFiles() : deleteTmpFiles(request.paths),
+    mutationFn: (request: DeleteRequest) => {
+      if (area === 'tmp') return request.kind === 'all' ? deleteAllTmpFiles() : deleteTmpFiles(request.paths)
+      return request.kind === 'all'
+        ? deleteAllUserFiles(user, area)
+        : deleteUserFiles(user, area, request.paths)
+    },
     onSuccess: async (result) => {
       setDeleteRequest(null)
       setSelectedPath('')
-      setSelectedTmpPaths(new Set())
-      setNotice(result.deleted_count ? `已删除 ${result.deleted_count} 个全局临时文件` : '全局临时区域没有可删除文件')
-      await queryClient.invalidateQueries({ queryKey: ['tmp-files'] })
+      setSelectedPaths(new Set())
+      const areaLabel = areaLabels[area].label
+      setNotice(result.deleted_count ? `已删除 ${result.deleted_count} 个${areaLabel}文件` : `${areaLabel}区域没有可删除文件`)
+      if (area === 'tmp') await queryClient.invalidateQueries({ queryKey: ['tmp-files'] })
+      else await queryClient.invalidateQueries({ queryKey: ['user-files', user, area] })
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : '临时文件删除失败'),
+    onError: (error) => setNotice(error instanceof Error ? error.message : '文件删除失败'),
   })
 
   const switchArea = (next: FileArea) => {
@@ -253,7 +262,7 @@ export function FilesPage() {
     setCurrentPath('')
     setSearchQuery('')
     setSelectedPath('')
-    setSelectedTmpPaths(new Set())
+    setSelectedPaths(new Set())
     setDeleteRequest(null)
     setRenameTarget(null)
     setNotice('')
@@ -302,8 +311,8 @@ export function FilesPage() {
     moveMutation.mutate({ target: renameTarget, name })
   }
 
-  const toggleTmpSelection = (path: string) => {
-    setSelectedTmpPaths((current) => {
+  const toggleSelection = (path: string) => {
+    setSelectedPaths((current) => {
       const next = new Set(current)
       if (next.has(path)) next.delete(path)
       else next.add(path)
@@ -311,18 +320,18 @@ export function FilesPage() {
     })
   }
 
-  const toggleAllVisibleTmp = () => {
-    setSelectedTmpPaths((current) => {
+  const toggleAllVisible = () => {
+    setSelectedPaths((current) => {
       const next = new Set(current)
-      if (allVisibleTmpSelected) visibleTmpFiles.forEach((path) => next.delete(path))
-      else visibleTmpFiles.forEach((path) => next.add(path))
+      if (allVisibleSelected) visibleFilePaths.forEach((path) => next.delete(path))
+      else visibleFilePaths.forEach((path) => next.add(path))
       return next
     })
   }
 
   const rootLabel = areaLabels[area].label
   const crumbs = currentPath ? currentPath.split('/') : []
-  const operationDescription = area === 'tmp' ? '复制路径、多选删除、全部删除' : '复制路径、重命名、下载'
+  const operationDescription = area === 'tmp' ? '复制路径、多选删除、全部删除' : '复制路径、重命名、下载、多选删除、全部删除'
 
   const renderEntryActions = (entry: FileEntry, compact = false) => (
     <>
@@ -447,25 +456,23 @@ export function FilesPage() {
               })}
               {normalizedSearch && <span><ChevronRight size={13} /><b>全区域搜索结果</b></span>}
             </nav>
-            {area === 'tmp' && (
-              <div className={styles.tmpToolbar}>
-                <span>{selectedTmpPaths.size ? `已选 ${selectedTmpPaths.size} 个文件` : '可多选临时文件'}</span>
+            <div className={styles.tmpToolbar}>
+                <span>{selectedPaths.size ? `已选 ${selectedPaths.size} 个文件` : `可多选${areaLabels[area].label}文件`}</span>
                 <button
                   type="button"
-                  disabled={!selectedTmpPaths.size}
-                  onClick={() => setDeleteRequest({ kind: 'selected', paths: [...selectedTmpPaths], label: `${selectedTmpPaths.size} 个已选文件` })}
+                  disabled={!selectedPaths.size}
+                  onClick={() => setDeleteRequest({ kind: 'selected', paths: [...selectedPaths], label: `${selectedPaths.size} 个已选文件` })}
                 >
                   <CheckSquare size={14} />删除已选
                 </button>
-                <button type="button" className={styles.deleteAction} disabled={!data?.summary.total_files} onClick={() => setDeleteRequest({ kind: 'all', paths: [], label: '全局临时区域的全部文件' })}>
+                <button type="button" className={styles.deleteAction} disabled={!data?.summary.total_files} onClick={() => setDeleteRequest({ kind: 'all', paths: [], label: `${areaLabels[area].label}区域的全部文件` })}>
                   <Trash2 size={14} />全部删除
                 </button>
               </div>
-            )}
           </div>
 
-          <div className={`${styles.fileHeader} ${area === 'tmp' ? styles.withCheckbox : ''}`}>
-            {area === 'tmp' && <input type="checkbox" checked={allVisibleTmpSelected} onChange={toggleAllVisibleTmp} aria-label="选择当前列表全部临时文件" disabled={!visibleTmpFiles.length} />}
+          <div className={`${styles.fileHeader} ${styles.withCheckbox}`}>
+            <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label={`选择当前列表全部${areaLabels[area].label}文件`} disabled={!visibleFilePaths.length} />
             <span>名称与相对路径</span><span>类型</span><span>修改时间</span><span>大小</span><span>操作</span>
           </div>
 
@@ -476,18 +483,16 @@ export function FilesPage() {
               {visibleEntries.map((entry) => {
                 const kind = fileKind(entry)
                 const isSelected = selectedPath === entry.relativePath
-                const isTmpChecked = selectedTmpPaths.has(entry.relativePath)
+                const isChecked = selectedPaths.has(entry.relativePath)
                 return (
                   <div
                     key={`${entry.type}:${entry.relativePath}`}
-                    className={`${styles.fileRow} ${area === 'tmp' ? styles.withCheckbox : ''} ${isSelected ? styles.selectedRow : ''}`}
+                    className={`${styles.fileRow} ${styles.withCheckbox} ${isSelected ? styles.selectedRow : ''}`}
                     onClick={() => setSelectedPath(entry.relativePath)}
                   >
-                    {area === 'tmp' && (
-                      entry.type === 'file'
-                        ? <input type="checkbox" checked={isTmpChecked} onClick={(event) => event.stopPropagation()} onChange={() => toggleTmpSelection(entry.relativePath)} aria-label={`选择 ${entry.name}`} />
-                        : <span className={styles.checkboxSpacer} />
-                    )}
+                    {entry.type === 'file'
+                      ? <input type="checkbox" checked={isChecked} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(entry.relativePath)} aria-label={`选择 ${entry.name}`} />
+                      : <span className={styles.checkboxSpacer} />}
                     <button
                       type="button"
                       className={styles.fileIdentity}
@@ -560,8 +565,8 @@ export function FilesPage() {
       {deleteRequest && (
         <div className={styles.dialogBackdrop} role="presentation" onMouseDown={() => setDeleteRequest(null)}>
           <div className={styles.dialog} role="alertdialog" aria-modal="true" aria-labelledby="delete-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div><span className={`${styles.dialogIcon} ${styles.dangerIcon}`}><Trash2 size={18} /></span><span><strong id="delete-title">确认删除临时文件</strong><small>{deleteRequest.label}</small></span></div>
-            <p>删除后无法通过 Web 恢复。系统会保留 tmp 根目录，并自动清理已经变空的子目录。</p>
+            <div><span className={`${styles.dialogIcon} ${styles.dangerIcon}`}><Trash2 size={18} /></span><span><strong id="delete-title">确认删除文件</strong><small>{deleteRequest.label}</small></span></div>
+            <p>删除后无法通过 Web 恢复。系统会保留当前区域根目录，并自动清理已经变空的子目录。</p>
             <footer><button type="button" onClick={() => setDeleteRequest(null)}>取消</button><button type="button" className={styles.confirmDelete} onClick={() => deleteMutation.mutate(deleteRequest)} disabled={deleteMutation.isPending}>{deleteMutation.isPending ? '正在删除…' : '确认删除'}</button></footer>
           </div>
         </div>

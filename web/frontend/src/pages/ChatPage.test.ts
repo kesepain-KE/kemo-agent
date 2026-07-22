@@ -41,8 +41,13 @@ describe('reduceRunEvent', () => {
       task_id: 'user-task', title: '用户任务', user_defined: true, status: 'enabled', type: 'daily', time: '18:00',
       next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never',
     }
-    const items = buildScheduledTaskItems([base, { ...base, task_id: 'system-task', title: '系统维护', user_defined: false }])
-    expect(items.map((item) => item.title)).toEqual(['用户任务'])
+    const items = buildScheduledTaskItems([
+      base,
+      { ...base, task_id: 'completed-task', title: '已完成单次任务', status: 'completed', type: 'once', next_run_at: '', last_state: 'completed' },
+      { ...base, task_id: 'system-task', title: '系统维护', user_defined: false },
+    ])
+    expect(items.map((item) => item.title)).toEqual(['已完成单次任务', '用户任务'])
+    expect(items[0]).toMatchObject({ id: 'completed-task', status: 'completed', nextRun: '—' })
   })
 
   it('最近活动只保留本轮实际注入的感知来源', () => {
@@ -87,6 +92,29 @@ describe('reduceRunEvent', () => {
         { id: 'usage-1' },
       ],
     })
+  })
+
+  it('历史中的计划执行控制提示只生成执行标记，不显示伪用户气泡', () => {
+    const items = buildHistoryItems({
+      user: 'kesepain',
+      source: 'web',
+      session_id: 's1',
+      messages: [
+        { role: 'user', content: '【任务计划连续执行】\n计划 ID：plan_12345678\n起始步骤：step_1' },
+        { role: 'assistant', content: '计划已经执行完成。' },
+      ],
+      round_metrics: [],
+      round_traces: [],
+    })
+
+    expect(items).toMatchObject([
+      { kind: 'execution_marker', planId: 'plan_12345678' },
+      { kind: 'message', role: 'assistant', content: '计划已经执行完成。' },
+    ])
+    const blocks = groupConversationItems(items)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toMatchObject({ kind: 'assistant' })
+    expect(blocks.some((block) => block.kind === 'user')).toBe(false)
   })
 
   it('流式合并正文和思考', () => {

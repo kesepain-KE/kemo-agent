@@ -275,6 +275,16 @@ export async function updatePlan(user: string, planId: string, plan: Record<stri
   })
 }
 
+export async function commandPlan(
+  user: string,
+  planId: string,
+  action: 'pause' | 'cancel',
+): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/actions/${action}`, {
+    method: 'POST',
+  })
+}
+
 export async function deletePlan(user: string, planId: string): Promise<Record<string, unknown>> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' })
 }
@@ -470,6 +480,25 @@ export async function deleteUserFile(
   )
 }
 
+export async function deleteUserFiles(
+  user: string,
+  scope: 'file_upload' | 'download',
+  paths: string[],
+): Promise<TmpFilesDeleteResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/delete-many`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  })
+}
+
+export async function deleteAllUserFiles(
+  user: string,
+  scope: 'file_upload' | 'download',
+): Promise<TmpFilesDeleteResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/all`, { method: 'DELETE' })
+}
+
 export async function uploadUserFile(user: string, scope: 'file_upload' | 'download', path: string, file: File): Promise<FileMutationResponse> {
   const body = new FormData()
   body.append('file', file)
@@ -653,6 +682,7 @@ export interface StreamChatOptions {
   prompt: string
   content?: Array<Record<string, unknown>>
   runId: string
+  planId?: string
   signal?: AbortSignal
   onEvent: (event: RunEvent) => void
 }
@@ -701,6 +731,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       prompt: options.prompt,
       content: options.content ?? [],
       run_id: options.runId,
+      plan_id: options.planId ?? '',
     }),
     signal: options.signal,
   })

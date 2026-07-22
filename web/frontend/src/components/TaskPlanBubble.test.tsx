@@ -28,9 +28,37 @@ describe('TaskPlanBubble', () => {
   })
 
   it('运行状态显示当前进度', () => {
-    render(<TaskPlanBubble title="运行计划" status="running" steps={[{ id: 'step_1', title: '完成项', status: 'completed' }, { id: 'step_2', title: '执行项', status: 'running' }]} />)
+    const onPause = vi.fn()
+    const confirm = vi.spyOn(window, 'confirm')
+    confirm.mockReturnValueOnce(false).mockReturnValueOnce(true)
+    render(<TaskPlanBubble title="运行计划" status="running" steps={[{ id: 'step_1', title: '完成项', status: 'completed' }, { id: 'step_2', title: '执行项', status: 'running' }]} onPause={onPause} />)
     expect(screen.getByText('执行进度 1/2')).toBeInTheDocument()
     expect(screen.getByText('50%')).toBeInTheDocument()
     expect(screen.getByText('正在执行：执行项')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /停止任务/ })).not.toBeInTheDocument()
+    const pauseButton = screen.getByRole('button', { name: /暂停任务/ })
+    fireEvent.click(pauseButton)
+    expect(onPause).not.toHaveBeenCalled()
+    fireEvent.click(pauseButton)
+    expect(onPause).toHaveBeenCalledOnce()
+    expect(confirm).toHaveBeenCalledWith('确定要暂停此任务吗？任务将在当前步骤结束后暂停。')
+    confirm.mockRestore()
+  })
+
+  it('暂停后允许修改并继续执行剩余步骤', () => {
+    const onModify = vi.fn()
+    const onRetry = vi.fn()
+    render(<TaskPlanBubble
+      title="暂停计划"
+      status="paused"
+      steps={[{ id: 'step_1', title: '完成项', status: 'completed' }, { id: 'step_2', title: '待执行项', status: 'pending' }]}
+      onModify={onModify}
+      onRetry={onRetry}
+    />)
+    expect(screen.getByText('任务计划已暂停。修改计划后可继续执行剩余步骤。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '修改计划' }))
+    fireEvent.click(screen.getByRole('button', { name: '继续执行' }))
+    expect(onModify).toHaveBeenCalledOnce()
+    expect(onRetry).toHaveBeenCalledOnce()
   })
 })

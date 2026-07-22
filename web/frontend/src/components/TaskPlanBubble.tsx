@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, ChevronDown, ChevronUp, Circle, ClipboardList, Info, LoaderCircle, Pencil, Play, RotateCcw, Square, X, XCircle } from 'lucide-react'
+import { Check, CheckCircle2, ChevronDown, ChevronUp, Circle, ClipboardList, Info, LoaderCircle, Pause, Pencil, Play, RotateCcw, X, XCircle } from 'lucide-react'
 import type { PlanStepSummary, PlanSummary } from '../types/api'
 import styles from './TaskPlanBubble.module.css'
 
@@ -18,7 +18,7 @@ export interface TaskPlanBubbleProps {
   onReject?: () => void
   onModify?: () => void
   onApprove?: () => void
-  onStop?: () => void
+  onPause?: () => void
   onRetry?: () => void
 }
 
@@ -35,13 +35,14 @@ function icon(status: TaskStepStatus) {
 function notice(status: TaskPlanStatus, autoAccept: boolean, current?: TaskPlanStep) {
   if (status === 'pending') return autoAccept ? '当前 auto_accept 为 true，任务计划确认后将自动开始执行。' : '当前 auto_accept 为 false，需要手动批准后才会执行。'
   if (status === 'running') return current ? `正在执行：${current.title}` : '任务计划正在执行。'
+  if (status === 'paused') return '任务计划已暂停。修改计划后可继续执行剩余步骤。'
   if (status === 'completed') return '任务计划中的全部步骤均已执行完成。'
   if (status === 'failed') return current ? `步骤“${current.title}”执行失败，请检查执行结果。` : '任务执行失败，请检查任务日志。'
   if (status === 'rejected' || status === 'cancelled') return '该任务计划已停止，不会继续执行。'
   return '任务计划已批准，等待运行时执行。'
 }
 
-export function TaskPlanBubble({ title, description = '已创建任务计划，请确认后执行以下步骤', status, steps, autoAccept = false, collapsed = false, className, onToggleCollapse, onReject, onModify, onApprove, onStop, onRetry }: TaskPlanBubbleProps) {
+export function TaskPlanBubble({ title, description = '已创建任务计划，请确认后执行以下步骤', status, steps, autoAccept = false, collapsed = false, className, onToggleCollapse, onReject, onModify, onApprove, onPause, onRetry }: TaskPlanBubbleProps) {
   const completed = steps.filter((step) => step.status === 'completed').length
   const current = steps.find((step) => step.status === 'running' || step.status === 'failed')
   const progress = steps.length ? Math.round(completed * 100 / steps.length) : 0
@@ -54,9 +55,19 @@ export function TaskPlanBubble({ title, description = '已创建任务计划，�
     {collapsed ? <div className={styles.collapsedSummary}>{status === 'running' ? <><LoaderCircle size={17} className={styles.loadingIcon} /><span>正在执行{current ? `：${current.title}` : ''}</span><strong>{completed}/{steps.length}</strong></> : status === 'completed' ? <><CheckCircle2 size={17} /><span>任务计划已完成</span><strong>{completed}/{steps.length}</strong></> : status === 'failed' ? <><XCircle size={17} /><span>任务计划执行失败</span></> : <><Info size={17} /><span>{status === 'pending' ? '任务计划等待用户批准' : `任务计划${planLabels[status]}`}</span></>}</div> : <>
       {status === 'running' && <div className={styles.progressSection}><div className={styles.progressHeader}><span>执行进度 {completed}/{steps.length}</span><strong>{progress}%</strong></div><div className={styles.progressTrack}><div className={styles.progressBar} style={{ width: `${progress}%` }} /></div></div>}
       <div className={styles.stepList} style={{ maxHeight: 'min(26vh, 250px)', paddingRight: 4, overflowY: 'auto', overscrollBehavior: 'contain', scrollbarGutter: 'stable' }}>{steps.map((step, index) => { const stepStatus = step.status ?? 'pending'; return <div key={step.id} className={cx(styles.stepRow, styles[`stepStatus_${stepStatus}`])}><div className={styles.stepNumber}>{stepStatus === 'pending' ? index + 1 : icon(stepStatus)}</div><div className={styles.stepId}>{step.id}</div><div className={styles.stepContent}><div className={styles.stepTitle}>{step.title}</div>{step.description && <div className={styles.stepDescription}>{step.description}</div>}</div><div className={styles.stepMeta}>{step.dependency && <span className={styles.dependency}>依赖 {step.dependency}</span>}{stepStatus !== 'pending' && <span className={styles.stepStatusLabel}>{stepLabels[stepStatus]}</span>}</div></div> })}</div>
-      <div className={cx(styles.notice, styles[`notice_${normalizedStatus}`])}><Info size={17} /><span>{notice(status, autoAccept, current)}</span></div>
+      <div className={cx(styles.notice, styles[`notice_${normalizedStatus}`])}>
+        <Info size={17} />
+        <span className={styles.noticeCopy}>{notice(status, autoAccept, current)}</span>
+        {status === 'running' && <button
+          type="button"
+          className={styles.pauseButton}
+          onClick={() => {
+            if (window.confirm('确定要暂停此任务吗？任务将在当前步骤结束后暂停。')) onPause?.()
+          }}
+        ><Pause size={15} />暂停任务</button>}
+      </div>
       {status === 'pending' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.rejectButton)} onClick={onReject}><X size={17} />拒绝</button><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onApprove}><Play size={17} fill="currentColor" />批准执行</button></div>}
-      {status === 'running' && <div className={cx(styles.actionBar, styles.singleActionBar)}><button type="button" className={cx(styles.actionButton, styles.stopButton)} onClick={onStop}><Square size={15} fill="currentColor" />停止任务</button></div>}
+      {status === 'paused' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onRetry}><Play size={17} fill="currentColor" />继续执行</button></div>}
       {status === 'failed' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onRetry}><RotateCcw size={17} />重新执行</button></div>}
     </>}
     <div className={styles.bottomPointer} aria-hidden="true" />

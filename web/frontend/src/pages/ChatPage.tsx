@@ -17,7 +17,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { closeSession, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
+import { closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -39,6 +39,7 @@ function eventId(prefix: string) {
 }
 
 const EMPTY_CHAT_ITEMS: ChatItem[] = []
+const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 
 export function isNearScrollBottom(
   metrics: Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>,
@@ -64,6 +65,11 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
   }
 
   for (const item of items) {
+    if (item.kind === 'execution_marker') {
+      flushAssistant()
+      currentUserId = item.id
+      continue
+    }
     if (item.kind === 'message' && item.role === 'user') {
       flushAssistant()
       currentUserId = item.id
@@ -234,6 +240,10 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
   for (const [index, message] of (history?.messages ?? []).entries()) {
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (message.role === 'user') {
+      if (message.content.startsWith(PLAN_EXECUTION_PROMPT_PREFIX)) {
+        result.push({ id: `history_execution_${index}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
+        continue
+      }
       result.push({ id: `history_${index}`, kind: 'message', role: 'user', content: message.content })
       continue
     }
@@ -388,6 +398,7 @@ function GuidanceMessage({ item, placement }: { item: GuidanceItem; placement: '
 }
 
 export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
+  const supportedStatuses = new Set<ScheduledTaskItem['status']>(['enabled', 'running', 'completed', 'paused', 'failed', 'cancelled', 'disabled'])
   return [...tasks]
     .filter((task) => task.user_defined)
     .sort((left, right) => (left.next_run_at || left.created_at).localeCompare(right.next_run_at || right.created_at))
@@ -396,7 +407,7 @@ export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTask
       title: task.title,
       schedule: cronScheduleLabel(task),
       nextRun: formatDateTime(task.next_run_at),
-      enabled: task.status === 'enabled',
+      status: supportedStatuses.has(task.status as ScheduledTaskItem['status']) ? task.status as ScheduledTaskItem['status'] : 'disabled',
       icon: task.type === 'daily' ? 'calendar' : task.type === 'recurring' ? 'alarm' : 'clipboard',
     }))
 }
@@ -464,6 +475,10 @@ export function ChatPage() {
     enabled: Boolean(user),
     refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
   })
+  useEffect(() => {
+    if (!sessionId || !tasksQuery.dataUpdatedAt) return
+    void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+  }, [queryClient, sessionId, tasksQuery.dataUpdatedAt, user])
   const senseQuery = useQuery({
     queryKey: ['sense', user],
     queryFn: () => getSense(user),
@@ -532,14 +547,19 @@ export function ChatPage() {
 
   const send = async (
     promptOverride?: string,
-    options: { sessionId?: string; content?: Array<Record<string, unknown>> } = {},
+    options: {
+      sessionId?: string
+      content?: Array<Record<string, unknown>>
+      historyUserMessages?: number
+    } = {},
   ) => {
     const prompt = (promptOverride ?? draft).trim()
     if (!prompt || !user || running) return
     const activeSession = options.sessionId || sessionId || createSessionId()
     lastAttemptSessionRef.current = activeSession
     const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
-    const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
+    const historyUserMessages = options.historyUserMessages
+      ?? (activeSession === sessionId ? persistedUserMessages : 0)
     beginChatRun(user, activeSession, runId, historyUserMessages)
     setDraft('')
     setRunning(true)
@@ -589,7 +609,6 @@ export function ChatPage() {
     }
   }
 
-  const stop = abortChatRun
   const uploadFile = async (file: File) => {
     if (!user) return
     setUploadFeedback({ tone: 'pending', text: `正在上传 ${file.name}…` })
@@ -763,6 +782,9 @@ export function ChatPage() {
       await send(prompt, {
         sessionId: targetSession || undefined,
         content: undo?.content?.length ? undo.content : undefined,
+        // 重新生成会先撤销一轮再补回一轮，最终历史轮数不会增长。
+        // 接管基线必须使用撤销后的轮数，否则持久化历史与流式缓存会同时显示。
+        historyUserMessages: Math.max(0, expectedRound - 1),
       })
     } catch (error) {
       setConversationFeedback({
@@ -786,9 +808,9 @@ export function ChatPage() {
   }, [clearConversation, compressCurrentConversation, regenerateLastResponse, saveAndNewConversation])
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
   const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
-  const changePlanStatus = async (plan: PlanSummary, status: 'approved' | 'paused' | 'cancelled') => {
+  const commandPlanStatus = async (plan: PlanSummary, action: 'pause' | 'cancel') => {
     try {
-      const response = await updatePlan(user, plan.plan_id, { revision: plan.revision, status })
+      const response = await commandPlan(user, plan.plan_id, action)
       const updated = extractPlanSummary(response.plan)
       if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
@@ -796,23 +818,94 @@ export function ChatPage() {
       setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '任务计划更新失败' }])
     }
   }
+
+  const executePlan = async (plan: PlanSummary) => {
+    if (!user || running) return
+    const activeSession = plan.session_id || sessionId || createSessionId()
+    lastAttemptSessionRef.current = activeSession
+    const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
+    const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
+    beginChatRun(user, activeSession, runId, historyUserMessages)
+    updateChatRunItems(user, activeSession, (current) => [
+      ...current,
+      { id: eventId('plan_execution'), kind: 'execution_marker', planId: plan.plan_id },
+    ])
+    setPlanOverrides((current) => ({
+      ...current,
+      [plan.plan_id]: { ...plan, status: 'running', revision: plan.revision + 1 },
+    }))
+    setRunning(true)
+    setActiveRunId(runId)
+    followOutputRef.current = true
+    setShowFollowOutput(false)
+    const controller = new AbortController()
+    setChatAbortController(controller)
+    let committed = false
+    let refreshedRunningPlan = false
+    try {
+      await streamChat({
+        user,
+        sessionId: activeSession,
+        prompt: '',
+        planId: plan.plan_id,
+        runId,
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (!refreshedRunningPlan) {
+            refreshedRunningPlan = true
+            void queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+          }
+          if (event.type === 'done') committed = true
+          const updated = event.type === 'tool_call_result' ? extractPlanSummary(event.result) : null
+          if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
+          updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
+        },
+      })
+      await refreshSessions()
+      if (!sessionId) {
+        locallyCommittedSessionRef.current = activeSession
+        setSessionId(activeSession)
+      }
+      if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
+      await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+      refreshOverview()
+    } catch (error) {
+      if ((error as Error).name !== 'AbortError') {
+        updateChatRunItems(user, activeSession, (current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '任务计划执行失败' }])
+      }
+      await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+    } finally {
+      finishChatRun(user, activeSession, committed)
+      setChatAbortController(null)
+      setActiveRunId('')
+      setRunning(false)
+    }
+  }
+
   const planActions = (plan: PlanSummary) => ({
     onToggleCollapse: () => setCollapsedPlans((current) => { const next = new Set(current); if (next.has(plan.plan_id)) next.delete(plan.plan_id); else next.add(plan.plan_id); return next }),
-    onReject: () => void changePlanStatus(plan, 'cancelled'),
+    onReject: () => void commandPlanStatus(plan, 'cancel'),
     onModify: () => navigate(`/tasks?user=${encodeURIComponent(user)}`),
-    onApprove: () => void changePlanStatus(plan, 'approved'),
-    onStop: () => void changePlanStatus(plan, 'paused'),
-    onRetry: () => void changePlanStatus(plan, 'approved'),
+    onApprove: () => void executePlan(plan),
+    onPause: () => void commandPlanStatus(plan, 'pause'),
+    onRetry: () => void executePlan(plan),
   })
   const persistedPlans = tasksQuery.data?.plans || []
   const persistedPlanById = new Map(persistedPlans.map((plan) => [plan.plan_id, plan]))
-  const resolvePlan = (plan: PlanSummary) => persistedPlanById.get(plan.plan_id) || planOverrides[plan.plan_id] || plan
+  const resolvePlan = (plan: PlanSummary) => {
+    const candidates = [plan, persistedPlanById.get(plan.plan_id), planOverrides[plan.plan_id]].filter((value): value is PlanSummary => Boolean(value))
+    return candidates.reduce((latest, candidate) => candidate.revision > latest.revision ? candidate : latest)
+  }
   const renderedPlanIds = new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id))
   const persistedSessionPlans = persistedPlans.filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id)).map(resolvePlan)
   const renderedSessionPlans = items
     .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
     .map((item) => resolvePlan(item.plan))
   const dockedPlan = selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
+  const stopCurrentRun = () => {
+    if (dockedPlan?.status === 'running') void commandPlanStatus(dockedPlan, 'pause')
+    else abortChatRun()
+  }
   const revealPlan = (plan: PlanSummary) => {
     if (plan.plan_id !== dockedPlan?.plan_id) {
       navigate(`/tasks?user=${encodeURIComponent(user)}`)
@@ -959,6 +1052,7 @@ export function ChatPage() {
                 <div className="assistant-turn-content">
                   {block.items.map((item) => {
                     if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
+                    if (item.kind === 'execution_marker') return null
                     if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
                     if (item.kind === 'usage') return null
                     if (item.kind === 'task_plan') {
@@ -1055,7 +1149,7 @@ export function ChatPage() {
           onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value) => !value)}
           onSubmit={() => { if (running) void sendGuidance(); else void send() }}
-          onStop={stop}
+          onStop={stopCurrentRun}
         />
       </div>
       <KnowledgeReferenceDrawer

@@ -885,10 +885,14 @@ export interface FileDeleteResponse {
   deleted: boolean
 }
 
-export interface TmpFilesDeleteResponse {
+export interface FilesDeleteResponse {
+  user?: string
+  scope?: 'file_upload' | 'download'
   deleted_paths: string[]
   deleted_count: number
 }
+
+export type TmpFilesDeleteResponse = FilesDeleteResponse
 
 export interface FileMutationResponse {
   user?: string
@@ -1118,6 +1122,7 @@ export interface ApiErrorPayload {
 
 export type ChatItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; streaming?: boolean; edited?: boolean; originalContent?: string }
+  | { id: string; kind: 'execution_marker'; planId: string }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
   | {
       id: string

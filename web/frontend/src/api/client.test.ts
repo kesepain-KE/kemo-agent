@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import { http, HttpResponse } from 'msw'
+import { server } from '../test/server'
 import {
   AVATAR_UPDATED_EVENT,
+  commandPlan,
   getLogoUrl,
   getUserAvatarUrl,
   getUserFileDownloadUrl,
   parseSseFrames,
   submitGuidance,
+  streamChat,
   uploadUserAvatar,
 } from './client'
 
@@ -26,6 +30,42 @@ describe('parseSseFrames', () => {
   it('提交运行中引导到指定 run_id', async () => {
     const result = await submitGuidance('kesepain', 'run_test_123', 'adjust')
     expect(result).toMatchObject({ run_id: 'run_test_123', status: 'queued', queued: 1 })
+  })
+
+  it('计划执行请求携带 plan_id 且不需要伪造用户 prompt', async () => {
+    let requestBody: Record<string, unknown> = {}
+    server.use(http.post('/api/chat', async ({ request }) => {
+      requestBody = await request.json() as Record<string, unknown>
+      return new HttpResponse(
+        'event: text_delta\ndata: {"type":"text_delta","content":"执行中"}\n\n'
+        + 'event: done\ndata: {"type":"done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    const events: string[] = []
+
+    await streamChat({
+      user: 'kesepain',
+      sessionId: 's1',
+      prompt: '',
+      planId: 'plan_12345678',
+      runId: 'run_plan_123',
+      onEvent: (event) => events.push(event.type),
+    })
+
+    expect(requestBody).toMatchObject({
+      user: 'kesepain',
+      session_id: 's1',
+      prompt: '',
+      plan_id: 'plan_12345678',
+      run_id: 'run_plan_123',
+    })
+    expect(events).toEqual(['text_delta', 'done'])
+  })
+
+  it('暂停计划使用无 revision 的状态指令接口', async () => {
+    const result = await commandPlan('kesepain', 'plan_12345678', 'pause')
+    expect(result).toMatchObject({ action: 'pause', updated: true, plan: { status: 'paused' } })
   })
 
   it('为头像、Logo 和文件下载生成安全 URL', () => {

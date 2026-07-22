@@ -120,6 +120,7 @@ export const handlers = [
     },
   })),
   http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 1, completed_plans: 0 }, plans: [], cron_tasks: [{ task_id: 'daily-check', title: '每日检查', user_defined: true, status: 'enabled', type: 'daily', time: '18:00', next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never' }], executions: [] })),
+  http.post('/api/users/kesepain/tasks/plans/:planId/actions/:action', ({ params }) => HttpResponse.json({ user: 'kesepain', action: params.action, updated: true, plan: { plan_id: params.planId, status: params.action === 'cancel' ? 'cancelled' : 'paused', revision: 2, title: '测试计划', description: '', auto_accept: false, reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', created_at: '', updated_at: '', progress: { completed: 0, total: 1, percent: 0 }, steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }] } })),
   http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true, retrieval: { mode: 'index_only', full_index: true }, summary: { documents: 3, user_documents: 1, shared_documents: 1, global_documents: 1 }, documents: [{ scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true }, { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, active_for_main_agent: true }, { scope: 'global', relative_path: 'guide.md', title: '全局指南', size: 160, updated_at: 1, active_for_main_agent: true }], extensions: { kemo_graph: 'disabled' }, source_policy: sourcePolicy })),
   http.get('/api/users/kesepain/knowledge/:scope/document', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: params.scope === 'shared' ? 'team.md' : params.scope === 'global' ? 'guide.md' : 'notes.md', content: '# 知识正文\n\n测试内容', size: 24, updated_at: 1 })),
   http.put('/api/users/kesepain/knowledge/:scope/document', async ({ params, request }) => { const body = await request.json() as { content?: string }; return HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: new URL(request.url).searchParams.get('path') || 'notes.md', size: String(body.content || '').length, updated: true, index_refresh: 'next_request' }) }),
@@ -229,6 +230,11 @@ export const handlers = [
     const url = new URL(request.url)
     return HttpResponse.json({ user: 'kesepain', scope: params.scope, path: url.searchParams.get('path'), new_path: url.searchParams.get('new_path'), moved: true })
   }),
+  http.post('/api/users/kesepain/files/:scope/delete-many', async ({ request, params }) => {
+    const body = await request.json() as { paths: string[] }
+    return HttpResponse.json({ user: 'kesepain', scope: params.scope, deleted_paths: body.paths, deleted_count: body.paths.length })
+  }),
+  http.delete('/api/users/kesepain/files/:scope/all', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, deleted_paths: ['readme.txt', 'screenshots/shot.png', 'screenshots/release/final-shot.png'], deleted_count: 3 })),
   http.delete('/api/users/kesepain/files/:scope', ({ request, params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, path: new URL(request.url).searchParams.get('path'), deleted: true })),
   http.get('/api/tmp', () => HttpResponse.json({ root: 'tmp', summary: { total_files: 1, total_dirs: 0, total_size: 64 }, tree: [{ type: 'file', name: 'cache.tmp', relative_path: 'cache.tmp', size: 64, updated_at: 1, extension: '.tmp' }] })),
   http.delete('/api/tmp', ({ request }) => HttpResponse.json({ path: new URL(request.url).searchParams.get('path'), deleted: true })),
