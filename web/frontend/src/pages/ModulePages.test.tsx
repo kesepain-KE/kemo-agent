@@ -275,6 +275,12 @@ describe('V16 module pages', () => {
   })
 
   it('配置页使用六个纵向栏目并提供结构化字段编辑', async () => {
+    let savedChanges: Record<string, unknown> | undefined
+    server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
+      const body = await request.json() as { changes: Record<string, unknown> }
+      savedChanges = body.changes
+      return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: ['provider.api_key'], updated: true })
+    }))
     renderPage('settings')
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
     expect(screen.queryByText('结构化配置与敏感字段保护')).not.toBeInTheDocument()
@@ -298,10 +304,17 @@ describe('V16 module pages', () => {
     expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password')
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveTextContent('已关闭')
+    expect(screen.getByLabelText('默认子智能体模型')).toHaveValue('agent-default')
+    expect(screen.getByLabelText('轻量子智能体模型')).toHaveValue('summary-model')
+    expect(screen.getByLabelText('推理子智能体模型')).toHaveValue('agent-reasoning')
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
+    fireEvent.change(screen.getByLabelText('轻量子智能体模型'), { target: { value: 'summary-model-next' } })
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
+    await waitFor(() => expect(savedChanges).toMatchObject({
+      agent_models: { default: 'agent-default', cheap: 'summary-model-next', reasoning: 'agent-reasoning' },
+    }))
 
     fireEvent.click(screen.getByRole('button', { name: '用户切换 ›' }))
     expect(screen.queryByRole('combobox', { name: '可切换用户' })).not.toBeInTheDocument()

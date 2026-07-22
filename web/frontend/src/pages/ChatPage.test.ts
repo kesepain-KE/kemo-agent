@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, reduceRunEvent, selectDockedPlan } from './ChatPage'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, mergeHistoryPages, reduceRunEvent, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
@@ -187,6 +187,39 @@ describe('reduceRunEvent', () => {
     expect(items.map((item) => item.kind)).toEqual(['message', 'reasoning', 'tool', 'message', 'usage'])
     expect(items[1]).toMatchObject({ kind: 'reasoning', content: '先分析', streaming: false })
     expect(items[2]).toMatchObject({ kind: 'tool', callId: 'c1', argumentsText: '{"command":"status"}', resultText: 'ok' })
+  })
+
+  it('合并向上分页结果并保留绝对轮次和稳定消息标识', () => {
+    const latest = {
+      user: 'kesepain', source: 'web' as const, session_id: 's1',
+      messages: [
+        { role: 'user' as const, content: '第 21 轮' },
+        { role: 'assistant' as const, content: '第 21 轮回复' },
+      ],
+      round_metrics: [{ round: 21, usage: { total_tokens: 21 }, elapsed_ms: 21, tool_calls: 0, guidance: [] }],
+      round_traces: [{ round: 21, reasoning: '思考 21', tools: [] }],
+      pagination: { limit: 20, total_rounds: 21, first_round: 21, last_round: 21, has_more_before: true, next_before: 21 },
+    }
+    const earlier = {
+      user: 'kesepain', source: 'web' as const, session_id: 's1',
+      messages: [
+        { role: 'user' as const, content: '第 1 轮' },
+        { role: 'assistant' as const, content: '第 1 轮回复' },
+      ],
+      round_metrics: [{ round: 1, usage: { total_tokens: 1 }, elapsed_ms: 1, tool_calls: 0, guidance: [] }],
+      round_traces: [{ round: 1, reasoning: '思考 1', tools: [] }],
+      pagination: { limit: 20, total_rounds: 21, first_round: 1, last_round: 20, has_more_before: false, next_before: null },
+    }
+
+    const merged = mergeHistoryPages([latest, earlier])
+    expect(merged?.messages.map((message) => message.content)).toEqual([
+      '第 1 轮', '第 1 轮回复', '第 21 轮', '第 21 轮回复',
+    ])
+    expect(merged?.pagination).toMatchObject({ total_rounds: 21, first_round: 1, last_round: 21, has_more_before: false })
+    const items = buildHistoryItems(latest)
+    expect(items[0]).toMatchObject({ id: 'history_21_user', content: '第 21 轮' })
+    expect(items[1]).toMatchObject({ id: 'history_reasoning_21', content: '思考 21' })
+    expect(items.at(-1)).toMatchObject({ id: 'history_usage_21', round: 21 })
   })
 
   it('done 结束流式标记，error 生成错误项', () => {

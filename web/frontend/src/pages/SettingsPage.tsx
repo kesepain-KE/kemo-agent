@@ -20,10 +20,12 @@ import { useUiStore } from '../store/ui'
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime'
 type ProviderType = 'chat' | 'kemo'
 type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_generation'
+type AgentModelProfile = 'default' | 'cheap' | 'reasoning'
 type RestartState = 'idle' | 'confirming' | 'restarting' | 'waiting' | 'failed'
 
 interface UserConfigDraft {
   provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean }
+  agent_models: Record<AgentModelProfile, string>
   multimodal_models: Record<MultimodalKey, string>
   knowledge: { use_shared: boolean; use_global: boolean }
   kemo_graph: GraphDraft
@@ -82,6 +84,12 @@ const multimodalFields: Array<{ key: MultimodalKey; label: string; description: 
   { key: 'video_generation', label: '视频生成', description: '文本或素材生成视频的模型' },
 ]
 
+const agentModelFields: Array<{ key: AgentModelProfile; label: string; description: string }> = [
+  { key: 'default', label: '默认子智能体模型', description: '普通子智能体使用；留空时继承主对话模型' },
+  { key: 'cheap', label: '轻量子智能体模型', description: '摘要、上下文整理等轻量任务使用；留空时继承主对话模型' },
+  { key: 'reasoning', label: '推理子智能体模型', description: '任务规划和深度整理使用；留空时继承主对话模型' },
+]
+
 const graphFields: Array<{ key: keyof GraphDraft; label: string }> = [
   { key: 'kemo_graph_global_knowledge', label: '图谱—全局知识库' },
   { key: 'kemo_graph_shared_knowledge', label: '图谱—共享知识库' },
@@ -125,6 +133,7 @@ function graphDraft(value: unknown): GraphDraft {
 
 function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
   const provider = record(config.provider)
+  const agentModels = record(config.agent_models)
   const multimodal = record(config.multimodal_models)
   const knowledge = record(config.knowledge)
   const skills = record(config.skills)
@@ -139,6 +148,11 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
       base_url: stringValue(provider.base_url),
       api_key: stringValue(provider.api_key),
       stream: booleanValue(provider.stream, true),
+    },
+    agent_models: {
+      default: stringValue(agentModels.default),
+      cheap: stringValue(agentModels.cheap),
+      reasoning: stringValue(agentModels.reasoning),
     },
     multimodal_models: {
       vision: stringValue(multimodal.vision),
@@ -429,7 +443,14 @@ export function SettingsPage() {
       stream: userDraft.provider.stream,
     }
     if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
-    submit({ label: '保存模型与 Provider', userChanges: { provider, multimodal_models: userDraft.multimodal_models } }, validation)
+    submit({
+      label: '保存模型与 Provider',
+      userChanges: {
+        provider,
+        agent_models: userDraft.agent_models,
+        multimodal_models: userDraft.multimodal_models,
+      },
+    }, validation)
   }
 
   const saveMemory = () => {
@@ -551,6 +572,10 @@ export function SettingsPage() {
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
           </article>
+          <details className="setting-section settings-disclosure" open>
+            <summary><span><strong>子智能体模型</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
+            <div>{agentModelFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.agent_models[field.key]} placeholder="继承主对话模型" onChange={(event) => setUserDraft({ ...userDraft, agent_models: { ...userDraft.agent_models, [field.key]: event.target.value } })} />} />)}</div>
+          </details>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>多模态模型</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
             <div>{multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.multimodal_models[field.key]} placeholder="未指定" onChange={(event) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: event.target.value } })} />} />)}</div>

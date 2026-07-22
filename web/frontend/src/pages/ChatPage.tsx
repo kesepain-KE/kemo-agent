@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   BrainCircuit,
@@ -40,6 +40,7 @@ function eventId(prefix: string) {
 
 const EMPTY_CHAT_ITEMS: ChatItem[] = []
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
+const HISTORY_PAGE_SIZE = 20
 
 export function isNearScrollBottom(
   metrics: Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>,
@@ -235,20 +236,23 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
   const metrics = new Map((history?.round_metrics || []).map((item) => [item.round, item]))
   const traces = new Map((history?.round_traces || []).map((item) => [item.round, item]))
   const result: ChatItem[] = []
-  let round = 0
+  let round = Math.max(0, Number(history?.pagination?.first_round || 1) - 1)
+  let messagePosition = 0
 
-  for (const [index, message] of (history?.messages ?? []).entries()) {
+  for (const message of history?.messages ?? []) {
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (message.role === 'user') {
+      round += 1
+      messagePosition = 0
       if (message.content.startsWith(PLAN_EXECUTION_PROMPT_PREFIX)) {
-        result.push({ id: `history_execution_${index}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
+        result.push({ id: `history_execution_${round}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
         continue
       }
-      result.push({ id: `history_${index}`, kind: 'message', role: 'user', content: message.content })
+      result.push({ id: `history_${round}_user`, kind: 'message', role: 'user', content: message.content })
       continue
     }
 
-    round += 1
+    messagePosition += 1
     const trace = traces.get(round)
     if (trace?.reasoning) {
       result.push({
@@ -267,7 +271,7 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
         } catch { /* historical tool output need not be JSON */ }
       }
     })
-    result.push({ id: `history_${index}`, kind: 'message', role: 'assistant', content: message.content })
+    result.push({ id: `history_${round}_assistant_${messagePosition}`, kind: 'message', role: 'assistant', content: message.content })
 
     const selected = metrics.get(round)
     if (selected) {
@@ -282,6 +286,31 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
     }
   }
   return result
+}
+
+export function mergeHistoryPages(pages: HistoryResponse[] | undefined): HistoryResponse | undefined {
+  if (!pages?.length) return undefined
+  if (pages.length === 1) return pages[0]
+  const ordered = [...pages].reverse()
+  const earliest = ordered[0]
+  const latest = pages[0]
+  return {
+    ...latest,
+    messages: ordered.flatMap((page) => page.messages),
+    round_metrics: ordered.flatMap((page) => page.round_metrics),
+    round_traces: ordered.flatMap((page) => page.round_traces),
+    pagination: {
+      limit: latest.pagination?.limit ?? HISTORY_PAGE_SIZE,
+      total_rounds: latest.pagination?.total_rounds
+        ?? ordered.reduce((total, page) => total + page.messages.filter((message) => message.role === 'user').length, 0),
+      first_round: earliest.pagination?.first_round ?? 1,
+      last_round: latest.pagination?.last_round
+        ?? latest.pagination?.total_rounds
+        ?? ordered.reduce((total, page) => total + page.messages.filter((message) => message.role === 'user').length, 0),
+      has_more_before: earliest.pagination?.has_more_before ?? false,
+      next_before: earliest.pagination?.next_before ?? null,
+    },
+  }
 }
 
 const quickStartCards = [
@@ -449,6 +478,8 @@ export function ChatPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
+  const loadingEarlierRef = useRef(false)
+  const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const locallyCommittedSessionRef = useRef('')
   const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
@@ -463,9 +494,16 @@ export function ChatPage() {
     return sessionId === locallyCommittedSessionRef.current
       || sessions.some((session) => session.session_id === sessionId)
   }, [sessionId, sessions])
-  const historyQuery = useQuery({
+  const historyQuery = useInfiniteQuery({
     queryKey: ['history', user, sessionId],
-    queryFn: () => getHistory(user, sessionId),
+    queryFn: ({ pageParam }) => getHistory(user, sessionId, {
+      limit: HISTORY_PAGE_SIZE,
+      before: pageParam,
+    }),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage) => lastPage.pagination?.has_more_before
+      ? lastPage.pagination.next_before ?? undefined
+      : undefined,
     enabled: Boolean(user && sessionId && hasCommitted),
     retry: false,
   })
@@ -499,8 +537,14 @@ export function ChatPage() {
     [expandsQuery.data],
   )
 
-  const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
-  const persistedUserMessages = historyQuery.data?.messages.filter((message) => message.role === 'user').length ?? 0
+  const historyData = useMemo(
+    () => mergeHistoryPages(historyQuery.data?.pages),
+    [historyQuery.data?.pages],
+  )
+  const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyData), [historyData])
+  const persistedUserMessages = historyData?.pagination?.total_rounds
+    ?? historyData?.messages.filter((message) => message.role === 'user').length
+    ?? 0
   const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
   const visibleLiveItems = handoffReady ? [] : liveItems
   const items = [...historyItems, ...visibleLiveItems]
@@ -510,6 +554,8 @@ export function ChatPage() {
     conversationKeyRef.current = conversationKey
     lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
+    loadingEarlierRef.current = false
+    prependSnapshotRef.current = null
     setShowFollowOutput(false)
     setEditingSource(null)
     setEditedSources(new Set())
@@ -540,10 +586,19 @@ export function ChatPage() {
 
   useEffect(() => {
     const element = scrollRef.current
-    if (!element || !followOutputRef.current) return
+    if (!element || !followOutputRef.current || prependSnapshotRef.current) return
     if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: running ? 'auto' : 'smooth' })
     else element.scrollTop = element.scrollHeight
   }, [items.length, liveItems, running])
+
+  useLayoutEffect(() => {
+    const snapshot = prependSnapshotRef.current
+    const element = scrollRef.current
+    if (!snapshot || !element) return
+    element.scrollTop = snapshot.scrollTop + (element.scrollHeight - snapshot.scrollHeight)
+    prependSnapshotRef.current = null
+    loadingEarlierRef.current = false
+  }, [historyQuery.data?.pages.length])
 
   const send = async (
     promptOverride?: string,
@@ -719,7 +774,7 @@ export function ChatPage() {
   const editAndResend = async (id: string, content: string) => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
     const targetSession = sessionId || lastAttemptSessionRef.current
-    const persistedRounds = (historyQuery.data?.messages || []).filter((item) => item.role === 'user').length
+    const persistedRounds = persistedUserMessages
     const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
     const expectedRound = persistedRounds + liveRounds
     if (!targetSession || expectedRound < 1) return
@@ -780,7 +835,7 @@ export function ChatPage() {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
     const prompt = lastUserMessage.content
     const targetSession = sessionId || lastAttemptSessionRef.current
-    const persistedRounds = (historyQuery.data?.messages || []).filter((item) => item.role === 'user').length
+    const persistedRounds = persistedUserMessages
     const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
     const expectedRound = persistedRounds + liveRounds
     if (expectedRound < 1) return
@@ -937,9 +992,37 @@ export function ChatPage() {
   const userRoundCount = items.filter((item) => item.kind === 'message' && item.role === 'user').length
   const currentRound = Math.max(1, userRoundCount, Number(overview?.context.rounds || 0))
   const roundLimit = Math.max(1, Number(overview?.context.round_limit || 30))
+  const loadEarlierHistory = async () => {
+    const element = scrollRef.current
+    if (!element || !historyQuery.hasNextPage || historyQuery.isFetchingNextPage || loadingEarlierRef.current) return
+    loadingEarlierRef.current = true
+    followOutputRef.current = false
+    setShowFollowOutput(true)
+    prependSnapshotRef.current = {
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }
+    const previousPageCount = historyQuery.data?.pages.length ?? 0
+    try {
+      const result = await historyQuery.fetchNextPage()
+      if ((result.data?.pages.length ?? 0) === previousPageCount) {
+        prependSnapshotRef.current = null
+        loadingEarlierRef.current = false
+      }
+    } catch {
+      prependSnapshotRef.current = null
+      loadingEarlierRef.current = false
+    }
+  }
   const handleChatScroll = () => {
     const element = scrollRef.current
     if (!element) return
+    if (element.scrollTop <= 120 && historyQuery.hasNextPage) {
+      followOutputRef.current = false
+      setShowFollowOutput(true)
+      void loadEarlierHistory()
+      return
+    }
     const following = isNearScrollBottom(element)
     followOutputRef.current = following
     setShowFollowOutput(!following)
@@ -1028,6 +1111,14 @@ export function ChatPage() {
         {historyQuery.isLoading && <div className="center-state">正在加载历史…</div>}
         {historyQuery.isError && sessionId && liveItems.length === 0 && <div className="center-state error">该会话尚无已提交历史，可以直接发送第一条消息。</div>}
         <div className={`messages ${items.length ? 'show' : ''}`}>
+          {historyQuery.isFetchingNextPage ? <div className="history-page-status">正在加载更早对话…</div> : null}
+          {historyQuery.hasNextPage && !historyQuery.isFetchingNextPage ? (
+            <button className="history-page-button" type="button" onClick={() => { void loadEarlierHistory() }}>加载更早对话</button>
+          ) : null}
+          {!historyQuery.hasNextPage
+            && (historyData?.pagination?.total_rounds ?? 0) > HISTORY_PAGE_SIZE
+            ? <div className="history-page-status complete">已到达对话开头</div>
+            : null}
           {items.length ? <div className="conversation-divider"><span>当前对话</span></div> : null}
           {conversationBlocks.map((block) => {
             if (block.kind === 'user') {
