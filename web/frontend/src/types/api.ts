@@ -43,6 +43,11 @@ export interface SessionSummary {
   window: string
   title: string
   summary?: string
+  summary_status?: 'none' | 'queued' | 'processing' | 'completed' | 'failed' | string
+  summary_target_round?: number
+  summary_completed_round?: number
+  summary_retry_at?: string
+  summary_retry_count?: number
   state?: 'open' | 'closed' | string
   run_state?: 'idle' | 'running' | 'failed' | string
   chain?: 'interactive' | 'message' | 'background' | string
@@ -66,6 +71,11 @@ export interface SessionCloseResponse {
   closed: boolean
   deferred?: boolean
   active_clients?: number
+  summary?: {
+    status: string
+    reason: string
+    rounds: number
+  }
   memory: {
     status: 'queued' | 'skipped'
     reason: string
@@ -196,6 +206,14 @@ export interface HistoryResponse {
       result_truncated: boolean
     }>
   }>
+  pagination?: {
+    limit: number | null
+    total_rounds: number
+    first_round: number
+    last_round: number
+    has_more_before: boolean
+    next_before: number | null
+  }
 }
 
 export interface PlanStepSummary {

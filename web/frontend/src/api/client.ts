@@ -187,9 +187,17 @@ export async function releaseSessionLease(
   )
 }
 
-export async function getHistory(user: string, sessionId: string): Promise<HistoryResponse> {
+export async function getHistory(
+  user: string,
+  sessionId: string,
+  options: { limit?: number; before?: number } = {},
+): Promise<HistoryResponse> {
+  const query = new URLSearchParams()
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.before !== undefined) query.set('before', String(options.before))
+  const suffix = query.size ? `?${query.toString()}` : ''
   return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history`,
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
   )
 }
 
