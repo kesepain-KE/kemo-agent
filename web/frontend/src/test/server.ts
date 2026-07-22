@@ -192,6 +192,7 @@ export const handlers = [
     config: {
       schema_version: 1,
       provider: { type: 'kemo', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false },
+      agent_models: { default: 'agent-default', cheap: 'summary-model', reasoning: 'agent-reasoning' },
       multimodal_models: { vision: 'vision-model', image_generation: '', image_edit: '', audio_transcription: '', speech_generation: '', speech_to_speech: '', video_generation: '' },
       task_plan: { auto_accept: false },
       knowledge: { use_shared: true, use_global: true },

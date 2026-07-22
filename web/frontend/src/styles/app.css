@@ -561,6 +561,31 @@ button[aria-busy="true"] { cursor: progress; }
   max-width: var(--conversation-width);
 }
 .messages.show { gap: 0; }
+.history-page-status,
+.history-page-button {
+  justify-self: center;
+  min-height: 30px;
+  margin: 2px 0 9px;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  color: var(--muted);
+  font-size: .6875rem;
+}
+.history-page-status {
+  display: inline-flex;
+  align-items: center;
+}
+.history-page-status.complete { color: var(--muted-2); }
+.history-page-button {
+  border: 1px solid var(--line);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-soft);
+}
+.history-page-button:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  color: var(--text-2);
+}
 .conversation-divider {
   width: 100%;
   margin: 1px 0 9px;

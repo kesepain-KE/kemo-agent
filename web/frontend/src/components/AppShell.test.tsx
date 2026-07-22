@@ -72,6 +72,44 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('查询 kemo-agent 当前拓展情况')
   })
 
+  it('对话首屏只请求最新20轮并可向上加载更早轮次', async () => {
+    const requestedBefore: Array<string | null> = []
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', ({ request }) => {
+      const url = new URL(request.url)
+      requestedBefore.push(url.searchParams.get('before'))
+      expect(url.searchParams.get('limit')).toBe('20')
+      if (url.searchParams.get('before') === '21') {
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1',
+          messages: [
+            { role: 'user', content: '第1轮问题' },
+            { role: 'assistant', content: '第1轮回复' },
+          ],
+          round_metrics: [], round_traces: [],
+          pagination: { limit: 20, total_rounds: 21, first_round: 1, last_round: 20, has_more_before: false, next_before: null },
+        })
+      }
+      return HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [
+          { role: 'user', content: '第21轮问题' },
+          { role: 'assistant', content: '第21轮回复' },
+        ],
+        round_metrics: [], round_traces: [],
+        pagination: { limit: 20, total_rounds: 21, first_round: 21, last_round: 21, has_more_before: true, next_before: 21 },
+      })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+
+    expect(await screen.findByText('第21轮问题')).toBeInTheDocument()
+    expect(screen.queryByText('第1轮问题')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '加载更早对话' }))
+    expect(await screen.findByText('第1轮问题')).toBeInTheDocument()
+    expect(requestedBefore).toContain(null)
+    expect(requestedBefore).toContain('21')
+    expect(screen.getByText('已到达对话开头')).toBeInTheDocument()
+  })
+
   it('对话运行期间同时锁定配置页与侧栏的用户切换', async () => {
     let releaseChat!: () => void
     let markChatStarted!: () => void

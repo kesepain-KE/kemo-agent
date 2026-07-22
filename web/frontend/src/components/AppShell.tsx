@@ -348,6 +348,26 @@ export function AppShell() {
   }, [commandOpen])
 
   useEffect(() => {
+    if (!historyDrawerOpen) return
+    const sessions = sessionsQuery.data?.sessions ?? []
+    const hasPendingSummary = sessions.some(
+      (session) => session.summary_status === 'queued' || session.summary_status === 'processing',
+    )
+    let delay = hasPendingSummary ? 2_000 : 0
+    if (!delay) {
+      const failed = sessions.filter((session) => session.summary_status === 'failed')
+      if (!failed.length) return
+      const retryTimes = failed
+        .map((session) => Date.parse(session.summary_retry_at || ''))
+        .filter((value) => Number.isFinite(value))
+      const nextRetryAt = retryTimes.length ? Math.min(...retryTimes) : Date.now() + 30_000
+      delay = Math.min(30_000, Math.max(2_000, nextRetryAt - Date.now() + 1_500))
+    }
+    const timer = window.setTimeout(() => { void sessionsQuery.refetch() }, delay)
+    return () => window.clearTimeout(timer)
+  }, [historyDrawerOpen, sessionsQuery.data?.sessions])
+
+  useEffect(() => {
     const refreshAvatar = (event: Event) => {
       const updatedUser = (event as CustomEvent<{ user?: string }>).detail?.user
       if (!updatedUser || updatedUser === user) setAvatarRevision(Date.now())
