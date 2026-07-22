@@ -117,6 +117,24 @@ def resolve_stream_handler() -> Callable[[dict[str, str]], Any] | None:
     return handler if callable(handler) else None
 
 
+def resolve_interactive_context(user: str, root: Path) -> dict[str, str]:
+    try:
+        module = importlib.import_module("run.cli")
+    except ModuleNotFoundError as exc:
+        raise CLIError("运行核心尚未提供共享会话解析器") from exc
+    resolver = getattr(module, "resolve_interactive_context", None)
+    if not callable(resolver):
+        raise CLIError("运行核心尚未提供共享会话解析器")
+    value = resolver(user, root=root)
+    if not isinstance(value, dict):
+        raise CLIError("运行核心返回了无效的共享会话")
+    source = str(value.get("source") or "").strip()
+    session_id = str(value.get("session_id") or "").strip()
+    if not source or not session_id:
+        raise CLIError("运行核心返回了空的共享会话")
+    return {"source": source, "session_id": session_id}
+
+
 
 
 def resolve_handler() -> Callable[[dict[str, str]], Any]:
@@ -786,6 +804,19 @@ def main(
             raise CLIError("--source 和 --session 不能为空。")
 
         user = discover_user(args.user, root, interactive=(prompt is None and not args.stdin))
+        source = args.source.strip()
+        session_id = args.session.strip()
+        if (
+            handler is None
+            and source == DEFAULT_SOURCE
+            and session_id == DEFAULT_SESSION
+        ):
+            context = resolve_interactive_context(
+                user,
+                (root or _project_root()).resolve(),
+            )
+            source = context["source"]
+            session_id = context["session_id"]
         active_handler = handler or resolve_handler()
         active_stream_handler = None if args.no_stream or handler is not None else resolve_stream_handler()
 
@@ -793,8 +824,8 @@ def main(
             run_interactive(
                 active_handler,
                 user,
-                args.source.strip(),
-                args.session.strip(),
+                source,
+                session_id,
                 args.output,
                 input_stream,
                 output_stream,
@@ -808,8 +839,8 @@ def main(
                 active_handler,
                 user,
                 prompt,
-                args.source.strip(),
-                args.session.strip(),
+                source,
+                session_id,
                 args.output,
                 output_stream,
                 stderr=error_stream,

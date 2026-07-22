@@ -5,12 +5,62 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from run.history import commit_window, empty_window, load_window
+from run.history_index import find_record
 from run.maintenance import MaintenanceScheduler
 from run.memory import MemoryStore, normalize_memory_filename
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):
+    def test_pending_committed_round_is_recovered_once(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"recovery_max_rounds_per_scan": 2}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}),
+            "utf-8",
+        )
+        archive = root / "users" / "alice" / "history" / "conv_pending"
+        window = empty_window("alice", "web", "conv_pending")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "请记住设备名"},
+            {"role": "assistant", "content": "设备名是 J1900"},
+        ]
+        window["think"]["rounds"] = [{"round": 1, "content": "提取设备名"}]
+        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
+        window["data"].update(
+            {
+                "rounds": 1,
+                "memory_processed_round": 0,
+                "memory_status": "pending",
+            }
+        )
+        commit_window(archive, window)
+        observed: dict[str, object] = {}
+
+        def extract(**kwargs):
+            observed.update(kwargs)
+            return {"status": "completed", "candidate_count": 1, "error": None}
+
+        with patch("run.maintenance._extract_round_memory", side_effect=extract):
+            result = MaintenanceScheduler(root).scan_once()
+
+        self.assertEqual(result["alice"]["memory_recovery"]["claimed"], 1)
+        self.assertEqual(observed["round_number"], 1)
+        self.assertEqual(observed["prompt"], "请记住设备名")
+        self.assertEqual(load_window(archive)["data"]["memory_processed_round"], 1)
+        record = find_record(root, "alice", "web", "conv_pending")
+        self.assertEqual(record["memory_processed_round"], 1)
+        self.assertEqual(record["memory_status"], "completed")
+
     def test_force_scan_promotes_expired_half_year_memory_to_permanent(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

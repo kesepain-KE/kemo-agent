@@ -37,7 +37,13 @@ from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ChatRequest, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
 from run.config import load_config, project_root, provider_runtime_config
-from run.context import ContextPolicy, estimate_messages_tokens, estimate_tools_tokens, select_context
+from run.context import (
+    ContextPolicy,
+    build_context_snapshot,
+    estimate_messages_tokens,
+    estimate_tools_tokens,
+    select_context,
+)
 from run.context_summary import build_summary_message, get_or_create_summary
 from run.history import (
     _trim_to_max_rounds,
@@ -47,6 +53,8 @@ from run.history import (
     prepare_window,
     runtime_window_path,
 )
+from run.history_index import set_active as set_active_history_session
+from run.history_index import update_memory_state, update_run_state
 from run.memory import MemoryStore
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
@@ -253,8 +261,22 @@ def _merge_usage(total: dict[str, Any], usage: Usage) -> None:
     provider_raw = usage.extra.get("provider_raw")
     if isinstance(provider_raw, dict) and provider_raw:
         total.setdefault("provider_raw", []).append(copy.deepcopy(provider_raw))
+    provider_request_count = usage.extra.get("provider_request_count")
+    if provider_request_count is not None:
+        total["provider_request_count"] = int(
+            total.get("provider_request_count", 0)
+        ) + max(0, int(provider_request_count))
     total["input_tokens"] = total["prompt_tokens"]
     total["output_tokens"] = total["completion_tokens"]
+
+
+def _record_provider_request(total: dict[str, Any], usage: Usage) -> None:
+    declared = usage.extra.get("provider_request_count")
+    _merge_usage(total, usage)
+    if declared is None or max(0, int(declared)) == 0:
+        total["provider_request_count"] = int(
+            total.get("provider_request_count", 0)
+        ) + 1
 
 
 def _usage_total() -> dict[str, Any]:
@@ -264,6 +286,7 @@ def _usage_total() -> dict[str, Any]:
         "total_tokens": 0,
         "input_tokens": 0,
         "output_tokens": 0,
+        "provider_request_count": 0,
         "estimated": False,
         "measurement": {"mode": "unknown", "exact": False},
         "stages": [],
@@ -883,6 +906,8 @@ def _iter_request_events_impl(
         return
 
     with _session_lock(base, user, source, session_id):
+        history_run_registered = False
+        history_run_error: dict[str, Any] | None = None
         try:
             config = load_config(user, base)
             context_policy = ContextPolicy.from_config(config)
@@ -896,6 +921,24 @@ def _iter_request_events_impl(
                 provider_factory=provider_factory,
             )
             window_path, archive_window, _ = prepare_window(base, user, source, session_id)
+            try:
+                history_run_registered = (
+                    update_run_state(
+                        base,
+                        user,
+                        source,
+                        session_id,
+                        run_state="running",
+                        run_id=run_id or None,
+                        directory=window_path,
+                    )
+                    is not None
+                )
+            except Exception as exc:
+                history_run_error = {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
             runtime_path, window = load_runtime_window(
                 window_path,
                 archive_window,
@@ -984,7 +1027,7 @@ def _iter_request_events_impl(
                     cancel_event=cancel_event,
                     chunk_token_budget=max(256, context_policy.input_budget // 2),
                     max_tokens=min(4096, max(256, context_policy.output_reserve)),
-                    response_hook=lambda raw: _merge_usage(
+                    response_hook=lambda raw: _record_provider_request(
                         summary_usage, _usage_from_dict(raw)
                     ),
                     event_callback=subagent_events.append,
@@ -1196,8 +1239,12 @@ def _iter_request_events_impl(
                             chunk_token_budget=max(256, retry_policy.input_budget // 2),
                             max_tokens=min(4096, max(256, retry_policy.output_reserve)),
                             response_hook=lambda raw: (
-                                _merge_usage(summary_usage, _usage_from_dict(raw)),
-                                _merge_usage(usage_total, _usage_from_dict(raw)),
+                                _record_provider_request(
+                                    summary_usage, _usage_from_dict(raw)
+                                ),
+                                _record_provider_request(
+                                    usage_total, _usage_from_dict(raw)
+                                ),
                             ),
                             event_callback=retry_events.append,
                         )
@@ -1232,7 +1279,7 @@ def _iter_request_events_impl(
                     iteration_usage = _usage_from_dict(iteration_done.usage)
                 all_text.extend(iteration_text)
                 all_reasoning.extend(iteration_reasoning)
-                _merge_usage(usage_total, iteration_usage)
+                _record_provider_request(usage_total, iteration_usage)
                 final_metadata = dict(iteration_done.metadata)
                 provider_response = final_metadata.get("provider_response")
                 if isinstance(provider_response, dict):
@@ -1465,20 +1512,84 @@ def _iter_request_events_impl(
                     "error": str(exc),
                     "exception_type": type(exc).__name__,
                 }
-            commit_window(window_path, archive_window)
-            commit_window(
-                runtime_path,
-                _trim_to_max_rounds(window, context_policy.max_rounds),
+            runtime_window = _trim_to_max_rounds(window, context_policy.max_rounds)
+            next_summary_message = build_summary_message(summary_cache)
+            next_context_selection = select_context(
+                window=runtime_window,
+                policy=context_policy,
+                system_message=system_message,
+                summary_message=next_summary_message,
+                current_user_message=None,
+                tools=tool_schemas,
             )
-
+            runtime_window["data"]["context"] = {
+                **next_context_selection.stats(),
+                "summary": summary_diagnostics,
+                "summary_usage": summary_usage,
+                "round_offset": max(
+                    0,
+                    archive_round_number
+                    - int(runtime_window["data"].get("rounds", 0)),
+                ),
+                "workspace_rounds": int(runtime_window["data"].get("rounds", 0)),
+                "summary_cache": (
+                    "context_summary.json" if summary_cache is not None else None
+                ),
+            }
+            runtime_window["data"]["context_snapshot"] = build_context_snapshot(
+                next_context_selection,
+                system_prompt=prompt_bundle.text,
+                summary_message=next_summary_message,
+                capacity_tokens=context_policy.token_limit,
+            )
             memory_config = config.get("memory") or {}
+            auto_extract_on_commit = bool(
+                memory_config.get("auto_extract_on_commit", False)
+            )
+            archive_data = archive_window.setdefault("data", {})
+            if archive_data.get("memory_processed_round") is None:
+                archive_data["memory_processed_round"] = max(
+                    0, archive_round_number - 1
+                )
+            memory_processed_round = max(
+                0, int(archive_data.get("memory_processed_round") or 0)
+            )
+            extract_current_round = bool(
+                auto_extract_on_commit
+                and memory_processed_round == archive_round_number - 1
+            )
+            archive_data["memory_status"] = (
+                "processing" if extract_current_round else "pending"
+            )
+            archive_data.pop("memory_error", None)
+            commit_window(window_path, archive_window)
+            commit_window(runtime_path, runtime_window)
+            history_index_error: dict[str, Any] | None = history_run_error
+            try:
+                update_memory_state(
+                    base,
+                    user,
+                    source,
+                    session_id,
+                    status=("processing" if extract_current_round else "pending"),
+                )
+            except Exception as exc:
+                history_index_error = {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+
             memory_extraction: dict[str, Any] = {
                 "status": "skipped",
                 "candidate_count": 0,
-                "reason": "auto_extract_on_commit_disabled",
+                "reason": (
+                    "memory_backlog_pending"
+                    if auto_extract_on_commit and not extract_current_round
+                    else "auto_extract_on_commit_disabled"
+                ),
                 "error": None,
             }
-            if bool(memory_config.get("auto_extract_on_commit", False)):
+            if extract_current_round:
                 try:
                     memory_extraction = _extract_round_memory(
                         root=base,
@@ -1500,6 +1611,83 @@ def _iter_request_events_impl(
                             "message": str(exc),
                             "exception_type": type(exc).__name__,
                         },
+                    }
+            extraction_status = str(memory_extraction.get("status") or "pending")
+            memory_error = (
+                memory_extraction.get("error")
+                if isinstance(memory_extraction.get("error"), dict)
+                else {"message": "记忆提取失败"}
+            )
+            if extraction_status == "completed":
+                archive_data["memory_processed_round"] = archive_round_number
+                archive_data["memory_status"] = "completed"
+                archive_data.pop("memory_error", None)
+                commit_window(window_path, archive_window)
+            elif extraction_status == "failed":
+                archive_data["memory_status"] = "failed"
+                archive_data["memory_error"] = memory_error
+                commit_window(window_path, archive_window)
+
+            if extraction_status == "completed":
+                try:
+                    update_memory_state(
+                        base,
+                        user,
+                        source,
+                        session_id,
+                        processed_round=archive_round_number,
+                        status="completed",
+                    )
+                except Exception as exc:
+                    history_index_error = history_index_error or {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
+            elif extraction_status == "failed":
+                try:
+                    update_memory_state(
+                        base,
+                        user,
+                        source,
+                        session_id,
+                        status="failed",
+                        error=memory_error,
+                    )
+                except Exception as exc:
+                    history_index_error = history_index_error or {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
+            try:
+                update_run_state(
+                    base,
+                    user,
+                    source,
+                    session_id,
+                    run_state="idle",
+                    run_id=run_id or None,
+                    directory=window_path,
+                )
+                history_run_registered = False
+            except Exception as exc:
+                history_index_error = history_index_error or {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+            active_key = request.get("_history_active_key")
+            if isinstance(active_key, str) and active_key.strip():
+                try:
+                    set_active_history_session(
+                        base,
+                        user,
+                        active_key.strip(),
+                        session_id,
+                        source=source,
+                    )
+                except Exception as exc:
+                    history_index_error = history_index_error or {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
                     }
 
             # 仅对选择并实际发送到主模型的记忆进行加权。取消或失败的
@@ -1540,6 +1728,7 @@ def _iter_request_events_impl(
                         "extraction_mode": "round_commit",
                         "round_extraction": memory_extraction,
                     },
+                    "history_index_error": history_index_error,
                     "knowledge": {
                         "documents": prompt_bundle.diagnostics["knowledge_documents"],
                         "injected_chars": prompt_bundle.diagnostics["sections"]
@@ -1554,6 +1743,19 @@ def _iter_request_events_impl(
             raise
         except BaseException as exc:
             yield error_event(exc, phase="run")
+        finally:
+            if history_run_registered:
+                try:
+                    update_run_state(
+                        base,
+                        user,
+                        source,
+                        session_id,
+                        run_state="idle",
+                        run_id=run_id or None,
+                    )
+                except Exception:
+                    pass
 
 
 def iter_request_events(

@@ -10,6 +10,7 @@ import copy
 import json
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 
@@ -99,6 +100,50 @@ class ContextSelection:
             "fixed_content_over_budget": self.fixed_content_over_budget,
             "recent_content_over_budget": self.recent_content_over_budget,
         }
+
+
+def build_context_snapshot(
+    selection: ContextSelection,
+    *,
+    system_prompt: str,
+    summary_message: dict[str, Any] | None = None,
+    capacity_tokens: int,
+    source: str = "runtime_recalculated",
+) -> dict[str, Any]:
+    """Build a self-consistent display snapshot for one Provider input window."""
+
+    total_tokens = max(0, int(selection.estimated_tokens_after))
+    remaining = total_tokens
+    system_prompt_tokens = min(remaining, estimate_text_tokens(system_prompt))
+    remaining -= system_prompt_tokens
+    tool_schema_tokens = min(remaining, max(0, int(selection.tool_schema_tokens)))
+    remaining -= tool_schema_tokens
+    summary_tokens = min(
+        remaining,
+        estimate_messages_tokens([summary_message]) if summary_message is not None else 0,
+    )
+    remaining -= summary_tokens
+    conversation_tokens = remaining
+    capacity = max(0, int(capacity_tokens))
+    return {
+        "available": True,
+        "source": source,
+        "measurement": "estimated",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "system_prompt_tokens": system_prompt_tokens,
+        "tool_schema_tokens": tool_schema_tokens,
+        "conversation_tokens": conversation_tokens,
+        "summary_tokens": summary_tokens,
+        "other_tokens": 0,
+        "total_tokens": total_tokens,
+        "capacity_tokens": capacity,
+        "percent": round(total_tokens * 100 / capacity, 4) if capacity else 0.0,
+        "foreground_rounds": len(selection.kept_rounds),
+        "workspace_rounds": len(selection.all_rounds),
+        "removed_rounds": len(selection.removed_rounds),
+        "kept_round_numbers": [item.number for item in selection.kept_rounds],
+        "removed_round_numbers": [item.number for item in selection.removed_rounds],
+    }
 
 
 def estimate_text_tokens(text: str) -> int:

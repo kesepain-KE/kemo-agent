@@ -1,9 +1,9 @@
 
 """会话窗口双层存储合约。
 
-归档路径（history/<timestamp>/）保存用户可见的完整对话，不受轮次上限
+归档路径（history/<conversation-id>/）保存用户可见的完整对话，不受轮次上限
 影响，也不允许上下文整理裁剪。临时工作区
-（history/temp/<timestamp>/）是上游 Provider 使用的可变上下文窗口，受
+（history/temp/<conversation-id>/）是上游 Provider 使用的可变上下文窗口，受
 agents.max_rounds 限制，允许保存压缩统计和局部轮号偏移。
 
 两层都包含 text.json、think.json、tool.json、items.json 和 data.json。
@@ -22,6 +22,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run.history_index import (
+    find_record as find_index_record,
+    list_records as list_index_records,
+    new_conversation_id,
+    remove_all_sessions as remove_all_index_sessions,
+    remove_session as remove_index_session,
+    update_title as update_index_title,
+    upsert_window as upsert_index_window,
+)
 from run.users import user_dir
 
 
@@ -39,6 +48,9 @@ _ARCHIVE_DATA_FIELDS = frozenset(
         "rounds",
         "round_metrics",
         "token_usage",
+        "memory_processed_round",
+        "memory_status",
+        "memory_error",
         "complete",
     }
 )
@@ -54,9 +66,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _window_name() -> str:
-    local = datetime.now().astimezone().strftime("%Y-%m-%d-%H-%M-%S-%f")
-    return f"{local}-{uuid.uuid4().hex[:6]}"
+def _window_name(session_id: str = "") -> str:
+    # New archives use opaque machine identifiers.  Legacy timestamp-named
+    # directories remain readable and are indexed without destructive moves.
+    value = str(session_id or "")
+    if value.startswith("conv_") and value.replace("_", "").isalnum():
+        return value
+    return new_conversation_id()
 
 
 def _lock(path: Path) -> threading.RLock:
@@ -108,6 +124,7 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
+                "provider_request_count": 0,
                 "estimated": False,
             },
             "complete": True,
@@ -425,7 +442,30 @@ def commit_window(directory: Path, window: dict[str, Any]) -> None:
         _atomic_write_json(directory / "items.json", items)
         data["complete"] = True
         _atomic_write_json(directory / "data.json", data)
-        window["data"] = data
+        current_data = window.get("data")
+        if isinstance(current_data, dict):
+            current_data.clear()
+            current_data.update(data)
+        else:
+            window["data"] = data
+        if (
+            directory.parent.name == "history"
+            and directory.parent.parent.parent.name == "users"
+        ):
+            try:
+                root = directory.parents[3]
+                upsert_index_window(
+                    root,
+                    str(data.get("user") or directory.parent.parent.name),
+                    str(data.get("source") or ""),
+                    str(data.get("session_id") or ""),
+                    directory,
+                    data,
+                )
+            except Exception:
+                # The complete archive is authoritative.  A missing/corrupt
+                # registry is rebuilt from window manifests on the next read.
+                pass
 
 
 def load_window(directory: Path) -> dict[str, Any]:
@@ -492,6 +532,7 @@ def _usage_from_round_metrics(metrics: Any) -> dict[str, Any]:
         "prompt_tokens",
         "completion_tokens",
         "total_tokens",
+        "provider_request_count",
         "cached_prompt_tokens",
         "cached_input_tokens",
         "cache_miss_tokens",
@@ -570,6 +611,17 @@ def _remove_last_round(window: dict[str, Any], round_number: int) -> dict[str, A
     data["round_metrics"] = kept_metrics
     data["rounds"] = max(0, round_number - 1)
     data["token_usage"] = _usage_from_round_metrics(kept_metrics)
+    if data.get("memory_processed_round") is not None:
+        data["memory_processed_round"] = min(
+            max(0, int(data.get("memory_processed_round") or 0)),
+            data["rounds"],
+        )
+        data["memory_status"] = (
+            "completed"
+            if data["memory_processed_round"] >= data["rounds"]
+            else "pending"
+        )
+        data.pop("memory_error", None)
     data.pop("context", None)
     return result
 
@@ -831,7 +883,7 @@ def prepare_window(root: Path, user: str, source: str, session_id: str) -> tuple
     if existing is not None:
         return existing, load_window(existing), False
     history_dir = user_dir(user, root) / "history"
-    return history_dir / _window_name(), empty_window(user, source, session_id), True
+    return history_dir / _window_name(session_id), empty_window(user, source, session_id), True
 
 
 def get_or_create_window(root: Path, user: str, source: str, session_id: str) -> tuple[Path, dict[str, Any]]:
@@ -843,31 +895,21 @@ def get_or_create_window(root: Path, user: str, source: str, session_id: str) ->
 
 
 def list_sessions(root: Path, user: str, source: str) -> list[dict[str, Any]]:
-    history_dir = user_dir(user, root) / "history"
-    sessions: dict[str, dict[str, Any]] = {}
-    if not history_dir.is_dir():
-        return []
-    for directory in history_dir.iterdir():
-        if not directory.is_dir():
-            continue
-        try:
-            data = _read_json(directory / "data.json")
-        except HistoryError:
-            continue
-        if not isinstance(data, dict) or data.get("complete") is not True or data.get("source") != source:
-            continue
-        session_id = str(data.get("session_id") or "")
-        item = {
-            "session_id": session_id,
-            "window": directory.name,
-            "title": str(data.get("title") or ""),
-            "rounds": int(data.get("rounds", 0)),
-            "updated_at": str(data.get("updated_at") or ""),
+    return [
+        {
+            "session_id": str(record.get("session_id") or ""),
+            "conversation_id": str(record.get("conversation_id") or ""),
+            "window": str(record.get("archive_window") or ""),
+            "title": str(record.get("title") or ""),
+            "summary": str(record.get("summary") or ""),
+            "state": str(record.get("lifecycle") or "open"),
+            "run_state": str(record.get("run_state") or "idle"),
+            "chain": str(record.get("chain") or ""),
+            "rounds": int(record.get("rounds") or 0),
+            "updated_at": str(record.get("updated_at") or ""),
         }
-        previous = sessions.get(session_id)
-        if previous is None or item["updated_at"] > previous["updated_at"]:
-            sessions[session_id] = item
-    return sorted(sessions.values(), key=lambda item: item["updated_at"], reverse=True)
+        for record in list_index_records(root, user, source=source)
+    ]
 
 
 def _source_windows(root: Path, user: str, source: str) -> list[tuple[Path, str]]:
@@ -927,12 +969,27 @@ def rename_session(root: Path, user: str, source: str, session_id: str, title: s
                 if isinstance(runtime_data, dict) and runtime_data.get("complete") is True:
                     runtime_data["title"] = title
                     _atomic_write_json(runtime_data_path, runtime_data)
-    return len(directories)
+        try:
+            refreshed = _read_json(directory / "data.json")
+            if isinstance(refreshed, dict):
+                upsert_index_window(
+                    root,
+                    user,
+                    source,
+                    session_id,
+                    directory,
+                    refreshed,
+                )
+        except Exception:
+            pass
+    indexed = update_index_title(root, user, source, session_id, title)
+    return max(len(directories), 1 if indexed is not None else 0)
 
 
 def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
     """Delete every verified history window belonging to a session."""
 
+    indexed = find_index_record(root, user, source, session_id)
     directories = _matching_windows(root, user, source, session_id)
     for directory in directories:
         with _lock(directory):
@@ -941,7 +998,8 @@ def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
         if runtime_directory.is_dir():
             with _lock(runtime_directory):
                 shutil.rmtree(runtime_directory)
-    return len(directories)
+    remove_index_session(root, user, source, session_id)
+    return max(len(directories), 1 if indexed is not None else 0)
 
 
 def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
@@ -956,12 +1014,13 @@ def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
         if runtime_directory.is_dir():
             with _lock(runtime_directory):
                 shutil.rmtree(runtime_directory)
-    return len(session_ids), len(entries)
+    removed_index_sessions = remove_all_index_sessions(root, user, source)
+    return max(len(session_ids), removed_index_sessions), len(entries)
 
 
 def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
     existing = find_window(root, user, source, session_id)
-    directory = existing or user_dir(user, root) / "history" / _window_name()
+    directory = existing or user_dir(user, root) / "history" / _window_name(session_id)
     window = empty_window(user, source, session_id)
     commit_window(directory, window)
     commit_window(runtime_window_path(directory), copy.deepcopy(window))

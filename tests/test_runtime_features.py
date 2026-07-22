@@ -29,6 +29,7 @@ from run.engine import (
     iter_request_events,
 )
 from run.history import find_window, load_runtime_window, load_window
+from run.history_index import find_record as find_history_record
 from run.tools import apply_runtime_tool_policy, discover_tools, execute_tool
 
 
@@ -361,10 +362,23 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["status"], "completed")
         self.assertGreaterEqual(window["tool"]["rounds"][0]["calls"][0]["elapsed_ms"], 0)
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 6)
+        self.assertEqual(window["data"]["token_usage"]["provider_request_count"], 2)
+        _, runtime_window = load_runtime_window(path, window)
+        snapshot = runtime_window["data"]["context_snapshot"]
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(
+            snapshot["total_tokens"],
+            snapshot["system_prompt_tokens"]
+            + snapshot["tool_schema_tokens"]
+            + snapshot["conversation_tokens"]
+            + snapshot["summary_tokens"]
+            + snapshot["other_tokens"],
+        )
         self.assertEqual(window["data"]["token_usage"]["cached_prompt_tokens"], 2)
         self.assertEqual(window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1)
         done = events[-1]
         self.assertEqual(done.usage["cached_prompt_tokens"], 2)
+        self.assertEqual(done.usage["provider_request_count"], 2)
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
 
@@ -410,6 +424,12 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(observed["prompt"], "我的设备是 J1900。")
         self.assertEqual(result["memory"]["extraction_mode"], "round_commit")
         self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
+        archive = load_window(find_window(root, "alice", "cli", "memory-round"))
+        self.assertEqual(archive["data"]["memory_processed_round"], 1)
+        self.assertEqual(archive["data"]["memory_status"], "completed")
+        indexed = find_history_record(root, "alice", "cli", "memory-round")
+        self.assertEqual(indexed["memory_processed_round"], 1)
+        self.assertEqual(indexed["memory_status"], "completed")
 
     def test_extract_round_memory_persists_candidates_and_contains_failures(self) -> None:
         _, root = self.make_root()

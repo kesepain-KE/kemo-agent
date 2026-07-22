@@ -12,6 +12,8 @@ from unittest.mock import patch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
+from run.history import find_window, load_window
+from run.history_index import find_record as find_history_record
 from run.memory import MemoryStore
 
 
@@ -89,6 +91,9 @@ class MemoryEngineTests(unittest.TestCase):
         self.assertIsNone(result["memory"]["extraction_error"])
         self.assertEqual(result["memory"]["extraction_mode"], "round_commit")
         self.assertEqual(result["memory"]["round_extraction"]["status"], "skipped")
+        archive = load_window(find_window(root, "alice", "cli", "s"))
+        self.assertEqual(archive["data"]["memory_processed_round"], 0)
+        self.assertEqual(archive["data"]["memory_status"], "pending")
         self.assertEqual(
             MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
             [],
@@ -114,9 +119,26 @@ class MemoryEngineTests(unittest.TestCase):
             result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
         self.assertTrue(result["committed"])
         history = root / "users" / "alice" / "history"
-        windows = [item for item in history.iterdir() if item.name != "temp"]
+        windows = [
+            item for item in history.iterdir() if item.is_dir() and item.name != "temp"
+        ]
         self.assertEqual(len(windows), 1)
         self.assertTrue((history / "temp" / windows[0].name / "data.json").is_file())
+
+    def test_index_memory_error_does_not_fail_commit_or_leave_run_running(self) -> None:
+        root = self.root()
+        request = self.request()
+        request["session_id"] = "index-error"
+        with (
+            patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False),
+            patch("run.engine.update_memory_state", side_effect=RuntimeError("index failed")),
+        ):
+            result = handle_request(request, root=root, provider_factory=lambda _: Provider())
+
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["history_index_error"]["message"], "index failed")
+        indexed = find_history_record(root, "alice", "cli", "index-error")
+        self.assertEqual(indexed["run_state"], "idle")
 
 
 if __name__ == "__main__":

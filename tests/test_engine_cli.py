@@ -251,6 +251,33 @@ class EngineAndCLITests(unittest.TestCase):
             window = load_window(find_window(root, "alice", "cli", "chat"))
             self.assertEqual(window["data"]["rounds"], 2)
 
+    def test_default_cli_resolves_the_shared_web_interactive_session(self) -> None:
+        _, root = self.make_root()
+        received: list[dict[str, str]] = []
+
+        def handler(request: dict[str, str]) -> str:
+            received.append(request)
+            return "ok"
+
+        with (
+            patch("cli.resolve_handler", return_value=handler),
+            patch("cli.resolve_stream_handler", return_value=None),
+        ):
+            code = cli.main(
+                ["--user", "alice", "--no-stream", "hello"],
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                root=root,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(received[0]["source"], "web")
+        self.assertTrue(received[0]["session_id"].startswith("conv_"))
+        self.assertEqual(
+            received[0]["session_id"],
+            cli.resolve_interactive_context("alice", root)["session_id"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
