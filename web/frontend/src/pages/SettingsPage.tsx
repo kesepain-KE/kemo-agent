@@ -1,22 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, LockKeyhole, RefreshCw, Save } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, LockKeyhole, Power, RefreshCw, Save } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
+  ApiError,
   getGlobalConfig,
   getSettings,
   getUserConfig,
   patchGlobalConfig,
   patchPreferences,
   patchUserConfig,
+  restartSystem,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
-import { ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
+import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime'
 type ProviderType = 'chat' | 'kemo'
 type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_generation'
+type RestartState = 'idle' | 'confirming' | 'restarting' | 'waiting' | 'failed'
 
 interface UserConfigDraft {
   provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean }
@@ -328,6 +332,13 @@ export function SettingsPage() {
   const [initialApiKey, setInitialApiKey] = useState('')
   const [formError, setFormError] = useState('')
   const [savedLabel, setSavedLabel] = useState('')
+  const [restartState, setRestartState] = useState<RestartState>('idle')
+  const [restartMessage, setRestartMessage] = useState('')
+  const restartTimerRef = useRef<number | null>(null)
+
+  useEffect(() => () => {
+    if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
+  }, [])
 
   useEffect(() => {
     if (!userConfigQuery.data) return
@@ -388,6 +399,7 @@ export function SettingsPage() {
     setFormError('')
     void Promise.all([settingsQuery.refetch(), userConfigQuery.refetch(), globalConfigQuery.refetch()])
   }
+  const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching
 
   const submit = (request: SaveRequest, validationError = '') => {
     if (validationError) {
@@ -473,11 +485,36 @@ export function SettingsPage() {
     }, validation)
   }
 
+  const confirmRestart = async () => {
+    if (chatRunning || restartState === 'restarting' || restartState === 'waiting') return
+    const port = Number.parseInt(window.location.port || '80', 10)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setRestartState('failed')
+      setRestartMessage('无法从当前网页地址识别有效端口。')
+      return
+    }
+    setRestartState('restarting')
+    setRestartMessage(`正在请求智能体使用端口 ${port} 重新启动…`)
+    try {
+      await restartSystem(port)
+      setRestartMessage(`重启请求已提交，正在等待端口 ${port} 恢复…`)
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setRestartState('failed')
+        setRestartMessage(error.message)
+        return
+      }
+      setRestartMessage('服务连接已中断，正在等待新实例接管当前端口…')
+    }
+    setRestartState('waiting')
+    restartTimerRef.current = window.setTimeout(() => window.location.reload(), 4000)
+  }
+
   return <ModuleFrame
     kicker="Configuration Overview"
     title="配置"
     description="通过结构化字段管理界面、Provider、上下文、权限和运行限制；敏感凭据始终脱敏。"
-    actions={<button className="module-btn" onClick={refreshAll}><RefreshCw size={15} />重新读取</button>}
+    actions={<RefreshActionButton pending={settingsRefreshing} label="重新读取" pendingLabel="读取中…" onClick={refreshAll} />}
   >
     {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
     {formError ? <ModuleError message={formError} /> : null}
@@ -624,6 +661,31 @@ export function SettingsPage() {
             <SettingRow title="Cron 自动退避" description="Provider 繁忙时跳过本轮重型 Cron；感知和拓展采集仍执行" source="global" control={<Toggle checked={globalDraft.cron.avoid_congestion} label="Cron 自动退避" onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, avoid_congestion: value } })} />} />
             <SettingRow title="退避触发阈值" description={`Provider 可用槽位低于 ${Math.round(globalDraft.cron.congestion_threshold_ratio * 100)}% 时触发`} source="global" control={<div className="config-range"><input type="range" aria-label="退避触发阈值" min="0.05" max="1" step="0.05" value={globalDraft.cron.congestion_threshold_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, congestion_threshold_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.cron.congestion_threshold_ratio * 100)}%</b></div>} />
           </article>
+          <article className={`settings-restart-card ${restartState === 'waiting' || restartState === 'restarting' ? 'is-restarting' : ''}`}>
+            <span className="settings-restart-icon"><Power size={20} /></span>
+            <span className="settings-restart-copy">
+              <strong>重启智能体</strong>
+              <small>{chatRunning ? '当前对话正在运行，请结束或停止后再重启。' : '关闭当前 Web 与 RuntimeHost，并使用当前网页端口重新启动。'}</small>
+            </span>
+            <button
+              type="button"
+              className="settings-restart-button"
+              disabled={chatRunning || restartState === 'restarting' || restartState === 'waiting'}
+              onClick={() => { setRestartMessage(''); setRestartState('confirming') }}
+            ><Power size={15} />{restartState === 'failed' ? '重新尝试' : '重启智能体'}</button>
+            {restartMessage ? <div className={`settings-restart-status ${restartState === 'failed' ? 'error' : ''}`} role="status">{restartState === 'restarting' || restartState === 'waiting' ? <RefreshCw className="spin" size={14} /> : null}{restartMessage}</div> : null}
+          </article>
+          {restartState === 'confirming' ? createPortal(<div className="settings-restart-confirm-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) setRestartState('idle') }}>
+            <section className="settings-restart-confirm" role="alertdialog" aria-modal="true" aria-label="确认重启智能体">
+              <span className="settings-restart-confirm-icon"><AlertTriangle size={23} /></span>
+              <span className="settings-restart-confirm-copy">
+                <strong>您确定要重启吗？</strong>
+                <small>智能体在执行任务时重启可能会出现故障。请先确认当前任务已经结束，并保存尚未提交的配置。</small>
+                <small>重启期间网页会短暂断开，服务恢复后将自动刷新。</small>
+              </span>
+              <span className="settings-restart-confirm-actions"><button type="button" onClick={() => setRestartState('idle')}>取消</button><button type="button" className="confirm" onClick={() => void confirmRestart()}>确认重启</button></span>
+            </section>
+          </div>, document.body) : null}
         </> : null}
 
         {(userConfigQuery.isLoading || globalConfigQuery.isLoading) && tab !== 'appearance' && tab !== 'users' ? <div className="settings-loading">正在读取结构化配置…</div> : null}

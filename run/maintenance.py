@@ -21,7 +21,11 @@ from run.history_index import (
     finish_memory_claim,
     history_directory,
 )
-from run.memory import MemoryStore, contains_sensitive_credential
+from run.memory import (
+    MemoryStore,
+    contains_sensitive_credential,
+    memory_extraction_mode,
+)
 from run.memory_pipeline import memory_round_payload
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
@@ -206,6 +210,19 @@ class MaintenanceScheduler:
 
     def _recover_pending_memory(self, user: str) -> dict[str, Any]:
         config = load_config(user, self.root)
+        extraction_mode = memory_extraction_mode(config)
+        if extraction_mode == "disabled":
+            return {
+                "mode": extraction_mode,
+                "claimed": 0,
+                "processed": [],
+                "failed": [],
+            }
+        claimable_statuses = {"failed", "processing", "queued"}
+        remaining_status = "deferred"
+        if extraction_mode in {"background", "on_commit"}:
+            claimable_statuses.add("pending")
+            remaining_status = "pending"
         raw_limit = (config.get("memory") or {}).get(
             "recovery_max_rounds_per_scan", MEMORY_RECOVERY_ROUNDS_PER_SCAN
         )
@@ -221,7 +238,11 @@ class MaintenanceScheduler:
         for _ in range(limit):
             if self._stop_event.is_set():
                 break
-            claim = claim_pending_memory(self.root, user)
+            claim = claim_pending_memory(
+                self.root,
+                user,
+                statuses=claimable_statuses,
+            )
             if claim is None:
                 break
             claimed += 1
@@ -230,6 +251,12 @@ class MaintenanceScheduler:
             archive_name = str(claim.get("archive_window") or "")
             claim_id = str(claim.get("memory_claim_id") or "")
             round_number = int(claim.get("memory_claim_round") or 0)
+            claim_remaining_status = (
+                "queued"
+                if extraction_mode == "compression_only"
+                and str(claim.get("lifecycle") or "") == "closed"
+                else remaining_status
+            )
             archive_path = history_directory(self.root, user) / archive_name
             identity = {
                 "source": source,
@@ -292,7 +319,9 @@ class MaintenanceScheduler:
                             raise MaintenanceError(message)
                         data["memory_processed_round"] = round_number
                         data["memory_status"] = (
-                            "completed" if round_number >= archive_rounds else "pending"
+                            "completed"
+                            if round_number >= archive_rounds
+                            else claim_remaining_status
                         )
                         data.pop("memory_error", None)
                         commit_window(archive_path, window)
@@ -304,6 +333,7 @@ class MaintenanceScheduler:
                     session_id,
                     claim_id=claim_id,
                     processed_round=round_number,
+                    remaining_status=claim_remaining_status,
                 )
                 processed.append(
                     {
@@ -350,6 +380,7 @@ class MaintenanceScheduler:
                 failed.append({**identity, "error": error})
                 self._report_error(f"maintenance:{user}:memory", exc)
         return {
+            "mode": extraction_mode,
             "claimed": claimed,
             "processed": processed,
             "failed": failed,

@@ -22,6 +22,14 @@
   font-size: .75rem;
 }
 
+.headerSearch input:focus,
+.headerSearch input:focus-visible {
+  border: 0 !important;
+  border-color: transparent !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
 .headerSearch button {
   width: 24px;
   height: 24px;
@@ -164,7 +172,16 @@
   gap: 12px;
 }
 
-.browserPanel { min-width: 0; overflow: hidden; }
+.browserPanel {
+  min-width: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+  border-radius: var(--radius-panel);
+  background: var(--surface-elevated);
+}
 .browserToolbar {
   min-height: 54px;
   padding: 9px 12px;
@@ -172,7 +189,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--surface-2) 36%, var(--surface-elevated));
 }
 
 .breadcrumbs {
@@ -254,8 +273,9 @@
 .fileHeader {
   min-height: 37px;
   padding: 0 11px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control-lg);
+  background: color-mix(in srgb, var(--surface-2) 48%, var(--surface-elevated));
   color: var(--muted);
   font-size: .625rem;
   font-weight: 650;
@@ -270,16 +290,18 @@
   cursor: pointer;
 }
 
-.fileList { min-height: 112px; }
+.fileList { min-height: 112px; display: grid; align-content: start; gap: 6px; }
 .fileRow {
   min-height: 62px;
   padding: 0 11px;
-  border-bottom: 1px solid var(--line);
-  transition: background .12s ease;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control-lg);
+  background: var(--surface);
+  transition: border-color .12s ease, background .12s ease, box-shadow .12s ease, transform .12s ease;
   cursor: default;
 }
-.fileRow:hover { background: var(--surface-hover); }
-.fileRow.selectedRow { background: color-mix(in srgb, var(--brand-soft) 62%, var(--surface)); }
+.fileRow:hover { border-color: var(--line-strong); background: var(--surface-hover); box-shadow: var(--shadow-soft); transform: translateY(-1px); }
+.fileRow.selectedRow { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 54%, var(--surface)); box-shadow: 0 5px 14px color-mix(in srgb, var(--brand) 8%, transparent); }
 
 .checkboxSpacer { width: 14px; height: 14px; }
 .fileIdentity {
@@ -354,9 +376,25 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border-top: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control-lg);
+  background: color-mix(in srgb, var(--surface-2) 28%, var(--surface-elevated));
   color: var(--muted);
   font-size: .625rem;
+}
+
+.browserPanel :global(.empty-panel) {
+  min-height: 210px;
+  padding: 30px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card-lg);
+  background: color-mix(in srgb, var(--surface-2) 34%, var(--surface-elevated));
+}
+
+.browserPanel :global(.empty-panel-icon) {
+  border-radius: var(--radius-control-lg);
+  background: var(--brand-soft);
+  opacity: .78;
 }
 
 .detailPanel {
@@ -389,17 +427,6 @@
 .detailActions { margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); text-align: left; }
 .detailActions > strong { display: block; margin-bottom: 8px; color: var(--text); font-size: .6875rem; }
 .detailActions > div { display: flex; flex-wrap: wrap; gap: 6px; }
-
-.ruleHint {
-  margin-top: 14px;
-  padding: 10px;
-  border: 1px solid var(--brand-line);
-  border-radius: 10px;
-  background: var(--brand-soft);
-  text-align: left;
-}
-.ruleHint strong { color: var(--brand); font-size: .625rem; }
-.ruleHint p { margin: 5px 0 0; color: var(--muted); font-size: .5625rem; line-height: 1.55; }
 
 .detailEmpty {
   min-height: 310px;

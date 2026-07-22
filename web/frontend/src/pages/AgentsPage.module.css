@@ -41,7 +41,7 @@
 .search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: .75rem; }
 .search input::placeholder { color: var(--muted-2); }
 
-.agentList { min-height: 0; padding-right: .125rem; display: flex; flex: 1; flex-direction: column; gap: .5625rem; overflow-y: auto; scrollbar-width: thin; }
+.agentList { min-height: 0; padding: .125rem .125rem 0 0; display: flex; flex: 1; flex-direction: column; gap: .5625rem; overflow-y: auto; scrollbar-width: thin; }
 .agentItem { position: relative; width: 100%; min-height: 6rem; border: 1px solid var(--line); border-radius: .875rem; background: var(--surface); transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
 .agentItem:hover { border-color: var(--line-strong); background: var(--surface-hover); transform: translateY(-1px); }
 .agentItem.selected { border-color: color-mix(in srgb, var(--agent-accent) 55%, var(--line)); background: linear-gradient(135deg, color-mix(in srgb, var(--agent-accent) 8%, var(--surface-elevated)), var(--surface-elevated)); box-shadow: 0 .4375rem 1.125rem color-mix(in srgb, var(--agent-accent) 8%, transparent); }
@@ -93,7 +93,24 @@
 .detailRow > div { min-width: 0; color: var(--text-2); font-size: .8125rem; line-height: 1.65; }
 .detailRow p { margin: 0; }
 .detailRow code { padding: .1875rem .4375rem; border: 1px solid var(--line); border-radius: .4375rem; color: var(--text-2); background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .75rem; overflow-wrap: anywhere; }
-.rulesText { max-height: 13.75rem; padding: .75rem; overflow: auto; border: 1px solid var(--line); border-radius: .75rem; color: var(--text-2); background: var(--surface-2); font-size: .75rem; line-height: 1.7; white-space: pre-wrap; scrollbar-width: thin; }
+.rulesText { max-height: 13.75rem; padding: .875rem 1rem 1rem; overflow: auto; border: 1px solid var(--line); border-radius: .75rem; color: var(--text-2); background: var(--surface-2); font-size: .75rem; line-height: 1.7; overflow-wrap: anywhere; scrollbar-width: thin; }
+.rulesText > :first-child { margin-top: 0; }
+.rulesText > :last-child { margin-bottom: 0; }
+.rulesText h1, .rulesText h2, .rulesText h3, .rulesText h4 { margin: 1.1em 0 .55em; color: var(--text); line-height: 1.4; }
+.rulesText h1 { padding-bottom: .45rem; border-bottom: 1px solid var(--line); font-size: 1.05rem; }
+.rulesText h2 { font-size: .9375rem; }
+.rulesText h3 { font-size: .84375rem; }
+.rulesText h4 { font-size: .78125rem; }
+.rulesText p { margin: .625em 0; }
+.rulesText ul, .rulesText ol { margin: .625em 0; padding-left: 1.45rem; }
+.rulesText li + li { margin-top: .25em; }
+.rulesText blockquote { margin: .75rem 0; padding: .4rem .7rem; border-left: 3px solid var(--agent-accent); background: var(--agent-accent-soft); color: var(--muted); }
+.rulesText hr { height: 1px; margin: 1rem 0; border: 0; background: var(--line); }
+.rulesText table { width: 100%; margin: .75rem 0; border-collapse: collapse; font-size: .71875rem; }
+.rulesText th, .rulesText td { padding: .45rem .55rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rulesText th { background: var(--surface-3); color: var(--text); font-weight: 700; }
+.rulesText pre { margin: .75rem 0; padding: .75rem; overflow: auto; border: 1px solid var(--line); border-radius: .625rem; background: var(--surface); white-space: pre-wrap; }
+.rulesText pre code { padding: 0; border: 0; background: transparent; font-size: .6875rem; line-height: 1.65; }
 .layerValue { display: flex; align-items: center; flex-wrap: wrap; gap: .5625rem; color: var(--muted); }
 .globalBadge, .userBadge { min-height: 1.5625rem; padding: 0 .625rem; display: inline-flex; align-items: center; border-radius: 999px; font-size: .6875rem; font-weight: 720; }
 .globalBadge { color: var(--agent-accent); background: var(--agent-accent-soft); }
@@ -102,7 +119,7 @@
 .executorList code { min-height: 1.6875rem; padding: 0 .625rem; display: inline-flex; align-items: center; border: 0; border-radius: .5625rem; background: var(--surface-3); font-size: .6875rem; }
 
 .emptyState, .detailEmpty { display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--muted-2); text-align: center; }
-.emptyState { min-height: 16.25rem; }
+.emptyState { width: 100%; min-height: 0; flex: 1 1 auto; }
 .detailEmpty { height: 100%; min-height: 28.125rem; }
 .emptyState strong, .detailEmpty h3 { margin: .8125rem 0 0; color: var(--muted); font-size: .875rem; }
 .emptyState p, .detailEmpty p { margin: .4375rem 0 0; color: var(--muted-2); font-size: .75rem; }

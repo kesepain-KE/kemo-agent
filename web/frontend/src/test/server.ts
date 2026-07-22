@@ -11,6 +11,10 @@ const sourcePolicy = {
 }
 
 export const handlers = [
+  http.post('/api/system/restart', async ({ request }) => {
+    const body = await request.json() as { port: number }
+    return HttpResponse.json({ ok: true, port: body.port, helper_pid: 4321 })
+  }),
   http.get('/api/health', () => HttpResponse.json({ status: 'ok', service: 'kemo-agent-web', version: 1 })),
   http.get('/api/auth/status', () => HttpResponse.json({ enabled: false, authenticated: true, methods: { token: false, password: false }, session_cookie_configured: false })),
   http.post('/api/auth/logout', () => HttpResponse.json({ authenticated: false })),
@@ -251,14 +255,15 @@ export const handlers = [
       last_error: null, health: 'healthy', last_check: '2026-07-20T12:00:00Z', last_message_at: null, latency_ms: 12, messages_received_today: 2, messages_sent_today: 1,
       path: 'message/out/onebot', files_path: 'message/out/onebot/files', log_path: 'message/out/onebot/log', message_buffer: 'message/out/onebot/message.md',
       modules: { input: 'input.py', output: 'output.py', detect: 'detect.py' }, api_imported: true, polling_interval: '1s', health_interval: '30s', file_relay_enabled: true,
-      log_rotation: '每日轮换', temporary_file_count: 1, temporary_file_bytes: 128, today_log_count: 3, logs_truncated: false,
+      log_rotation: '每日轮换', temporary_file_count: 1, temporary_file_bytes: 128, today_log_count: 12, logs_truncated: false,
       logs: [
         { id: 'log-1', direction: 'receive', kind: 'text', timestamp: '2026-07-21 12:49:08', content: '请查看今日任务', file_path: null, success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' },
         { id: 'log-2', direction: 'receive', kind: 'file', timestamp: '2026-07-21 12:48:21', content: 'meeting_notes.docx', file_path: 'message/out/onebot/files/meeting_notes.docx', success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' },
         { id: 'log-3', direction: 'send', kind: 'text', timestamp: '2026-07-21 12:47:58', content: '任务已整理完成', file_path: null, success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' },
+        ...Array.from({ length: 9 }, (_, index) => ({ id: `log-${index + 4}`, direction: 'receive', kind: 'text', timestamp: `2026-07-21 12:${String(46 - index).padStart(2, '0')}:00`, content: `历史日志 ${index + 4}`, file_path: null, success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' })),
       ],
     }],
-    summary: { total_bindings: 1, total_transports: 1, running_transports: 1, stopped_transports: 0, error_transports: 0, connected_transports: 1, temporary_files: 1, today_logs: 3 }, issues: [],
+    summary: { total_bindings: 1, total_transports: 1, running_transports: 1, stopped_transports: 0, error_transports: 0, connected_transports: 1, temporary_files: 1, today_logs: 12 }, issues: [],
   })),
   http.post('/api/users/kesepain/message/modules/:module/check', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, checked: true, state: { health: 'healthy' }, transport: null })),
   http.delete('/api/users/kesepain/message/modules/:module', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, platform: params.module, path: `message/out/${params.module}`, deleted: true })),

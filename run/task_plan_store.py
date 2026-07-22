@@ -25,6 +25,7 @@ STEP_STATUSes = frozenset({
 })
 # 任务计划管理工具名称绝不能显示为执行步骤。
 _BLOCKED_TOOL_PREFIXES = ("task_plan_",)
+_BLOCKED_TOOL_NAMES = frozenset({"task_plan"})
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
@@ -112,11 +113,12 @@ def _validate_step(step: dict[str, Any], index: int, tool_names: set[str] | None
     if tool_name is not None:
         if not isinstance(tool_name, str) or not tool_name.strip():
             raise PlanValidationError(f"步骤 {step_id} 的 tool_name 无效")
-        for prefix in _BLOCKED_TOOL_PREFIXES:
-            if tool_name.startswith(prefix):
-                raise PlanValidationError(
-                    f"步骤 {step_id} 的工具 {tool_name!r} 是管理工具，不能作为执行步骤"
-                )
+        if tool_name in _BLOCKED_TOOL_NAMES or any(
+            tool_name.startswith(prefix) for prefix in _BLOCKED_TOOL_PREFIXES
+        ):
+            raise PlanValidationError(
+                f"步骤 {step_id} 的工具 {tool_name!r} 是管理工具，不能作为执行步骤"
+            )
         if tool_names is not None and tool_name not in tool_names:
             raise PlanValidationError(f"步骤 {step_id} 的工具 {tool_name!r} 不在可用工具列表中")
     tool_arguments = step.get("tool_arguments")

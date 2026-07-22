@@ -18,7 +18,11 @@ def execute(context, input_data):
         isinstance(item, dict) and (item.get("messages") or item.get("tools"))
         for item in rounds
     )
-    if trigger in {"round_limit", "token_limit", "manual", "api_context_length"} and has_memory_payload:
+    if (
+        trigger in {"round_limit", "token_limit", "manual", "api_context_length"}
+        and has_memory_payload
+        and not bool(input_data.get("skip_memory_extraction", False))
+    ):
         memory_result = extract_compressed_round_memory(
             root=context.runner.root,
             user=context.runner.user,

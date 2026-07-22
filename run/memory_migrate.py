@@ -1,4 +1,4 @@
-"""One-time migration from array-based memory storage to file-backed schema v2."""
+"""One-time migration from array storage to the current file-backed schema."""
 
 from __future__ import annotations
 
@@ -105,8 +105,12 @@ def _temporary_meta(item: dict[str, Any], tier: str, now: datetime) -> dict[str,
     expires = parse_time(item.get("review_at")) or entered + timedelta(days=days)
     return {
         "weight": max(0, int(item.get("tier_weight", item.get("weight", 0)))),
+        "created_at": iso(parse_time(item.get("created_at")) or entered),
+        "content_updated_at": iso(updated),
         "updated_at": iso(updated),
+        "last_used_at": iso(updated) if item.get("last_weight_date") else None,
         "last_weight_date": item.get("last_weight_date"),
+        "tier_entered_at": iso(entered),
         "expires_at": iso(expires),
     }
 
@@ -249,7 +253,7 @@ def _users(root: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="迁移 kemo-agent 文件记忆到 schema v2")
+    parser = argparse.ArgumentParser(description="迁移 kemo-agent 文件记忆到当前 schema")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--user", action="append", default=[])
     parser.add_argument("--all", action="store_true")

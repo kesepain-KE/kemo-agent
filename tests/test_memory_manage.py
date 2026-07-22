@@ -14,7 +14,7 @@ from plugins.memory_manage.memory_ops import (
     search_by_title,
 )
 from plugins.memory_manage.tool import run as run_memory_manage
-from run.memory import MemoryStore, utc_now
+from run.memory import MemoryError as RuntimeMemoryError, MemoryStore, utc_now
 from run.tools import discover_tools, validate_arguments
 
 
@@ -204,14 +204,16 @@ class MemoryManageTests(unittest.TestCase):
             "memory_temporary_important.md",
             "# Updated profile",
         )
-        self.assertTrue(
+        with self.assertRaisesRegex(RuntimeMemoryError, "不可删除"):
             delete_fragment(
                 self.root,
                 "alice",
                 self.config,
                 "important",
                 "memory_temporary_important.md",
-            )["deleted"]
+            )
+        self.assertTrue(
+            (self.root / "users" / "alice" / "memory_temporary_important.md").is_file()
         )
 
     def test_user_isolation_and_sensitive_content_rejection(self) -> None:

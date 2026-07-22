@@ -123,7 +123,7 @@
 .deleteConfirm > div { display: flex; gap: .4375rem; }
 .deleteConfirm button { min-height: 1.875rem; padding: 0 .625rem; border: 1px solid var(--line); border-radius: .5625rem; color: var(--text-2); background: var(--surface-elevated); cursor: pointer; font-size: .6875rem; }
 .deleteConfirm button.confirmDelete { border-color: var(--skill-danger); color: #fff; background: var(--skill-danger); }
-.emptyState { min-height: 16rem; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--muted-2); text-align: center; }
+.emptyState { width: 100%; min-height: 0; display: flex; flex: 1 1 auto; align-items: center; justify-content: center; flex-direction: column; color: var(--muted-2); text-align: center; }
 .emptyState strong { margin-top: .75rem; color: var(--muted); font-size: .8125rem; }
 .emptyState p { max-width: 20rem; margin: .375rem 0 0; color: var(--muted-2); font-size: .6875rem; line-height: 1.55; }
 .detailEmpty { height: 100%; min-height: 28rem; }

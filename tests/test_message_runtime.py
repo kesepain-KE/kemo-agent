@@ -30,6 +30,8 @@ from message.transport import (
     TransportRegistrationError,
     TransportRegistry,
 )
+from run.history import commit_window, empty_window, session_messages
+from run.history_index import find_record, get_active, get_or_reserve_active
 from run.runtime_host import RuntimeHost
 from run.cron_store import CronStore
 from run.tools import ToolDefinition, ToolRegistry
@@ -550,6 +552,135 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(all(item[2].startswith("conv_") for item in seen))
         self.assertNotEqual(seen[0][2], seen[1][2])
 
+    def test_new_command_saves_current_session_and_queues_memory_without_model(self) -> None:
+        (self.root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
+            "utf-8",
+        )
+        source = "message:mock"
+        active_key = "message:mock:private:chat-1"
+        active, _ = get_or_reserve_active(
+            self.root,
+            "alice",
+            source,
+            active_key,
+            title="mock · private",
+        )
+        previous_session_id = str(active["session_id"])
+        archive = self.root / "users" / "alice" / "history" / previous_session_id
+        window = empty_window("alice", source, previous_session_id)
+        window["text"]["messages"] = [
+            {"role": "user", "content": "保存这轮"},
+            {"role": "assistant", "content": "好的"},
+        ]
+        window["data"].update(
+            {
+                "rounds": 1,
+                "memory_processed_round": 0,
+                "memory_status": "deferred",
+            }
+        )
+        commit_window(archive, window)
+        model_calls = 0
+
+        def source_events(request, **kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            yield from _done_events(request, **kwargs)
+
+        result = self._router(source_events).route(
+            _envelope("m-new", text="/new")
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertNotEqual(result.session_id, previous_session_id)
+        self.assertEqual(model_calls, 0)
+        self.assertIn("已创建并切换到新对话", result.text)
+        self.assertIn("后台继续提取", result.text)
+        self.assertEqual(
+            find_record(self.root, "alice", source, previous_session_id)["lifecycle"],
+            "closed",
+        )
+        self.assertEqual(
+            find_record(self.root, "alice", source, previous_session_id)["memory_status"],
+            "queued",
+        )
+        self.assertEqual(get_active(self.root, "alice", active_key)["session_id"], result.session_id)
+        self.assertEqual(len(self.transport.sent), 1)
+
+    def test_new_command_accepts_telegram_bot_mention(self) -> None:
+        model_calls = 0
+
+        def source_events(request, **kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            yield from _done_events(request, **kwargs)
+
+        result = self._router(source_events).route(
+            _envelope("m-new-mention", text="/new@kesepain_bot 新标题")
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(model_calls, 0)
+        self.assertIn("已创建并切换到新对话", result.text)
+
+    def test_clear_command_clears_only_current_external_chat_without_model(self) -> None:
+        source = "message:mock"
+        first_key = "message:mock:private:chat-1"
+        second_key = "message:mock:private:chat-2"
+        first, _ = get_or_reserve_active(
+            self.root, "alice", source, first_key, title="first"
+        )
+        second, _ = get_or_reserve_active(
+            self.root, "alice", source, second_key, title="second"
+        )
+        for record, content in ((first, "first message"), (second, "second message")):
+            session_id = str(record["session_id"])
+            archive = self.root / "users" / "alice" / "history" / session_id
+            window = empty_window("alice", source, session_id)
+            window["text"]["messages"] = [{"role": "user", "content": content}]
+            window["data"]["rounds"] = 1
+            commit_window(archive, window)
+        model_calls = 0
+
+        def source_events(request, **kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            yield from _done_events(request, **kwargs)
+
+        result = self._router(source_events).route(
+            _envelope("m-clear", chat_id="chat-1", text="/clear@kesepain_bot")
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.session_id, first["session_id"])
+        self.assertEqual(result.text, "当前对话已清空。")
+        self.assertEqual(model_calls, 0)
+        self.assertEqual(session_messages(self.root, "alice", source, first["session_id"]), [])
+        self.assertEqual(
+            session_messages(self.root, "alice", source, second["session_id"])[0]["content"],
+            "second message",
+        )
+        self.assertEqual(get_active(self.root, "alice", first_key)["session_id"], first["session_id"])
+
+    def test_unknown_slash_command_returns_help_without_model(self) -> None:
+        model_calls = 0
+
+        def source_events(request, **kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            yield from _done_events(request, **kwargs)
+
+        result = self._router(source_events).route(
+            _envelope("m-unknown-command", text="/unknown@kesepain_bot")
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(model_calls, 0)
+        self.assertIn("未知指令：/unknown", result.text)
+        self.assertIn("/new、/clear", result.text)
+        self.assertEqual(len(self.transport.sent), 1)
+
     def test_run_error_isolated(self) -> None:
         def failed(request, **kwargs):
             yield RunEvent(type="error", error={"message": "boom"})
@@ -737,6 +868,7 @@ class HostTests(unittest.TestCase):
             registry=TransportRegistry(),
         )
         self.assertEqual(host.cron.poll_interval, 5)
+        self.assertIs(host.cron._transport_registry, host.router.transports)
         self.assertEqual(host.maintenance.poll_interval, 30)
 
     def test_background_switch_disables_cron_and_maintenance(self) -> None:

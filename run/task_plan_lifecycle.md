@@ -99,7 +99,7 @@ pending → approved → running → completed
 | `running` | 正在执行某一步骤 |
 | `paused` | 已暂停（用户主动或步骤失败） |
 | `completed` | 全部步骤完成 |
-| `failed` | 关键步骤失败且未恢复 |
+| `failed` | 仍有未完成步骤但依赖断裂，已无可运行步骤 |
 | `cancelled` | 已取消 |
 
 ### 步骤状态
@@ -136,7 +136,7 @@ pending → approved → running → completed
 ## 进程重启恢复
 
 - 启动时扫描所有用户计划文件
-- 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态转为 `paused`
+- 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态恢复为 `pending`
 - 不自动重放有副作用的步骤
 - 等待用户决定恢复或取消
 

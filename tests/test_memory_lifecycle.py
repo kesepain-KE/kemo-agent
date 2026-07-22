@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from run.memory import (
     MemoryError,
     MemoryStore,
     contains_sensitive_credential,
+    memory_extraction_mode,
     normalize_memory_filename,
     tier_rules,
 )
@@ -96,11 +98,80 @@ class MemoryLifecycleTests(unittest.TestCase):
             normalize_memory_filename("***")
         self.assertEqual(tier_rules(CONFIG)["seven_days"].next, "one_month")
 
+    def test_extraction_mode_resolves_explicit_and_legacy_configuration(self) -> None:
+        self.assertEqual(memory_extraction_mode({"memory": {}}), "compression_only")
+        self.assertEqual(
+            memory_extraction_mode({"memory": {"auto_extract_on_commit": True}}),
+            "on_commit",
+        )
+        self.assertEqual(
+            memory_extraction_mode({"memory": {"auto_extract_on_commit": False}}),
+            "compression_only",
+        )
+        self.assertEqual(
+            memory_extraction_mode({"memory": {"extraction_mode": "background"}}),
+            "background",
+        )
+        with self.assertRaisesRegex(MemoryError, "extraction_mode"):
+            memory_extraction_mode({"memory": {"extraction_mode": "invalid"}})
+
+    def test_v2_index_is_atomically_upgraded_with_split_timestamps(self) -> None:
+        filename = normalize_memory_filename("旧时间字段")
+        fragment = self.store.fragment_path("seven_days", filename)
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        fragment.write_text("旧正文", "utf-8")
+        os.utime(fragment, (self.start.timestamp(), self.start.timestamp()))
+        used_at = self.start + timedelta(hours=2)
+        self.store.path("seven_days").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "files": {
+                        filename: {
+                            "weight": 1,
+                            "updated_at": used_at.isoformat(),
+                            "last_weight_date": "2026-01-01",
+                            "expires_at": (self.start + timedelta(days=7)).isoformat(),
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+
+        meta = self.store.load_index("seven_days")[filename]
+
+        self.assertEqual(meta["created_at"], self.start.isoformat())
+        self.assertEqual(meta["content_updated_at"], self.start.isoformat())
+        self.assertEqual(meta["last_used_at"], used_at.isoformat())
+        self.assertEqual(
+            json.loads(self.store.path("seven_days").read_text("utf-8"))[
+                "schema_version"
+            ],
+            3,
+        )
+
     def test_new_temporary_index_contains_only_lifecycle_metadata(self) -> None:
         filename = self.add("用户在成都上学", "用户在成都上学。")
         index = self.store.load_index("seven_days")
-        self.assertEqual(set(index[filename]), {"weight", "updated_at", "last_weight_date", "expires_at"})
+        self.assertEqual(
+            set(index[filename]),
+            {
+                "weight",
+                "created_at",
+                "content_updated_at",
+                "updated_at",
+                "last_used_at",
+                "last_weight_date",
+                "tier_entered_at",
+                "expires_at",
+            },
+        )
         self.assertEqual(index[filename]["weight"], 0)
+        self.assertEqual(index[filename]["created_at"], self.start.isoformat())
+        self.assertEqual(index[filename]["content_updated_at"], self.start.isoformat())
+        self.assertIsNone(index[filename]["last_used_at"])
         self.assertEqual(
             index[filename]["expires_at"],
             (self.start + timedelta(days=7)).isoformat(),
@@ -147,8 +218,21 @@ class MemoryLifecycleTests(unittest.TestCase):
         after_reference = self.store.load_index("seven_days")[filename]
         self.assertEqual(after_reference["weight"], 1)
         self.assertEqual(after_reference["expires_at"], before)
+        self.assertEqual(
+            after_reference["content_updated_at"],
+            (self.start + timedelta(hours=1)).isoformat(),
+        )
+        self.assertEqual(
+            after_reference["last_used_at"],
+            (self.start + timedelta(hours=2)).isoformat(),
+        )
         self.assertEqual(self.store.mark_used([filename], now=self.start + timedelta(days=1)), [filename])
-        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 2)
+        after_next_day = self.store.load_index("seven_days")[filename]
+        self.assertEqual(after_next_day["weight"], 2)
+        self.assertEqual(
+            after_next_day["content_updated_at"],
+            (self.start + timedelta(hours=1)).isoformat(),
+        )
 
     def test_unchanged_match_weights_once_per_day(self) -> None:
         filename = self.add("稳定事实", "稳定事实。")

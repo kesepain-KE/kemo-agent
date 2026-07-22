@@ -9,8 +9,8 @@
    - `one_month`：30 天微记忆碎片，有权重和到期时间。
    - `half_year`：180 天微记忆碎片，有权重和到期时间。
    - `permanent`：永久记忆碎片，不会过期，权重为 null。
-   - `important`：单文件临时重要记忆热画像，由 `memory_temporary_important` 子代理维护，权重和到期时间为 null。
-2. **权限范围**：主智能体可以使用全部七个 action；`self_improve` 子代理只能使用 `search_by_title` 和 `search_by_content`，候选写入、遗忘和晋升仍由运行时原子持久化。
+   - `important`：单文件临时重要记忆热画像，由 `memory_temporary_important` 子代理自动维护，权重和到期时间为 null。**此文件不可删除，不可写入空内容。** 主智能体只允许 `get` 和 `search_by_title`/`search_by_content` 读取此层级，不得使用 `add`、`edit` 或 `delete` 操作。
+2. **权限范围**：主智能体可以使用全部七个 action，但 `important` 层级只允许读取（`get`、`search_by_title`、`search_by_content`），禁止写入或删除；`self_improve` 子代理只能使用 `search_by_title` 和 `search_by_content`，候选写入、遗忘和晋升仍由运行时原子持久化。
 3. **搜索、列出与获取**：列出整层摘要使用 `list`；按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；获取单条完整正文使用 `get`。
 4. **禁止空搜索**：两个搜索 action 的 query 都必须是非空字符串。列出全部记忆不能再依赖空 query，应使用 `list`，需要正文时再逐条 `get`。
 5. **敏感凭据检测**：`add` 与 `edit` 会拒绝包含疑似密码、API Key、Token、Cookie 或私钥的内容。

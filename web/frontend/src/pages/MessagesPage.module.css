@@ -95,7 +95,7 @@
 .logFilters button { min-height: 1.75rem; padding: 0 .65rem; border: 0; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: .62rem; font-weight: 650; }
 .logFilters button:hover { color: var(--brand); background: var(--brand-soft); }
 .logFilters button.activeFilter { color: #fff; background: var(--brand); }
-.logList { min-height: 0; max-height: 27rem; flex: 1; padding: .65rem .8rem; display: grid; align-content: start; gap: .38rem; overflow-y: auto; }
+.logList { min-height: 0; flex: 1; padding: .65rem .8rem; display: grid; align-content: start; gap: .38rem; }
 .logRow { min-height: 3rem; padding: .42rem .55rem; display: grid; grid-template-columns: 1.7rem 2.9rem 4.6rem minmax(0, 1fr) auto; align-items: center; gap: .45rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); }
 .logRow.sendLog { background: linear-gradient(90deg, color-mix(in srgb, var(--brand) 4%, var(--surface)), var(--surface)); }
 .logRow.receiveLog { background: linear-gradient(90deg, color-mix(in srgb, var(--green) 4%, var(--surface)), var(--surface)); }
@@ -113,7 +113,15 @@
 .logContent strong { margin-top: .12rem; color: var(--text-2); font-size: .66rem; }
 .logContent code { margin-top: .12rem; color: var(--brand); font-size: .56rem; }
 .logRow em { min-height: 1.3rem; padding: 0 .45rem; display: inline-flex; align-items: center; border-radius: 999px; color: var(--red); background: var(--surface-elevated); font-size: .58rem; font-style: normal; font-weight: 700; }
-.logFooter { min-height: 2.4rem; padding: .45rem 1rem; display: flex; align-items: center; gap: .4rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .62rem; }
+.logFooter { min-height: 2.7rem; padding: .4rem .75rem .4rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: .8rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .62rem; }
+.logSource { min-width: 0; display: flex; align-items: center; gap: .4rem; }
+.logSource > svg { flex: 0 0 auto; }
+.logSource > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logPagination { flex: 0 0 auto; display: flex; align-items: center; gap: .35rem; }
+.logPagination button { width: 1.75rem; height: 1.75rem; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--muted); background: var(--surface); }
+.logPagination button:hover:not(:disabled) { color: var(--brand); border-color: var(--brand-line); background: var(--brand-soft); }
+.logPagination button:disabled { cursor: default; opacity: .38; }
+.logPagination b { min-width: 3.2rem; color: var(--text-2); font-size: .62rem; text-align: center; }
 .logEmpty, .emptyState, .detailEmpty { min-height: 15rem; padding: 2rem; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--muted); text-align: center; }
 .emptyState { min-height: 25rem; }
 .detailEmpty { min-height: 35rem; }
@@ -121,6 +129,9 @@
 .logEmpty p, .emptyState p, .detailEmpty p { margin: .3rem 0 0; max-width: 24rem; color: var(--muted); font-size: .68rem; line-height: 1.55; }
 .spinning { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.refreshButton { transition: border-color .16s ease, background .16s ease, color .16s ease, transform .12s ease, opacity .16s ease; }
+.refreshButton:active:not(:disabled) { transform: scale(.97); }
+.refreshButton:disabled { cursor: wait; opacity: .72; }
 
 @media (max-width: 1250px) {
   .summaryGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

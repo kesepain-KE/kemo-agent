@@ -2,6 +2,8 @@
   position: relative;
   width: 100%;
   min-width: 0;
+  flex: 0 0 auto;
+  margin-top: auto;
 }
 
 .profileCard {

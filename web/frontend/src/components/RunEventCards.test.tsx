@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ReasoningTrace, ToolCallCard, UsageCard } from './RunEventCards'
+import { ReasoningTrace, ToolCallCard, toolArgumentSummary, UsageCard } from './RunEventCards'
 
 describe('RunEventCards', () => {
   it('运行中默认展开、尊重手动折叠，并在运行结束后自动收起', () => {
@@ -27,6 +27,22 @@ describe('RunEventCards', () => {
   it('工具调用即使运行中也默认折叠', () => {
     render(<ToolCallCard item={{ id: 't1', kind: 'tool', callId: 'call-1', name: 'file', status: 'running' }} />)
     expect(screen.getByRole('button', { name: /file/ })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('折叠工具卡隐藏机器调用 ID 并显示脱敏后的横向参数摘要', () => {
+    const { container } = render(<ToolCallCard item={{
+      id: 't1', kind: 'tool', callId: 'call_02_machine_id', name: 'memory_manage', status: 'success',
+      arguments: { action: 'delete', tier: 'seven_days', filename: 'device.md', access_token: 'secret-value' },
+    }} />)
+    const summary = container.querySelector('.tool-call-summary')
+    expect(screen.queryByText('call_02_machine_id')).not.toBeInTheDocument()
+    expect(summary).toHaveTextContent('action: delete · tier: seven_days · filename: device.md · access_token: ••••')
+    expect(summary).toHaveAttribute('title', 'action: delete · tier: seven_days · filename: device.md · access_token: ••••')
+  })
+
+  it('历史工具参数也能生成无需展开即可查看的摘要', () => {
+    expect(toolArgumentSummary('{"command":"Get-ChildItem users/kesepain","timeout":30}', undefined))
+      .toBe('command: Get-ChildItem users/kesepain · timeout: 30')
   })
 
   it('工具运行时从零计时，完成后锁定耗时并显示结果', () => {

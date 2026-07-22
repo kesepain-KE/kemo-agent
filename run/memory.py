@@ -14,11 +14,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
-MEMORY_SCHEMA_VERSION = 2
+MEMORY_SCHEMA_VERSION = 3
+LEGACY_MEMORY_SCHEMA_VERSION = 2
 TIERS = ("seven_days", "one_month", "half_year", "permanent")
 TEMPORARY_TIERS = TIERS[:-1]
+MEMORY_EXTRACTION_MODES = frozenset(
+    {"disabled", "compression_only", "background", "on_commit"}
+)
 FILENAME_MAX_CHARS = 50
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
@@ -42,6 +47,7 @@ _WINDOWS_RESERVED = {
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
 LOGGER = logging.getLogger(__name__)
+BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
@@ -116,7 +122,30 @@ def parse_time(value: Any) -> datetime | None:
 
 
 def local_day(value: datetime | None = None) -> str:
-    return (value or utc_now()).astimezone().date().isoformat()
+    return (value or utc_now()).astimezone(BEIJING).date().isoformat()
+
+
+def memory_extraction_mode(config: dict[str, Any]) -> str:
+    """Resolve the explicit extraction policy, including the legacy boolean."""
+
+    raw_memory = config.get("memory") or {}
+    if not isinstance(raw_memory, dict):
+        raise MemoryConfigError("memory 必须是对象")
+    raw_mode = raw_memory.get("extraction_mode")
+    if raw_mode is None:
+        # The legacy boolean described synchronous timing, but users naturally
+        # interpreted false as disabling per-round extraction.  Preserve true
+        # as on_commit and map false/absent to the safe compression boundary.
+        return (
+            "on_commit"
+            if raw_memory.get("auto_extract_on_commit") is True
+            else "compression_only"
+        )
+    mode = str(raw_mode).strip().casefold()
+    if mode not in MEMORY_EXTRACTION_MODES:
+        allowed = ", ".join(sorted(MEMORY_EXTRACTION_MODES))
+        raise MemoryConfigError(f"memory.extraction_mode 只允许 {allowed}")
+    return mode
 
 
 def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
@@ -251,6 +280,65 @@ class MemoryStore:
     def fragment_path(self, tier: str, filename: str) -> Path:
         return self.tier_dir(tier) / normalize_memory_filename(filename)
 
+    def _normalise_temporary_meta(
+        self,
+        tier: str,
+        filename: str,
+        raw_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        weight = raw_meta.get("weight", 0)
+        if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
+            raise MemoryError(
+                f"记忆权重必须是非负整数：{self.path(tier)}#{filename}"
+            )
+        legacy_updated = parse_time(raw_meta.get("updated_at"))
+        expires_at = parse_time(raw_meta.get("expires_at"))
+        if legacy_updated is None or expires_at is None:
+            raise MemoryError(
+                f"记忆索引时间字段无效：{self.path(tier)}#{filename}"
+            )
+        last_weight_date = raw_meta.get("last_weight_date")
+        if last_weight_date is not None and not isinstance(last_weight_date, str):
+            raise MemoryError(
+                f"last_weight_date 必须是字符串或 null：{self.path(tier)}#{filename}"
+            )
+
+        rule = self.rules[tier]
+        tier_entered_at = parse_time(raw_meta.get("tier_entered_at"))
+        if tier_entered_at is None:
+            tier_entered_at = expires_at - timedelta(days=int(rule.days or 0))
+        fragment = self.fragment_path(tier, filename)
+        try:
+            file_modified_at = datetime.fromtimestamp(
+                fragment.stat().st_mtime,
+                timezone.utc,
+            )
+        except OSError:
+            file_modified_at = legacy_updated
+        content_updated_at = (
+            parse_time(raw_meta.get("content_updated_at")) or file_modified_at
+        )
+        created_at = parse_time(raw_meta.get("created_at")) or min(
+            tier_entered_at,
+            file_modified_at,
+            legacy_updated,
+        )
+        last_used_at = parse_time(raw_meta.get("last_used_at"))
+        if last_used_at is None and last_weight_date is not None:
+            last_used_at = legacy_updated
+        return {
+            "weight": weight,
+            "created_at": iso(created_at),
+            "content_updated_at": iso(content_updated_at),
+            # Retain updated_at as a compatibility alias.  From schema v3 it
+            # means content update time and is never changed merely by use.
+            "updated_at": iso(content_updated_at),
+            "last_used_at": iso(last_used_at) if last_used_at is not None else None,
+            "last_weight_date": last_weight_date,
+            "tier_entered_at": iso(tier_entered_at),
+            "expires_at": iso(expires_at),
+        }
+
     def load_index(self, tier: str) -> dict[str, dict[str, Any]]:
         if tier not in TEMPORARY_TIERS:
             raise MemoryError("永久记忆没有 data.json 索引")
@@ -268,9 +356,13 @@ class MemoryStore:
         except json.JSONDecodeError as exc:
             raise MemoryError(f"记忆索引不是有效 JSON：{path}（{exc}）") from exc
         if isinstance(raw, list):
-            raise MemoryError(f"检测到旧版记忆数组，请先执行 v2 迁移：{path}")
-        if not isinstance(raw, dict) or raw.get("schema_version") != MEMORY_SCHEMA_VERSION:
-            raise MemoryError(f"记忆索引 schema_version 必须是 {MEMORY_SCHEMA_VERSION}：{path}")
+            raise MemoryError(f"检测到旧版记忆数组，请先执行文件记忆迁移：{path}")
+        schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
+        if schema_version not in {LEGACY_MEMORY_SCHEMA_VERSION, MEMORY_SCHEMA_VERSION}:
+            raise MemoryError(
+                f"记忆索引 schema_version 必须是 {LEGACY_MEMORY_SCHEMA_VERSION} 或 "
+                f"{MEMORY_SCHEMA_VERSION}：{path}"
+            )
         files = raw.get("files")
         if not isinstance(files, dict):
             raise MemoryError(f"记忆索引 files 必须是对象：{path}")
@@ -279,28 +371,22 @@ class MemoryStore:
             filename = normalize_memory_filename(raw_filename)
             if filename != raw_filename or not isinstance(raw_meta, dict):
                 raise MemoryError(f"记忆索引条目无效：{path}#{raw_filename}")
-            weight = raw_meta.get("weight", 0)
-            if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
-                raise MemoryError(f"记忆权重必须是非负整数：{path}#{filename}")
-            updated_at = parse_time(raw_meta.get("updated_at"))
-            expires_at = parse_time(raw_meta.get("expires_at"))
-            if updated_at is None or expires_at is None:
-                raise MemoryError(f"记忆索引时间字段无效：{path}#{filename}")
-            last_weight_date = raw_meta.get("last_weight_date")
-            if last_weight_date is not None and not isinstance(last_weight_date, str):
-                raise MemoryError(f"last_weight_date 必须是字符串或 null：{path}#{filename}")
-            result[filename] = {
-                "weight": weight,
-                "updated_at": iso(updated_at),
-                "last_weight_date": last_weight_date,
-                "expires_at": iso(expires_at),
-            }
+            result[filename] = self._normalise_temporary_meta(
+                tier,
+                filename,
+                raw_meta,
+            )
+        if schema_version == LEGACY_MEMORY_SCHEMA_VERSION:
+            self.write_index(tier, result)
         return result
 
     def write_index(self, tier: str, files: dict[str, dict[str, Any]]) -> None:
         if tier not in TEMPORARY_TIERS:
             raise MemoryError("永久记忆不能写入 data.json 索引")
-        ordered = {name: files[name] for name in sorted(files, key=str.casefold)}
+        ordered = {
+            name: self._normalise_temporary_meta(tier, name, files[name])
+            for name in sorted(files, key=str.casefold)
+        }
         _atomic_json(self.path(tier), {"schema_version": MEMORY_SCHEMA_VERSION, "files": ordered})
 
     def _locations(self, filename: str) -> list[MemoryLocation]:
@@ -385,8 +471,12 @@ class MemoryStore:
                 "content": content,
                 "tier": location.tier,
                 "weight": 0,
+                "created_at": updated_at,
+                "content_updated_at": updated_at,
                 "updated_at": updated_at,
+                "last_used_at": None,
                 "last_weight_date": None,
+                "tier_entered_at": updated_at,
                 "expires_at": None,
             }
         current_meta = meta or self.load_index(location.tier).get(location.filename)
@@ -474,18 +564,48 @@ class MemoryStore:
             ),
         )
 
-    def _new_meta(self, tier: str, current: datetime) -> dict[str, Any]:
+    def _new_meta(
+        self,
+        tier: str,
+        current: datetime,
+        *,
+        source_meta: dict[str, Any] | None = None,
+        content_changed: bool = False,
+    ) -> dict[str, Any]:
         rule = self.rules[tier]
         if rule.days is None:
             raise MemoryError(f"永久层不应创建生命周期索引：{tier}")
+        source = source_meta or {}
+        created_at = parse_time(source.get("created_at")) or current
+        content_updated_at = (
+            current
+            if content_changed
+            else parse_time(
+                source.get("content_updated_at") or source.get("updated_at")
+            )
+            or current
+        )
+        last_used_at = parse_time(source.get("last_used_at"))
         return {
             "weight": 0,
-            "updated_at": iso(current),
+            "created_at": iso(created_at),
+            "content_updated_at": iso(content_updated_at),
+            "updated_at": iso(content_updated_at),
+            "last_used_at": (
+                iso(last_used_at) if last_used_at is not None else None
+            ),
             "last_weight_date": None,
+            "tier_entered_at": iso(current),
             "expires_at": iso(current + timedelta(days=rule.days)),
         }
 
-    def _touch_temporary(self, location: MemoryLocation, current: datetime) -> bool:
+    def _touch_temporary(
+        self,
+        location: MemoryLocation,
+        current: datetime,
+        *,
+        content_changed: bool = False,
+    ) -> bool:
         index = self.load_index(location.tier)
         meta = index.get(location.filename)
         if meta is None:
@@ -495,7 +615,10 @@ class MemoryStore:
         if weighted:
             meta["weight"] = int(meta.get("weight", 0)) + 1
             meta["last_weight_date"] = day
-        meta["updated_at"] = iso(current)
+        if content_changed:
+            meta["content_updated_at"] = iso(current)
+            meta["updated_at"] = iso(current)
+        meta["last_used_at"] = iso(current)
         index[location.filename] = meta
         self.write_index(location.tier, index)
         return weighted
@@ -563,6 +686,8 @@ class MemoryStore:
                     target_index[target_name] = self._new_meta(
                         target_tier,
                         current,
+                        source_meta=source_meta,
+                        content_changed=True,
                     )
                     self.write_index(target_tier, target_index)
                 location.path.unlink()
@@ -590,7 +715,11 @@ class MemoryStore:
         try:
             if target_tier != "permanent":
                 target_index = self.load_index(target_tier)
-                target_index[target_name] = self._new_meta(target_tier, current)
+                target_index[target_name] = self._new_meta(
+                    target_tier,
+                    current,
+                    source_meta=source_meta,
+                )
                 self.write_index(target_tier, target_index)
             self.write_index(location.tier, source_index)
         except Exception:
@@ -666,13 +795,22 @@ class MemoryStore:
                 if explicit and location.tier != "permanent":
                     if changed:
                         _atomic_text(location.path, content)
+                        self._touch_temporary(
+                            location,
+                            current,
+                            content_changed=True,
+                        )
                     self._promote_location(location, "permanent", current)
                     updated.append(filename)
                     continue
                 if changed:
                     _atomic_text(location.path, content)
                 if location.tier != "permanent":
-                    self._touch_temporary(location, current)
+                    self._touch_temporary(
+                        location,
+                        current,
+                        content_changed=changed,
+                    )
                 updated.append(filename)
         return {"created": created, "updated": updated, "forgotten": forgotten, "rejected": rejected}
 
@@ -774,7 +912,6 @@ class MemoryStore:
                 index.items(),
                 key=lambda pair: (
                     -int(pair[1]["weight"]),
-                    -(parse_time(pair[1]["updated_at"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
                     pair[0].casefold(),
                 ),
             )

@@ -1,16 +1,16 @@
 # 记忆生命周期
 
-`users/<user>/improve/` 使用文件型 schema v2 保存微量记忆：
+`users/<user>/improve/` 使用文件型 schema v3 保存微量记忆：
 
 ```text
 seven_days → one_month → half_year → permanent
 ```
 
-临时三层的正文是独立 Markdown；同目录 `data.json` 只保存文件名、权重、最近更新时间、当日加权锁和固定到期时间。永久层只有 Markdown，不存在索引。
+临时三层的正文是独立 Markdown；同目录 `data.json` 分别记录创建、内容更新、最近使用、层级进入、当日加权锁和固定到期时间。永久层只有 Markdown，不存在索引。
 
 ## 文件身份
 
-- 文件名是全部层级中的全局唯一身份，基础名称最长 20 个字符。
+- 文件名是全部层级中的全局唯一身份，基础名称最长 50 个字符。
 - 同名 upsert 更新原文件，不创建重复文件。
 - 创建前扫描全部层级；检测到跨层同名属于存储损坏并停止覆盖。
 - 当前文件检索只使用文件名，不依赖关键词、实体、向量或知识图谱。
@@ -22,7 +22,8 @@ seven_days → one_month → half_year → permanent
 - 临时记忆正文实际修改或被 Prompt 实际引用时可加权。
 - 引用只有在 Provider/工具循环和正式历史提交成功后成立；失败或取消不加权。
 - 修改与引用共用 `last_weight_date`，同一记忆在同一用户本地自然日合计最多 `+1`。
-- 每次实际修改或引用都更新 `updated_at`，但不会改变固定的 `expires_at`。
+- 实际修改更新 `content_updated_at`；引用更新 `last_used_at`，不得覆盖内容时间；`updated_at` 仅是内容更新时间的兼容别名。
+- `last_weight_date` 显式按 `Asia/Shanghai` 计算，绝对时间统一保存为 UTC ISO 8601。
 - 进入新档位后 weight 归零，重新计算该档位的固定到期时间。
 - 永久记忆不记录权重，也不参与 `mark_used`。
 
@@ -46,11 +47,13 @@ seven_days → one_month → half_year → permanent
 - 永久层全部注入，按自然文件名稳定排序。
 - `memory_temporary_important.md` 是独立单文件，受字符上限控制，不参与普通权重。
 - 临时三层按 `half_year → one_month → seven_days` 注入。
-- 层内按 weight 降序、updated_at 降序、文件名自然排序。
+- 层内按 weight 降序、文件名自然排序；使用时间或文件系统修改时间不得打乱同权重稳定顺序。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
 
 ## 数据与执行边界
 
+- `memory.extraction_mode` 控制提取边界；默认 `compression_only` 只在保存或上下文压缩时处理延期轮次。
+- 所有保存与压缩入口共用连续 `memory_processed_round` 游标；`context_manage` 只负责摘要，不重复持久化同一轮记忆。
 - 成功提交的对话才能产生记忆候选；失败、取消或未提交轮次不得写入。
 - 用户明确要求长期记住的有效内容直接进入永久层。
 - 密码、API Key、Token、Cookie、私钥、验证码等敏感凭据禁止入库。

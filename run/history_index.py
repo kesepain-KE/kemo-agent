@@ -733,9 +733,11 @@ def claim_pending_memory(
     *,
     worker_id: str | None = None,
     stale_after_seconds: float = MEMORY_CLAIM_STALE_SECONDS,
+    statuses: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """Atomically lease the next unprocessed committed round for one user."""
 
+    claimable_statuses = set(statuses or {"pending", "failed", "processing"})
     with index_lock(root, user):
         path = index_path(root, user)
         index = _normalize_index(_read_json(path))
@@ -769,7 +771,7 @@ def claim_pending_memory(
                 ),
             ):
                 continue
-            if status not in {"pending", "failed", "processing"}:
+            if status not in claimable_statuses:
                 continue
             if record.get("run_state") == "running" and not _run_is_stale(
                 record,
@@ -807,6 +809,7 @@ def finish_memory_claim(
     claim_id: str,
     processed_round: int | None = None,
     error: dict[str, Any] | None = None,
+    remaining_status: str = "pending",
 ) -> dict[str, Any] | None:
     """Finish a memory lease; stale workers cannot overwrite a newer claim."""
 
@@ -833,7 +836,7 @@ def finish_memory_claim(
                 "completed"
                 if int(record.get("memory_processed_round") or 0)
                 >= int(record.get("last_committed_round") or 0)
-                else "pending"
+                else remaining_status
             )
         record["memory_state_updated_at"] = _now()
         index["sessions"][key] = record

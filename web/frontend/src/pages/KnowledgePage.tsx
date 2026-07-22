@@ -155,8 +155,6 @@ export function KnowledgePage() {
 
       <div className="module-toolbar knowledge-layer-toolbar">
         <div className="module-tabs">{(['all', 'user', 'shared', 'global'] as const).map((value) => <button type="button" key={value} className={`module-tab-btn ${scope === value ? 'active' : ''}`} onClick={() => setScope(value)}>{value === 'all' ? '全部' : scopeLabels[value]}</button>)}</div>
-        <div className="toolbar-spacer" />
-        <span className="toolbar-note">当前显示 {documents.length} / {data?.summary.documents || 0}</span>
       </div>
 
       <div className="module-grid knowledge-grid knowledge-grid-editor">
@@ -166,7 +164,7 @@ export function KnowledgePage() {
         </article>
 
         <aside className="knowledge-editor panel">
-          <div className="panel-head"><div className="panel-title"><span className="panel-title-icon"><FileText size={15} /></span><span><strong>编辑查看</strong><span>{readOnly ? '全局层只支持查看' : 'Markdown 编辑与预览'}</span></span></div>{selected && <button type="button" className="knowledge-close-button" aria-label="关闭编辑查看" onClick={() => setSelected(null)}><X size={16} /></button>}</div>
+          <div className="panel-head"><div className="panel-title"><span className="panel-title-icon knowledge-collection-icon"><FileText size={17} /></span><span><strong>编辑查看</strong><span>{readOnly ? '全局层只支持查看' : 'Markdown 编辑与预览'}</span></span></div>{selected && <button type="button" className="knowledge-close-button" aria-label="关闭编辑查看" onClick={() => setSelected(null)}><X size={16} /></button>}</div>
           {!selected || !selectedSummary ? <div className="knowledge-editor-empty"><BookOpen size={25} /><strong>选择知识文件</strong><span>点击左侧知识文件后，可在此处编辑或预览。</span></div> : <>
             <div className="knowledge-editor-file"><span className="knowledge-file-avatar"><FileText size={18} /></span><span><strong>{basename(selected.path)}</strong><small>{selectedSummary.relative_path}</small></span><span className={`scope-tag ${selected.scope}`}>{scopeLabels[selected.scope as Exclude<Scope, 'all'>] || selected.scope}</span><StatusChip status={selectedSummary.active_for_main_agent ? 'enabled' : 'paused'}>{selectedSummary.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></div>
             <div className="knowledge-editor-toolbar"><div className="knowledge-mode-switch"><button type="button" className={`module-btn ${editorMode === 'preview' ? 'active' : ''}`} onClick={() => setEditorMode('preview')}><Eye size={14} />预览</button>{!readOnly && <button type="button" className={`module-btn ${editorMode === 'markdown' ? 'active' : ''}`} onClick={() => setEditorMode('markdown')}><Pencil size={14} />编辑</button>}</div>{!readOnly && <div className="module-actions"><button type="button" className="module-btn primary" disabled={saveMutation.isPending || documentQuery.isFetching || editorMode !== 'markdown'} onClick={() => saveMutation.mutate()}><Save size={14} />保存编辑</button><button type="button" className="module-btn danger" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm('删除此知识文件？')) deleteMutation.mutate() }}><Trash2 size={14} />删除此知识</button></div>}</div>

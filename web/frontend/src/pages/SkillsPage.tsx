@@ -7,7 +7,6 @@ import {
   FileCode2,
   LoaderCircle,
   Pencil,
-  RefreshCw,
   Save,
   Search,
   Share2,
@@ -28,6 +27,7 @@ import {
   setSkillEnabled,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import { RefreshActionButton } from '../components/ModuleUi'
 import type { SkillCatalogItem, SkillCategory } from '../types/api'
 import styles from './SkillsPage.module.css'
 
@@ -151,9 +151,7 @@ export function SkillsPage() {
               <div className={styles.titleRow}><h2>工具与技能</h2><span>{user || '未选择用户'}</span></div>
               <p>统一查看基础插件、共享技能与两类用户技能；可用范围由当前用户的插件和共享技能白名单控制。</p>
             </div>
-            <button type="button" className={styles.refreshButton} disabled={skillsQuery.isFetching} onClick={() => void refresh()}>
-              {skillsQuery.isFetching ? <LoaderCircle size={16} className={styles.spinning} /> : <RefreshCw size={16} />}刷新技能库
-            </button>
+            <RefreshActionButton pending={skillsQuery.isFetching} label="刷新技能库" pendingLabel="刷新中…" iconSize={16} className={styles.refreshButton} onClick={() => { void refresh() }} />
           </header>
 
           <section className={styles.summaryGrid} aria-label="技能统计">

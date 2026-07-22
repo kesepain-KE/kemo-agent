@@ -14,15 +14,20 @@ describe('UserProfileCard', () => {
     expect(screen.queryByRole('menu', { name: '用户菜单' })).not.toBeInTheDocument()
   })
 
-  it('执行资料、设置和退出动作后关闭菜单', () => {
+  it('执行资料、用户切换、设置和退出动作后关闭菜单', () => {
     const onOpenProfile = vi.fn()
+    const onOpenUserSwitch = vi.fn()
     const onOpenSettings = vi.fn()
     const onLogout = vi.fn()
-    render(<UserProfileCard onOpenProfile={onOpenProfile} onOpenSettings={onOpenSettings} onLogout={onLogout} />)
+    render(<UserProfileCard onOpenProfile={onOpenProfile} onOpenUserSwitch={onOpenUserSwitch} onOpenSettings={onOpenSettings} onLogout={onLogout} />)
     const trigger = screen.getByRole('button', { name: '切换当前用户' })
     fireEvent.click(trigger)
     fireEvent.click(screen.getByRole('menuitem', { name: '用户资料' }))
     expect(onOpenProfile).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: '切换用户' }))
+    expect(onOpenUserSwitch).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     fireEvent.click(trigger)
     fireEvent.click(screen.getByRole('menuitem', { name: '用户设置' }))

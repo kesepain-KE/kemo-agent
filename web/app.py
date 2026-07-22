@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 from typing import Any, Iterator
 from urllib.parse import quote
@@ -25,6 +28,8 @@ from web.auth import (
 )
 from web.service import (
     AVATAR_MAX_BYTES,
+    ConflictError,
+    FILE_UPLOAD_MAX_BYTES,
     InvalidRequestError,
     WebRunService,
     WebServiceError,
@@ -90,6 +95,10 @@ class TmpDeleteManyBody(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=10_000)
 
 
+class RestartBody(BaseModel):
+    port: int = Field(ge=1, le=65535)
+
+
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "status": status}}
 
@@ -114,6 +123,31 @@ def _frontend_media_type(path: Path) -> str | None:
     }.get(path.suffix.lower())
 
 
+def _spawn_restart_helper(base: Path, port: int) -> int:
+    command = [
+        sys.executable,
+        str(base / "restart.py"),
+        f"--port={port}",
+        f"--parent-pid={os.getpid()}",
+    ]
+    kwargs: dict[str, Any] = {
+        "cwd": str(base),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **kwargs)
+    return process.pid
+
+
 def create_app(
     *,
     root: Path | None = None,
@@ -128,6 +162,8 @@ def create_app(
     configured_auth = auth_config or WebAuthConfig()
     authenticator = WebAuthenticator(configured_auth)
     app.state.web_auth = configured_auth
+    restart_lock = threading.Lock()
+    app.state.restart_requested = False
 
     @app.middleware("http")
     async def require_web_auth(request: Request, call_next):
@@ -206,6 +242,18 @@ def create_app(
     async def health() -> dict[str, Any]:
         return backend.health()
 
+    @app.post("/api/system/restart")
+    async def restart_system(body: RestartBody) -> dict[str, Any]:
+        active_run_checker = getattr(backend, "has_active_runs", None)
+        if callable(active_run_checker) and active_run_checker():
+            raise ConflictError("存在正在运行的对话，请结束当前响应后再重启智能体")
+        with restart_lock:
+            if app.state.restart_requested:
+                return {"ok": True, "port": body.port, "already_requested": True}
+            helper_pid = _spawn_restart_helper(base, body.port)
+            app.state.restart_requested = True
+        return {"ok": True, "port": body.port, "helper_pid": helper_pid}
+
     @app.get("/api/auth/status")
     async def auth_status(request: Request) -> dict[str, Any]:
         session = request.session if configured_auth.enabled else None
@@ -239,7 +287,7 @@ def create_app(
         path: str = Query(...),
     ) -> dict[str, Any]:
         try:
-            data = await file.read(25 * 1024 * 1024 + 1)
+            data = await file.read(FILE_UPLOAD_MAX_BYTES + 1)
         finally:
             await file.close()
         return backend.save_file(user, scope, path, data)
@@ -320,7 +368,7 @@ def create_app(
         path: str = Query(...),
     ) -> dict[str, Any]:
         try:
-            data = await file.read(25 * 1024 * 1024 + 1)
+            data = await file.read(FILE_UPLOAD_MAX_BYTES + 1)
         finally:
             await file.close()
         return backend.save_tmp_file(path, data)
@@ -703,10 +751,6 @@ def create_app(
     @app.put("/api/users/{user}/memory/important")
     async def update_important_memory(user: str, body: TextBody) -> dict[str, Any]:
         return backend.update_important_memory(user, body.content)
-
-    @app.delete("/api/users/{user}/memory/important")
-    async def delete_important_memory(user: str) -> dict[str, Any]:
-        return backend.delete_important_memory(user)
 
     @app.get("/api/users/{user}/config/full")
     async def full_config(user: str) -> dict[str, Any]:

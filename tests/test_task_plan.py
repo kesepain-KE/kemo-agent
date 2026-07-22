@@ -38,6 +38,7 @@ from run.task_plan_service import (
     generate_plan,
     persist_agent_result,
 )
+from run.task_plan_scheduler import TaskPlanScheduler
 from run.tools import ToolRegistry
 
 
@@ -317,6 +318,56 @@ class PlanExecutionTests(unittest.TestCase):
         plan = get_plan(self.root, "alice", plan["plan_id"])
         self.assertEqual(plan["steps"][0]["status"], "completed")
         self.assertEqual(plan["steps"][1]["status"], "completed")
+
+    def test_scheduler_executes_approved_steps_through_main_agent(self) -> None:
+        plan = self._plan_with_steps([
+            {
+                "step_id": "step_1",
+                "title": "Collect",
+                "description": "Collect data",
+                "tool_name": "shell",
+                "tool_arguments": {"command": "first"},
+                "critical": True,
+            },
+            {
+                "step_id": "step_2",
+                "title": "Report",
+                "description": "Write report",
+                "depends_on": ["step_1"],
+                "tool_name": "shell",
+                "tool_arguments": {"command": "second"},
+                "critical": True,
+            },
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+        requests: list[dict] = []
+
+        def event_source(request, **kwargs):
+            requests.append(dict(request))
+            yield RunEvent(
+                type="tool_call_result",
+                tool_name="shell",
+                result={"ok": True, "result": "done"},
+                metadata={"status": "completed"},
+            )
+            yield RunEvent(type="text_delta", content="done")
+            yield RunEvent(type="done", metadata={"committed": True})
+
+        scheduler = TaskPlanScheduler(self.root, event_source=event_source)
+        result = scheduler.scan_once()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(requests), 2)
+        self.assertIn("只执行当前步骤", requests[0]["prompt"])
+        self.assertIn("step_1", requests[0]["prompt"])
+        self.assertIn("step_2", requests[1]["prompt"])
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(
+            [step["status"] for step in stored["steps"]],
+            ["completed", "completed"],
+        )
 
     def test_critical_failure_pauses_plan(self) -> None:
         plan = self._plan_with_steps([

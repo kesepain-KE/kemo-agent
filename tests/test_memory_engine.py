@@ -82,18 +82,22 @@ class MemoryEngineTests(unittest.TestCase):
         store.tier_dir("permanent").mkdir(parents=True, exist_ok=True)
         self.assertEqual(store.load_tier("permanent"), [])
 
-    def test_committed_round_records_disabled_commit_extraction(self) -> None:
+    def test_committed_round_defers_compression_only_extraction(self) -> None:
         root = self.root()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
         self.assertTrue(result["committed"])
         self.assertIsNone(result["memory"]["extraction_task_id"])
         self.assertIsNone(result["memory"]["extraction_error"])
-        self.assertEqual(result["memory"]["extraction_mode"], "round_commit")
+        self.assertEqual(result["memory"]["extraction_mode"], "compression_only")
         self.assertEqual(result["memory"]["round_extraction"]["status"], "skipped")
+        self.assertEqual(
+            result["memory"]["round_extraction"]["reason"],
+            "deferred_until_compression",
+        )
         archive = load_window(find_window(root, "alice", "cli", "s"))
         self.assertEqual(archive["data"]["memory_processed_round"], 0)
-        self.assertEqual(archive["data"]["memory_status"], "pending")
+        self.assertEqual(archive["data"]["memory_status"], "deferred")
         self.assertEqual(
             MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
             [],

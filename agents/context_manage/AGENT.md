@@ -1,6 +1,6 @@
 # context_manage
 
-上下文压缩与记忆提取子代理。负责三种触发场景下的对话压缩，以及将裁剪内容移交 self_improve 提取记忆。
+上下文压缩子代理。负责三种触发场景下的对话压缩；记忆提取由引擎的会话游标管线独立负责。
 
 所有阈值均从 `config/global_config.json` → `agents` 节点读取，不做硬编码。
 
@@ -16,8 +16,8 @@
 
 1. 读取 `agents.rounds_after_compression`，计算裁剪量 = `max_rounds - rounds_after_compression`
 2. 裁剪掉最旧的 N 轮对话
-3. **先将裁剪下来的完整轮次传递给 self_improve**，由 self_improve 从中提取记忆候选
-4. 等 self_improve 返回后，自身将裁剪的轮次压缩为**一轮对话数据**（事实 + 需求 + 决策 + 未完成事项 + 实体 + 简短叙述），拼接在被保留的最旧轮次之后
+3. 引擎先沿 `memory_processed_round` 提取所有延期轮次并逐轮推进游标
+4. 自身将裁剪的轮次压缩为**一轮对话数据**（事实 + 需求 + 决策 + 未完成事项 + 实体 + 简短叙述），拼接在被保留的最旧轮次之后
 5. 处理完毕
 
 ### 数据读写规则
@@ -42,8 +42,8 @@
 1. 读取 `agents.token_compression_ratio`
 2. 计算压缩目标：`（当前总 Token - 系统提示词 Token）× token_compression_ratio`
 3. 以压缩目标为准，从旧到新截取需要裁剪的完整轮次
-4. **先将裁剪的轮次传递给 self_improve**，提取记忆候选
-5. 等 self_improve 返回后，自身将裁剪的轮次压缩为**一轮对话数据**，拼接在被保留的最旧轮次之后
+4. 引擎先沿会话游标完成延期记忆提取
+5. 自身将裁剪的轮次压缩为**一轮对话数据**，拼接在被保留的最旧轮次之后
 6. 处理完毕
 
 ---
@@ -85,9 +85,9 @@
 
 ---
 
-## 五、调用 self_improve 的方式
+## 五、与记忆提取管线的边界
 
-由 `executor.py` 在摘要模型调用前同步调用 self_improve，传入裁剪的完整轮次数据；记忆候选完成持久化后，context_manage 才继续生成摘要。该顺序由运行时强制保证，不依赖模型自行决定是否调用工具。
+正式运行管线在摘要前调用统一记忆游标处理器，按归档轮次逐轮调用 `self_improve` 并持久化，然后向 `context_manage` 传入 `skip_memory_extraction=true`。`context_manage` 不得再次提取同一批轮次；只有不经过正式引擎的旧式直接调用才保留 executor 兼容行为。
 
 ---
 

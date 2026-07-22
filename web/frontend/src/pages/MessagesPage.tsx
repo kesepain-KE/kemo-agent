@@ -4,6 +4,8 @@ import {
   Activity,
   AlertCircle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   CircleCheck,
   Copy,
   File,
@@ -26,6 +28,7 @@ import { copyText } from '../utils/clipboard'
 import styles from './MessagesPage.module.css'
 
 type LogFilter = 'all' | 'send' | 'receive' | 'file'
+const LOG_PAGE_SIZE = 10
 
 function SummaryCard({
   icon,
@@ -98,16 +101,18 @@ function logLabel(log: MessageLogEntry) {
 function ModuleCard({
   module,
   selected,
-  pending,
+  checking,
+  deleting,
   onSelect,
-  onLogs,
+  onCheck,
   onDelete,
 }: {
   module: MessageTransportSummary
   selected: boolean
-  pending: boolean
+  checking: boolean
+  deleting: boolean
   onSelect: () => void
-  onLogs: () => void
+  onCheck: () => void
   onDelete: () => void
 }) {
   const handleKey = (event: KeyboardEvent<HTMLElement>) => {
@@ -141,8 +146,8 @@ function ModuleCard({
       <span>今日日志 {module.today_log_count}</span>
     </div>
     <div className={styles.cardActions}>
-      <button type="button" onClick={(event) => { event.stopPropagation(); onLogs() }}><FileText size={14} />查看日志</button>
-      <button className={styles.dangerButton} type="button" disabled={pending} onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button>
+      <button type="button" disabled={checking} aria-busy={checking} onClick={(event) => { event.stopPropagation(); onCheck() }}><RefreshCw className={checking ? styles.spinning : ''} size={14} />{checking ? '检测中…' : '检测连接'}</button>
+      <button className={styles.dangerButton} type="button" disabled={deleting} onClick={(event) => { event.stopPropagation(); onDelete() }}><Trash2 size={14} />删除</button>
     </div>
   </article>
 }
@@ -152,9 +157,11 @@ export function MessagesPage() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState('')
   const [filter, setFilter] = useState<LogFilter>('all')
+  const [logPage, setLogPage] = useState(1)
   const [copiedId, setCopiedId] = useState('')
   const [notice, setNotice] = useState('')
   const [actionError, setActionError] = useState('')
+  const [manualRefreshing, setManualRefreshing] = useState(false)
 
   const query = useQuery({
     queryKey: ['message-status', user],
@@ -202,10 +209,25 @@ export function MessagesPage() {
       return true
     })
   }, [filter, selected])
+  const logPageCount = Math.max(1, Math.ceil(filteredLogs.length / LOG_PAGE_SIZE))
+  const currentLogPage = Math.min(logPage, logPageCount)
+  const visibleLogs = useMemo(() => {
+    const start = (currentLogPage - 1) * LOG_PAGE_SIZE
+    return filteredLogs.slice(start, start + LOG_PAGE_SIZE)
+  }, [currentLogPage, filteredLogs])
+
+  useEffect(() => {
+    setLogPage((current) => Math.min(current, logPageCount))
+  }, [logPageCount])
+
+  useEffect(() => {
+    setLogPage(1)
+  }, [selected?.id])
 
   const chooseModule = (module: MessageTransportSummary) => {
     setSelectedId(module.id)
     setFilter('all')
+    setLogPage(1)
   }
   const confirmDelete = (module: MessageTransportSummary) => {
     if (module.bound_user !== user) return
@@ -223,12 +245,29 @@ export function MessagesPage() {
     }
   }
 
+  const refreshMessageModules = async () => {
+    if (manualRefreshing || query.isFetching) return
+    setManualRefreshing(true)
+    setNotice('')
+    setActionError('')
+    try {
+      const result = await query.refetch()
+      if (result.isError) {
+        setActionError(result.error instanceof Error ? result.error.message : '消息模块刷新失败')
+        return
+      }
+      setNotice(`消息模块已刷新，共发现 ${result.data?.summary.total_transports ?? 0} 个绑定模块`)
+    } finally {
+      setManualRefreshing(false)
+    }
+  }
+
   return <ModuleFrame
     kicker="External Messaging"
     title="外部消息"
     description="仅显示与当前用户身份绑定的外部消息模块，可查看连接状态、参数配置与收发日志。"
-    actions={<button className="module-btn" type="button" onClick={() => void query.refetch()} disabled={query.isFetching}>
-      <RefreshCw className={query.isFetching ? styles.spinning : ''} size={15} />刷新消息模块
+    actions={<button className={`module-btn ${styles.refreshButton}`} type="button" onClick={() => void refreshMessageModules()} disabled={query.isFetching || manualRefreshing} aria-busy={manualRefreshing}>
+      <RefreshCw className={manualRefreshing ? styles.spinning : ''} size={15} />{manualRefreshing ? '正在刷新…' : '刷新消息模块'}
     </button>}
   >
     {query.isError && <ModuleError message="外部消息模块读取失败，请检查 message/out 配置和 RuntimeHost 状态。" />}
@@ -253,9 +292,10 @@ export function MessagesPage() {
             key={module.id}
             module={module}
             selected={selected?.id === module.id}
-            pending={deleteMutation.isPending && deleteMutation.variables === module.id}
+            checking={checkMutation.isPending && checkMutation.variables === module.id}
+            deleting={deleteMutation.isPending && deleteMutation.variables === module.id}
             onSelect={() => chooseModule(module)}
-            onLogs={() => chooseModule(module)}
+            onCheck={() => { chooseModule(module); checkMutation.mutate(module.id) }}
             onDelete={() => confirmDelete(module)}
           />)}
         </div> : <div className={styles.emptyState}><RadioTower size={26} /><strong>当前用户未绑定消息模块</strong><p>在 message/out 的模块配置中设置 bound_user 后会显示在这里。</p></div>}
@@ -304,11 +344,11 @@ export function MessagesPage() {
           <header className={styles.logHeader}>
             <span><strong>消息日志</strong><small>按时间倒序显示，可用于排查消息接收与发送流程</small></span>
             <div className={styles.logFilters} role="tablist" aria-label="日志筛选">
-              {([['all', '全部'], ['send', '发送'], ['receive', '接收'], ['file', '文件']] as const).map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? styles.activeFilter : ''} onClick={() => setFilter(value)}>{label}</button>)}
+              {([['all', '全部'], ['send', '发送'], ['receive', '接收'], ['file', '文件']] as const).map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={filter === value} className={filter === value ? styles.activeFilter : ''} onClick={() => { setFilter(value); setLogPage(1) }}>{label}</button>)}
             </div>
           </header>
           {filteredLogs.length ? <div className={styles.logList}>
-            {filteredLogs.map((log) => <div key={log.id} className={`${styles.logRow} ${log.direction === 'send' ? styles.sendLog : styles.receiveLog} ${!log.success ? styles.failedLog : ''}`}>
+            {visibleLogs.map((log) => <div key={log.id} className={`${styles.logRow} ${log.direction === 'send' ? styles.sendLog : styles.receiveLog} ${!log.success ? styles.failedLog : ''}`}>
               <span className={styles.logIcon}>{log.direction === 'send' ? <Send size={13} /> : <Inbox size={13} />}</span>
               <b className={log.direction === 'send' ? styles.sendDirection : styles.receiveDirection}>{log.direction === 'send' ? '发送' : '接收'}</b>
               <time dateTime={log.timestamp}>{timePart(log.timestamp)}</time>
@@ -316,7 +356,14 @@ export function MessagesPage() {
               {!log.success && <em>失败</em>}
             </div>)}
           </div> : <div className={styles.logEmpty}><FileText size={24} /><strong>没有符合筛选条件的日志</strong><p>模块处理消息后，记录会按时间显示在这里。</p></div>}
-          <footer className={styles.logFooter}><Activity size={13} />日志来源：{selected.log_path}{selected.logs_truncated ? ' · 仅展示最近 500 条' : ''}</footer>
+          <footer className={styles.logFooter}>
+            <span className={styles.logSource}><Activity size={13} /><span>日志来源：{selected.log_path}{selected.logs_truncated ? ' · 仅展示最近 500 条' : ''}</span></span>
+            {filteredLogs.length ? <nav className={styles.logPagination} aria-label="消息日志分页">
+              <button type="button" aria-label="上一页日志" disabled={currentLogPage <= 1} onClick={() => setLogPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} /></button>
+              <b>{currentLogPage} / {logPageCount}</b>
+              <button type="button" aria-label="下一页日志" disabled={currentLogPage >= logPageCount} onClick={() => setLogPage((current) => Math.min(logPageCount, current + 1))}><ChevronRight size={14} /></button>
+            </nav> : null}
+          </footer>
         </article>
       </div> : <div className={styles.detailEmpty}><RadioTower size={30} /><strong>选择一个消息模块</strong><p>选择后可查看参数、连接状态与收发日志。</p></div>}
     </section>

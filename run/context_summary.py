@@ -147,6 +147,7 @@ def get_or_create_summary(
     max_tokens: int = 2048,
     response_hook: Callable[[dict[str, Any]], None] | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,
+    skip_memory_extraction: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return an exact cache hit or atomically generate a replacement.
 
@@ -179,13 +180,16 @@ def get_or_create_summary(
         for chunk in chunks:
             if cancel_event is not None and cancel_event.is_set():
                 raise SummaryError("cancelled")
+            model_input = {
+                "previous_summary": rolling,
+                "rounds": summary_source(chunk),
+                "trigger": trigger,
+            }
+            if skip_memory_extraction:
+                model_input["skip_memory_extraction"] = True
             result = agent_runner.run(
                 agent_name,
-                {
-                    "previous_summary": rolling,
-                    "rounds": summary_source(chunk),
-                    "trigger": trigger,
-                },
+                model_input,
                 cancel_event=cancel_event,
                 event_callback=event_callback,
                 max_tokens=max_tokens,

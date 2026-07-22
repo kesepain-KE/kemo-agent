@@ -4,6 +4,51 @@ import type { ChatItem } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
 const TOOL_TEXT_LIMIT = 5000
+const SENSITIVE_ARGUMENT_KEY = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)/i
+
+function redactToolArgument(value: unknown, key = ''): unknown {
+  if (key && SENSITIVE_ARGUMENT_KEY.test(key)) return '••••'
+  if (Array.isArray(value)) return value.map((item) => redactToolArgument(item))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [childKey, redactToolArgument(childValue, childKey)]))
+  }
+  return value
+}
+
+function compactArgumentValue(value: unknown) {
+  if (typeof value === 'string') return value.replace(/\s+/g, ' ').trim() || '空字符串'
+  if (value === null) return 'null'
+  if (value === undefined) return '—'
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value).replace(/\s+/g, ' ')
+  } catch {
+    return String(value)
+  }
+}
+
+export function toolArgumentSummary(persistedText: string | undefined, value: unknown) {
+  let source = value
+  const valueIsEmptyObject = source && typeof source === 'object' && !Array.isArray(source) && Object.keys(source as Record<string, unknown>).length === 0
+  if ((source === undefined || valueIsEmptyObject) && persistedText?.trim()) {
+    try {
+      source = JSON.parse(persistedText)
+    } catch {
+      const summary = persistedText
+        .replace(/\s+/g, ' ')
+        .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)\s*[:=]\s*)([^\s,;}]+)/gi, '$1••••')
+        .trim()
+      return summary || '无参数'
+    }
+  }
+  const redacted = redactToolArgument(source ?? {})
+  if (redacted && typeof redacted === 'object' && !Array.isArray(redacted)) {
+    const entries = Object.entries(redacted as Record<string, unknown>)
+    if (!entries.length) return '无参数'
+    return entries.map(([key, entry]) => `${key}: ${compactArgumentValue(entry)}`).join(' · ')
+  }
+  return compactArgumentValue(redacted)
+}
 
 function toolPayloadPreview(
   persistedText: string | undefined,
@@ -104,6 +149,7 @@ export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' 
       : toolPayloadPreview(item.resultText, item.result, item.resultTruncated),
   } : null
   const statusLabel = item.status === 'running' ? '运行中' : item.status === 'success' ? '已完成' : '失败'
+  const argumentSummary = toolArgumentSummary(item.argumentsText, item.arguments)
   const elapsed = item.status === 'running'
     ? `${(liveElapsedMs / 1000).toFixed(1)} s`
     : elapsedLabel(item.elapsedMs ?? liveElapsedMs)
@@ -111,7 +157,8 @@ export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' 
     <article className={`tool-call ${open ? 'open' : ''}`}>
       <button className="tool-call-head" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
         <span className="tool-call-icon"><Wrench size={15} /></span>
-        <span className="tool-call-copy"><strong>{item.name || '未知工具'}</strong><span>{item.callId}</span></span>
+        <span className="tool-call-copy"><strong>{item.name || '未知工具'}</strong></span>
+        <span className="tool-call-summary" title={argumentSummary}>{argumentSummary}</span>
         <span className="tool-call-meta">
           <span className="tool-elapsed">{elapsed}</span>
           <ChevronDown className="tool-call-chevron" size={15} />

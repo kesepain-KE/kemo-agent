@@ -376,6 +376,7 @@ class CronScheduler:
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         on_task_executed: Callable[[str, str, dict[str, Any]], None] | None = None,
         on_error: Callable[[str, Exception], None] | None = None,
+        transport_registry: Any | None = None,
     ) -> None:
         self.root = root.resolve()
         self.poll_interval = poll_interval
@@ -384,6 +385,7 @@ class CronScheduler:
         self.tool_registry_factory = tool_registry_factory
         self.on_task_executed = on_task_executed
         self.on_error = on_error
+        self._transport_registry = transport_registry
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -551,6 +553,7 @@ class CronScheduler:
                     provider_factory=self.provider_factory,
                     tool_registry_factory=self.tool_registry_factory,
                     cancel_event=self._stop_event,
+                    transport_registry=self._transport_registry,
                 )
                 executed += 1
                 if self.on_task_executed:

@@ -1,6 +1,7 @@
 import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react'
 import { useEffect, useRef } from 'react'
-import { BarChart3, BookOpen, Boxes, ChevronDown, Paperclip, Send, Square, Zap } from 'lucide-react'
+import { BarChart3, BookOpen, Boxes, ChevronDown, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
+import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import styles from './AgentComposer.module.css'
 
 export interface AgentComposerProps {
@@ -17,7 +18,7 @@ export interface AgentComposerProps {
   onChange: (value: string) => void
   onUploadFile?: (file: File) => void
   onOpenKnowledge: () => void
-  onOpenSkills: () => void
+  onOpenExpand: () => void
   onOpenCommands: () => void
   onToggleConversationMenu: () => void
   onSubmit: () => void
@@ -38,7 +39,7 @@ export function AgentComposer({
   onChange,
   onUploadFile,
   onOpenKnowledge,
-  onOpenSkills,
+  onOpenExpand,
   onOpenCommands,
   onToggleConversationMenu,
   onSubmit,
@@ -47,6 +48,11 @@ export function AgentComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canSubmit = !disabled && value.trim().length > 0
+  const speech = useSpeechRecognition((text) => {
+    const separator = value && !/\s$/.test(value) ? ' ' : ''
+    onChange(`${value}${separator}${text}`)
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
+  })
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -96,10 +102,19 @@ export function AgentComposer({
           <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || !onUploadFile}>
             <Paperclip />
           </ComposerIconButton>
+          {speech.supported ? <ComposerIconButton
+            label={speech.listening ? '停止语音识别' : '语音识别'}
+            title={speech.listening ? '停止语音识别' : '语音识别'}
+            onClick={speech.listening ? speech.stop : speech.start}
+            disabled={disabled}
+            active={speech.listening}
+          >
+            <Mic />
+          </ComposerIconButton> : null}
           <ComposerIconButton label="打开知识库" onClick={onOpenKnowledge} disabled={disabled}>
             <BookOpen />
           </ComposerIconButton>
-          <ComposerIconButton label="打开技能" onClick={onOpenSkills} disabled={disabled}>
+          <ComposerIconButton label="打开拓展" onClick={onOpenExpand} disabled={disabled}>
             <Boxes />
           </ComposerIconButton>
           <ComposerIconButton label="打开快捷指令" onClick={onOpenCommands} disabled={disabled} command>
@@ -148,19 +163,22 @@ export function AgentComposer({
 
 interface ComposerIconButtonProps {
   label: string
+  title?: string
   disabled?: boolean
   command?: boolean
+  active?: boolean
   children: ReactNode
   onClick?: () => void
 }
 
-function ComposerIconButton({ label, disabled, command = false, children, onClick }: ComposerIconButtonProps) {
+function ComposerIconButton({ label, title, disabled, command = false, active = false, children, onClick }: ComposerIconButtonProps) {
   return (
     <button
       type="button"
-      className={`${styles.iconButton} ${command ? styles.commandButton : ''}`}
+      className={`${styles.iconButton} ${command ? styles.commandButton : ''} ${active ? styles.listeningButton : ''}`}
       aria-label={label}
-      title={disabled && !onClick ? `${label} · 待接入` : label}
+      aria-pressed={active || undefined}
+      title={disabled && !onClick ? `${label} · 待接入` : title || label}
       disabled={disabled}
       onClick={onClick}
     >

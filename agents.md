@@ -16,7 +16,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
   → 提交五文件历史（text + think + tool + items + data）
-  → 记忆引用加权；成功提交后提取本轮记忆；上下文压缩前批量兜底提取
+  → 记忆引用加权；按 extraction_mode 提交、延期或游标提取
 ```
 
 关键模块：
@@ -28,7 +28,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
 | 历史管理 | `run/history.py` | 用户可见完整归档与 `history/temp/<window>/` Provider 临时工作区的创建、裁剪、恢复和提交 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
-| 记忆管道 | `run/engine.py`、`run/memory_pipeline.py` | 成功提交后的同步单轮提取，以及上下文压缩前的同步批量兜底提取 |
+| 记忆管道 | `run/engine.py`、`run/memory_pipeline.py` | 按模式登记状态，并在提交、保存或压缩边界沿 `memory_processed_round` 顺序提取 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
 | Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
 | 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
@@ -264,7 +264,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 
 - 文件名是全部记忆层级中的全局唯一身份，基础名称最长 20 个字符。
 - 一个 Markdown 只保存一个微量化事实、偏好、关系或项目状态；同名写入更新原文件。
-- 临时三层正文存为 Markdown，同目录 `data.json` 只保存文件名、weight、updated_at、last_weight_date 和 expires_at。
+- 临时三层正文存为 Markdown，同目录 `data.json` 保存 weight、created_at、content_updated_at、last_used_at、last_weight_date、tier_entered_at 和 expires_at。绝对时间统一存 UTC，展示层转换到本地时区。
+- `updated_at` 仅作为 `content_updated_at` 的兼容别名；记忆被注入使用时不得覆盖内容更新时间。
 - 永久层只保存 Markdown，不存在 `data.json`。
 - 当前文件检索只使用文件名，不接入关键词、实体、向量或 `kemo-graph`。
 
@@ -273,9 +274,10 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 永久记忆全部注入，不设置文件数量上限。
 - 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
-- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。
-- `memory.auto_extract_on_commit=true` 时，每轮对话成功提交后同步交给 `self_improve` 提取；失败只写入运行诊断，不回滚已提交历史。
-- `context_manage` 在上下文压缩前仍会把即将裁剪的完整轮次批量交给 `self_improve`，作为独立兜底入口。
+- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
+- `memory.extraction_mode=compression_only` 时，普通提交只登记 `deferred` 游标，保存会话或上下文压缩时才顺序提取。
+- `background` 模式允许 Maintenance 领取普通 `pending` 轮次；`on_commit` 模式同步提取。提取失败可按租约重试，不回滚已提交历史。
+- `disabled` 模式不进行自动提取，Maintenance 也不会领取该用户的记忆任务。
 
 ### 用户指令
 
@@ -307,7 +309,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - **Provider 触发**：统一协议或兼容 Provider 返回 `context_length_exceeded` 时，自动压缩并重试，最多 2 次。
 - **手动触发**：请求带 `compress=true` 时强制压缩。
 - 压缩时移除最旧轮次，保留最近 `rounds_after_compression` 轮。
-- 所有场景统一由 `context_manage` 处理；其 executor 先同步调用 `self_improve` 并持久化记忆候选，再生成摘要。
+- 所有摘要场景统一由 `context_manage` 处理；记忆提取由引擎沿会话 `memory_processed_round` 游标逐轮完成，随后 `context_manage` 只生成摘要，避免摘要子代理与保存链路重复提取。
 - 摘要缓存在 `history/temp/<window>/context_summary.json` 中；缓存 schema 升级时自动重建。
 - `history/<window>/` 始终保留完整原始记录，`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
 
@@ -392,8 +394,9 @@ users/<user>/agents/<name>/
 
 - `task_plan.auto_accept` 控制是否自动执行（默认 false，需手动批准）。
 - 计划文件存储在 `users/<name>/task_plan/`。
-- 计划状态机：pending → running → completed/failed/paused/aborted。
-- 每步完成或失败调用对应状态工具。
+- 计划状态机：pending → approved → running → completed/failed/paused/cancelled。
+- 主智能体手动执行计划步骤后，必须立即调用 `task_plan step_done` 或 `task_plan step_fail` 写回结果；创建和编辑仍走 `task_plan` 子代理。
+- `task_plan` 是运行态管理工具，不能作为计划中的执行步骤。
 - 计划暂停后等待用户继续，不自动恢复。
 - `task_plan.max_steps` 限制最大步骤数（默认 20）。
 - 计划生成输入按“可用工具 → 插件技能全文 → 共享技能全文 → 用户技能全文 → 全局/共享/用户知识索引”顺序组装，且这些专项输入不截断。

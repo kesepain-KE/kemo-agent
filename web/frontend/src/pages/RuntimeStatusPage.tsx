@@ -1,5 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Activity,
   Braces,
@@ -297,11 +299,9 @@ function PanelHeader({ icon, title, detail, count }: { icon: ReactNode; title: s
 }
 
 function PromptPreview({ content, components }: { content: string; components: RuntimeStatusResponse['prompt']['components'] }) {
-  const lines = content.split('\n')
   return <div className={styles.promptLayout}>
     <div className={styles.codePreview} aria-label="完整系统提示词">
-      <div className={styles.lineNumbers}>{lines.map((_, index) => <span key={index}>{index + 1}</span>)}</div>
-      <pre>{content}</pre>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
     <div className={styles.componentSidebar}>
       <div className={styles.tableHead}><span>模块</span><span>状态</span><span>Tokens</span></div>
@@ -314,7 +314,7 @@ function PromptComponents({ components }: { components: RuntimeStatusResponse['p
   return <div className={styles.componentCards}>
     {components.map((item) => <article key={item.id}>
       <span className={styles.iconBox}><Braces size={15} /></span>
-      <span><strong>{sectionLabels[item.name] || item.name}</strong><small>{item.source_files.length ? item.source_files.join(' · ') : '无来源文件'}</small></span>
+      <span><strong>{sectionLabels[item.name] || item.name}</strong></span>
       <StatusPill tone={statusTone(item.state)}>{stateLabel(item.state)}</StatusPill>
       <code>{formatNumber(item.tokens)} Tokens</code>
     </article>)}
@@ -363,8 +363,12 @@ function HealthPanel({ data }: { data: RuntimeStatusResponse }) {
 }
 
 function HealthGroup({ title, items }: { title: string; items: Array<{ id: string; name: string; health: RuntimeHealth; state: string; description: string }> }) {
-  return <section><h4>{title}</h4><div className={styles.healthHead}><span>组件名称</span><span>健康</span><span>状态</span></div><div className={styles.healthRows}>
-    {items.map((item) => <div key={item.id} title={item.description}><strong><i className={styles[`health_${item.health}`]} />{item.name}</strong><span>{healthLabel(item.health)}</span><StatusPill tone={statusTone(item.state)}>{stateLabel(item.state)}</StatusPill></div>)}
+  return <section className={styles.healthGroup}><header><h4>{title}</h4><span>{items.length} 个组件</span></header><div className={styles.healthRows}>
+    {items.map((item) => <article className={styles.healthCard} key={item.id} title={item.description}>
+      <span className={styles.healthIdentity}><span className={styles.healthIcon}><Activity size={17} /></span><span><strong>{item.name}</strong><small>{item.description || '暂无组件说明'}</small></span></span>
+      <span className={styles.healthValue}><small>健康状态</small><strong><i className={styles[`health_${item.health}`]} />{healthLabel(item.health)}</strong></span>
+      <StatusPill tone={statusTone(item.state)}>{stateLabel(item.state)}</StatusPill>
+    </article>)}
     {!items.length ? <p>当前没有可见组件</p> : null}
   </div></section>
 }
@@ -400,7 +404,11 @@ function SystemCronPanel({ data }: { data: RuntimeStatusResponse }) {
 
 function MessageRoutePanel({ data }: { data: RuntimeStatusResponse }) {
   return <CompactPanel icon={<Router size={16} />} title="外部消息路由连接状态" detail={`${data.message_routes.summary.connected_transports} / ${data.message_routes.summary.total_transports} 个已连接`}>
-    {data.message_routes.routes.map((item) => <div className={styles.routeRow} key={item.id}><span><strong>{item.name}</strong><small>{item.platform} · {item.description}</small></span><span>{item.latency_ms == null ? '—' : `${item.latency_ms}ms`}</span><StatusPill tone={statusTone(item.health)}>{healthLabel(item.health)}</StatusPill></div>)}
+    {data.message_routes.routes.map((item) => <article className={styles.routeRow} key={item.id}>
+      <span className={styles.routeIdentity}><span className={styles.routeIcon}><Router size={17} /></span><span><strong>{item.name}</strong><small>{item.platform} · {item.description}</small></span></span>
+      <span className={styles.routeMetric}><small>响应延迟</small><strong>{item.latency_ms == null ? '—' : `${item.latency_ms}ms`}</strong></span>
+      <StatusPill tone={statusTone(item.health)}>{healthLabel(item.health)}</StatusPill>
+    </article>)}
     {!data.message_routes.routes.length ? <CompactEmpty title="当前用户未绑定外部消息" description="绑定消息模块后会显示连接和延迟状态。" icon={<Router size={18} />} /> : null}
   </CompactPanel>
 }

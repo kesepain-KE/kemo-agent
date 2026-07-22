@@ -35,6 +35,7 @@ from message.transport import (
 from provider.factory import create_provider
 from run.config import read_json_object
 from run.maintenance import MaintenanceScheduler
+from run.task_plan_scheduler import TaskPlanScheduler
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
 
@@ -106,6 +107,7 @@ class RuntimeHost:
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         cron_scheduler: CronScheduler | None = None,
         maintenance_scheduler: MaintenanceScheduler | None = None,
+        task_plan_scheduler: TaskPlanScheduler | None = None,
         router: MessageRouter | None = None,
         on_result: Callable[[RouteResult], None] | None = None,
         on_error: Callable[[str, BaseException], None] | None = None,
@@ -187,12 +189,21 @@ class RuntimeHost:
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
+            transport_registry=self.router.transports,
         )
         self.maintenance = maintenance_scheduler or MaintenanceScheduler(
             self.root,
             poll_interval=_positive_seconds(cron_config.get("poll_interval", 30), 30.0),
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
+            on_error=self._handle_error,
+        )
+        self.task_plans = task_plan_scheduler or TaskPlanScheduler(
+            self.root,
+            poll_interval=1.0,
+            provider_factory=provider_factory,
+            tool_registry_factory=tool_registry_factory,
+            transport_registry=self.router.transports,
             on_error=self._handle_error,
         )
         self._components["router"] = ComponentStatus("router", "router")
@@ -202,6 +213,9 @@ class RuntimeHost:
         self._components["cron"] = ComponentStatus("cron", "scheduler")
         self._components["maintenance"] = ComponentStatus(
             "maintenance", "scheduler"
+        )
+        self._components["task_plans"] = ComponentStatus(
+            "task_plans", "scheduler"
         )
         for item in self.registry.items():
             self._components[f"transport:{item.transport.name}"] = ComponentStatus(
@@ -305,9 +319,13 @@ class RuntimeHost:
                 self._set_component("maintenance", "starting")
                 self.maintenance.start()
                 self._set_component("maintenance", "running")
+                self._set_component("task_plans", "starting")
+                self.task_plans.start()
+                self._set_component("task_plans", "running")
             else:
                 self._set_component("background", "stopped")
                 self._set_component("maintenance", "stopped")
+                self._set_component("task_plans", "stopped")
 
             if self.cron_enabled:
                 self._set_component("cron", "starting")
@@ -342,6 +360,12 @@ class RuntimeHost:
             self._state = "stopping"
             self._stop_event.set()
 
+        try:
+            self.task_plans.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+            self._set_component("task_plans", "stopped")
+        except Exception as exc:
+            self._set_component("task_plans", "failed", exc)
+
         for item in reversed(self.registry.items()):
             key = f"transport:{item.transport.name}"
             try:
@@ -371,9 +395,11 @@ class RuntimeHost:
         except Exception as exc:
             self._set_component("maintenance", "failed", exc)
 
-        if self._components["cron"].state == "stopped" and self._components[
-            "maintenance"
-        ].state == "stopped":
+        if (
+            self._components["cron"].state == "stopped"
+            and self._components["maintenance"].state == "stopped"
+            and self._components["task_plans"].state == "stopped"
+        ):
             self._set_component("background", "stopped")
 
         with self._lock:
@@ -389,7 +415,11 @@ class RuntimeHost:
             components = {
                 key: value.to_dict() for key, value in self._components.items()
             }
-            return {"state": self._state, "components": components}
+            return {
+                "state": self._state,
+                "components": components,
+                "task_plans": self.task_plans.status(),
+            }
 
     def _start_transport(self, item: RegisteredTransport) -> None:
         name = item.transport.name

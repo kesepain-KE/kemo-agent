@@ -106,6 +106,21 @@ describe('reduceRunEvent', () => {
     expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'error', result: { ok: false }, elapsedMs: 12 })
   })
 
+  it('逐条确认运行中引导并在本轮结束时固化全部状态', () => {
+    let items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '开始执行' },
+      { id: 'g1', kind: 'guidance', content: '先检查目录', status: 'queued' },
+      { id: 'g2', kind: 'guidance', content: '结果放入临时区', status: 'queued' },
+    ]
+    items = reduceRunEvent(items, { type: 'guidance_applied', metadata: { guidance: ['先检查目录'] } })
+    expect(items[1]).toMatchObject({ kind: 'guidance', status: 'accepted' })
+    expect(items[2]).toMatchObject({ kind: 'guidance', status: 'queued' })
+
+    items = reduceRunEvent(items, { type: 'done', metadata: { guidance_count: 1 } })
+    expect(items[1]).toMatchObject({ kind: 'guidance', status: 'completed', finalized: true })
+    expect(items[2]).toMatchObject({ kind: 'guidance', status: 'not_applied', finalized: true })
+  })
+
   it('无论事件到达顺序如何都按思考、工具、正文排列一轮内容', () => {
     let items: ChatItem[] = [{ id: 'u1', kind: 'message', role: 'user', content: '请处理' }]
     items = reduceRunEvent(items, { type: 'text_delta', content: '最终正文' })

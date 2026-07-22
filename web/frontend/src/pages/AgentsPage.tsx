@@ -1,6 +1,8 @@
 import { useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bot, Check, Copy, Layers3, Search, Trash2, Users } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useOutletContext } from 'react-router-dom'
 import { deleteUserAgent, getAgents } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
@@ -43,15 +45,26 @@ export function AgentsPage() {
     enabled: Boolean(user),
   })
   const agents = agentsQuery.data?.agents ?? []
+  const layerAgents = useMemo(
+    () => agents.filter((agent) => agent.source === activeLayer),
+    [activeLayer, agents],
+  )
+  const layerSummary = agentsQuery.data ? {
+    total: layerAgents.length,
+    enabled: layerAgents.filter((agent) => agent.enabled).length,
+  } : null
+  const layerCounts = agentsQuery.data ? {
+    global: agents.filter((agent) => agent.source === 'global').length,
+    user: agents.filter((agent) => agent.source === 'user').length,
+  } : null
   const filteredAgents = useMemo(() => {
     const keyword = searchText.trim().toLocaleLowerCase()
-    return agents.filter((agent) => {
-      if (agent.source !== activeLayer) return false
+    return layerAgents.filter((agent) => {
       if (!keyword) return true
       return [agent.name, agent.description, agent.trigger, agent.version]
         .some((value) => String(value || '').toLocaleLowerCase().includes(keyword))
     })
-  }, [activeLayer, agents, searchText])
+  }, [layerAgents, searchText])
   const selectedAgent = filteredAgents.find((agent) => agentKey(agent) === selectedKey)
     ?? filteredAgents[0]
     ?? null
@@ -110,13 +123,13 @@ export function AgentsPage() {
           </header>
 
           <div className={styles.layerTabs} role="tablist" aria-label="子智能体层级">
-            <LayerTab layer="global" active={activeLayer === 'global'} count={agentsQuery.data?.summary.global} onClick={() => changeLayer('global')} />
-            <LayerTab layer="user" active={activeLayer === 'user'} count={agentsQuery.data?.summary.user} onClick={() => changeLayer('user')} />
+            <LayerTab layer="global" active={activeLayer === 'global'} count={layerCounts?.global} onClick={() => changeLayer('global')} />
+            <LayerTab layer="user" active={activeLayer === 'user'} count={layerCounts?.user} onClick={() => changeLayer('user')} />
           </div>
 
           <section className={styles.summaryGrid} aria-label="子智能体统计">
-            <SummaryCard label="已发现" value={agentsQuery.data?.summary.total ?? '—'} description="所有子智能体总数" icon={<Bot size={18} />} />
-            <SummaryCard label="已启用" value={agentsQuery.data?.summary.enabled ?? '—'} description="当前启用数量" icon={<Check size={18} />} />
+            <SummaryCard label="已发现" value={layerSummary?.total ?? '—'} description="当前层级子智能体总数" icon={<Bot size={18} />} />
+            <SummaryCard label="已启用" value={layerSummary?.enabled ?? '—'} description="当前层级启用数量" icon={<Check size={18} />} />
             <SummaryCard label="当前层级" value={layerLabel(activeLayer)} description={activeLayer === 'global' ? '系统内置，所有用户可用' : `仅对用户 ${user} 生效`} icon={activeLayer === 'global' ? <Layers3 size={18} /> : <Users size={18} />} />
           </section>
 
@@ -216,7 +229,7 @@ function AgentDetail({ agent, copied, confirmingDelete, deleting, deleteError, o
       <DetailRow label="名称"><code>{agent.name}</code></DetailRow>
       <DetailRow label="版本号">{versionLabel(agent.version)}</DetailRow>
       <DetailRow label="触发条件"><p>{agent.trigger || '未声明独立触发条件'}</p></DetailRow>
-      <DetailRow label="规则"><div className={styles.rulesText}>{agent.rules || '未提供 AGENT.md 规则。'}</div></DetailRow>
+      <DetailRow label="规则"><div className={styles.rulesText}><ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.rules || '未提供 AGENT.md 规则。'}</ReactMarkdown></div></DetailRow>
       <DetailRow label="来源层级"><div className={styles.layerValue}><span className={agent.source === 'global' ? styles.globalBadge : styles.userBadge}>{layerLabel(agent.source)}</span><span>{agent.source === 'global' ? '系统内置，所有用户可用' : '用户自定义，仅对当前用户生效'}</span></div></DetailRow>
       <DetailRow label="执行器"><div className={styles.executorList}>{executorTags.map((tag) => <code key={tag}>{tag}</code>)}</div></DetailRow>
       <DetailRow label="路径"><code>{agent.root}</code></DetailRow>

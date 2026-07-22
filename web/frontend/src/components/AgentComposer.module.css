@@ -88,6 +88,18 @@
 .iconButton:active:not(:disabled) { transform: scale(.96); }
 .iconButton:disabled { cursor: not-allowed; opacity: .42; }
 .commandButton { color: var(--brand); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface-elevated)); border-color: color-mix(in srgb, var(--brand) 22%, var(--line)); }
+.listeningButton,
+.listeningButton:hover:not(:disabled) {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 42%, var(--line));
+  background: color-mix(in srgb, var(--red-soft) 64%, var(--surface-elevated));
+  animation: speechPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes speechPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 0%, transparent); }
+  50% { box-shadow: 0 0 0 .38rem color-mix(in srgb, var(--red) 13%, transparent); }
+}
 
 .stat,
 .actionButton,
@@ -196,4 +208,8 @@
   .stat { grid-column: 1 / -1; }
   .menuWrap { width: 100%; }
   .stopButton { grid-column: 1 / -1; width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .listeningButton { animation: none; }
 }

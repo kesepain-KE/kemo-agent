@@ -871,6 +871,55 @@ def find_window(root: Path, user: str, source: str, session_id: str) -> Path | N
     return max(candidates, default=("", None), key=lambda item: item[0])[1]
 
 
+def queue_memory_extraction(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Durably queue a committed session's remaining memory rounds."""
+
+    directory = find_window(root, user, source, session_id)
+    if directory is None:
+        return {
+            "status": "skipped",
+            "reason": "no_archive",
+            "rounds": 0,
+            "processed_round": 0,
+        }
+    from run.config import load_config
+    from run.memory import memory_extraction_mode
+
+    if memory_extraction_mode(load_config(user, root)) == "disabled":
+        return {
+            "status": "skipped",
+            "reason": "memory_extraction_disabled",
+            "rounds": 0,
+            "processed_round": 0,
+        }
+    window = load_window(directory)
+    data = window.setdefault("data", {})
+    rounds = max(0, int(data.get("rounds") or 0))
+    processed_round = max(0, int(data.get("memory_processed_round") or 0))
+    if rounds < 1 or processed_round >= rounds:
+        return {
+            "status": "skipped",
+            "reason": "no_pending_rounds",
+            "rounds": rounds,
+            "processed_round": processed_round,
+        }
+    data["memory_status"] = "queued"
+    data.pop("memory_error", None)
+    commit_window(directory, window)
+    return {
+        "status": "queued",
+        "reason": "session_closed",
+        "rounds": rounds,
+        "processed_round": processed_round,
+        "pending_rounds": rounds - processed_round,
+    }
+
+
 def prepare_window(root: Path, user: str, source: str, session_id: str) -> tuple[Path, dict[str, Any], bool]:
     """Load a committed window or prepare a new in-memory window.
 

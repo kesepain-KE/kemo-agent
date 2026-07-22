@@ -1,0 +1,57 @@
+.surface {
+  background: var(--surface-elevated);
+  border-color: var(--line);
+  color: var(--text);
+  box-shadow: var(--shadow-soft);
+}
+
+.surface button {
+  background: var(--control-bg);
+  border-color: var(--line);
+  color: var(--text-2);
+}
+
+.surface button:hover {
+  background: var(--surface-hover);
+  border-color: var(--brand-line);
+  color: var(--brand);
+}
+
+.detail > header,
+.detail > footer {
+  border-color: var(--line);
+}
+
+.detail header p,
+.detail > footer,
+.detail dl > div,
+.detail section p,
+.detail > div > span {
+  color: var(--muted);
+}
+
+.detail h2,
+.detail h3,
+.detail dd,
+.detail > div > strong {
+  color: var(--text-2);
+}
+
+.emptyDetailPanel {
+  display: flex;
+  flex-direction: column;
+}
+
+.emptyDetailPanel > footer {
+  display: none;
+}
+
+.expandedEmpty {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 45px 25px;
+}

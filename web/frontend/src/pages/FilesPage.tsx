@@ -15,7 +15,6 @@ import {
   HardDrive,
   Info,
   Pencil,
-  RefreshCw,
   Search,
   Trash2,
   UploadCloud,
@@ -38,6 +37,7 @@ import {
   formatDateTime,
   ModuleError,
   ModuleFrame,
+  RefreshActionButton,
 } from '../components/ModuleUi'
 import type { FileTreeNode } from '../types/api'
 import styles from './FilesPage.module.css'
@@ -386,9 +386,7 @@ export function FilesPage() {
           ) : (
             <button className="module-btn" type="button" onClick={() => setSearchOpen(true)}><Search size={15} />在当前区域搜索</button>
           )}
-          <button className="module-btn" type="button" onClick={() => void refreshFiles()} disabled={activeQuery.isFetching}>
-            <RefreshCw size={15} className={activeQuery.isFetching ? styles.spinning : ''} />刷新文件统计
-          </button>
+          <RefreshActionButton pending={activeQuery.isFetching} label="刷新文件统计" pendingLabel="刷新中…" onClick={() => { void refreshFiles() }} />
           <button
             className="module-btn primary"
             type="button"
@@ -538,12 +536,6 @@ export function FilesPage() {
                 <strong>当前区域可操作</strong>
                 <div>{renderEntryActions(selectedEntry)}</div>
               </div>
-              {area === 'tmp' && (
-                <div className={styles.ruleHint}>
-                  <strong>全局临时规则</strong>
-                  <p>临时文件只能复制相对路径或删除；可在左侧勾选多个普通文件后批量删除。</p>
-                </div>
-              )}
             </div>
           ) : (
             <div className={styles.detailEmpty}>

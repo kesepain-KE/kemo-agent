@@ -36,12 +36,13 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         (self.root / "users" / "alice").mkdir(parents=True)
         self.path = self.root / "users" / "alice" / "memory_temporary_important.md"
 
-    def test_nonempty_output_is_written_and_empty_output_deletes(self) -> None:
+    def test_nonempty_output_is_written_and_empty_output_restores_placeholder(self) -> None:
         execute(_Context(self.root, "# Profile\n\n- concise"), {"trigger": "periodic_scan"})
         self.assertEqual(self.path.read_text("utf-8").strip(), "# Profile\n\n- concise")
 
         execute(_Context(self.root, ""), {"trigger": "daily_consolidate"})
-        self.assertFalse(self.path.exists())
+        self.assertTrue(self.path.is_file())
+        self.assertIn("暂无可提取的重要记忆", self.path.read_text("utf-8"))
 
     def test_daily_output_over_limit_is_rejected_without_overwrite(self) -> None:
         self.path.write_text("original", "utf-8")

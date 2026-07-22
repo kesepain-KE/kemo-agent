@@ -97,6 +97,7 @@ const runEventSchema = z
       'reasoning_delta',
       'tool_call_start',
       'tool_call_result',
+      'guidance_applied',
       'usage',
       'error',
       'done',
@@ -123,6 +124,14 @@ export async function getUsers(): Promise<UsersResponse> {
 export async function getSessions(user: string, query = ''): Promise<SessionsResponse> {
   const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/sessions${suffix}`)
+}
+
+export async function restartSystem(port: number): Promise<{ ok: boolean; port: number; helper_pid?: number; already_requested?: boolean }> {
+  return requestJson('/api/system/restart', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ port }),
+  })
 }
 
 export async function getActiveSession(user: string): Promise<ActiveSessionResponse> {
@@ -433,10 +442,6 @@ export async function updateImportantMemory(user: string, content: string): Prom
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
   })
-}
-
-export async function deleteImportantMemory(user: string): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`, { method: 'DELETE' })
 }
 
 export async function getUserFiles(

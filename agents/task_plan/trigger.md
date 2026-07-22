@@ -93,3 +93,5 @@
 - `critical=true` 的步骤失败时暂停计划
 - auto_accept=false 时追加提醒文本
 - reminder 随标准化计划持久化，后续读取仍可见
+- **reminder 由 executor 硬编码覆盖**：无论 LLM 输出什么 reminder 文本，executor 都会根据 auto_accept 和 action 类型强制覆盖为规范文本。LLM 不需要自行生成 reminder，输出空字符串即可
+- 注入内容由调用方组装，子代理不控制注入过程

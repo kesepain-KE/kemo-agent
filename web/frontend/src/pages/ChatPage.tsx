@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  CheckCircle2,
+  Activity,
+  BrainCircuit,
   Check,
   ChevronDown,
   ListChecks,
@@ -9,21 +10,24 @@ import {
   Pencil,
   RotateCcw,
   Save,
+  Shapes,
   TimerReset,
   Trash2,
   UserRound,
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { closeSession, compressSession, deleteSession, extractSessionMemory, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
+import { closeSession, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
-import type { ShellOutletContext } from '../components/AppShell'
+import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
+import { ExpandReferenceDrawer } from '../components/ExpandReferenceDrawer'
+import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
-import type { ChatItem, CronTaskSummary, HistoryResponse, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, KnowledgeDocumentSummary, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
 function createSessionId() {
@@ -33,6 +37,8 @@ function createSessionId() {
 function eventId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`
 }
+
+const EMPTY_CHAT_ITEMS: ChatItem[] = []
 
 export function isNearScrollBottom(
   metrics: Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>,
@@ -155,9 +161,31 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       (candidate) => candidate.kind === 'message' && candidate.role === 'assistant' || candidate.kind === 'usage' || candidate.kind === 'error',
     )
   }
+  if (event.type === 'guidance_applied') {
+    const pending = Array.isArray(event.metadata?.guidance)
+      ? event.metadata.guidance.map((value) => String(value))
+      : []
+    return items.map((item) => {
+      if (item.kind !== 'guidance' || item.status !== 'queued') return item
+      const matched = pending.indexOf(item.content)
+      if (matched < 0) return item
+      pending.splice(matched, 1)
+      return { ...item, status: 'accepted' as const }
+    })
+  }
   if (event.type === 'error') {
     return [
-      ...items.map((item) => item.kind === 'message' || item.kind === 'reasoning' ? { ...item, streaming: false } : item),
+      ...items.map((item) => {
+        if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
+        if (item.kind === 'guidance') {
+          return {
+            ...item,
+            status: item.status === 'queued' ? 'not_applied' as const : item.status === 'accepted' ? 'completed' as const : item.status,
+            finalized: true,
+          }
+        }
+        return item
+      }),
       { id: eventId('error'), kind: 'error', content: String(event.error?.message || '聊天执行失败') },
     ]
   }
@@ -165,9 +193,19 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     let guidanceRemaining = Number(event.metadata?.guidance_count || 0)
     const completed = items.map((item) => {
       if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
-      if (item.kind === 'guidance' && item.status === 'queued' && guidanceRemaining > 0) {
-        guidanceRemaining -= 1
-        return { ...item, status: 'accepted' as const }
+      if (item.kind === 'guidance') {
+        if (item.status === 'accepted') {
+          if (guidanceRemaining > 0) guidanceRemaining -= 1
+          return { ...item, status: 'completed' as const, finalized: true }
+        }
+        if (item.status === 'queued') {
+          if (guidanceRemaining > 0) {
+            guidanceRemaining -= 1
+            return { ...item, status: 'completed' as const, finalized: true }
+          }
+          return { ...item, status: 'not_applied' as const, finalized: true }
+        }
+        return { ...item, finalized: true }
       }
       return item
     })
@@ -223,7 +261,7 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
 
     const selected = metrics.get(round)
     if (selected) {
-      selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'accepted' }))
+      selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'completed', finalized: true }))
       result.push({
         id: `history_usage_${round}`, kind: 'usage', usage: selected.usage,
         elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
@@ -237,10 +275,10 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
 }
 
 const quickStartCards = [
-  { prompt: '帮我整理今天的任务并生成优先级计划', icon: CheckCircle2, title: '整理今日任务', desc: '读取任务与上下文，生成执行顺序' },
-  { prompt: '查询知识库中与当前问题相关的资料', icon: BookOpen_, title: '查询知识库', desc: '使用当前用户和全局文件索引检索' },
-  { prompt: '检查 kemo-agent 当前运行状态', icon: Zap, title: '检查运行状态', desc: '汇总核心模块、Provider 与外接服务状态' },
-  { prompt: '为当前用户创建一个定时任务', icon: TimerReset, title: '创建定时任务', desc: '通过对话描述时间、内容与执行目标' },
+  { prompt: '查询 kemo-agent 当前感知情况', icon: BrainCircuit, title: '查询感知情况', desc: '查看感知来源、采集数据与当前注入状态', tone: 'sense' },
+  { prompt: '查询 kemo-agent 当前拓展情况', icon: Shapes, title: '查询拓展情况', desc: '查看拓展模块、采集能力与注入状态', tone: 'expand' },
+  { prompt: '查询 kemo-agent 当前运行状态', icon: Activity, title: '查询运行状态', desc: '汇总核心模块、Provider 与外接服务状态', tone: 'status' },
+  { prompt: '为当前用户创建一个定时任务', icon: TimerReset, title: '创建定时任务', desc: '通过对话描述时间、内容与执行目标', tone: 'timer' },
 ]
 
 function greetingLabel() {
@@ -250,8 +288,6 @@ function greetingLabel() {
   if (hour < 18) return '下午好'
   return '晚上好'
 }
-
-function BookOpen_() { return <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z" /></svg> }
 
 export function compactPlanAssistantText(content: string, hasPlanBubble: boolean) {
   if (!hasPlanBubble) return content
@@ -325,6 +361,32 @@ function senseIconFor(source: SenseSourceSummary): SenseDataItem['icon'] {
   return 'radio'
 }
 
+type GuidanceItem = Extract<ChatItem, { kind: 'guidance' }>
+
+function GuidanceMessage({ item, placement }: { item: GuidanceItem; placement: 'current' | 'completed' }) {
+  const title = item.status === 'queued'
+    ? '正在引导'
+    : item.status === 'not_applied'
+      ? '本轮未生效'
+      : item.status === 'error'
+        ? '引导失败'
+        : '引导成功'
+  const detail = item.status === 'queued'
+    ? '等待智能体到达下一个安全边界'
+    : item.status === 'accepted'
+      ? '智能体已读取该引导并继续运行'
+      : item.status === 'completed'
+        ? '本轮运行已采用此引导'
+        : item.status === 'not_applied'
+          ? '本轮结束前未进入下一次模型请求'
+          : '引导未能提交到当前运行'
+  return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
+    <span className="guidance-title"><i aria-hidden="true" />{title}</span>
+    <strong>{item.content}</strong>
+    <small>{detail}</small>
+  </article>
+}
+
 export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
   return [...tasks]
     .filter((task) => task.user_defined)
@@ -355,17 +417,18 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, setSessionId, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('')
-  const [liveItems, setLiveItems] = useState<ChatItem[]>([])
   const [editingSource, setEditingSource] = useState<{ id: string; content: string } | null>(null)
   const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
   const [copiedItem, setCopiedItem] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
-  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | ''>('')
+  const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false)
+  const [expandDrawerOpen, setExpandDrawerOpen] = useState(false)
+  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
@@ -376,9 +439,14 @@ export function ChatPage() {
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
   const locallyCommittedSessionRef = useRef('')
-  const historyHandoffSessionRef = useRef('')
   const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
+  const liveSessionId = sessionId || lastAttemptSessionRef.current
+  const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
+  const liveItems = liveRun?.items ?? EMPTY_CHAT_ITEMS
+  const setLiveItems = (updater: ChatItemsUpdater) => {
+    if (liveSessionId) updateChatRunItems(user, liveSessionId, updater)
+  }
   const hasCommitted = useMemo(() => {
     if (!sessionId) return false
     return sessionId === locallyCommittedSessionRef.current
@@ -394,32 +462,47 @@ export function ChatPage() {
     queryKey: ['tasks', user],
     queryFn: () => getTasks(user),
     enabled: Boolean(user),
+    refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
   })
   const senseQuery = useQuery({
     queryKey: ['sense', user],
     queryFn: () => getSense(user),
     enabled: Boolean(user),
   })
+  const knowledgeQuery = useQuery({
+    queryKey: ['knowledge', user],
+    queryFn: () => getKnowledge(user),
+    enabled: Boolean(user && knowledgeDrawerOpen),
+  })
+  const expandsQuery = useQuery({
+    queryKey: ['expands', user],
+    queryFn: () => getExpands(user),
+    enabled: Boolean(user && expandDrawerOpen),
+  })
+  const expandModules = useMemo(
+    () => expandsQuery.data?.expands.flatMap((group) => group.items) ?? [],
+    [expandsQuery.data],
+  )
 
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyQuery.data), [historyQuery.data])
-  const handoffReady = historyHandoffSessionRef.current === sessionId && Boolean(historyQuery.data)
+  const persistedUserMessages = historyQuery.data?.messages.filter((message) => message.role === 'user').length ?? 0
+  const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
   const visibleLiveItems = handoffReady ? [] : liveItems
   const items = [...historyItems, ...visibleLiveItems]
   useEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return
     conversationKeyRef.current = conversationKey
-    if (historyHandoffSessionRef.current === sessionId) return
-    historyHandoffSessionRef.current = ''
     lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
     setShowFollowOutput(false)
-    setLiveItems([])
     setEditingSource(null)
     setEditedSources(new Set())
     setCopiedItem('')
     setActiveRunId('')
     setUploadFeedback(null)
+    setKnowledgeDrawerOpen(false)
+    setExpandDrawerOpen(false)
     setConversationBusy('')
     setConversationFeedback(null)
     setPlanOverrides({})
@@ -427,10 +510,9 @@ export function ChatPage() {
   }, [abortChatRun, user, sessionId])
 
   useEffect(() => {
-    if (historyHandoffSessionRef.current !== sessionId || !historyQuery.data) return
-    historyHandoffSessionRef.current = ''
-    setLiveItems([])
-  }, [historyQuery.data, sessionId])
+    if (!handoffReady || !liveSessionId) return
+    clearChatRun(user, liveSessionId)
+  }, [clearChatRun, handoffReady, liveSessionId, user])
 
   useEffect(() => {
     const prompt = searchParams.get('prompt')
@@ -457,6 +539,8 @@ export function ChatPage() {
     const activeSession = options.sessionId || sessionId || createSessionId()
     lastAttemptSessionRef.current = activeSession
     const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
+    const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
+    beginChatRun(user, activeSession, runId, historyUserMessages)
     setDraft('')
     setRunning(true)
     setActiveRunId(runId)
@@ -464,13 +548,14 @@ export function ChatPage() {
     followOutputRef.current = true
     setShowFollowOutput(false)
     if (editingSource) setEditedSources((current) => new Set(current).add(editingSource.id))
-    setLiveItems((current) => [...current, {
+    updateChatRunItems(user, activeSession, (current) => [...current, {
       id: eventId('user'), kind: 'message', role: 'user', content: prompt,
       edited: Boolean(editingSource), originalContent: editingSource?.content,
     }])
     setEditingSource(null)
     const controller = new AbortController()
     setChatAbortController(controller)
+    let committed = false
     try {
       await streamChat({
         user,
@@ -480,22 +565,24 @@ export function ChatPage() {
         runId,
         signal: controller.signal,
         onEvent: (event) => {
-          setLiveItems((current) => reduceRunEvent(current, event))
+          if (event.type === 'done') committed = true
+          updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
         },
       })
       await refreshSessions()
       if (!sessionId) {
         locallyCommittedSessionRef.current = activeSession
-        historyHandoffSessionRef.current = activeSession
         setSessionId(activeSession)
       }
+      if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
       refreshOverview()
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
-        setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
+        updateChatRunItems(user, activeSession, (current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
       }
     } finally {
+      finishChatRun(user, activeSession, committed)
       setChatAbortController(null)
       setActiveRunId('')
       setRunning(false)
@@ -517,6 +604,7 @@ export function ChatPage() {
   const newConversation = async () => {
     abortChatRun()
     await createNewSession()
+    if (liveSessionId) clearChatRun(user, liveSessionId)
     setConversationMenuOpen(false)
   }
 
@@ -525,11 +613,7 @@ export function ChatPage() {
     setConversationBusy('save')
     setConversationFeedback(null)
     try {
-      if (sessionId && hasCommitted) {
-        await extractSessionMemory(user, sessionId)
-      }
       if (sessionId) await closeSession(user, sessionId)
-      await refreshSessions()
       await newConversation()
     } catch (error) {
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
@@ -548,7 +632,6 @@ export function ChatPage() {
         await deleteSession(user, sessionId)
         queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
         if (locallyCommittedSessionRef.current === sessionId) locallyCommittedSessionRef.current = ''
-        if (historyHandoffSessionRef.current === sessionId) historyHandoffSessionRef.current = ''
         await refreshSessions()
         refreshOverview()
       } else if (sessionId) {
@@ -583,7 +666,9 @@ export function ChatPage() {
         : memory.status === 'skipped'
           ? (memory.reason === 'already_processed'
               ? '记忆已是最新状态。'
-              : '当前没有可提取的完整对话轮次。')
+              : memory.reason === 'memory_extraction_disabled'
+                ? '记忆提取已按配置关闭。'
+                : '当前没有可提取的完整对话轮次。')
           : '记忆提取未完成，已保留待后台重试。'
       setConversationFeedback({
         tone: memory.status === 'failed' ? 'error' : 'success',
@@ -597,10 +682,39 @@ export function ChatPage() {
     }
   }
 
-  const editAndResend = (id: string, content: string) => {
-    if (running) return
-    setDraft(content)
-    setEditingSource({ id, content })
+  const editAndResend = async (id: string, content: string) => {
+    if (running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
+    const targetSession = sessionId || lastAttemptSessionRef.current
+    const persistedRounds = (historyQuery.data?.messages || []).filter((item) => item.role === 'user').length
+    const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
+    const expectedRound = persistedRounds + liveRounds
+    if (!targetSession || expectedRound < 1) return
+    setConversationBusy('edit')
+    setConversationFeedback(null)
+    try {
+      const undo = await undoLastRound(user, targetSession, expectedRound, content)
+      setLiveItems((current) => dropLastLiveRound(current))
+      if (sessionId) {
+        await queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+      }
+      const editableContent = undo.prompt || content
+      setDraft(editableContent)
+      setEditingSource({ id, content })
+      setConversationFeedback({ tone: 'success', text: '最新一轮已撤销，原问题已放回输入框，可修改后重新发送。' })
+      window.requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')
+        if (!input) return
+        input.focus()
+        input.setSelectionRange(input.value.length, input.value.length)
+      })
+    } catch (error) {
+      setConversationFeedback({
+        tone: 'error',
+        text: error instanceof Error ? error.message : '撤销最新一轮并进入编辑状态失败',
+      })
+    } finally {
+      setConversationBusy('')
+    }
   }
 
   const copyMessage = async (id: string, content: string) => {
@@ -625,6 +739,9 @@ export function ChatPage() {
 
   const activePlan = overview?.active_plan
   const lastUserMessage = [...items].reverse().find((item) => item.kind === 'message' && item.role === 'user')
+  const latestRunningGuidance = running
+    ? [...visibleLiveItems].reverse().find((item): item is GuidanceItem => item.kind === 'guidance' && !item.finalized)
+    : undefined
   const regenerateLastResponse = async () => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
     const prompt = lastUserMessage.content
@@ -656,6 +773,17 @@ export function ChatPage() {
       setConversationBusy('')
     }
   }
+  useEffect(() => {
+    const handleConversationCommand = (event: Event) => {
+      const action = (event as CustomEvent<ConversationCommandAction>).detail
+      if (action === 'save') void saveAndNewConversation()
+      else if (action === 'clear') void clearConversation()
+      else if (action === 'compress') void compressCurrentConversation()
+      else if (action === 'retry') void regenerateLastResponse()
+    }
+    window.addEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
+    return () => window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
+  }, [clearConversation, compressCurrentConversation, regenerateLastResponse, saveAndNewConversation])
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
   const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
   const changePlanStatus = async (plan: PlanSummary, status: 'approved' | 'paused' | 'cancelled') => {
@@ -678,7 +806,7 @@ export function ChatPage() {
   })
   const persistedPlans = tasksQuery.data?.plans || []
   const persistedPlanById = new Map(persistedPlans.map((plan) => [plan.plan_id, plan]))
-  const resolvePlan = (plan: PlanSummary) => planOverrides[plan.plan_id] || persistedPlanById.get(plan.plan_id) || plan
+  const resolvePlan = (plan: PlanSummary) => persistedPlanById.get(plan.plan_id) || planOverrides[plan.plan_id] || plan
   const renderedPlanIds = new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id))
   const persistedSessionPlans = persistedPlans.filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id)).map(resolvePlan)
   const renderedSessionPlans = items
@@ -715,6 +843,26 @@ export function ChatPage() {
     if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
     else element.scrollTop = element.scrollHeight
   }
+  const referenceKnowledge = (document: KnowledgeDocumentSummary) => {
+    const referenceId = `${document.scope}:${document.relative_path}`
+    const reference = `[知识库引用 ${referenceId}] ${document.title}`
+    setDraft((current) => {
+      if (current.includes(`[知识库引用 ${referenceId}]`)) return current
+      const existing = current.trimEnd()
+      return existing ? `${existing}\n${reference}` : reference
+    })
+    setKnowledgeDrawerOpen(false)
+  }
+  const referenceExpand = (module: ExpandModuleSummary) => {
+    const referenceId = `${module.scope}:${module.name}`
+    const reference = `[拓展引用 ${referenceId}] ${module.display_name || module.name}`
+    setDraft((current) => {
+      if (current.includes(`[拓展引用 ${referenceId}]`)) return current
+      const existing = current.trimEnd()
+      return existing ? `${existing}\n${reference}` : reference
+    })
+    setExpandDrawerOpen(false)
+  }
   const conversationBlocks = groupConversationItems(items)
 
   return (
@@ -749,8 +897,8 @@ export function ChatPage() {
               <div className="active-task-detail">{activePlan.steps.slice(0, 6).map((step, index) => <div className={`active-task-step ${step.status}`} key={step.step_id}><i>{step.status === 'completed' ? '✓' : index + 1}</i><span><strong>{step.title}</strong><small>{statusLabel(step.status)} · {step.description}</small></span></div>)}</div>
             </article>}
             <div className="quick-start">
-              {quickStartCards.map(({ prompt, icon: Icon, title, desc }) => (
-                <button key={prompt} className="quick-card" onClick={() => setDraft(prompt)}>
+              {quickStartCards.map(({ prompt, icon: Icon, title, desc, tone }) => (
+                <button key={prompt} className={`quick-card quick-card-${tone}`} onClick={() => setDraft(prompt)}>
                   <span className="quick-icon"><Icon size={17} /></span>
                   <strong>{title}</strong>
                   <span>{desc}</span>
@@ -776,18 +924,20 @@ export function ChatPage() {
             if (block.kind === 'user') {
               const item = block.item
               return (
-                <article key={block.id} className="message user">
-                  <div className="msg-avatar"><UserRound size={17} /></div>
-                  <div className="message-body">
-                    <div className="bubble"><MarkdownMessage content={item.content} streaming={Boolean(item.streaming)} /></div>
-                    <div className="message-actions">
-                      {item.edited ? <span className="edited-label">编辑后重发</span> : null}
-                      {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
-                      {!running ? <button onClick={() => editAndResend(item.id, item.content)} aria-label="编辑后重发"><Pencil size={12} />编辑重发</button> : null}
-                      <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
+                <Fragment key={block.id}>
+                  <article className="message user">
+                    <div className="msg-avatar"><UserRound size={17} /></div>
+                    <div className="message-body">
+                      <div className="bubble"><MarkdownMessage content={item.content} streaming={Boolean(item.streaming)} /></div>
+                      <div className="message-actions">
+                        {item.edited ? <span className="edited-label">编辑后重发</span> : null}
+                        {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
+                        {!running && lastUserMessage?.id === item.id ? <button onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
+                        <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
+                      </div>
                     </div>
-                  </div>
-                </article>
+                  </article>
+                </Fragment>
               )
             }
 
@@ -800,6 +950,9 @@ export function ChatPage() {
             const assistantText = assistantMessages.map((item) => item.content).filter(Boolean).join('\n\n')
             const assistantCopyId = assistantMessages.at(-1)?.id || block.id
             const hasPlanBubble = block.items.some((item) => item.kind === 'task_plan')
+            const finalizedGuidance = block.items.filter(
+              (item): item is GuidanceItem => item.kind === 'guidance' && Boolean(item.finalized),
+            )
             return (
               <article key={block.id} className="assistant-turn">
                 <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
@@ -812,7 +965,7 @@ export function ChatPage() {
                       const plan = resolvePlan(item.plan)
                       return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
                     }
-                    if (item.kind === 'guidance') return <article key={item.id} className={`guidance-message ${item.status}`}><span>运行中引导</span><strong>{item.content}</strong><small>{item.status === 'queued' ? '已排队，将在下一个安全边界生效' : item.status === 'accepted' ? '已在该轮运行中采用' : '提交失败'}</small></article>
+                    if (item.kind === 'guidance') return null
                     if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
                     if (item.role !== 'assistant') return null
                     return (
@@ -836,6 +989,7 @@ export function ChatPage() {
                       )}
                     </div>
                   )}
+                  {finalizedGuidance.length > 0 && <div className="assistant-guidance-list">{finalizedGuidance.map((item) => <GuidanceMessage key={item.id} item={item} placement="completed" />)}</div>}
                 </div>
               </article>
             )
@@ -854,6 +1008,7 @@ export function ChatPage() {
             />
           </div>
         ) : null}
+        {latestRunningGuidance ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage item={latestRunningGuidance} placement="current" /></div> : null}
         <AgentComposer
           value={draft}
           placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
@@ -863,13 +1018,13 @@ export function ChatPage() {
           disabled={!user}
           conversationMenuOpen={conversationMenuOpen}
           uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status">{uploadFeedback.text}<button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : null}
-          notice={editingSource ? <div className="edit-resend-banner"><span>正在编辑旧消息并作为新消息追加发送；原历史不会被改写。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消</button></div> : null}
+          notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消编辑</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
               <div className="conversation-menu-head">对话操作</div>
               <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void saveAndNewConversation() }}>
                 <span className="conversation-action-icon"><Save size={16} /></span>
-                <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在提取记忆并确认归档…' : '保留当前归档并开启新上下文'}</span></span>
+                  <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在保存归档并切换…' : '保留当前归档，记忆转入后台提取'}</span></span>
               </button>
               <button className="conversation-action danger" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void clearConversation() }}>
                 <span className="conversation-action-icon"><Trash2 size={16} /></span>
@@ -889,14 +1044,36 @@ export function ChatPage() {
           ) : null}
           onChange={setDraft}
           onUploadFile={uploadFile}
-          onOpenKnowledge={() => navigate(`/knowledge?user=${encodeURIComponent(user)}`)}
-          onOpenSkills={() => navigate(`/skills?user=${encodeURIComponent(user)}`)}
+          onOpenKnowledge={() => {
+            setExpandDrawerOpen(false)
+            setKnowledgeDrawerOpen(true)
+          }}
+          onOpenExpand={() => {
+            setKnowledgeDrawerOpen(false)
+            setExpandDrawerOpen(true)
+          }}
           onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value) => !value)}
           onSubmit={() => { if (running) void sendGuidance(); else void send() }}
           onStop={stop}
         />
       </div>
+      <KnowledgeReferenceDrawer
+        open={knowledgeDrawerOpen}
+        documents={knowledgeQuery.data?.documents ?? []}
+        loading={knowledgeQuery.isLoading || knowledgeQuery.isFetching}
+        error={knowledgeQuery.isError}
+        onClose={() => setKnowledgeDrawerOpen(false)}
+        onReference={referenceKnowledge}
+      />
+      <ExpandReferenceDrawer
+        open={expandDrawerOpen}
+        modules={expandModules}
+        loading={expandsQuery.isLoading || expandsQuery.isFetching}
+        error={expandsQuery.isError}
+        onClose={() => setExpandDrawerOpen(false)}
+        onReference={referenceExpand}
+      />
     </div>
   )
 }

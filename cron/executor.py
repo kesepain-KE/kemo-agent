@@ -127,6 +127,7 @@ def _execute_claimed_task(
     provider_factory: Callable[[dict[str, Any]], Any],
     tool_registry_factory: Callable[[Path, str], ToolRegistry],
     cancel_event: threading.Event | None,
+    transport_registry: Any | None = None,
 ) -> dict[str, Any]:
     store = CronStore(root, user)
     task_id = task["task_id"]
@@ -162,13 +163,16 @@ def _execute_claimed_task(
             background_session_id = str(task.get("session_id") or "").strip()
             if not background_session_id or background_session_id == "cron":
                 background_session_id = new_conversation_id()
+            request_payload: dict[str, Any] = {
+                "user": task["user"],
+                "prompt": task["prompt"],
+                "source": f"background:cron:{task_id}",
+                "session_id": background_session_id,
+            }
+            if transport_registry is not None:
+                request_payload["_transport_registry"] = transport_registry
             handle_request(
-                {
-                    "user": task["user"],
-                    "prompt": task["prompt"],
-                    "source": f"background:cron:{task_id}",
-                    "session_id": background_session_id,
-                },
+                request_payload,
                 root=root,
                 provider_factory=provider_factory,
                 tool_registry_factory=tool_registry_factory,
@@ -412,6 +416,7 @@ def execute_cron_task(
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
     system_task: dict[str, Any] | None = None,
+    transport_registry: Any | None = None,
 ) -> dict[str, Any]:
     """根据 ``exec_mode`` 领取并执行一个 cron 任务。"""
     cfg = config if config is not None else load_config(user, root)
@@ -433,6 +438,7 @@ def execute_cron_task(
         provider_factory=provider_factory,
         tool_registry_factory=tool_registry_factory,
         cancel_event=cancel_event,
+        transport_registry=transport_registry,
     )
 
 

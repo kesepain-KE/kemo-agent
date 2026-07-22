@@ -401,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_status_provider=host.status if host is not None else None,
         message_health_checker=host.check_message_transport if host is not None else None,
         message_transport_remover=host.remove_message_transport if host is not None else None,
+        plan_waker=host.task_plans.wake if host is not None else None,
         router_ref=host.router if host is not None else None,
     )
     app = create_app(root=root, service=service, auth_config=auth_config)

@@ -1,5 +1,26 @@
 import type { ReactNode } from 'react'
-import { AlertCircle, Inbox } from 'lucide-react'
+import { AlertCircle, Inbox, RefreshCw } from 'lucide-react'
+
+export function RefreshActionButton({
+  pending,
+  label,
+  pendingLabel,
+  onClick,
+  className = 'module-btn',
+  iconSize = 15,
+}: {
+  pending: boolean
+  label: string
+  pendingLabel: string
+  onClick: () => void
+  className?: string
+  iconSize?: number
+}) {
+  return <button type="button" className={className} disabled={pending} aria-busy={pending} onClick={onClick}>
+    <RefreshCw size={iconSize} className={pending ? 'spin' : ''} />
+    {pending ? pendingLabel : label}
+  </button>
+}
 
 export function ModuleFrame({
   kicker,

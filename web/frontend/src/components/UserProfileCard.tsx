@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, LogOut, Settings, UserRound } from 'lucide-react'
+import { Check, LogOut, Settings, UserRound, Users } from 'lucide-react'
 import styles from './UserProfileCard.module.css'
 
 export interface UserProfileOption {
@@ -19,6 +19,7 @@ export interface UserProfileCardProps {
   switchingDisabledReason?: string
   onSelectUser?: (username: string) => void
   onOpenProfile?: () => void
+  onOpenUserSwitch?: () => void
   onOpenSettings?: () => void
   onLogout?: () => void
 }
@@ -46,6 +47,7 @@ export function UserProfileCard({
   switchingDisabledReason = '当前暂不可切换用户',
   onSelectUser,
   onOpenProfile,
+  onOpenUserSwitch,
   onOpenSettings,
   onLogout,
 }: UserProfileCardProps) {
@@ -103,6 +105,7 @@ export function UserProfileCard({
           <Check size={15} aria-hidden="true" />
         </div>
         <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenProfile)}><UserRound size={16} /><span>用户资料</span></button>
+        <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenUserSwitch)}><Users size={16} /><span>切换用户</span></button>
         <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenSettings)}><Settings size={16} /><span>用户设置</span></button>
 
         {switchableUsers.length > 0 && <>

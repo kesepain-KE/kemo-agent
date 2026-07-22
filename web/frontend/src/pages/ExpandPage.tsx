@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Activity,
   BookOpen,
@@ -33,7 +35,7 @@ import {
   setExpandModuleEnabled,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
-import { EmptyPanel, ModuleError, ModuleFrame, formatDateTime } from '../components/ModuleUi'
+import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton, formatDateTime } from '../components/ModuleUi'
 import type { ExpandModuleSummary, ExpandScope } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import styles from './ExpandPage.module.css'
@@ -85,7 +87,9 @@ function TextPreview({ title, subtitle, content, empty, copied, onCopy }: {
         {copied ? <Clipboard size={13} /> : <Copy size={13} />}{copied ? '已复制' : '复制'}
       </button>
     </header>
-    {content ? <pre>{content}</pre> : <div className={styles.previewEmpty}><Eye size={19} /><span>{empty}</span></div>}
+    {content
+      ? <div className={styles.markdownContent}><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>
+      : <div className={styles.previewEmpty}><Eye size={19} /><span>{empty}</span></div>}
   </section>
 }
 
@@ -206,9 +210,7 @@ export function ExpandPage() {
     title="拓展"
     description="拓展模块保留数据采集与系统提示词注入能力，并可按操作文档操纵外部系统；全局层、共享层由当前用户白名单控制。"
     actions={<>
-      <button className="module-btn" type="button" onClick={() => void query.refetch()} disabled={query.isFetching}>
-        <RefreshCw className={query.isFetching ? styles.spinning : ''} size={15} />刷新拓展数据
-      </button>
+      <RefreshActionButton pending={query.isFetching} label="刷新拓展数据" pendingLabel="刷新中…" onClick={() => { void query.refetch() }} />
       <div className={styles.addControl} ref={addRef}>
         <button className="module-btn primary" type="button" aria-expanded={addOpen} onClick={() => setAddOpen((current) => !current)}>
           <Plus size={15} />增加拓展模块<ChevronDown size={13} />

@@ -422,7 +422,7 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         self.assertEqual(observed["round_number"], 1)
         self.assertEqual(observed["prompt"], "我的设备是 J1900。")
-        self.assertEqual(result["memory"]["extraction_mode"], "round_commit")
+        self.assertEqual(result["memory"]["extraction_mode"], "on_commit")
         self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
         archive = load_window(find_window(root, "alice", "cli", "memory-round"))
         self.assertEqual(archive["data"]["memory_processed_round"], 1)
@@ -513,18 +513,21 @@ class RuntimeFeatureTests(unittest.TestCase):
             ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            result = handle_request(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "guided",
-                    "prompt": "start",
-                    "run_id": "run_guided_test",
-                    "_guidance_queue": guidance,
-                },
-                root=root,
-                provider_factory=lambda _: provider,
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "guided",
+                        "prompt": "start",
+                        "run_id": "run_guided_test",
+                        "_guidance_queue": guidance,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
             )
+        result = events[-1].metadata
         guidance_messages = [
             item["content"]
             for item in provider.requests[1].messages
@@ -534,6 +537,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn("focus on the revised target", guidance_messages[0])
         self.assertEqual(result["guidance_count"], 1)
         self.assertEqual(result["run_id"], "run_guided_test")
+        applied = [event for event in events if event.type == "guidance_applied"]
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0].metadata["guidance"], ["focus on the revised target"])
         window = load_window(find_window(root, "alice", "cli", "guided"))
         self.assertEqual(
             window["data"]["round_metrics"][0]["guidance"],
@@ -777,22 +783,27 @@ class RuntimeFeatureTests(unittest.TestCase):
             self.assertEqual(status["rounds"], 12)
             summary_provider = ScriptedProvider(
                 responses=[
-                    ChatResponse(
-                        text=json.dumps(
-                            {
-                                "candidates": [
-                                    {
-                                        "action": "upsert",
-                                        "filename": "压缩记忆",
-                                        "content": "old rounds fact",
-                                        "explicit": False,
-                                    }
-                                ]
-                            },
-                            ensure_ascii=False,
-                        ),
-                        usage=Usage(1, 1, 2, source="mock"),
-                    ),
+                    *[
+                        ChatResponse(
+                            text=json.dumps(
+                                {
+                                    "candidates": [
+                                        {
+                                            "action": "upsert",
+                                            "filename": "压缩记忆",
+                                            "content": "old rounds fact",
+                                            "explicit": False,
+                                            "durable": True,
+                                            "evidence": f"round-{index}",
+                                        }
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            ),
+                            usage=Usage(1, 1, 2, source="mock"),
+                        )
+                        for index in range(12)
+                    ],
                     ChatResponse(
                         text=json.dumps(
                             {
@@ -818,10 +829,13 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(result["committed"])
         self.assertEqual(result["context"]["rounds_kept"], 10)
         self.assertEqual(result["context"]["rounds_removed"], 2)
-        self.assertEqual(len(summary_provider.requests), 2)
+        self.assertEqual(len(summary_provider.requests), 13)
         self.assertTrue(result["context"]["summary"]["generated"])
         window = load_window(find_window(root, "alice", "cli", "long"))
         self.assertEqual(window["data"]["rounds"], 12)
+        self.assertEqual(window["data"]["memory_processed_round"], 12)
+        self.assertEqual(window["data"]["memory_status"], "completed")
+        self.assertEqual(result["memory"]["status"], "completed")
         self.assertEqual(len(window["text"]["messages"]), 24)
         self.assertTrue(
             (root / "users" / "alice" / "improve" / "seven_days" / "压缩记忆.md").is_file()
@@ -868,7 +882,13 @@ class RuntimeFeatureTests(unittest.TestCase):
                 ChatResponse(text="reply-2", usage=Usage()),
                 ChatResponse(text="reply-3", usage=Usage()),
                 context_error,
-                ChatResponse(text=json.dumps({"candidates": []}), usage=Usage(1, 1, 2)),
+                *[
+                    ChatResponse(
+                        text=json.dumps({"candidates": []}),
+                        usage=Usage(1, 1, 2),
+                    )
+                    for _ in range(3)
+                ],
                 ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
                 ChatResponse(text="recovered", usage=Usage(3, 1, 4)),
             ]
@@ -897,12 +917,14 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
         self.assertEqual(result["text"], "recovered")
         self.assertEqual(result["context"]["api_context_retries"], 1)
-        self.assertEqual(len(provider.requests), 7)
+        self.assertEqual(len(provider.requests), 9)
         archive_path = find_window(root, "alice", "cli", "retry")
         self.assertIsNotNone(archive_path)
         archive = load_window(archive_path)
         _, runtime = load_runtime_window(archive_path, archive)
         self.assertEqual(archive["data"]["rounds"], 4)
+        self.assertEqual(archive["data"]["memory_processed_round"], 3)
+        self.assertEqual(archive["data"]["memory_status"], "deferred")
         self.assertEqual(runtime["data"]["rounds"], 4)
 
     def test_cli_stream_reasoning_json_and_interrupt(self) -> None:

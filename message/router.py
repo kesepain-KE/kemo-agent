@@ -15,7 +15,9 @@ from message.state import ProcessedMessageStore
 from message.transport import TransportRegistry
 from provider.factory import create_provider
 from run.engine import iter_request_events
+from run.history import clear_session, queue_memory_extraction
 from run.history_index import (
+    close_session as close_history_session,
     get_or_reserve_active as get_or_reserve_history_session,
 )
 from run.tools import ToolRegistry, discover_tools
@@ -52,6 +54,23 @@ def _session_lock(root: Path, user: str, source: str, session_id: str) -> thread
     key = (str(root.resolve()).casefold(), user, source, session_id)
     with _SESSION_LOCKS_GUARD:
         return _SESSION_LOCKS.setdefault(key, threading.RLock())
+
+
+def _slash_command(text: str) -> tuple[str, str] | None:
+    parts = text.strip().split(maxsplit=1)
+    if not parts or not parts[0].startswith("/"):
+        return None
+    return (
+        parts[0].split("@", 1)[0].casefold(),
+        parts[1].strip() if len(parts) > 1 else "",
+    )
+
+
+def _new_session_command_title(text: str, default: str) -> str | None:
+    command = _slash_command(text)
+    if command is None or command[0] != "/new":
+        return None
+    return command[1][:80] or default
 
 
 class MessageRouter:
@@ -267,8 +286,113 @@ class MessageRouter:
             chunks: list[str] = []
             terminal_seen = False
             route_error: dict[str, Any] | None = None
-            lock = _session_lock(self.root, user, source, session_id)
+            lock = _session_lock(self.root, user, source, active_key)
             with lock:
+                active_record, _ = get_or_reserve_history_session(
+                    self.root,
+                    user,
+                    source,
+                    active_key,
+                    preferred_session_id=legacy_session_id,
+                    title=f"{envelope.platform} · {envelope.chat_type}",
+                )
+                session_id = str(active_record.get("session_id") or legacy_session_id)
+                result.session_id = session_id
+                request["session_id"] = session_id
+                slash_command = _slash_command(envelope.text)
+                command_title = _new_session_command_title(
+                    envelope.text,
+                    f"{envelope.platform} · {envelope.chat_type}",
+                )
+                if command_title is not None:
+                    memory = queue_memory_extraction(
+                        self.root,
+                        user,
+                        source,
+                        session_id,
+                    )
+                    closed = close_history_session(
+                        self.root,
+                        user,
+                        source,
+                        session_id,
+                    )
+                    if closed is None:
+                        raise MessageRouteError(f"会话不存在：{session_id}")
+                    next_record, _ = get_or_reserve_history_session(
+                        self.root,
+                        user,
+                        source,
+                        active_key,
+                        title=command_title,
+                    )
+                    next_session_id = str(next_record.get("session_id") or "")
+                    text = "当前对话已保存，已创建并切换到新对话。"
+                    if memory.get("status") == "queued":
+                        text += "旧对话记忆将在后台继续提取。"
+                    outbound = OutboundMessage.reply(
+                        envelope,
+                        text,
+                        metadata={
+                            "user": user,
+                            "source": source,
+                            "session_id": next_session_id,
+                            "previous_session_id": session_id,
+                            "memory": memory,
+                            **(
+                                {
+                                    "message_queue_token": envelope.metadata[
+                                        "message_queue_token"
+                                    ]
+                                }
+                                if envelope.metadata.get("message_queue_token")
+                                else {}
+                            ),
+                        },
+                    )
+                    registered.transport.send(outbound)
+                    result.session_id = next_session_id
+                    result.status = "completed"
+                    result.text = text
+                    result.outbound = outbound
+                    store.complete_many(dedupe_keys, status="completed")
+                    self._notify_result(result)
+                    return result
+                if slash_command is not None:
+                    command_name, _ = slash_command
+                    if command_name == "/clear":
+                        clear_session(self.root, user, source, session_id)
+                        text = "当前对话已清空。"
+                    else:
+                        text = (
+                            f"未知指令：{command_name}。"
+                            "目前支持：/new、/clear。"
+                        )
+                    outbound = OutboundMessage.reply(
+                        envelope,
+                        text,
+                        metadata={
+                            "user": user,
+                            "source": source,
+                            "session_id": session_id,
+                            **(
+                                {
+                                    "message_queue_token": envelope.metadata[
+                                        "message_queue_token"
+                                    ]
+                                }
+                                if envelope.metadata.get("message_queue_token")
+                                else {}
+                            ),
+                        },
+                    )
+                    registered.transport.send(outbound)
+                    result.status = "completed"
+                    result.text = text
+                    result.outbound = outbound
+                    store.complete_many(dedupe_keys, status="completed")
+                    self._notify_result(result)
+                    return result
                 for event in self.event_source(
                     request,
                     root=self.root,

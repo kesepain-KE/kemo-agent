@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -68,6 +69,7 @@ def execute_plan(
     tool_registry: ToolRegistry | None = None,
     cancel_event: threading.Event | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,
+    agent_event_source: Callable[[dict[str, Any]], Iterator[RunEvent]] | None = None,
 ) -> Iterator[RunEvent]:
     """Execute a plan step by step, yielding events.
 
@@ -79,7 +81,7 @@ def execute_plan(
     leftover ``running`` steps to ``pending`` and pauses the plan.
     """
     cfg = config or load_config(user, root)
-    if tool_registry is None:
+    if agent_event_source is None and tool_registry is None:
         tool_config = cfg.get("tools") or {}
         tool_registry = (
             apply_runtime_tool_policy(discover_tools(root, user), cfg)
@@ -108,7 +110,14 @@ def execute_plan(
         # 如果仍然获得批准，则过渡到运行
     if plan["status"] == "approved":
         try:
-            plan = store.update(plan_id, lambda p: {**p, "status": "running"})
+            def _claim(p: dict[str, Any]) -> dict[str, Any]:
+                if p.get("status") != "approved":
+                    raise PlanExecutionError(
+                        f"计划 {plan_id} 已被其他执行器领取或状态已变化"
+                    )
+                return {**p, "status": "running"}
+
+            plan = store.update(plan_id, _claim)
         except (PlanError, PlanValidationError) as exc:
             yield error_event(exc, phase="plan_status")
             return
@@ -212,7 +221,85 @@ def execute_plan(
         result_payload: Any
         error_payload: dict[str, Any] | None = None
 
-        if tool_name is None:
+        if agent_event_source is not None:
+            control_prompt = (
+                "【任务计划自动执行】\n"
+                f"计划 ID：{plan_id}\n"
+                f"当前步骤：{step_id} - {step.get('title', '')}\n"
+                f"步骤说明：{step.get('description', '')}\n"
+                f"计划工具：{tool_name or '由主智能体判断'}\n"
+                f"计划参数：{json.dumps(tool_arguments, ensure_ascii=False)}\n\n"
+                "完整活跃计划已注入系统提示词。只执行当前步骤，不要执行后续步骤，"
+                "不要创建或编辑任务计划。可以根据实际环境修正工具或参数；"
+                "完成当前步骤后简要报告结果。"
+            )
+            agent_request = {
+                "user": user,
+                "source": str(plan.get("source") or "web"),
+                "session_id": str(plan.get("session_id") or f"plan:{plan_id}"),
+                "prompt": control_prompt,
+                "stream": True,
+                "run_id": f"plan_run_{uuid.uuid4().hex}",
+                "_task_plan_id": plan_id,
+                "_task_plan_step_id": step_id,
+            }
+            assistant_text: list[str] = []
+            agent_tools: list[dict[str, Any]] = []
+            agent_error: dict[str, Any] | None = None
+            terminal_done = False
+            for agent_event in agent_event_source(agent_request):
+                agent_event.metadata.setdefault("plan_id", plan_id)
+                agent_event.metadata.setdefault("step_id", step_id)
+                agent_event.metadata.setdefault("background_plan_run", True)
+                if agent_event.type == "text_delta":
+                    assistant_text.append(agent_event.content)
+                elif agent_event.type == "tool_call_result":
+                    succeeded = bool(
+                        (isinstance(agent_event.result, dict) and agent_event.result.get("ok"))
+                        or agent_event.metadata.get("status") in {"completed", "success"}
+                    )
+                    agent_tools.append(
+                        {
+                            "name": agent_event.tool_name,
+                            "status": "completed" if succeeded else "failed",
+                        }
+                    )
+                elif agent_event.type == "error":
+                    agent_error = dict(agent_event.error or {})
+                elif agent_event.type == "done":
+                    terminal_done = True
+                if agent_event.type not in {"done", "error"}:
+                    yield agent_event
+            if agent_error is not None:
+                status = "failed"
+                error_payload = agent_error
+                result_payload = {"ok": False, "error": error_payload}
+            elif not terminal_done:
+                status = "failed"
+                error_payload = {
+                    "message": "主智能体执行未产生完成事件",
+                    "exception_type": "PlanAgentRunIncomplete",
+                }
+                result_payload = {"ok": False, "error": error_payload}
+            elif tool_name is not None and not any(
+                item["status"] == "completed" for item in agent_tools
+            ):
+                status = "failed"
+                error_payload = {
+                    "message": "主智能体未成功执行任何工具",
+                    "exception_type": "PlanAgentToolMissing",
+                }
+                result_payload = {"ok": False, "error": error_payload}
+            else:
+                status = "completed"
+                result_payload = {
+                    "ok": True,
+                    "result": {
+                        "assistant": "".join(assistant_text)[-4000:],
+                        "tool_calls": agent_tools,
+                    },
+                }
+        elif tool_name is None:
             status = "completed"
             result_payload = {"ok": True, "result": None}
         else:

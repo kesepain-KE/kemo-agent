@@ -2,9 +2,9 @@
 
 - **名称**: context_manage
 - **触发**: 三种场景 — ① 对话轮次 ≥ `global_config.json → agents.max_rounds` ② Token 超限（≥ `agents.token_limit`）/ API 报 context_length_exceeded / 用户手动 /compress ③ 逐轮检查中某轮距离当前轮超过 `agents.conserved_rounds`
-- **职责**: 按完整对话轮执行上下文压缩与记忆提取编排 — 裁剪旧轮次 → 调 self_improve 提取记忆 → 自身生成结构化摘要写回历史；逐轮压缩工具日志与思考过程
+- **职责**: 按完整对话轮执行上下文压缩 — 引擎游标先完成延期记忆提取 → 自身生成结构化摘要写回临时历史；逐轮压缩工具日志与思考过程
 - **模型**: cheap
-- **编排**: executor 在摘要生成前同步调用 self_improve，并等待记忆候选持久化完成
+- **编排**: 正式引擎先推进 `memory_processed_round`，再以 `skip_memory_extraction=true` 调用摘要 executor，禁止重复提取
 
 # 操作信息
 
@@ -21,8 +21,9 @@
 `对话轮次 ≥ agents.max_rounds`
 
 1. 读取 `agents.rounds_after_compression`，裁剪量 = `max_rounds - rounds_after_compression`
-2. 裁剪最旧 N 轮 → 调用 self_improve 提取记忆
-3. 自身将裁剪轮次压缩为一轮对话摘要，拼接到保留的最旧轮次之后
+2. **前置**：引擎沿会话游标先完成延期记忆提取（self_improve），传入 `skip_memory_extraction=true`
+3. 裁剪最旧 N 轮
+4. 自身将裁剪轮次压缩为一轮对话摘要，拼接到保留的最旧轮次之后
 
 ### 场景二：Token 超限
 
@@ -32,8 +33,9 @@
 - 用户手动 /compress
 
 1. 读取 `agents.token_compression_ratio`，目标 = (总 Token - 系统提示词 Token) × 比例
-2. 从旧到新裁剪完整轮次直到满足目标
-3. 调用 self_improve → 自身生成摘要 → 写回
+2. **前置**：引擎游标先完成延期记忆提取（self_improve），传入 `skip_memory_extraction=true`
+3. 从旧到新裁剪完整轮次直到满足目标
+4. 自身生成摘要 → 写回
 
 ### 场景三：工具日志/思考压缩
 
@@ -70,6 +72,6 @@
 
 - 所有阈值从 `config/global_config.json → agents` 读取，不硬编码
 - 不直接修改 archive，所有压缩产物写入 temp
-- executor 必须先同步调 self_improve 并持久化记忆候选，再生成摘要（确保记忆不丢失）
+- 正式引擎必须先持久化游标记忆提取结果，再让 executor 只生成摘要
 - 工具/思考压缩是逐轮进行的，不会批量压缩多轮
-- self_improve 调用是同步的，等其返回后才继续
+- 记忆游标逐轮同步推进；失败停在当前轮，后续由恢复机制重试

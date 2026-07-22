@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Activity,
   CheckCircle2,
@@ -26,7 +28,7 @@ import {
   setSenseModuleEnabled,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
-import { EmptyPanel, ModuleError, ModuleFrame } from '../components/ModuleUi'
+import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton } from '../components/ModuleUi'
 import type { SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import styles from './SensePage.module.css'
@@ -85,7 +87,7 @@ function MarkdownPane({
       </button>
     </header>
     {content
-      ? <pre>{content}</pre>
+      ? <div className={styles.markdownContent}><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>
       : <div className={styles.markdownEmpty}><Eye size={20} /><span>{empty}</span></div>}
   </section>
 }
@@ -176,9 +178,7 @@ export function SensePage() {
     title="感知"
     description="全局感知模块通过标准 Markdown 数据文件热加载；模块负责采集信息并注入系统提示词，当前用户配置中的白名单决定最终启用范围。"
     actions={<>
-      <button className="module-btn" type="button" onClick={() => void query.refetch()} disabled={query.isFetching}>
-        <RefreshCw className={query.isFetching ? styles.spinning : ''} size={15} />重新读取
-      </button>
+      <RefreshActionButton pending={query.isFetching} label="重新读取" pendingLabel="读取中…" onClick={() => { void query.refetch() }} />
       <button className="module-btn primary" type="button" onClick={() => setGuideOpen((current) => !current)}>
         <Plus size={15} />注册感知模块
       </button>

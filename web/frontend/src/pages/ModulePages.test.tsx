@@ -47,6 +47,8 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('heading', { name: '任务中枢' })).toBeInTheDocument()
     expect(await screen.findByText('暂无任务计划')).toBeInTheDocument()
     expect(screen.getAllByText('定时任务').length).toBeGreaterThan(0)
+    expect(screen.getByText('选择一个计划')).toBeInTheDocument()
+    expect(screen.queryByText('提示：选择未运行或已完成的计划查看详情')).not.toBeInTheDocument()
   })
 
   it('定时任务和执行记录使用统一双栏卡片并按状态限制操作', async () => {
@@ -111,6 +113,7 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('共享笔记')).toBeInTheDocument()
     expect(screen.getAllByText('共享层').length).toBeGreaterThan(0)
     expect(screen.getByText('编辑查看')).toBeInTheDocument()
+    expect(screen.queryByText(/当前显示\s+\d+\s*\/\s*\d+/)).not.toBeInTheDocument()
     expect(screen.queryByText('外接项目 · kemo-graph')).not.toBeInTheDocument()
     expect(screen.queryByText('知识集合')).not.toBeInTheDocument()
   })
@@ -130,6 +133,26 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存编辑' }))
     expect(await screen.findByText('当前知识文件已更新，请提醒智能体刷新索引')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '我知道了，不用刷新' })).toBeInTheDocument()
+  })
+
+  it('临时重要记忆直接展示单文件编辑器而不展示记忆列表', async () => {
+    server.use(http.get('/api/users/kesepain/memory/important', () => HttpResponse.json({
+      user: 'kesepain',
+      path: 'users/kesepain/memory_temporary_important.md',
+      content: '# 临时重要记忆\n\n需要直接编辑的内容。',
+      size: 24,
+      updated_at: '2026-07-22T16:46:02+08:00',
+    })))
+    renderPage('memory')
+    await screen.findByRole('heading', { name: '记忆' })
+    fireEvent.click(await screen.findByRole('button', { name: '临时重要记忆' }))
+
+    await waitFor(() => expect(screen.getByPlaceholderText('输入记忆内容……')).toHaveValue('# 临时重要记忆\n\n需要直接编辑的内容。'))
+    expect(screen.queryByPlaceholderText('搜索当前记忆栏……')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '关闭编辑查看' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Markdown 预览/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /保存编辑/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /删除此记忆/ })).not.toBeInTheDocument()
   })
 
   it('技能页展示五类库存、查看面板和按归属区分的操作', async () => {
@@ -183,7 +206,7 @@ describe('V16 module pages', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '拼接组件状态' }))
     expect(await screen.findByText('用户人格')).toBeInTheDocument()
-    expect(screen.getByText('users/kesepain/user_soul.md')).toBeInTheDocument()
+    expect(screen.queryByText('users/kesepain/user_soul.md')).not.toBeInTheDocument()
 
     fireEvent.click(sectionTabs.getByRole('tab', { name: '今日 Token 情况' }))
     expect(await screen.findByText('327,845')).toBeInTheDocument()
@@ -213,7 +236,7 @@ describe('V16 module pages', () => {
       user: 'kesepain',
       summary: { total: deleted ? 1 : 2, enabled: deleted ? 1 : 2, global: 1, user: deleted ? 0 : 1 },
       agents: [
-        { name: 'context_manage', version: '1.2.0', description: '上下文管理子代理', enabled: true, source: 'global', trigger: '上下文接近上限时', rules: '# context_manage\n\n压缩并保留关键事实。', executor: 'executor.py:execute', execution: 'sync', model_profile: 'cheap', exposure: 'tool', root: 'agents/context_manage', files: [] },
+        { name: 'context_manage', version: '1.2.0', description: '上下文管理子代理', enabled: true, source: 'global', trigger: '上下文接近上限时', rules: '# context_manage\n\n压缩并保留关键事实。\n\n| 场景 | 动作 |\n| --- | --- |\n| Token 超限 | 压缩旧轮次 |', executor: 'executor.py:execute', execution: 'sync', model_profile: 'cheap', exposure: 'tool', root: 'agents/context_manage', files: [] },
         ...(deleted ? [] : [{ name: 'custom_agent', version: '1.0.0', description: '用户自定义子代理', enabled: true, source: 'user', trigger: '用户明确指定时', rules: '# custom_agent\n\n按用户规则处理输入。', executor: 'builtin:llm', execution: 'sync', model_profile: 'default', exposure: 'tool', root: 'users/kesepain/agents/custom_agent', files: [] }]),
       ],
     })
@@ -230,16 +253,25 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('上下文接近上限时')).toBeInTheDocument()
     expect(screen.getAllByText('v1.2.0').length).toBeGreaterThan(0)
     expect(screen.getByText(/压缩并保留关键事实/)).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { name: 'context_manage' }).some((heading) => heading.tagName === 'H1')).toBe(true)
+    expect(screen.getByRole('table')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /复制子智能体名称 context_manage/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
+    const summary = screen.getByRole('region', { name: '子智能体统计' })
+    expect(within(within(summary).getByText('已发现').closest('article')!).getByText('1')).toBeInTheDocument()
+    expect(within(within(summary).getByText('已启用').closest('article')!).getByText('1')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /用户层/ }))
     expect((await screen.findAllByText('用户自定义子代理')).length).toBeGreaterThan(0)
+    expect(within(within(summary).getByText('已发现').closest('article')!).getByText('1')).toBeInTheDocument()
+    expect(within(summary).getByText('当前层级子智能体总数')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '删除' }))
     expect(screen.getByRole('alertdialog', { name: '确认删除用户子智能体' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('已删除用户子智能体 custom_agent')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('用户层暂无子智能体')).toBeInTheDocument())
+    expect(within(within(summary).getByText('已发现').closest('article')!).getByText('0')).toBeInTheDocument()
+    expect(within(within(summary).getByText('已启用').closest('article')!).getByText('0')).toBeInTheDocument()
   })
 
   it('配置页使用六个纵向栏目并提供结构化字段编辑', async () => {
@@ -287,6 +319,14 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '运行限制 ›' }))
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
     expect(screen.getByRole('switch', { name: '自动接受任务计划' })).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '重启智能体' }))
+    const restartDialog = screen.getByRole('alertdialog', { name: '确认重启智能体' })
+    expect(restartDialog).toBeInTheDocument()
+    expect(restartDialog.parentElement?.parentElement).toBe(document.body)
+    expect(screen.getByText('您确定要重启吗？')).toBeInTheDocument()
+    expect(screen.getByText(/智能体在执行任务时重启可能会出现故障/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '确认重启' }))
+    expect(await screen.findByText(/重启请求已提交/)).toBeInTheDocument()
   })
 
   it('文件空间支持逐层目录、分区搜索与严格的区域操作权限', async () => {
@@ -343,10 +383,22 @@ describe('V16 module pages', () => {
     expect(screen.getByText('message/out/onebot/files')).toBeInTheDocument()
     expect(screen.getByText('消息日志')).toBeInTheDocument()
     expect(screen.getByText('请查看今日任务')).toBeInTheDocument()
+    expect(screen.getByText('1 / 2')).toBeInTheDocument()
+    expect(screen.getByText('历史日志 10')).toBeInTheDocument()
+    expect(screen.queryByText('历史日志 11')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页日志' }))
+    expect(await screen.findByText('历史日志 11')).toBeInTheDocument()
+    expect(screen.queryByText('请查看今日任务')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '文件' }))
     expect(await screen.findByText('meeting_notes.docx')).toBeInTheDocument()
     expect(screen.queryByText('请查看今日任务')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '检测连接' }))
+    expect(screen.getByText('1 / 1')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上一页日志' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '下一页日志' })).toBeDisabled()
+    const connectionButtons = screen.getAllByRole('button', { name: '检测连接' })
+    expect(connectionButtons).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: '查看日志' })).not.toBeInTheDocument()
+    fireEvent.click(connectionButtons[0])
     expect(await screen.findByText('onebot 连接状态已更新')).toBeInTheDocument()
   })
 
@@ -366,6 +418,7 @@ describe('V16 module pages', () => {
   it('新增独立栏目拥有各自页面', async () => {
     renderPage('memory')
     expect(await screen.findByRole('heading', { name: '记忆' })).toBeInTheDocument()
+    expect(screen.queryByText(/^共\s*\d+\s*条$/)).not.toBeInTheDocument()
   })
 
   it('用户资料读取并原子保存人格 Markdown', async () => {

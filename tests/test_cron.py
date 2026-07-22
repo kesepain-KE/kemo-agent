@@ -237,14 +237,17 @@ class ExecutorTests(unittest.TestCase):
 
     def test_agent_mode_enters_handle_request(self) -> None:
         task = self._create()
+        transport_registry = object()
         with patch("cron.executor.handle_request", return_value={"text": "ok"}) as handled:
             result = execute_cron_task(
                 root=self.root, user="alice", task_id=task["task_id"], config={},
+                transport_registry=transport_registry,
             )
         request = handled.call_args.args[0]
         self.assertEqual(request["source"], f"background:cron:{task['task_id']}")
         self.assertTrue(request["session_id"].startswith("conv_"))
         self.assertEqual(request["prompt"], "do work")
+        self.assertIs(request["_transport_registry"], transport_registry)
         self.assertEqual(result["status"], "enabled")
         self.assertTrue(result["latest_run_at"].endswith("+08:00"))
 
@@ -521,10 +524,18 @@ class SchedulerTests(unittest.TestCase):
             interval_seconds=60,
             next_run_at=(datetime.now(BEIJING) - timedelta(seconds=1)).isoformat(),
         ))
+        transport_registry = object()
         with patch("cron.scheduler.execute_cron_task", return_value=task) as execute:
-            count = CronScheduler(self.root).scan_once()
+            count = CronScheduler(
+                self.root,
+                transport_registry=transport_registry,
+            ).scan_once()
         self.assertEqual(count, 1)
         execute.assert_called_once()
+        self.assertIs(
+            execute.call_args.kwargs["transport_registry"],
+            transport_registry,
+        )
 
     def test_scan_system_task_runs_for_every_user_then_advances_once(self) -> None:
         for user in ("alice", "bob"):

@@ -58,7 +58,7 @@ from run.cron_store import (
     normalize_task,
 )
 from run.engine import (
-    _extract_round_memory,
+    _extract_memory_backlog,
     _session_lock,
     compress_context,
     iter_request_events,
@@ -72,6 +72,7 @@ from run.history import (
     find_window,
     list_sessions,
     load_window,
+    queue_memory_extraction,
     rename_session as rename_history_session,
     runtime_window_path,
     session_messages,
@@ -83,7 +84,6 @@ from run.history_index import (
     get_or_reserve_active as get_or_reserve_index_session,
     new_conversation_id,
     reserve_session,
-    update_memory_state,
 )
 from run.memory import (
     TIERS,
@@ -93,7 +93,6 @@ from run.memory import (
     normalize_memory_filename,
     utc_now,
 )
-from run.memory_pipeline import memory_round_payload
 from run.prompt import (
     PROMPT_SECTION_ORDER,
     build_prompt_bundle,
@@ -120,7 +119,7 @@ _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
-FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+FILE_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
 TEXT_DOCUMENT_MAX_CHARS = 1_000_000
 IMPORTANT_MEMORY_MAX_HARD_CHARS = 65_536
 _CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
@@ -172,6 +171,7 @@ _CONFIG_SOURCE_PATHS = (
     "tools.enabled",
     "tools.max_iterations",
     "tools.timeout",
+    "memory.extraction_mode",
     "memory.history_read_enabled",
     "memory.temporary_injection_limits.half_year",
     "memory.temporary_injection_limits.one_month",
@@ -656,6 +656,7 @@ class WebRunService:
         runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
         message_health_checker: Callable[[str, str], dict[str, Any]] | None = None,
         message_transport_remover: Callable[[str, str], None] | None = None,
+        plan_waker: Callable[[], None] | None = None,
         router_ref: Any | None = None,
     ) -> None:
         self.root = root.resolve()
@@ -664,6 +665,7 @@ class WebRunService:
         self.runtime_status_provider = runtime_status_provider
         self.message_health_checker = message_health_checker
         self.message_transport_remover = message_transport_remover
+        self.plan_waker = plan_waker
         self._router_ref = router_ref
         self._active_runs: dict[str, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
@@ -783,6 +785,10 @@ class WebRunService:
         if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id.strip()):
             raise InvalidRequestError("run_id 必须是 8–128 位字母、数字、下划线或连字符")
         return run_id.strip()
+
+    def has_active_runs(self) -> bool:
+        with self._active_runs_lock:
+            return bool(self._active_runs)
 
     def submit_guidance(self, user: Any, run_id: Any, guidance: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -2195,6 +2201,12 @@ class WebRunService:
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再关闭")
+            memory = queue_memory_extraction(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+            )
             record = close_index_session(
                 self.root,
                 name,
@@ -2208,6 +2220,7 @@ class WebRunService:
             "source": normalized_source,
             "session_id": normalized_session,
             "closed": True,
+            "memory": memory,
             "session": self._index_session_payload(record),
         }
 
@@ -2317,35 +2330,36 @@ class WebRunService:
         context = result.get("context") if isinstance(result.get("context"), dict) else {}
         rounds_removed = max(0, int(context.get("rounds_removed") or 0))
         summary_cache = str(result.get("summary_cache") or "")
-        try:
-            memory = self.extract_session_memory(
-                name,
-                normalized_session,
-                source=normalized_source,
-            )
-        except Exception as exc:
-            # Context compression has already completed at this point.  Keep
-            # the archived rounds pending for background recovery and expose
-            # the independent memory failure instead of reporting the whole
-            # compression request as if it had never run.
-            memory = {
-                "status": "failed",
-                "reason": "memory_extraction_error",
-                "user": name,
-                "source": normalized_source,
-                "session_id": normalized_session,
-                "round": 0,
-                "candidates": 0,
-                "extraction": None,
-                "extractions": [],
-                "retry_pending": True,
-                "error": {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                },
-            }
+        raw_memory = result.get("memory")
+        if isinstance(raw_memory, dict):
+            memory = dict(raw_memory)
         else:
-            memory["retry_pending"] = memory.get("status") == "failed"
+            try:
+                memory = self.extract_session_memory(
+                    name,
+                    normalized_session,
+                    source=normalized_source,
+                )
+            except Exception as exc:
+                # A custom compressor may not implement the unified cursor
+                # pipeline.  Preserve compression success and expose the
+                # independent extraction failure for background recovery.
+                memory = {
+                    "status": "failed",
+                    "reason": "memory_extraction_error",
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                    "round": 0,
+                    "candidates": 0,
+                    "extraction": None,
+                    "extractions": [],
+                    "error": {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    },
+                }
+        memory["retry_pending"] = memory.get("status") == "failed"
         return {
             "user": name,
             "source": normalized_source,
@@ -2365,7 +2379,7 @@ class WebRunService:
         *,
         source: Any = "web",
     ) -> dict[str, Any]:
-        """Extract memory candidates from the newest complete archived round."""
+        """Extract every unprocessed archived round through the durable cursor."""
 
         name = self.require_user(user)
         normalized_source = self.require_source(source)
@@ -2387,150 +2401,31 @@ class WebRunService:
 
         with _session_lock(self.root, name, normalized_source, normalized_session):
             window = load_window(directory)
-            data = window.setdefault("data", {})
-            rounds = max(0, int(data.get("rounds") or 0))
-            if rounds < 1:
-                return {
-                    "status": "skipped",
-                    "reason": "no_complete_round",
-                    "user": name,
-                    "source": normalized_source,
-                    "session_id": normalized_session,
-                    "round": rounds,
-                    "candidates": 0,
-                    "extraction": None,
-                    "extractions": [],
-                }
-
-            raw_cursor = data.get("memory_processed_round")
-            processed_round = (
-                max(0, int(raw_cursor or 0))
-                if raw_cursor is not None
-                else max(0, rounds - 1)
-            )
-            if processed_round >= rounds:
-                return {
-                    "status": "skipped",
-                    "reason": "already_processed",
-                    "user": name,
-                    "source": normalized_source,
-                    "session_id": normalized_session,
-                    "round": rounds,
-                    "candidates": 0,
-                    "extraction": None,
-                    "extractions": [],
-                }
-
+            if max(0, int((window.get("data") or {}).get("rounds") or 0)) < 1:
+                return _extract_memory_backlog(
+                    root=self.root,
+                    user=name,
+                    source=normalized_source,
+                    session_id=normalized_session,
+                    directory=directory,
+                    window=window,
+                    config={},
+                    agent_runner=None,
+                    cancel_event=None,
+                )
             config = load_config(name, self.root)
             runner = AgentRunner(self.root, name, config=config)
-            data["memory_processed_round"] = processed_round
-            data["memory_status"] = "processing"
-            data.pop("memory_error", None)
-            commit_window(directory, window)
-            index_error: dict[str, Any] | None = None
-            try:
-                update_memory_state(
-                    self.root,
-                    name,
-                    normalized_source,
-                    normalized_session,
-                    status="processing",
-                )
-            except Exception as exc:
-                index_error = {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
-
-            extractions: list[dict[str, Any]] = []
-            candidates = 0
-            for round_number in range(processed_round + 1, rounds + 1):
-                try:
-                    extraction = _extract_round_memory(
-                        root=self.root,
-                        user=name,
-                        config=config,
-                        round_number=round_number,
-                        agent_runner=runner,
-                        cancel_event=None,
-                        **memory_round_payload(window, round_number),
-                    )
-                except Exception as exc:
-                    extraction = {
-                        "status": "failed",
-                        "candidate_count": 0,
-                        "error": {
-                            "message": str(exc),
-                            "exception_type": type(exc).__name__,
-                        },
-                    }
-                extractions.append(extraction)
-                if extraction.get("status") != "completed":
-                    error = (
-                        extraction.get("error")
-                        if isinstance(extraction.get("error"), dict)
-                        else {"message": "记忆提取失败"}
-                    )
-                    data["memory_status"] = "failed"
-                    data["memory_error"] = error
-                    commit_window(directory, window)
-                    try:
-                        update_memory_state(
-                            self.root,
-                            name,
-                            normalized_source,
-                            normalized_session,
-                            status="failed",
-                            error=error,
-                        )
-                    except Exception as exc:
-                        index_error = index_error or {
-                            "message": str(exc),
-                            "exception_type": type(exc).__name__,
-                        }
-                    return {
-                        "status": "failed",
-                        "user": name,
-                        "source": normalized_source,
-                        "session_id": normalized_session,
-                        "round": round_number,
-                        "candidates": candidates,
-                        "extraction": extraction,
-                        "extractions": extractions,
-                        "index_error": index_error,
-                    }
-                candidates += int(extraction.get("candidate_count") or 0)
-                data["memory_processed_round"] = round_number
-                data["memory_status"] = (
-                    "completed" if round_number >= rounds else "processing"
-                )
-                data.pop("memory_error", None)
-                commit_window(directory, window)
-                try:
-                    update_memory_state(
-                        self.root,
-                        name,
-                        normalized_source,
-                        normalized_session,
-                        processed_round=round_number,
-                        status=str(data["memory_status"]),
-                    )
-                except Exception as exc:
-                    index_error = index_error or {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-            return {
-                "status": "completed",
-                "user": name,
-                "source": normalized_source,
-                "session_id": normalized_session,
-                "round": rounds,
-                "candidates": candidates,
-                "extraction": extractions[-1],
-                "extractions": extractions,
-                "index_error": index_error,
-            }
+            return _extract_memory_backlog(
+                root=self.root,
+                user=name,
+                source=normalized_source,
+                session_id=normalized_session,
+                directory=directory,
+                window=window,
+                config=config,
+                agent_runner=runner,
+                cancel_event=None,
+            )
 
     def undo_last_round(
         self,
@@ -2851,6 +2746,8 @@ class WebRunService:
             stored = PlanStore(self.root, name).create(plan)
         except (PlanError, KeyError, TypeError, ValueError) as exc:
             raise InvalidRequestError(f"计划校验失败：{exc}") from None
+        if stored.get("status") == "approved" and self.plan_waker is not None:
+            self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
 
     def update_plan(self, user: Any, plan_id: Any, payload: Any) -> dict[str, Any]:
@@ -2885,6 +2782,8 @@ class WebRunService:
             raise ConflictError(str(exc)) from None
         except (PlanError, KeyError, TypeError, ValueError) as exc:
             raise InvalidRequestError(f"计划校验失败：{exc}") from None
+        if stored.get("status") == "approved" and self.plan_waker is not None:
+            self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
 
     def delete_plan(self, user: Any, plan_id: Any) -> dict[str, Any]:
@@ -3735,8 +3634,15 @@ class WebRunService:
                     "filename": str(item.get("filename") or ""),
                     "tier": str(item.get("tier") or ""),
                     "weight": int(item.get("weight") or 0),
+                    "created_at": str(item.get("created_at") or ""),
+                    "content_updated_at": str(
+                        item.get("content_updated_at") or item.get("updated_at") or ""
+                    ),
                     "updated_at": str(item.get("updated_at") or ""),
+                    "last_used_at": item.get("last_used_at"),
+                    "tier_entered_at": item.get("tier_entered_at"),
                     "expires_at": item.get("expires_at"),
+                    "timezone": "UTC",
                     "preview": content[:160],
                     "truncated": len(content) > 160,
                 }
@@ -3813,7 +3719,11 @@ class WebRunService:
                 _atomic_write(scoped_existing.path, text.encode("utf-8"))
                 try:
                     if scoped_existing.indexed:
-                        store._touch_temporary(scoped_existing, utc_now())
+                        store._touch_temporary(
+                            scoped_existing,
+                            utc_now(),
+                            content_changed=True,
+                        )
                 except Exception:
                     _atomic_write(scoped_existing.path, previous)
                     raise
@@ -3910,6 +3820,8 @@ class WebRunService:
             content,
             max_chars=min(IMPORTANT_MEMORY_MAX_HARD_CHARS, max(1, configured_limit)),
         )
+        if not text.strip():
+            raise InvalidRequestError("临时重要记忆内容不能为空")
         if contains_sensitive_credential(text):
             raise InvalidRequestError("临时重要记忆包含疑似敏感凭据，已拒绝写入")
         path = self.root / "users" / name / "memory_temporary_important.md"
@@ -3923,18 +3835,6 @@ class WebRunService:
                 path.stat().st_mtime, timezone.utc
             ).astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
             "updated": True,
-        }
-
-    def delete_important_memory(self, user: Any) -> dict[str, Any]:
-        name = self.require_user(user)
-        path = self.root / "users" / name / "memory_temporary_important.md"
-        if not path.is_file():
-            raise NotFoundError("临时重要记忆不存在")
-        path.unlink()
-        return {
-            "user": name,
-            "path": f"users/{name}/memory_temporary_important.md",
-            "deleted": True,
         }
 
     def _current_context_status(

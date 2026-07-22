@@ -156,6 +156,44 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
 
+    def test_restart_endpoint_launches_detached_helper_for_requested_port(self) -> None:
+        _, root = self.make_root()
+        app = create_app(root=root, service=FakeService())
+        with patch("web.app._spawn_restart_helper", return_value=4321) as launcher:
+            response = self.request(
+                app,
+                "POST",
+                "/api/system/restart",
+                json={"port": 1360},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"ok": True, "port": 1360, "helper_pid": 4321})
+        launcher.assert_called_once_with(root.resolve(), 1360)
+
+    def test_restart_endpoint_rejects_invalid_port_and_active_chat(self) -> None:
+        invalid = self.request(
+            create_app(service=FakeService()),
+            "POST",
+            "/api/system/restart",
+            json={"port": 0},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+        class ActiveService(FakeService):
+            def has_active_runs(self) -> bool:
+                return True
+
+        with patch("web.app._spawn_restart_helper") as launcher:
+            active = self.request(
+                create_app(service=ActiveService()),
+                "POST",
+                "/api/system/restart",
+                json={"port": 1360},
+            )
+        self.assertEqual(active.status_code, 409)
+        self.assertEqual(active.json()["error"]["code"], "conflict")
+        launcher.assert_not_called()
+
     def test_agents_expose_runtime_details_and_only_delete_user_layer(self) -> None:
         _, root = self.make_root()
         create_user_agent_package(
@@ -608,6 +646,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(closed.status_code, 200)
         self.assertEqual(closed.json()["session"]["state"], "closed")
+        self.assertEqual(closed.json()["memory"]["reason"], "no_archive")
 
         replacement = self.request(app, "GET", "/api/users/alice/sessions/active")
         replacement_id = replacement.json()["session"]["session_id"]
@@ -767,7 +806,7 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch("web.service.AgentRunner", return_value=object()),
             patch(
-                "web.service._extract_round_memory",
+                "run.engine._extract_round_memory",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -861,7 +900,7 @@ class WebBackendTests(unittest.TestCase):
 
         with (
             patch("web.service.AgentRunner", return_value=object()),
-            patch("web.service._extract_round_memory", side_effect=extract) as extracted,
+            patch("run.engine._extract_round_memory", side_effect=extract) as extracted,
         ):
             app = create_app(service=WebRunService(root))
             response = self.request(
@@ -1324,8 +1363,21 @@ class WebBackendTests(unittest.TestCase):
             "DELETE",
             "/api/users/alice/memory/important",
         )
-        self.assertEqual(deleted_important.status_code, 200, deleted_important.text)
-        self.assertTrue(deleted_important.json()["deleted"])
+        self.assertEqual(deleted_important.status_code, 405, deleted_important.text)
+        cleared_important = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/memory/important",
+            json={"content": "   "},
+        )
+        self.assertEqual(cleared_important.status_code, 400, cleared_important.text)
+        preserved_important = self.request(
+            app,
+            "GET",
+            "/api/users/alice/memory/important",
+        )
+        self.assertEqual(preserved_important.status_code, 200, preserved_important.text)
+        self.assertEqual(preserved_important.json()["content"], "important context")
 
         upload = self.request(
             app,

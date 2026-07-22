@@ -5,10 +5,9 @@
 .avatarFrame img { width: 100%; height: 100%; object-fit: cover; }
 .avatarFrame span { font-size: 1.9rem; font-weight: 700; }
 .profileIdentity { min-width: 0; }
-.profileIdentity small, .profileIdentity strong, .profileIdentity span { display: block; }
+.profileIdentity small, .profileIdentity strong { display: block; }
 .profileIdentity small { color: var(--brand); font-size: .625rem; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; }
 .profileIdentity strong { margin-top: 4px; color: var(--text); font-size: 1.3rem; }
-.profileIdentity span { margin-top: 5px; color: var(--muted); font-size: .6875rem; overflow-wrap: anywhere; }
 .avatarControls { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
 .avatarControls input { display: none; }
 .avatarControls button, .editorFoot button { height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text-2); font-size: .6875rem; font-weight: 700; cursor: pointer; }
@@ -20,6 +19,7 @@
 .editorGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 12px; }
 .editorCard { min-width: 0; overflow: hidden; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
 .editorGrid > .editorCard { margin-top: 0; }
+.titleIcon { width: 20px; height: 24px; flex: 0 0 20px; display: grid; place-items: center; align-self: center; transform: translateY(2px); color: var(--brand); background: transparent; }
 .editorToolbar { min-height: 52px; padding: 8px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .editorToolbar button { height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text-2); font-size: .6875rem; font-weight: 700; cursor: pointer; }
 .editorToolbar button:hover { border-color: var(--brand-line); background: var(--surface-hover); color: var(--brand); }

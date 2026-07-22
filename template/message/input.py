@@ -217,6 +217,9 @@ async def _run_bot(token: str) -> None:
         except Exception as exc:
             print(f"[Telegram input] 消息处理异常：{exc}")
 
+    # Slash commands must reach the platform-neutral router.  Platform input
+    # modules only forward them and do not implement command semantics.
+    app.add_handler(MessageHandler(filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handler))
 
     global _BOT_APP

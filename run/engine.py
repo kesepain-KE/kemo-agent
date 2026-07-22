@@ -49,13 +49,16 @@ from run.history import (
     _trim_to_max_rounds,
     append_round_items,
     commit_window,
+    find_window,
+    load_window,
     load_runtime_window,
     prepare_window,
     runtime_window_path,
 )
 from run.history_index import set_active as set_active_history_session
 from run.history_index import update_memory_state, update_run_state
-from run.memory import MemoryStore
+from run.memory import MemoryStore, memory_extraction_mode
+from run.memory_pipeline import memory_round_payload
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from run.tools import (
@@ -876,6 +879,177 @@ def _extract_round_memory(
         }
 
 
+def _extract_memory_backlog(
+    *,
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    directory: Path,
+    window: dict[str, Any],
+    config: dict[str, Any],
+    agent_runner: AgentRunner | None,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Extract every unprocessed committed round and advance one durable cursor."""
+
+    data = window.setdefault("data", {})
+    rounds = max(0, int(data.get("rounds") or 0))
+    base_result: dict[str, Any] = {
+        "user": user,
+        "source": source,
+        "session_id": session_id,
+        "round": rounds,
+        "candidates": 0,
+        "extraction": None,
+        "extractions": [],
+        "usage": _usage_total(),
+        "index_error": None,
+    }
+    if rounds < 1:
+        return {
+            **base_result,
+            "status": "skipped",
+            "reason": "no_complete_round",
+        }
+
+    extraction_mode = memory_extraction_mode(config)
+    if extraction_mode == "disabled":
+        return {
+            **base_result,
+            "status": "skipped",
+            "reason": "memory_extraction_disabled",
+            "mode": extraction_mode,
+        }
+
+    raw_cursor = data.get("memory_processed_round")
+    processed_round = (
+        max(0, int(raw_cursor or 0))
+        if raw_cursor is not None
+        else max(0, rounds - 1)
+    )
+    if processed_round >= rounds:
+        return {
+            **base_result,
+            "status": "skipped",
+            "reason": "already_processed",
+        }
+
+    if agent_runner is None:
+        raise EngineError("记忆提取缺少 AgentRunner")
+
+    data["memory_processed_round"] = processed_round
+    data["memory_status"] = "processing"
+    data.pop("memory_error", None)
+    commit_window(directory, window)
+    index_error: dict[str, Any] | None = None
+    try:
+        update_memory_state(
+            root,
+            user,
+            source,
+            session_id,
+            status="processing",
+        )
+    except Exception as exc:
+        index_error = {
+            "message": str(exc),
+            "exception_type": type(exc).__name__,
+        }
+
+    extractions: list[dict[str, Any]] = []
+    candidates = 0
+    usage = _usage_total()
+    for round_number in range(processed_round + 1, rounds + 1):
+        try:
+            extraction = _extract_round_memory(
+                root=root,
+                user=user,
+                config=config,
+                round_number=round_number,
+                agent_runner=agent_runner,
+                cancel_event=cancel_event,
+                **memory_round_payload(window, round_number),
+            )
+        except Exception as exc:
+            extraction = {
+                "status": "failed",
+                "candidate_count": 0,
+                "error": {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                },
+            }
+        extractions.append(extraction)
+        extraction_usage = extraction.get("usage")
+        if isinstance(extraction_usage, dict):
+            _record_provider_request(usage, _usage_from_dict(extraction_usage))
+        if extraction.get("status") != "completed":
+            error = (
+                extraction.get("error")
+                if isinstance(extraction.get("error"), dict)
+                else {"message": "记忆提取失败"}
+            )
+            data["memory_status"] = "failed"
+            data["memory_error"] = error
+            commit_window(directory, window)
+            try:
+                update_memory_state(
+                    root,
+                    user,
+                    source,
+                    session_id,
+                    status="failed",
+                    error=error,
+                )
+            except Exception as exc:
+                index_error = index_error or {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+            return {
+                **base_result,
+                "status": "failed",
+                "round": round_number,
+                "candidates": candidates,
+                "extraction": extraction,
+                "extractions": extractions,
+                "usage": usage,
+                "index_error": index_error,
+            }
+
+        candidates += int(extraction.get("candidate_count") or 0)
+        data["memory_processed_round"] = round_number
+        data["memory_status"] = (
+            "completed" if round_number >= rounds else "processing"
+        )
+        data.pop("memory_error", None)
+        commit_window(directory, window)
+        try:
+            update_memory_state(
+                root,
+                user,
+                source,
+                session_id,
+                processed_round=round_number,
+                status=str(data["memory_status"]),
+            )
+        except Exception as exc:
+            index_error = index_error or {
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            }
+    return {
+        **base_result,
+        "status": "completed",
+        "candidates": candidates,
+        "extraction": extractions[-1],
+        "extractions": extractions,
+        "usage": usage,
+        "index_error": index_error,
+    }
+
+
 def _iter_request_events_impl(
     request: dict[str, Any],
     *,
@@ -898,6 +1072,7 @@ def _iter_request_events_impl(
         prompt = _content_display(content_blocks)
         source = _required_text(request, "source")
         session_id = _required_text(request, "session_id")
+        run_id = str(request.get("run_id") or "")
         base = (root or project_root()).resolve()
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
@@ -996,6 +1171,28 @@ def _iter_request_events_impl(
             )
             _ensure_fixed_content_fits(context_selection, system_message=system_message)
             summary_usage = _usage_total()
+            compression_memory: dict[str, Any] | None = None
+            compression_usage = _usage_total()
+            if force_compress or context_selection.removed_rounds:
+                compression_memory = _extract_memory_backlog(
+                    root=base,
+                    user=user,
+                    source=source,
+                    session_id=session_id,
+                    directory=window_path,
+                    window=archive_window,
+                    config=config,
+                    agent_runner=agent_runner,
+                    cancel_event=cancel_event,
+                )
+                raw_memory_usage = compression_memory.get("usage")
+                if isinstance(raw_memory_usage, dict) and raw_memory_usage.get(
+                    "provider_request_count", 0
+                ):
+                    _record_provider_request(
+                        compression_usage,
+                        _usage_from_dict(raw_memory_usage),
+                    )
             subagent_events: list[RunEvent] = []
             summary_cache = None
             summary_diagnostics: dict[str, Any] = {
@@ -1031,6 +1228,7 @@ def _iter_request_events_impl(
                         summary_usage, _usage_from_dict(raw)
                     ),
                     event_callback=subagent_events.append,
+                    skip_memory_extraction=True,
                 )
                 next_selection = select_context(
                     window=window,
@@ -1055,13 +1253,19 @@ def _iter_request_events_impl(
             for subagent_event in subagent_events:
                 yield subagent_event
             if compress_only:
+                compression_total_usage = copy.deepcopy(summary_usage)
+                if compression_usage.get("provider_request_count", 0):
+                    _record_provider_request(
+                        compression_total_usage,
+                        _usage_from_dict(compression_usage),
+                    )
                 yield RunEvent(
                     type="done",
-                    usage=dict(summary_usage),
+                    usage=dict(compression_total_usage),
                     metadata={
                         "text": "",
                         "reasoning": "",
-                        "usage": dict(summary_usage),
+                        "usage": dict(compression_total_usage),
                         "model": runtime_provider["model"],
                         "user": user,
                         "source": source,
@@ -1076,6 +1280,7 @@ def _iter_request_events_impl(
                         ),
                         "compressed": True,
                         "committed": False,
+                        "memory": compression_memory,
                     },
                 )
                 return
@@ -1086,10 +1291,15 @@ def _iter_request_events_impl(
             tool_records: list[dict[str, Any]] = []
             guidance_channel = request.get("_guidance_queue")
             consumed_guidance: list[str] = []
-            run_id = str(request.get("run_id") or "")
+            pending_guidance_ack: list[str] = []
             protocol_parent_request_id: str | None = None
             provider_responses: list[dict[str, Any]] = []
             usage_total = copy.deepcopy(summary_usage)
+            if compression_usage.get("provider_request_count", 0):
+                _record_provider_request(
+                    usage_total,
+                    _usage_from_dict(compression_usage),
+                )
             if summary_usage.get("total_tokens", 0):
                 yield RunEvent(
                     type="usage",
@@ -1164,6 +1374,18 @@ def _iter_request_events_impl(
                             for event in _provider_events(provider, protocol_request):
                                 if cancel_event is not None and cancel_event.is_set():
                                     return
+                                if pending_guidance_ack:
+                                    applied_guidance = list(pending_guidance_ack)
+                                    pending_guidance_ack.clear()
+                                    consumed_guidance.extend(applied_guidance)
+                                    yield RunEvent(
+                                        type="guidance_applied",
+                                        metadata={
+                                            "guidance": applied_guidance,
+                                            "guidance_count": len(applied_guidance),
+                                            "iteration": iteration,
+                                        },
+                                    )
                                 if event.type == "text_delta":
                                     iteration_text.append(event.content)
                                     yield event
@@ -1228,6 +1450,30 @@ def _iter_request_events_impl(
                             raise ContextLengthExceededError(
                                 "Provider 上下文超限，但没有可继续裁剪的历史轮次"
                             ) from exc
+                        if compression_memory is None:
+                            compression_memory = _extract_memory_backlog(
+                                root=base,
+                                user=user,
+                                source=source,
+                                session_id=session_id,
+                                directory=window_path,
+                                window=archive_window,
+                                config=config,
+                                agent_runner=agent_runner,
+                                cancel_event=cancel_event,
+                            )
+                            raw_memory_usage = compression_memory.get("usage")
+                            if isinstance(raw_memory_usage, dict) and raw_memory_usage.get(
+                                "provider_request_count", 0
+                            ):
+                                _record_provider_request(
+                                    compression_usage,
+                                    _usage_from_dict(raw_memory_usage),
+                                )
+                                _record_provider_request(
+                                    usage_total,
+                                    _usage_from_dict(raw_memory_usage),
+                                )
                         retry_events: list[RunEvent] = []
                         summary_cache, retry_diagnostics = get_or_create_summary(
                             cache_path=runtime_path / "context_summary.json",
@@ -1247,6 +1493,7 @@ def _iter_request_events_impl(
                                 ),
                             ),
                             event_callback=retry_events.append,
+                            skip_memory_extraction=True,
                         )
                         if summary_cache is None:
                             raise ContextLengthExceededError(
@@ -1293,7 +1540,7 @@ def _iter_request_events_impl(
                             {"role": "assistant", "content": "".join(iteration_text)}
                         )
                         _append_guidance(messages, pending_guidance)
-                        consumed_guidance.extend(pending_guidance)
+                        pending_guidance_ack.extend(pending_guidance)
                         all_text.append("\n\n")
                         yield RunEvent(type="text_delta", content="\n\n")
                         continue
@@ -1419,7 +1666,7 @@ def _iter_request_events_impl(
                     )
                 pending_guidance = _drain_guidance(guidance_channel)
                 _append_guidance(messages, pending_guidance)
-                consumed_guidance.extend(pending_guidance)
+                pending_guidance_ack.extend(pending_guidance)
 
             if not completed:
                 yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
@@ -1542,10 +1789,7 @@ def _iter_request_events_impl(
                 summary_message=next_summary_message,
                 capacity_tokens=context_policy.token_limit,
             )
-            memory_config = config.get("memory") or {}
-            auto_extract_on_commit = bool(
-                memory_config.get("auto_extract_on_commit", False)
-            )
+            extraction_mode = memory_extraction_mode(config)
             archive_data = archive_window.setdefault("data", {})
             if archive_data.get("memory_processed_round") is None:
                 archive_data["memory_processed_round"] = max(
@@ -1555,12 +1799,18 @@ def _iter_request_events_impl(
                 0, int(archive_data.get("memory_processed_round") or 0)
             )
             extract_current_round = bool(
-                auto_extract_on_commit
+                extraction_mode == "on_commit"
                 and memory_processed_round == archive_round_number - 1
             )
-            archive_data["memory_status"] = (
-                "processing" if extract_current_round else "pending"
-            )
+            if extract_current_round:
+                initial_memory_status = "processing"
+            elif extraction_mode in {"background", "on_commit"}:
+                initial_memory_status = "pending"
+            elif extraction_mode == "compression_only":
+                initial_memory_status = "deferred"
+            else:
+                initial_memory_status = "disabled"
+            archive_data["memory_status"] = initial_memory_status
             archive_data.pop("memory_error", None)
             commit_window(window_path, archive_window)
             commit_window(runtime_path, runtime_window)
@@ -1571,7 +1821,7 @@ def _iter_request_events_impl(
                     user,
                     source,
                     session_id,
-                    status=("processing" if extract_current_round else "pending"),
+                    status=initial_memory_status,
                 )
             except Exception as exc:
                 history_index_error = {
@@ -1584,8 +1834,16 @@ def _iter_request_events_impl(
                 "candidate_count": 0,
                 "reason": (
                     "memory_backlog_pending"
-                    if auto_extract_on_commit and not extract_current_round
-                    else "auto_extract_on_commit_disabled"
+                    if extraction_mode == "on_commit" and not extract_current_round
+                    else (
+                        "deferred_until_compression"
+                        if extraction_mode == "compression_only"
+                        else (
+                            "background_extraction_pending"
+                            if extraction_mode == "background"
+                            else "memory_extraction_disabled"
+                        )
+                    )
                 ),
                 "error": None,
             }
@@ -1725,7 +1983,8 @@ def _iter_request_events_impl(
                         "injected_chars": _memory_injected_chars(prompt_bundle),
                         "extraction_task_id": None,
                         "extraction_error": None,
-                        "extraction_mode": "round_commit",
+                        "extraction_mode": extraction_mode,
+                        "compression_extraction": compression_memory,
                         "round_extraction": memory_extraction,
                     },
                     "history_index_error": history_index_error,

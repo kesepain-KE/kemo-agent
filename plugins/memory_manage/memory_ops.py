@@ -18,6 +18,11 @@ from run.memory import (
 
 MANAGED_TIERS = frozenset((*TIERS, "important"))
 IMPORTANT_FILENAME = "memory_temporary_important.md"
+IMPORTANT_MEMORY_PLACEHOLDER = """# 临时重要记忆
+
+> 此文件由 memory_temporary_important 子代理自动维护，权重仅次于永久记忆。
+
+暂无可提取的重要记忆。当临时记忆层级中出现符合重要特征的碎片时，子代理会自动写入此文件。"""
 
 
 def _memory_ref(tier: str, filename: str) -> str:
@@ -91,6 +96,9 @@ def _summary(item: dict[str, Any], tier: str) -> dict[str, Any]:
         "memory_ref": _memory_ref(tier, filename),
         "filename": filename,
         "weight": int(item.get("weight", 0)) if temporary else None,
+        "created_at": item.get("created_at"),
+        "content_updated_at": item.get("content_updated_at"),
+        "last_used_at": item.get("last_used_at"),
         "expires_at": item.get("expires_at") if temporary else None,
     }
 
@@ -142,6 +150,9 @@ def list_entries(
                 "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
                 "weight": int(index[filename].get("weight", 0)),
+                "created_at": index[filename].get("created_at"),
+                "content_updated_at": index[filename].get("content_updated_at"),
+                "last_used_at": index[filename].get("last_used_at"),
                 "expires_at": index[filename].get("expires_at"),
             }
             for filename in names[:normalized_limit]
@@ -149,6 +160,7 @@ def list_entries(
     return {
         "action": "list",
         "tier": tier,
+        "timezone": "UTC",
         "entries": entries,
         "total": len(names),
         "truncated": len(names) > normalized_limit,
@@ -195,7 +207,11 @@ def get_fragment(
         "filename": normalized if tier != "important" else IMPORTANT_FILENAME,
         "content": str(item.get("content") or ""),
         "weight": int(item.get("weight", 0)) if tier in TEMPORARY_TIERS else None,
+        "created_at": item.get("created_at"),
+        "content_updated_at": item.get("content_updated_at"),
+        "last_used_at": item.get("last_used_at"),
         "expires_at": item.get("expires_at") if tier in TEMPORARY_TIERS else None,
+        "timezone": "UTC",
     }
 
 
@@ -224,6 +240,7 @@ def search_by_title(
     return {
         "action": "search_by_title",
         "tier": tier,
+        "timezone": "UTC",
         "query": query,
         "matches": all_matches[:normalized_limit],
         "total_matches": len(all_matches),
@@ -276,6 +293,7 @@ def search_by_content(
     return {
         "action": "search_by_content",
         "tier": tier,
+        "timezone": "UTC",
         "query": query,
         "matches": matches,
         "total_matches": total_matches,
@@ -292,16 +310,7 @@ def delete_fragment(
 ) -> dict[str, Any]:
     _validate_tier(tier)
     if tier == "important":
-        path = _important_path(root, user)
-        existed = path.is_file()
-        path.unlink(missing_ok=True)
-        return {
-            "action": "delete",
-            "tier": tier,
-            "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
-            "filename": IMPORTANT_FILENAME,
-            "deleted": existed,
-        }
+        raise MemoryError("临时重要记忆文件不可删除")
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
     with store._lock:
@@ -414,10 +423,12 @@ def edit_fragment(
             previous = location.path.read_text("utf-8")
             _atomic_text(location.path, body)
             if tier in TEMPORARY_TIERS:
-                index = store.load_index(tier)
-                index[source_name]["updated_at"] = utc_now().isoformat()
                 try:
-                    store.write_index(tier, index)
+                    store._touch_temporary(
+                        location,
+                        utc_now(),
+                        content_changed=True,
+                    )
                 except Exception:
                     _atomic_text(location.path, previous)
                     raise
@@ -426,7 +437,10 @@ def edit_fragment(
             if tier in TEMPORARY_TIERS:
                 index = store.load_index(tier)
                 meta = dict(index.pop(source_name))
-                meta["updated_at"] = utc_now().isoformat()
+                current = utc_now().isoformat()
+                meta["content_updated_at"] = current
+                meta["updated_at"] = current
+                meta["last_used_at"] = current
                 index[target_name] = meta
                 try:
                     store.write_index(tier, index)
@@ -437,6 +451,7 @@ def edit_fragment(
     return {
         "action": "edit",
         "tier": tier,
+        "timezone": "UTC",
         "memory_ref": _memory_ref(tier, target_name),
         "filename": source_name,
         "new_filename": target_name,
@@ -444,11 +459,8 @@ def edit_fragment(
 
 
 def write_important_memory(root: Path, user: str, content: str) -> None:
-    body = content.strip()
+    body = content.strip() or IMPORTANT_MEMORY_PLACEHOLDER
     path = _important_path(root, user)
-    if not body:
-        path.unlink(missing_ok=True)
-        return
     if contains_sensitive_credential(body):
         raise MemoryError("临时重要记忆包含疑似敏感凭据")
     _atomic_text(path, body)

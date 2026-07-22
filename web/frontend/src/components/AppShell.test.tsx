@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -53,6 +53,20 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
     expect(screen.getByText(/当前用户的配置、历史、知识/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换当前用户' })).toBeInTheDocument()
+    expect(screen.getByText('核心工作区')).toBeInTheDocument()
+    expect(screen.queryByText('运行能力')).not.toBeInTheDocument()
+    expect(screen.getByText('资源与系统')).toBeInTheDocument()
+  })
+
+  it('欢迎页快捷卡展示感知、拓展、运行状态与定时任务入口', async () => {
+    renderApp('/chat?user=kesepain')
+
+    expect(await screen.findByRole('button', { name: /查询感知情况/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /查询拓展情况/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /查询运行状态/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /创建定时任务/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /查询拓展情况/ }))
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('查询 kemo-agent 当前拓展情况')
   })
 
   it('对话运行期间同时锁定配置页与侧栏的用户切换', async () => {
@@ -96,6 +110,44 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
     expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
+  })
+
+  it('切换页面后继续接收流式事件并在返回对话页时恢复现场', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    let markChatStarted!: () => void
+    const chatStarted = new Promise<void>((resolve) => { markChatStarted = resolve })
+    const encoder = new TextEncoder()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller
+          markChatStarted()
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '跨页面运行测试' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await chatStarted
+
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
+    await screen.findByRole('heading', { name: '配置' })
+    streamController.enqueue(encoder.encode('event: text_delta\ndata: {"type":"text_delta","content":"切页后仍然可见"}\n\n'))
+
+    fireEvent.click(screen.getByRole('link', { name: /^对话$/ }))
+    expect(await screen.findByText('跨页面运行测试')).toBeInTheDocument()
+    expect(await screen.findByText('切页后仍然可见')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+
+    streamController.enqueue(encoder.encode('event: done\ndata: {"type":"done"}\n\n'))
+    streamController.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
   })
 
   it('从 URL 恢复用户与会话并加载历史空状态', async () => {
@@ -189,7 +241,7 @@ describe('AppShell navigation', () => {
     expect(screen.getAllByTitle('调整界面字号').length).toBeGreaterThan(0)
     expect(screen.getByTitle(/切换为高级/)).toBeInTheDocument()
     expect(screen.getByTitle('运行状态')).toBeInTheDocument()
-    expect(screen.getByTitle('命令面板')).toBeInTheDocument()
+    expect(screen.getByTitle('搜索历史对话')).toBeInTheDocument()
     expect(await screen.findByTitle('查看当前 Provider')).toBeInTheDocument()
   })
 
@@ -270,7 +322,106 @@ describe('AppShell navigation', () => {
     expect(screen.getAllByText('上一条问题')).toHaveLength(1)
   })
 
-  it('保存并创建新对话前先提取当前会话最后一轮记忆', async () => {
+  it('编辑重发只撤销最新一轮并把原问题放回输入框', async () => {
+    let undoBody: Record<string, unknown> | null = null
+    let historyMessages = [
+      { role: 'user', content: '第一条问题' },
+      { role: 'assistant', content: '第一条回答' },
+      { role: 'user', content: '第二条问题' },
+      { role: 'assistant', content: '第二条回答' },
+    ]
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: historyMessages,
+        round_metrics: [], round_traces: [],
+      })),
+      http.post('/api/users/kesepain/sessions/s1/undo-last-round', async ({ request }) => {
+        undoBody = await request.json() as Record<string, unknown>
+        historyMessages = historyMessages.slice(0, 2)
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', found: true,
+          rolled_back: true, round: 2, remaining_rounds: 1, prompt: '第二条问题',
+          content: [{ type: 'text', text: '第一条问题' }, { type: 'text', text: '第一条回答' }],
+        })
+      }),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('第二条回答')
+    const editButtons = screen.getAllByRole('button', { name: '编辑后重发' })
+    expect(editButtons).toHaveLength(1)
+
+    fireEvent.click(editButtons[0])
+    await waitFor(() => expect(undoBody).toEqual({ expected_round: 2, prompt: '第二条问题' }))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('第二条问题'))
+    await waitFor(() => expect(screen.queryByText('第二条回答')).not.toBeInTheDocument())
+    expect(screen.getByText('第一条回答')).toBeInTheDocument()
+    expect(screen.getByText('最新一轮已撤销；修改内容后发送将创建新的最新一轮。')).toBeInTheDocument()
+  })
+
+  it('运行中只在输入框上方展示最新引导并在结束后归档到 Token 统计下方', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    let markChatStarted!: () => void
+    const chatStarted = new Promise<void>((resolve) => { markChatStarted = resolve })
+    const encoder = new TextEncoder()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller
+          markChatStarted()
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '开始处理任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await chatStarted
+
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '先检查目录' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    const firstCurrent = await screen.findByText('正在引导')
+    const firstCard = firstCurrent.closest('article')!
+    const guidancePreview = firstCard.closest('.composer-guidance-preview')!
+    const composer = screen.getByRole('textbox', { name: '消息内容' }).closest('section[aria-label="消息输入区域"]')!
+    expect(guidancePreview).toBeInTheDocument()
+    expect(firstCard.closest('.messages')).toBeNull()
+    expect(guidancePreview.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    streamController.enqueue(encoder.encode('event: guidance_applied\ndata: {"type":"guidance_applied","metadata":{"guidance":["先检查目录"]}}\n\n'))
+    expect(await screen.findByText('智能体已读取该引导并继续运行')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '结果放入临时区' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    expect(await screen.findByText('结果放入临时区')).toBeInTheDocument()
+    expect(screen.queryByText('先检查目录')).not.toBeInTheDocument()
+
+    streamController.enqueue(encoder.encode('event: guidance_applied\ndata: {"type":"guidance_applied","metadata":{"guidance":["结果放入临时区"]}}\n\n'))
+    streamController.enqueue(encoder.encode('event: text_delta\ndata: {"type":"text_delta","content":"任务完成"}\n\n'))
+    streamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","usage":{"total_tokens":12},"metadata":{"guidance_count":2}}\n\n'))
+    streamController.close()
+
+    await screen.findByText('任务完成')
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+    expect(screen.getAllByText('引导成功')).toHaveLength(2)
+    expect(screen.getByText('先检查目录')).toBeInTheDocument()
+    expect(screen.getByText('结果放入临时区')).toBeInTheDocument()
+    const guidanceList = screen.getByText('先检查目录').closest('.assistant-guidance-list')!
+    const completedCards = guidanceList.querySelectorAll('.guidance-message')
+    expect(completedCards).toHaveLength(2)
+    expect(completedCards[0]).toHaveTextContent('先检查目录')
+    expect(completedCards[1]).toHaveTextContent('结果放入临时区')
+    const footer = guidanceList.previousElementSibling!
+    expect(footer).toHaveClass('assistant-turn-footer')
+  })
+
+  it('保存并创建新对话时不在前台同步等待记忆提取', async () => {
     let extractedSession = ''
     server.use(
       http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
@@ -296,8 +447,8 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
 
-    await waitFor(() => expect(extractedSession).toBe('s1'))
     await waitFor(() => expect(getSearch()).toBe('?user=kesepain&session=conv_new_session'))
+    expect(extractedSession).toBe('')
   })
 
   it('清空当前对话会删除归档并进入新对话', async () => {
@@ -354,127 +505,130 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(document.documentElement.dataset.fontSize).toBe('medium'))
   })
 
-  it('命令面板可以打开并展示标准页面入口', async () => {
+  it('快捷指令面板按分组展示卡片并提供斜杠指令参考', async () => {
     renderApp('/chat')
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
-    fireEvent.click(screen.getByTitle('命令面板'))
-    expect(screen.getByRole('dialog', { name: '全局搜索与命令' })).toBeInTheDocument()
-    expect(screen.getByText('查看任务中枢')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
+    const commandDialog = screen.getByRole('dialog', { name: '全局搜索与命令' })
+    expect(within(commandDialog).getByRole('heading', { name: '对话操作' })).toBeInTheDocument()
+    expect(within(commandDialog).getByRole('heading', { name: '查看指令' })).toBeInTheDocument()
+    expect(within(commandDialog).getByRole('heading', { name: '侧边栏功能' })).toBeInTheDocument()
+    expect(within(commandDialog).getByText('打开记忆管理')).toBeInTheDocument()
+    expect(within(commandDialog).getByText('编辑用户资料')).toBeInTheDocument()
+    expect(commandDialog.querySelector('kbd')).not.toBeInTheDocument()
+    expect(within(commandDialog).queryByText(/Ctrl K 打开/)).not.toBeInTheDocument()
+
+    fireEvent.click(within(commandDialog).getByRole('button', { name: /查看斜杠指令/ }))
+    expect(within(commandDialog).getByText('/compress')).toBeInTheDocument()
+    expect(within(commandDialog).getByText('/remember <内容>')).toBeInTheDocument()
+    expect(within(commandDialog).getByRole('button', { name: '返回快捷指令' })).toBeInTheDocument()
   })
 
-  it('历史超过侧栏上限时可以展开全部并搜索', async () => {
-    const sessions = Array.from({ length: 10 }, (_, index) => (
-      session(`session-${index + 1}`, index === 9 ? '年度规划十' : `普通对话 ${index + 1}`, index + 1)
-    ))
-    server.use(http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
-      user: 'kesepain', source: 'web', sessions,
-    })))
-    renderApp('/chat?user=kesepain')
-
-    fireEvent.click(await screen.findByRole('button', { name: /展开全部/ }))
-    expect(screen.getByRole('dialog', { name: '全部历史对话' })).toBeInTheDocument()
-    fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话' }), {
-      target: { value: '年度规划' },
-    })
-
-    expect(screen.getByText('年度规划十')).toBeInTheDocument()
-    expect(screen.queryByText('普通对话 9')).not.toBeInTheDocument()
-  })
-
-  it('侧栏历史右键可以编辑名字并持久化', async () => {
-    let sessions = [session('s1', '旧名字', 1)]
-    let receivedTitle = ''
+  it('快捷指令中的对话操作复用对话栏原有处理逻辑', async () => {
+    let compressionCalled = false
     server.use(
-      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
-        user: 'kesepain', source: 'web', sessions,
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '需要压缩的问题' }, { role: 'assistant', content: '需要压缩的回答' }],
+        round_metrics: [], round_traces: [],
       })),
-      http.patch('/api/users/kesepain/sessions/:sessionId', async ({ request }) => {
-        const body = await request.json() as { title: string }
-        receivedTitle = body.title
-        sessions = [{ ...sessions[0], title: body.title }]
-        return HttpResponse.json({ user: 'kesepain', source: 'web', session: sessions[0] })
-      }),
-    )
-    renderApp('/chat?user=kesepain')
-
-    fireEvent.contextMenu((await screen.findByText('旧名字')).closest('button')!)
-    fireEvent.click(screen.getByRole('menuitem', { name: '编辑名字' }))
-    fireEvent.change(screen.getByLabelText('对话名称'), { target: { value: '新的对话名字' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存名称' }))
-
-    await waitFor(() => expect(receivedTitle).toBe('新的对话名字'))
-    expect(await screen.findByText('新的对话名字')).toBeInTheDocument()
-  })
-
-  it('展开列表右键删除当前会话后清除 URL session', async () => {
-    let sessions = Array.from({ length: 9 }, (_, index) => session(`s${index + 1}`, `历史 ${index + 1}`, index + 1))
-    server.use(
-      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
-        user: 'kesepain', source: 'web', sessions,
-      })),
-      http.delete('/api/users/kesepain/sessions/:sessionId', ({ params }) => {
-        sessions = sessions.filter((item) => item.session_id !== params.sessionId)
+      http.post('/api/users/kesepain/sessions/s1/compress', () => {
+        compressionCalled = true
         return HttpResponse.json({
-          user: 'kesepain', source: 'web', session_id: params.sessionId, deleted: true,
+          user: 'kesepain', source: 'web', session_id: 's1', requested: true,
+          compressed: false, rounds_removed: 0, summary_cache_exists: true,
+          context: { rounds_removed: 0 },
+          memory: { status: 'skipped', user: 'kesepain', source: 'web', session_id: 's1', round: 1, candidates: 0, reason: 'already_processed', extraction: { status: 'skipped', candidate_count: 0 }, retry_pending: false },
         })
       }),
     )
-    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('需要压缩的回答')
+    fireEvent.click(screen.getByRole('button', { name: '打开快捷指令' }))
+    const commandDialog = screen.getByRole('dialog', { name: '全局搜索与命令' })
+    fireEvent.click(within(commandDialog).getByRole('button', { name: /手动进行一次上下文压缩/ }))
 
-    fireEvent.click(await screen.findByRole('button', { name: /展开全部/ }))
-    const dialog = screen.getByRole('dialog', { name: '全部历史对话' })
-    fireEvent.contextMenu(Array.from(dialog.querySelectorAll('button')).find((item) => item.textContent?.includes('历史 1'))!)
-    fireEvent.click(screen.getByRole('menuitem', { name: '删除' }))
-    expect(screen.getByRole('alertdialog', { name: '删除历史对话' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
-
-    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
-    expect(screen.queryByRole('alertdialog', { name: '删除历史对话' })).not.toBeInTheDocument()
+    await waitFor(() => expect(compressionCalled).toBe(true))
+    expect(screen.queryByRole('dialog', { name: '全局搜索与命令' })).not.toBeInTheDocument()
   })
 
-  it('全部删除按钮位于标题下方并通过确认后清空当前用户历史', async () => {
-    let sessions = [session('s1', '历史 1', 1), session('s2', '历史 2', 2)]
-    let deleteCalled = false
+  it('顶部历史搜索保存当前对话后跳转到指定历史会话', async () => {
+    let extractedSession = ''
+    let closedSession = ''
+    const sessions = [
+      { ...session('s1', '当前工作', 3), state: 'open' },
+      { ...session('s2', '项目复盘', 8), state: 'closed' },
+    ]
     server.use(
-      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
-        user: 'kesepain', source: 'web', sessions,
-      })),
-      http.delete('/api/users/kesepain/sessions', () => {
-        deleteCalled = true
-        const deletedSessions = sessions.length
-        sessions = []
-        return HttpResponse.json({
-          user: 'kesepain', source: 'web', deleted: true,
-          deleted_sessions: deletedSessions, deleted_windows: deletedSessions,
-        })
+      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({ user: 'kesepain', source: 'web', sessions })),
+      http.post('/api/users/kesepain/sessions/:sessionId/extract-memory', ({ params }) => {
+        extractedSession = String(params.sessionId)
+        return HttpResponse.json({ status: 'completed', user: 'kesepain', source: 'web', session_id: params.sessionId, round: 3, candidates: 0, extraction: { status: 'completed', candidate_count: 0 } })
       }),
+      http.post('/api/users/kesepain/sessions/:sessionId/close', ({ params }) => {
+        closedSession = String(params.sessionId)
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: params.sessionId, closed: true, session: { ...sessions[0], state: 'closed' } })
+      }),
+      http.get('/api/users/kesepain/sessions/s2/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's2', messages: [], round_metrics: [], round_traces: [],
+      })),
     )
     const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByTitle('搜索历史对话'))
 
-    const deleteAllButton = await screen.findByRole('button', { name: /全部删除/ })
-    await waitFor(() => expect(deleteAllButton).toBeEnabled())
-    expect(screen.getByText('最近对话').nextElementSibling).toBe(deleteAllButton)
-    fireEvent.click(deleteAllButton)
-    expect(screen.getByRole('alertdialog', { name: '删除全部历史对话' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    const historyDrawer = await screen.findByRole('dialog', { name: '历史对话' })
+    fireEvent.change(within(historyDrawer).getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '项目' } })
+    fireEvent.click(await within(historyDrawer).findByRole('button', { name: '打开对话 项目复盘' }))
+    fireEvent.click(within(historyDrawer).getByRole('button', { name: '确认切换' }))
 
-    await waitFor(() => expect(deleteCalled).toBe(true))
-    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
-    expect(await screen.findByText('暂无 Web 会话')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '全部删除' })).toBeDisabled()
+    await waitFor(() => expect(closedSession).toBe('s1'))
+    await waitFor(() => expect(getSearch()).toContain('session=s2'))
+    expect(extractedSession).toBe('')
+    expect(screen.queryByRole('dialog', { name: '历史对话' })).not.toBeInTheDocument()
   })
 
-  it('侧边栏收缩时不渲染全部删除按钮', async () => {
+  it('输入框知识库按钮按层级展示卡片并把引用写入草稿', async () => {
+    renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByRole('button', { name: '打开知识库' }))
+
+    const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
+    fireEvent.click(within(drawer).getByRole('button', { name: '用户' }))
+    expect(await within(drawer).findByText('个人笔记')).toBeInTheDocument()
+    expect(within(drawer).queryByText('共享笔记')).not.toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: '引用 个人笔记' }))
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('[知识库引用 user:notes.md] 个人笔记'))
+    expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
+  })
+
+  it('输入框拓展按钮打开侧边卡片并把稳定引用追加到草稿', async () => {
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '先检查当前状态' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开拓展' }))
+
+    const drawer = await screen.findByRole('dialog', { name: '拓展引用' })
+    fireEvent.click(within(drawer).getByRole('button', { name: '全局' }))
+    expect(await within(drawer).findByText('智能灯光控制')).toBeInTheDocument()
+    fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索拓展' }), { target: { value: '客厅' } })
+    fireEvent.click(within(drawer).getByRole('button', { name: '引用 智能灯光控制' }))
+
+    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制'))
+    expect(screen.queryByRole('dialog', { name: '拓展引用' })).not.toBeInTheDocument()
+  })
+
+  it('侧边栏不再渲染历史对话区，历史统一从右上角入口查看', async () => {
     server.use(http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
       user: 'kesepain', source: 'web', sessions: [session('s1', '历史 1', 1)],
     })))
     renderApp('/chat?user=kesepain')
 
-    expect(screen.queryByText('Personal Agent Runtime')).not.toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: /全部删除/ })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '收缩侧边栏' }))
+    await screen.findByTitle('搜索历史对话')
+    expect(screen.queryByText('最近对话')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /全部删除/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('历史 1')).not.toBeInTheDocument()
 
-    await waitFor(() => expect(screen.queryByRole('button', { name: /全部删除/ })).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: '收缩侧边栏' }))
     const expandButton = screen.getByRole('button', { name: '展开侧边栏' })
     expect(screen.getAllByAltText('kemo-agent logo').length).toBeGreaterThan(0)
     expect(screen.getByRole('link', { name: '身份与人格' })).toHaveAttribute('title', '身份与人格')

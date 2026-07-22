@@ -88,8 +88,8 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `storage_schema_version` | int | `2` | 记忆存储格式版本 |
-| `auto_extract_on_commit` | bool | `false` | **每轮提交后是否同步提取记忆碎片**。开启时会在返回前调用子代理，延迟较大；关闭时已提交轮次进入后台恢复队列，不会丢失 |
+| `storage_schema_version` | int | `3` | 记忆存储格式版本 |
+| `extraction_mode` | string | `compression_only` | `disabled` 完全关闭；`compression_only` 仅保存/压缩时提取；`background` 每轮后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | `2` | Maintenance 每轮扫描最多补提取的会话轮数，运行时限制为 1–20 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体读取历史对话 |
 | `important_memory_max_chars` | int | `5000` | 临时重要记忆文件最大字符数 |

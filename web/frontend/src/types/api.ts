@@ -3,6 +3,7 @@ export type RunEventType =
   | 'reasoning_delta'
   | 'tool_call_start'
   | 'tool_call_result'
+  | 'guidance_applied'
   | 'usage'
   | 'error'
   | 'done'
@@ -61,6 +62,13 @@ export interface SessionCloseResponse {
   source: 'web'
   session_id: string
   closed: boolean
+  memory: {
+    status: 'queued' | 'skipped'
+    reason: string
+    rounds: number
+    processed_round: number
+    pending_rounds?: number
+  }
   session: SessionSummary
 }
 
@@ -524,8 +532,13 @@ export interface MemorySummaryResponse {
     filename: string
     tier: string
     weight: number
+    created_at: string
+    content_updated_at: string
     updated_at: string
+    last_used_at: string | null
+    tier_entered_at: string | null
     expires_at: string | null
+    timezone: 'UTC'
     preview: string
     truncated: boolean
   }>
@@ -538,7 +551,11 @@ export interface MemoryItemResponse {
   content: string
   tier: string
   weight: number
+  created_at: string
+  content_updated_at: string
   updated_at: string
+  last_used_at: string | null
+  tier_entered_at: string | null
   expires_at: string | null
   last_weight_date?: string | null
 }
@@ -1118,5 +1135,5 @@ export type ChatItem =
     }
   | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary }
-  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'error' }
+  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; finalized?: boolean }
   | { id: string; kind: 'error'; content: string }

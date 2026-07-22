@@ -32,6 +32,38 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
     required = "promotions" if trigger == "memory_promotion" else "candidates"
     if not isinstance(result.data.get(required), list):
         raise AgentOutputError(f"self_improve 输出缺少 {required} 数组")
+    if trigger == "context_compression":
+        rounds = input_data.get("rounds") or []
+        candidate_limit = min(5, max(1, len(rounds) * 2))
+        accepted: list[dict[str, Any]] = []
+        rejected = 0
+        for candidate in result.data["candidates"]:
+            if not isinstance(candidate, dict):
+                rejected += 1
+                continue
+            action = str(candidate.get("action") or "upsert").strip().casefold()
+            if action == "forget":
+                if candidate.get("explicit") is True:
+                    accepted.append(candidate)
+                else:
+                    rejected += 1
+                continue
+            evidence = str(candidate.get("evidence") or "").strip()
+            if (
+                action != "upsert"
+                or candidate.get("durable") is not True
+                or not evidence
+            ):
+                rejected += 1
+                continue
+            accepted.append(candidate)
+        result.data["candidates"] = accepted[:candidate_limit]
+        result.metadata["candidate_filter"] = {
+            "accepted": len(result.data["candidates"]),
+            "rejected": rejected + max(0, len(accepted) - candidate_limit),
+            "limit": candidate_limit,
+            "fail_closed": True,
+        }
     if trigger == "manual_review":
         persisted = MemoryStore(
             context.runner.root,

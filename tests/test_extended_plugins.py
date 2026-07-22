@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_thirteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_fourteen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -47,6 +47,7 @@ class PluginManifestTests(unittest.TestCase):
                 "shell",
                 "skill_creater",
                 "subagent_dispatch",
+                "task_plan",
                 "task_time",
                 "web_search",
             ],
@@ -56,7 +57,7 @@ class PluginManifestTests(unittest.TestCase):
             self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 13)
+        self.assertEqual(len(registry.tools), 14)
         expand_schema = registry.get("expand_creater").input_schema
         self.assertEqual(
             set(expand_schema["properties"]["action"]["enum"]),

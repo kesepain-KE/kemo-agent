@@ -265,6 +265,31 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 {"trigger": "memory_promotion", "promotions": []},
             )
 
+    def test_context_extraction_rejects_non_durable_and_caps_candidates(self) -> None:
+        class Context:
+            @staticmethod
+            def run_model(input_data):
+                return _result(candidates=[
+                    {"action": "upsert", "filename": "系统配置", "content": "当前模型配置"},
+                    {"action": "upsert", "filename": "缺少证据", "content": "用户长期偏好", "durable": True},
+                    {"action": "upsert", "filename": "偏好一", "content": "用户偏好简洁回答", "durable": True, "evidence": "请回答简洁一些"},
+                    {"action": "upsert", "filename": "偏好二", "content": "用户偏好中文", "durable": True, "evidence": "以后请使用中文"},
+                    {"action": "upsert", "filename": "偏好三", "content": "用户偏好表格", "durable": True, "evidence": "我喜欢表格"},
+                    {"action": "forget", "filename": "旧偏好"},
+                ])
+
+        result = execute_self_improve(
+            Context(),
+            {"trigger": "context_compression", "rounds": [{"round": 1}]},
+        )
+
+        self.assertEqual(
+            [item["filename"] for item in result.data["candidates"]],
+            ["偏好一", "偏好二"],
+        )
+        self.assertEqual(result.metadata["candidate_filter"]["accepted"], 2)
+        self.assertEqual(result.metadata["candidate_filter"]["rejected"], 4)
+
     def test_manual_review_persists_candidates_for_main_agent_call(self) -> None:
         class Context:
             runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)

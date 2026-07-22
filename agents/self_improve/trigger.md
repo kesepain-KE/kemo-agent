@@ -12,13 +12,25 @@
 
 | trigger | 调用方 | 说明 |
 |---------|--------|------|
-| `context_compression` | context_manage（内部直调） | 上下文压缩前传入即将裁剪的完整批量轮次 |
+| `context_compression` | context_manage / 记忆提取管线 | 保存、压缩或配置允许的逐轮入口传入完整轮次 |
 | `memory_promotion` | cron `review_due` 任务 | 发现到期且权重达标的碎片后唤起 |
 | `manual_review` | 主智能体（通过 `subagent_dispatch`） | 用户主动要求审阅/整理/搜索记忆时，手动唤起记忆提取与审阅 |
 
 ## 三种模式
 
 ### 模式一：碎片提取与更新（trigger = `"context_compression"`）
+
+采用失败关闭策略：默认不创建记忆。只提取跨会话仍有价值、无法从系统配置重新读取、
+并且有用户原话证明的长期用户事实。
+
+**该记**：用户偏好/身份/长期目标、设备稳定事实（已确认）、架构决策与技术偏好（视为工作记忆）、
+配置值与配置偏好（视为工作记忆）、拓展模块的用途与配置（视为工作记忆）、
+行为纠正规则（正常走临时层，用户主动提及时 explicit=true 直接落 permanent）。
+
+**不该记**：工具/插件清单、一次性测试、任务运行状态、报错诊断、
+未确认的过程状态（含"待验证""尚未确认"等措辞）、用户问题本身、敏感凭据。
+
+来源标记为"对话摘要"不构成拒绝理由，以内容本身价值为准。
 
 ```
 输入: { rounds: [...], trigger: "context_compression", source: {...} }
@@ -30,7 +42,8 @@
   2. 逐条通过 memory_manage 搜索匹配
   3. 命中: 返回同名 upsert 候选，由 MemoryStore 依据 last_weight_date 每天最多+1
   4. 未命中: seven_days 创建新碎片，weight=0
-  5. 返回 candidates[]
+  5. 每个 upsert 必须携带 `durable=true` 与 `evidence`；单轮最多 2 条，批量最多 5 条
+  6. 没有合格信息时返回空 candidates[]
 
 权重规则: 每天最多+1，通过 last_weight_date（日期字符串）比较
 永久记忆: 不自动修改，除非用户 explicit=true
@@ -79,18 +92,18 @@
 
 ## 工作记忆特征
 
-满足任一条件：
-- 涉及项目开发/代码/部署
-- 涉及用户技能/工作流
-- 涉及架构决策/技术偏好
-- 涉及硬件/服务器管理
-- 包含工具/命令/路径引用
+满足任一条件（180d→permanent 晋升时触发技能生成）：
+- 涉及项目开发/代码/部署（如 votx-agent、kemo-agent 的配置步骤）
+- 涉及用户技能/工作流（如"每次启动前检查 xxx"、"部署流程是 yyy"）
+- 涉及架构决策/技术偏好（如"拆分哲学"、"不使用 xxx 方案"）—设计决策归此类
+- 涉及硬件/服务器管理（如树莓派配置、J1900-ITX 设置）—仅限已确认的稳定事实
+- 文件名或内容包含明显的工具/命令/路径
 
 ## 输出格式
 
 ```json
 {
-  "candidates": [{ "action": "upsert|forget", "filename": "...", "content": "...", "explicit": false }],
+  "candidates": [{ "action": "upsert|forget", "filename": "...", "content": "...", "explicit": false, "durable": true, "evidence": "用户原话" }],
   "promotions": [{ "from_tier": "...", "to_tier": "...", "filename": "...", "merged_with": null, "content": null, "skill_created": false }]
 }
 ```
