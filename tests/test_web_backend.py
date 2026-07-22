@@ -65,8 +65,10 @@ class FakeService:
             },
         }
 
-    def delete_session(self, user, session_id, *, source="web"):
+    def delete_session(self, user, session_id, *, source="web", client_id=""):
         self.seen = {"user": user, "session_id": session_id, "source": source}
+        if client_id:
+            self.seen["client_id"] = client_id
         return {"user": user, "source": source, "session_id": session_id, "deleted": True}
 
     def delete_all_sessions(self, user, *, source="web"):
@@ -107,12 +109,14 @@ class FakeService:
     def settings(self, user):
         return {"user": user, "schema_version": 1}
 
-    def stream_chat(self, user, session_id, prompt, *, cancel_event, run_id=""):
+    def stream_chat(self, user, session_id, prompt, *, cancel_event, run_id="", client_id="", **kwargs):
         self.cancel_event = cancel_event
         self.seen = {"user": user, "session_id": session_id, "prompt": prompt, "run_id": run_id}
+        if client_id:
+            self.seen["client_id"] = client_id
         return iter(self.events)
 
-    def stream_plan(self, user, session_id, plan_id, *, cancel_event, run_id=""):
+    def stream_plan(self, user, session_id, plan_id, *, cancel_event, run_id="", client_id=""):
         self.cancel_event = cancel_event
         self.seen = {
             "user": user,
@@ -120,6 +124,8 @@ class FakeService:
             "plan_id": plan_id,
             "run_id": run_id,
         }
+        if client_id:
+            self.seen["client_id"] = client_id
         return iter(self.events)
 
 
@@ -668,6 +674,128 @@ class WebBackendTests(unittest.TestCase):
             f"/api/users/alice/sessions/{replacement_id}",
         )
         self.assertEqual(deleted.status_code, 200)
+
+    def test_client_scoped_sessions_and_leases_isolate_browser_pages(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        app = create_app(service=service)
+        client_a = "web_client_a"
+        client_b = "web_client_b"
+
+        active_a = self.request(
+            app, "GET", f"/api/users/alice/sessions/active?client_id={client_a}"
+        ).json()
+        active_b = self.request(
+            app, "GET", f"/api/users/alice/sessions/active?client_id={client_b}"
+        ).json()
+        self.assertEqual(active_a["active_key"], f"interactive:alice:{client_a}")
+        self.assertEqual(active_b["active_key"], f"interactive:alice:{client_b}")
+        self.assertNotEqual(active_a["active_key"], active_b["active_key"])
+
+        service._active_runs["run_client_a"] = ActiveRun(
+            "run_client_a", "alice", active_a["session"]["session_id"]
+        )
+        created = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions",
+            json={"client_id": client_b},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        service._active_runs.pop("run_client_a", None)
+
+        session_id = created.json()["session"]["session_id"]
+        leased = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/sessions/{session_id}/lease",
+            json={"client_id": client_a},
+        )
+        self.assertEqual(leased.status_code, 200, leased.text)
+        self.assertEqual(leased.json()["active_clients"], 2)
+
+        deferred = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/sessions/{session_id}/close?client_id={client_a}",
+        )
+        self.assertEqual(deferred.status_code, 200, deferred.text)
+        self.assertFalse(deferred.json()["closed"])
+        self.assertTrue(deferred.json()["deferred"])
+        self.assertEqual(deferred.json()["active_clients"], 1)
+
+        closed = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/sessions/{session_id}/close?client_id={client_b}",
+        )
+        self.assertEqual(closed.status_code, 200, closed.text)
+        self.assertTrue(closed.json()["closed"])
+        self.assertFalse(closed.json()["deferred"])
+
+    def test_session_delete_rejects_other_page_lease_and_allows_expired_lease(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        app = create_app(service=service)
+        client_a = "web_client_a"
+        client_b = "web_client_b"
+        created = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions",
+            json={"client_id": client_a},
+        ).json()
+        session_id = created["session"]["session_id"]
+        self.request(
+            app,
+            "POST",
+            f"/api/users/alice/sessions/{session_id}/lease",
+            json={"client_id": client_b},
+        )
+
+        blocked = self.request(
+            app,
+            "DELETE",
+            f"/api/users/alice/sessions/{session_id}?client_id={client_a}",
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+
+        with service._active_runs_lock:
+            service._session_leases[("alice", "web", session_id)][client_b] = 0.0
+        deleted = self.request(
+            app,
+            "DELETE",
+            f"/api/users/alice/sessions/{session_id}?client_id={client_a}",
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+    def test_stream_chat_uses_client_scoped_history_key_and_touches_lease(self) -> None:
+        _, root = self.make_root()
+        requests: list[dict[str, Any]] = []
+
+        def source(request, **_kwargs):
+            requests.append(request)
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_chat(
+                "alice",
+                "client-session",
+                "hello",
+                cancel_event=threading.Event(),
+                client_id="web_client_a",
+            )
+        )
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(
+            requests[0]["_history_active_key"],
+            "interactive:alice:web_client_a",
+        )
+        self.assertIn(
+            "web_client_a",
+            service._session_leases[("alice", "web", "client-session")],
+        )
 
     def test_delete_all_sessions_includes_uncommitted_reservations(self) -> None:
         _, root = self.make_root()
