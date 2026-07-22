@@ -118,7 +118,7 @@ def execute_plan(
                 return {**p, "status": "running"}
 
             plan = store.update(plan_id, _claim)
-        except (PlanError, PlanValidationError) as exc:
+        except (PlanError, PlanValidationError, PlanExecutionError) as exc:
             yield error_event(exc, phase="plan_status")
             return
 
@@ -230,7 +230,8 @@ def execute_plan(
                 f"计划工具：{tool_name or '由主智能体判断'}\n"
                 f"计划参数：{json.dumps(tool_arguments, ensure_ascii=False)}\n\n"
                 "完整活跃计划已注入系统提示词。只执行当前步骤，不要执行后续步骤，"
-                "不要创建或编辑任务计划。可以根据实际环境修正工具或参数；"
+                "不要创建或编辑任务计划。本次为 executor-managed 模式，步骤状态由框架维护，"
+                "禁止调用 task_plan.step_done 或 task_plan.step_fail。可以根据实际环境修正工具或参数；"
                 "完成当前步骤后简要报告结果。"
             )
             agent_request = {
@@ -242,6 +243,7 @@ def execute_plan(
                 "run_id": f"plan_run_{uuid.uuid4().hex}",
                 "_task_plan_id": plan_id,
                 "_task_plan_step_id": step_id,
+                "_task_plan_mode": "executor_managed",
             }
             assistant_text: list[str] = []
             agent_tools: list[dict[str, Any]] = []

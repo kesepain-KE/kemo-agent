@@ -118,7 +118,7 @@ pending → approved → running → completed
 **计划状态**:
 - `pending → approved`（用户批准）
 - `pending → cancelled`
-- `approved → running`（执行器开始）
+- `approved → running`（RuntimeHost 的 TaskPlanScheduler 原子领取）
 - `running → paused`（用户暂停或步骤失败）
 - `running → completed`（全部步骤完成）
 - `paused → running`（用户恢复）
@@ -135,6 +135,8 @@ pending → approved → running → completed
 
 ## 进程重启恢复
 
+- TaskPlanScheduler 按依赖逐步触发主智能体 Run；活跃计划由系统提示词自动注入。
+- 每次 Run 只执行当前可运行步骤，步骤与计划状态由框架持久化，不能交给模型自行修改。
 - 启动时扫描所有用户计划文件
 - 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态恢复为 `pending`
 - 不自动重放有副作用的步骤

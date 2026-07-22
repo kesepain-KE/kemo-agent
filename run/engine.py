@@ -1596,6 +1596,9 @@ def _iter_request_events_impl(
                                         "transport_registry": request.get(
                                             "_transport_registry"
                                         ),
+                                        "task_plan_id": request.get("_task_plan_id"),
+                                        "task_plan_step_id": request.get("_task_plan_step_id"),
+                                        "task_plan_mode": request.get("_task_plan_mode"),
                                         "knowledge_scopes": list(
                                             source_policy.direct_knowledge_scopes()
                                         ),
