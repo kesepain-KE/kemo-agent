@@ -36,7 +36,7 @@ const pages = [
 ]
 
 function renderPage(path: string) {
-  const router = createMemoryRouter([{ path: '/', element: <AppShell />, children: pages }], { initialEntries: [`/${path}?user=kesepain`] })
+  const router = createMemoryRouter([{ path: '/', element: <AppShell />, children: pages }], { initialEntries: [`/${path}?user=kesepain&session=s1`] })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>)
 }

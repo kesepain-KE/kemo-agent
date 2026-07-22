@@ -27,6 +27,8 @@ import { NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'reac
 import {
   deleteAllSessions,
   deleteSession,
+  createSession,
+  getActiveSession,
   getHealth,
   getLogoUrl,
   getOverview,
@@ -56,6 +58,7 @@ export interface ShellOutletContext {
   setSessionId: (sessionId: string) => void
   sessions: SessionsResponse['sessions']
   refreshSessions: () => Promise<SessionsResponse | undefined>
+  createNewSession: () => Promise<void>
   overview?: OverviewResponse
   refreshOverview: () => void
   openCommandPanel: () => void
@@ -137,6 +140,12 @@ export function AppShell() {
     queryKey: ['sessions', user],
     queryFn: () => getSessions(user),
     enabled: Boolean(user),
+  })
+  const activeSessionQuery = useQuery({
+    queryKey: ['active-session', user],
+    queryFn: () => getActiveSession(user),
+    enabled: Boolean(user) && !sessionId,
+    staleTime: 0,
   })
   const overviewQuery = useQuery({
     queryKey: ['overview', user, sessionId],
@@ -246,7 +255,22 @@ export function AppShell() {
     setParams(next)
   }
 
+  useEffect(() => {
+    const active = activeSessionQuery.data?.session?.session_id
+    if (!sessionId && active) setSessionId(active)
+  }, [activeSessionQuery.data?.session?.session_id, sessionId])
+
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
+
+  const createNewSession = async () => {
+    if (!user || chatRunning) return
+    const result = await createSession(user)
+    await sessionsQuery.refetch()
+    const next = new URLSearchParams()
+    next.set('user', user)
+    next.set('session', result.session.session_id)
+    navigate(`/chat?${next.toString()}`)
+  }
 
   const renameHistorySession = async (targetSessionId: string, title: string) => {
     if (!user) throw new Error('当前没有可用用户')
@@ -301,7 +325,7 @@ export function AppShell() {
   }
 
   const commands = useMemo(() => [
-    { label: '新建对话', detail: '打开当前用户的新上下文窗口', shortcut: 'N', keywords: 'chat conversation', action: () => { setSessionId(''); navigate(withContext('/chat', '')) } },
+    { label: '新建对话', detail: '打开当前用户的新上下文窗口', shortcut: 'N', keywords: 'chat conversation', action: () => { void createNewSession() } },
     { label: '查看任务中枢', detail: '计划、Cron 与执行记录', shortcut: 'T', keywords: 'task plan cron', action: () => navigate(withContext('/tasks')) },
     { label: '查询文件知识库', detail: '用户层与全局层索引', shortcut: 'K', keywords: 'knowledge file search', action: () => navigate(withContext('/knowledge')) },
     { label: '查看技能注册表', detail: '工具与能力来源', shortcut: 'S', keywords: 'skills tools', action: () => navigate(withContext('/skills')) },
@@ -313,15 +337,19 @@ export function AppShell() {
     { label: '编辑用户资料', detail: '头像、用户人格与全局人格', shortcut: 'P', keywords: 'profile avatar soul', action: () => navigate(withContext('/profile')) },
      { label: '打开运行状态', detail: '上下文、Provider 与后台组件', shortcut: 'R', keywords: 'runtime status context', action: () => navigate(withContext('/status')) },
     { label: '打开配置', detail: 'Provider、上下文、权限与运行限制', shortcut: ',', keywords: 'settings config provider', action: () => navigate(withContext('/settings')) },
-  ], [navigate, sessionId, user, ui])
+  ], [createNewSession, navigate, sessionId, user, ui])
   const filteredCommands = commands.filter((command) => `${command.label} ${command.detail} ${command.keywords}`.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase()))
 
   const overview = overviewQuery.data
-  const context = overview?.context
   const contextWindow = overview?.context_window
-  const contextTotal = Number(contextWindow?.tokens.total_tokens ?? context?.usage.total_tokens ?? 0)
-  const contextLimit = Number(contextWindow?.tokens.capacity_tokens ?? context?.limit ?? 0)
-  const contextPercent = Number(contextWindow?.tokens.percent ?? context?.percent ?? 0)
+  const hasContextSnapshot = overview?.context_snapshot !== undefined
+  const contextTokens = hasContextSnapshot ? overview?.context_snapshot : contextWindow?.tokens
+  const contextAvailable = hasContextSnapshot
+    ? Boolean(overview?.context_snapshot?.available)
+    : Boolean(contextWindow?.tokens && contextWindow.tokens.source !== 'unavailable')
+  const contextTotal = Number(contextTokens?.total_tokens ?? 0)
+  const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
+  const contextPercent = Number(contextTokens?.percent ?? 0)
   const provider = overview?.provider
 
   const settingsPath = (tab: 'users' | 'provider') => {
@@ -388,8 +416,8 @@ export function AppShell() {
           </div>
           <div className="top-right">
             <button className="context-button" title="查看上下文与运行状态" onClick={() => ui.setDrawerOpen(true)}>
-              <span className="context-main"><span className="context-icon"><CircleGauge size="1.528rem" strokeWidth={2.3} /></span><span className="context-copy"><strong>上下文窗口</strong><span>{contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '正在读取'}</span></span></span>
-              <span className="context-mini"><b>{contextLimit ? `${contextPercent}%` : '—'}</b><span className="context-track"><i style={{ width: `${contextPercent}%` }} /></span></span>
+              <span className="context-main"><span className="context-icon"><CircleGauge size="1.528rem" strokeWidth={2.3} /></span><span className="context-copy"><strong>上下文窗口</strong><span>{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '暂不可用'}</span></span></span>
+              <span className="context-mini"><b>{contextAvailable && contextLimit ? `${contextPercent}%` : '—'}</b><span className="context-track"><i style={{ width: `${contextAvailable ? contextPercent : 0}%` }} /></span></span>
             </button>
             <div className="model-wrap" ref={modelMenuRef}>
               <button className="model-btn" onClick={() => setModelMenuOpen((value) => !value)} aria-expanded={modelMenuOpen} title="查看当前 Provider">
@@ -406,21 +434,22 @@ export function AppShell() {
             <button className="icon-btn" onClick={() => setCommandOpen(true)} aria-label="命令面板" title="命令面板"><Search size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, sessionId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, setSessionId, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel: () => setCommandOpen(true) } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, sessionId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, setSessionId, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel: () => setCommandOpen(true) } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>
         <div className="drawer-head"><div className="context-drawer-heading"><strong>上下文窗口</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话 · 系统提示词已就绪'}</span></div><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
         <div className="drawer-body context-drawer-body">
           <section className="context-drawer-card context-token-card">
-            <div className="context-card-head"><span><CircleGauge size={17} /><strong>Token 占用概览</strong></span><small>当前输入窗口</small></div>
+            <div className="context-card-head"><span><CircleGauge size={17} /><strong>Token 占用概览</strong></span><small>{!contextAvailable ? '暂不可用' : contextTokens?.measurement === 'estimated' ? '运行时估算' : contextTokens?.measurement === 'provider_reference' ? 'Provider 参考' : '当前输入窗口'}</small></div>
             <div className="context-metric-grid two-columns">
-              <div className="context-metric"><span>系统提示词</span><strong>{formatTokens(contextWindow?.tokens.system_prompt_tokens ?? 0)}</strong><small>Token</small></div>
-              <div className="context-metric"><span>对话上下文</span><strong>{formatTokens(contextWindow?.tokens.context_tokens ?? 0)}</strong><small>Token</small></div>
-              <div className="context-metric emphasized"><span>当前总占用</span><strong>{formatTokens(contextWindow?.tokens.total_tokens ?? 0)}</strong><small>Token</small></div>
-              <div className="context-metric"><span>容量上限</span><strong>{formatTokens(contextWindow?.tokens.capacity_tokens ?? 0)}</strong><small>Token</small></div>
+              <div className="context-metric"><span>系统提示词</span><strong>{contextAvailable ? formatTokens(contextTokens?.system_prompt_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>工具定义</span><strong>{contextAvailable ? formatTokens(contextTokens?.tool_schema_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>对话与摘要</span><strong>{contextAvailable ? formatTokens(Number(contextTokens?.conversation_tokens ?? contextWindow?.tokens.context_tokens ?? 0) + Number(contextTokens?.summary_tokens ?? 0)) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric emphasized"><span>当前总占用</span><strong>{contextAvailable ? formatTokens(contextTokens?.total_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>容量上限</span><strong>{contextLimit ? formatTokens(contextTokens?.capacity_tokens ?? 0) : '—'}</strong><small>Token</small></div>
             </div>
-            <div className="context-capacity"><div><span>上下文容量</span><strong>{contextWindow ? `${contextWindow.tokens.percent.toFixed(2)}%` : '—'}</strong></div><span className="context-capacity-track"><i style={{ width: `${contextWindow?.tokens.percent ?? 0}%` }} /></span></div>
+            <div className="context-capacity"><div><span>上下文容量</span><strong>{contextAvailable ? `${Number(contextTokens?.percent ?? 0).toFixed(2)}%` : '—'}</strong></div><span className="context-capacity-track"><i style={{ width: `${contextAvailable ? contextTokens?.percent ?? 0 : 0}%` }} /></span></div>
           </section>
 
           <section className="context-drawer-card">
@@ -428,7 +457,8 @@ export function AppShell() {
             <div className="context-metric-grid three-columns">
               <div className="context-metric"><span>前台对话</span><strong>{contextWindow?.conversation.foreground_rounds ?? '—'}</strong><small>轮</small></div>
               <div className="context-metric"><span>后台归档</span><strong>{contextWindow?.conversation.archived_rounds ?? '—'}</strong><small>轮</small></div>
-              <div className="context-metric"><span>工具调用</span><strong>{contextWindow?.conversation.total_tool_calls ?? '—'}</strong><small>次</small></div>
+              <div className="context-metric"><span>当前会话总轮数</span><strong>{contextWindow?.conversation.session_total_rounds ?? '—'}</strong><small>轮</small></div>
+              <div className="context-metric"><span>工具调用</span><strong>{contextWindow?.conversation.session_tool_calls ?? contextWindow?.conversation.total_tool_calls ?? '—'}</strong><small>次</small></div>
             </div>
           </section>
 

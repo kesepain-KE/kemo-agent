@@ -20,6 +20,7 @@ import type {
   MessageDeleteResponse,
   MessageStatusResponse,
   OverviewResponse,
+  ActiveSessionResponse,
   PreferencesResponse,
   PromptDiagnosticsResponse,
   RuntimeStatusResponse,
@@ -28,6 +29,7 @@ import type {
   SessionDeleteAllResponse,
   SessionDeleteResponse,
   SessionCompressResponse,
+  SessionCloseResponse,
   SessionMemoryExtractionResponse,
   SessionUndoLastRoundResponse,
   SessionRenameResponse,
@@ -121,6 +123,24 @@ export async function getUsers(): Promise<UsersResponse> {
 export async function getSessions(user: string, query = ''): Promise<SessionsResponse> {
   const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/sessions${suffix}`)
+}
+
+export async function getActiveSession(user: string): Promise<ActiveSessionResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/active`)
+}
+
+export async function createSession(user: string): Promise<ActiveSessionResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions`, { method: 'POST' })
+}
+
+export async function closeSession(
+  user: string,
+  sessionId: string,
+): Promise<SessionCloseResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/close`,
+    { method: 'POST' },
+  )
 }
 
 export async function getHistory(user: string, sessionId: string): Promise<HistoryResponse> {

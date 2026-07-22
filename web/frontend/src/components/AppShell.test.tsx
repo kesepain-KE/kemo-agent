@@ -224,6 +224,12 @@ describe('AppShell navigation', () => {
           user: 'kesepain', source: 'web', session_id: 's1', requested: true,
           compressed: true, rounds_removed: 2, summary_cache_exists: true,
           context: { rounds_removed: 2 },
+          memory: {
+            status: 'completed', user: 'kesepain', source: 'web', session_id: 's1',
+            round: 2, candidates: 1,
+            extraction: { status: 'completed', candidate_count: 1 },
+            retry_pending: false,
+          },
         })
       }),
       http.post('/api/users/kesepain/sessions/s1/undo-last-round', async ({ request }) => {
@@ -244,11 +250,11 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('menuitem', { name: /清空此对话/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /重新发送一次消息/ })).toBeInTheDocument()
-    expect(screen.getByText('每次打开新网页都会创建新对话，可通过打开历史对话接续对话。')).toBeInTheDocument()
+    expect(screen.getByText('再次打开网页会恢复上次活跃对话；点击“保存并创建新对话”才会关闭并切换会话。')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ }))
     await waitFor(() => expect(compressionCalled).toBe(true))
-    expect(await screen.findByText('上下文压缩完成，已整理 2 轮历史。')).toBeInTheDocument()
+    expect(await screen.findByText('上下文压缩完成，已整理 2 轮历史。已同步提取 1 条记忆候选。')).toBeInTheDocument()
 
     const regenerate = screen.getByRole('menuitem', { name: /重新发送一次消息/ })
     await waitFor(() => expect(regenerate).toBeEnabled())
@@ -291,7 +297,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
 
     await waitFor(() => expect(extractedSession).toBe('s1'))
-    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
+    await waitFor(() => expect(getSearch()).toBe('?user=kesepain&session=conv_new_session'))
   })
 
   it('清空当前对话会删除归档并进入新对话', async () => {
@@ -315,7 +321,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /清空此对话/ }))
 
     await waitFor(() => expect(deletedSession).toBe('s1'))
-    await waitFor(() => expect(getSearch()).toBe('?user=kesepain'))
+    await waitFor(() => expect(getSearch()).toBe('?user=kesepain&session=conv_new_session'))
   })
 
   it('上下文窗口抽屉展示七组真实聚合统计', async () => {

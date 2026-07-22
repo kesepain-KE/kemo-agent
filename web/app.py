@@ -440,6 +440,27 @@ def create_app(
     ) -> dict[str, Any]:
         return backend.delete_all_sessions(user, source=source)
 
+    @app.get("/api/users/{user}/sessions/active")
+    async def active_session(user: str) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.active_session, user)
+
+    @app.post("/api/users/{user}/sessions")
+    async def create_session(user: str) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.create_session, user)
+
+    @app.post("/api/users/{user}/sessions/{session_id}/close")
+    async def close_session(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.close_session,
+            user,
+            session_id,
+            source=source,
+        )
+
     @app.patch("/api/users/{user}/sessions/{session_id}")
     async def rename_session(
         user: str,

@@ -43,7 +43,13 @@ from run.config import (
     load_config,
     read_json_object,
 )
-from run.context import estimate_text_tokens
+from run.context import (
+    ContextPolicy,
+    build_context_snapshot,
+    estimate_text_tokens,
+    select_context,
+)
+from run.context_summary import build_summary_message
 from run.cron_store import (
     CronConflictError,
     CronError,
@@ -51,11 +57,18 @@ from run.cron_store import (
     CronStore,
     normalize_task,
 )
-from run.engine import _extract_round_memory, compress_context, iter_request_events
+from run.engine import (
+    _extract_round_memory,
+    _session_lock,
+    compress_context,
+    iter_request_events,
+)
 from run.history import (
     HistoryError,
+    commit_window,
     delete_all_sessions as delete_all_history_sessions,
     delete_session as delete_history_session,
+    empty_window,
     find_window,
     list_sessions,
     load_window,
@@ -63,6 +76,14 @@ from run.history import (
     runtime_window_path,
     session_messages,
     undo_last_round as undo_history_last_round,
+)
+from run.history_index import (
+    close_session as close_index_session,
+    find_record as find_index_record,
+    get_or_reserve_active as get_or_reserve_index_session,
+    new_conversation_id,
+    reserve_session,
+    update_memory_state,
 )
 from run.memory import (
     TIERS,
@@ -72,6 +93,7 @@ from run.memory import (
     normalize_memory_filename,
     utc_now,
 )
+from run.memory_pipeline import memory_round_payload
 from run.prompt import (
     PROMPT_SECTION_ORDER,
     build_prompt_bundle,
@@ -86,7 +108,7 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
-from run.tools import discover_tools
+from run.tools import apply_runtime_tool_policy, discover_tools
 from run.users import list_users
 
 
@@ -242,13 +264,40 @@ def _nonnegative_int(value: Any) -> int:
 
 
 def _usage_cache_tokens(usage: dict[str, Any]) -> int:
+    # Prefer the normalized cumulative field written by the runtime.  This
+    # keeps today's totals correct for both unified Provider usage and legacy
+    # records, and preserves an explicitly reported zero.
+    for key in (
+        "cached_input_tokens",
+        "cached_prompt_tokens",
+        "cache_hit_tokens",
+        "cached_tokens",
+        "cache_read_input_tokens",
+        "prompt_cache_hit_tokens",
+    ):
+        if usage.get(key) is not None:
+            return _nonnegative_int(usage.get(key))
     raw = usage.get("provider_raw")
     values = raw if isinstance(raw, list) else [raw]
     total = 0
     for item in values:
         if not isinstance(item, dict):
             continue
-        direct = item.get("prompt_cache_hit_tokens")
+        direct = next(
+            (
+                item.get(key)
+                for key in (
+                    "prompt_cache_hit_tokens",
+                    "cached_tokens",
+                    "cached_prompt_tokens",
+                    "cached_input_tokens",
+                    "cache_hit_tokens",
+                    "cache_read_input_tokens",
+                )
+                if item.get(key) is not None
+            ),
+            None,
+        )
         details = item.get("prompt_tokens_details")
         nested = details.get("cached_tokens") if isinstance(details, dict) else None
         total += _nonnegative_int(direct if direct is not None else nested)
@@ -2071,6 +2120,97 @@ class WebRunService:
             "sessions": sessions,
         }
 
+    @staticmethod
+    def _interactive_active_key(user: str) -> str:
+        return f"interactive:{user}"
+
+    @staticmethod
+    def _index_session_payload(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "session_id": str(record.get("session_id") or ""),
+            "conversation_id": str(record.get("conversation_id") or ""),
+            "window": str(record.get("archive_window") or ""),
+            "title": str(record.get("title") or ""),
+            "summary": str(record.get("summary") or ""),
+            "state": str(record.get("lifecycle") or "open"),
+            "run_state": str(record.get("run_state") or "idle"),
+            "chain": str(record.get("chain") or "interactive"),
+            "rounds": max(0, int(record.get("rounds") or 0)),
+            "updated_at": str(record.get("updated_at") or ""),
+        }
+
+    def active_session(self, user: Any) -> dict[str, Any]:
+        """Return or reserve the user's durable interactive session."""
+
+        name = self.require_user(user)
+        active_key = self._interactive_active_key(name)
+        record, created = get_or_reserve_index_session(
+            self.root,
+            name,
+            "web",
+            active_key,
+            reuse_latest=True,
+        )
+        return {
+            "user": name,
+            "active_key": active_key,
+            "created": created,
+            "session": self._index_session_payload(record),
+        }
+
+    def create_session(self, user: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        with self._active_runs_lock:
+            if any(active.user == name for active in self._active_runs.values()):
+                raise ConflictError("存在正在运行的会话，结束当前响应后再创建新对话")
+            session_id = new_conversation_id()
+            active_key = self._interactive_active_key(name)
+            record = reserve_session(
+                self.root,
+                name,
+                "web",
+                session_id,
+                active_key=active_key,
+            )
+        return {
+            "user": name,
+            "active_key": active_key,
+            "created": True,
+            "session": self._index_session_payload(record),
+        }
+
+    def close_session(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        with self._active_runs_lock:
+            if any(
+                active.user == name and active.session_id == normalized_session
+                for active in self._active_runs.values()
+            ):
+                raise ConflictError("会话正在运行，结束当前响应后再关闭")
+            record = close_index_session(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+            )
+        if record is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "closed": True,
+            "session": self._index_session_payload(record),
+        }
+
     def rename_session(
         self,
         user: Any,
@@ -2177,6 +2317,35 @@ class WebRunService:
         context = result.get("context") if isinstance(result.get("context"), dict) else {}
         rounds_removed = max(0, int(context.get("rounds_removed") or 0))
         summary_cache = str(result.get("summary_cache") or "")
+        try:
+            memory = self.extract_session_memory(
+                name,
+                normalized_session,
+                source=normalized_source,
+            )
+        except Exception as exc:
+            # Context compression has already completed at this point.  Keep
+            # the archived rounds pending for background recovery and expose
+            # the independent memory failure instead of reporting the whole
+            # compression request as if it had never run.
+            memory = {
+                "status": "failed",
+                "reason": "memory_extraction_error",
+                "user": name,
+                "source": normalized_source,
+                "session_id": normalized_session,
+                "round": 0,
+                "candidates": 0,
+                "extraction": None,
+                "extractions": [],
+                "retry_pending": True,
+                "error": {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                },
+            }
+        else:
+            memory["retry_pending"] = memory.get("status") == "failed"
         return {
             "user": name,
             "source": normalized_source,
@@ -2186,6 +2355,7 @@ class WebRunService:
             "rounds_removed": rounds_removed,
             "summary_cache_exists": bool(summary_cache),
             "context": dict(context),
+            "memory": memory,
         }
 
     def extract_session_memory(
@@ -2215,72 +2385,152 @@ class WebRunService:
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再提取记忆")
 
-        window = load_window(directory)
-        messages = (window.get("text") or {}).get("messages", [])
-        rounds = int((window.get("data") or {}).get("rounds", 0))
-        user_messages = [
-            message
-            for message in messages
-            if isinstance(message, dict) and message.get("role") == "user"
-        ]
-        assistant_messages = [
-            message
-            for message in messages
-            if isinstance(message, dict) and message.get("role") == "assistant"
-        ]
-        if rounds < 1 or not user_messages or not assistant_messages:
+        with _session_lock(self.root, name, normalized_source, normalized_session):
+            window = load_window(directory)
+            data = window.setdefault("data", {})
+            rounds = max(0, int(data.get("rounds") or 0))
+            if rounds < 1:
+                return {
+                    "status": "skipped",
+                    "reason": "no_complete_round",
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                    "round": rounds,
+                    "candidates": 0,
+                    "extraction": None,
+                    "extractions": [],
+                }
+
+            raw_cursor = data.get("memory_processed_round")
+            processed_round = (
+                max(0, int(raw_cursor or 0))
+                if raw_cursor is not None
+                else max(0, rounds - 1)
+            )
+            if processed_round >= rounds:
+                return {
+                    "status": "skipped",
+                    "reason": "already_processed",
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                    "round": rounds,
+                    "candidates": 0,
+                    "extraction": None,
+                    "extractions": [],
+                }
+
+            config = load_config(name, self.root)
+            runner = AgentRunner(self.root, name, config=config)
+            data["memory_processed_round"] = processed_round
+            data["memory_status"] = "processing"
+            data.pop("memory_error", None)
+            commit_window(directory, window)
+            index_error: dict[str, Any] | None = None
+            try:
+                update_memory_state(
+                    self.root,
+                    name,
+                    normalized_source,
+                    normalized_session,
+                    status="processing",
+                )
+            except Exception as exc:
+                index_error = {
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+
+            extractions: list[dict[str, Any]] = []
+            candidates = 0
+            for round_number in range(processed_round + 1, rounds + 1):
+                try:
+                    extraction = _extract_round_memory(
+                        root=self.root,
+                        user=name,
+                        config=config,
+                        round_number=round_number,
+                        agent_runner=runner,
+                        cancel_event=None,
+                        **memory_round_payload(window, round_number),
+                    )
+                except Exception as exc:
+                    extraction = {
+                        "status": "failed",
+                        "candidate_count": 0,
+                        "error": {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        },
+                    }
+                extractions.append(extraction)
+                if extraction.get("status") != "completed":
+                    error = (
+                        extraction.get("error")
+                        if isinstance(extraction.get("error"), dict)
+                        else {"message": "记忆提取失败"}
+                    )
+                    data["memory_status"] = "failed"
+                    data["memory_error"] = error
+                    commit_window(directory, window)
+                    try:
+                        update_memory_state(
+                            self.root,
+                            name,
+                            normalized_source,
+                            normalized_session,
+                            status="failed",
+                            error=error,
+                        )
+                    except Exception as exc:
+                        index_error = index_error or {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        }
+                    return {
+                        "status": "failed",
+                        "user": name,
+                        "source": normalized_source,
+                        "session_id": normalized_session,
+                        "round": round_number,
+                        "candidates": candidates,
+                        "extraction": extraction,
+                        "extractions": extractions,
+                        "index_error": index_error,
+                    }
+                candidates += int(extraction.get("candidate_count") or 0)
+                data["memory_processed_round"] = round_number
+                data["memory_status"] = (
+                    "completed" if round_number >= rounds else "processing"
+                )
+                data.pop("memory_error", None)
+                commit_window(directory, window)
+                try:
+                    update_memory_state(
+                        self.root,
+                        name,
+                        normalized_source,
+                        normalized_session,
+                        processed_round=round_number,
+                        status=str(data["memory_status"]),
+                    )
+                except Exception as exc:
+                    index_error = index_error or {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
             return {
-                "status": "skipped",
-                "reason": "no_complete_round",
+                "status": "completed",
                 "user": name,
                 "source": normalized_source,
                 "session_id": normalized_session,
                 "round": rounds,
-                "candidates": 0,
-                "extraction": None,
+                "candidates": candidates,
+                "extraction": extractions[-1],
+                "extractions": extractions,
+                "index_error": index_error,
             }
-
-        think_rounds = (window.get("think") or {}).get("rounds", [])
-        reasoning = next(
-            (
-                str(item.get("content") or "")
-                for item in think_rounds
-                if isinstance(item, dict) and item.get("round") == rounds
-            ),
-            "",
-        )
-        tool_rounds = (window.get("tool") or {}).get("rounds", [])
-        tools = next(
-            (
-                item.get("calls", [])
-                for item in tool_rounds
-                if isinstance(item, dict) and item.get("round") == rounds
-            ),
-            [],
-        )
-        config = load_config(name, self.root)
-        runner = AgentRunner(self.root, name, config=config)
-        extraction = _extract_round_memory(
-            root=self.root,
-            user=name,
-            config=config,
-            round_number=rounds,
-            prompt=str(user_messages[-1].get("content") or ""),
-            text=str(assistant_messages[-1].get("content") or ""),
-            reasoning=reasoning,
-            tool_records=list(tools) if isinstance(tools, list) else [],
-            agent_runner=runner,
-            cancel_event=None,
-        )
-        return {
-            "status": str(extraction.get("status") or "completed"),
-            "user": name,
-            "source": normalized_source,
-            "session_id": normalized_session,
-            "round": rounds,
-            "candidates": int(extraction.get("candidate_count") or 0),
-            "extraction": extraction,
-        }
 
     def undo_last_round(
         self,
@@ -2360,6 +2610,21 @@ class WebRunService:
         normalized_session = self.require_session_id(session_id)
         directory = find_window(self.root, name, normalized_source, normalized_session)
         if directory is None:
+            reserved = find_index_record(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+            )
+            if isinstance(reserved, dict) and not reserved.get("archive_window"):
+                return {
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                    "messages": [],
+                    "round_metrics": [],
+                    "round_traces": [],
+                }
             raise NotFoundError(f"会话不存在：{normalized_session}")
         window = load_window(directory)
         raw_metrics = (window.get("data") or {}).get("round_metrics") or []
@@ -3677,79 +3942,106 @@ class WebRunService:
         user: str,
         session_id: str,
         *,
+        config: dict[str, Any],
         token_limit: int,
         round_limit: int,
         configured_ratio: float,
     ) -> dict[str, Any]:
-        empty = {
+        unavailable = {
             "selected": False,
+            "available": False,
             "used_tokens": 0,
             "max_tokens": token_limit,
             "percent": 0.0,
             "rounds": 0,
             "round_limit": round_limit,
             "compression_threshold": max(0, round(token_limit * configured_ratio)),
-            "source": "none",
+            "source": "unavailable",
         }
-        if not session_id:
-            return empty
-        directory = find_window(self.root, user, "web", session_id)
+        selected = bool(session_id)
+        directory = (
+            find_window(self.root, user, "web", session_id) if selected else None
+        )
+        archive: dict[str, Any]
         if directory is None:
-            return empty
-        try:
-            archive = load_window(directory)
-        except Exception:
-            return empty
-        archive_data = archive.get("data") or {}
-        runtime_data: dict[str, Any] = {}
-        runtime_path = runtime_window_path(directory)
-        if runtime_path.is_dir():
+            if selected:
+                return unavailable
+            directory = self.root / "users" / user / "history" / "__new_session__"
+            archive = empty_window(user, "web", "__new_session__")
+        else:
             try:
-                runtime_data = load_window(runtime_path).get("data") or {}
+                archive = load_window(directory)
             except Exception:
-                runtime_data = {}
-        context = runtime_data.get("context") or {}
-        used_tokens = _nonnegative_int(context.get("estimated_tokens_after"))
-        source = "runtime_estimate" if used_tokens else "none"
-        if not used_tokens:
-            metrics = archive_data.get("round_metrics") or []
-            for metric in reversed(metrics if isinstance(metrics, list) else []):
-                if not isinstance(metric, dict):
-                    continue
-                responses = metric.get("provider_responses") or []
-                for response in reversed(responses if isinstance(responses, list) else []):
-                    if not isinstance(response, dict):
-                        continue
-                    usage = response.get("usage") or {}
-                    if isinstance(usage, dict):
-                        used_tokens = _nonnegative_int(
-                            usage.get("input_tokens") or usage.get("prompt_tokens")
-                        )
-                    if used_tokens:
-                        source = "latest_provider_request"
-                        break
-                if used_tokens:
-                    break
-        if not used_tokens:
-            usage = archive_data.get("token_usage") or {}
-            if isinstance(usage, dict):
-                used_tokens = _nonnegative_int(
-                    usage.get("input_tokens") or usage.get("prompt_tokens")
-                )
-                source = "session_usage" if used_tokens else "none"
+                return unavailable
+        try:
+            runtime_path = (
+                runtime_window_path(directory)
+                if selected
+                else directory / "temp" / "__new_session__"
+            )
+            runtime_window = archive
+            source = "new_session_recalculated"
+            if runtime_path.is_dir() and (runtime_path / "data.json").is_file():
+                runtime_window = load_window(runtime_path)
+                source = "runtime_recalculated"
+            elif selected:
+                source = "archive_recalculated"
+            policy = ContextPolicy.from_config(config)
+            prompt_bundle = build_prompt_bundle(self.root, user, config)
+            registry = apply_runtime_tool_policy(
+                discover_tools(self.root, user), config
+            )
+            system_message = (
+                {"role": "system", "content": prompt_bundle.text}
+                if prompt_bundle.text
+                else None
+            )
+            summary_message = None
+            summary_path = runtime_path / "context_summary.json"
+            if summary_path.is_file():
+                try:
+                    summary_message = build_summary_message(
+                        json.loads(summary_path.read_text("utf-8"))
+                    )
+                except (OSError, json.JSONDecodeError):
+                    summary_message = None
+            selection = select_context(
+                window=runtime_window,
+                policy=policy,
+                system_message=system_message,
+                summary_message=summary_message,
+                current_user_message=None,
+                tools=registry.schemas() or None,
+            )
+            snapshot = build_context_snapshot(
+                selection,
+                system_prompt=prompt_bundle.text,
+                summary_message=summary_message,
+                capacity_tokens=token_limit,
+                source=source,
+            )
+        except Exception:
+            return unavailable
+        archive_data = archive.get("data") or {}
+        total_rounds = _nonnegative_int(archive_data.get("rounds"))
+        foreground_rounds = _nonnegative_int(snapshot.get("foreground_rounds"))
         effective_limit = max(0, token_limit)
-        threshold = _nonnegative_int(context.get("input_budget")) or max(
+        threshold = _nonnegative_int(selection.input_budget) or max(
             0, round(effective_limit * configured_ratio)
         )
         return {
-            "selected": True,
-            "used_tokens": used_tokens,
+            "selected": selected,
+            "available": True,
+            "used_tokens": _nonnegative_int(snapshot.get("total_tokens")),
             "max_tokens": effective_limit,
-            "percent": round(used_tokens * 100 / effective_limit, 2) if effective_limit else 0.0,
-            "rounds": _nonnegative_int(archive_data.get("rounds")),
+            "percent": float(snapshot.get("percent") or 0.0),
+            "rounds": foreground_rounds,
             "round_limit": max(0, round_limit),
             "compression_threshold": threshold,
-            "source": source,
+            "source": str(snapshot.get("source") or source),
+            "context_snapshot": snapshot,
+            "session_total_rounds": total_rounds,
+            "background_archived_rounds": max(0, total_rounds - foreground_rounds),
         }
 
     def _today_token_statistics(self, user: str, *, now: datetime) -> dict[str, Any]:
@@ -3768,10 +4060,24 @@ class WebRunService:
             received = _nonnegative_int(
                 usage.get("output_tokens") or usage.get("completion_tokens")
             )
+            cached = _usage_cache_tokens(usage)
+            declared_requests = _nonnegative_int(
+                usage.get("provider_request_count")
+            )
+            if not any(
+                (
+                    sent,
+                    received,
+                    cached,
+                    declared_requests,
+                    _nonnegative_int(usage.get("total_tokens")),
+                )
+            ):
+                return
             sent_tokens += sent
             received_tokens += received
-            cached_tokens += _usage_cache_tokens(usage)
-            request_count += 1
+            cached_tokens += cached
+            request_count += declared_requests or 1
             if occurred_at is not None:
                 trend[occurred_at.astimezone(_BEIJING).hour] += sent + received
 
@@ -4114,6 +4420,7 @@ class WebRunService:
         context = self._current_context_status(
             name,
             normalized_session,
+            config=config,
             token_limit=token_limit,
             round_limit=round_limit,
             configured_ratio=compression_ratio,
@@ -4271,10 +4578,13 @@ class WebRunService:
             "estimated": False,
         }
         rounds = 0
+        selected_directory: Path | None = None
         if normalized_session:
-            directory = find_window(self.root, name, "web", normalized_session)
-            if directory is not None:
-                data = load_window(directory).get("data") or {}
+            selected_directory = find_window(
+                self.root, name, "web", normalized_session
+            )
+            if selected_directory is not None:
+                data = load_window(selected_directory).get("data") or {}
                 rounds = max(0, int(data.get("rounds") or 0))
                 stored_usage = data.get("token_usage")
                 if isinstance(stored_usage, dict):
@@ -4298,55 +4608,64 @@ class WebRunService:
         current_context = self._current_context_status(
             name,
             normalized_session,
+            config=config,
             token_limit=token_limit,
             round_limit=round_limit,
             configured_ratio=compression_ratio,
         )
-        prompt_bundle = build_prompt_bundle(self.root, name, config)
-        system_prompt_tokens = estimate_text_tokens(prompt_bundle.text)
-        current_input_tokens = _nonnegative_int(current_context.get("used_tokens"))
-        context_tokens = max(0, current_input_tokens - system_prompt_tokens)
-        context_total_tokens = system_prompt_tokens + context_tokens
-        context_capacity = _nonnegative_int(current_context.get("max_tokens"))
-        context_window_percent = (
-            round(context_total_tokens * 100 / context_capacity, 2)
-            if context_capacity
-            else 0.0
-        )
+        context_snapshot = current_context.get("context_snapshot")
+        if not isinstance(context_snapshot, dict):
+            context_snapshot = {
+                "available": False,
+                "source": "unavailable",
+                "measurement": "unknown",
+                "captured_at": "",
+                "system_prompt_tokens": 0,
+                "tool_schema_tokens": 0,
+                "conversation_tokens": 0,
+                "summary_tokens": 0,
+                "other_tokens": 0,
+                "total_tokens": 0,
+                "capacity_tokens": token_limit,
+                "percent": 0.0,
+                "foreground_rounds": 0,
+            }
 
-        archived_rounds = sum(
-            _nonnegative_int(item.get("rounds"))
-            for item in sessions
-            if item.get("session_id") != normalized_session
-        )
-        total_tool_calls = 0
-        for session in sessions:
-            stored_session_id = str(session.get("session_id") or "")
-            if not stored_session_id:
-                continue
-            directory = find_window(self.root, name, "web", stored_session_id)
-            if directory is None:
-                continue
+        session_tool_calls = 0
+        if selected_directory is not None:
             try:
-                archive = load_window(directory)
+                archive = load_window(selected_directory)
             except Exception:
-                continue
-            archive_data = archive.get("data") or {}
-            metrics = archive_data.get("round_metrics") or []
+                archive = {}
+            selected_data = archive.get("data") or {}
+            metrics = selected_data.get("round_metrics") or []
             if isinstance(metrics, list) and metrics:
-                total_tool_calls += sum(
+                session_tool_calls = sum(
                     _nonnegative_int(metric.get("tool_calls"))
                     for metric in metrics
                     if isinstance(metric, dict)
                 )
-                continue
-            item_container = archive.get("items") or {}
-            items = item_container.get("items") if isinstance(item_container, dict) else []
-            total_tool_calls += sum(
-                item.get("type") == "tool_call"
-                for item in (items or [])
-                if isinstance(item, dict)
-            )
+            else:
+                item_container = archive.get("items") or {}
+                items = (
+                    item_container.get("items")
+                    if isinstance(item_container, dict)
+                    else []
+                )
+                session_tool_calls = sum(
+                    item.get("type") == "tool_call"
+                    for item in (items or [])
+                    if isinstance(item, dict)
+                )
+        foreground_rounds = _nonnegative_int(
+            current_context.get("rounds")
+        )
+        session_total_rounds = _nonnegative_int(
+            current_context.get("session_total_rounds")
+        )
+        background_archived_rounds = max(
+            0, session_total_rounds - foreground_rounds
+        )
 
         sense_data = self.sense(name)
         expand_data = self.expands(name)
@@ -4437,16 +4756,46 @@ class WebRunService:
             },
             "context_window": {
                 "tokens": {
-                    "system_prompt_tokens": system_prompt_tokens,
-                    "context_tokens": context_tokens,
-                    "total_tokens": context_total_tokens,
-                    "capacity_tokens": context_capacity,
-                    "percent": min(100.0, context_window_percent),
+                    "system_prompt_tokens": _nonnegative_int(
+                        context_snapshot.get("system_prompt_tokens")
+                    ),
+                    "tool_schema_tokens": _nonnegative_int(
+                        context_snapshot.get("tool_schema_tokens")
+                    ),
+                    "conversation_tokens": _nonnegative_int(
+                        context_snapshot.get("conversation_tokens")
+                    ),
+                    "summary_tokens": _nonnegative_int(
+                        context_snapshot.get("summary_tokens")
+                    ),
+                    "other_tokens": _nonnegative_int(
+                        context_snapshot.get("other_tokens")
+                    ),
+                    "context_tokens": _nonnegative_int(
+                        context_snapshot.get("total_tokens")
+                    )
+                    - _nonnegative_int(context_snapshot.get("system_prompt_tokens")),
+                    "total_tokens": _nonnegative_int(
+                        context_snapshot.get("total_tokens")
+                    ),
+                    "capacity_tokens": _nonnegative_int(
+                        context_snapshot.get("capacity_tokens")
+                    ),
+                    "percent": min(
+                        100.0, float(context_snapshot.get("percent") or 0.0)
+                    ),
+                    "source": str(context_snapshot.get("source") or "unavailable"),
+                    "measurement": str(
+                        context_snapshot.get("measurement") or "unknown"
+                    ),
+                    "captured_at": str(context_snapshot.get("captured_at") or ""),
                 },
                 "conversation": {
-                    "foreground_rounds": _nonnegative_int(current_context.get("rounds")),
-                    "archived_rounds": archived_rounds,
-                    "total_tool_calls": total_tool_calls,
+                    "foreground_rounds": foreground_rounds,
+                    "archived_rounds": background_archived_rounds,
+                    "total_tool_calls": session_tool_calls,
+                    "session_total_rounds": session_total_rounds,
+                    "session_tool_calls": session_tool_calls,
                 },
                 "tasks": {
                     "active_plans": _nonnegative_int(task_data["summary"].get("active_plans")),
@@ -4475,6 +4824,14 @@ class WebRunService:
                         (sense_data.get("summary") or {}).get("enabled")
                     ),
                 },
+            },
+            "context_snapshot": context_snapshot,
+            "session_context_stats": {
+                "selected": bool(normalized_session),
+                "foreground_rounds": foreground_rounds,
+                "background_archived_rounds": background_archived_rounds,
+                "session_total_rounds": session_total_rounds,
+                "session_tool_calls": session_tool_calls,
             },
             "agents": agents,
             "summary_cache": self._summary_cache_status(name, normalized_session),
@@ -4527,6 +4884,7 @@ class WebRunService:
             "stream": True,
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,
+            "_history_active_key": self._interactive_active_key(name),
         }
         if self._router_ref is not None:
             transport_registry = getattr(self._router_ref, "transports", None)

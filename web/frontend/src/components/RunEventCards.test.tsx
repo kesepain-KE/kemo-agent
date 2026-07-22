@@ -75,13 +75,32 @@ describe('RunEventCards', () => {
 
   it('运行统计是没有下拉按钮的静态指标面板', () => {
     render(<UsageCard item={{
-      id: 'u1', kind: 'usage', elapsedMs: 2200,
+      id: 'u1', kind: 'usage', elapsedMs: 2200, providerRequestCount: 2,
       usage: { prompt_tokens: 11838, completion_tokens: 27, total_tokens: 11865, cached_prompt_tokens: 7296, cache_hit_rate: .616 },
     }} />)
     expect(screen.getByRole('group', { name: '本轮运行统计' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /运行统计/ })).not.toBeInTheDocument()
     expect(screen.getByText('7,296')).toBeInTheDocument()
     expect(screen.getByText('61.6%')).toBeInTheDocument()
+    expect(screen.getByText('请求')).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
     expect(screen.getByText('2.2 s')).toBeInTheDocument()
+  })
+
+  it('缓存统计区分未知值和明确的零', () => {
+    const { rerender } = render(<UsageCard item={{
+      id: 'unknown', kind: 'usage', usage: {
+        prompt_tokens: 8, completion_tokens: 1, cached_prompt_tokens: null, cache_hit_rate: null,
+      },
+    }} />)
+    expect(screen.getAllByText('—')).toHaveLength(3)
+
+    rerender(<UsageCard item={{
+      id: 'zero', kind: 'usage', usage: {
+        prompt_tokens: 8, completion_tokens: 1, cached_prompt_tokens: 0, cache_hit_rate: 0,
+      },
+    }} />)
+    expect(screen.getByText('0.0%')).toBeInTheDocument()
+    expect(screen.getByText('0')).toBeInTheDocument()
   })
 })

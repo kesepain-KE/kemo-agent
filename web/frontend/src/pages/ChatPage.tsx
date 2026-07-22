@@ -15,7 +15,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { compressSession, deleteSession, extractSessionMemory, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
+import { closeSession, compressSession, deleteSession, extractSessionMemory, getHistory, getSense, getTasks, streamChat, submitGuidance, undoLastRound, updatePlan, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import type { ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -175,6 +175,7 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       id: eventId('usage'), kind: 'usage', usage: event.usage,
       elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
       toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
+      providerRequestCount: event.usage.provider_request_count === undefined ? undefined : Number(event.usage.provider_request_count),
     }] : completed
   }
   return items
@@ -226,6 +227,9 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
       result.push({
         id: `history_usage_${round}`, kind: 'usage', usage: selected.usage,
         elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
+        providerRequestCount: selected.usage.provider_request_count === undefined
+          ? undefined
+          : Number(selected.usage.provider_request_count),
       })
     }
   }
@@ -351,7 +355,7 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, setSessionId, sessions, refreshSessions, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, setSessionId, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -510,9 +514,9 @@ export function ChatPage() {
       setUploadFeedback({ tone: 'error', text: error instanceof Error ? `上传失败：${error.message}` : '上传失败' })
     }
   }
-  const newConversation = () => {
+  const newConversation = async () => {
     abortChatRun()
-    setSessionId('')
+    await createNewSession()
     setConversationMenuOpen(false)
   }
 
@@ -524,8 +528,9 @@ export function ChatPage() {
       if (sessionId && hasCommitted) {
         await extractSessionMemory(user, sessionId)
       }
+      if (sessionId) await closeSession(user, sessionId)
       await refreshSessions()
-      newConversation()
+      await newConversation()
     } catch (error) {
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
     } finally {
@@ -546,8 +551,10 @@ export function ChatPage() {
         if (historyHandoffSessionRef.current === sessionId) historyHandoffSessionRef.current = ''
         await refreshSessions()
         refreshOverview()
+      } else if (sessionId) {
+        await closeSession(user, sessionId)
       }
-      newConversation()
+      await newConversation()
     } catch (error) {
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '清空当前对话失败' })
     } finally {
@@ -565,11 +572,22 @@ export function ChatPage() {
     setConversationFeedback(null)
     try {
       const result = await compressSession(user, sessionId)
+      const compressionText = result.compressed
+        ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。`
+        : '当前上下文较短，暂时无需压缩。'
+      const memory = result.memory
+      const memoryText = memory.status === 'completed'
+        ? (memory.candidates > 0
+            ? `已同步提取 ${memory.candidates} 条记忆候选。`
+            : '记忆提取已完成，本次没有需要保存的新记忆。')
+        : memory.status === 'skipped'
+          ? (memory.reason === 'already_processed'
+              ? '记忆已是最新状态。'
+              : '当前没有可提取的完整对话轮次。')
+          : '记忆提取未完成，已保留待后台重试。'
       setConversationFeedback({
-        tone: 'success',
-        text: result.compressed
-          ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。`
-          : '当前上下文较短，暂时无需压缩。',
+        tone: memory.status === 'failed' ? 'error' : 'success',
+        text: `${compressionText}${memoryText}`,
       })
       refreshOverview()
     } catch (error) {
@@ -859,14 +877,14 @@ export function ChatPage() {
               </button>
               <button className="conversation-action compress" role="menuitem" disabled={running || Boolean(conversationBusy) || !sessionId || !hasCommitted} onClick={() => { void compressCurrentConversation() }}>
                 <span className="conversation-action-icon"><Zap size={16} /></span>
-                <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在执行 Token 压缩…' : '使用 Token 压缩法整理当前上下文'}</span></span>
+                <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在压缩并提取记忆…' : '整理当前上下文并同步提取待处理记忆'}</span></span>
               </button>
               <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={() => void regenerateLastResponse()}>
                 <span className="conversation-action-icon"><RotateCcw size={16} /></span>
                 <span className="conversation-action-copy"><strong>重新发送一次消息</strong><span>撤销上一轮后重放原消息，不增加对话轮数</span></span>
               </button>
               {conversationFeedback ? <div className={`conversation-menu-status ${conversationFeedback.tone}`} role="status">{conversationFeedback.text}</div> : null}
-              <div className="conversation-menu-foot">每次打开新网页都会创建新对话，可通过打开历史对话接续对话。</div>
+              <div className="conversation-menu-foot">再次打开网页会恢复上次活跃对话；点击“保存并创建新对话”才会关闭并切换会话。</div>
             </div>
           ) : null}
           onChange={setDraft}

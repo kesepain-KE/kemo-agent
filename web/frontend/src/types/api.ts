@@ -38,10 +38,30 @@ export interface UserSummary {
 
 export interface SessionSummary {
   session_id: string
+  conversation_id?: string
   window: string
   title: string
+  summary?: string
+  state?: 'open' | 'closed' | string
+  run_state?: 'idle' | 'running' | 'failed' | string
+  chain?: 'interactive' | 'message' | 'background' | string
   rounds: number
   updated_at: string
+}
+
+export interface ActiveSessionResponse {
+  user: string
+  active_key: string
+  created: boolean
+  session: SessionSummary
+}
+
+export interface SessionCloseResponse {
+  user: string
+  source: 'web'
+  session_id: string
+  closed: boolean
+  session: SessionSummary
 }
 
 export interface HistoryMessage {
@@ -98,6 +118,7 @@ export interface SessionCompressResponse {
   rounds_removed: number
   summary_cache_exists: boolean
   context: Record<string, unknown>
+  memory: SessionMemoryExtractionResponse
 }
 
 export interface SessionMemoryExtractionResponse {
@@ -109,6 +130,12 @@ export interface SessionMemoryExtractionResponse {
   candidates: number
   reason?: string
   extraction: Record<string, unknown> | null
+  extractions?: Array<Record<string, unknown>>
+  retry_pending?: boolean
+  error?: {
+    message: string
+    exception_type?: string
+  }
 }
 
 export interface SessionUndoLastRoundResponse {
@@ -558,15 +585,24 @@ export interface OverviewResponse {
   context_window: {
     tokens: {
       system_prompt_tokens: number
+      tool_schema_tokens: number
+      conversation_tokens: number
+      summary_tokens: number
+      other_tokens: number
       context_tokens: number
       total_tokens: number
       capacity_tokens: number
       percent: number
+      source: string
+      measurement: string
+      captured_at: string
     }
     conversation: {
       foreground_rounds: number
       archived_rounds: number
       total_tool_calls: number
+      session_total_rounds: number
+      session_tool_calls: number
     }
     tasks: {
       active_plans: number
@@ -587,6 +623,28 @@ export interface OverviewResponse {
       expands: number
       senses: number
     }
+  }
+  context_snapshot: {
+    available: boolean
+    source: string
+    measurement: string
+    captured_at: string
+    system_prompt_tokens: number
+    tool_schema_tokens: number
+    conversation_tokens: number
+    summary_tokens: number
+    other_tokens: number
+    total_tokens: number
+    capacity_tokens: number
+    percent: number
+    foreground_rounds: number
+  }
+  session_context_stats: {
+    selected: boolean
+    foreground_rounds: number
+    background_archived_rounds: number
+    session_total_rounds: number
+    session_tool_calls: number
   }
   agents: Array<{
     name: string
@@ -1058,7 +1116,7 @@ export type ChatItem =
       status: 'running' | 'success' | 'error'
       elapsedMs?: number
     }
-  | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number }
+  | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary }
   | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'error' }
   | { id: string; kind: 'error'; content: string }

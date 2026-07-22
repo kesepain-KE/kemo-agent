@@ -152,14 +152,15 @@ function elapsedLabel(value: number | undefined) {
 export function UsageCard({ item }: { item: Extract<ChatItem, { kind: 'usage' }> }) {
   const prompt = metric(item.usage.prompt_tokens)
   const completion = metric(item.usage.completion_tokens)
-  const cached = item.usage.cached_prompt_tokens === undefined ? undefined : metric(item.usage.cached_prompt_tokens)
-  const hitRate = item.usage.cache_hit_rate === undefined ? undefined : metric(item.usage.cache_hit_rate)
+  const cached = item.usage.cached_prompt_tokens == null ? undefined : metric(item.usage.cached_prompt_tokens)
+  const hitRate = item.usage.cache_hit_rate == null ? undefined : metric(item.usage.cache_hit_rate)
   return <article className="usage-card" role="group" aria-label={`${item.round ? `第 ${item.round} 轮` : '本轮'}运行统计`}>
     <div className="usage-card-head">
       <span className="usage-summary-chip"><small>输入</small><strong>{prompt.toLocaleString()}</strong></span>
       <span className="usage-summary-chip"><small>输出</small><strong>{completion.toLocaleString()}</strong></span>
       <span className="usage-summary-chip"><small>缓存</small><strong>{cached === undefined ? '—' : cached.toLocaleString()}</strong></span>
       <span className="usage-summary-chip"><small>命中率</small><strong>{hitRate === undefined ? '—' : `${(hitRate * 100).toFixed(1)}%`}</strong></span>
+      {item.providerRequestCount !== undefined ? <span className="usage-summary-chip" title="本轮所有模型请求的累计计量"><small>请求</small><strong>{item.providerRequestCount}</strong></span> : null}
       <span className="usage-summary-chip"><small>耗时</small><strong>{elapsedLabel(item.elapsedMs)}</strong></span>
     </div>
   </article>

@@ -21,6 +21,18 @@ export const handlers = [
   http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
     user: 'kesepain', source: 'web', sessions: [{ session_id: 's1', window: 'w1', title: '', rounds: 2, updated_at: 'now' }],
   })),
+  http.get('/api/users/kesepain/sessions/active', () => HttpResponse.json({
+    user: 'kesepain', active_key: 'interactive:kesepain', created: false,
+    session: { session_id: 's1', conversation_id: 'legacy_s1', window: 'w1', title: '', rounds: 2, updated_at: 'now', state: 'open', run_state: 'idle', chain: 'interactive' },
+  })),
+  http.post('/api/users/kesepain/sessions', () => HttpResponse.json({
+    user: 'kesepain', active_key: 'interactive:kesepain', created: true,
+    session: { session_id: 'conv_new_session', conversation_id: 'conv_new_session', window: '', title: '', rounds: 0, updated_at: 'now', state: 'open', run_state: 'idle', chain: 'interactive' },
+  })),
+  http.post('/api/users/kesepain/sessions/:sessionId/close', ({ params }) => HttpResponse.json({
+    user: 'kesepain', source: 'web', session_id: params.sessionId, closed: true,
+    session: { session_id: params.sessionId, window: 'w1', title: '', rounds: 2, updated_at: 'now', state: 'closed', run_state: 'idle', chain: 'interactive' },
+  })),
   http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
     user: 'kesepain', source: 'web', session_id: 's1', messages: [], round_metrics: [], round_traces: [],
   })),
@@ -28,6 +40,11 @@ export const handlers = [
     user: 'kesepain', source: 'web', session_id: params.sessionId, requested: true,
     compressed: true, rounds_removed: 2, summary_cache_exists: true,
     context: { rounds_removed: 2 },
+    memory: {
+      status: 'completed', user: 'kesepain', source: 'web', session_id: params.sessionId,
+      round: 2, candidates: 1, extraction: { status: 'completed', candidate_count: 1 },
+      retry_pending: false,
+    },
   })),
   http.post('/api/users/kesepain/sessions/:sessionId/extract-memory', ({ params }) => HttpResponse.json({
     status: 'completed', user: 'kesepain', source: 'web', session_id: params.sessionId,
@@ -51,14 +68,16 @@ export const handlers = [
     provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', timeout: 120, stream: false, credential_source: 'environment', configured: true },
     counts: { sessions: 1, knowledge_documents: 3, enabled_tools: 2, enabled_agents: 1, active_tasks: 0 },
     context_window: {
-      tokens: { system_prompt_tokens: 18200, context_tokens: 4200, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67 },
-      conversation: { foreground_rounds: 8, archived_rounds: 36, total_tool_calls: 19 },
+      tokens: { system_prompt_tokens: 18200, tool_schema_tokens: 2400, conversation_tokens: 1800, summary_tokens: 0, other_tokens: 0, context_tokens: 4200, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67, source: 'runtime_recalculated', measurement: 'estimated', captured_at: '2026-07-22T00:00:00Z' },
+      conversation: { foreground_rounds: 8, archived_rounds: 36, total_tool_calls: 19, session_total_rounds: 44, session_tool_calls: 19 },
       tasks: { active_plans: 2, waiting_crons: 3 },
       capabilities: { tools_enabled: 12, tools_disabled: 2, agents_enabled: 4 },
       knowledge: { enabled: 9, disabled: 2, graph_enabled: true },
       messages: { connected: 1 },
       integrations: { expands: 2, senses: 1 },
     },
+    context_snapshot: { available: true, source: 'runtime_recalculated', measurement: 'estimated', captured_at: '2026-07-22T00:00:00Z', system_prompt_tokens: 18200, tool_schema_tokens: 2400, conversation_tokens: 1800, summary_tokens: 0, other_tokens: 0, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67, foreground_rounds: 8 },
+    session_context_stats: { selected: false, foreground_rounds: 8, background_archived_rounds: 36, session_total_rounds: 44, session_tool_calls: 19 },
     agents: [{ name: 'context_manage', description: '上下文摘要', enabled: true, source: 'builtin', execution: 'sync', model_profile: 'default', exposure: 'internal' }],
     summary_cache: { exists: false, covered_rounds: [], created_at: '', window: '' },
     runtime_host: { state: 'unmanaged', components: {} },

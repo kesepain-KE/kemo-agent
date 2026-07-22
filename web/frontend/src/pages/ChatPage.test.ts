@@ -155,7 +155,7 @@ describe('reduceRunEvent', () => {
   })
 
   it('done 生成可持久化的逐轮统计卡片', () => {
-    const items = reduceRunEvent([], { type: 'done', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }, metadata: { elapsed_ms: 35, tool_calls: 1 } })
-    expect(items[0]).toMatchObject({ kind: 'usage', elapsedMs: 35, toolCalls: 1, usage: { total_tokens: 12 } })
+    const items = reduceRunEvent([], { type: 'done', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, provider_request_count: 2 }, metadata: { elapsed_ms: 35, tool_calls: 1 } })
+    expect(items[0]).toMatchObject({ kind: 'usage', elapsedMs: 35, toolCalls: 1, providerRequestCount: 2, usage: { total_tokens: 12 } })
   })
 })
