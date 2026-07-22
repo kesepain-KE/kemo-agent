@@ -43,6 +43,7 @@ class ChatBody(BaseModel):
     content: list[dict[str, Any]] = Field(default_factory=list)
     run_id: str = ""
     plan_id: str = ""
+    client_id: str = ""
 
     @model_validator(mode="after")
     def require_input(self) -> "ChatBody":
@@ -63,6 +64,10 @@ class GuidanceBody(BaseModel):
 
 class SessionRenameBody(BaseModel):
     title: str
+
+
+class SessionClientBody(BaseModel):
+    client_id: str = ""
 
 
 class SessionUndoLastRoundBody(BaseModel):
@@ -498,24 +503,58 @@ def create_app(
         return backend.delete_all_sessions(user, source=source)
 
     @app.get("/api/users/{user}/sessions/active")
-    async def active_session(user: str) -> dict[str, Any]:
-        return await asyncio.to_thread(backend.active_session, user)
+    async def active_session(
+        user: str,
+        client_id: str = Query(default=""),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.active_session, user, client_id)
 
     @app.post("/api/users/{user}/sessions")
-    async def create_session(user: str) -> dict[str, Any]:
-        return await asyncio.to_thread(backend.create_session, user)
+    async def create_session(
+        user: str,
+        body: SessionClientBody | None = None,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.create_session,
+            user,
+            body.client_id if body is not None else "",
+        )
 
     @app.post("/api/users/{user}/sessions/{session_id}/close")
     async def close_session(
         user: str,
         session_id: str,
         source: str = Query(default="web"),
+        client_id: str = Query(default=""),
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             backend.close_session,
             user,
             session_id,
             source=source,
+            client_id=client_id,
+        )
+
+    @app.post("/api/users/{user}/sessions/{session_id}/lease")
+    async def session_lease(
+        user: str,
+        session_id: str,
+        body: SessionClientBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.session_lease(
+            user, session_id, body.client_id, source=source
+        )
+
+    @app.post("/api/users/{user}/sessions/{session_id}/lease/release")
+    async def release_session_lease(
+        user: str,
+        session_id: str,
+        body: SessionClientBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.release_session_lease(
+            user, session_id, body.client_id, source=source
         )
 
     @app.patch("/api/users/{user}/sessions/{session_id}")
@@ -532,8 +571,11 @@ def create_app(
         user: str,
         session_id: str,
         source: str = Query(default="web"),
+        client_id: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.delete_session(user, session_id, source=source)
+        return backend.delete_session(
+            user, session_id, source=source, client_id=client_id
+        )
 
     @app.post("/api/users/{user}/sessions/{session_id}/compress")
     async def compress_session(
@@ -810,6 +852,7 @@ def create_app(
                         body.plan_id,
                         cancel_event=cancel_event,
                         run_id=body.run_id,
+                        client_id=body.client_id,
                     )
                 )
             else:
@@ -821,6 +864,7 @@ def create_app(
                         body.prompt,
                         cancel_event=cancel_event,
                         run_id=body.run_id,
+                        client_id=body.client_id,
                         **content_options,
                     )
                 )

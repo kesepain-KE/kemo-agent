@@ -113,6 +113,7 @@ from run.users import list_users
 
 
 _SESSION_RE = re.compile(r"^[^\x00-\x1f]{1,128}$")
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _SESSION_TITLE_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -123,6 +124,7 @@ AVATAR_MAX_BYTES = 5 * 1024 * 1024
 FILE_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
 TEXT_DOCUMENT_MAX_CHARS = 1_000_000
 IMPORTANT_MEMORY_MAX_HARD_CHARS = 65_536
+SESSION_LEASE_TTL_SECONDS = 45.0
 _CONTENT_LIST_ADAPTER = TypeAdapter(list[ContentBlock])
 _FILE_SCOPES = frozenset({"file_upload", "download"})
 _KNOWLEDGE_SCOPES = frozenset({"user", "shared", "global"})
@@ -670,6 +672,7 @@ class WebRunService:
         self._router_ref = router_ref
         self._active_runs: dict[str, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
+        self._session_leases: dict[tuple[str, str, str], dict[str, float]] = {}
         self._chat_gates: dict[str, _UserChatGate] = {}
         self._chat_gates_lock = threading.Lock()
 
@@ -748,6 +751,104 @@ class WebRunService:
         if not _SESSION_RE.fullmatch(value):
             raise InvalidRequestError("session_id 必须是 1–128 字符且不能包含控制字符")
         return value
+
+    def require_client_id(self, client_id: Any, *, optional: bool = True) -> str:
+        if client_id in (None, "") and optional:
+            return ""
+        if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id.strip()):
+            raise InvalidRequestError("client_id 必须是 8–128 位字母、数字、下划线或连字符")
+        return client_id.strip()
+
+    def _prune_session_leases_locked(self, now: float | None = None) -> None:
+        cutoff = (time.monotonic() if now is None else now) - SESSION_LEASE_TTL_SECONDS
+        for key, clients in list(self._session_leases.items()):
+            active = {client: seen for client, seen in clients.items() if seen >= cutoff}
+            if active:
+                self._session_leases[key] = active
+            else:
+                self._session_leases.pop(key, None)
+
+    def _touch_session_lease_locked(
+        self,
+        user: str,
+        source: str,
+        session_id: str,
+        client_id: str,
+    ) -> int:
+        if not client_id:
+            return 0
+        self._prune_session_leases_locked()
+        clients = self._session_leases.setdefault((user, source, session_id), {})
+        clients[client_id] = time.monotonic()
+        return len(clients)
+
+    def _release_session_lease_locked(
+        self,
+        user: str,
+        source: str,
+        session_id: str,
+        client_id: str,
+    ) -> int:
+        self._prune_session_leases_locked()
+        key = (user, source, session_id)
+        clients = self._session_leases.get(key, {})
+        if client_id:
+            clients.pop(client_id, None)
+        if clients:
+            self._session_leases[key] = clients
+            return len(clients)
+        self._session_leases.pop(key, None)
+        return 0
+
+    def session_lease(
+        self,
+        user: Any,
+        session_id: Any,
+        client_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id, optional=False)
+        with self._active_runs_lock:
+            clients = self._touch_session_lease_locked(
+                name, normalized_source, normalized_session, normalized_client
+            )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "client_id": normalized_client,
+            "active_clients": clients,
+            "leased": True,
+        }
+
+    def release_session_lease(
+        self,
+        user: Any,
+        session_id: Any,
+        client_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id, optional=False)
+        with self._active_runs_lock:
+            remaining = self._release_session_lease_locked(
+                name, normalized_source, normalized_session, normalized_client
+            )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "client_id": normalized_client,
+            "active_clients": remaining,
+            "released": True,
+        }
 
     def require_session_title(self, title: Any) -> str:
         if not isinstance(title, str):
@@ -2155,8 +2256,8 @@ class WebRunService:
         }
 
     @staticmethod
-    def _interactive_active_key(user: str) -> str:
-        return f"interactive:{user}"
+    def _interactive_active_key(user: str, client_id: str = "") -> str:
+        return f"interactive:{user}:{client_id}" if client_id else f"interactive:{user}"
 
     @staticmethod
     def _index_session_payload(record: dict[str, Any]) -> dict[str, Any]:
@@ -2173,11 +2274,12 @@ class WebRunService:
             "updated_at": str(record.get("updated_at") or ""),
         }
 
-    def active_session(self, user: Any) -> dict[str, Any]:
+    def active_session(self, user: Any, client_id: Any = "") -> dict[str, Any]:
         """Return or reserve the user's durable interactive session."""
 
         name = self.require_user(user)
-        active_key = self._interactive_active_key(name)
+        normalized_client = self.require_client_id(client_id)
+        active_key = self._interactive_active_key(name, normalized_client)
         record, created = get_or_reserve_index_session(
             self.root,
             name,
@@ -2185,20 +2287,25 @@ class WebRunService:
             active_key,
             reuse_latest=True,
         )
+        with self._active_runs_lock:
+            active_clients = self._touch_session_lease_locked(
+                name, "web", str(record.get("session_id") or ""), normalized_client
+            )
         return {
             "user": name,
             "active_key": active_key,
             "created": created,
+            "client_id": normalized_client,
+            "active_clients": active_clients,
             "session": self._index_session_payload(record),
         }
 
-    def create_session(self, user: Any) -> dict[str, Any]:
+    def create_session(self, user: Any, client_id: Any = "") -> dict[str, Any]:
         name = self.require_user(user)
+        normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
-            if any(active.user == name for active in self._active_runs.values()):
-                raise ConflictError("存在正在运行的会话，结束当前响应后再创建新对话")
             session_id = new_conversation_id()
-            active_key = self._interactive_active_key(name)
+            active_key = self._interactive_active_key(name, normalized_client)
             record = reserve_session(
                 self.root,
                 name,
@@ -2206,10 +2313,15 @@ class WebRunService:
                 session_id,
                 active_key=active_key,
             )
+            active_clients = self._touch_session_lease_locked(
+                name, "web", session_id, normalized_client
+            )
         return {
             "user": name,
             "active_key": active_key,
             "created": True,
+            "client_id": normalized_client,
+            "active_clients": active_clients,
             "session": self._index_session_payload(record),
         }
 
@@ -2219,11 +2331,37 @@ class WebRunService:
         session_id: Any,
         *,
         source: Any = "web",
+        client_id: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
+            remaining_clients = self._release_session_lease_locked(
+                name, normalized_source, normalized_session, normalized_client
+            ) if normalized_client else 0
+            if normalized_client and remaining_clients:
+                record = find_index_record(
+                    self.root, name, normalized_source, normalized_session
+                )
+                if record is None:
+                    raise NotFoundError(f"会话不存在：{normalized_session}")
+                return {
+                    "user": name,
+                    "source": normalized_source,
+                    "session_id": normalized_session,
+                    "closed": False,
+                    "deferred": True,
+                    "active_clients": remaining_clients,
+                    "memory": {
+                        "status": "skipped",
+                        "reason": "session_in_use_by_other_clients",
+                        "rounds": 0,
+                        "processed_round": 0,
+                    },
+                    "session": self._index_session_payload(record),
+                }
             if any(
                 active.user == name and active.session_id == normalized_session
                 for active in self._active_runs.values()
@@ -2248,6 +2386,8 @@ class WebRunService:
             "source": normalized_source,
             "session_id": normalized_session,
             "closed": True,
+            "deferred": False,
+            "active_clients": 0,
             "memory": memory,
             "session": self._index_session_payload(record),
         }
@@ -2293,11 +2433,24 @@ class WebRunService:
         session_id: Any,
         *,
         source: Any = "web",
+        client_id: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
+            self._prune_session_leases_locked()
+            lease_clients = self._session_leases.get(
+                (name, normalized_source, normalized_session), {}
+            )
+            other_clients = [
+                value for value in lease_clients if value != normalized_client
+            ]
+            if other_clients:
+                raise ConflictError(
+                    f"该对话正在其他 {len(other_clients)} 个页面中使用，暂时不能删除"
+                )
             if any(
                 active.user == name and active.session_id == normalized_session
                 for active in self._active_runs.values()
@@ -2308,6 +2461,9 @@ class WebRunService:
                 name,
                 normalized_source,
                 normalized_session,
+            )
+            self._session_leases.pop(
+                (name, normalized_source, normalized_session), None
             )
         if deleted == 0:
             raise NotFoundError(f"会话不存在：{normalized_session}")
@@ -4802,9 +4958,11 @@ class WebRunService:
         content: Any = None,
         task_plan_id: str = "",
         task_plan_mode: str = "",
+        client_id: Any = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id)
         if not isinstance(prompt, str):
             raise InvalidRequestError("prompt 必须是字符串")
         normalized_prompt = prompt.strip()
@@ -4828,6 +4986,9 @@ class WebRunService:
                 gate.release()
                 raise ConflictError(f"run_id 已在使用：{normalized_run_id}")
             self._active_runs[normalized_run_id] = active
+            self._touch_session_lease_locked(
+                name, "web", normalized_session, normalized_client
+            )
         request = {
             "user": name,
             "source": "web",
@@ -4837,7 +4998,9 @@ class WebRunService:
             "stream": True,
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,
-            "_history_active_key": self._interactive_active_key(name),
+            "_history_active_key": self._interactive_active_key(
+                name, normalized_client
+            ),
         }
         if task_plan_id:
             request["_task_plan_id"] = task_plan_id
@@ -4926,6 +5089,7 @@ class WebRunService:
         *,
         cancel_event: threading.Event,
         run_id: Any = "",
+        client_id: Any = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
@@ -4990,6 +5154,7 @@ class WebRunService:
                 run_id=run_id,
                 task_plan_id=normalized_plan_id,
                 task_plan_mode="agent_managed",
+                client_id=client_id,
             )
         except BaseException:
             current = store.read(normalized_plan_id)
