@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "machine_id": "tg-mybot-001",
+  "platform": "telegram",
+  "display_name": "My Telegram Bot",
+  "bound_user": "用户名",
+  "modules": {
+    "input": "input.py",
+    "output": "output.py",
+    "detect": "detect.py"
+  },
+  "capabilities": [
+    "receive_text",
+    "send_text",
+    "receive_file",
+    "send_file"
+  ],
+  "allowed_tools": null,
+  "message_buffer": "message.md",
+  "files_dir": "files",
+  "log_dir": "log"
+}

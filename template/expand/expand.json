@@ -1,0 +1,12 @@
+{
+  "name": "my_expand",
+  "explain": "描述此拓展模块的功能",
+  "open_input": true,
+  "input_data": "input_data.md",
+  "input_health": "正常",
+  "start_update": "data_update.py",
+  "open_control": true,
+  "start_expand": "start_expand.py",
+  "start_control": "expand_control.md",
+  "recent_update": ""
+}

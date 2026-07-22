@@ -4,30 +4,15 @@ kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说
 
 更新时间：2026-07-22
 
-## 当前状态
-
-全部设计文档和编程方案已迁移至 `开发临时目录/开发文档/`。本目录仅保留索引文件。
+## 索引
 
 | 文件 | 用途 | 检索关键词 |
 |------|------|------------|
 | `data_structure.md` | 本索引文件 | 索引、知识库 |
-
-## 已迁移文档
-
-以下文档已移至 `E:\code\kemo-agent\开发临时目录\开发文档\`：
-
-| 文件 | 用途 |
-|------|------|
-| `Markdown渲染增强-编程方案.md` | Web 前端 Markdown 渲染增强方案 |
-| `sense_creater工具创建-编程方案.md` | sense_creater 工具从零创建 |
-| `web-README.md` | Web 前端开发说明与构建指南 |
-| `web_search工具优化-编程方案.md` | web_search 工具 SKILL.md 优化 |
-| `全局配置文件.md` | 全局配置全字段说明 |
-| `删除max_per_round-编程方案.md` | 移除无用 max_per_round 配置项 |
-| `子代理配置规范.md` | 子代理配置字段说明 |
-| `环境变量.md` | 环境变量全字段说明 |
-| `用户目录结构.md` | 用户目录骨架与字段说明 |
-| `配置页面栏目设计方案.md` | Web 配置页面 6 栏目重新设计方案 |
+| `version-and-update-modules.md` | 版本号与更新模块对照 — 5 组版本号分别对应 all/core/agents/plugins/web 的更新范围 | 版本号、更新、模块 |
+| `update-module-refactor-plan.md` | update 模块板块化重构编程方案 — 4 大板块独立更新脚本 + update.py 调度器改造 | update、板块、模块化、重构 |
+| `external-message-plugin-plan.md` | external_message 插件编程方案 — 工具型 send_message/send_file + 指令型 create_platform | 外部消息、插件、平台 |
+| `user-create-module-plan.md` | user_create.py 编程方案 — CLI + import 双模，骨架复制 + 后处理 + API 配置引导 | 用户创建、CLI、provider |
 
 ## 检索规则
 

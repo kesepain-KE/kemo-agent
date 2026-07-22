@@ -29,7 +29,7 @@ desktop.ini
 *.bak
 *.tmp
 tmp_unstage_obsidian.txt
-tmp/
+tmp/*
 !tmp/.gitkeep
 
 # Environment
@@ -53,11 +53,10 @@ web/frontend/output/
 # Obsidian knowledge graph (local dev workspace, not tracked)
 开发临时目录/
 
-# User runtime data — only _template skeleton with .gitkeep
+# User runtime data — only .gitkeep tracked
 users/*/
-!users/_template/
-
-# _template is fully tracked — it's the skeleton for new users
+users/_template/
+!users/.gitkeep
 
 # Expand / Sense / Skills — only register.py is tracked
 global_expand/*

@@ -1,0 +1,4 @@
+# 忽略所有临时文件，只保留 .gitkeep 以维持目录结构
+*
+!.gitignore
+!.gitkeep

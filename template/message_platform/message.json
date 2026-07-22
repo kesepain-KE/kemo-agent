@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "machine_id": "{{MACHINE_ID}}",
+  "platform": "{{PLATFORM}}",
+  "display_name": "{{DISPLAY_NAME}}",
+  "bound_user": "{{BOUND_USER}}",
+  "modules": {
+    "input": "input.py",
+    "output": "output.py",
+    "detect": "detect.py"
+  },
+  "capabilities": ["receive_text", "send_text"],
+  "allowed_tools": null,
+  "message_buffer": "message.md",
+  "files_dir": "files",
+  "log_dir": "logs"
+}

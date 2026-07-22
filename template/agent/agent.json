@@ -1,0 +1,6 @@
+{
+  "name": "my_agent",
+  "version": "1.0.0",
+  "description": "在此描述子代理的职责和触发场景。",
+  "trigger": "trigger.md"
+}

@@ -16,7 +16,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
   → 提交五文件历史（text + think + tool + items + data）
-  → 记忆引用加权；上下文压缩前批量提取即将裁剪轮次
+  → 记忆引用加权；成功提交后提取本轮记忆；上下文压缩前批量兜底提取
 ```
 
 关键模块：
@@ -28,7 +28,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
 | 历史管理 | `run/history.py` | 用户可见完整归档与 `history/temp/<window>/` Provider 临时工作区的创建、裁剪、恢复和提交 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
-| 记忆管道 | `run/memory_pipeline.py` | 已提交轮次的异步提取，以及上下文压缩前的同步记忆提取 |
+| 记忆管道 | `run/engine.py`、`run/memory_pipeline.py` | 成功提交后的同步单轮提取，以及上下文压缩前的同步批量兜底提取 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
 | Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
 | 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
@@ -102,6 +102,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
+| 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
 | 环境变量 | `.env` | 启动级参数和密钥兜底 |
 
 ### 外部消息插件发现规则
@@ -139,6 +140,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 |------|------|------|
 | `schema_version` | int | 配置结构版本号，当前固定为 1 |
 | `provider` | object | LLM 提供商配置 |
+| `provider_runtime` | object | 全来源共享的 Provider 请求并发上限与等待超时 |
 | `multimodal_models` | object | 多模态模型名（设计预留） |
 | `task_plan` | object | 任务计划配置 |
 | `tools` | object | 工具开关、超时、最大循环次数 |
@@ -152,7 +154,10 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `plugins` | object | 可执行插件白名单 |
 | `memory` | object | 记忆挡位、注入上限与历史读取工具开关 |
 | `agent_runtime` | object | 子代理运行时参数 |
+| `web` | object | 单用户 Web Chat 并发、等待槽与等待超时 |
+| `message` | object | 外部消息工作线程和有界等待队列 |
 | `cron` | object | cron 调度配置 |
+| `task_cron_system` | object | 系统级感知与拓展数据刷新频率 |
 | `agents` | object | 上下文管理参数（轮次/token 上限等） |
 
 ### 主智能体来源控制
@@ -268,7 +273,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
 - 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。
-- 不再逐轮异步提取；`context_manage` 在上下文压缩前把即将裁剪的完整轮次批量交给 `self_improve`。
+- `memory.auto_extract_on_commit=true` 时，每轮对话成功提交后同步交给 `self_improve` 提取；失败只写入运行诊断，不回滚已提交历史。
+- `context_manage` 在上下文压缩前仍会把即将裁剪的完整轮次批量交给 `self_improve`，作为独立兜底入口。
 
 ### 用户指令
 
@@ -401,11 +407,14 @@ users/<user>/agents/<name>/
 - 用户用自然语言编辑任务时，必须先用 `task_time get` 读取现有任务，再调用 `time_plan` 解析修改要求，最后调用 `task_time update`；删除前也必须先核对任务。
 - 只有内部程序或 API 已经确定完整调度参数时，才能直接调用 `task_time create/update`。
 - `cron.enabled` 控制是否启用调度（默认 true）。
-- `cron.poll_interval` 控制轮询间隔（默认 30 秒）。
+- `cron.poll_interval` 控制常规轮询间隔（默认 30 秒）；运行时会自动取它与两个系统数据刷新间隔的最小值，保证短周期任务按时被扫描。
+- `cron.avoid_congestion=true` 时，Provider 可用槽位低于 `cron.congestion_threshold_ratio` 指定比例会推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避。
+- `task_cron_system.sense_update_rate` 控制全局感知数据刷新间隔，`task_cron_system.expand_update_rate` 控制全局拓展数据刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
   自动管理 Cron 与上下文整理。
 - 普通任务通过主智能体执行；系统任务可通过 `subagent` 直调内部子代理，或通过白名单 `function` 模式执行内部函数。
-- 系统自动注册临时重要记忆巡检、每日整理，以及每 30 秒一次的 self_improve 到期晋升检查。
+- 系统自动注册临时重要记忆巡检、每日整理、每 30 秒一次的 self_improve 到期晋升检查，以及全局感知/全局拓展数据刷新任务。
+- 记忆类系统任务按用户分别执行；感知和拓展属于全局资源，每个到期周期只以 `__system__` 身份执行一次。模块更新脚本优先调用 `update()`，兼容调用 `main()`。
 
 ---
 
@@ -447,6 +456,16 @@ system prompt 按以下固定顺序拼接：
 ---
 
 ## 12. Provider 与多模态
+
+### 并发与反压
+
+- `provider_runtime.max_concurrent_requests` 是进程级总闸，Web、外部消息、Cron、维护任务和子代理共享；每一次真实 LLM API 请求独立占槽，工具执行期间释放槽位，避免主智能体调用子代理时发生嵌套自锁。
+- 等待 Provider 超过 `provider_runtime.request_semaphore_timeout` 会产生明确的 `ProviderCongestionError`；运行状态 API 的 `congestion.provider` 提供活动、可用和等待估计数。
+- Web Chat 按用户隔离，最多并发 `web.max_concurrent_chats` 个 Run，另允许 `web.max_pending_chats` 个请求等待；队列满或等待超过 `web.pending_chat_timeout` 时返回 HTTP 503 和 `Retry-After`。空闲闸门会自动采用新保存的 Web 限制。
+- 外部消息总容量为 `message.max_workers + message.max_queued_messages`；后者为 0 时保持无界兼容模式，否则队列满会抛出 `MessageQueueFullError`。
+- 每个用户的 `AgentScheduler` 使用实例级串行锁和 `agent_runtime.queue_maxsize` 有界队列，不再由一个进程级锁串行所有用户；0 表示无界。
+- Cron 在 Provider 高负载时跳过本轮普通任务，任务仍保持到期状态并在后续扫描重试；感知和拓展采集仍按计划运行。
+- `congestion.web` 与 `congestion.message_router` 分别暴露 Web 用户闸门和消息路由的活动/排队状态。MessageRouter、Cron 等 RuntimeHost 启动期参数保存后需重启 Web RuntimeHost 才能重建对应组件。
 
 ### Provider 类型
 

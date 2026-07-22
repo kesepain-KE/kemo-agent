@@ -1,5 +1,9 @@
 {
   "schema_version": 1,
+  "provider_runtime": {
+    "max_concurrent_requests": 10,
+    "request_semaphore_timeout": 300.0
+  },
   "tools": {
     "enabled": true,
     "timeout": 240,
@@ -38,6 +42,7 @@
   },
   "memory": {
     "storage_schema_version": 2,
+    "auto_extract_on_commit": true,
     "temporary_injection_limits": {
       "half_year": 300,
       "one_month": 200,
@@ -64,7 +69,7 @@
     }
   },
   "agent_runtime": {
-    "queue_maxsize": 0,
+    "queue_maxsize": 50,
     "default_timeout": 600
   },
   "task_plan": {
@@ -72,13 +77,25 @@
   },
   "cron": {
     "enabled": true,
-    "poll_interval": 30
+    "poll_interval": 30,
+    "avoid_congestion": true,
+    "congestion_threshold_ratio": 0.2
+  },
+  "task_cron_system": {
+    "sense_update_rate": 5,
+    "expand_update_rate": 5
   },
   "runtime_host": {
     "enable_background_scheduler": true
   },
   "message": {
-    "max_workers": 8
+    "max_workers": 8,
+    "max_queued_messages": 20
+  },
+  "web": {
+    "max_concurrent_chats": 3,
+    "max_pending_chats": 5,
+    "pending_chat_timeout": 30.0
   },
   "agents": {
     "conserved_rounds": 3,

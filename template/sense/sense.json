@@ -1,0 +1,7 @@
+{
+  "name": "my_sense",
+  "data_md": "sense.md",
+  "recent_update": "",
+  "health": "正常",
+  "start_update": "data_update.py"
+}

@@ -1,6 +1,6 @@
 # self_improve
 
-记忆自进化子代理。从 context_manage 传入的批量对话数据中提取、更新和升级微记忆碎片。
+记忆自进化子代理。从成功提交的单轮对话或 context_manage 传入的批量对话中提取、更新和升级微记忆碎片。
 
 所有配置阈值均从 `config/global_config.json` 读取，不做硬编码。
 
@@ -24,12 +24,13 @@
 支持三种入口：context_manage 批量提取、cron 晋升决策、主智能体手动审阅。
 
 ```
-context_manage 裁剪 N 轮
+对话成功提交 1 轮，或 context_manage 裁剪 N 轮
   → 传入 self_improve: { rounds: [...], trigger: "context_compression" }
     → 分解为微记忆碎片 → 全量匹配 → 写入/更新/晋升
 ```
 
-不再接收旧的逐轮自动提取输入。`submit_memory_extraction()` 管线废弃。
+逐轮入口由 `run/engine.py` 在历史成功提交后同步触发；旧的异步
+`submit_memory_extraction()` 管线仍保持废弃。上下文压缩前的批量入口继续保留为兜底。
 
 主智能体手动调用时使用：
 

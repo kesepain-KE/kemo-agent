@@ -21,7 +21,9 @@
 ### 模式一：碎片提取与更新（trigger = `"context_compression"`）
 
 ```
-输入: { rounds: [...], trigger: "context_compression" }
+输入: { rounds: [...], trigger: "context_compression", source: {...} }
+
+来源可以是历史提交后的单轮 `round_commit`，也可以是 context_manage 压缩前的多轮批次。
 
 流程:
   1. 分解批量对话为微记忆碎片
