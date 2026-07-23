@@ -2,7 +2,10 @@
 # Web 后端: FastAPI + Pydantic + Uvicorn
 
 fastapi>=0.110.0,<0.140.0
+itsdangerous>=2.2.0,<3.0.0
+PyYAML>=6.0.0,<7.0.0
 python-multipart>=0.0.20,<0.1.0
 pydantic>=2.0.0,<3.0.0
+tzdata>=2024.1,<2027.0
 uvicorn>=0.27.0,<0.52.0
 tavily-python>=0.7.0,<0.8.0
