@@ -28,6 +28,7 @@ desktop.ini
 # Backups & temp
 *.bak
 *.tmp
+.backups/
 tmp_unstage_obsidian.txt
 tmp/*
 !tmp/.gitkeep
