@@ -33,6 +33,8 @@ jobs:
     name: Backend (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
