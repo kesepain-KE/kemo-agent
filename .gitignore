@@ -36,7 +36,11 @@ tmp/*
 
 # Environment
 .env
-.env.local
+.env.*
+!.env.example
+
+# Local message routing identity map
+config/message_config.json
 
 # Node (web)
 node_modules/
