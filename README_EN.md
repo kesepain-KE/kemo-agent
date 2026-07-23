@@ -1,11 +1,11 @@
 # kemo-agent
 
 <p align="center">
-  <a href="readme.md">简体中文</a> · <strong>English</strong>
+  <img src="kemo-agent.jpg" alt="kemo-agent logo" width="200">
 </p>
 
 <p align="center">
-  <img src="kemo-agent.jpg" alt="kemo-agent logo" width="200">
+  <a href="readme.md">简体中文</a> · <strong>English</strong>
 </p>
 
 <p align="center">
