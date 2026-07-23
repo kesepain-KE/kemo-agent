@@ -1,6 +1,10 @@
 # kemo-agent
 
 <p align="center">
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
+</p>
+
+<p align="center">
   <img src="kemo-agent.jpg" alt="kemo-agent logo" width="200">
 </p>
 
@@ -14,12 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent">
-    <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version">
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license">
-  </a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
+  <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
 
 ---
@@ -133,6 +134,8 @@ kemo-agent 坚持本地优先。
 ---
 
 ## 开始体验
+
+> 📖 完整的安装、配置、功能使用和扩展开发说明，请访问 **[kemo-agent 在线文档](https://kesepain-ke.github.io/kemo-agent-doc/)**。
 
 ### 环境要求
 
