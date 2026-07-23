@@ -22,7 +22,7 @@ from pathlib import Path
 
 # ── 常量 ──
 
-_PROVIDER_TYPES = ("kemo", "openai")
+_PROVIDER_TYPES = ("kemo", "chat")
 _NAME_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f.][^\\/:*?\"<>|\x00-\x1f]{0,63}$")
 
 
@@ -193,7 +193,7 @@ def _guide_api_config(
     print("  " + "─" * 42)
     print()
 
-    answer = input(f"  Provider 类型 [kemo/openai] ({provider_type}): ").strip().lower()
+    answer = input(f"  Provider 类型 [kemo/chat] ({provider_type}): ").strip().lower()
     if answer in _PROVIDER_TYPES:
         provider_type = answer
 
