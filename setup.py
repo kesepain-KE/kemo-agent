@@ -134,19 +134,6 @@ def _setup_env(assume_yes: bool) -> bool:
     if url:
         _replace_env(env_path, "KEMO_BASE_URL", url, "http://127.0.0.1:8741/v1")
 
-    # WEB_USERNAME / WEB_PASSWORD
-    web_user = input("  Web 登录用户名 (留空跳过): ").strip()
-    if web_user:
-        _replace_env(env_path, "WEB_USERNAME", web_user, "")
-    if web_user:
-        try:
-            web_pass = getpass.getpass("  Web 登录密码: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            web_pass = ""
-        if web_pass:
-            _replace_env(env_path, "WEB_PASSWORD", web_pass, "")
-
     _ok("配置已写入 .env")
     return True
 
