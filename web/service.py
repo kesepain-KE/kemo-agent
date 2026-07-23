@@ -34,6 +34,7 @@ from provider.protocol.models import (
     FileContent,
     ImageContent,
     VideoContent,
+    normalize_reasoning_effort,
 )
 from run.agents import discover_agents
 from run.agent_runner import AgentRunner
@@ -108,6 +109,7 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
+from run.process_utils import hidden_subprocess_kwargs
 from run.task_plan_executor import cancel_plan, pause_plan
 from run.tools import apply_runtime_tool_policy, discover_tools
 from run.users import list_users
@@ -174,6 +176,7 @@ _CONFIG_SOURCE_PATHS = (
     "provider.stream",
     "tools.enabled",
     "tools.max_iterations",
+    "tools.consecutive_identical_call_limit",
     "tools.timeout",
     "memory.extraction_mode",
     "memory.history_read_enabled",
@@ -507,6 +510,7 @@ class ActiveRun:
     run_id: str
     user: str
     session_id: str
+    cancel_event: threading.Event = field(default_factory=threading.Event)
     guidance: queue.Queue[str] = field(default_factory=lambda: queue.Queue(maxsize=8))
     started_at: float = field(default_factory=time.monotonic)
 
@@ -676,6 +680,7 @@ class WebRunService:
         self._session_leases: dict[tuple[str, str, str], dict[str, float]] = {}
         self._chat_gates: dict[str, _UserChatGate] = {}
         self._chat_gates_lock = threading.Lock()
+        self._file_upload_lock = threading.RLock()
 
     def _get_chat_gate(self, user: str) -> _UserChatGate:
         try:
@@ -916,6 +921,23 @@ class WebRunService:
             "queued": queued,
         }
 
+    def cancel_run(self, user: Any, run_id: Any) -> dict[str, Any]:
+        """Request an idempotent emergency stop for one active run owned by the user."""
+
+        name = self.require_user(user)
+        normalized_run_id = self.require_run_id(run_id)
+        with self._active_runs_lock:
+            active = self._active_runs.get(normalized_run_id)
+            if active is None or active.user != name:
+                raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
+            active.cancel_event.set()
+        return {
+            "run_id": normalized_run_id,
+            "user": name,
+            "session_id": active.session_id,
+            "status": "stopping",
+        }
+
     def _config_path(self, user: str) -> Path:
         return self.root / "users" / user / "user_config.json"
 
@@ -1071,7 +1093,14 @@ class WebRunService:
             "tree": tree,
         }
 
-    def _write_area_file(self, directory: Path, path: Any, data: bytes) -> dict[str, Any]:
+    def _write_area_file(
+        self,
+        directory: Path,
+        path: Any,
+        data: bytes,
+        *,
+        avoid_overwrite: bool = False,
+    ) -> dict[str, Any]:
         if len(data) > FILE_UPLOAD_MAX_BYTES:
             raise InvalidRequestError(
                 f"文件超过最大限制 {FILE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"
@@ -1080,13 +1109,64 @@ class WebRunService:
         _reject_link_path(directory.resolve(), target)
         if target.exists() and target.is_dir():
             raise ConflictError(f"目标是目录：{relative}")
+        if avoid_overwrite and target.exists():
+            stem = target.stem
+            suffix = target.suffix
+            index = 2
+            while True:
+                candidate = target.with_name(f"{stem} ({index}){suffix}")
+                _reject_link_path(directory.resolve(), candidate)
+                if not candidate.exists():
+                    target = candidate
+                    relative = target.relative_to(directory.resolve()).as_posix()
+                    break
+                index += 1
         _atomic_write(target, data)
-        return {"path": relative, "size": len(data), "updated": True}
+        return {
+            "path": relative,
+            "size": len(data),
+            "updated": True,
+            "renamed": str(relative) != str(path).replace("\\", "/"),
+        }
 
     def save_file(self, user: Any, scope: Any, path: Any, data: bytes) -> dict[str, Any]:
         name, normalized_scope, directory = self._file_scope_root(user, scope)
-        result = self._write_area_file(directory, path, data)
+        with self._file_upload_lock:
+            result = self._write_area_file(
+                directory,
+                path,
+                data,
+                avoid_overwrite=True,
+            )
         return {"user": name, "scope": normalized_scope, **result}
+
+    def require_uploaded_files(self, user: str, uploaded_files: Any) -> list[dict[str, Any]]:
+        if uploaded_files in (None, []):
+            return []
+        if not isinstance(uploaded_files, list) or len(uploaded_files) > 20:
+            raise InvalidRequestError("uploaded_files 必须是不超过 20 项的文件路径数组")
+        directory = (self.root / "users" / user / "file_upload").resolve()
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for value in uploaded_files:
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidRequestError("uploaded_files 只能包含非空文件路径")
+            relative, target = _safe_relative_target(directory, value)
+            _reject_link_path(directory, target)
+            relative_path = relative.as_posix() if isinstance(relative, Path) else str(relative).replace("\\", "/")
+            if relative_path in seen:
+                continue
+            if not target.is_file():
+                raise NotFoundError(f"上传文件不存在：{relative_path}")
+            seen.add(relative_path)
+            normalized.append(
+                {
+                    "name": target.name,
+                    "path": self._project_path(target),
+                    "size": target.stat().st_size,
+                }
+            )
+        return normalized
 
     def write_file_text(
         self,
@@ -2108,6 +2188,7 @@ class WebRunService:
                 errors="replace",
                 timeout=120,
                 check=False,
+                **hidden_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             raise WebServiceError(f"拓展模块更新超时：{normalized_scope}:{logical_name}") from exc
@@ -2525,6 +2606,7 @@ class WebRunService:
                     "user": name,
                     "source": normalized_source,
                     "session_id": normalized_session,
+                    "memory_extraction_policy": "queue",
                 },
                 root=self.root,
             )
@@ -2535,35 +2617,42 @@ class WebRunService:
         context = result.get("context") if isinstance(result.get("context"), dict) else {}
         rounds_removed = max(0, int(context.get("rounds_removed") or 0))
         summary_cache = str(result.get("summary_cache") or "")
+        summary = context.get("summary")
+        if isinstance(summary, dict) and summary.get("failed") is True:
+            detail = str(summary.get("error") or "").strip()
+            message = "手动上下文压缩失败"
+            if detail:
+                message = f"{message}：{detail}"
+            raise WebServiceError(message)
         raw_memory = result.get("memory")
         if isinstance(raw_memory, dict):
             memory = dict(raw_memory)
         else:
             try:
-                memory = self.extract_session_memory(
+                latest_window = load_window(directory)
+                memory = queue_memory_extraction(
+                    self.root,
                     name,
+                    normalized_source,
                     normalized_session,
-                    source=normalized_source,
+                    target_round=int(
+                        latest_window.get("data", {}).get("rounds") or 0
+                    ),
+                    reason="manual_compression",
                 )
             except Exception as exc:
-                # A custom compressor may not implement the unified cursor
-                # pipeline.  Preserve compression success and expose the
-                # independent extraction failure for background recovery.
-                memory = {
-                    "status": "failed",
-                    "reason": "memory_extraction_error",
-                    "user": name,
-                    "source": normalized_source,
-                    "session_id": normalized_session,
-                    "round": 0,
-                    "candidates": 0,
-                    "extraction": None,
-                    "extractions": [],
-                    "error": {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    },
-                }
+                raise WebServiceError(
+                    "上下文压缩成功，但后台记忆任务登记失败"
+                ) from exc
+        memory.setdefault("user", name)
+        memory.setdefault("source", normalized_source)
+        memory.setdefault("session_id", normalized_session)
+        memory.setdefault(
+            "round",
+            int(memory.get("target_round") or memory.get("rounds") or 0),
+        )
+        memory.setdefault("candidates", 0)
+        memory.setdefault("extraction", None)
         memory["retry_pending"] = memory.get("status") == "failed"
         return {
             "user": name,
@@ -2791,6 +2880,9 @@ class WebRunService:
                             for value in item.get("guidance", [])
                             if isinstance(value, str)
                         ] if isinstance(item.get("guidance"), list) else [],
+                        "status": str(item.get("status") or "completed"),
+                        "cancelled": bool(item.get("cancelled", False)),
+                        "cancel_reason": str(item.get("cancel_reason") or ""),
                     }
                 )
         reasoning_by_round: dict[int, str] = {}
@@ -2826,7 +2918,7 @@ class WebRunService:
                         if raw_status in {"running", "started", "pending", "deferred"}
                         else "error"
                         if raw_status
-                        in {"failed", "error", "temporarily_unavailable"}
+                        in {"failed", "error", "temporarily_unavailable", "cancelled"}
                         else "success"
                     )
                     calls.append(
@@ -3705,6 +3797,7 @@ class WebRunService:
                 errors="replace",
                 timeout=120,
                 check=False,
+                **hidden_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             raise WebServiceError(f"感知模块更新超时：{logical_name}") from exc
@@ -3825,6 +3918,9 @@ class WebRunService:
                 "type": str(provider.get("type") or ""),
                 "base_url": str(provider.get("base_url") or ""),
                 "model": str(provider.get("model") or ""),
+                "reasoning_effort": normalize_reasoning_effort(
+                    provider.get("reasoning_effort")
+                ),
                 "timeout": 120.0,
                 "stream": bool(provider.get("stream", True)),
                 "credential_source": credential_source,
@@ -3848,7 +3944,7 @@ class WebRunService:
                     agents.get("token_compression_ratio") or 0.6
                 ),
                 "task_plan_steps": int(task_plan.get("max_steps") or 10),
-                "tool_iterations": int(tools.get("max_iterations") or 8),
+                "tool_iterations": int(tools.get("max_iterations") or 80),
                 "tool_timeout": float(tools.get("timeout") or 60),
                 "memory_items": sum(
                     int(temporary_memory_limits.get(tier, default))
@@ -4650,10 +4746,8 @@ class WebRunService:
                 "type": provider["type"],
                 "base_url": provider["base_url"],
                 "model": provider["model"],
-                "thinking_effort": str(
-                    provider_config.get("thinking_effort")
-                    or provider_config.get("reasoning_effort")
-                    or "provider_default"
+                "thinking_effort": normalize_reasoning_effort(
+                    provider_config.get("reasoning_effort")
                 ),
                 "configured": bool(
                     provider.get("configured")
@@ -5031,6 +5125,7 @@ class WebRunService:
         cancel_event: threading.Event,
         run_id: Any = "",
         content: Any = None,
+        uploaded_files: Any = None,
         task_plan_id: str = "",
         task_plan_mode: str = "",
         client_id: Any = "",
@@ -5042,6 +5137,7 @@ class WebRunService:
             raise InvalidRequestError("prompt 必须是字符串")
         normalized_prompt = prompt.strip()
         normalized_content = self.require_content(content)
+        normalized_uploaded_files = self.require_uploaded_files(name, uploaded_files)
         if not normalized_prompt and not normalized_content:
             raise InvalidRequestError("prompt 和 content 不能同时为空")
         normalized_run_id = (
@@ -5055,7 +5151,12 @@ class WebRunService:
                 "当前用户并发聊天或等待队列已满，请稍后重试",
                 retry_after=gate.pending_timeout,
             )
-        active = ActiveRun(normalized_run_id, name, normalized_session)
+        active = ActiveRun(
+            normalized_run_id,
+            name,
+            normalized_session,
+            cancel_event=cancel_event,
+        )
         with self._active_runs_lock:
             if normalized_run_id in self._active_runs:
                 gate.release()
@@ -5070,6 +5171,7 @@ class WebRunService:
             "session_id": normalized_session,
             "prompt": normalized_prompt,
             "content": normalized_content,
+            "uploaded_files": normalized_uploaded_files,
             "stream": True,
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,
@@ -5090,8 +5192,13 @@ class WebRunService:
         output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
 
         def put(value: RunEvent | BaseException | object) -> bool:
+            terminal_value = (
+                value is _WORKER_DONE
+                or isinstance(value, BaseException)
+                or (isinstance(value, RunEvent) and value.type in {"done", "error"})
+            )
             while True:
-                if cancel_event.is_set():
+                if cancel_event.is_set() and not terminal_value:
                     return False
                 try:
                     output.put(value, timeout=0.1)

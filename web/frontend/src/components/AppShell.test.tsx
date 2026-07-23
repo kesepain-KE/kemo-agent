@@ -110,6 +110,25 @@ describe('AppShell navigation', () => {
     expect(screen.getByText('已到达对话开头')).toBeInTheDocument()
   })
 
+  it('用户消息优先显示当前用户头像并在加载失败时回退图标', async () => {
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: 's1',
+      messages: [
+        { role: 'user', content: '头像显示测试' },
+        { role: 'assistant', content: '收到' },
+      ],
+      round_metrics: [], round_traces: [],
+    })))
+    renderApp('/chat?user=kesepain&session=s1')
+
+    expect(await screen.findByText('头像显示测试')).toBeInTheDocument()
+    const avatar = document.querySelector<HTMLImageElement>('.message.user .user-message-avatar img')
+    expect(avatar?.getAttribute('src')).toBe('/api/users/kesepain/avatar?v=0')
+    fireEvent.error(avatar!)
+    expect(document.querySelector('.message.user .user-message-avatar img')).not.toBeInTheDocument()
+    expect(document.querySelector('.message.user .user-message-avatar svg')).toBeInTheDocument()
+  })
+
   it('对话运行期间同时锁定配置页与侧栏的用户切换', async () => {
     let releaseChat!: () => void
     let markChatStarted!: () => void
@@ -143,8 +162,10 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('menuitem', { name: /reviewer/ })).toBeDisabled()
 
     fireEvent.click(screen.getByRole('link', { name: /^对话$/ }))
+    const abortedBeforeStop = chatSignal?.aborted
     fireEvent.click(await screen.findByRole('button', { name: '停止生成' }))
-    expect(chatSignal?.aborted).toBe(true)
+    await waitFor(() => expect(screen.getByRole('button', { name: '停止生成' })).toHaveTextContent('正在停止'))
+    expect(chatSignal?.aborted).toBe(abortedBeforeStop)
 
     releaseChat()
     await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
@@ -286,6 +307,45 @@ describe('AppShell navigation', () => {
     expect(await screen.findByTitle('查看当前 Provider')).toBeInTheDocument()
   })
 
+  it('顶部模型气泡可单独保存思考强度', async () => {
+    let savedChanges: Record<string, unknown> | undefined
+    server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
+      const body = await request.json() as { changes: Record<string, unknown> }
+      savedChanges = body.changes
+      return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: [], updated: true })
+    }))
+    renderApp('/chat')
+    const providerButton = await screen.findByTitle('查看当前 Provider')
+    expect(providerButton).toHaveTextContent('中度')
+    fireEvent.click(providerButton)
+    fireEvent.click(screen.getByRole('combobox', { name: '顶部模型思考强度' }))
+    fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
+    await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'high' } }))
+  })
+
+  it('上传文件随下一条消息发送并在本轮完成后清除提示', async () => {
+    let chatBody: { uploaded_files?: string[] } | undefined
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatBody = JSON.parse(String(init?.body)) as { uploaded_files?: string[] }
+      return new Response('event: done\ndata: {"type":"done"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    const uploadButton = await screen.findByRole('button', { name: '上传文件' })
+    fireEvent.click(uploadButton)
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    expect(fileInput).not.toBeNull()
+    fireEvent.change(fileInput!, { target: { files: [new File(['attachment'], 'note.md', { type: 'text/markdown' })] } })
+    expect(await screen.findByText(/已上传 note\.md/)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '请读取这个文件' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatBody?.uploaded_files).toEqual(['note.md']))
+    await waitFor(() => expect(screen.queryByText(/已上传 note\.md/)).not.toBeInTheDocument())
+  })
+
   it('对话操作菜单提供保存新建、清空、压缩和重新生成', async () => {
     let compressionCalled = false
     let undoBody: Record<string, unknown> | null = null
@@ -322,9 +382,9 @@ describe('AppShell navigation', () => {
           compressed: true, rounds_removed: 2, summary_cache_exists: true,
           context: { rounds_removed: 2 },
           memory: {
-            status: 'completed', user: 'kesepain', source: 'web', session_id: 's1',
-            round: 2, candidates: 1,
-            extraction: { status: 'completed', candidate_count: 1 },
+            status: 'queued', user: 'kesepain', source: 'web', session_id: 's1',
+            round: 2, candidates: 0, processed_round: 0, target_round: 2,
+            pending_rounds: 2, extraction: null,
             retry_pending: false,
           },
         })
@@ -351,7 +411,7 @@ describe('AppShell navigation', () => {
 
     fireEvent.click(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ }))
     await waitFor(() => expect(compressionCalled).toBe(true))
-    expect(await screen.findByText('上下文压缩完成，已整理 2 轮历史。已同步提取 1 条记忆候选。')).toBeInTheDocument()
+    expect(await screen.findByText('上下文压缩完成，已整理 2 轮历史。记忆提取已转入后台，共有 2 轮待处理。')).toBeInTheDocument()
 
     const regenerate = screen.getByRole('menuitem', { name: /重新发送一次消息/ })
     await waitFor(() => expect(regenerate).toBeEnabled())
@@ -749,17 +809,22 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('spinbutton', { name: '单用户最大并发聊天' })).toHaveValue(3)
     expect(screen.getByRole('spinbutton', { name: '消息路由队列上限' })).toHaveValue(20)
     expect(screen.getByRole('spinbutton', { name: '子代理队列上限' })).toHaveValue(50)
+    expect(screen.getByRole('spinbutton', { name: '每轮最大工具循环' })).toHaveValue(80)
+    expect(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' })).toHaveValue(8)
     expect(screen.getByRole('switch', { name: 'Cron 自动退避' })).toBeChecked()
     expect(screen.getByRole('slider', { name: '退避触发阈值' })).toHaveValue('0.2')
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '最大并发请求数' }), { target: { value: '12' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Web 排队槽位上限' }), { target: { value: '7' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' }), { target: { value: '9' } })
     fireEvent.click(screen.getByRole('button', { name: '保存运行限制' }))
     await waitFor(() => expect(captured.globalChanges).toBeDefined())
 
     const providerRuntime = captured.globalChanges?.provider_runtime as Record<string, unknown>
     const web = captured.globalChanges?.web as Record<string, unknown>
+    const tools = captured.globalChanges?.tools as Record<string, unknown>
     expect(providerRuntime.max_concurrent_requests).toBe(12)
     expect(web.max_pending_chats).toBe(7)
+    expect(tools.consecutive_identical_call_limit).toBe(9)
   })
 })

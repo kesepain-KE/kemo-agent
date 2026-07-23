@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from '../reasoningEffort'
+
 export type RunEventType =
   | 'text_delta'
   | 'reasoning_delta'
@@ -144,12 +146,15 @@ export interface SessionCompressResponse {
 }
 
 export interface SessionMemoryExtractionResponse {
-  status: 'completed' | 'failed' | 'skipped'
+  status: 'completed' | 'failed' | 'skipped' | 'queued'
   user: string
   source: 'web'
   session_id: string
   round: number
   candidates: number
+  processed_round?: number
+  target_round?: number
+  pending_rounds?: number
   reason?: string
   extraction: Record<string, unknown> | null
   extractions?: Array<Record<string, unknown>>
@@ -191,6 +196,9 @@ export interface HistoryResponse {
     elapsed_ms: number
     tool_calls: number
     guidance: string[]
+    status?: 'completed' | 'cancelled' | string
+    cancelled?: boolean
+    cancel_reason?: string
   }>
   round_traces: Array<{
     round: number
@@ -466,6 +474,7 @@ export interface ProviderSummary {
   type: string
   base_url: string
   model: string
+  reasoning_effort: ReasoningEffort
   timeout: number
   stream: boolean
   credential_source: 'inline' | 'environment' | 'missing' | string
@@ -926,6 +935,7 @@ export interface FileMutationResponse {
   updated?: boolean
   created?: boolean
   moved?: boolean
+  renamed?: boolean
 }
 
 export interface PreferencesResponse {

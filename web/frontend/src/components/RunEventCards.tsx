@@ -163,7 +163,7 @@ export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' 
           <span className="tool-elapsed">{elapsed}</span>
           <ChevronDown className="tool-call-chevron" size={15} />
           <span className={`tool-call-status ${item.status}`} aria-label={statusLabel} title={statusLabel}>
-            {item.status === 'running' && <LoaderCircle className="spin" size={16} />}
+            {item.status === 'running' && <LoaderCircle className="spin tool-running-spinner" size={16} />}
             {item.status === 'success' && <CheckCircle2 size={17} />}
             {item.status === 'error' && <AlertCircle size={17} />}
           </span>
@@ -175,7 +175,7 @@ export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' 
           <div className={`tool-call-panel ${body.result === null ? 'waiting' : ''}`}>
             <label>返回结果</label>
             {body.result === null
-              ? <div className="tool-result-waiting"><LoaderCircle className="spin" size={14} />工具仍在运行，完成后显示结果</div>
+              ? <div className="tool-result-waiting"><LoaderCircle className="spin tool-running-spinner" size={14} />工具仍在运行，完成后显示结果</div>
               : <pre>{body.result}</pre>}
           </div>
         </div>

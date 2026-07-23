@@ -17,7 +17,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -27,6 +27,7 @@ import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
+import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
 import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, KnowledgeDocumentSummary, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
@@ -41,6 +42,26 @@ function eventId(prefix: string) {
 const EMPTY_CHAT_ITEMS: ChatItem[] = []
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 const HISTORY_PAGE_SIZE = 20
+
+interface PendingUploadedFile {
+  path: string
+  name: string
+  size: number
+}
+
+function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
+  const [avatarFailed, setAvatarFailed] = useState(false)
+
+  useEffect(() => setAvatarFailed(false), [avatarUrl])
+
+  return (
+    <div className="msg-avatar user-message-avatar">
+      {avatarUrl && !avatarFailed
+        ? <img src={avatarUrl} alt="" onError={() => setAvatarFailed(true)} />
+        : <UserRound size={17} />}
+    </div>
+  )
+}
 
 export function isNearScrollBottom(
   metrics: Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>,
@@ -89,6 +110,24 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
   }
   flushAssistant()
   return blocks
+}
+
+export function buildUserMessageMarkers(items: ChatItem[], firstRound = 1): UserMessageMarker[] {
+  const markers: UserMessageMarker[] = []
+  let nextRound = Math.max(1, Math.floor(firstRound))
+  for (const item of items) {
+    if (item.kind === 'execution_marker') {
+      const executionRound = /^history_execution_(\d+)$/.exec(item.id)?.[1]
+      if (executionRound) nextRound = Math.max(nextRound, Number(executionRound) + 1)
+      continue
+    }
+    if (item.kind !== 'message' || item.role !== 'user') continue
+    const historicalRound = /^history_(\d+)_user$/.exec(item.id)?.[1]
+    const round = historicalRound ? Number(historicalRound) : nextRound
+    markers.push({ id: item.id, content: item.content, round })
+    nextRound = Math.max(nextRound, round + 1)
+  }
+  return markers
 }
 
 function insertCurrentRoundItem(
@@ -198,8 +237,22 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
   }
   if (event.type === 'done') {
     let guidanceRemaining = Number(event.metadata?.guidance_count || 0)
+    const cancelled = event.metadata?.status === 'cancelled' || event.metadata?.cancelled === true
+    const cancelledText = String(event.metadata?.text || '[本轮已由用户紧急停止]')
     const completed = items.map((item) => {
-      if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
+      if (item.kind === 'message') {
+        return {
+          ...item,
+          content: cancelled && item.role === 'assistant' && item.streaming
+            ? cancelledText
+            : item.content,
+          streaming: false,
+        }
+      }
+      if (item.kind === 'reasoning') return { ...item, streaming: false }
+      if (cancelled && item.kind === 'tool' && item.status === 'running') {
+        return { ...item, status: 'error' as const, result: { ok: false, error: { message: '工具调用因用户紧急停止而取消', cancelled: true } } }
+      }
       if (item.kind === 'guidance') {
         if (item.status === 'accepted') {
           if (guidanceRemaining > 0) guidanceRemaining -= 1
@@ -216,7 +269,10 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       }
       return item
     })
-    return event.usage ? [...completed, {
+    const withCancelledText = cancelled && !completed.some((item) => item.kind === 'message' && item.role === 'assistant')
+      ? [...completed, { id: eventId('assistant'), kind: 'message' as const, role: 'assistant' as const, content: cancelledText }]
+      : completed
+    return event.usage ? [...withCancelledText, {
       id: eventId('usage'), kind: 'usage', usage: event.usage,
       elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
       toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
@@ -228,7 +284,7 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
 
 function historyToolStatus(status: string): 'running' | 'success' | 'error' {
   if (status === 'running') return 'running'
-  if (status === 'error') return 'error'
+  if (status === 'error' || status === 'cancelled') return 'error'
   return 'success'
 }
 
@@ -457,7 +513,7 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, sessionId, clientId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, userAvatarUrl, sessionId, clientId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -474,7 +530,9 @@ export function ChatPage() {
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
   const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
+  const [pendingUploads, setPendingUploads] = useState<PendingUploadedFile[]>([])
   const [showFollowOutput, setShowFollowOutput] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
@@ -485,6 +543,7 @@ export function ChatPage() {
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
   const liveSessionId = sessionId || lastAttemptSessionRef.current
   const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
+  const effectiveRunId = activeRunId || liveRun?.runId || ''
   const liveItems = liveRun?.items ?? EMPTY_CHAT_ITEMS
   const setLiveItems = (updater: ChatItemsUpdater) => {
     if (liveSessionId) updateChatRunItems(user, liveSessionId, updater)
@@ -560,12 +619,14 @@ export function ChatPage() {
     setEditingSource(null)
     setEditedSources(new Set())
     setCopiedItem('')
-    setActiveRunId('')
+    if (!running) setActiveRunId('')
     setUploadFeedback(null)
+    setPendingUploads([])
     setKnowledgeDrawerOpen(false)
     setExpandDrawerOpen(false)
     setConversationBusy('')
     setConversationFeedback(null)
+    setStopping(false)
     setPlanOverrides({})
     abortChatRun()
   }, [abortChatRun, user, sessionId])
@@ -606,11 +667,13 @@ export function ChatPage() {
       sessionId?: string
       content?: Array<Record<string, unknown>>
       historyUserMessages?: number
+      uploadedFiles?: PendingUploadedFile[]
     } = {},
   ) => {
     const prompt = (promptOverride ?? draft).trim()
     if (!prompt || !user || running) return
     const activeSession = options.sessionId || sessionId || createSessionId()
+    const uploadedFiles = options.uploadedFiles ?? []
     lastAttemptSessionRef.current = activeSession
     const runId = `run_${crypto.randomUUID().replaceAll('-', '')}`
     const historyUserMessages = options.historyUserMessages
@@ -638,6 +701,7 @@ export function ChatPage() {
         clientId,
         prompt: options.content?.length ? '' : prompt,
         content: options.content,
+        uploadedFiles: uploadedFiles.map((file) => file.path),
         runId,
         signal: controller.signal,
         onEvent: (event) => {
@@ -645,6 +709,11 @@ export function ChatPage() {
           updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
         },
       })
+      if (committed && uploadedFiles.length) {
+        const sentPaths = new Set(uploadedFiles.map((file) => file.path))
+        setPendingUploads((current) => current.filter((file) => !sentPaths.has(file.path)))
+        setUploadFeedback(null)
+      }
       await refreshSessions()
       if (!sessionId) {
         locallyCommittedSessionRef.current = activeSession
@@ -670,7 +739,13 @@ export function ChatPage() {
     setUploadFeedback({ tone: 'pending', text: `正在上传 ${file.name}…` })
     try {
       const result = await uploadUserFile(user, 'file_upload', file.name, file)
-      setUploadFeedback({ tone: 'success', text: `已上传 ${result.path || file.name} · ${formatBytes(result.size ?? file.size)}` })
+      const uploaded = {
+        path: result.path || file.name,
+        name: (result.path || file.name).split('/').at(-1) || file.name,
+        size: result.size ?? file.size,
+      }
+      setPendingUploads((current) => [...current, uploaded])
+      setUploadFeedback(null)
       await queryClient.invalidateQueries({ queryKey: ['user-files', user, 'file_upload'] })
     } catch (error) {
       setUploadFeedback({ tone: 'error', text: error instanceof Error ? `上传失败：${error.message}` : '上传失败' })
@@ -748,8 +823,12 @@ export function ChatPage() {
         ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。`
         : '当前上下文较短，暂时无需压缩。'
       const memory = result.memory
-      const memoryText = memory.status === 'completed'
-        ? (memory.candidates > 0
+      const memoryText = memory.status === 'queued'
+        ? (Number(memory.pending_rounds || 0) > 0
+            ? `记忆提取已转入后台，共有 ${Number(memory.pending_rounds)} 轮待处理。`
+            : '记忆提取已转入后台。')
+        : memory.status === 'completed'
+          ? (memory.candidates > 0
             ? `已同步提取 ${memory.candidates} 条记忆候选。`
             : '记忆提取已完成，本次没有需要保存的新记忆。')
         : memory.status === 'skipped'
@@ -758,7 +837,9 @@ export function ChatPage() {
               : memory.reason === 'memory_extraction_disabled'
                 ? '记忆提取已按配置关闭。'
                 : '当前没有可提取的完整对话轮次。')
-          : '记忆提取未完成，已保留待后台重试。'
+          : memory.error?.message
+            ? `记忆提取任务登记失败：${memory.error.message}`
+            : '记忆提取未完成，已保留待后台重试。'
       setConversationFeedback({
         tone: memory.status === 'failed' ? 'error' : 'success',
         text: `${compressionText}${memoryText}`,
@@ -814,12 +895,12 @@ export function ChatPage() {
 
   const sendGuidance = async () => {
     const guidance = draft.trim()
-    if (!guidance || !user || !running || !activeRunId) return
+    if (!guidance || !user || !running || !effectiveRunId || stopping) return
     setDraft('')
     const id = eventId('guidance')
     setLiveItems((current) => [...current, { id, kind: 'guidance', content: guidance, status: 'queued' }])
     try {
-      await submitGuidance(user, activeRunId, guidance)
+      await submitGuidance(user, effectiveRunId, guidance)
     } catch (error) {
       setLiveItems((current) => current.map((item) => item.kind === 'guidance' && item.id === id ? { ...item, status: 'error' } : item))
       setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '运行中引导提交失败' }])
@@ -950,6 +1031,7 @@ export function ChatPage() {
       setChatAbortController(null)
       setActiveRunId('')
       setRunning(false)
+      setStopping(false)
     }
   }
 
@@ -973,9 +1055,26 @@ export function ChatPage() {
     .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
     .map((item) => resolvePlan(item.plan))
   const dockedPlan = selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
-  const stopCurrentRun = () => {
-    if (dockedPlan?.status === 'running') void commandPlanStatus(dockedPlan, 'pause')
-    else abortChatRun()
+  const stopCurrentRun = async () => {
+    if (dockedPlan?.status === 'running') {
+      await commandPlanStatus(dockedPlan, 'pause')
+      return
+    }
+    if (!user || !effectiveRunId || stopping) return
+    setStopping(true)
+    try {
+      await cancelRun(user, effectiveRunId)
+    } catch (error) {
+      abortChatRun()
+      setStopping(false)
+      setLiveItems((current) => [...current, {
+        id: eventId('error'),
+        kind: 'error',
+        content: error instanceof Error
+          ? `紧急停止请求失败：${error.message}`
+          : '紧急停止请求失败，已断开当前响应',
+      }])
+    }
   }
   const revealPlan = (plan: PlanSummary) => {
     if (plan.plan_id !== dockedPlan?.plan_id) {
@@ -1027,6 +1126,21 @@ export function ChatPage() {
     followOutputRef.current = following
     setShowFollowOutput(!following)
   }
+  const jumpToUserMessage = (id: string) => {
+    const element = scrollRef.current
+    if (!element) return
+    const target = Array.from(element.querySelectorAll<HTMLElement>('[data-user-message-id]'))
+      .find((candidate) => candidate.dataset.userMessageId === id)
+    if (!target) return
+    followOutputRef.current = false
+    setShowFollowOutput(true)
+    const containerRect = element.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    const top = targetRect.top - containerRect.top + element.scrollTop
+      - Math.max(24, (element.clientHeight - targetRect.height) / 2)
+    if (typeof element.scrollTo === 'function') element.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+    else element.scrollTop = Math.max(0, top)
+  }
   const resumeFollowingOutput = () => {
     const element = scrollRef.current
     if (!element) return
@@ -1056,10 +1170,12 @@ export function ChatPage() {
     setExpandDrawerOpen(false)
   }
   const conversationBlocks = groupConversationItems(items)
+  const userMessageMarkers = buildUserMessageMarkers(items, historyData?.pagination?.first_round ?? 1)
 
   return (
     <div className={`view chat-view active${items.length === 0 ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
-      <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
+      <div className="chat-scroll-stage">
+        <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
         {items.length === 0 && (!sessionId || !historyQuery.isLoading) && (
           <section className="welcome">
             <div className="welcome-top">
@@ -1125,8 +1241,8 @@ export function ChatPage() {
               const item = block.item
               return (
                 <Fragment key={block.id}>
-                  <article className="message user">
-                    <div className="msg-avatar"><UserRound size={17} /></div>
+                  <article className="message user" data-user-message-id={item.id}>
+                    <UserMessageAvatar avatarUrl={userAvatarUrl} />
                     <div className="message-body">
                       <div className="bubble"><MarkdownMessage content={item.content} streaming={Boolean(item.streaming)} /></div>
                       <div className="message-actions">
@@ -1198,6 +1314,15 @@ export function ChatPage() {
           {items.length > 0 && persistedSessionPlans.map((plan) => <TaskPlanRecord key={`persisted_${plan.plan_id}`} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />)}
         </div>
         {showFollowOutput && items.length > 0 ? <button className="chat-follow-output" type="button" onClick={resumeFollowingOutput}><ChevronDown size={15} />继续跟随最新回复</button> : null}
+        </div>
+        <UserMessageNavigator
+          markers={userMessageMarkers}
+          scrollContainerRef={scrollRef}
+          hasEarlierMessages={Boolean(historyQuery.hasNextPage)}
+          loadingEarlierMessages={historyQuery.isFetchingNextPage}
+          onLoadEarlierMessages={() => { void loadEarlierHistory() }}
+          onNavigate={jumpToUserMessage}
+        />
       </div>
       <div className="composer-zone">
         {dockedPlan ? (
@@ -1216,9 +1341,10 @@ export function ChatPage() {
           currentRound={currentRound}
           roundLimit={roundLimit}
           running={running}
+          stopping={stopping}
           disabled={!user}
           conversationMenuOpen={conversationMenuOpen}
-          uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status">{uploadFeedback.text}<button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : null}
+          uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status"><span>{uploadFeedback.text}</span><button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : pendingUploads.length ? <div className="upload-feedback success" role="status"><span>{pendingUploads.map((file) => `已上传 ${file.name} · ${formatBytes(file.size)}`).join('；')}</span><button type="button" onClick={() => setPendingUploads([])} aria-label="移除待发送文件">×</button></div> : null}
           notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消编辑</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
@@ -1255,8 +1381,8 @@ export function ChatPage() {
           }}
           onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value) => !value)}
-          onSubmit={() => { if (running) void sendGuidance(); else void send() }}
-          onStop={stopCurrentRun}
+          onSubmit={() => { if (running) void sendGuidance(); else void send(undefined, { uploadedFiles: pendingUploads }) }}
+          onStop={() => { void stopCurrentRun() }}
         />
       </div>
       <KnowledgeReferenceDrawer

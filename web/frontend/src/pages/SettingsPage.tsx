@@ -14,6 +14,8 @@ import {
   restartSystem,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import { ReasoningEffortSelect } from '../components/ReasoningEffortSelect'
+import { normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
 import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 
@@ -21,10 +23,10 @@ type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions
 type ProviderType = 'chat' | 'kemo'
 type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_generation'
 type AgentModelProfile = 'default' | 'cheap' | 'reasoning'
-type RestartState = 'idle' | 'confirming' | 'restarting' | 'waiting' | 'failed'
+type RestartState = 'idle' | 'confirming' | 'confirming-force' | 'restarting' | 'waiting' | 'failed'
 
 interface UserConfigDraft {
-  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean }
+  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean; reasoning_effort: ReasoningEffort }
   agent_models: Record<AgentModelProfile, string>
   multimodal_models: Record<MultimodalKey, string>
   knowledge: { use_shared: boolean; use_global: boolean }
@@ -47,7 +49,7 @@ interface GlobalConfigDraft {
   agents: { token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
   memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
   kemo_graph: GraphDraft
-  tools: { timeout: number; max_iterations: number }
+  tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
   provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number }
@@ -148,6 +150,7 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
       base_url: stringValue(provider.base_url),
       api_key: stringValue(provider.api_key),
       stream: booleanValue(provider.stream, true),
+      reasoning_effort: normalizeReasoningEffort(provider.reasoning_effort),
     },
     agent_models: {
       default: stringValue(agentModels.default),
@@ -206,7 +209,8 @@ function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
     kemo_graph: graphDraft(config.kemo_graph),
     tools: {
       timeout: numberValue(tools.timeout, 240),
-      max_iterations: numberValue(tools.max_iterations, 8),
+      max_iterations: numberValue(tools.max_iterations, 80),
+      consecutive_identical_call_limit: numberValue(tools.consecutive_identical_call_limit, 8),
     },
     history: { consecutive_tool_fail_limit: numberValue(history.consecutive_tool_fail_limit, 5) },
     task_plan: { max_steps: numberValue(taskPlan.max_steps, 20) },
@@ -348,6 +352,7 @@ export function SettingsPage() {
   const [savedLabel, setSavedLabel] = useState('')
   const [restartState, setRestartState] = useState<RestartState>('idle')
   const [restartMessage, setRestartMessage] = useState('')
+  const [restartCanForce, setRestartCanForce] = useState(false)
   const restartTimerRef = useRef<number | null>(null)
 
   useEffect(() => () => {
@@ -441,6 +446,7 @@ export function SettingsPage() {
       model: userDraft.provider.model.trim(),
       base_url: userDraft.provider.base_url.trim(),
       stream: userDraft.provider.stream,
+      reasoning_effort: userDraft.provider.reasoning_effort,
     }
     if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
     submit({
@@ -485,7 +491,7 @@ export function SettingsPage() {
 
   const saveRuntime = () => {
     if (!userDraft || !globalDraft) return
-    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
+    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
     const nonnegativeIntegers = [globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
     let validation = positiveIntegers.every((value) => Number.isInteger(value) && value > 0) ? '' : '超时、轮询和并发上限必须为大于 0 的整数。'
     if (!validation && !nonnegativeIntegers.every((value) => Number.isInteger(value) && value >= 0)) validation = '队列与等待槽上限必须为大于等于 0 的整数。'
@@ -506,29 +512,35 @@ export function SettingsPage() {
     }, validation)
   }
 
-  const confirmRestart = async () => {
-    if (chatRunning || restartState === 'restarting' || restartState === 'waiting') return
+  const confirmRestart = async (force = false) => {
+    if ((!force && chatRunning) || restartState === 'restarting' || restartState === 'waiting') return
     const port = Number.parseInt(window.location.port || '80', 10)
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       setRestartState('failed')
       setRestartMessage('无法从当前网页地址识别有效端口。')
+      setRestartCanForce(false)
       return
     }
     setRestartState('restarting')
-    setRestartMessage(`正在请求智能体使用端口 ${port} 重新启动…`)
+    setRestartCanForce(false)
+    setRestartMessage(`正在请求${force ? '强制' : ''}重启智能体并继续使用端口 ${port}…`)
     try {
-      await restartSystem(port)
-      setRestartMessage(`重启请求已提交，正在等待端口 ${port} 恢复…`)
+      await restartSystem(port, force)
+      setRestartMessage(`${force ? '强制重启' : '重启'}请求已提交，正在等待端口 ${port} 恢复…`)
     } catch (error) {
       if (error instanceof ApiError) {
         setRestartState('failed')
         setRestartMessage(error.message)
+        setRestartCanForce(!force && error.status === 409 && error.code === 'conflict')
         return
       }
       setRestartMessage('服务连接已中断，正在等待新实例接管当前端口…')
     }
     setRestartState('waiting')
     restartTimerRef.current = window.setTimeout(() => window.location.reload(), 4000)
+  }
+  const closeRestartConfirmation = () => {
+    setRestartState((current) => current === 'confirming-force' ? 'failed' : 'idle')
   }
 
   return <ModuleFrame
@@ -571,6 +583,7 @@ export function SettingsPage() {
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
+            <SettingRow title="思考强度" description="控制主对话和子智能体的推理深度；不可关闭，缺省使用中度" source="user" control={<ReasoningEffortSelect ariaLabel="思考强度" value={userDraft.provider.reasoning_effort} onChange={(reasoningEffort) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, reasoning_effort: reasoningEffort } })} />} />
           </article>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>子智能体模型</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
@@ -653,9 +666,10 @@ export function SettingsPage() {
         {tab === 'runtime' && userDraft && globalDraft ? <>
           <ConfigSaveBar label="保存运行限制" description="运行限制属于全局默认；任务计划自动接受为当前用户偏好。" pending={saveMutation.isPending} saved={savedLabel === '保存运行限制'} onSave={saveRuntime} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>工具执行</strong><span>约束单轮工具循环的时间、次数与连续失败行为。</span></div>
+            <div className="setting-section-head"><strong>工具执行</strong><span>分别约束工具等待时间、Provider 循环以及连续重复或失败行为。</span></div>
             <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
-            <SettingRow title="每轮最大工具调用" description="单轮 Provider 工具循环的最大迭代次数" source="global" control={<NumberInput label="每轮最大工具调用" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
+            <SettingRow title="每轮最大工具循环" description="单轮 Provider 工具循环的最大迭代次数；不是工具卡片数量" source="global" control={<NumberInput label="每轮最大工具循环" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
+            <SettingRow title="单个工具最大连续使用上限" description="仅当工具名称和完整参数连续完全相同时累计；参数变化后重新计数" source="global" control={<NumberInput label="单个工具最大连续使用上限" value={globalDraft.tools.consecutive_identical_call_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, consecutive_identical_call_limit: value } })} />} />
             <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
           </article>
           <article className="setting-section">
@@ -696,19 +710,22 @@ export function SettingsPage() {
               type="button"
               className="settings-restart-button"
               disabled={chatRunning || restartState === 'restarting' || restartState === 'waiting'}
-              onClick={() => { setRestartMessage(''); setRestartState('confirming') }}
+              onClick={() => { setRestartMessage(''); setRestartCanForce(false); setRestartState('confirming') }}
             ><Power size={15} />{restartState === 'failed' ? '重新尝试' : '重启智能体'}</button>
-            {restartMessage ? <div className={`settings-restart-status ${restartState === 'failed' ? 'error' : ''}`} role="status">{restartState === 'restarting' || restartState === 'waiting' ? <RefreshCw className="spin" size={14} /> : null}{restartMessage}</div> : null}
+            {restartMessage ? <div className={`settings-restart-status ${restartState === 'failed' ? 'error' : ''}`} role="status">
+              <span className="settings-restart-status-message">{restartState === 'restarting' || restartState === 'waiting' ? <RefreshCw className="spin" size={14} /> : null}{restartMessage}</span>
+              {restartCanForce ? <button type="button" className="settings-force-restart-button" onClick={() => setRestartState('confirming-force')}><Power size={13} />强制重启</button> : null}
+            </div> : null}
           </article>
-          {restartState === 'confirming' ? createPortal(<div className="settings-restart-confirm-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) setRestartState('idle') }}>
-            <section className="settings-restart-confirm" role="alertdialog" aria-modal="true" aria-label="确认重启智能体">
+          {restartState === 'confirming' || restartState === 'confirming-force' ? createPortal(<div className="settings-restart-confirm-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) closeRestartConfirmation() }}>
+            <section className={`settings-restart-confirm ${restartState === 'confirming-force' ? 'force' : ''}`} role="alertdialog" aria-modal="true" aria-label={restartState === 'confirming-force' ? '确认强制重启智能体' : '确认重启智能体'}>
               <span className="settings-restart-confirm-icon"><AlertTriangle size={23} /></span>
               <span className="settings-restart-confirm-copy">
-                <strong>您确定要重启吗？</strong>
-                <small>智能体在执行任务时重启可能会出现故障。请先确认当前任务已经结束，并保存尚未提交的配置。</small>
+                <strong>{restartState === 'confirming-force' ? '您确定要强制重启吗？' : '您确定要重启吗？'}</strong>
+                <small>{restartState === 'confirming-force' ? '后端仍报告存在运行中的对话。强制重启将绕过运行状态检查，未完成的回复或任务可能会被中断。' : '智能体在执行任务时重启可能会出现故障。请先确认当前任务已经结束，并保存尚未提交的配置。'}</small>
                 <small>重启期间网页会短暂断开，服务恢复后将自动刷新。</small>
               </span>
-              <span className="settings-restart-confirm-actions"><button type="button" onClick={() => setRestartState('idle')}>取消</button><button type="button" className="confirm" onClick={() => void confirmRestart()}>确认重启</button></span>
+              <span className="settings-restart-confirm-actions"><button type="button" onClick={closeRestartConfirmation}>取消</button><button type="button" className="confirm" onClick={() => void confirmRestart(restartState === 'confirming-force')}>{restartState === 'confirming-force' ? '确认强制重启' : '确认重启'}</button></span>
             </section>
           </div>, document.body) : null}
         </> : null}

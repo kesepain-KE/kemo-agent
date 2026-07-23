@@ -41,6 +41,7 @@ class ChatBody(BaseModel):
     session_id: str
     prompt: str = ""
     content: list[dict[str, Any]] = Field(default_factory=list)
+    uploaded_files: list[str] = Field(default_factory=list, max_length=20)
     run_id: str = ""
     plan_id: str = ""
     client_id: str = ""
@@ -60,6 +61,10 @@ class LoginBody(BaseModel):
 class GuidanceBody(BaseModel):
     user: str
     guidance: str
+
+
+class RunCancelBody(BaseModel):
+    user: str
 
 
 class SessionRenameBody(BaseModel):
@@ -103,6 +108,7 @@ class DeleteManyBody(BaseModel):
 
 class RestartBody(BaseModel):
     port: int = Field(ge=1, le=65535)
+    force: bool = False
 
 
 def _error_body(code: str, message: str, status: int) -> dict[str, Any]:
@@ -251,7 +257,7 @@ def create_app(
     @app.post("/api/system/restart")
     async def restart_system(body: RestartBody) -> dict[str, Any]:
         active_run_checker = getattr(backend, "has_active_runs", None)
-        if callable(active_run_checker) and active_run_checker():
+        if not body.force and callable(active_run_checker) and active_run_checker():
             raise ConflictError("存在正在运行的对话，请结束当前响应后再重启智能体")
         with restart_lock:
             if app.state.restart_requested:
@@ -842,12 +848,18 @@ def create_app(
     async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:
         return backend.submit_guidance(body.user, run_id, body.guidance)
 
+    @app.post("/api/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, body: RunCancelBody) -> dict[str, Any]:
+        return backend.cancel_run(body.user, run_id)
+
     @app.post("/api/chat")
     async def chat(body: ChatBody, request: Request) -> StreamingResponse:
         cancel_event = threading.Event()
         events: Iterator[RunEvent] | None = None
         try:
             content_options = {"content": body.content} if body.content else {}
+            if body.uploaded_files:
+                content_options["uploaded_files"] = body.uploaded_files
             # stream_chat 可能在用户级并发闸前有界等待；放入工作线程，避免
             # 一个用户的排队请求阻塞 FastAPI 事件循环和其他用户的 API。
             if body.plan_id:

@@ -158,7 +158,7 @@
   align-content: start;
   gap: .58rem;
   overflow-y: auto;
-  padding-right: .2rem;
+  padding: .32rem .2rem .2rem;
 }
 
 .moduleList::-webkit-scrollbar,

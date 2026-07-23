@@ -126,11 +126,11 @@ export async function getSessions(user: string, query = ''): Promise<SessionsRes
   return requestJson(`/api/users/${encodeURIComponent(user)}/sessions${suffix}`)
 }
 
-export async function restartSystem(port: number): Promise<{ ok: boolean; port: number; helper_pid?: number; already_requested?: boolean }> {
+export async function restartSystem(port: number, force = false): Promise<{ ok: boolean; port: number; helper_pid?: number; already_requested?: boolean }> {
   return requestJson('/api/system/restart', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ port }),
+    body: JSON.stringify(force ? { port, force: true } : { port }),
   })
 }
 
@@ -727,6 +727,7 @@ export interface StreamChatOptions {
   clientId?: string
   prompt: string
   content?: Array<Record<string, unknown>>
+  uploadedFiles?: string[]
   runId: string
   planId?: string
   signal?: AbortSignal
@@ -742,6 +743,17 @@ export async function submitGuidance(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user, guidance }),
+  })
+}
+
+export async function cancelRun(
+  user: string,
+  runId: string,
+): Promise<{ run_id: string; user: string; session_id: string; status: 'stopping' }> {
+  return requestJson(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user }),
   })
 }
 
@@ -776,6 +788,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       session_id: options.sessionId,
       prompt: options.prompt,
       content: options.content ?? [],
+      uploaded_files: options.uploadedFiles ?? [],
       run_id: options.runId,
       plan_id: options.planId ?? '',
       client_id: options.clientId ?? '',

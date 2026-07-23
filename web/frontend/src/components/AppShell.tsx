@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   ArrowLeft,
@@ -46,18 +46,22 @@ import {
   getUsers,
   logoutAuth,
   patchPreferences,
+  patchUserConfig,
   releaseSessionLease,
   touchSessionLease,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
+import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
+import { normalizeReasoningEffort, reasoningEffortLabel, type ReasoningEffort } from '../reasoningEffort'
 
 export interface ShellOutletContext {
   user: string
+  userAvatarUrl?: string
   sessionId: string
   clientId: string
   chatRunning: boolean
@@ -227,6 +231,19 @@ export function AppShell() {
     queryFn: () => getPreferences(user),
     enabled: Boolean(user),
     staleTime: 60_000,
+  })
+  const reasoningEffortMutation = useMutation({
+    mutationFn: ({ targetUser, reasoningEffort }: { targetUser: string; reasoningEffort: ReasoningEffort }) => patchUserConfig(targetUser, {
+      provider: { reasoning_effort: reasoningEffort },
+    }),
+    onSuccess: async (_, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['overview', variables.targetUser] }),
+        queryClient.invalidateQueries({ queryKey: ['settings', variables.targetUser] }),
+        queryClient.invalidateQueries({ queryKey: ['user-config', variables.targetUser] }),
+        queryClient.invalidateQueries({ queryKey: ['runtime-status', variables.targetUser] }),
+      ])
+    },
   })
 
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
@@ -627,6 +644,9 @@ export function AppShell() {
   const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
   const contextPercent = Number(contextTokens?.percent ?? 0)
   const provider = overview?.provider
+  const displayedReasoningEffort = reasoningEffortMutation.isPending
+    ? normalizeReasoningEffort(reasoningEffortMutation.variables?.reasoningEffort)
+    : normalizeReasoningEffort(provider?.reasoning_effort)
 
   const settingsPath = (tab: 'users' | 'provider') => {
     const path = withContext('/settings')
@@ -685,9 +705,9 @@ export function AppShell() {
             </button>
             <div className="model-wrap" ref={modelMenuRef}>
               <button className="model-btn" onClick={() => setModelMenuOpen((value) => !value)} aria-expanded={modelMenuOpen} title="查看当前 Provider">
-                <span className="model-main"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
+                <span className="model-main"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {reasoningEffortLabel(displayedReasoningEffort)} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
               </button>
-              {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像</span></div><div className="model-current"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置 <span>›</span></button></div>}
+              {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像</span></div><div className="model-current"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><div className="model-effort-row"><span><strong>思考强度</strong><small>下一轮请求立即生效</small></span><ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /></div>{reasoningEffortMutation.isError ? <div className="model-effort-error" role="alert">思考强度保存失败，请重试。</div> : null}<button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置 <span>›</span></button></div>}
             </div>
             <div className="font-size-wrap" ref={fontSizeRef}>
               <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size="1.181rem" strokeWidth={2.2} /></button>
@@ -698,7 +718,7 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

@@ -10,6 +10,7 @@ export interface AgentComposerProps {
   currentRound: number
   roundLimit: number
   running?: boolean
+  stopping?: boolean
   disabled?: boolean
   conversationMenuOpen?: boolean
   conversationMenu?: ReactNode
@@ -31,6 +32,7 @@ export function AgentComposer({
   currentRound,
   roundLimit,
   running = false,
+  stopping = false,
   disabled = false,
   conversationMenuOpen = false,
   conversationMenu,
@@ -47,7 +49,7 @@ export function AgentComposer({
 }: AgentComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const canSubmit = !disabled && value.trim().length > 0
+  const canSubmit = !disabled && !stopping && value.trim().length > 0
   const speech = useSpeechRecognition((text) => {
     const separator = value && !/\s$/.test(value) ? ' ' : ''
     onChange(`${value}${separator}${text}`)
@@ -150,9 +152,9 @@ export function AgentComposer({
             <span>{running ? '发送引导' : '发送'}</span>
           </button>
           {running && onStop ? (
-            <button type="button" className={styles.stopButton} onClick={onStop} aria-label="停止生成">
+            <button type="button" className={styles.stopButton} onClick={onStop} aria-label="停止生成" disabled={stopping}>
               <Square aria-hidden="true" />
-              <span>停止</span>
+              <span>{stopping ? '正在停止…' : '停止'}</span>
             </button>
           ) : null}
         </div>

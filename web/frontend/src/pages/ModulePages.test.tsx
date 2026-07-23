@@ -304,15 +304,19 @@ describe('V16 module pages', () => {
     expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password')
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveTextContent('已关闭')
+    expect(screen.getByRole('combobox', { name: '思考强度' })).toHaveTextContent('中 — 均衡（推荐）')
     expect(screen.getByLabelText('默认子智能体模型')).toHaveValue('agent-default')
     expect(screen.getByLabelText('轻量子智能体模型')).toHaveValue('summary-model')
     expect(screen.getByLabelText('推理子智能体模型')).toHaveValue('agent-reasoning')
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
     fireEvent.change(screen.getByLabelText('轻量子智能体模型'), { target: { value: 'summary-model-next' } })
+    fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
+    fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     await waitFor(() => expect(savedChanges).toMatchObject({
+      provider: { reasoning_effort: 'high' },
       agent_models: { default: 'agent-default', cheap: 'summary-model-next', reasoning: 'agent-reasoning' },
     }))
 
@@ -331,6 +335,8 @@ describe('V16 module pages', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '运行限制 ›' }))
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
+    expect(screen.getByLabelText('每轮最大工具循环')).toHaveValue(80)
+    expect(screen.getByLabelText('单个工具最大连续使用上限')).toHaveValue(8)
     expect(screen.getByRole('switch', { name: '自动接受任务计划' })).toHaveAttribute('aria-checked', 'false')
     fireEvent.click(screen.getByRole('button', { name: '重启智能体' }))
     const restartDialog = screen.getByRole('alertdialog', { name: '确认重启智能体' })
@@ -350,7 +356,9 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('button', { name: '全部删除' })).toBeEnabled()
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 readme.txt' }))
     fireEvent.click(screen.getByRole('button', { name: '删除已选' }))
-    expect(screen.getByRole('alertdialog', { name: '确认删除文件' })).toBeInTheDocument()
+    const deleteDialog = screen.getByRole('alertdialog', { name: '确认删除文件' })
+    expect(deleteDialog).toBeInTheDocument()
+    expect(deleteDialog.parentElement?.parentElement).toBe(document.body)
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('已删除 1 个用户上传文件')).toBeInTheDocument()
 
@@ -384,6 +392,34 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('alertdialog', { name: '确认删除文件' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('已删除 1 个全局临时文件')).toBeInTheDocument()
+  })
+
+  it('重启被运行态拦截后允许经二次确认强制重启', async () => {
+    const restartBodies: Array<{ port: number; force?: boolean }> = []
+    server.use(http.post('/api/system/restart', async ({ request }) => {
+      const body = await request.json() as { port: number; force?: boolean }
+      restartBodies.push(body)
+      if (!body.force) {
+        return HttpResponse.json({ error: { code: 'conflict', message: '存在正在运行的对话，请结束当前响应后再重启智能体', status: 409 } }, { status: 409 })
+      }
+      return HttpResponse.json({ ok: true, port: body.port, helper_pid: 4321 })
+    }))
+
+    renderPage('settings')
+    fireEvent.click(await screen.findByRole('button', { name: '运行限制 ›' }))
+    fireEvent.click(await screen.findByRole('button', { name: '重启智能体' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认重启' }))
+
+    expect(await screen.findByText('存在正在运行的对话，请结束当前响应后再重启智能体')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '强制重启' }))
+    const forceDialog = screen.getByRole('alertdialog', { name: '确认强制重启智能体' })
+    expect(within(forceDialog).getByText(/绕过运行状态检查/)).toBeInTheDocument()
+    fireEvent.click(within(forceDialog).getByRole('button', { name: '确认强制重启' }))
+
+    expect(await screen.findByText(/强制重启请求已提交/)).toBeInTheDocument()
+    expect(restartBodies).toHaveLength(2)
+    expect(restartBodies[0].force).toBeUndefined()
+    expect(restartBodies[1]).toEqual({ port: restartBodies[0].port, force: true })
   })
 
   it('运行模块展示子代理、消息传输和三层 Expand', async () => {

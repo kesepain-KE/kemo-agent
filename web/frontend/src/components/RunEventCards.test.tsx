@@ -57,6 +57,7 @@ describe('RunEventCards', () => {
 
       fireEvent.click(screen.getByRole('button', { name: /shell/ }))
       expect(screen.getByText('工具仍在运行，完成后显示结果')).toBeInTheDocument()
+      expect(container.querySelectorAll('svg.tool-running-spinner')).toHaveLength(2)
       expect(container.querySelector('.tool-call-status.success')).toBeNull()
 
       rerender(<ToolCallCard item={{

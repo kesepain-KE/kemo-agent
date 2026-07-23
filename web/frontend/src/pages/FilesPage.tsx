@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Archive,
@@ -552,25 +553,27 @@ export function FilesPage() {
         </aside>
       </section>
 
-      {renameTarget && (
+      {typeof document !== 'undefined' && renameTarget ? createPortal(
         <div className={styles.dialogBackdrop} role="presentation" onMouseDown={() => setRenameTarget(null)}>
           <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="rename-title" onMouseDown={(event) => event.stopPropagation()}>
             <div><span className={styles.dialogIcon}><Pencil size={18} /></span><span><strong id="rename-title">重命名{renameTarget.type === 'directory' ? '文件夹' : '文件'}</strong><small>{renameTarget.relativePath}</small></span></div>
             <label>新名称<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitRename() }} /></label>
             <footer><button type="button" onClick={() => setRenameTarget(null)}>取消</button><button type="button" className="module-btn primary" onClick={submitRename} disabled={!renameValue.trim() || moveMutation.isPending}>{moveMutation.isPending ? '正在保存…' : '保存名称'}</button></footer>
           </div>
-        </div>
-      )}
+        </div>,
+        document.body,
+      ) : null}
 
-      {deleteRequest && (
+      {typeof document !== 'undefined' && deleteRequest ? createPortal(
         <div className={styles.dialogBackdrop} role="presentation" onMouseDown={() => setDeleteRequest(null)}>
           <div className={styles.dialog} role="alertdialog" aria-modal="true" aria-labelledby="delete-title" onMouseDown={(event) => event.stopPropagation()}>
             <div><span className={`${styles.dialogIcon} ${styles.dangerIcon}`}><Trash2 size={18} /></span><span><strong id="delete-title">确认删除文件</strong><small>{deleteRequest.label}</small></span></div>
             <p>删除后无法通过 Web 恢复。系统会保留当前区域根目录，并自动清理已经变空的子目录。</p>
             <footer><button type="button" onClick={() => setDeleteRequest(null)}>取消</button><button type="button" className={styles.confirmDelete} onClick={() => deleteMutation.mutate(deleteRequest)} disabled={deleteMutation.isPending}>{deleteMutation.isPending ? '正在删除…' : '确认删除'}</button></footer>
           </div>
-        </div>
-      )}
+        </div>,
+        document.body,
+      ) : null}
     </ModuleFrame>
   )
 }

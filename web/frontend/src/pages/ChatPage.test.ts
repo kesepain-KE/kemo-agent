@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, mergeHistoryPages, reduceRunEvent, selectDockedPlan } from './ChatPage'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, mergeHistoryPages, reduceRunEvent, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('用户消息导航只收集真实用户气泡并保留历史绝对轮次', () => {
+    const markers = buildUserMessageMarkers([
+      { id: 'history_18_user', kind: 'message', role: 'user', content: '第十八轮问题' },
+      { id: 'history_execution_19', kind: 'execution_marker', planId: 'plan_1' },
+      { id: 'history_19_assistant_1', kind: 'message', role: 'assistant', content: '执行结果' },
+      { id: 'user_live', kind: 'message', role: 'user', content: '最新问题' },
+    ], 18)
+
+    expect(markers).toEqual([
+      { id: 'history_18_user', content: '第十八轮问题', round: 18 },
+      { id: 'user_live', content: '最新问题', round: 20 },
+    ])
+  })
+
   it('task_plan 子代理结果生成独立任务计划记录项', () => {
     const event = {
       type: 'tool_call_result' as const,
@@ -228,6 +242,29 @@ describe('reduceRunEvent', () => {
     expect(items[0]).toMatchObject({ streaming: false })
     items = reduceRunEvent(items, { type: 'error', error: { message: 'failed' } })
     expect(items.at(-1)).toMatchObject({ kind: 'error', content: 'failed' })
+  })
+
+  it('紧急停止会固化部分正文并结束仍在运行的工具卡片', () => {
+    const items = reduceRunEvent([
+      { id: 'u1', kind: 'message', role: 'user', content: '开始执行' },
+      { id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'running' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '部分结果', streaming: true },
+    ], {
+      type: 'done',
+      metadata: {
+        status: 'cancelled',
+        cancelled: true,
+        text: '部分结果\n\n[本轮已由用户紧急停止]',
+      },
+    })
+
+    expect(items[1]).toMatchObject({ kind: 'tool', status: 'error' })
+    expect(items[2]).toMatchObject({
+      kind: 'message',
+      role: 'assistant',
+      streaming: false,
+      content: '部分结果\n\n[本轮已由用户紧急停止]',
+    })
   })
 
   it('done 生成可持久化的逐轮统计卡片', () => {

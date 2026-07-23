@@ -19,6 +19,7 @@ export const handlers = [
   http.get('/api/auth/status', () => HttpResponse.json({ enabled: false, authenticated: true, methods: { token: false, password: false }, session_cookie_configured: false })),
   http.post('/api/auth/logout', () => HttpResponse.json({ authenticated: false })),
   http.post('/api/runs/:runId/guidance', ({ params }) => HttpResponse.json({ run_id: params.runId, status: 'queued', queued: 1 })),
+  http.post('/api/runs/:runId/cancel', ({ params }) => HttpResponse.json({ run_id: params.runId, user: 'kesepain', session_id: 's1', status: 'stopping' })),
   http.get('/api/users', () => HttpResponse.json({ users: [{ name: 'kesepain' }, { name: 'reviewer' }] })),
   http.get('/api/users/:user/preferences', ({ params }) => HttpResponse.json({ user: params.user, appearance: { theme: 'light', font_size: 'medium' } })),
   http.patch('/api/users/:user/preferences', async ({ params, request }) => HttpResponse.json({ user: params.user, appearance: await request.json() })),
@@ -83,7 +84,7 @@ export const handlers = [
   http.get('/api/users/kesepain/overview', () => HttpResponse.json({
     user: 'kesepain', session_id: '',
     context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false }, limit: 120000, percent: 0, rounds: 0, round_limit: 30 },
-    provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', timeout: 120, stream: false, credential_source: 'environment', configured: true },
+    provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true },
     counts: { sessions: 1, knowledge_documents: 3, enabled_tools: 2, enabled_agents: 1, active_tasks: 0 },
     context_window: {
       tokens: { system_prompt_tokens: 18200, tool_schema_tokens: 2400, conversation_tokens: 1800, summary_tokens: 0, other_tokens: 0, context_tokens: 4200, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67, source: 'runtime_recalculated', measurement: 'estimated', captured_at: '2026-07-22T00:00:00Z' },
@@ -106,7 +107,7 @@ export const handlers = [
     generated_at: '2026-07-21T14:30:00+08:00',
     user: 'kesepain',
     session_id: new URL(request.url).searchParams.get('session_id') || '',
-    api: { type: 'chat', base_url: 'http://127.0.0.1:8741', model: 'test-model', thinking_effort: 'provider_default', configured: true, credential_source: 'environment' },
+    api: { type: 'chat', base_url: 'http://127.0.0.1:8741', model: 'test-model', thinking_effort: 'medium', configured: true, credential_source: 'environment' },
     context: { selected: false, used_tokens: 55900, max_tokens: 1000000, percent: 5.59, rounds: 12, round_limit: 80, compression_threshold: 300000, source: 'runtime_estimate' },
     tokens: { date: '2026-07-21', timezone: 'Asia/Shanghai', sent_tokens: 168732, received_tokens: 159113, total_tokens: 327845, cached_tokens: 145329, cache_rate: 45.2, request_count: 1248, estimated: false, trend: [8, 10, 13, 11, 17, 21, 13, 18, 29, 52] },
     prompt: {
@@ -186,12 +187,12 @@ export const handlers = [
     return HttpResponse.json({ enabled: body.enabled })
   }),
   http.delete('/api/users/kesepain/sense/:module', ({ params }) => HttpResponse.json({ module: params.module, deleted: true })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
     user: 'kesepain',
     config: {
       schema_version: 1,
-      provider: { type: 'kemo', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false },
+      provider: { type: 'kemo', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false, reasoning_effort: 'medium' },
       agent_models: { default: 'agent-default', cheap: 'summary-model', reasoning: 'agent-reasoning' },
       multimodal_models: { vision: 'vision-model', image_generation: '', image_edit: '', audio_transcription: '', speech_generation: '', speech_to_speech: '', video_generation: '' },
       task_plan: { auto_accept: false },
@@ -212,7 +213,7 @@ export const handlers = [
       agents: { token_limit: 1000000, token_compression_ratio: 0.3, max_rounds: 80, rounds_after_compression: 20 },
       memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
       kemo_graph: { kemo_graph_global_knowledge: false, kemo_graph_shared_knowledge: false, kemo_graph_user_knowledge: false, kemo_graph_temporary_memory: false },
-      tools: { timeout: 240, max_iterations: 8 },
+      tools: { timeout: 240, max_iterations: 80, consecutive_identical_call_limit: 8 },
       history: { consecutive_tool_fail_limit: 5 },
       task_plan: { max_steps: 20 },
       provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },
