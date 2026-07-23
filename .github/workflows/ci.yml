@@ -25,9 +25,9 @@ jobs:
         with:
           python-version: "3.13"
       - name: Check public versions
-        run: python scripts/check_versions.py
+        run: python .github/scripts/check_versions.py
       - name: Check tracked repository data
-        run: python scripts/check_repository_hygiene.py
+        run: python .github/scripts/check_repository_hygiene.py
 
   backend-tests:
     name: Backend (${{ matrix.os }}, Python ${{ matrix.python-version }})
