@@ -218,6 +218,63 @@ def _runtime_tools(
     return apply_runtime_tool_policy(discover_tools(root, user), config)
 
 
+def prepare_task_plan_input(
+    *,
+    root: Path,
+    user: str,
+    input_data: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    tool_registry: ToolRegistry | None = None,
+) -> dict[str, Any]:
+    """Build the authoritative task-plan payload for every invocation path.
+
+    Tool names, planning sources, and limits are runtime authority.  They must
+    not depend on a main-agent model remembering to copy them into a generic
+    subagent call, and caller-supplied values must not widen that authority.
+    """
+
+    if not isinstance(input_data, dict):
+        raise PlanGenerationError("task_plan 输入必须是对象")
+    cfg = config if config is not None else load_config(user, root)
+    registry = _runtime_tools(root, user, cfg, tool_registry)
+    task_plan_config = cfg.get("task_plan") or {}
+    existing_plan = input_data.get("existing_plan")
+    existing = existing_plan if isinstance(existing_plan, dict) else None
+    auto_accept = (
+        bool(existing.get("auto_accept", False))
+        if existing is not None
+        else bool(task_plan_config.get("auto_accept", False))
+    )
+    max_steps = int(task_plan_config.get("max_steps", 20))
+    goal = str(input_data.get("goal") or "")
+    edit_request = input_data.get("edit_request")
+    memory_query = str(edit_request or goal)
+    injections = _planning_injections(root, user)
+
+    payload: dict[str, Any] = {
+        "action": input_data.get("action"),
+        "goal": goal,
+        "available_tools": _tool_summary(registry),
+        "plugin_skills": injections["plugin_skills"],
+        "shared_skills_text": injections["shared_skills_text"],
+        "user_skills_text": injections["user_skills_text"],
+        "global_knowledge_index": injections["global_knowledge_index"],
+        "shared_knowledge_index": injections["shared_knowledge_index"],
+        "user_knowledge_index": injections["user_knowledge_index"],
+        "max_steps": max_steps,
+        "auto_accept": auto_accept,
+        "relevant_memory": _relevant_memory(root, user, cfg, memory_query),
+    }
+    protected_fields = set(payload) | {"completed_steps"}
+    for key, value in input_data.items():
+        if key not in protected_fields:
+            payload[key] = value
+    if existing is not None:
+        payload["existing_plan"] = existing
+        payload["completed_steps"] = _completed_steps(existing)
+    return payload
+
+
 def _normalize_result(
     *,
     data: dict[str, Any],
@@ -302,28 +359,21 @@ def generate_plan(
         else bool(task_plan_config.get("auto_accept", False))
     )
     action = "edit" if existing_plan is not None else "create"
-    memory_text = _relevant_memory(root, user, cfg, edit_request or goal)
-    injections = _planning_injections(root, user)
-
-    input_data: dict[str, Any] = {
+    raw_input: dict[str, Any] = {
         "action": action,
         "goal": goal,
-        "available_tools": _tool_summary(registry),
-        "plugin_skills": injections["plugin_skills"],
-        "shared_skills_text": injections["shared_skills_text"],
-        "user_skills_text": injections["user_skills_text"],
-        "global_knowledge_index": injections["global_knowledge_index"],
-        "shared_knowledge_index": injections["shared_knowledge_index"],
-        "user_knowledge_index": injections["user_knowledge_index"],
-        "max_steps": max_steps,
-        "auto_accept": auto_accept,
-        "relevant_memory": memory_text,
     }
     if existing_plan is not None:
-        input_data["existing_plan"] = existing_plan
-        input_data["completed_steps"] = _completed_steps(existing_plan)
+        raw_input["existing_plan"] = existing_plan
     if edit_request is not None:
-        input_data["edit_request"] = edit_request
+        raw_input["edit_request"] = edit_request
+    input_data = prepare_task_plan_input(
+        root=root,
+        user=user,
+        input_data=raw_input,
+        config=cfg,
+        tool_registry=registry,
+    )
 
     try:
         result = AgentRunner(
