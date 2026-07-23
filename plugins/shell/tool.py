@@ -11,6 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from run.process_utils import (
+    cancellable_subprocess_kwargs,
+    hidden_subprocess_kwargs,
+    terminate_process_tree,
+)
+
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SESSION_HISTORY_LIMIT = 2000
@@ -266,6 +272,7 @@ def _run_process(
     env_extra: dict[str, str],
     stdin: str,
     timeout: float,
+    cancel_event: threading.Event | None,
     shell_type: str = "auto",
 ) -> dict[str, Any]:
     environment = os.environ.copy()
@@ -286,29 +293,93 @@ def _run_process(
     else:
         process_command = command
         use_shell = True
-    try:
-        completed = subprocess.run(
+    if cancel_event is None:
+        try:
+            completed = subprocess.run(
+                process_command,
+                shell=use_shell,
+                cwd=str(cwd),
+                env=environment,
+                input=stdin.encode("utf-8") if stdin else None,
+                timeout=timeout,
+                capture_output=True,
+                **hidden_subprocess_kwargs(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _decode_output(exc.stdout or b"")
+            stderr = _decode_output(exc.stderr or b"")
+            output, truncated = _truncate(
+                "\n".join(value for value in (stdout, stderr) if value).strip()
+            )
+            return {
+                "ok": False,
+                "output": output or f"命令超时 ({timeout:g}s)",
+                "exit_code": -1,
+                "timed_out": True,
+                "truncated": truncated,
+            }
+        stdout = _decode_output(completed.stdout).strip()
+        stderr = _decode_output(completed.stderr).strip()
+        if stdout and stderr:
+            output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+        elif stderr:
+            output = f"STDERR:\n{stderr}"
+        else:
+            output = stdout or "(无输出)"
+        output, truncated = _truncate(output)
+        return {
+            "ok": completed.returncode == 0,
+            "output": output,
+            "exit_code": completed.returncode,
+            "timed_out": False,
+            "truncated": truncated,
+        }
+    process = subprocess.Popen(
             process_command,
             shell=use_shell,
             cwd=str(cwd),
             env=environment,
-            input=stdin.encode("utf-8") if stdin else None,
-            timeout=timeout,
-            capture_output=True,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **cancellable_subprocess_kwargs(),
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _decode_output(exc.stdout or b"")
-        stderr = _decode_output(exc.stderr or b"")
+    input_data = stdin.encode("utf-8") if stdin else None
+    deadline = time.monotonic() + timeout
+    cancelled = False
+    timed_out = False
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            terminate_process_tree(process)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 and process.poll() is None:
+            timed_out = True
+            terminate_process_tree(process)
+        try:
+            stdout_data, stderr_data = process.communicate(
+                input=input_data, timeout=max(0.01, min(0.1, max(0.0, remaining)))
+            )
+            break
+        except subprocess.TimeoutExpired:
+            input_data = None
+            continue
+    if cancelled or timed_out:
+        stdout = _decode_output(stdout_data or b"")
+        stderr = _decode_output(stderr_data or b"")
         output, truncated = _truncate("\n".join(value for value in (stdout, stderr) if value).strip())
         return {
             "ok": False,
-            "output": output or f"命令超时 ({timeout:g}s)",
+            "output": output or (
+                "命令因用户紧急停止而取消" if cancelled else f"命令超时 ({timeout:g}s)"
+            ),
             "exit_code": -1,
-            "timed_out": True,
+            "timed_out": timed_out,
+            "cancelled": cancelled,
             "truncated": truncated,
         }
-    stdout = _decode_output(completed.stdout).strip()
-    stderr = _decode_output(completed.stderr).strip()
+    stdout = _decode_output(stdout_data).strip()
+    stderr = _decode_output(stderr_data).strip()
     if stdout and stderr:
         output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
     elif stderr:
@@ -317,9 +388,9 @@ def _run_process(
         output = stdout or "(无输出)"
     output, truncated = _truncate(output)
     return {
-        "ok": completed.returncode == 0,
+        "ok": process.returncode == 0,
         "output": output,
-        "exit_code": completed.returncode,
+        "exit_code": process.returncode,
         "timed_out": False,
         "truncated": truncated,
     }
@@ -332,6 +403,7 @@ def _execute(
     environment: dict[str, str],
     stdin: str,
     timeout: float,
+    cancel_event: threading.Event | None,
     session: dict[str, Any] | None,
     shell_type: str = "auto",
     chain_timeout_mode: str = "total",
@@ -345,6 +417,15 @@ def _execute(
     runtime_state = session if session is not None else {"cwd": str(cwd), "env": environment, "history": []}
 
     for index, segment in enumerate(commands):
+        if cancel_event is not None and cancel_event.is_set():
+            last = {
+                "ok": False,
+                "output": "命令因用户紧急停止而取消",
+                "exit_code": -1,
+                "cancelled": True,
+            }
+            results.append({"command": segment, **last})
+            break
         if index:
             operator = operators[index - 1]
             if (operator == "&&" and last is not None and not last["ok"]) or (
@@ -368,6 +449,7 @@ def _execute(
                     env_extra=environment,
                     stdin=stdin if not stdin_used else "",
                     timeout=remaining,
+                    cancel_event=cancel_event,
                     shell_type=shell_type,
                 )
                 stdin_used = True
@@ -419,6 +501,9 @@ def run(
         raise ValueError("tool_timeout 未在上下文中提供，请检查配置链路")
     effective_timeout = float(timeout or context_timeout)
     effective_timeout = max(1.0, min(effective_timeout, 3600.0))
+    cancel_event = context.get("cancel_event")
+    if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+        cancel_event = None
     key = _session_key(context, root, session_id) if session_id else None
     if reset_session:
         if key is None:
@@ -442,6 +527,7 @@ def run(
             environment=environment,
             stdin=stdin,
             timeout=effective_timeout,
+            cancel_event=cancel_event,
             session=session,
             shell_type=shell_type,
             chain_timeout_mode=chain_timeout_mode,
