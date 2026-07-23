@@ -43,6 +43,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 定时任务 | `run/cron_store.py` | cron 任务 CRUD、校验 |
 | 运行时宿主 | `run/runtime_host.py` | Web、cron、消息路由与任务计划调度的统一宿主 |
 | Provider | `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
+| 事件系统 | `events.py` | 统一事件类型定义（`text_delta`、`reasoning_delta`、`tool_call_start`、`tool_call_result`、`usage`、`error`、`done`），供所有入口复用 |
 
 ---
 
@@ -78,7 +79,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 资源 | 路径 | 说明 |
 |------|------|------|
 | 全局配置 | `config/global_config.json` | 框架全局默认值 |
-| 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置 |
+| 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置（可选，不存在时使用默认值） |
 | 外部消息插件 | `message/out/<platform>/` | 文件夹级平台适配器、文件消息队列、附件、状态与日志 |
 | 外部消息附件 | `message/out/<platform>/files/` | 各平台消息模块的收发文件存放处。文件名保留原始名称（可能来自不同操作系统和设备），智能体在处理附件时应使用绝对路径。例：`message/out/telegram/files/` |
 | 全局人格 | `config/global_soul.md` | 安全底线，不可覆盖 |
@@ -95,8 +96,8 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 共享拓展 | `shared_expand/` | 标准化共享拓展模块，按用户主配置过滤 |
 | 用户拓展 | `users/<name>/expand/` | 当前用户私有拓展模块，可信自动发现且不执行用户注册代码 |
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
-| 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`executor.py` |
-| 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、可选 `executor.py` |
+| 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、`executor.py`、可选 `schema.json` |
+| 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、可选 `executor.py`、可选 `schema.json` |
 | 用户历史 | `users/<name>/history/` | `data.json` 保存可重建会话索引；`conv_<uuid>/`（兼容旧时间戳目录）保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
 | 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
 | 任务计划 | `users/<name>/task_plan/` | 计划文件 |
@@ -104,6 +105,17 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
 | 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
+| 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
+| 外部消息状态 | `users/<name>/message_state/` | 外部消息处理状态（`processed.json`） |
+| Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
+| 记忆存储标记 | `users/<name>/improve/storage.json` | 记忆存储 schema 版本标记 |
+| Web 服务 | `web/` | 前端（React + Vite）+ 后端（Flask），开发服务器默认 `:5173` |
+| 全局版本 | `version.json` | 5 组版本号（core/agents/plugins/web/all），启动时展示 |
+| 更新系统 | `update.py` + `update/` | 8 板块覆盖策略，版本对比，远程拉取 |
+| CLI 入口 | `cli.py` | 纯命令行交互，用户选择 → 对话 |
+| 重启模块 | `restart.py` | Web 端触发，保持端口不变 |
+| 环境安装 | `setup.py` / `requirements.txt` | 依赖安装与环境初始化 |
+| 事件定义 | `events.py` | 统一事件类型（text_delta / tool_call_result / usage / error / done） |
 | 环境变量 | `.env` | 启动级参数和密钥兜底 |
 
 ### 外部消息插件发现规则
@@ -125,7 +137,32 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - 扫描 `shared_skills/*/SKILL.md` 和 `users/<name>/user_skills/*/SKILL.md`。
 - 仅注入提示词描述，不注册可调用工具。
 - 项目静态来源由根目录的 `register.py` 注册；当前用户的技能和拓展由可信运行时按目录约定解析，用户目录不加载 Python。
-- 详细注册契约见 `config/prompt_registries.md`。
+
+
+### 知识库检索优先级
+
+三层知识库的检索顺序固定为 **用户级 → 共享级 → 全局级**：
+
+1. **用户知识库**（`users/<name>/knowledge/`）— 最高优先级，所有检索首先从此层开始，命中即返回。
+2. **共享知识库**（`shared_knowledge/`）— 用户层无结果时检索，受 `knowledge.use_shared` 控制。
+3. **全局知识库**（`global_knowledge/`）— 兜底层，受 `knowledge.use_global` 控制。
+
+写入规则：
+
+- 新增知识默认写入用户知识库。
+- 只有用户明确说「写入共享知识库」或「写入全局知识库」时才写入对应层。
+- 不得将用户私有信息写入共享或全局知识库。
+
+### 知识库优先规则
+
+用户提问时，按以下顺序处理：
+
+1. **先查知识库索引**：拿到问题后，先扫描知识库索引（`data_structure.md`），检查是否命中已有知识条目。
+2. **命中则优先走知识库**：若索引表明用户/共享/全局知识库中存在相关内容，直接读取对应文件作答，不额外发起网络搜索或联网请求。
+3. **未命中再走常规流程**：知识库无匹配时，才考虑网络搜索、Provider 内置知识或其他来源。
+4. **跨层合并**：用户层命中部分、共享/全局层命中另一部分时，合并所有命中结果，用户层内容优先展示。
+
+> **kemo-graph 场景**：当用户配置中任一 `kemo_graph_*` 开关为 `true` 时，对应知识层的检索入口切换为 kemo-graph 接口而非 `data_structure.md` 文件索引。若 kemo-graph 未连接（返回 `not_connected`），该层不回退到原始索引，直接跳过。开关为 `false` 的知识层仍走文件索引。三层各自独立判断。
 
 ---
 
@@ -159,7 +196,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `web` | object | 单用户 Web Chat 并发、等待槽与等待超时 |
 | `message` | object | 外部消息工作线程和有界等待队列 |
 | `cron` | object | cron 调度配置 |
-| `task_cron_system` | object | 系统级感知与拓展数据刷新频率 |
+| `task_cron_system` | object | 系统级感知与拓展数据刷新频率及单模块超时 |
 | `agents` | object | 上下文管理参数（轮次/token 上限等） |
 
 ### 主智能体来源控制
@@ -198,6 +235,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，chat 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
+| `reasoning_effort` | string | 思考强度：`minimal`、`low`、`medium`、`high`、`max`；缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
 
 Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
 
@@ -226,17 +264,21 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 |------|------|------|
 | `auto_accept` | bool | 是否自动执行计划，默认 false |
 
-详细结构说明见 `global_knowledge/users-structure.md`。
+详细结构说明见 `global_knowledge/user-config-reference.md`。
 
 ---
 
 ## 5. 工具使用规则
 
+- **`action` 必填参数**：以下工具使用统一的 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会导致调用失败并报「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、`task_time`、`expand_creater`、`external_message`、`sense_creater`、`skill_creater`。特别注意 `file` 工具的所有操作（读、写、编辑、搜索、复制、移动、删除等）都必须带 `action`——例如编辑文件应传 `action: "edit"`，编辑内容参数名为 `content`（不是 `new_text`），模式参数为 `edit_mode`。
+- **`scope` 必填参数**：`expand_creater` 和 `skill_creater` 的 `scope` 为必填，漏传会报「缺少必填参数：scope」。取值仅 `"user"`（当前用户私有的拓展/技能）或 `"shared"`（所有用户共享），不存在 `"global"`。创建前应在流程中向用户确认 scope，不得自行猜测。
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
 - 不重复执行已经产生副作用的工具调用（框架层有签名去重）。
 - 工具执行有超时限制（`tools.timeout`，默认 240 秒）。
-- 工具循环有最大次数限制（`tools.max_iterations`，默认 8 次）。
+- 工具循环有最大次数限制（`tools.max_iterations`，默认 80 次）；该值统计 Provider 迭代，不等同于工具卡片数量。
+- 单个工具以“工具名称 + 完整参数”作为调用签名；同一签名连续请求超过
+  `tools.consecutive_identical_call_limit`（默认 8 次）后阻止继续执行。工具或参数变化会将连续计数重置为 1。
 - 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
   Provider 工具 schema 中临时移除；其他工具穿插执行会重置连续失败计数。
 - 用户取消时立即停止，不继续执行后续工具调用。
@@ -268,7 +310,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 
 ### 文件存储
 
-- 文件名是全部记忆层级中的全局唯一身份，基础名称最长 20 个字符。
+- 文件名是全部记忆层级中的全局唯一身份，建议使用标题 slug 格式（如 `用户偏好-xxx.md`），人可读且便于后期维护。
 - 一个 Markdown 只保存一个微量化事实、偏好、关系或项目状态；同名写入更新原文件。
 - 临时三层正文存为 Markdown，同目录 `data.json` 保存 weight、created_at、content_updated_at、last_used_at、last_weight_date、tier_entered_at 和 expires_at。绝对时间统一存 UTC，展示层转换到本地时区。
 - `updated_at` 仅作为 `content_updated_at` 的兼容别名；记忆被注入使用时不得覆盖内容更新时间。
@@ -353,7 +395,8 @@ agents/<name>/
 ├── agent.json
 ├── agent-config.json
 ├── trigger.md
-└── executor.py
+├── executor.py
+└── schema.json（可选，子代理输入输出 JSON Schema）
 ```
 
 用户代理位于 `users/<user>/agents/<name>/`，可按需携带可信的自定义执行代码：
@@ -364,7 +407,8 @@ users/<user>/agents/<name>/
 ├── agent.json
 ├── agent-config.json
 ├── trigger.md
-└── executor.py（可选）
+├── executor.py（可选）
+└── schema.json（可选，子代理输入输出 JSON Schema）
 ```
 
 - `agent.json` 精简为 `name`、`version`、`description`、`trigger` 四个字段。执行方式、写入策略和兼容模型标签由运行时按内置代理名补全；超时读取 `agent_runtime.default_timeout`。
@@ -417,15 +461,33 @@ users/<user>/agents/<name>/
 - 用户用自然语言创建定时任务时，主智能体必须先调用 `time_plan` 生成自包含提示词和结构化调度参数，再调用 `task_time create`；不得直接猜测时间参数。
 - 用户用自然语言编辑任务时，必须先用 `task_time get` 读取现有任务，再调用 `time_plan` 解析修改要求，最后调用 `task_time update`；删除前也必须先核对任务。
 - 只有内部程序或 API 已经确定完整调度参数时，才能直接调用 `task_time create/update`。
+
+### 调用 time_plan 子代理的参数
+
+通过 `subagent_dispatch action=call agent=time_plan` 调用，`input` 必须包含：
+
+| 字段 | 必填 | 来源 | 说明 |
+|------|------|------|------|
+| `action` | 是 | 按场景选择 | `create`、`edit`、`delete` |
+| `user_request` | 是 | 用户原话 | 用户的自然语言定时要求 |
+| `current_time_beijing` | 否 | 框架运行时 | 当前北京时间 ISO 字符串。`subagent_dispatch` 会按 `Asia/Shanghai` 强制注入；主智能体提交的同名值会被覆盖。 |
+| `existing_task` | 编辑/删除时 | `task_time get` 返回结果 | 现有任务完整 JSON |
+| `edit_request` | 编辑时 | 用户修改要求 | 用户明确表达的修改内容 |
+
+主智能体不需要为了组装该字段额外调用时间工具。`time_plan` executor 仍要求最终输入包含
+`current_time_beijing`，该契约由框架适配层保证。
+
+调用前应先读取 `agents/time_plan/trigger.md` 确认最新输入约定。
 - `cron.enabled` 控制是否启用调度（默认 true）。
 - `cron.poll_interval` 控制常规轮询间隔（默认 30 秒）；运行时会自动取它与两个系统数据刷新间隔的最小值，保证短周期任务按时被扫描。
 - `cron.avoid_congestion=true` 时，Provider 可用槽位低于 `cron.congestion_threshold_ratio` 指定比例会推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避。
-- `task_cron_system.sense_update_rate` 控制全局感知数据刷新间隔，`task_cron_system.expand_update_rate` 控制全局拓展数据刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。
+- `task_cron_system.sense_update_rate` 控制全局感知刷新间隔，`task_cron_system.expand_update_rate` 控制三层拓展刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。`module_update_timeout` 是每个采集脚本的独立子进程超时，默认 120 秒。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
   自动管理 Cron 与上下文整理。
 - 普通任务通过主智能体执行；系统任务可通过 `subagent` 直调内部子代理，或通过白名单 `function` 模式执行内部函数。
-- 系统自动注册临时重要记忆巡检、每日整理、每 30 秒一次的 self_improve 到期晋升检查，以及全局感知/全局拓展数据刷新任务。
-- 记忆类系统任务按用户分别执行；感知和拓展属于全局资源，每个到期周期只以 `__system__` 身份执行一次。模块更新脚本优先调用 `update()`，兼容调用 `main()`。
+- 系统自动注册临时重要记忆巡检、每日整理、每 30 秒一次的 self_improve 到期晋升检查，以及感知/拓展数据刷新任务。
+- 记忆类系统任务按用户分别执行；感知只以 `__system__` 身份刷新全局层。拓展任务先以 `__system__` 身份各刷新一次全局层和共享层，再按用户身份只刷新对应的 `users/<user>/expand/`，不得跨用户聚合执行。
+- 模块更新脚本在独立 Python 子进程中运行，优先调用 `update()`，兼容调用 `main()`；超时、非零退出码、`False`、`{ok: false}` 或失败状态均记为失败。
 
 ---
 

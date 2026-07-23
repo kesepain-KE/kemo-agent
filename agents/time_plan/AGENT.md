@@ -60,7 +60,7 @@
 |------|------|------|
 | `action` | string | `create`、`edit` 或 `delete` |
 | `user_request` | string | 用户的自然语言定时要求 |
-| `current_time_beijing` | string | 当前北京时间 ISO（如 `2026-07-19T22:00:00+08:00`） |
+| `current_time_beijing` | string | 框架强制注入的当前北京时间 ISO（如 `2026-07-19T22:00:00+08:00`），调用方提交的值不可信 |
 | `existing_task` | object | 编辑/删除时的现有任务（可选） |
 | `edit_request` | string | 编辑时的修改要求（可选） |
 
@@ -94,4 +94,5 @@
 - 无法解析时返回 `action=skip` 和原因
 - recurring 间隔 ≥ 60 秒
 - 所有时间使用北京时间
+- 当前时间由调用适配层强制注入，不要求主智能体复制工具结果
 - `next_run_at` 由调用方通过 `compute_next_run()` 覆盖，子代理的输出为参考

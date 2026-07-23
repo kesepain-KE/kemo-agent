@@ -47,7 +47,7 @@
 |------|------|
 | `action` | `create` / `edit` / `delete` |
 | `user_request` | 用户自然语言 |
-| `current_time_beijing` | 当前北京时间 ISO |
+| `current_time_beijing` | 框架在每次调用前强制注入的当前北京时间 ISO；主智能体无需提供，伪造值会被覆盖 |
 | `existing_task` | 编辑/删除时的现有任务 |
 | `edit_request` | 编辑时的修改要求 |
 
@@ -69,6 +69,7 @@
 ## 注意事项
 
 - 所有时间使用北京时间（`Asia/Shanghai`）
+- `subagent_dispatch` 在运行时强制注入真实 `current_time_beijing`，不依赖主智能体先调用时间工具
 - 不直接执行、写文件或调用 CLI
 - 执行 prompt 必须自包含（cron 执行时无上下文）
 - `next_run_at` 由 `compute_next_run()` 确定性覆盖，子代理输出为参考

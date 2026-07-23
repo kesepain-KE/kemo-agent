@@ -46,6 +46,8 @@
 | `edit_request` | 编辑模式时的修改要求（可选） |
 | `completed_steps` | 编辑模式下不可修改的已完成步骤 ID 与标题 |
 
+通过 `subagent_dispatch` 调用时，框架会忽略调用方提交的同名权限字段，并根据当前用户配置强制注入真实的 `available_tools`、技能/知识索引、`max_steps` 与 `auto_accept`。主智能体只需提供任务数据，不得手工伪造工具清单。任务计划必须同步调用，以便输出立即完成校验和持久化。
+
 ## 上下文隔离
 
 - `inherit_main_history: true` — 首次传入时获得主会话上下文

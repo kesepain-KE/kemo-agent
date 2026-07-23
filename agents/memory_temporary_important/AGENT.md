@@ -18,8 +18,8 @@
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
-| 全量临时记忆 | `seven_days` / `one_month` / `half_year` 三层的全部微记忆碎片 | 无数量限制，全量读取 |
-| 全量永久记忆 | `permanent` 层全部碎片 | 用于去重 |
+| 临时记忆摘要与全文 | `seven_days` / `one_month` / `half_year` 三层的微记忆碎片 | 先用 `list` 读取摘要，再逐条用 `get` 读取全文后筛选 |
+| 永久记忆摘要与全文 | `permanent` 层碎片 | 先用 `list` 读取摘要，再逐条用 `get` 读取全文做语义去重 |
 
 ### 重要记忆特征定义
 
@@ -39,13 +39,15 @@
 
 ### 流程
 
-1. 读取三层临时记忆的**全部**微记忆碎片（不设数量限制）
-2. 根据上述重要记忆特征，筛选出符合条件的碎片
-3. 读取永久记忆全量碎片
-4. 去重：与永久记忆**语义重复**的内容不进入热画像
-5. 将筛选后的碎片合并，生成/更新热画像 Markdown
-6. **删除已被提取的源碎片**：对每个被提取的微记忆碎片，调用 `memory_manage.delete` 删除其 Markdown 文件，并更新对应层级的 `data.json`（移除该条目的权重和到期时间记录）
-7. 当检测到没有符合重要记忆特征的微记忆碎片后，流程结束
+1. 对 `seven_days`、`one_month`、`half_year` 三层分别调用 `memory_manage(action="list", tier=..., limit=500)`，读取条目摘要；不得使用空查询搜索代替列出
+2. 对摘要中的每个条目调用 `memory_manage(action="get", tier=..., filename=...)`，读取完整 Markdown 正文
+3. 结合完整正文以及摘要中的 `filename`、`weight`、`expires_at`，按上述重要记忆特征筛选碎片
+4. 调用 `memory_manage(action="list", tier="permanent", limit=500)` 读取永久记忆摘要
+5. 对永久记忆摘要中的每个条目调用 `memory_manage(action="get", tier="permanent", filename=...)` 获取正文，完成语义去重；与永久记忆**语义重复**的内容不进入热画像
+6. 如果任一次 `list` 返回 `truncated=true`，不得基于不完整数据删除源碎片；保持当前热画像并明确报告该层条目超过单次列出上限
+7. 将筛选并去重后的碎片合并，生成/更新热画像 Markdown
+8. **删除已被提取的源碎片**：对每个被提取的微记忆碎片，调用 `memory_manage(action="delete", tier=..., filename=...)` 删除其 Markdown 文件，并更新对应层级的 `data.json`（移除该条目的权重和到期时间记录）
+9. 当检测到没有符合重要记忆特征的微记忆碎片后，流程结束
 
 ### 防丢失规则
 
@@ -70,7 +72,7 @@
 
 ### 流程
 
-1. 读取当前 `users/<name>/memory_temporary_important.md` 全文
+1. 调用 `memory_manage(action="get", tier="important", filename="memory_temporary_important.md")` 读取当前热画像全文；不得使用空查询搜索
 2. 检查记忆条目是否可以整合优化（合并同主题、精简冗余表述、统一格式）
 3. 如果可以整合，先执行一次整合优化
 4. 检查总字符数是否超过 `global_config.json → memory.important_memory_max_chars`（默认 2000）

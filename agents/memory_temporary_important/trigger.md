@@ -32,17 +32,18 @@
 
 子代理自行通过 `memory_manage` 插件读取数据，不依赖外部传入：
 
-1. 调 `memory_manage.search_by_content(tier="seven_days", query="")` — 读取全量 7 天碎片
-2. 同上读取 `one_month` 和 `half_year` 全量碎片
-3. 调 `memory_manage.search_by_content(tier="permanent", query="")` — 读取永久记忆全文做语义去重
+1. 对 `seven_days`、`one_month`、`half_year` 分别调 `memory_manage(action="list", tier=..., limit=500)`，读取包含 `filename`、`weight`、`expires_at` 的条目摘要
+2. 对摘要中的每个条目调 `memory_manage(action="get", tier=..., filename=...)` 读取完整 Markdown 正文，再按重要特征筛选
+3. 调 `memory_manage(action="list", tier="permanent", limit=500)` 读取永久记忆摘要；对每个永久条目逐条调 `memory_manage(action="get", tier="permanent", filename=...)` 获取全文做语义去重
+4. 任一次 `list` 返回 `truncated=true` 时停止删除操作，保持当前热画像并报告该层超过单次列出上限
 
 ### 流程
 
-1. 全量读取三层临时记忆
-2. 按重要记忆特征筛选
-3. 与永久记忆去重
+1. 用 `list` 读取三层临时记忆摘要
+2. 用 `get` 逐条读取全文，再按重要记忆特征筛选
+3. 用永久记忆的 `list` 摘要和逐条 `get` 全文做语义去重
 4. 生成热画像 Markdown
-5. 对每个已提取碎片调 `memory_manage.delete(tier=..., filename=...)`
+5. 对每个已提取碎片调 `memory_manage(action="delete", tier=..., filename=...)`
 6. 检测无更多符合特征的碎片 → 结束
 
 ### 优先级
@@ -53,7 +54,7 @@
 
 ### 输入
 
-调用 `memory_manage` 的 `search_by_content(tier="important", query="")` 读取现有热画像全文。
+调用 `memory_manage(action="get", tier="important", filename="memory_temporary_important.md")` 读取现有热画像全文。
 
 ### 流程
 
@@ -84,9 +85,9 @@
 ## 注意事项
 
 - 子代理通过 memory_manage 插件自行读写，不依赖外部数据
-- 全量读取三层临时记忆，不设数量限制
+- 列出整层必须调用 `memory_manage(action="list", ...)`；需要正文时调用 `memory_manage(action="get", ...)`，禁止空查询搜索
 - 与永久记忆语义重复的不进入热画像
-- 提取后必须调 memory_manage.delete 删除源碎片
+- 提取后必须调用 `memory_manage(action="delete", tier=..., filename=...)` 删除源碎片
 - **防丢失**：操作 A 提取时若热画像已接近字符上限且新碎片无法完整保留，则不删除该源碎片；操作 B 压缩时优先精简表述而非删除条目，删除作为最后手段
 - 不得记录密码、API Key、Token 等敏感凭据
 - 字符限制以 `memory.important_memory_max_chars` 配置为准

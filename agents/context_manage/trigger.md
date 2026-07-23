@@ -10,9 +10,13 @@
 
 ## 调用方式
 
-由引擎 `run/engine.py` 在上下文选择阶段自动调用，也可由主智能体通过 `subagent_dispatch` 主动调用。
+仅由引擎 `run/engine.py` 在上下文选择阶段调用。用户手动 `/compress`
+也必须进入引擎的会话压缩管线，不能由主智能体通过 `subagent_dispatch` 直调。
 
-`allowed_callers: ["main_agent", "engine"]`。
+`internal_mode: true`，`allowed_callers: ["engine"]`。
+
+直接调用本子代理只会生成摘要数据，不会安全地更新当前会话游标、运行时窗口和记忆状态；
+活跃响应中直调还可能与当前会话锁冲突，因此不对主智能体公开。
 
 ## 三种触发场景
 
