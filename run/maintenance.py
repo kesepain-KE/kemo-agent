@@ -14,11 +14,18 @@ from zoneinfo import ZoneInfo
 from provider.factory import create_provider
 from run.agent_runner import AgentRunner
 from run.config import load_config
-from run.engine import _extract_round_memory, _session_lock, compress_context, context_status
+from run.engine import (
+    _analyze_round_memory,
+    _persist_round_memory_analysis,
+    _session_lock,
+    compress_context,
+    context_status,
+)
 from run.history import commit_window, load_window
 from run.history_index import (
     claim_pending_memory,
     claim_pending_summary,
+    find_record,
     finish_memory_claim,
     finish_summary_claim,
     history_directory,
@@ -431,10 +438,14 @@ class MaintenanceScheduler:
             archive_name = str(claim.get("archive_window") or "")
             claim_id = str(claim.get("memory_claim_id") or "")
             round_number = int(claim.get("memory_claim_round") or 0)
+            target_round = max(0, int(claim.get("memory_target_round") or 0))
             claim_remaining_status = (
                 "queued"
-                if extraction_mode == "compression_only"
-                and str(claim.get("lifecycle") or "") == "closed"
+                if target_round > 0
+                or (
+                    extraction_mode == "compression_only"
+                    and str(claim.get("lifecycle") or "") == "closed"
+                )
                 else remaining_status
             )
             archive_path = history_directory(self.root, user) / archive_name
@@ -444,7 +455,9 @@ class MaintenanceScheduler:
                 "round": round_number,
             }
             extraction: dict[str, Any] | None = None
+            extraction_error: dict[str, Any] | None = None
             archive_committed = False
+            stale_result = False
             try:
                 if (
                     not source
@@ -455,6 +468,7 @@ class MaintenanceScheduler:
                     or Path(archive_name).name != archive_name
                 ):
                     raise MaintenanceError("记忆恢复领取记录缺少有效会话身份")
+                payload: dict[str, Any] | None = None
                 with _session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
                     data = window.get("data") or {}
@@ -473,48 +487,119 @@ class MaintenanceScheduler:
                         }
                     else:
                         payload = memory_round_payload(window, round_number)
-                        if runner is None:
-                            runner = AgentRunner(
-                                self.root,
-                                user,
-                                config=config,
-                                provider_factory=self.provider_factory,
-                            )
-                        extraction = _extract_round_memory(
+                if payload is not None:
+                    if runner is None:
+                        runner = AgentRunner(
+                            self.root,
+                            user,
+                            config=config,
+                            provider_factory=self.provider_factory,
+                        )
+                    analysis = _analyze_round_memory(
+                        round_number=round_number,
+                        agent_runner=runner,
+                        cancel_event=self._stop_event,
+                        **payload,
+                    )
+                    if analysis.get("status") != "completed":
+                        raw_error = analysis.get("error")
+                        extraction_error = (
+                            dict(raw_error)
+                            if isinstance(raw_error, dict)
+                            else {
+                                "message": "记忆提取失败",
+                                "exception_type": "MaintenanceError",
+                            }
+                        )
+                        raise MaintenanceError(
+                            str(extraction_error.get("message") or "记忆提取失败")
+                        )
+
+                with _session_lock(self.root, user, source, session_id):
+                    window = load_window(archive_path)
+                    data = window.setdefault("data", {})
+                    archive_cursor = max(
+                        0, int(data.get("memory_processed_round") or 0)
+                    )
+                    current_claim = find_record(
+                        self.root,
+                        user,
+                        source,
+                        session_id,
+                    )
+                    if (
+                        not isinstance(current_claim, dict)
+                        or current_claim.get("memory_claim_id") != claim_id
+                        or int(current_claim.get("memory_claim_round") or 0)
+                        != round_number
+                    ):
+                        stale_result = True
+                        raise MaintenanceError("记忆提取 claim 已失效，丢弃陈旧结果")
+                    if archive_cursor >= round_number:
+                        extraction = {
+                            "status": "already_processed",
+                            "candidate_count": 0,
+                        }
+                    elif archive_cursor != round_number - 1:
+                        raise MaintenanceError(
+                            f"记忆提取游标已变化：{archive_cursor} != {round_number - 1}"
+                        )
+                    elif payload is not None:
+                        extraction = _persist_round_memory_analysis(
                             root=self.root,
                             user=user,
                             config=config,
-                            round_number=round_number,
-                            agent_runner=runner,
-                            cancel_event=self._stop_event,
-                            **payload,
+                            analysis=analysis,
                         )
                         if extraction.get("status") != "completed":
-                            error = extraction.get("error")
-                            message = (
-                                str(error.get("message") or "记忆提取失败")
-                                if isinstance(error, dict)
-                                else "记忆提取失败"
+                            raw_error = extraction.get("error")
+                            extraction_error = (
+                                dict(raw_error)
+                                if isinstance(raw_error, dict)
+                                else {
+                                    "message": "记忆持久化失败",
+                                    "exception_type": "MaintenanceError",
+                                }
                             )
-                            raise MaintenanceError(message)
-                        data["memory_processed_round"] = round_number
-                        data["memory_status"] = (
-                            "completed"
-                            if round_number >= archive_rounds
-                            else claim_remaining_status
+                            raise MaintenanceError(
+                                str(
+                                    extraction_error.get("message")
+                                    or "记忆持久化失败"
+                                )
+                            )
+                    finished = finish_memory_claim(
+                        self.root,
+                        user,
+                        source,
+                        session_id,
+                        claim_id=claim_id,
+                        processed_round=round_number,
+                        remaining_status=claim_remaining_status,
+                    )
+                    if finished is None:
+                        raise MaintenanceError("记忆提取 claim 在提交时已失效")
+                    data["memory_processed_round"] = int(
+                        finished.get("memory_processed_round") or round_number
+                    )
+                    data["memory_status"] = str(
+                        finished.get("memory_status") or claim_remaining_status
+                    )
+                    data.pop("memory_error", None)
+                    if isinstance(finished.get("memory_last_error"), dict):
+                        data["memory_last_error"] = dict(
+                            finished["memory_last_error"]
                         )
-                        data.pop("memory_error", None)
-                        commit_window(archive_path, window)
-                        archive_committed = True
-                finished = finish_memory_claim(
-                    self.root,
-                    user,
-                    source,
-                    session_id,
-                    claim_id=claim_id,
-                    processed_round=round_number,
-                    remaining_status=claim_remaining_status,
-                )
+                    for field in (
+                        "memory_queue_reason",
+                        "memory_target_round",
+                        "memory_queued_at",
+                    ):
+                        if finished.get(field) not in {None, "", 0}:
+                            data[field] = finished[field]
+                        else:
+                            data.pop(field, None)
+                    commit_window(archive_path, window)
+                    archive_committed = True
                 processed.append(
                     {
                         **identity,
@@ -527,24 +612,15 @@ class MaintenanceScheduler:
                     }
                 )
             except Exception as exc:
-                error = {
+                error = extraction_error or {
                     "message": str(exc),
                     "exception_type": type(exc).__name__,
                 }
+                if stale_result:
+                    failed.append({**identity, "stale": True, "error": error})
+                    continue
                 try:
-                    with _session_lock(self.root, user, source, session_id):
-                        window = load_window(archive_path)
-                        data = window.setdefault("data", {})
-                        data["memory_status"] = "failed"
-                        data["memory_error"] = error
-                        commit_window(archive_path, window)
-                except Exception as archive_exc:
-                    error["archive_error"] = {
-                        "message": str(archive_exc),
-                        "exception_type": type(archive_exc).__name__,
-                    }
-                try:
-                    finish_memory_claim(
+                    finished = finish_memory_claim(
                         self.root,
                         user,
                         source,
@@ -556,6 +632,26 @@ class MaintenanceScheduler:
                     error["index_error"] = {
                         "message": str(index_exc),
                         "exception_type": type(index_exc).__name__,
+                    }
+                    finished = None
+                try:
+                    with _session_lock(self.root, user, source, session_id):
+                        window = load_window(archive_path)
+                        data = window.setdefault("data", {})
+                        diagnostic = (
+                            finished.get("memory_last_error")
+                            if isinstance(finished, dict)
+                            and isinstance(finished.get("memory_last_error"), dict)
+                            else error
+                        )
+                        data["memory_status"] = "failed"
+                        data["memory_error"] = dict(diagnostic)
+                        data["memory_last_error"] = dict(diagnostic)
+                        commit_window(archive_path, window)
+                except Exception as archive_exc:
+                    error["archive_error"] = {
+                        "message": str(archive_exc),
+                        "exception_type": type(archive_exc).__name__,
                     }
                 failed.append({**identity, "error": error})
                 self._report_error(f"maintenance:{user}:memory", exc)

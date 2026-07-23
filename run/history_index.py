@@ -265,6 +265,26 @@ def _record_from_data(
         record["memory_error"] = copy.deepcopy(memory_error)
     elif memory_status != "failed":
         record.pop("memory_error", None)
+    memory_last_error = data.get("memory_last_error") or old.get("memory_last_error")
+    if isinstance(memory_last_error, dict):
+        record["memory_last_error"] = copy.deepcopy(memory_last_error)
+    for field in ("memory_queue_reason", "memory_queued_at"):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            record[field] = value
+        else:
+            record.pop(field, None)
+    try:
+        memory_target_round = max(0, int(data.get("memory_target_round") or 0))
+    except (TypeError, ValueError):
+        memory_target_round = 0
+    if memory_target_round > record["memory_processed_round"]:
+        record["memory_target_round"] = memory_target_round
+    else:
+        record.pop("memory_target_round", None)
+        if not memory_claim_active:
+            record.pop("memory_queue_reason", None)
+            record.pop("memory_queued_at", None)
     if record["lifecycle"] not in {"open", "closed", "deleted"}:
         record["lifecycle"] = "open"
     return record
@@ -402,7 +422,12 @@ def _reconcile_unlocked(root: Path, user: str, index: dict[str, Any]) -> bool:
             committed_round = max(0, int(record.get("last_committed_round") or 0))
         except (TypeError, ValueError):
             continue
-        if processed_round < committed_round or not record.get("memory_claim_id"):
+        try:
+            target_round = max(0, int(record.get("memory_target_round") or 0))
+        except (TypeError, ValueError):
+            target_round = 0
+        claim_limit = min(committed_round, target_round) if target_round else committed_round
+        if processed_round < claim_limit or not record.get("memory_claim_id"):
             continue
         for field in ("memory_claim_id", "memory_claimed_at", "memory_claim_round"):
             record.pop(field, None)
@@ -753,7 +778,12 @@ def claim_pending_memory(
                 committed_round = max(0, int(record.get("last_committed_round") or 0))
             except (TypeError, ValueError):
                 continue
-            if processed_round >= committed_round or not record.get("archive_window"):
+            try:
+                target_round = max(0, int(record.get("memory_target_round") or 0))
+            except (TypeError, ValueError):
+                target_round = 0
+            claim_limit = min(committed_round, target_round) if target_round else committed_round
+            if processed_round >= claim_limit or not record.get("archive_window"):
                 continue
             status = str(record.get("memory_status") or "pending")
             stale = _claim_is_stale(
@@ -826,19 +856,46 @@ def finish_memory_claim(
                 int(record.get("memory_processed_round") or 0),
                 int(processed_round),
             )
+        claimed_round = max(0, int(record.get("memory_claim_round") or 0))
         for field in ("memory_claim_id", "memory_claimed_at", "memory_claim_round"):
             record.pop(field, None)
         if error is not None:
+            previous_error = record.get("memory_last_error")
+            retry_count = (
+                max(0, int(previous_error.get("retry_count") or 0)) + 1
+                if isinstance(previous_error, dict)
+                else 1
+            )
+            diagnostic = {
+                **copy.deepcopy(error),
+                "round": claimed_round,
+                "occurred_at": _now(),
+                "retry_count": retry_count,
+            }
             record["memory_status"] = "failed"
-            record["memory_error"] = copy.deepcopy(error)
+            record["memory_error"] = diagnostic
+            record["memory_last_error"] = copy.deepcopy(diagnostic)
         else:
             record.pop("memory_error", None)
-            record["memory_status"] = (
-                "completed"
-                if int(record.get("memory_processed_round") or 0)
-                >= int(record.get("last_committed_round") or 0)
-                else remaining_status
-            )
+            current_round = max(0, int(record.get("memory_processed_round") or 0))
+            committed_round = max(0, int(record.get("last_committed_round") or 0))
+            target_round = max(0, int(record.get("memory_target_round") or 0))
+            if target_round and current_round >= target_round:
+                for field in (
+                    "memory_queue_reason",
+                    "memory_target_round",
+                    "memory_queued_at",
+                ):
+                    record.pop(field, None)
+                record["memory_status"] = (
+                    "completed" if current_round >= committed_round else "deferred"
+                )
+            else:
+                record["memory_status"] = (
+                    "completed"
+                    if current_round >= committed_round
+                    else remaining_status
+                )
         record["memory_state_updated_at"] = _now()
         index["sessions"][key] = record
         return _write_index_unlocked(root, user, index)["sessions"][key]

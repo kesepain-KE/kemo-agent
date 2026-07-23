@@ -51,6 +51,10 @@ _ARCHIVE_DATA_FIELDS = frozenset(
         "memory_processed_round",
         "memory_status",
         "memory_error",
+        "memory_last_error",
+        "memory_queue_reason",
+        "memory_target_round",
+        "memory_queued_at",
         "complete",
     }
 )
@@ -876,8 +880,11 @@ def queue_memory_extraction(
     user: str,
     source: str,
     session_id: str,
+    *,
+    target_round: int | None = None,
+    reason: str = "session_closed",
 ) -> dict[str, Any]:
-    """Durably queue a committed session's remaining memory rounds."""
+    """Durably queue a bounded set of committed rounds for memory extraction."""
 
     directory = find_window(root, user, source, session_id)
     if directory is None:
@@ -887,6 +894,27 @@ def queue_memory_extraction(
             "rounds": 0,
             "processed_round": 0,
         }
+    window = load_window(directory)
+    data = window.setdefault("data", {})
+    rounds = max(0, int(data.get("rounds") or 0))
+    processed_round = max(0, int(data.get("memory_processed_round") or 0))
+    requested_target = rounds if target_round is None else max(0, int(target_round))
+    requested_target = min(rounds, requested_target)
+    existing_target = max(0, int(data.get("memory_target_round") or 0))
+    bounded_target = max(requested_target, existing_target)
+    if rounds < 1 or processed_round >= bounded_target:
+        return {
+            "status": "skipped",
+            "reason": (
+                "already_processed"
+                if reason == "manual_compression"
+                else "no_pending_rounds"
+            ),
+            "rounds": rounds,
+            "processed_round": processed_round,
+            "target_round": bounded_target,
+            "pending_rounds": 0,
+        }
     from run.config import load_config
     from run.memory import memory_extraction_mode
 
@@ -894,29 +922,32 @@ def queue_memory_extraction(
         return {
             "status": "skipped",
             "reason": "memory_extraction_disabled",
-            "rounds": 0,
-            "processed_round": 0,
-        }
-    window = load_window(directory)
-    data = window.setdefault("data", {})
-    rounds = max(0, int(data.get("rounds") or 0))
-    processed_round = max(0, int(data.get("memory_processed_round") or 0))
-    if rounds < 1 or processed_round >= rounds:
-        return {
-            "status": "skipped",
-            "reason": "no_pending_rounds",
             "rounds": rounds,
             "processed_round": processed_round,
+            "target_round": bounded_target,
+            "pending_rounds": 0,
         }
     data["memory_status"] = "queued"
+    data["memory_queue_reason"] = str(reason or "session_closed")
+    data["memory_target_round"] = bounded_target
+    data["memory_queued_at"] = _now()
     data.pop("memory_error", None)
     commit_window(directory, window)
+    indexed = find_index_record(root, user, source, session_id)
+    if (
+        not isinstance(indexed, dict)
+        or str(indexed.get("memory_status") or "") not in {"queued", "processing"}
+        or int(indexed.get("memory_target_round") or 0) != bounded_target
+        or int(indexed.get("memory_processed_round") or 0) != processed_round
+    ):
+        raise HistoryError("记忆后台队列未能同步写入历史索引")
     return {
         "status": "queued",
-        "reason": "session_closed",
+        "reason": data["memory_queue_reason"],
         "rounds": rounds,
         "processed_round": processed_round,
-        "pending_rounds": rounds - processed_round,
+        "target_round": bounded_target,
+        "pending_rounds": bounded_target - processed_round,
     }
 
 
