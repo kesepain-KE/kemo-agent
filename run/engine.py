@@ -53,8 +53,10 @@ from run.history import (
     load_window,
     load_runtime_window,
     prepare_window,
+    queue_memory_extraction,
     runtime_window_path,
 )
+from run.history_index import find_record as find_history_record
 from run.history_index import set_active as set_active_history_session
 from run.history_index import update_memory_state, update_run_state
 from run.memory import MemoryStore, memory_extraction_mode
@@ -62,11 +64,14 @@ from run.memory_pipeline import memory_round_payload
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from run.tools import (
+    ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
+    ToolCancelledError,
     ToolRegistry,
     apply_runtime_tool_policy,
     discover_tools,
     execute_tool,
+    tool_call_signature,
 )
 
 
@@ -120,6 +125,29 @@ def _content_for_message(blocks: list[ContentBlock]) -> str | list[dict[str, Any
     if all(isinstance(block, TextContent) for block in blocks):
         return "".join(block.text for block in blocks if isinstance(block, TextContent))
     return [block.model_dump(mode="json", exclude_none=True) for block in blocks]
+
+
+def _uploaded_file_context(request: dict[str, Any]) -> str:
+    raw_files = request.get("uploaded_files") or []
+    if not isinstance(raw_files, list):
+        raise EngineError("请求字段 'uploaded_files' 必须是文件描述数组")
+    lines: list[str] = []
+    for item in raw_files:
+        if not isinstance(item, dict):
+            raise EngineError("请求字段 'uploaded_files' 包含无效文件描述")
+        path = str(item.get("path") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not path:
+            raise EngineError("上传文件描述缺少 path")
+        size = max(0, int(item.get("size") or 0))
+        lines.append(f"- {name or Path(path).name}：{path}（{size} bytes）")
+    if not lines:
+        return ""
+    return (
+        "\n\n[本轮用户上传文件]\n"
+        "以下文件已经由 Web 端保存，可按需使用 file 工具读取其内容：\n"
+        + "\n".join(lines)
+    )
 
 
 def _content_display(blocks: list[ContentBlock]) -> str:
@@ -584,6 +612,36 @@ def _json_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _tool_context_diagnostics(
+    tool_records: list[dict[str, Any]],
+    *,
+    iteration: int,
+) -> list[dict[str, Any]]:
+    """Describe tool payload sizes without copying result bodies into errors."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for record in tool_records:
+        if not isinstance(record, dict) or record.get("iteration") != iteration:
+            continue
+        arguments = record.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        item: dict[str, Any] = {
+            "name": str(record.get("name") or ""),
+            "argument_chars": len(_json_result(arguments)),
+            "result_chars": len(_json_result(record.get("result"))),
+            "status": str(record.get("status") or ""),
+        }
+        action = arguments.get("action")
+        if action is not None:
+            item["action"] = str(action)
+        path = arguments.get("path")
+        if path is not None:
+            item["path"] = str(path)
+        diagnostics.append(item)
+    return diagnostics
+
+
 def _ensure_fixed_content_fits(
     selection: Any,
     *,
@@ -807,11 +865,8 @@ def _compress_per_round_tool_think(
     }
 
 
-def _extract_round_memory(
+def _analyze_round_memory(
     *,
-    root: Path,
-    user: str,
-    config: dict[str, Any],
     round_number: int,
     prompt: str,
     text: str,
@@ -820,7 +875,7 @@ def _extract_round_memory(
     agent_runner: AgentRunner,
     cancel_event: threading.Event | None,
 ) -> dict[str, Any]:
-    """Extract and persist memory fragments from one completed round."""
+    """Analyze one completed round without mutating memory or history state."""
 
     round_data: dict[str, Any] = {
         "round": round_number,
@@ -856,16 +911,13 @@ def _extract_round_memory(
         candidates = result.data.get("candidates")
         if not isinstance(candidates, list):
             raise EngineError("self_improve 输出缺少 candidates 数组")
-        persisted = MemoryStore(root, user, config).upsert_candidates(
-            candidates,
-            source=source,
-        )
         return {
             "status": "completed",
             "candidate_count": len(candidates),
+            "candidates": copy.deepcopy(candidates),
+            "source": source,
             "agent": result.agent,
             "usage": dict(result.usage),
-            "persisted": persisted,
             "error": None,
         }
     except Exception as exc:
@@ -877,6 +929,86 @@ def _extract_round_memory(
                 "exception_type": type(exc).__name__,
             },
         }
+
+
+def _persist_round_memory_analysis(
+    *,
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist a successful analysis after its owning cursor is validated."""
+
+    if analysis.get("status") != "completed":
+        return dict(analysis)
+    candidates = analysis.get("candidates")
+    if not isinstance(candidates, list):
+        return {
+            "status": "failed",
+            "candidate_count": 0,
+            "error": {
+                "message": "记忆分析结果缺少 candidates 数组",
+                "exception_type": "EngineError",
+            },
+        }
+    source = analysis.get("source")
+    if not isinstance(source, dict):
+        source = {"source": "round_commit"}
+    try:
+        persisted = MemoryStore(root, user, config).upsert_candidates(
+            candidates,
+            source=source,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "candidate_count": 0,
+            "usage": dict(analysis.get("usage") or {}),
+            "error": {
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            },
+        }
+    result = {
+        key: copy.deepcopy(value)
+        for key, value in analysis.items()
+        if key not in {"candidates", "source"}
+    }
+    result["persisted"] = persisted
+    return result
+
+
+def _extract_round_memory(
+    *,
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    round_number: int,
+    prompt: str,
+    text: str,
+    reasoning: str,
+    tool_records: list[dict[str, Any]],
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Analyze and persist one completed round synchronously."""
+
+    analysis = _analyze_round_memory(
+        round_number=round_number,
+        prompt=prompt,
+        text=text,
+        reasoning=reasoning,
+        tool_records=tool_records,
+        agent_runner=agent_runner,
+        cancel_event=cancel_event,
+    )
+    return _persist_round_memory_analysis(
+        root=root,
+        user=user,
+        config=config,
+        analysis=analysis,
+    )
 
 
 def _extract_memory_backlog(
@@ -911,6 +1043,17 @@ def _extract_memory_backlog(
             **base_result,
             "status": "skipped",
             "reason": "no_complete_round",
+        }
+
+    indexed_session = find_history_record(root, user, source, session_id)
+    if isinstance(indexed_session, dict) and (
+        indexed_session.get("memory_claim_id")
+        or indexed_session.get("memory_queue_reason") == "manual_compression"
+    ):
+        return {
+            **base_result,
+            "status": "skipped",
+            "reason": "background_extraction_in_progress",
         }
 
     extraction_mode = memory_extraction_mode(config)
@@ -960,7 +1103,26 @@ def _extract_memory_backlog(
     extractions: list[dict[str, Any]] = []
     candidates = 0
     usage = _usage_total()
+    cancelled_rounds = {
+        int(item.get("round") or 0)
+        for item in data.get("round_metrics", [])
+        if isinstance(item, dict) and item.get("status") == "cancelled"
+    }
     for round_number in range(processed_round + 1, rounds + 1):
+        if round_number in cancelled_rounds:
+            extraction = {
+                "status": "skipped",
+                "candidate_count": 0,
+                "reason": "cancelled_round",
+            }
+            extractions.append(extraction)
+            data["memory_processed_round"] = round_number
+            data["memory_status"] = (
+                "completed" if round_number >= rounds else "processing"
+            )
+            data.pop("memory_error", None)
+            commit_window(directory, window)
+            continue
         try:
             extraction = _extract_round_memory(
                 root=root,
@@ -1070,6 +1232,7 @@ def _iter_request_events_impl(
         if not content_blocks and not compress_only_requested:
             raise EngineError("请求必须包含非空 prompt 或 content[]")
         prompt = _content_display(content_blocks)
+        uploaded_file_context = _uploaded_file_context(request)
         source = _required_text(request, "source")
         session_id = _required_text(request, "session_id")
         run_id = str(request.get("run_id") or "")
@@ -1128,7 +1291,19 @@ def _iter_request_events_impl(
             )
             tool_schemas = registry.schemas() or None
             tool_timeout = float(tool_config.get("timeout", 240))
-            max_iterations = max(1, int(tool_config.get("max_iterations", 8)))
+            max_iterations = max(1, int(tool_config.get("max_iterations", 80)))
+            raw_identical_call_limit = tool_config.get(
+                "consecutive_identical_call_limit", 8
+            )
+            if (
+                isinstance(raw_identical_call_limit, bool)
+                or not isinstance(raw_identical_call_limit, int)
+                or raw_identical_call_limit < 1
+            ):
+                raise EngineError(
+                    "tools.consecutive_identical_call_limit 必须是正整数"
+                )
+            identical_call_limit = raw_identical_call_limit
             raw_failure_limit = (config.get("history") or {}).get(
                 "consecutive_tool_fail_limit", 5
             )
@@ -1140,6 +1315,9 @@ def _iter_request_events_impl(
                 raise EngineError("history.consecutive_tool_fail_limit 必须是正整数")
             failure_limit = raw_failure_limit
             failures = ConsecutiveToolFailureTracker(failure_limit)
+            identical_calls = ConsecutiveIdenticalToolCallTracker(
+                identical_call_limit
+            )
 
             memory_store = MemoryStore(base, user, config)
             prompt_bundle = build_prompt_bundle(
@@ -1155,10 +1333,23 @@ def _iter_request_events_impl(
                 else None
             )
             compress_only = bool(request.get("compress_only", False))
+            memory_extraction_policy = str(
+                request.get("memory_extraction_policy") or "sync"
+            ).strip().casefold()
+            if memory_extraction_policy not in {"sync", "queue"}:
+                raise EngineError(
+                    "memory_extraction_policy 必须是 sync 或 queue"
+                )
+            queue_compression_memory = (
+                compress_only and memory_extraction_policy == "queue"
+            )
+            provider_content_blocks = list(content_blocks)
+            if uploaded_file_context:
+                provider_content_blocks.append(TextContent(text=uploaded_file_context))
             current_user_message = (
                 None
                 if compress_only
-                else {"role": "user", "content": _content_for_message(content_blocks)}
+                else {"role": "user", "content": _content_for_message(provider_content_blocks)}
             )
             force_compress = bool(request.get("compress", False) or compress_only)
             context_selection = select_context(
@@ -1170,10 +1361,23 @@ def _iter_request_events_impl(
                 force_compress=force_compress,
             )
             _ensure_fixed_content_fits(context_selection, system_message=system_message)
+            all_text: list[str] = []
+            all_reasoning: list[str] = []
+            observed_text: list[str] = []
+            observed_reasoning: list[str] = []
+            tool_records: list[dict[str, Any]] = []
+            pending_tool_calls: dict[str, dict[str, Any]] = {}
+            consumed_guidance: list[str] = []
+            provider_responses: list[dict[str, Any]] = []
+            usage_total = _usage_total()
+            context_stats = context_selection.stats()
+            round_finalized = False
             summary_usage = _usage_total()
             compression_memory: dict[str, Any] | None = None
             compression_usage = _usage_total()
-            if force_compress or context_selection.removed_rounds:
+            if (
+                force_compress or context_selection.removed_rounds
+            ) and not queue_compression_memory:
                 compression_memory = _extract_memory_backlog(
                     root=base,
                     user=user,
@@ -1244,7 +1448,213 @@ def _iter_request_events_impl(
                 _ensure_fixed_content_fits(context_selection, system_message=system_message)
                 if removed_after == removed_before:
                     break
+
+            def commit_cancelled_round() -> RunEvent:
+                """Persist the interrupted request as a real, terminal conversation round."""
+
+                nonlocal round_finalized, history_run_registered
+                if round_finalized:
+                    return RunEvent(
+                        type="done",
+                        usage=dict(usage_total),
+                        metadata={
+                            "committed": True,
+                            "status": "cancelled",
+                            "cancelled": True,
+                            "run_id": run_id,
+                        },
+                    )
+
+                cancelled_records = copy.deepcopy(tool_records)
+                recorded_ids = {
+                    str(record.get("id") or "")
+                    for record in cancelled_records
+                    if isinstance(record, dict)
+                }
+                for call_id, pending in pending_tool_calls.items():
+                    if call_id in recorded_ids:
+                        continue
+                    cancelled_records.append(
+                        {
+                            "id": call_id,
+                            "name": str(pending.get("name") or "unknown_tool"),
+                            "arguments": copy.deepcopy(pending.get("arguments") or {}),
+                            "status": "cancelled",
+                            "duplicate": False,
+                            "result": {
+                                "ok": False,
+                                "error": {
+                                    "message": "工具调用因用户紧急停止而取消",
+                                    "exception_type": "ToolCancelledError",
+                                    "cancelled": True,
+                                },
+                            },
+                            "iteration": int(pending.get("iteration") or 1),
+                            "elapsed_ms": 0,
+                        }
+                    )
+
+                cancelled_window = copy.deepcopy(window)
+                cancelled_archive = copy.deepcopy(archive_window)
+                round_number = int(cancelled_window["data"].get("rounds", 0)) + 1
+                archive_round_number = int(
+                    cancelled_archive["data"].get("rounds", 0)
+                ) + 1
+                elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
+                partial_text = "".join(observed_text).rstrip()
+                marker = "[本轮已由用户紧急停止]"
+                cancelled_text = f"{partial_text}\n\n{marker}" if partial_text else marker
+                reasoning = "".join(observed_reasoning)
+                cancelled_window["text"]["messages"].extend(
+                    [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": cancelled_text},
+                    ]
+                )
+                cancelled_window["think"]["rounds"].append(
+                    {"round": round_number, "content": reasoning}
+                )
+                cancelled_window["tool"]["rounds"].append(
+                    {"round": round_number, "calls": cancelled_records}
+                )
+                append_round_items(
+                    cancelled_window,
+                    round_number=round_number,
+                    user_content=[
+                        block.model_dump(mode="json", exclude_none=True)
+                        for block in content_blocks
+                    ],
+                    reasoning=reasoning,
+                    text=cancelled_text,
+                    tool_records=cancelled_records,
+                    # A cancelled Provider response may end before it can expose a
+                    # complete native output item list.  Synthesize every call/result
+                    # pair from the records so the durable item protocol has no orphan.
+                    provider_responses=[],
+                )
+                cancelled_window["data"]["rounds"] = round_number
+                metrics = cancelled_window["data"].setdefault("round_metrics", [])
+                if not isinstance(metrics, list):
+                    metrics = []
+                    cancelled_window["data"]["round_metrics"] = metrics
+                metrics.append(
+                    {
+                        "round": round_number,
+                        "usage": dict(usage_total),
+                        "elapsed_ms": elapsed_ms,
+                        "tool_calls": len(cancelled_records),
+                        "guidance": list(consumed_guidance),
+                        "provider_responses": copy.deepcopy(provider_responses),
+                        "status": "cancelled",
+                        "cancelled": True,
+                        "cancel_reason": "user_emergency_stop",
+                    }
+                )
+                _merge_usage(
+                    cancelled_window["data"]["token_usage"],
+                    _usage_from_dict(usage_total),
+                )
+                _copy_committed_round_to_archive(
+                    cancelled_archive,
+                    cancelled_window,
+                    round_number,
+                    archive_round_number,
+                )
+                runtime_window = _trim_to_max_rounds(
+                    cancelled_window, context_policy.max_rounds
+                )
+                try:
+                    next_summary_message = build_summary_message(summary_cache)
+                    next_selection = select_context(
+                        window=runtime_window,
+                        policy=context_policy,
+                        system_message=system_message,
+                        summary_message=next_summary_message,
+                        current_user_message=None,
+                        tools=tool_schemas,
+                    )
+                    runtime_window["data"]["context"] = {
+                        **next_selection.stats(),
+                        "round_offset": max(
+                            0,
+                            archive_round_number
+                            - int(runtime_window["data"].get("rounds", 0)),
+                        ),
+                        "workspace_rounds": int(
+                            runtime_window["data"].get("rounds", 0)
+                        ),
+                        "summary_cache": (
+                            "context_summary.json" if summary_cache is not None else None
+                        ),
+                    }
+                    runtime_window["data"]["context_snapshot"] = build_context_snapshot(
+                        next_selection,
+                        system_prompt=prompt_bundle.text,
+                        summary_message=next_summary_message,
+                        capacity_tokens=context_policy.token_limit,
+                    )
+                except Exception as exc:
+                    runtime_window["data"]["context"] = {
+                        **context_stats,
+                        "snapshot_error": {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        },
+                    }
+
+                commit_window(window_path, cancelled_archive)
+                commit_window(runtime_path, runtime_window)
+                round_finalized = True
+                try:
+                    update_run_state(
+                        base,
+                        user,
+                        source,
+                        session_id,
+                        run_state="idle",
+                        run_id=run_id or None,
+                        directory=window_path,
+                    )
+                    history_run_registered = False
+                except Exception:
+                    pass
+                active_key = request.get("_history_active_key")
+                if isinstance(active_key, str) and active_key.strip():
+                    try:
+                        set_active_history_session(
+                            base,
+                            user,
+                            active_key.strip(),
+                            session_id,
+                            source=source,
+                        )
+                    except Exception:
+                        pass
+                return RunEvent(
+                    type="done",
+                    usage=dict(usage_total),
+                    metadata={
+                        "text": cancelled_text,
+                        "reasoning": reasoning,
+                        "usage": dict(usage_total),
+                        "model": runtime_provider["model"],
+                        "user": user,
+                        "source": source,
+                        "session_id": session_id,
+                        "window": window_path.name,
+                        "tool_calls": len(cancelled_records),
+                        "elapsed_ms": elapsed_ms,
+                        "run_id": run_id,
+                        "guidance_count": len(consumed_guidance),
+                        "committed": True,
+                        "status": "cancelled",
+                        "cancelled": True,
+                        "cancel_reason": "user_emergency_stop",
+                    },
+                )
+
             if cancel_event is not None and cancel_event.is_set():
+                yield commit_cancelled_round()
                 return
             messages = context_selection.messages
             context_stats = context_selection.stats()
@@ -1253,6 +1663,31 @@ def _iter_request_events_impl(
             for subagent_event in subagent_events:
                 yield subagent_event
             if compress_only:
+                if queue_compression_memory:
+                    if bool(summary_diagnostics.get("failed")):
+                        compression_memory = {
+                            "status": "failed",
+                            "reason": "context_summary_failed",
+                            "round": int(
+                                archive_window.get("data", {}).get("rounds") or 0
+                            ),
+                            "candidates": 0,
+                            "error": {
+                                "message": "上下文摘要生成失败，未登记后台记忆提取",
+                                "exception_type": "ContextSummaryError",
+                            },
+                        }
+                    else:
+                        compression_memory = queue_memory_extraction(
+                            base,
+                            user,
+                            source,
+                            session_id,
+                            target_round=int(
+                                archive_window.get("data", {}).get("rounds") or 0
+                            ),
+                            reason="manual_compression",
+                        )
                 compression_total_usage = copy.deepcopy(summary_usage)
                 if compression_usage.get("provider_request_count", 0):
                     _record_provider_request(
@@ -1286,14 +1721,9 @@ def _iter_request_events_impl(
                 return
 
             stream = bool(request.get("stream", runtime_provider.get("stream", False)))
-            all_text: list[str] = []
-            all_reasoning: list[str] = []
-            tool_records: list[dict[str, Any]] = []
             guidance_channel = request.get("_guidance_queue")
-            consumed_guidance: list[str] = []
             pending_guidance_ack: list[str] = []
             protocol_parent_request_id: str | None = None
-            provider_responses: list[dict[str, Any]] = []
             usage_total = copy.deepcopy(summary_usage)
             if compression_usage.get("provider_request_count", 0):
                 _record_provider_request(
@@ -1310,24 +1740,60 @@ def _iter_request_events_impl(
             final_metadata: dict[str, Any] = {}
             completed = False
             context_retry_count = 0
+            last_provider_input_tokens: int | None = None
+            last_sent_local_tokens: int | None = None
 
             for iteration in range(1, max_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
+                    yield commit_cancelled_round()
                     return
                 if iteration > 1:
                     active_tool_schemas = (
                         registry.schemas(exclude=failures.unavailable) or None
                     )
-                    current_tokens = estimate_messages_tokens(messages) + estimate_tools_tokens(
+                    current_local_tokens = estimate_messages_tokens(
+                        messages
+                    ) + estimate_tools_tokens(
                         active_tool_schemas
                     )
-                    if current_tokens > context_policy.token_limit:
-                        yield error_event(
+                    if (
+                        last_provider_input_tokens is not None
+                        and last_sent_local_tokens is not None
+                    ):
+                        incremental_tokens = (
+                            current_local_tokens - last_sent_local_tokens
+                        )
+                        projected_tokens = max(
+                            0,
+                            last_provider_input_tokens + incremental_tokens,
+                        )
+                        measurement = "provider_plus_increment"
+                    else:
+                        incremental_tokens = None
+                        projected_tokens = current_local_tokens
+                        measurement = "local_estimate"
+                    if projected_tokens > context_policy.token_limit:
+                        context_error = error_event(
                             EngineError(
                                 "当前工具循环已超过上下文上限；为避免拆散工具消息组，本轮已停止"
                             ),
                             phase="context",
                         )
+                        context_error.metadata["context_guard"] = {
+                            "measurement": measurement,
+                            "provider_input_tokens": last_provider_input_tokens,
+                            "previous_local_tokens": last_sent_local_tokens,
+                            "current_local_tokens": current_local_tokens,
+                            "incremental_tokens": incremental_tokens,
+                            "projected_tokens": projected_tokens,
+                            "token_limit": context_policy.token_limit,
+                            "iteration": iteration,
+                            "latest_tools": _tool_context_diagnostics(
+                                tool_records,
+                                iteration=iteration - 1,
+                            ),
+                        }
+                        yield context_error
                         return
                 else:
                     active_tool_schemas = tool_schemas
@@ -1341,12 +1807,20 @@ def _iter_request_events_impl(
                     else None
                 )
                 while True:
+                    request_local_tokens = estimate_messages_tokens(
+                        messages
+                    ) + estimate_tools_tokens(active_tool_schemas)
                     chat_request = ChatRequest(
                         model=runtime_provider["model"],
                         messages=messages,
                         stream=stream,
                         tools=active_tool_schemas,
                         max_tokens=request_max_tokens,
+                        extra={
+                            "reasoning_effort": runtime_provider[
+                                "reasoning_effort"
+                            ]
+                        },
                     )
                     protocol_request = chat_request_to_kemo(chat_request).model_copy(
                         update={
@@ -1373,6 +1847,7 @@ def _iter_request_events_impl(
                         with provider_request_slot(config, cancel_event=cancel_event):
                             for event in _provider_events(provider, protocol_request):
                                 if cancel_event is not None and cancel_event.is_set():
+                                    yield commit_cancelled_round()
                                     return
                                 if pending_guidance_ack:
                                     applied_guidance = list(pending_guidance_ack)
@@ -1388,18 +1863,24 @@ def _iter_request_events_impl(
                                     )
                                 if event.type == "text_delta":
                                     iteration_text.append(event.content)
+                                    observed_text.append(event.content)
                                     yield event
                                 elif event.type == "reasoning_delta":
                                     iteration_reasoning.append(event.content)
+                                    observed_reasoning.append(event.content)
                                     yield event
                                 elif event.type == "tool_call_start":
-                                    calls.append(
-                                        ToolCall(
-                                            id=event.tool_call_id,
-                                            name=event.tool_name,
-                                            arguments=event.arguments or {},
-                                        )
+                                    call = ToolCall(
+                                        id=event.tool_call_id,
+                                        name=event.tool_name,
+                                        arguments=event.arguments or {},
                                     )
+                                    calls.append(call)
+                                    pending_tool_calls[call.id] = {
+                                        "name": call.name,
+                                        "arguments": copy.deepcopy(call.arguments),
+                                        "iteration": iteration,
+                                    }
                                     yield event
                                 elif event.type == "usage":
                                     iteration_usage = _usage_from_dict(event.usage)
@@ -1417,6 +1898,7 @@ def _iter_request_events_impl(
                         break
                     except ProviderCongestionError as exc:
                         if cancel_event is not None and cancel_event.is_set():
+                            yield commit_cancelled_round()
                             return
                         yield error_event(exc, phase="provider")
                         return
@@ -1524,6 +2006,12 @@ def _iter_request_events_impl(
                     return
                 if iteration_usage is None:
                     iteration_usage = _usage_from_dict(iteration_done.usage)
+                if (
+                    not iteration_usage.estimated
+                    and iteration_usage.prompt_tokens > 0
+                ):
+                    last_provider_input_tokens = iteration_usage.prompt_tokens
+                    last_sent_local_tokens = request_local_tokens
                 all_text.extend(iteration_text)
                 all_reasoning.extend(iteration_reasoning)
                 _record_provider_request(usage_total, iteration_usage)
@@ -1542,6 +2030,7 @@ def _iter_request_events_impl(
                         _append_guidance(messages, pending_guidance)
                         pending_guidance_ack.extend(pending_guidance)
                         all_text.append("\n\n")
+                        observed_text.append("\n\n")
                         yield RunEvent(type="text_delta", content="\n\n")
                         continue
                     completed = True
@@ -1557,11 +2046,34 @@ def _iter_request_events_impl(
                 messages.append(_assistant_tool_message(assistant_text, calls))
                 for call in calls:
                     if cancel_event is not None and cancel_event.is_set():
+                        yield commit_cancelled_round()
                         return
-                    signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
+                    signature = tool_call_signature(call.name, call.arguments)
+                    identical_call_count = identical_calls.record(
+                        call.name, call.arguments
+                    )
                     duplicate = False
                     tool_started = time.monotonic()
-                    if failures.is_unavailable(call.name):
+                    if identical_calls.is_blocked(identical_call_count):
+                        result_payload = {
+                            "ok": False,
+                            "error": {
+                                "message": (
+                                    f"工具 {call.name} 使用完全相同参数连续调用已达到"
+                                    f"上限 {identical_call_limit} 次"
+                                ),
+                                "exception_type": (
+                                    "ConsecutiveIdenticalToolCallLimitExceeded"
+                                ),
+                                "limit": identical_call_limit,
+                                "consecutive_identical_calls": identical_call_count,
+                                "instruction": (
+                                    "请修改参数、改用其他工具或根据已有结果继续任务"
+                                ),
+                            },
+                        }
+                        status = "identical_call_blocked"
+                    elif failures.is_unavailable(call.name):
                         result_payload = {
                             "ok": False,
                             "error": {
@@ -1611,14 +2123,16 @@ def _iter_request_events_impl(
                             except BaseException as exc:
                                 if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                                     raise
+                                cancelled_tool = isinstance(exc, ToolCancelledError)
                                 result_payload = {
                                     "ok": False,
                                     "error": {
                                         "message": str(exc),
                                         "exception_type": type(exc).__name__,
+                                        **({"cancelled": True} if cancelled_tool else {}),
                                     },
                                 }
-                                status = "failed"
+                                status = "cancelled" if cancelled_tool else "failed"
                             seen_calls[signature] = copy.deepcopy(result_payload)
                         failure_count = failures.record(
                             call.name,
@@ -1641,11 +2155,13 @@ def _iter_request_events_impl(
                         "arguments": call.arguments,
                         "status": status,
                         "duplicate": duplicate,
+                        "consecutive_identical_calls": identical_call_count,
                         "result": result_payload,
                         "iteration": iteration,
                         "elapsed_ms": elapsed_ms,
                     }
                     tool_records.append(record)
+                    pending_tool_calls.pop(call.id, None)
                     yield RunEvent(
                         type="tool_call_result",
                         tool_call_id=call.id,
@@ -1655,6 +2171,7 @@ def _iter_request_events_impl(
                         metadata={
                             "status": status,
                             "duplicate": duplicate,
+                            "consecutive_identical_calls": identical_call_count,
                             "iteration": iteration,
                             "elapsed_ms": elapsed_ms,
                         },
@@ -1675,6 +2192,7 @@ def _iter_request_events_impl(
                 yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
                 return
             if cancel_event is not None and cancel_event.is_set():
+                yield commit_cancelled_round()
                 return
 
             round_number = int(window["data"].get("rounds", 0)) + 1
@@ -1817,6 +2335,7 @@ def _iter_request_events_impl(
             archive_data.pop("memory_error", None)
             commit_window(window_path, archive_window)
             commit_window(runtime_path, runtime_window)
+            round_finalized = True
             history_index_error: dict[str, Any] | None = history_run_error
             try:
                 update_memory_state(
@@ -2006,6 +2525,17 @@ def _iter_request_events_impl(
         except BaseException as exc:
             yield error_event(exc, phase="run")
         finally:
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+                and not locals().get("round_finalized", False)
+            ):
+                cancel_commit = locals().get("commit_cancelled_round")
+                if callable(cancel_commit):
+                    try:
+                        cancel_commit()
+                    except Exception:
+                        pass
             if history_run_registered:
                 try:
                     update_run_state(

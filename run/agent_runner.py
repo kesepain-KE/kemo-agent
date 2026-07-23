@@ -26,6 +26,7 @@ from provider.protocol.models import (
     KemoRequest,
     KemoResponse,
     MessageItem,
+    ReasoningConfig,
     ToolCallItem,
     ToolDefinition,
     ToolResultItem,
@@ -39,7 +40,12 @@ from agents._runtime.resources import (
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
 from run.config import load_config, provider_runtime_config, resolve_agent_model
-from run.tools import ConsecutiveToolFailureTracker, ToolRegistry, execute_tool
+from run.tools import (
+    ConsecutiveIdenticalToolCallTracker,
+    ConsecutiveToolFailureTracker,
+    ToolRegistry,
+    execute_tool,
+)
 
 
 class AgentRunError(RuntimeError):
@@ -324,7 +330,20 @@ class AgentRunner:
         response_ids: list[str] = []
         parent_request_id: str | None = None
         max_iterations = definition.capabilities.max_tool_iterations
-        tool_timeout = float((self.config.get("tools") or {}).get("timeout", 240))
+        tool_config = self.config.get("tools") or {}
+        tool_timeout = float(tool_config.get("timeout", 240))
+        raw_identical_call_limit = tool_config.get(
+            "consecutive_identical_call_limit", 8
+        )
+        if (
+            isinstance(raw_identical_call_limit, bool)
+            or not isinstance(raw_identical_call_limit, int)
+            or raw_identical_call_limit < 1
+        ):
+            raise AgentRunError(
+                "tools.consecutive_identical_call_limit 必须是正整数"
+            )
+        identical_call_limit = raw_identical_call_limit
         raw_failure_limit = (self.config.get("history") or {}).get(
             "consecutive_tool_fail_limit", 5
         )
@@ -336,6 +355,9 @@ class AgentRunner:
             raise AgentRunError("history.consecutive_tool_fail_limit 必须是正整数")
         failure_limit = raw_failure_limit
         failures = ConsecutiveToolFailureTracker(failure_limit)
+        identical_calls = ConsecutiveIdenticalToolCallTracker(
+            identical_call_limit
+        )
         for iteration in range(1, max_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
@@ -357,6 +379,15 @@ class AgentRunner:
                             input=list(items),
                             tools=self._tool_definitions(tool_schemas),
                             generation={"max_output_tokens": context.max_tokens},
+                            reasoning=ReasoningConfig(
+                                enabled=True,
+                                effort=runtime["reasoning_effort"],
+                                return_mode="content",
+                                context="auto",
+                            ),
+                            provider_options={
+                                "reasoning_effort": runtime["reasoning_effort"]
+                            },
                             metadata={
                                 "user": self.user,
                                 "source": "subagent",
@@ -388,7 +419,29 @@ class AgentRunner:
             if iteration >= max_iterations:
                 raise AgentRunError(f"子代理 {definition.name} 工具调用超过最大循环次数 {max_iterations}")
             for call in calls:
-                if failures.is_unavailable(call.name):
+                identical_call_count = identical_calls.record(
+                    call.name, call.arguments
+                )
+                if identical_calls.is_blocked(identical_call_count):
+                    payload = {
+                        "ok": False,
+                        "error": {
+                            "message": (
+                                f"工具 {call.name} 使用完全相同参数连续调用已达到"
+                                f"上限 {identical_call_limit} 次"
+                            ),
+                            "exception_type": (
+                                "ConsecutiveIdenticalToolCallLimitExceeded"
+                            ),
+                            "limit": identical_call_limit,
+                            "consecutive_identical_calls": identical_call_count,
+                            "instruction": (
+                                "请修改参数、改用其他工具或根据已有结果继续任务"
+                            ),
+                        },
+                    }
+                    status = "identical_call_blocked"
+                elif failures.is_unavailable(call.name):
                     payload = {
                         "ok": False,
                         "error": {
@@ -451,6 +504,7 @@ class AgentRunner:
                         "status": status,
                         "result": payload,
                         "iteration": iteration,
+                        "consecutive_identical_calls": identical_call_count,
                     }
                 )
                 items.append(
