@@ -1,6 +1,16 @@
 # user_config.json 配置项手册
 
+> 文档版本：v2.1
+> 最后核对：2026-07-23
+> 事实来源：`template/user/user_config.json`、`run/config.py`、`provider/protocol/models.py`
+
 kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
+
+目录和数据文件职责见 `user-directory-skeleton.md`；环境变量兜底和密钥优先级见 `env-reference.md`。配置保存后，当前 Run 不会中途改变 Provider 或权限，下一次 Run 才使用新的合并结果；需要重建 RuntimeHost 组件的参数应重启服务。
+
+配置分两类：
+- **用户独有段**：`provider`、`agent_models`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins` — 只从用户配置读取，全局配置不兜底
+- **框架覆盖段**：其余段按对象深合并，用户配置中的字段覆盖全局默认值，未提供的字段继承全局值
 
 ---
 
@@ -16,18 +26,39 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 **这是用户首次使用时最需要填写的配置组。** `user_create.py` 的交互式引导也只配置这组。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `type` | string | Provider 类型。`"kemo"` = Kemo 网关本地适配（兼容所有 OpenAI 格式 API），`"chat"` = 标准 OpenAI Chat Completions |
-| `base_url` | string | API 基础地址。Kemo 网关默认 `http://127.0.0.1:8741`，直连 OpenAI 则填 `https://api.openai.com/v1` |
-| `api_key` | string | API 密钥。优先级高于 `api_key_env` |
-| `api_key_env` | string | 从环境变量读取密钥的变量名。当 `api_key` 为空时生效，如 `"KEMO_API_KEY"` |
-| `model` | string | 默认对话模型名，如 `"deepseek-chat"` |
-| `stream` | bool | 是否启用流式输出，默认 `true` |
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `type` | string | — | Provider 类型。`"kemo"` = Kemo 网关原生模式，`"chat"` = 标准 Chat Completions 模式。启动前选择，运行中不自动回退 |
+| `base_url` | string | — | API 基础地址。Kemo 默认 `http://127.0.0.1:8741`，chat 模式自动补全 `/v1` |
+| `api_key` | string | — | API 密钥。优先级高于 `api_key_env` |
+| `api_key_env` | string | — | 从环境变量读取密钥的变量名。当 `api_key` 为空时生效，如 `"KEMO_API_KEY"` |
+| `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
+| `stream` | bool | `true` | 是否启用流式输出 |
+| `reasoning_effort` | string | `"medium"` | 思考强度：`minimal`、`low`、`medium`、`high`、`max`。缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
 
 ### 密钥优先级
 
 `api_key`（明文） > `api_key_env`（环境变量名） > 全局 `.env` 兜底
+
+### 地址优先级
+
+1. `user_config.json → provider.base_url`
+2. `KEMO_BASE_URL` / `OPENAI_BASE_URL` 环境变量
+3. Provider 类型对应的内置默认地址（chat → OpenAI 默认，kemo → `http://127.0.0.1:8741`）
+
+最终地址统一去除尾部 `/`。只有 `chat` 模式自动补全 `/v1`。
+
+---
+
+## agent_models — 子代理专用模型
+
+子代理三档模型配置。任一字段留空时继承 `provider.model`。
+
+| 字段 | 说明 |
+|------|------|
+| `default` | 普通子代理用模型 |
+| `cheap` | 轻量子代理用模型；历史对话摘要也使用此档位 |
+| `reasoning` | 推理型子代理用模型 |
 
 ---
 
@@ -45,38 +76,62 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `speech_to_speech` | 语音生语音 |
 | `video_generation` | 视频生成 |
 
+> 不含 embedding 和 rerank。`chat` 模式的可移植基线仅包含文本、工具和图片输入；`kemo` 模式通过 Asset 与能力声明使用网关实际支持的完整多模态能力。
+
+---
+
+## provider_runtime — Provider 运行时并发控制
+
+覆盖全局 `global_config.json → provider_runtime`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `max_concurrent_requests` | int | 10 | 进程级总闸，所有 LLM API 请求共享；工具执行期间释放槽位 |
+| `request_semaphore_timeout` | float | 300.0 | 获取并发槽位的超时秒数 |
+
 ---
 
 ## task_plan — 任务计划
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `auto_accept` | bool | `false` | 是否自动批准任务计划。`true` 时计划创建即执行，`false` 时需在 Web UI 手动批准 |
+| `auto_accept` | bool | `false` | 是否自动批准任务计划。`true` 时计划创建即执行，`false` 时需手动批准 |
 
 ---
 
-## skills — 技能白名单
+## tools — 工具调用
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `shared_whitelist` | array | `[]` | 共享技能白名单。空数组 = 全部启用。填入技能目录名则只启用列出的 |
+覆盖全局 `global_config.json → tools`。按对象深合并。
 
----
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `timeout` | int | 240 | 单次工具调用超时（秒） |
+| `max_iterations` | int | 80 | 单轮最大 Provider 迭代次数 |
+| `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
 
-## expand — 拓展模块白名单
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `shared_whitelist` | array | `[]` | 共享拓展白名单。空 = 全部启用 |
-| `global_whitelist` | array | `[]` | 全局拓展白名单。空 = 全部启用 |
+> 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
 ---
 
-## perception — 感知模块白名单
+## history — 对话历史
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `global_whitelist` | array | `[]` | 全局感知模块白名单。空 = 全部启用 |
+覆盖全局 `global_config.json → history`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `recent_full_rounds` | int | 3 | 保留完整工具/思考日志的最近轮数 |
+| `consecutive_tool_fail_limit` | int | 5 | 同名工具连续失败后临时移除的容忍上限 |
+
+---
+
+## prompt — System Prompt 注入控制
+
+覆盖全局 `global_config.json → prompt`。按对象深合并。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts` |
+| `injection_mode` | object | 各模块注入模式。同全局结构：`permanent_memory`、`important_memory`、`temporary_seven_days`、`temporary_one_month`、`temporary_half_year`、`knowledge_index`、`task_plan`、`expand_data`、`perception`。可选值：`"full"` / `"truncated"` / `"off"` |
 
 ---
 
@@ -87,13 +142,44 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `use_shared` | bool | `true` | 是否注入共享知识库索引 |
 | `use_global` | bool | `true` | 是否注入全局知识库索引 |
 
-> 用户级知识库始终启用，无需开关。
+> 用户级知识库始终启用，无需开关。三个知识层的注入顺序：用户 > 共享 > 全局（权重从高到低）。
+
+---
+
+## skills — 技能白名单
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `shared_whitelist` | array | `[]` | 共享技能白名单。空数组 = 全部启用。填入技能目录名（支持相对路径如 `development/python`）则只启用列出的 |
+
+> 用户技能（`users/<name>/user_skills/`）始终允许，不受白名单控制。技能只注入 Prompt 提示词，不注册可执行工具。`user_whitelist` 已从配置契约删除。
+
+---
+
+## expand — 拓展模块白名单
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `shared_whitelist` | array | `[]` | 共享拓展白名单。空 = 全部启用 |
+| `global_whitelist` | array | `[]` | 全局拓展白名单。空 = 全部启用 |
+
+> 用户拓展（`users/<name>/expand/`）始终按当前用户目录动态解析，不受白名单控制。
+
+---
+
+## perception — 感知模块白名单
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `global_whitelist` | array | `[]` | 全局感知模块白名单。空 = 全部启用 |
+
+> 感知模块位于 `global_sense/`，只采集系统数据，通过 `sense.md` 单向注入 system prompt，不提供操控接口。
 
 ---
 
 ## kemo_graph — 知识图谱检索开关
 
-四个字段全部默认 `false`。只有当 global_expand 中接入 kemo-graph 模块后才实际生效。
+四个字段全部默认 `false`。只有当 `global_expand/` 中接入 kemo-graph 模块后才实际生效。
 
 | 字段 | 说明 |
 |------|------|
@@ -102,7 +188,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `kemo_graph_user_knowledge` | 用户知识库 → 图谱检索 |
 | `kemo_graph_temporary_memory` | 三层临时记忆 → 图谱检索 |
 
-> 注意：`global_config.json` 中也有同名开关。全局配置中的开关决定"图谱数据是否存在"，用户配置中的开关决定"该用户是否使用"。两者都开才生效。
+> 注意：`global_config.json` 中也有同名开关。全局决定"图谱数据是否存在"，用户决定"该用户是否启用"。两者都开才生效。任一开关为 true 但未建立连接时返回 `not_connected`，不回退原始内容。
 
 ---
 
@@ -114,19 +200,134 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 ---
 
-## 与 global_config.json 的关系
+## memory — 记忆系统
 
-| 维度 | global_config.json | user_config.json |
-|------|-------------------|-----------------|
-| 作用域 | 所有用户 | 单个用户 |
-| 覆盖性 | 默认值 | 可覆盖全局值 |
-| 典型配置 | 系统级参数（超时、限制、调度） | 用户级参数（API 密钥、模型、白名单偏好） |
-| 修改方式 | 直接编辑文件或 Web 全局配置面板 | Web 配置面板或 `user_create.py --interactive` |
+覆盖全局 `global_config.json → memory`。按对象深合并。
 
-### 白名单规则
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许后台提取；`on_commit` 每轮同步提取 |
+| `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days` |
+| `important_memory_max_chars` | int | 5000 | 临时重要记忆文件最大字符数 |
+| `history_read_enabled` | bool | true | 是否允许智能体使用 `history_search` 工具 |
+
+---
+
+## agent_runtime — 智能体运行时
+
+覆盖全局 `global_config.json → agent_runtime`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `queue_maxsize` | int | 50 | 用户级 `AgentScheduler` 有界队列最大长度；0 表示无界 |
+| `default_timeout` | int | 600 | 子代理默认超时（秒） |
+
+---
+
+## web — Web 服务
+
+覆盖全局 `global_config.json → web`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `max_concurrent_chats` | int | 3 | 单用户最大并发聊天数 |
+| `max_pending_chats` | int | 5 | 聊天等待队列上限 |
+| `pending_chat_timeout` | float | 30.0 | 排队超时（秒） |
+
+---
+
+## message — 外部消息路由
+
+覆盖全局 `global_config.json → message`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `max_workers` | int | 8 | 消息处理线程池大小 |
+| `max_queued_messages` | int | 20 | 消息等待队列上限；0 为无界模式 |
+
+---
+
+## cron — 定时调度
+
+覆盖全局 `global_config.json → cron`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `enabled` | bool | true | 是否启用 cron 调度器 |
+| `poll_interval` | int | 30 | 任务轮询间隔（秒） |
+| `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
+| `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
+
+---
+
+## task_cron_system — 系统定时任务
+
+按对象深合并全局 `global_config.json → task_cron_system`。刷新频率由 RuntimeHost 的全局配置统一调度；用户层只适合覆盖自己的模块执行超时。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `sense_update_rate` | int | 5 | 系统级感知刷新间隔；用户配置中的值不改变全局任务频率 |
+| `expand_update_rate` | int | 5 | 三层拓展统一刷新间隔；用户配置中的值不改变全局任务频率 |
+| `module_update_timeout` | number | 120 | 当前用户拓展的单模块子进程超时（秒），最大 3600 |
+
+---
+
+## agents — 智能体上下文与压缩
+
+覆盖全局 `global_config.json → agents`。按对象深合并。
+
+| 字段 | 类型 | 全局默认值 | 说明 |
+|------|------|-----------|------|
+| `conserved_rounds` | int | 3 | 保留完整工具/思考日志的最近轮数 |
+| `max_rounds` | int | 80 | 上下文最大对话轮数（触发压缩） |
+| `rounds_after_compression` | int | 20 | 压缩后保留的轮数 |
+| `token_limit` | int | 1000000 | 上下文 Token 上限 |
+| `token_compression_ratio` | float | 0.3 | 输入预算比例 |
+| `important_memory_review_hours` | int | 3 | 临时重要记忆巡检间隔（小时） |
+| `daily_memory_review_time` | str | `"02:00"` | 每日记忆审阅时间（北京时间 HH:MM） |
+
+---
+
+## 完整字段速查
+
+### 用户独有段（仅用户配置，全局不兜底）
+
+| 配置组 | 主要字段 |
+|--------|---------|
+| `provider` | type, base_url, api_key, api_key_env, model, stream, reasoning_effort |
+| `agent_models` | default, cheap, reasoning |
+| `multimodal_models` | vision, image_generation, image_edit, audio_transcription, speech_generation, speech_to_speech, video_generation |
+| `knowledge` | use_shared, use_global |
+| `skills` | shared_whitelist |
+| `expand` | global_whitelist, shared_whitelist |
+| `perception` | global_whitelist |
+| `kemo_graph` | kemo_graph_global_knowledge, kemo_graph_shared_knowledge, kemo_graph_user_knowledge, kemo_graph_temporary_memory |
+| `plugins` | whitelist |
+| `task_plan` | auto_accept |
+
+### 框架覆盖段（按对象深合并）
+
+| 配置组 | 对应全局段 | 说明 |
+|--------|-----------|------|
+| `provider_runtime` | provider_runtime | 覆盖全局默认 |
+| `tools` | tools | 覆盖（不含 enabled） |
+| `history` | history | 覆盖 |
+| `prompt` | prompt | 覆盖 |
+| `memory` | memory | 覆盖 |
+| `agent_runtime` | agent_runtime | 覆盖 |
+| `web` | web | 覆盖 |
+| `message` | message | 覆盖 |
+| `cron` | cron | 覆盖 |
+| `task_cron_system` | task_cron_system | 覆盖 |
+| `agents` | agents | 覆盖 |
+
+---
+
+## 白名单规则
 
 所有白名单字段（`shared_whitelist`、`global_whitelist`、`whitelist`）遵循相同规则：
-
 - **空数组 `[]`** = 全部启用
 - **有值** = 只启用列出的项
-- 用户级白名单叠加全局白名单取交集
+- 白名单配置过滤主智能体的 Prompt 选择和知识检索，不收缩子代理 `agent-config.json` 已授予的能力
+
+> 注意：这些白名单不控制子代理。子代理只服从各自 `agent-config.json`，不与主智能体策略求交集。

@@ -1,22 +1,85 @@
-# global_knowledge/ 目录结构
+# kemo-agent 框架骨架与全局知识索引
 
-kemo-agent 全局知识库索引。此目录存放所有用户共享的框架说明；用户私有资料应放入 `users/<name>/knowledge/`。
+本文是框架目录导航，也是全局知识库的主索引。这里只保留稳定结构和文档入口；具体创建步骤、字段约束与示例请进入对应专题文档。
 
-更新时间：2026-07-22（索引刷新）
+## 顶层骨架
 
-## 索引
+```text
+kemo-agent/
+├── run/                    # 对话引擎、历史、Prompt、工具、记忆与运行时宿主
+├── provider/               # Provider 协议、chat 兼容桥与 kemo 原生适配
+├── web/                    # Web 后端与 React 前端
+├── cron/                   # 定时任务调度器与系统维护任务
+├── message/                # 平台中立消息路由；out/ 存放热插拔平台模块
+├── agents/                 # 内置子智能体与子智能体运行时
+├── plugins/                # Provider 可调用的工具插件
+├── global_sense/           # 全局感知模块
+├── global_expand/          # 全局拓展模块
+├── shared_expand/          # 跨用户共享拓展模块
+├── shared_skills/          # 跨用户共享技能
+├── global_knowledge/       # 全局知识库（本目录）
+├── shared_knowledge/       # 共享知识库
+├── users/<name>/           # 用户配置、人格、历史、记忆和私有资源
+├── template/               # 用户、子智能体、技能、拓展等创建模板
+├── update/                 # 分板块更新实现
+├── tests/                  # 后端测试
+├── config/                 # 全局配置与全局人格
+├── tmp/                    # 智能体中间文件，不作为用户交付目录
+├── agents.md               # 智能体自身运行手册
+├── .env / .env.example     # 本机环境变量与无密钥示例
+├── cli.py / start_web.py   # CLI 与 Web 启动入口
+├── user_create.py          # 用户创建入口
+├── update.py               # 更新入口
+├── version.json            # 总版本与板块版本
+└── LICENSE                 # Apache License 2.0 正文
+```
 
-| 文件 | 用途 | 检索关键词 |
-|------|------|------------|
-| `data_structure.md` | 本索引文件 | 索引、知识库 |
-| `version-and-update-modules.md` | 版本号与更新模块对照 — 5 组版本号分别对应 all/core/agents/plugins/web 的更新范围 | 版本号、更新、模块 |
-| `global-config-reference.md` | global_config.json 配置项手册 — 全部 15 个配置组的字段、默认值与说明 | 全局配置、config、参数 |
-| `user-config-reference.md` | user_config.json 配置项手册 — 10 个配置组的字段、默认值与说明，含白名单规则和与全局配置的关系 | 用户配置、provider、白名单 |
+## 一次请求经过的主要层级
 
-## 检索规则
+```text
+入口（Web / CLI / 外部消息 / Cron）
+  → user + source + session_id 会话隔离
+  → 全局配置与用户配置合并
+  → 人格、子代理、插件、技能、知识索引、记忆、计划、拓展、感知拼接
+  → Provider 与工具循环
+  → 完整历史归档 + 当前上下文工作区
+  → 记忆、计划和后台维护管线
+```
 
-1. 索引按用户级、共享级、全局级顺序完整注入；知识正文检索由外部 kemo-graph 能力负责。
-2. 用户私有信息默认写入用户级知识库。
-3. 全局库只存放共享说明或用户明确要求的内容。
-4. 不把大段正文复制到索引。
-5. 文件发生增删改移后必须同步本索引。
+## 资源层级
+
+| 资源 | 全局/共享层 | 用户层 | 核心区别 |
+|------|-------------|--------|----------|
+| 知识库 | `global_knowledge/`、`shared_knowledge/` | `users/<name>/knowledge/` | 只自动注入索引，正文按需读取 |
+| 技能 | `shared_skills/` | `users/<name>/user_skills/` | 只提供指令，不注册可执行工具 |
+| 拓展 | `global_expand/`、`shared_expand/` | `users/<name>/expand/` | 可提供状态注入和外部操控入口 |
+| 感知 | `global_sense/` | 无 | 单向采集并注入，不提供操控 |
+| 子智能体 | `agents/` | `users/<name>/agents/` | 独立 Prompt、权限与工具循环 |
+| 工具插件 | `plugins/` | 无 | 唯一可注册 Provider function call 的目录 |
+
+## 专题文档
+
+| 文件 | 内容 |
+|------|------|
+| `expand-creation.md` | 拓展层级、清单、数据注入与操控入口 |
+| `sense-creation.md` | 全局感知模块的创建与刷新规则 |
+| `skill-creation.md` | 共享技能和用户技能的结构与作用域 |
+| `knowledge-creation.md` | 三层知识库及索引维护规则 |
+| `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
+| `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
+| `env-reference.md` | `.env` 参数、优先级与安全要求 |
+| `global-config-reference.md` | `config/global_config.json` 全字段 |
+| `user-config-reference.md` | `users/<name>/user_config.json` 全字段 |
+| `cron-task-creation.md` | 北京时间定时任务的创建与状态机 |
+| `task-plan-creation.md` | 多步骤任务计划的创建与执行规则 |
+| `subagent-creation.md` | 内置/用户子智能体包与授权规则 |
+| `external-message-route-creation.md` | 外部消息平台模块合同 |
+| `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
+
+## 维护原则
+
+1. 代码、模板和配置文件是事实来源，文档不得发明未实现能力。
+2. 新增、删除或移动全局知识文档后，同步更新本索引。
+3. 凭据、个人隐私、Cookie、Token 和本机秘密不得进入全局知识库。
+4. `.bak`、缓存、日志和运行产物不列入知识索引。
+5. 目录中只有 `data_structure.md`、`index.md`、`索引.md`、`目录.md` 会作为知识索引自动注入；其他正文按需读取。
