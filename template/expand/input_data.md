@@ -4,4 +4,4 @@
 
 ## 数据
 
-模块尚未运行。运行 `python data_update.py` 后将自动填充。
+模块尚未运行。等待 RuntimeHost 自动刷新，或手动运行 `python data_update.py` 初始化。

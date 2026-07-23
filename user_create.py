@@ -145,11 +145,13 @@ def _post_process_knowledge(root: Path, name: str) -> None:
 
 def _post_process_storage(root: Path, name: str) -> None:
     """初始化 improve/storage.json"""
+    from run.memory import MEMORY_SCHEMA_VERSION
+
     storage_path = root / "users" / name / "improve" / "storage.json"
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     if storage_path.exists() and storage_path.stat().st_size > 0:
         return
-    _write_json(storage_path, {"schema_version": 2, "last_compaction": None})
+    _write_json(storage_path, {"schema_version": MEMORY_SCHEMA_VERSION, "last_compaction": None})
 
 
 def _post_process_dirs(root: Path, name: str) -> None:

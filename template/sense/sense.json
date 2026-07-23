@@ -1,7 +1,7 @@
 {
   "name": "my_sense",
   "data_md": "sense.md",
-  "recent_update": "",
-  "health": "正常",
+  "recent_update": "2000-01-01 00:00:00",
+  "health": "异常",
   "start_update": "data_update.py"
 }

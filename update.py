@@ -48,7 +48,7 @@ BACKUP_EXCLUDES = (
     "venv/",
     ".backups/",
     "users/",
-    "skills/",
+    "shared_skills/",
     "web/node_modules/",
     "web/dist/",
     "web/frontend/node_modules/",

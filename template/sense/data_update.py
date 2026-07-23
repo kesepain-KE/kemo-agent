@@ -1,51 +1,60 @@
+"""感知模块数据采集模板。
+
+复制到 ``global_sense/<name>/data_update.py`` 后实现 ``collect()``。
+RuntimeHost 会按配置周期在隔离子进程中调用零参数 ``update()``；Windows
+后台调用由框架隐藏终端，模块不需要设置 ``CREATE_NO_WINDOW`` 或启动守护进程。
+
+输出：
+- ``sense.md``：进入 System Prompt 的最新感知数据；
+- ``sense.json``：最近成功时间与健康状态；
+- ``_last_run.json``：最近一次执行结果。
 """
-感知模块数据采集模板。
 
-== 用途 ==
-复制到 global_sense/<name>/data_update.py，由 cron 定时调用或手动执行。
-此模板不能直接运行——collect() 需要实现实际采集逻辑。
-
-== 修 改 指 南 ==
-1. 修改 collect()：实现实际的数据采集，返回 dict
-2. 修改标题：update() 中的 "# 系统状态感知" 改为模块实际名称
-3. 不需要修改 main() 和 update()：格式化和写文件逻辑已通用
-
-== 输出文件 ==
-- sense.md：Markdown 格式感知数据，注入系统提示词
-- _last_run.json：运行状态（ok/time/errors/size）
-"""
+from __future__ import annotations
 
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SENSE_MD_PATH = os.path.join(BASE_DIR, "sense.md")
-STATUS_PATH = os.path.join(BASE_DIR, "_last_run.json")
-HOST_TZ = timezone(timedelta(hours=8))  # 北京时间，按需修改
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 
-def collect() -> dict:
-    """
-    【必须修改】采集感知数据，返回 dict。
-
-    示例返回值:
-        {"cpu_usage": 45.2, "memory_free_gb": 12.3}
-    """
-    data: dict = {}
-    # TODO: 在此实现实际采集逻辑
-    return data
+BASE_DIR = Path(__file__).resolve().parent
+SENSE_MD_PATH = BASE_DIR / "sense.md"
+STATUS_PATH = BASE_DIR / "_last_run.json"
+MANIFEST_PATH = BASE_DIR / "sense.json"
+HOST_TZ = timezone(timedelta(hours=8))
 
 
-def update(data: dict) -> None:
-    """将采集到的数据写入 sense.md（不需要修改）"""
-    now = datetime.now(HOST_TZ).strftime("%Y-%m-%d %H:%M:%S")
+def collect() -> dict[str, Any]:
+    """采集只读感知数据；请替换为真实实现。"""
 
-    # ── 修改此处标题为模块实际名称 ──
-    content = f"""# 感知模块名称
+    # TODO: 在此读取本机状态、传感器或外部 API。
+    return {}
 
-> 自动采集时间：{now}
+
+def atomic_write(path: Path, content: str) -> None:
+    """在同一目录原子替换文本文件，避免 Prompt 读取到半份内容。"""
+
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def render_markdown(data: dict[str, Any], update_time: str) -> str:
+    """把结构化结果渲染为有界 Markdown；可按模块需要调整。"""
+
+    return f"""# 感知模块名称
+
+> 自动采集时间：{update_time}
 
 ## 数据
 
@@ -54,31 +63,57 @@ def update(data: dict) -> None:
 ```
 """
 
-    with open(SENSE_MD_PATH, "w", encoding="utf-8") as f:
-        f.write(content)
 
-    status = {
-        "ok": True,
-        "time": now,
-        "errors": [],
-        "sense_md_size": len(content),
-    }
-    with open(STATUS_PATH, "w", encoding="utf-8") as f:
-        json.dump(status, f, ensure_ascii=False, indent=2)
+def write_manifest_health(*, healthy: bool, update_time: str) -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text("utf-8-sig"))
+    if not isinstance(manifest, dict):
+        raise ValueError("sense.json 顶层必须是 JSON 对象")
+    manifest["health"] = "正常" if healthy else "异常"
+    if healthy:
+        manifest["recent_update"] = update_time
+    atomic_write(
+        MANIFEST_PATH,
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
-def main():
-    """入口：采集 → 写入 → 打印状态（不需要修改）"""
+def update() -> dict[str, Any]:
+    """零参数更新入口：采集、写入并返回结构化执行状态。"""
+
+    now = datetime.now(HOST_TZ).strftime("%Y-%m-%d %H:%M:%S")
     try:
         data = collect()
-        update(data)
-        print(json.dumps({"ok": True}))
-        sys.stdout.flush()
-    except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
-        sys.stdout.flush()
-        raise
+        content = render_markdown(data, now)
+        atomic_write(SENSE_MD_PATH, content)
+        write_manifest_health(healthy=True, update_time=now)
+        result: dict[str, Any] = {
+            "ok": True,
+            "time": now,
+            "errors": [],
+            "size": len(content),
+        }
+    except Exception as exc:
+        error = str(exc) or type(exc).__name__
+        try:
+            write_manifest_health(healthy=False, update_time=now)
+        except Exception as health_exc:
+            error = f"{error}；写回异常健康状态失败：{health_exc}"
+        result = {"ok": False, "time": now, "error": error}
+
+    atomic_write(
+        STATUS_PATH,
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+    )
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return result
+
+
+def main() -> dict[str, Any]:
+    """兼容手动运行；调度器优先调用 ``update()``。"""
+
+    return update()
 
 
 if __name__ == "__main__":
-    main()
+    execution = main()
+    sys.exit(0 if execution.get("ok") else 1)
