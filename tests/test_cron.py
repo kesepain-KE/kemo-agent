@@ -373,7 +373,7 @@ class ExecutorTests(unittest.TestCase):
 
         self.assertEqual(sense["status"], "completed")
         self.assertEqual(set(sense["updated"]), {"main_entry", "update_entry"})
-        self.assertEqual(expand["updated"], ["expand_entry"])
+        self.assertEqual(expand["updated"], ["global/expand_entry"])
         for parent, _, name, _ in modules:
             self.assertEqual(
                 (self.root / parent / name / "updated.txt").read_text("utf-8"),
@@ -423,6 +423,160 @@ class ExecutorTests(unittest.TestCase):
         self.assertIn("相对路径", reasons["escape"])
         self.assertIn("有效的 sense.json", reasons["invalid_json"])
         self.assertIn("update() 或 main()", reasons["missing_callable"])
+
+    def test_expand_updates_are_scoped_to_system_roots_or_one_user(self) -> None:
+        modules = (
+            (self.root / "global_expand" / "global_weather", "global"),
+            (self.root / "shared_expand" / "shared_weather", "shared"),
+            (self.root / "users" / "alice" / "expand" / "alice_weather", "alice"),
+            (self.root / "users" / "bob" / "expand" / "bob_weather", "bob"),
+        )
+        for directory, marker in modules:
+            directory.mkdir(parents=True)
+            (directory / "expand.json").write_text(
+                json.dumps({
+                    "start_update": "data_update.py",
+                    "input_health": "异常",
+                }),
+                "utf-8",
+            )
+            (directory / "data_update.py").write_text(
+                "from pathlib import Path\n"
+                "def update():\n"
+                f"    Path(__file__).with_name('updated.txt').write_text('{marker}', 'utf-8')\n",
+                "utf-8",
+            )
+
+        task = {
+            "task_id": "expand_update",
+            "exec_mode": "system",
+            "action": "expand_update",
+        }
+        system_result = execute_cron_task(
+            root=self.root,
+            user="__system__",
+            task_id="expand_update",
+            config={},
+            system_task=task,
+        )
+        self.assertEqual(
+            system_result["updated"],
+            ["global/global_weather", "shared/shared_weather"],
+        )
+        self.assertTrue((modules[0][0] / "updated.txt").is_file())
+        self.assertTrue((modules[1][0] / "updated.txt").is_file())
+        self.assertFalse((modules[2][0] / "updated.txt").exists())
+        self.assertFalse((modules[3][0] / "updated.txt").exists())
+
+        alice_result = execute_cron_task(
+            root=self.root,
+            user="alice",
+            task_id="expand_update",
+            config={},
+            system_task=task,
+        )
+        self.assertEqual(alice_result["updated"], ["alice_weather"])
+        self.assertEqual(alice_result["user"], "alice")
+        self.assertTrue((modules[2][0] / "updated.txt").is_file())
+        self.assertFalse((modules[3][0] / "updated.txt").exists())
+
+    def test_module_failure_result_is_not_reported_as_success(self) -> None:
+        module = self.root / "users" / "alice" / "expand" / "broken"
+        module.mkdir(parents=True)
+        manifest_path = module / "expand.json"
+        manifest_path.write_text(
+            json.dumps({
+                "start_update": "data_update.py",
+                "input_health": "正常",
+                "recent_update": "2026-07-20 08:00:00",
+            }),
+            "utf-8",
+        )
+        (module / "data_update.py").write_text(
+            "def update():\n"
+            "    return {'ok': False, 'error': 'sensor offline'}\n",
+            "utf-8",
+        )
+
+        result = execute_cron_task(
+            root=self.root,
+            user="alice",
+            task_id="expand_update",
+            config={},
+            system_task={
+                "task_id": "expand_update",
+                "exec_mode": "system",
+                "action": "expand_update",
+            },
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failed"], ["broken"])
+        self.assertIn("sensor offline", result["errors"][0]["reason"])
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        self.assertEqual(manifest["input_health"], "异常")
+        self.assertEqual(manifest["recent_update"], "2026-07-20 08:00:00")
+
+    def test_module_update_timeout_marks_module_failed(self) -> None:
+        module = self.root / "users" / "alice" / "expand" / "slow"
+        module.mkdir(parents=True)
+        manifest_path = module / "expand.json"
+        manifest_path.write_text(
+            json.dumps({
+                "start_update": "data_update.py",
+                "input_health": "正常",
+            }),
+            "utf-8",
+        )
+        (module / "data_update.py").write_text(
+            "import time\n"
+            "def update():\n"
+            "    time.sleep(1)\n",
+            "utf-8",
+        )
+
+        result = execute_cron_task(
+            root=self.root,
+            user="alice",
+            task_id="expand_update",
+            config={"task_cron_system": {"module_update_timeout": 0.05}},
+            system_task={
+                "task_id": "expand_update",
+                "exec_mode": "system",
+                "action": "expand_update",
+            },
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["errors"][0]["exception_type"], "TimeoutExpired")
+        self.assertIn("0.05 秒", result["errors"][0]["reason"])
+        self.assertEqual(
+            json.loads(manifest_path.read_text("utf-8"))["input_health"],
+            "异常",
+        )
+
+    def test_user_expand_rejects_linked_user_directory(self) -> None:
+        user_root = self.root / "users" / "alice"
+        user_root.mkdir(parents=True)
+        with patch(
+            "cron.executor._is_link_or_junction",
+            side_effect=lambda path: path == user_root,
+        ):
+            result = execute_cron_task(
+                root=self.root,
+                user="alice",
+                task_id="expand_update",
+                config={},
+                system_task={
+                    "task_id": "expand_update",
+                    "exec_mode": "system",
+                    "action": "expand_update",
+                },
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failed"], ["alice"])
+        self.assertIn("符号链接或目录联接", result["errors"][0]["reason"])
 
 
 class SchedulerTests(unittest.TestCase):
@@ -614,6 +768,37 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(record["result"]["category"], "sense")
         self.assertEqual(record["result"]["failed"], ["bad"])
         self.assertEqual(record["result"]["errors"][0]["reason"], "boom")
+
+    def test_expand_system_task_runs_shared_roots_then_each_user(self) -> None:
+        for user in ("alice", "bob"):
+            (self.root / "users" / user).mkdir(parents=True)
+        store = CronStore(self.root, "__system__", system=True)
+        task = store.create(normalize_task(
+            task_id="expand_update",
+            title="expand",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=5,
+            next_run_at=(datetime.now(BEIJING) - timedelta(seconds=1)).isoformat(),
+            exec_mode="system",
+            action="expand_update",
+        ))
+        with patch(
+            "cron.scheduler.execute_cron_task",
+            return_value={"status": "completed", "category": "expand"},
+        ) as execute:
+            count = CronScheduler(self.root, config=self.config).scan_once()
+
+        self.assertEqual(count, 3)
+        calls = {call.kwargs["user"]: call.kwargs for call in execute.call_args_list}
+        self.assertEqual(set(calls), {"__system__", "alice", "bob"})
+        self.assertIs(calls["__system__"]["config"], self.config)
+        self.assertNotIn("config", calls["alice"])
+        self.assertNotIn("config", calls["bob"])
+        self.assertTrue(
+            all(call.kwargs["system_task"]["task_id"] == task["task_id"] for call in execute.call_args_list)
+        )
 
 
 if __name__ == "__main__":

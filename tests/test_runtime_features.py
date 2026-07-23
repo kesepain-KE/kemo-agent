@@ -7,6 +7,7 @@ import queue
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,14 @@ from run.engine import (
 )
 from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
-from run.tools import apply_runtime_tool_policy, discover_tools, execute_tool
+from run.tools import (
+    ConsecutiveIdenticalToolCallTracker,
+    ToolCancelledError,
+    ToolDefinition,
+    apply_runtime_tool_policy,
+    discover_tools,
+    execute_tool,
+)
 
 
 class ScriptedProvider:
@@ -61,6 +69,34 @@ class ScriptedProvider:
 
 
 class RuntimeFeatureTests(unittest.TestCase):
+    def test_uploaded_file_context_reaches_provider_without_polluting_saved_user_text(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(responses=[ChatResponse(text="attachment received")])
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "uploaded-file",
+                    "prompt": "请读取附件",
+                    "uploaded_files": [{
+                        "name": "note.md",
+                        "path": "users/alice/file_upload/note.md",
+                        "size": 128,
+                    }],
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        current_user = next(
+            message for message in reversed(provider.requests[0].messages)
+            if message.get("role") == "user"
+        )
+        self.assertIn("users/alice/file_upload/note.md", current_user["content"])
+        self.assertIn("可按需使用 file 工具读取", current_user["content"])
+        window = load_window(find_window(root, "alice", "web", "uploaded-file"))
+        self.assertEqual(window["text"]["messages"][0]["content"], "请读取附件")
+
     def make_root(self, *, stream: bool = False) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -155,6 +191,35 @@ class RuntimeFeatureTests(unittest.TestCase):
         async_result = execute_tool(registry.get("async_tool"), {"value": "b"}, context=context, timeout=2)
         self.assertEqual(sync["source"], "sync")
         self.assertEqual(async_result["source"], "async")
+
+    def test_running_tool_observes_emergency_cancel_without_waiting_for_timeout(self) -> None:
+        cancel = threading.Event()
+        tool = ToolDefinition(
+            name="slow_tool",
+            description="slow",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=lambda: time.sleep(1),
+        )
+        timer = threading.Timer(0.05, cancel.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(ToolCancelledError):
+                execute_tool(
+                    tool,
+                    {},
+                    context={"root": str(Path.cwd()), "user": "alice"},
+                    timeout=5,
+                    cancel_event=cancel,
+                )
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 0.5)
 
     def test_history_search_registration_obeys_memory_switch(self) -> None:
         _, root = self.make_root()
@@ -381,6 +446,120 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(done.usage["provider_request_count"], 2)
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
+
+    def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall(id="c1", name="lookup", arguments={"value": "x"})
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(100, 1, 101, estimated=False),
+                ),
+                ChatResponse(
+                    text="finished",
+                    finish_reason="stop",
+                    usage=Usage(150, 1, 151, estimated=False),
+                ),
+            ]
+        )
+
+        def inflated_messages(messages: list[dict[str, Any]]) -> int:
+            has_tool_result = any(message.get("role") == "tool" for message in messages)
+            return 200_100 if has_tool_result else 200_000
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.engine.estimate_messages_tokens", side_effect=inflated_messages),
+            patch("run.engine.estimate_tools_tokens", return_value=0),
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "provider-context-baseline",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(events[-1].type, "done")
+        self.assertFalse(any(event.type == "error" for event in events))
+
+    def test_tool_loop_guard_reports_exact_projection_and_file_result_size(self) -> None:
+        _, root = self.make_root()
+        project_file_tool = Path(__file__).resolve().parents[1] / "plugins" / "file"
+        shutil.copytree(project_file_tool, root / "plugins" / "file")
+        (root / "large.txt").write_text("payload", "utf-8")
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config["agents"] = {
+            "token_limit": 100_000,
+            "token_compression_ratio": 0.9,
+        }
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            id="f1",
+                            name="file",
+                            arguments={"action": "read", "path": "large.txt"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(1_000, 1, 1_001, estimated=False),
+                )
+            ]
+        )
+
+        def growing_messages(messages: list[dict[str, Any]]) -> int:
+            has_tool_result = any(message.get("role") == "tool" for message in messages)
+            return 310_000 if has_tool_result else 200_000
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.engine.estimate_messages_tokens", side_effect=growing_messages),
+            patch("run.engine.estimate_tools_tokens", return_value=0),
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "provider-context-overflow",
+                        "prompt": "read",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        error = events[-1]
+        self.assertEqual(error.type, "error")
+        guard = error.metadata["context_guard"]
+        self.assertEqual(guard["measurement"], "provider_plus_increment")
+        self.assertEqual(guard["provider_input_tokens"], 1_000)
+        self.assertEqual(guard["incremental_tokens"], 110_000)
+        self.assertEqual(guard["projected_tokens"], 111_000)
+        self.assertEqual(guard["token_limit"], 100_000)
+        self.assertEqual(len(provider.requests), 1)
+        file_diagnostic = guard["latest_tools"][0]
+        self.assertEqual(file_diagnostic["name"], "file")
+        self.assertEqual(file_diagnostic["action"], "read")
+        self.assertEqual(file_diagnostic["path"], "large.txt")
+        self.assertGreater(file_diagnostic["result_chars"], 0)
+        self.assertNotIn("result", file_diagnostic)
 
     def test_completed_round_extracts_memory_after_history_commit(self) -> None:
         _, root = self.make_root()
@@ -656,7 +835,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn("缺少 done 终态", events[0].error["message"])
         self.assertIsNone(find_window(root, "alice", "cli", "missing-done"))
 
-    def test_error_and_cancel_do_not_commit(self) -> None:
+    def test_error_does_not_commit_and_cancel_commits_terminal_round(self) -> None:
         _, root = self.make_root(stream=True)
         error_provider = ScriptedProvider(streams=[[RunEvent(type="text_delta", content="partial"), RunEvent(type="error", error={"message": "boom"})]])
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -683,8 +862,41 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
             self.assertEqual(next(iterator).type, "text_delta")
             cancel.set()
-            self.assertEqual(list(iterator), [])
-        self.assertIsNone(find_window(root, "alice", "cli", "cancel"))
+            cancelled_events = list(iterator)
+        self.assertEqual([event.type for event in cancelled_events], ["done"])
+        self.assertTrue(cancelled_events[0].metadata["committed"])
+        self.assertEqual(cancelled_events[0].metadata["status"], "cancelled")
+        cancel_window = load_window(find_window(root, "alice", "cli", "cancel"))
+        self.assertEqual(cancel_window["data"]["rounds"], 1)
+        self.assertEqual(cancel_window["data"]["round_metrics"][0]["status"], "cancelled")
+        self.assertEqual(cancel_window["text"]["messages"][0]["content"], "go")
+        self.assertIn("partial", cancel_window["text"]["messages"][1]["content"])
+        self.assertIn("紧急停止", cancel_window["text"]["messages"][1]["content"])
+
+        next_provider = ScriptedProvider(
+            streams=[[
+                RunEvent(type="text_delta", content="next"),
+                RunEvent(type="usage", usage={}),
+                RunEvent(type="done", usage={}),
+            ]]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            next_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "cancel",
+                        "prompt": "continue",
+                    },
+                    root=root,
+                    provider_factory=lambda _: next_provider,
+                )
+            )
+        self.assertEqual(next_events[-1].type, "done")
+        resumed_window = load_window(find_window(root, "alice", "cli", "cancel"))
+        self.assertEqual(resumed_window["data"]["rounds"], 2)
+        self.assertEqual(resumed_window["text"]["messages"][-2]["content"], "continue")
 
     def test_duplicate_call_reuses_result(self) -> None:
         _, root = self.make_root()
@@ -706,6 +918,113 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
+
+    def test_cancelled_round_pairs_pending_tool_call_with_cancel_result(self) -> None:
+        _, root = self.make_root(stream=True)
+        cancel = threading.Event()
+        provider = ScriptedProvider(
+            streams=[[
+                RunEvent(
+                    type="tool_call_start",
+                    tool_call_id="pending-1",
+                    tool_name="lookup",
+                    arguments={"value": "x"},
+                ),
+                RunEvent(type="usage", usage={}),
+                RunEvent(type="done", usage={}),
+            ]]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            iterator = iter_request_events(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "cancel-tool",
+                    "prompt": "go",
+                    "stream": True,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+                cancel_event=cancel,
+            )
+            started = next(iterator)
+            self.assertEqual(started.type, "tool_call_start")
+            cancel.set()
+            terminal = list(iterator)
+
+        self.assertEqual([event.type for event in terminal], ["done"])
+        window = load_window(find_window(root, "alice", "cli", "cancel-tool"))
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["id"], "pending-1")
+        self.assertEqual(calls[0]["status"], "cancelled")
+        self.assertTrue(calls[0]["result"]["error"]["cancelled"])
+        durable_items = window["items"]["items"]
+        call_item = next(item for item in durable_items if item["type"] == "tool_call")
+        result_item = next(item for item in durable_items if item["type"] == "tool_result")
+        self.assertEqual(call_item["call_id"], "pending-1")
+        self.assertEqual(result_item["call_id"], "pending-1")
+        self.assertTrue(result_item["is_error"])
+
+    def test_identical_call_tracker_uses_name_and_canonical_arguments(self) -> None:
+        tracker = ConsecutiveIdenticalToolCallTracker(2)
+        self.assertEqual(tracker.record("lookup", {"a": 1, "b": 2}), 1)
+        self.assertEqual(tracker.record("lookup", {"b": 2, "a": 1}), 2)
+        count = tracker.record("lookup", {"a": 1, "b": 2})
+        self.assertEqual(count, 3)
+        self.assertTrue(tracker.is_blocked(count))
+        self.assertEqual(tracker.record("lookup", {"a": 2, "b": 2}), 1)
+        self.assertEqual(tracker.record("other", {"a": 2, "b": 2}), 1)
+
+    def test_ninth_consecutive_identical_call_is_blocked_but_changed_arguments_continue(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        global_path = root / "config" / "global_config.json"
+        config = json.loads(global_path.read_text("utf-8"))
+        config["tools"].update(
+            {"max_iterations": 12, "consecutive_identical_call_limit": 8}
+        )
+        global_path.write_text(json.dumps(config), "utf-8")
+        responses = [
+            ChatResponse(
+                text="",
+                tool_calls=[ToolCall(f"same-{index}", "lookup", {"value": "x"})],
+            )
+            for index in range(1, 10)
+        ]
+        responses.extend(
+            [
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("changed", "lookup", {"value": "y"})],
+                ),
+                ChatResponse(text="done"),
+            ]
+        )
+        provider = ScriptedProvider(responses=responses)
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "identical-limit",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        window = load_window(find_window(root, "alice", "cli", "identical-limit"))
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual(calls[0]["status"], "completed")
+        self.assertTrue(all(call["status"] == "duplicate_reused" for call in calls[1:8]))
+        self.assertEqual(calls[8]["status"], "identical_call_blocked")
+        self.assertEqual(
+            calls[8]["result"]["error"]["exception_type"],
+            "ConsecutiveIdenticalToolCallLimitExceeded",
+        )
+        self.assertEqual(calls[8]["consecutive_identical_calls"], 9)
+        self.assertEqual(calls[9]["status"], "completed")
+        self.assertEqual(calls[9]["consecutive_identical_calls"], 1)
 
     def test_consecutive_failures_temporarily_remove_tool_schema(self) -> None:
         _, root = self.make_root()
@@ -840,6 +1159,79 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(
             (root / "users" / "alice" / "improve" / "seven_days" / "压缩记忆.md").is_file()
         )
+
+    def test_queued_manual_compress_only_waits_for_summary(self) -> None:
+        _, root = self.make_root()
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config.update(
+            {
+                "agents": {
+                    "conserved_rounds": 3,
+                    "max_rounds": 30,
+                    "rounds_after_compression": 10,
+                    "token_limit": 120000,
+                    "token_compression_ratio": 0.6,
+                },
+                "memory": {"extraction_mode": "compression_only"},
+            }
+        )
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[ChatResponse(text=f"reply-{index}", usage=Usage()) for index in range(12)]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for index in range(12):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "queued-compress",
+                        "prompt": f"round-{index}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            summary_provider = ScriptedProvider(
+                responses=[
+                    ChatResponse(
+                        text=json.dumps(
+                            {
+                                "facts": ["old rounds"],
+                                "requirements": [],
+                                "decisions": [],
+                                "unfinished": [],
+                                "tool_results": [],
+                                "entities": [],
+                                "narrative": "summary",
+                            }
+                        ),
+                        usage=Usage(3, 1, 4, source="mock"),
+                    )
+                ]
+            )
+            result = compress_context(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "queued-compress",
+                    "memory_extraction_policy": "queue",
+                },
+                root=root,
+                provider_factory=lambda _: summary_provider,
+            )
+
+        self.assertTrue(result["compressed"])
+        self.assertFalse(result["committed"])
+        self.assertEqual(len(summary_provider.requests), 1)
+        self.assertEqual(result["memory"]["status"], "queued")
+        self.assertEqual(result["memory"]["processed_round"], 0)
+        self.assertEqual(result["memory"]["target_round"], 12)
+        self.assertEqual(result["memory"]["pending_rounds"], 12)
+        window = load_window(find_window(root, "alice", "web", "queued-compress"))
+        self.assertEqual(window["data"]["memory_status"], "queued")
+        self.assertEqual(window["data"]["memory_target_round"], 12)
+        self.assertEqual(window["data"]["memory_processed_round"], 0)
 
     def test_provider_context_length_error_compresses_and_retries(self) -> None:
         _, root = self.make_root()

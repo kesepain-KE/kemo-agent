@@ -173,6 +173,28 @@ class ConfigAndHistoryTests(unittest.TestCase):
         self.assertTrue(provider["stream"])
         self.assertEqual(provider["timeout"], 120.0)
 
+    def test_reasoning_effort_is_normalized_and_cannot_be_disabled(self) -> None:
+        for configured, expected in (
+            ("minimal", "minimal"),
+            ("high", "high"),
+            ("max", "max"),
+            ("none", "medium"),
+            ("xhigh", "medium"),
+            ("invalid", "medium"),
+            (None, "medium"),
+        ):
+            provider = provider_runtime_config(
+                {
+                    "provider": {
+                        "type": "chat",
+                        "model": "test",
+                        "api_key": "key",
+                        "reasoning_effort": configured,
+                    }
+                }
+            )
+            self.assertEqual(provider["reasoning_effort"], expected)
+
     def test_only_chat_and_kemo_provider_types_are_accepted(self) -> None:
         with self.assertRaisesRegex(ConfigError, "chat.*kemo"):
             provider_runtime_config(

@@ -114,6 +114,7 @@ class FakeService:
         self.seen = {"user": user, "session_id": session_id, "prompt": prompt, "run_id": run_id}
         if client_id:
             self.seen["client_id"] = client_id
+        self.seen.update(kwargs)
         return iter(self.events)
 
     def stream_plan(self, user, session_id, plan_id, *, cancel_event, run_id="", client_id=""):
@@ -130,6 +131,53 @@ class FakeService:
 
 
 class WebBackendTests(unittest.TestCase):
+    def test_upload_avoids_overwrite_and_chat_validates_attached_file_paths(self) -> None:
+        _, root = self.make_root()
+        captured: list[dict[str, Any]] = []
+
+        def source(request, **_kwargs):
+            captured.append(request)
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        first = service.save_file("alice", "file_upload", "note.txt", b"first")
+        second = service.save_file("alice", "file_upload", "note.txt", b"second")
+        self.assertEqual(first["path"], "note.txt")
+        self.assertFalse(first["renamed"])
+        self.assertEqual(second["path"], "note (2).txt")
+        self.assertTrue(second["renamed"])
+        self.assertEqual((root / "users" / "alice" / "file_upload" / "note.txt").read_bytes(), b"first")
+        self.assertEqual((root / "users" / "alice" / "file_upload" / "note (2).txt").read_bytes(), b"second")
+
+        events = list(
+            service.stream_chat(
+                "alice",
+                "upload-session",
+                "读取附件",
+                cancel_event=threading.Event(),
+                uploaded_files=[second["path"]],
+            )
+        )
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(
+            captured[0]["uploaded_files"],
+            [{
+                "name": "note (2).txt",
+                "path": "users/alice/file_upload/note (2).txt",
+                "size": 6,
+            }],
+        )
+        with self.assertRaisesRegex(Exception, "上传文件不存在"):
+            list(
+                service.stream_chat(
+                    "alice",
+                    "missing-upload",
+                    "读取附件",
+                    cancel_event=threading.Event(),
+                    uploaded_files=["missing.txt"],
+                )
+            )
+
     def test_usage_cache_tokens_prefers_normalized_fields_and_preserves_zero(self) -> None:
         self.assertEqual(
             _usage_cache_tokens({"cached_input_tokens": 12, "provider_raw": [{"cached_tokens": 3}]}),
@@ -199,16 +247,27 @@ class WebBackendTests(unittest.TestCase):
             def has_active_runs(self) -> bool:
                 return True
 
-        with patch("web.app._spawn_restart_helper") as launcher:
+        active_app = create_app(service=ActiveService())
+        with patch("web.app._spawn_restart_helper", return_value=4321) as launcher:
             active = self.request(
-                create_app(service=ActiveService()),
+                active_app,
                 "POST",
                 "/api/system/restart",
                 json={"port": 1360},
             )
-        self.assertEqual(active.status_code, 409)
-        self.assertEqual(active.json()["error"]["code"], "conflict")
-        launcher.assert_not_called()
+            self.assertEqual(active.status_code, 409)
+            self.assertEqual(active.json()["error"]["code"], "conflict")
+            launcher.assert_not_called()
+
+            forced = self.request(
+                active_app,
+                "POST",
+                "/api/system/restart",
+                json={"port": 1360, "force": True},
+            )
+        self.assertEqual(forced.status_code, 200, forced.text)
+        self.assertEqual(forced.json(), {"ok": True, "port": 1360, "helper_pid": 4321})
+        launcher.assert_called_once()
 
     def test_agents_expose_runtime_details_and_only_delete_user_layer(self) -> None:
         _, root = self.make_root()
@@ -988,11 +1047,16 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(response.json()["compressed"])
         self.assertEqual(response.json()["rounds_removed"], 3)
         self.assertEqual(response.json()["memory"]["status"], "skipped")
-        self.assertEqual(response.json()["memory"]["reason"], "no_complete_round")
+        self.assertEqual(response.json()["memory"]["reason"], "already_processed")
         self.assertFalse(response.json()["memory"]["retry_pending"])
         self.assertEqual(
             observed["request"],
-            {"user": "alice", "source": "web", "session_id": "s1"},
+            {
+                "user": "alice",
+                "source": "web",
+                "session_id": "s1",
+                "memory_extraction_policy": "queue",
+            },
         )
         self.assertEqual(observed["root"], root.resolve())
 
@@ -1040,15 +1104,17 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertTrue(payload["compressed"])
-        self.assertEqual(payload["memory"]["status"], "completed")
-        self.assertEqual(payload["memory"]["candidates"], 1)
+        self.assertEqual(payload["memory"]["status"], "queued")
+        self.assertEqual(payload["memory"]["pending_rounds"], 1)
+        self.assertEqual(payload["memory"]["target_round"], 1)
         self.assertFalse(payload["memory"]["retry_pending"])
-        self.assertEqual(extracted.call_count, 1)
+        extracted.assert_not_called()
         stored = load_window(archive)
-        self.assertEqual(stored["data"]["memory_processed_round"], 1)
-        self.assertEqual(stored["data"]["memory_status"], "completed")
+        self.assertEqual(stored["data"]["memory_processed_round"], 0)
+        self.assertEqual(stored["data"]["memory_status"], "queued")
+        self.assertEqual(stored["data"]["memory_target_round"], 1)
 
-    def test_session_manual_compression_keeps_success_when_memory_extraction_fails(
+    def test_session_manual_compression_fails_when_memory_queue_registration_fails(
         self,
     ) -> None:
         _, root = self.make_root()
@@ -1064,10 +1130,9 @@ class WebBackendTests(unittest.TestCase):
             }
 
         service = WebRunService(root, context_compressor=compressor)
-        with patch.object(
-            service,
-            "extract_session_memory",
-            side_effect=RuntimeError("memory provider unavailable"),
+        with patch(
+            "web.service.queue_memory_extraction",
+            side_effect=RuntimeError("memory queue unavailable"),
         ):
             response = self.request(
                 create_app(service=service),
@@ -1075,16 +1140,51 @@ class WebBackendTests(unittest.TestCase):
                 "/api/users/alice/sessions/s1/compress",
             )
 
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertTrue(payload["compressed"])
-        self.assertEqual(payload["rounds_removed"], 2)
-        self.assertEqual(payload["memory"]["status"], "failed")
-        self.assertTrue(payload["memory"]["retry_pending"])
+        self.assertEqual(response.status_code, 500, response.text)
         self.assertEqual(
-            payload["memory"]["error"]["message"],
-            "memory provider unavailable",
+            response.json()["error"]["message"],
+            "上下文压缩成功，但后台记忆任务登记失败",
         )
+
+    def test_session_manual_compression_reports_summary_failure_without_queueing(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+        commit_window(
+            root / "users" / "alice" / "history" / "window-1",
+            empty_window("alice", "web", "s1"),
+        )
+
+        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
+            return {
+                "context": {
+                    "rounds_removed": 2,
+                    "summary": {
+                        "failed": True,
+                        "error": "摘要响应格式无效",
+                    },
+                },
+                "memory": {
+                    "status": "failed",
+                    "reason": "context_summary_failed",
+                },
+            }
+
+        with patch("web.service.queue_memory_extraction") as queued:
+            response = self.request(
+                create_app(
+                    service=WebRunService(root, context_compressor=compressor)
+                ),
+                "POST",
+                "/api/users/alice/sessions/s1/compress",
+            )
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "手动上下文压缩失败：摘要响应格式无效",
+        )
+        queued.assert_not_called()
 
     def test_session_memory_extraction_uses_latest_complete_round(self) -> None:
         _, root = self.make_root()
@@ -1418,6 +1518,62 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(captured[-1].metadata["run_id"], "run_guidance_123")
         with self.assertRaisesRegex(Exception, "运行不存在"):
             service.submit_guidance("alice", "run_guidance_123", "too late")
+
+    def test_web_cancel_run_is_user_scoped_and_sets_active_event(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        active = ActiveRun("run_cancel_123", "alice", "cancel-session")
+        service._active_runs[active.run_id] = active
+
+        response = self.request(
+            create_app(service=service),
+            "POST",
+            "/api/runs/run_cancel_123/cancel",
+            json={"user": "alice"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "stopping")
+        self.assertTrue(active.cancel_event.is_set())
+
+        active.cancel_event.clear()
+        denied = self.request(
+            create_app(service=service),
+            "POST",
+            "/api/runs/run_cancel_123/cancel",
+            json={"user": "bob"},
+        )
+        self.assertEqual(denied.status_code, 404, denied.text)
+        self.assertFalse(active.cancel_event.is_set())
+
+    def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(self) -> None:
+        _, root = self.make_root()
+
+        def source(request, *, cancel_event, **_kwargs):
+            yield RunEvent(type="text_delta", content="partial")
+            self.assertTrue(cancel_event.wait(timeout=2))
+            yield RunEvent(
+                type="done",
+                metadata={
+                    "run_id": request["run_id"],
+                    "committed": True,
+                    "status": "cancelled",
+                    "cancelled": True,
+                },
+            )
+
+        service = WebRunService(root, event_source=source)
+        iterator = service.stream_chat(
+            "alice",
+            "cancel-stream",
+            "start",
+            cancel_event=threading.Event(),
+            run_id="run_cancel_stream_123",
+        )
+        self.assertEqual(next(iterator).type, "text_delta")
+        service.cancel_run("alice", "run_cancel_stream_123")
+        terminal = list(iterator)
+        self.assertEqual([event.type for event in terminal], ["done"])
+        self.assertEqual(terminal[0].metadata["status"], "cancelled")
 
     def test_sse_order_and_payload_are_preserved(self) -> None:
         events = [
@@ -2443,6 +2599,7 @@ class WebBackendTests(unittest.TestCase):
 
         settings = self.request(app, "GET", "/api/users/alice/settings")
         self.assertEqual(settings.json()["provider"]["model"], "test-model")
+        self.assertEqual(settings.json()["provider"]["reasoning_effort"], "medium")
         self.assertFalse(settings.json()["authentication"]["enabled"])
         self.assertEqual(
             settings.json()["source_policy"]["kemo_graph"]["status"],

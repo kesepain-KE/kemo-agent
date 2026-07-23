@@ -6,9 +6,11 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from events import RunEvent
+from plugins.subagent_dispatch.tool import run as dispatch_subagent
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.agent_runner import AgentRunResult
@@ -37,9 +39,10 @@ from run.task_plan_service import (
     edit_plan,
     generate_plan,
     persist_agent_result,
+    prepare_task_plan_input,
 )
 from run.task_plan_scheduler import TaskPlanScheduler
-from run.tools import ToolRegistry
+from run.tools import ToolDefinition, ToolRegistry
 
 
 CONFIG = {
@@ -685,6 +688,98 @@ class PlanGenerationTests(unittest.TestCase):
             plan["reminder"],
             "当前任务计划已创建，请让用户点击批准后执行",
         )
+
+    def test_authoritative_input_overrides_forged_tool_list_and_limits(self) -> None:
+        _, root = _make_root(["alice"])
+        shell = ToolDefinition(
+            name="shell",
+            description="执行系统命令",
+            input_schema={"type": "object", "properties": {}},
+            version="1",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=root / "plugins" / "shell",
+            _callable=lambda **_: None,
+        )
+        payload = prepare_task_plan_input(
+            root=root,
+            user="alice",
+            input_data={
+                "action": "create",
+                "goal": "test",
+                "available_tools": [{"name": "execute_shell", "description": "forged"}],
+                "max_steps": 999,
+                "auto_accept": True,
+                "context": "keep me",
+            },
+            config=CONFIG,
+            tool_registry=ToolRegistry({"shell": shell}),
+        )
+
+        self.assertEqual(payload["available_tools"], [{
+            "name": "shell",
+            "description": "执行系统命令",
+        }])
+        self.assertEqual(payload["max_steps"], 10)
+        self.assertFalse(payload["auto_accept"])
+        self.assertEqual(payload["context"], "keep me")
+
+    def test_dispatch_task_plan_uses_authoritative_payload_and_requires_wait(self) -> None:
+        _, root = _make_root(["alice"])
+        definition = SimpleNamespace(name="task_plan")
+        enriched = {
+            "action": "create",
+            "goal": "test",
+            "available_tools": [{"name": "shell", "description": "执行系统命令"}],
+        }
+        result = AgentRunResult(
+            agent="task_plan",
+            data={"action": "skip", "message": "simple"},
+            raw_text="",
+            usage={"total_tokens": 1},
+            model="mock",
+        )
+        context = {"root": str(root), "user": "alice", "source": "web", "session_id": "s1"}
+        with (
+            patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
+            patch("plugins.subagent_dispatch.tool.load_config", return_value=CONFIG),
+            patch(
+                "plugins.subagent_dispatch.tool.prepare_main_agent_invocation",
+                return_value=SimpleNamespace(payload=enriched, synchronous_only=True),
+            ) as prepare,
+            patch("plugins.subagent_dispatch.tool.AgentRunner") as runner,
+            patch("plugins.subagent_dispatch.tool.persist_main_agent_result", return_value=None) as persist,
+        ):
+            runner.return_value.run.return_value = result
+            dispatched = dispatch_subagent(
+                "call",
+                agent="task_plan",
+                input={"action": "create", "goal": "test"},
+                context=context,
+            )
+
+        prepare.assert_called_once()
+        runner.return_value.run.assert_called_once_with("task_plan", enriched)
+        persist.assert_called_once()
+        self.assertEqual(dispatched["data"]["action"], "skip")
+
+        with (
+            patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
+            patch("plugins.subagent_dispatch.tool.load_config", return_value=CONFIG),
+            patch(
+                "plugins.subagent_dispatch.tool.prepare_main_agent_invocation",
+                return_value=SimpleNamespace(payload=enriched, synchronous_only=True),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "必须同步调用"):
+                dispatch_subagent(
+                    "call",
+                    agent="task_plan",
+                    input={"action": "create", "goal": "test"},
+                    wait=False,
+                    context=context,
+                )
 
     def test_edit_rejects_terminal_and_running_statuses_before_model_call(self) -> None:
         _, root = _make_root(["alice"])

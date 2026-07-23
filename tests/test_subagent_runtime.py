@@ -113,6 +113,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "base_url": "http://127.0.0.1:1",
                 "api_key_env": "TEST_AGENT_KEY",
                 "model": "main-model",
+                "reasoning_effort": "high",
             },
         }
 
@@ -183,6 +184,10 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data["narrative"], "summary")
         request = provider.requests[0]
         self.assertEqual(request.model, "main-model")
+        self.assertTrue(request.reasoning.enabled)
+        self.assertEqual(request.reasoning.effort, "high")
+        self.assertEqual(request.reasoning.return_mode, "content")
+        self.assertEqual(request.provider_options["reasoning_effort"], "high")
         self.assertEqual(len(request.input), 1)
         self.assertIn("[trigger_registration]", request.system_prompt)
         self.assertNotIn("# 操作信息", request.system_prompt)

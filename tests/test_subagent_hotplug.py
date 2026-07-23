@@ -292,7 +292,6 @@ class SubAgentHotPlugTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         registry = discover_agents(root)
         expected = {
-            "context_manage": {"main_agent", "engine"},
             "self_improve": {"main_agent", "scheduler", "context_manage"},
             "memory_temporary_important": {"main_agent", "scheduler"},
             "task_plan": {"main_agent"},
@@ -305,6 +304,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
 
         public_names = {item.name for item in registry.public_agents("main_agent")}
         self.assertEqual(public_names, set(expected))
+        context_manage = registry.get("context_manage")
+        self.assertEqual(context_manage.capabilities.exposure, "internal")
+        self.assertEqual(set(context_manage.capabilities.allowed_callers), {"engine"})
         self.assertIn("manual_review", registry.get("self_improve").trigger_content)
         self.assertIn(
             "subagent_dispatch",
@@ -503,6 +505,38 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
         self.assertEqual(result.metadata["tool_calls"][0]["status"], "completed")
+
+    def test_agent_blocks_only_consecutive_identical_tool_arguments(self) -> None:
+        _, root, config = self.make_root()
+        config["tools"]["consecutive_identical_call_limit"] = 2
+        self.write_plugin(root, "echo")
+        directory = self.write_agent(root, "alice", "repeat_agent", tools=["echo"])
+        agent_config_path = directory / "agent-config.json"
+        agent_config = json.loads(agent_config_path.read_text("utf-8"))
+        agent_config["tools"]["max_iterations"] = 6
+        agent_config_path.write_text(json.dumps(agent_config), "utf-8")
+        provider = ScriptedProvider(
+            [
+                ChatResponse(text="", tool_calls=[ToolCall("same-1", "echo", {"value": "x"})]),
+                ChatResponse(text="", tool_calls=[ToolCall("same-2", "echo", {"value": "x"})]),
+                ChatResponse(text="", tool_calls=[ToolCall("same-3", "echo", {"value": "x"})]),
+                ChatResponse(text="", tool_calls=[ToolCall("changed", "echo", {"value": "y"})]),
+                ChatResponse(text='{"answer":"done"}', model="mock", usage=Usage()),
+            ]
+        )
+        result = AgentRunner(
+            root,
+            "alice",
+            config=config,
+            provider_factory=lambda _: provider,
+        ).run("repeat_agent", {})
+        calls = result.metadata["tool_calls"]
+        self.assertEqual(
+            [call["status"] for call in calls],
+            ["completed", "completed", "identical_call_blocked", "completed"],
+        )
+        self.assertEqual(calls[2]["consecutive_identical_calls"], 3)
+        self.assertEqual(calls[3]["consecutive_identical_calls"], 1)
 
     def test_background_scheduler_detects_hot_plugged_agent(self) -> None:
         _, root, config = self.make_root()

@@ -389,7 +389,11 @@ class UnifiedProtocolTests(unittest.TestCase):
             ],
         )
         request = chat_request_to_kemo(chat)
+        self.assertTrue(request.reasoning.enabled)
+        self.assertEqual(request.reasoning.effort, "medium")
+        self.assertEqual(request.reasoning.return_mode, "content")
         restored = kemo_request_to_chat(request)
+        self.assertEqual(restored.extra["reasoning_effort"], "medium")
         self.assertEqual(restored.messages[0]["role"], "system")
         self.assertEqual(restored.messages[1]["content"][1]["type"], "image_url")
         self.assertEqual(restored.messages[-1]["tool_call_id"], "call_1")

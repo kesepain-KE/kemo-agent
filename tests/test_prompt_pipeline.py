@@ -1106,6 +1106,7 @@ class PromptPipelineTests(unittest.TestCase):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(provider.requests[0].messages[0]["role"], "system")
+        self.assertEqual(provider.requests[0].extra["reasoning_effort"], "medium")
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         weighted = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
         self.assertEqual(weighted[0]["weight"], 1)
@@ -1157,7 +1158,8 @@ class PromptPipelineTests(unittest.TestCase):
                     cancel_event=cancel,
                 )
             )
-        self.assertEqual(events, [])
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(events[0].metadata["status"], "cancelled")
         items = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
         self.assertEqual(items[0]["weight"], 0)
 

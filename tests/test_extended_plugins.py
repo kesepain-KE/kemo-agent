@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from datetime import datetime, timedelta
@@ -299,6 +301,22 @@ class ShellPluginTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"], result)
         self.assertIn("hello-shell", result["output"])
+
+    def test_shell_process_tree_is_terminated_by_emergency_cancel(self) -> None:
+        cancel = threading.Event()
+        timer = threading.Timer(0.1, cancel.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            result = run_shell(
+                f'"{sys.executable}" -c "import time;time.sleep(10)"',
+                context=self._context(cancel_event=cancel),
+            )
+        finally:
+            timer.cancel()
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result.get("cancelled"), result)
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_session_state_is_isolated_by_user_and_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
