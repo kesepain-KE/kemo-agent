@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject runtime data and credential files that must never be tracked."""
+"""CI guard for runtime data and credential files that must never be tracked."""
 
 from __future__ import annotations
 
