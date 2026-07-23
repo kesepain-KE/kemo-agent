@@ -129,7 +129,7 @@ class TaskTimePluginOptimizationTests(unittest.TestCase):
 
         skill_text = (PROJECT_ROOT / "plugins" / "task_time" / "SKILL.md").read_text("utf-8")
         trigger_text = (PROJECT_ROOT / "agents" / "time_plan" / "trigger.md").read_text("utf-8")
-        agents_text = (PROJECT_ROOT / "AGENTS.md").read_text("utf-8")
+        agents_text = (PROJECT_ROOT / "agents.md").read_text("utf-8")
         self.assertIn("自然语言定时需求必须先走 time_plan", skill_text)
         self.assertIn("主智能体硬性调用规则", trigger_text)
         self.assertIn("task_time get", trigger_text)
