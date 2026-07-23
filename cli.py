@@ -80,6 +80,10 @@ def discover_user(explicit_user: str | None, root: Path | None = None, *, intera
     if explicit_user and explicit_user.strip():
         return explicit_user.strip()
 
+    env_user = os.getenv("KEMO_USER", "").strip()
+    if env_user:
+        return env_user
+
     users_dir = (root or _project_root()) / "users"
     if users_dir.is_dir():
         candidates = sorted(
@@ -194,6 +198,36 @@ def _event_value(event: Any, name: str, default: Any = None) -> Any:
     return getattr(event, name, default)
 
 
+def _truncate_args(args: Any, max_len: int = 120) -> str:
+    """将参数/结果转为紧凑字符串并截断。"""
+    if args is None:
+        return ""
+    text = json.dumps(args, ensure_ascii=False, default=str, separators=(",", ":"))
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "…"
+
+
+def _truncate_result(result: Any, max_len: int = 100) -> str:
+    """将工具结果转为摘要字符串并截断。"""
+    if result is None:
+        return ""
+    if isinstance(result, dict):
+        if result.get("ok") is True:
+            text = result.get("message") or result.get("text") or json.dumps(result, ensure_ascii=False, default=str)
+        elif result.get("ok") is False:
+            text = result.get("error") or json.dumps(result, ensure_ascii=False, default=str)
+        else:
+            text = json.dumps(result, ensure_ascii=False, default=str)
+    elif isinstance(result, str):
+        text = result
+    else:
+        text = json.dumps(result, ensure_ascii=False, default=str)
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "…"
+
+
 def emit_event_stream(
     events: Any,
     *,
@@ -215,7 +249,32 @@ def emit_event_stream(
                 print(_event_value(event, "content", ""), end="", file=stdout, flush=True)
                 wrote_text = True
             elif event_type == "tool_call_start":
-                print(f"\n  ⚙ {_event_value(event, 'tool_name', '')}", file=stdout, flush=True)
+                name = _event_value(event, "tool_name", "")
+                args = _event_value(event, "arguments")
+                args_str = _truncate_args(args)
+                if args_str:
+                    print(f"\n  ⚙ {name} {args_str}", file=stdout, flush=True)
+                else:
+                    print(f"\n  ⚙ {name}", file=stdout, flush=True)
+            elif event_type == "tool_call_result":
+                name = _event_value(event, "tool_name", "")
+                result = _event_value(event, "result")
+                metadata = _event_value(event, "metadata", {}) or {}
+                status = metadata.get("status", "")
+                if status == "completed":
+                    print(f"  ✓ {name}", file=stdout, flush=True)
+                elif status == "failed":
+                    print(f"  ✗ {name}", file=stdout, flush=True)
+                elif isinstance(result, dict) and result.get("ok") is True:
+                    print(f"  ✓ {name}", file=stdout, flush=True)
+                elif isinstance(result, dict) and result.get("ok") is False:
+                    print(f"  ✗ {name}", file=stdout, flush=True)
+                else:
+                    summary = _truncate_result(result)
+                    if summary:
+                        print(f"  ✓ {name}: {summary}", file=stdout, flush=True)
+                    else:
+                        print(f"  ✓ {name}", file=stdout, flush=True)
             elif event_type == "error":
                 error = _event_value(event, "error", {}) or {}
                 raise CLIError(str(error.get("message") or "运行失败"))
@@ -732,19 +791,33 @@ def run_interactive(
         print(f"kemo-agent 交互模式 | 用户: {user} | 会话: {session_id}")
         print("─" * 50)
         print("命令：")
-        print("  /new [名称]       新建会话")
-        print("  /sessions         列出所有会话")
-        print("  /use <会话ID>     切换会话")
-        print("  /status           查看上下文占用")
-        print("  /compress         压缩上下文")
-        print("  /memory           列出记忆")
-        print("  /remember <内容>   保存永久记忆")
-        print("  /forget <文件名>  删除记忆")
-        print("  /plans            列出任务计划")
-        print("  /plan <目标>       创建任务计划")
-        print("  /crons            列出定时任务")
-        print("  /cron <要求>       创建定时任务")
-        print("  /exit             退出")
+        print("  /new [名称]          新建会话")
+        print("  /sessions            列出所有会话")
+        print("  /use <会话ID>        切换会话")
+        print("  /history             查看当前会话历史")
+        print("  /clear               清空当前会话")
+        print("  /status              查看上下文占用")
+        print("  /compress            压缩上下文")
+        print("  /memory              列出记忆")
+        print("  /remember <内容>     保存永久记忆")
+        print("  /forget <关键词>     删除记忆")
+        print("  /plans               列出任务计划")
+        print("  /plan <目标>         创建任务计划")
+        print("  /plan-show <计划ID>  查看计划详情")
+        print("  /plan-approve <ID>   批准并执行计划")
+        print("  /plan-pause <ID>     暂停计划")
+        print("  /plan-resume <ID>    恢复计划")
+        print("  /plan-cancel <ID>    取消计划")
+        print("  /crons               列出定时任务")
+        print("  /cron <要求>         创建定时任务")
+        print("  /cron-show <任务ID>  查看任务详情")
+        print("  /cron-pause <ID>     暂停定时任务")
+        print("  /cron-resume <ID>    恢复定时任务")
+        print("  /cron-cancel <ID>    取消定时任务")
+        print("  /cron-run <ID>       立即执行定时任务")
+        print("  /cron-start          启动调度器")
+        print("  /cron-stop           停止调度器")
+        print("  /exit                退出")
         print("─" * 50)
 
     while True:
