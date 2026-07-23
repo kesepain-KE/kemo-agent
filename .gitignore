@@ -24,6 +24,7 @@ desktop.ini
 
 # Logs
 *.log
+cron/task_cron_system/log/
 
 # Backups & temp
 *.bak

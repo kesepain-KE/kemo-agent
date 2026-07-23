@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://github.com/kesepain-KE/kemo-agent">
-    <img src="https://img.shields.io/badge/version-0.1.0--dev-blue" alt="version">
+    <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license">
