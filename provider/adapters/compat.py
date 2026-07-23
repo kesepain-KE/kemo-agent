@@ -26,6 +26,7 @@ from provider.protocol.models import (
     Measurement,
     MessageItem,
     ModelCapabilities,
+    ReasoningConfig,
     ReasoningItem,
     ReferenceContent,
     TextContent,
@@ -34,6 +35,7 @@ from provider.protocol.models import (
     ToolResultItem,
     Usage,
     VideoContent,
+    normalize_reasoning_effort,
     text_from_content,
 )
 from provider.protocol.streaming import ProviderStreamEvent
@@ -279,6 +281,11 @@ def kemo_request_to_chat(request: KemoRequest) -> ChatRequest:
             index += 1
             continue
         index += 1
+    extra = dict(request.provider_options)
+    if request.reasoning is not None and request.reasoning.enabled:
+        extra["reasoning_effort"] = normalize_reasoning_effort(
+            request.reasoning.effort
+        )
     return ChatRequest(
         model=request.model,
         messages=messages,
@@ -286,7 +293,7 @@ def kemo_request_to_chat(request: KemoRequest) -> ChatRequest:
         tools=[_tool_schema(item) for item in request.tools] or None,
         temperature=request.generation.temperature,
         max_tokens=request.generation.max_output_tokens,
-        extra=dict(request.provider_options),
+        extra=extra,
     )
 
 
@@ -393,6 +400,7 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                     content=blocks,
                 )
             )
+    effort = normalize_reasoning_effort(request.extra.get("reasoning_effort"))
     return KemoRequest(
         model=request.model,
         stream=request.stream,
@@ -403,7 +411,13 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
             "max_output_tokens": request.max_tokens,
             "temperature": request.temperature,
         },
-        provider_options=dict(request.extra),
+        reasoning=ReasoningConfig(
+            enabled=True,
+            effort=effort,
+            return_mode="content",
+            context="auto",
+        ),
+        provider_options={**request.extra, "reasoning_effort": effort},
     )
 
 

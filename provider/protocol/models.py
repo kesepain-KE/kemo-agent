@@ -21,6 +21,8 @@ from provider.protocol.enums import (
 PROTOCOL_VERSION = "1.0"
 SUPPORTED_PROTOCOL_MAJOR = 1
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+USER_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "max"})
+DEFAULT_REASONING_EFFORT = "medium"
 
 
 def _now() -> datetime:
@@ -29,6 +31,13 @@ def _now() -> datetime:
 
 def _identifier(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def normalize_reasoning_effort(value: Any) -> str:
+    """Return the supported user effort, falling back to the always-on default."""
+
+    effort = str(value or "").strip().lower()
+    return effort if effort in USER_REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
 class ProtocolModel(BaseModel):

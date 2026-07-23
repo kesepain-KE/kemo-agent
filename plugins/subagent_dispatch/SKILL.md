@@ -69,6 +69,11 @@
 - `status`：使用后台任务 ID 查询状态。
 - `cancel`：取消尚未完成的后台任务。
 - 调用前先读取目标子代理的 `trigger.md`，按其中约定构造结构化 `input`。
+- `task_plan` 是特殊的同步调用：框架会从当前 Tool Registry 和配置强制补齐规划输入并在返回前持久化计划；调用方不要手工传入工具白名单，也不能对它使用 `wait=false`。
+- `time_plan` 的 `current_time_beijing` 由框架按 `Asia/Shanghai` 强制注入；调用方无需先调时间工具，手工提交的同名值也会被覆盖。
+- `self_improve` 由主智能体调用时只允许 `manual_review`；压缩提取和记忆晋升模式属于引擎/调度器私有入口。
+- `context_manage` 是引擎内部代理，不出现在公开列表中；手动压缩必须走 `/compress` 对应的会话管线。
+- 其他公开子代理只获得自身 `agent-config.json` 声明的能力以及调用方显式输入，不会继承主智能体的工具权限。
 
 ## Tool
 
