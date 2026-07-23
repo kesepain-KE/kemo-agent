@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import json
 import os
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -28,6 +30,51 @@ class ToolValidationError(ToolError):
 
 class ToolTimeoutError(ToolError):
     pass
+
+
+class ToolCancelledError(ToolError):
+    """The user explicitly cancelled the run while a tool was executing."""
+
+
+def tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
+    """Return a stable identity for one tool name and its complete arguments."""
+
+    normalized = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{name}:{normalized}"
+
+
+@dataclass(slots=True)
+class ConsecutiveIdenticalToolCallTracker:
+    """Track uninterrupted requests with the same tool name and arguments."""
+
+    limit: int
+    signature: str = ""
+    count: int = 0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or self.limit < 1
+        ):
+            raise ValueError("tools.consecutive_identical_call_limit 必须是正整数")
+
+    def record(self, name: str, arguments: dict[str, Any]) -> int:
+        signature = tool_call_signature(name, arguments)
+        if signature == self.signature:
+            self.count += 1
+        else:
+            self.signature = signature
+            self.count = 1
+        return self.count
+
+    def is_blocked(self, count: int) -> bool:
+        return count > self.limit
 
 
 @dataclass(slots=True)
@@ -252,13 +299,27 @@ def execute_tool(
 ) -> Any:
     validate_arguments(tool.input_schema, arguments)
     if cancel_event is not None and cancel_event.is_set():
-        raise ToolError("工具调用已取消")
+        raise ToolCancelledError("工具调用因用户紧急停止而取消")
+    invocation_context = dict(context)
+    if cancel_event is not None:
+        invocation_context["cancel_event"] = cancel_event
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{tool.name}")
-    future = executor.submit(_invoke, tool.load_callable(), arguments, context)
+    future = executor.submit(
+        _invoke, tool.load_callable(), arguments, invocation_context
+    )
+    deadline = time.monotonic() + timeout
     try:
-        return future.result(timeout=timeout)
-    except FutureTimeout as exc:
-        future.cancel()
-        raise ToolTimeoutError(f"工具 {tool.name} 执行超时（{timeout:g}s）") from exc
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                future.cancel()
+                raise ToolCancelledError("工具调用因用户紧急停止而取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                raise ToolTimeoutError(f"工具 {tool.name} 执行超时（{timeout:g}s）")
+            try:
+                return future.result(timeout=min(0.1, remaining))
+            except FutureTimeout:
+                continue
     finally:
         executor.shutdown(wait=False, cancel_futures=True)

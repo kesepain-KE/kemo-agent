@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from provider.protocol.models import normalize_reasoning_effort
+
 
 USER_ONLY_SECTIONS = frozenset(
     {
@@ -183,6 +185,9 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             "model": model,
             "timeout": float(provider.get("timeout", 120.0)),
             "stream": bool(provider.get("stream", True)),
+            "reasoning_effort": normalize_reasoning_effort(
+                provider.get("reasoning_effort")
+            ),
         }
     )
     provider.pop("headers", None)
