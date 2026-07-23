@@ -7,7 +7,8 @@
   "tools": {
     "enabled": true,
     "timeout": 240,
-    "max_iterations": 80
+    "max_iterations": 80,
+    "consecutive_identical_call_limit": 8
   },
   "history": {
     "schema_version": 1,
@@ -84,7 +85,8 @@
   },
   "task_cron_system": {
     "sense_update_rate": 5,
-    "expand_update_rate": 5
+    "expand_update_rate": 5,
+    "module_update_timeout": 120
   },
   "runtime_host": {
     "enable_background_scheduler": true

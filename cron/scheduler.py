@@ -32,8 +32,9 @@ _PERIODIC_TITLE = "临时重要记忆定时巡检"
 _DAILY_TITLE = "临时重要记忆每日整理"
 _PROMOTION_TITLE = "记忆碎片到期晋升检查"
 _PERCEPTION_TITLE = "全局感知模块数据采集"
-_EXPAND_TITLE = "全局拓展模块数据采集"
-_GLOBAL_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
+_EXPAND_TITLE = "拓展模块数据采集"
+_SINGLETON_SYSTEM_ACTIONS = frozenset({"perception_update"})
+_NO_BACKOFF_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
 
 
 def _system_result_summary(result: Any) -> dict[str, Any]:
@@ -42,7 +43,9 @@ def _system_result_summary(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     summary: dict[str, Any] = {}
-    for key in ("status", "action", "category", "model", "requested", "reason"):
+    for key in (
+        "status", "action", "category", "scope", "user", "model", "requested", "reason"
+    ):
         value = result.get(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
             summary[key] = value
@@ -470,13 +473,15 @@ class CronScheduler:
                 continue
             task_id = str(task.get("task_id") or "")
             action = str(task.get("action") or task_id)
-            if action not in _GLOBAL_SYSTEM_ACTIONS and self._should_backoff():
+            if action not in _NO_BACKOFF_SYSTEM_ACTIONS and self._should_backoff():
                 continue
-            execution_users = (
-                ("__system__",)
-                if action in _GLOBAL_SYSTEM_ACTIONS
-                else tuple(list_users(self.root))
-            )
+            users = tuple(list_users(self.root))
+            if action == "expand_update":
+                execution_users = ("__system__", *users)
+            elif action in _SINGLETON_SYSTEM_ACTIONS:
+                execution_users = ("__system__",)
+            else:
+                execution_users = users
             for user in execution_users:
                 if self._stop_event.is_set():
                     break
@@ -493,7 +498,7 @@ class CronScheduler:
                         "system_task": task,
                     }
                     if user == "__system__":
-                        execute_kwargs["config"] = {}
+                        execute_kwargs["config"] = self._config
                     result = execute_cron_task(
                         **execute_kwargs,
                     )
