@@ -328,9 +328,15 @@ class ShellPluginTests(unittest.TestCase):
             bob = self._context(root, user="bob")
             changed = run_shell(f'cd "{alice_dir}"', session_id="same", context=alice)
             self.assertTrue(changed["ok"])
-            self.assertEqual(Path(run_shell("pwd", session_id="same", context=alice)["output"]), alice_dir)
-            self.assertEqual(Path(run_shell("pwd", session_id="same", context=alice_web)["output"]), root)
-            self.assertEqual(Path(run_shell("pwd", session_id="same", context=bob)["output"]), root)
+            self.assertTrue(
+                Path(run_shell("pwd", session_id="same", context=alice)["output"]).samefile(alice_dir)
+            )
+            self.assertTrue(
+                Path(run_shell("pwd", session_id="same", context=alice_web)["output"]).samefile(root)
+            )
+            self.assertTrue(
+                Path(run_shell("pwd", session_id="same", context=bob)["output"]).samefile(root)
+            )
 
     def test_file_builtins_work_without_session_or_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

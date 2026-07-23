@@ -88,7 +88,7 @@ class SkillCreaterPluginTests(unittest.TestCase):
                     tool_schema=schema,
                     context=context,
                 )
-                self.assertEqual(Path(result["path"]), base / f"{scope}-skill")
+                self.assertTrue(Path(result["path"]).samefile(base / f"{scope}-skill"))
                 content = run("get", scope, name=f"{scope}-skill", context=context)["content"]
                 parsed = json.loads(content.split("```json\n", 1)[1].split("\n```", 1)[0])
                 self.assertEqual(parsed, schema)
