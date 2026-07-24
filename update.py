@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
+import importlib.util
 import platform
 import shutil
 import subprocess
@@ -27,6 +29,7 @@ from update._utils import (
     require_commands,
     run,
     sync_directory,
+    write_json_atomic,
     yellow,
 )
 
@@ -63,6 +66,7 @@ MODULES = {
     "plugins": ("插件生态", "update.plugins"),
     "web": ("Web 服务", "update.web"),
 }
+REMOTE_UPDATE_PACKAGE = "_kemo_agent_remote_update"
 
 
 def make_backup(dry_run: bool) -> Path | None:
@@ -162,11 +166,8 @@ def build_web_frontend(*, dry_run: bool) -> None:
     npm_command = _resolve_npm_command()
     dist_dir = WEB_DIR / "dist"
     if not npm_command:
-        if dist_dir.is_dir() and any(dist_dir.iterdir()):
-            print(yellow("未找到 npm，但 web/frontend/dist 已存在，跳过前端构建"))
-            return
         raise UpdateError(
-            "未找到 npm 且 web/frontend/dist 不存在。"
+            "未找到 npm，无法重新构建已更新的 Web 前端。"
             "请安装 Node.js（https://nodejs.org/），然后手动执行: "
             "cd web/frontend && npm install && npm run build"
         )
@@ -196,6 +197,15 @@ def load_version_documents(remote_url: str) -> tuple[dict, dict]:
     if not local_path.is_file():
         raise UpdateError(f"未找到本地版本文件: {local_path}")
     return read_json(local_path), fetch_json(remote_url)
+
+
+def validate_version_document(document: dict, label: str) -> None:
+    try:
+        version_for_module(document, "all")
+        for module_name in MODULES:
+            version_for_module(document, module_name)
+    except UpdateError as exc:
+        raise UpdateError(f"{label}版本文件无效: {exc}") from exc
 
 
 def version_for_module(document: dict, module: str) -> str:
@@ -251,37 +261,128 @@ def run_modules(
     assume_yes: bool,
 ) -> list[dict]:
     results: list[dict] = []
-    for name in module_names:
-        label, import_path = MODULES[name]
-        print(f"\n{'=' * 50}")
-        print(f"  板块: {label}")
-        print(f"{'=' * 50}")
-        try:
-            importlib.invalidate_caches()
-            module = importlib.import_module(import_path)
-            result = module.update(
-                source_root,
-                target_root,
-                dry_run=dry_run,
-                assume_yes=assume_yes,
-            )
-            if not isinstance(result, dict):
-                raise UpdateError(f"{import_path}.update() 未返回字典")
-            status = str(result.get("status", ""))
-            if status not in {"ok", "skipped", "partial", "failed"}:
-                raise UpdateError(f"{import_path}.update() 返回无效状态: {status!r}")
-            result.setdefault("module", name)
-            result.setdefault("details", [])
-            result.setdefault("warnings", [])
-        except Exception as exc:
-            result = {
-                "module": name,
-                "status": "failed",
-                "details": [],
-                "warnings": [str(exc)],
-            }
-        results.append(result)
+    remote_package = _load_remote_update_package(source_root)
+    try:
+        for name in module_names:
+            label, configured_import_path = MODULES[name]
+            board_name = configured_import_path.rsplit(".", 1)[-1]
+            import_path = f"{remote_package}.{board_name}"
+            print(f"\n{'=' * 50}")
+            print(f"  板块: {label}")
+            print(f"{'=' * 50}")
+            try:
+                importlib.invalidate_caches()
+                module = importlib.import_module(import_path)
+                update_kwargs = {
+                    "dry_run": dry_run,
+                    "assume_yes": assume_yes,
+                }
+                if name == "web":
+                    # The default remains enabled only for the 0.1.x dispatcher,
+                    # which imports the refreshed web board after its old core pass.
+                    update_kwargs["legacy_core_compat"] = False
+                result = module.update(source_root, target_root, **update_kwargs)
+                if not isinstance(result, dict):
+                    raise UpdateError(f"{import_path}.update() 未返回字典")
+                status = str(result.get("status", ""))
+                if status not in {"ok", "skipped", "partial", "failed"}:
+                    raise UpdateError(f"{import_path}.update() 返回无效状态: {status!r}")
+                result.setdefault("module", name)
+                result.setdefault("details", [])
+                result.setdefault("warnings", [])
+            except Exception as exc:
+                result = {
+                    "module": name,
+                    "status": "failed",
+                    "details": [],
+                    "warnings": [str(exc)],
+                }
+            results.append(result)
+    finally:
+        _clear_remote_update_package()
     return results
+
+
+def _clear_remote_update_package() -> None:
+    prefix = REMOTE_UPDATE_PACKAGE + "."
+    for module_name in list(sys.modules):
+        if module_name == REMOTE_UPDATE_PACKAGE or module_name.startswith(prefix):
+            sys.modules.pop(module_name, None)
+
+
+def _load_remote_update_package(source_root: Path) -> str:
+    update_dir = source_root / "update"
+    init_path = update_dir / "__init__.py"
+    if not init_path.is_file():
+        raise UpdateError(f"远程源码缺少更新模块入口: {init_path}")
+    _clear_remote_update_package()
+    importlib.invalidate_caches()
+    spec = importlib.util.spec_from_file_location(
+        REMOTE_UPDATE_PACKAGE,
+        init_path,
+        submodule_search_locations=[str(update_dir)],
+    )
+    if spec is None or spec.loader is None:
+        raise UpdateError(f"无法加载远程更新模块: {init_path}")
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[REMOTE_UPDATE_PACKAGE] = package
+    try:
+        spec.loader.exec_module(package)
+    except Exception as exc:
+        _clear_remote_update_package()
+        raise UpdateError(f"远程更新模块入口加载失败: {exc}") from exc
+    return REMOTE_UPDATE_PACKAGE
+
+
+def version_document_after_update(
+    local_document: dict,
+    remote_document: dict,
+    requested_module: str,
+) -> dict:
+    """Build the manifest committed after a successful update."""
+    if requested_module == "all":
+        return copy.deepcopy(remote_document)
+    local_components = local_document.get("components")
+    remote_components = remote_document.get("components")
+    if not isinstance(local_components, dict):
+        raise UpdateError("本地 version.json 缺少 components")
+    if not isinstance(remote_components, dict) or not isinstance(
+        remote_components.get(requested_module), dict
+    ):
+        raise UpdateError(f"远程 version.json 缺少 components.{requested_module}")
+    result = copy.deepcopy(local_document)
+    result_components = result.setdefault("components", {})
+    result_components[requested_module] = copy.deepcopy(remote_components[requested_module])
+    return result
+
+
+def finalize_version_document(
+    local_document: dict,
+    remote_document: dict,
+    requested_module: str,
+    *,
+    dry_run: bool,
+) -> None:
+    final_document = version_document_after_update(
+        local_document,
+        remote_document,
+        requested_module,
+    )
+    target = ROOT / "version.json"
+    final_version = version_for_module(final_document, requested_module)
+    if dry_run:
+        print(f"[dry-run] 将在全部步骤成功后写入 {requested_module} 版本: {final_version}")
+        return
+    try:
+        write_json_atomic(target, final_document)
+    except Exception as exc:
+        raise UpdateError(f"版本文件写入失败: {exc}") from exc
+    print(green(f"版本状态已提交: {requested_module} {final_version}"))
+
+
+def _print_backup_hint(backup_dir: Path | None) -> None:
+    if backup_dir is not None:
+        print(yellow(f"更新前备份保留在: {backup_dir}"), file=sys.stderr)
 
 
 def print_module_summary(results: list[dict]) -> None:
@@ -337,10 +438,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    backup_dir: Path | None = None
     try:
         _print_platform_warning()
         remote_url = args.remote_version_url or VERSION_URL_TEMPLATE.format(branch=args.branch)
         local_document, remote_document = load_version_documents(remote_url)
+        validate_version_document(local_document, "本地")
+        validate_version_document(remote_document, "远程")
 
         if args.check:
             print_version_report(local_document, remote_document, args.module)
@@ -362,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_modules = list(MODULES) if args.module == "all" else [args.module]
         with tempfile.TemporaryDirectory(prefix="kemo-agent-update-") as temporary:
             source = clone_latest(args.repo_url, args.branch, Path(temporary))
-            make_backup(args.dry_run)
+            backup_dir = make_backup(args.dry_run)
             results = run_modules(
                 selected_modules,
                 source,
@@ -373,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
             print_module_summary(results)
             if any(result.get("status") == "failed" for result in results):
                 raise UpdateError("一个或多个更新板块失败，请根据汇总信息处理")
+            if any(result.get("status") == "partial" for result in results):
+                raise UpdateError("一个或多个更新板块不完整，版本号保持不变")
 
             if "core" in selected_modules:
                 migrate_user_skeletons(dry_run=args.dry_run)
@@ -383,6 +489,13 @@ def main(argv: list[str] | None = None) -> int:
         if "core" in selected_modules and not args.skip_deps:
             refresh_dependencies(dry_run=args.dry_run)
 
+        finalize_version_document(
+            local_document,
+            remote_document,
+            args.module,
+            dry_run=args.dry_run,
+        )
+
         print(green("update complete"))
         return 0
     except subprocess.CalledProcessError as exc:
@@ -391,13 +504,20 @@ def main(argv: list[str] | None = None) -> int:
             print(exc.stdout, file=sys.stderr)
         if exc.stderr:
             print(exc.stderr, file=sys.stderr)
+        _print_backup_hint(backup_dir)
         return 1
     except UpdateError as exc:
         print(red(str(exc)), file=sys.stderr)
+        _print_backup_hint(backup_dir)
+        return 1
+    except OSError as exc:
+        print(red(f"文件系统操作失败: {exc}"), file=sys.stderr)
+        _print_backup_hint(backup_dir)
         return 1
     except KeyboardInterrupt:
         print()
         print(yellow("更新已中断"))
+        _print_backup_hint(backup_dir)
         return 130
 
 

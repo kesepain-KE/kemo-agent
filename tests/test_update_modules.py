@@ -11,7 +11,7 @@ from update import agents as agents_update
 from update import core as core_update
 from update import plugins as plugins_update
 from update import web as web_update
-from update._utils import sync_directory
+from update._utils import UpdateError, sync_directory, write_json_atomic
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,15 @@ def write_json(path: Path, value: dict) -> None:
 
 
 class UpdateModuleTests(unittest.TestCase):
+    @staticmethod
+    def load_dispatcher(name: str):
+        spec = importlib.util.spec_from_file_location(name, ROOT / "update.py")
+        if spec is None or spec.loader is None:
+            raise AssertionError("无法加载 update.py")
+        dispatcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dispatcher)
+        return dispatcher
+
     def test_sync_directory_dry_run_does_not_create_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -37,6 +46,29 @@ class UpdateModuleTests(unittest.TestCase):
             sync_directory(source, target, delete=True, dry_run=True)
 
             self.assertFalse(target.exists())
+
+    def test_write_json_atomic_replaces_manifest_without_temporary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "version.json"
+            write_json(path, {"version": "1.0.0"})
+
+            write_json_atomic(path, {"version": "2.0.0", "name": "kemo-agent"})
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], "2.0.0")
+            self.assertEqual(list(path.parent.glob(".version.json.*.tmp")), [])
+
+    def test_build_requires_npm_even_when_stale_dist_exists(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_build_requires_npm")
+        with tempfile.TemporaryDirectory() as temporary:
+            web_dir = Path(temporary) / "frontend"
+            write_json(web_dir / "package.json", {"name": "web"})
+            write(web_dir / "dist" / "index.html", "stale")
+            with (
+                mock.patch.object(dispatcher, "WEB_DIR", web_dir),
+                mock.patch.object(dispatcher, "_resolve_npm_command", return_value=None),
+                self.assertRaises(UpdateError),
+            ):
+                dispatcher.build_web_frontend(dry_run=False)
 
     def test_core_preserves_message_out_and_only_updates_register_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -87,6 +119,17 @@ class UpdateModuleTests(unittest.TestCase):
             )
             self.assertFalse((target / "provider" / "obsolete.py").exists())
             self.assertEqual((target / "README_EN.md").read_text(encoding="utf-8"), "new readme")
+
+    def test_core_contains_runtime_entrypoints_but_does_not_commit_version(self) -> None:
+        expected = {
+            "start_web.py",
+            "restart.py",
+            "requirements-dev.txt",
+            "kemo-agent.ico",
+            "kemo-web-UI.png",
+        }
+        self.assertTrue(expected.issubset(set(core_update.FILES)))
+        self.assertNotIn("version.json", core_update.FILES)
 
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -163,11 +206,7 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertEqual((target / "README_EN.md").read_text(encoding="utf-8"), "new readme")
 
     def test_dispatcher_parses_module_and_component_versions(self) -> None:
-        spec = importlib.util.spec_from_file_location("kemo_update_dispatcher", ROOT / "update.py")
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        dispatcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(dispatcher)
+        dispatcher = self.load_dispatcher("kemo_update_dispatcher")
 
         args = dispatcher.parse_args(["--module", "plugins", "--dry-run"])
         self.assertEqual(args.module, "plugins")
@@ -179,15 +218,129 @@ class UpdateModuleTests(unittest.TestCase):
         self.assertEqual(dispatcher.version_for_module(document, "all"), "1.2.0")
         self.assertEqual(dispatcher.version_for_module(document, "plugins"), "1.3.0")
 
-    def test_plugins_only_dispatch_does_not_run_core_migrations_or_builds(self) -> None:
-        spec = importlib.util.spec_from_file_location("kemo_update_plugins_only", ROOT / "update.py")
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        dispatcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(dispatcher)
-        version = {
+    def test_dispatcher_rejects_incomplete_version_manifest(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_version_validation")
+        document = {
+            "version": "2.0.0",
+            "components": {"core": {"version": "2.0.0"}},
+        }
+
+        with self.assertRaises(UpdateError):
+            dispatcher.validate_version_document(document, "远程")
+
+    def test_dispatcher_loads_update_board_from_cloned_source(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_remote_board")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            write(source / "update" / "__init__.py", "")
+            write(source / "update" / "_utils.py", "MARKER = 'remote-package'\n")
+            write(
+                source / "update" / "core.py",
+                "from ._utils import MARKER\n"
+                "def update(source_root, target_root, **kwargs):\n"
+                "    target_root.mkdir(parents=True, exist_ok=True)\n"
+                "    (target_root / 'remote-board-used').write_text(MARKER, encoding='utf-8')\n"
+                "    return {'module': 'core', 'status': 'ok', 'details': [], 'warnings': []}\n",
+            )
+
+            results = dispatcher.run_modules(
+                ["core"],
+                source,
+                target,
+                dry_run=False,
+                assume_yes=True,
+            )
+
+            self.assertEqual(results[0]["status"], "ok")
+            self.assertEqual(
+                (target / "remote-board-used").read_text(encoding="utf-8"),
+                "remote-package",
+            )
+
+    def test_dispatcher_disables_legacy_bridge_for_remote_web_board(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_remote_web_board")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            write(source / "update" / "__init__.py", "")
+            write(
+                source / "update" / "web.py",
+                "def update(source_root, target_root, *, legacy_core_compat=True, **kwargs):\n"
+                "    return {'module': 'web', 'status': 'ok', "
+                "'details': [str(legacy_core_compat)], 'warnings': []}\n",
+            )
+
+            results = dispatcher.run_modules(
+                ["web"],
+                source,
+                target,
+                dry_run=False,
+                assume_yes=True,
+            )
+
+            self.assertEqual(results[0]["status"], "ok")
+            self.assertEqual(results[0]["details"], ["False"])
+
+    def test_component_update_preserves_root_and_other_component_versions(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_version_merge")
+        local = {
+            "version": "1.0.0",
+            "components": {
+                "core": {"version": "1.0.0"},
+                "plugins": {"version": "1.0.0"},
+            },
+        }
+        remote = {
+            "version": "2.0.0",
+            "components": {
+                "core": {"version": "2.0.0"},
+                "plugins": {"version": "2.1.0"},
+            },
+        }
+
+        merged = dispatcher.version_document_after_update(local, remote, "plugins")
+
+        self.assertEqual(merged["version"], "1.0.0")
+        self.assertEqual(merged["components"]["core"]["version"], "1.0.0")
+        self.assertEqual(merged["components"]["plugins"]["version"], "2.1.0")
+        self.assertEqual(local["components"]["plugins"]["version"], "1.0.0")
+
+    def test_finalize_version_writes_only_after_explicit_commit(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_version_commit")
+        local = {
             "version": "1.0.0",
             "components": {"plugins": {"version": "1.0.0"}},
+        }
+        remote = {
+            "version": "2.0.0",
+            "components": {"plugins": {"version": "2.0.0"}},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_json(root / "version.json", local)
+            with mock.patch.object(dispatcher, "ROOT", root):
+                dispatcher.finalize_version_document(
+                    local,
+                    remote,
+                    "plugins",
+                    dry_run=False,
+                )
+
+            stored = json.loads((root / "version.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["version"], "1.0.0")
+            self.assertEqual(stored["components"]["plugins"]["version"], "2.0.0")
+
+    def test_plugins_only_dispatch_does_not_run_core_migrations_or_builds(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_plugins_only")
+        version = {
+            "version": "1.0.0",
+            "components": {
+                name: {"version": "1.0.0"}
+                for name in dispatcher.MODULES
+            },
         }
 
         with (
@@ -206,6 +359,7 @@ class UpdateModuleTests(unittest.TestCase):
             mock.patch.object(dispatcher, "migrate_user_memories") as migrate_memories,
             mock.patch.object(dispatcher, "build_web_frontend") as build_web,
             mock.patch.object(dispatcher, "refresh_dependencies") as refresh_dependencies,
+            mock.patch.object(dispatcher, "finalize_version_document") as finalize_version,
         ):
             result = dispatcher.main(["--module", "plugins", "--yes"])
 
@@ -215,6 +369,51 @@ class UpdateModuleTests(unittest.TestCase):
         migrate_memories.assert_not_called()
         build_web.assert_not_called()
         refresh_dependencies.assert_not_called()
+        finalize_version.assert_called_once_with(
+            version,
+            version,
+            "plugins",
+            dry_run=False,
+        )
+
+    def test_failed_web_build_does_not_commit_version(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_failed_build")
+        local = {
+            "version": "1.0.0",
+            "components": {name: {"version": "1.0.0"} for name in dispatcher.MODULES},
+        }
+        remote = {
+            "version": "2.0.0",
+            "components": {name: {"version": "2.0.0"} for name in dispatcher.MODULES},
+        }
+        results = [
+            {"module": name, "status": "ok", "details": [], "warnings": []}
+            for name in dispatcher.MODULES
+        ]
+
+        with (
+            mock.patch.object(dispatcher, "_print_platform_warning"),
+            mock.patch.object(dispatcher, "load_version_documents", return_value=(local, remote)),
+            mock.patch.object(dispatcher, "should_update", return_value=True),
+            mock.patch.object(dispatcher, "require_commands"),
+            mock.patch.object(dispatcher, "clone_latest", return_value=ROOT),
+            mock.patch.object(dispatcher, "make_backup", return_value=ROOT / ".backups" / "test"),
+            mock.patch.object(dispatcher, "run_modules", return_value=results),
+            mock.patch.object(dispatcher, "migrate_user_skeletons"),
+            mock.patch.object(dispatcher, "migrate_user_memories"),
+            mock.patch.object(
+                dispatcher,
+                "build_web_frontend",
+                side_effect=UpdateError("frontend build failed"),
+            ),
+            mock.patch.object(dispatcher, "refresh_dependencies") as refresh_dependencies,
+            mock.patch.object(dispatcher, "finalize_version_document") as finalize_version,
+        ):
+            result = dispatcher.main(["--module", "all", "--yes"])
+
+        self.assertEqual(result, 1)
+        refresh_dependencies.assert_not_called()
+        finalize_version.assert_not_called()
 
 
 if __name__ == "__main__":

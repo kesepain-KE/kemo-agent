@@ -52,6 +52,7 @@ def update(
     *,
     dry_run: bool = False,
     assume_yes: bool = False,
+    legacy_core_compat: bool = True,
 ) -> dict:
     """Replace web/ while preserving dependency and build-product directories."""
     del assume_yes
@@ -73,13 +74,14 @@ def update(
     )
     details = ["完全同步 web/（保留 node_modules/ 与 dist/）"]
     warnings: list[str] = []
-    _sync_legacy_core_omissions(
-        source_root,
-        target_root,
-        dry_run=dry_run,
-        details=details,
-        warnings=warnings,
-    )
+    if legacy_core_compat:
+        _sync_legacy_core_omissions(
+            source_root,
+            target_root,
+            dry_run=dry_run,
+            details=details,
+            warnings=warnings,
+        )
     return {
         "module": MODULE_NAME,
         "status": "partial" if warnings else "ok",

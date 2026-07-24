@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Iterable
@@ -99,11 +100,43 @@ def require_commands(names: Iterable[str]) -> None:
 
 
 def read_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise UpdateError(f"无法读取 JSON 文件 {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise UpdateError(f"{path} 不是 JSON 对象")
     return data
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    """Write a JSON object atomically without exposing a partial manifest."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def fetch_json(url: str) -> dict:
@@ -111,8 +144,11 @@ def fetch_json(url: str) -> dict:
         url,
         headers={"Accept": "application/json", "User-Agent": "kemo-agent-updater"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise UpdateError(f"无法读取远程版本文件 {url}: {exc}") from exc
     if not isinstance(data, dict):
         raise UpdateError(f"远程 JSON 不是对象: {url}")
     return data
