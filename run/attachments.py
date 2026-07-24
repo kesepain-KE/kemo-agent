@@ -6,6 +6,7 @@ import base64
 import hashlib
 import mimetypes
 import os
+import stat
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -63,30 +64,62 @@ def _upload_root(root: Path, user: str) -> Path:
     return (root / "users" / user / "file_upload").resolve()
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
+def _same_existing_path(left: Path, right: Path) -> bool:
+    """Compare filesystem identity, including Windows 8.3 path aliases."""
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
+            os.path.realpath(right)
+        )
+
+
+def _reject_linked_path(candidate: Path, base: Path) -> None:
+    current = candidate
+    while True:
+        if _is_link_or_junction(current):
+            raise AttachmentError("上传附件路径不得包含符号链接或目录联接")
+        if _same_existing_path(current, base):
+            return
+        parent = current.parent
+        if parent == current:
+            raise AttachmentError("附件路径必须位于当前用户的 file_upload 目录")
+        current = parent
+
+
 def _safe_uploaded_path(root: Path, user: str, value: Any) -> tuple[Path, str]:
     if not isinstance(value, str) or not value.strip():
         raise AttachmentError("上传附件缺少有效 path")
-    base = _upload_root(root.resolve(), user)
+    root_resolved = root.resolve()
+    base = _upload_root(root_resolved, user)
     raw = Path(value.strip())
-    candidate = raw if raw.is_absolute() else root.resolve() / raw
-    lexical = Path(os.path.abspath(candidate))
+    candidate = raw if raw.is_absolute() else root_resolved / raw
+    candidate = Path(os.path.abspath(candidate))
+    _reject_linked_path(candidate, base)
     try:
-        lexical_relative = lexical.relative_to(base)
-        current = base
-        for part in lexical_relative.parts:
-            current = current / part
-            is_junction = getattr(current, "is_junction", lambda: False)
-            if current.is_symlink() or is_junction():
-                raise AttachmentError("上传附件路径不得包含符号链接或目录联接")
         resolved = candidate.resolve(strict=True)
-        relative = resolved.relative_to(base)
+        resolved.relative_to(base)
     except FileNotFoundError:
         raise AttachmentError(f"上传附件不存在：{value}") from None
     except ValueError:
         raise AttachmentError("附件路径必须位于当前用户的 file_upload 目录") from None
     if not resolved.is_file():
         raise AttachmentError(f"上传附件不是文件：{value}")
-    return resolved, resolved.relative_to(root.resolve()).as_posix()
+    return resolved, resolved.relative_to(root_resolved).as_posix()
 
 
 def _sha256(path: Path) -> str:

@@ -112,6 +112,30 @@ class MultimodalRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(AttachmentError, "file_upload"):
             describe_uploaded_asset(root, "alice", {"path": str(outside)})
 
+    def test_uploaded_asset_rejects_link_inside_upload_root(self) -> None:
+        root, _ = self.make_root()
+        outside = root / "outside.txt"
+        outside.write_text("outside", "utf-8")
+        linked = root / "users" / "alice" / "file_upload" / "linked.txt"
+        try:
+            linked.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(AttachmentError, "符号链接|目录联接"):
+            describe_uploaded_asset(root, "alice", {"path": str(linked)})
+
+    @unittest.skipUnless(os.name == "nt", "Windows path alias regression")
+    def test_absolute_windows_upload_path_accepts_temp_directory_alias(self) -> None:
+        root, _ = self.make_root()
+        uploaded = root / "users" / "alice" / "file_upload" / "absolute.txt"
+        uploaded.write_text("hello", "utf-8")
+
+        descriptor = describe_uploaded_asset(root, "alice", {"path": str(uploaded)})
+
+        self.assertEqual(descriptor["name"], "absolute.txt")
+        self.assertEqual(descriptor["media_kind"], "file")
+
     def test_uploaded_audio_video_and_file_are_classified_without_becoming_images(self) -> None:
         root, _ = self.make_root()
         upload = root / "users" / "alice" / "file_upload"
