@@ -29,7 +29,7 @@ describe('parseSseFrames', () => {
 
   it('提交运行中引导到指定 run_id', async () => {
     const result = await submitGuidance('kesepain', 'run_test_123', 'adjust')
-    expect(result).toMatchObject({ run_id: 'run_test_123', status: 'queued', queued: 1 })
+    expect(result).toMatchObject({ run_id: 'run_test_123', status: 'accepted_current_run', queued: 1 })
   })
 
   it('计划执行请求携带 plan_id 且不需要伪造用户 prompt', async () => {

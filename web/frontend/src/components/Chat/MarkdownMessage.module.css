@@ -101,6 +101,7 @@
 }
 
 .codeBlockWrapper {
+  position: relative;
   max-width: 100%;
   margin: 0.7em 0;
   overflow: hidden;
@@ -110,12 +111,66 @@
 
 .codeBlockWrapper pre {
   margin: 0;
-  padding: 13px 15px;
+  padding: 43px 15px 13px;
   overflow-x: auto;
   border: 0;
   border-radius: 0;
   background: var(--surface-2);
   white-space: pre;
+}
+
+.copyButton {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  min-width: 68px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
+  color: var(--muted);
+  box-shadow: var(--shadow-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: color 0.15s, border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.copyButton:hover:not(:disabled) {
+  border-color: var(--brand-line);
+  background: var(--surface-hover);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.copyButton:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.copyButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.copyButton.copied {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--line));
+  background: color-mix(in srgb, var(--green) 10%, var(--surface-elevated));
+  color: var(--green);
+}
+
+.copyButton.error {
+  border-color: color-mix(in srgb, var(--red) 38%, var(--line));
+  background: var(--red-soft);
+  color: var(--red);
 }
 
 .codeBlockWrapper code {
@@ -126,4 +181,18 @@
 
 .markdownBody :global(.hljs) {
   background: transparent;
+}
+
+@media (max-width: 620px) {
+  .codeBlockWrapper pre {
+    padding: 41px 12px 12px;
+  }
+
+  .copyButton {
+    top: 7px;
+    right: 7px;
+    height: 27px;
+    min-width: 64px;
+    padding: 0 8px;
+  }
 }

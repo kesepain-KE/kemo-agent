@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, History, LoaderCircle, MessageSquareText, Search, Trash2, X } from 'lucide-react'
 import type { SessionSummary } from '../types/api'
+import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import { formatDateTime } from './ModuleUi'
 import { sessionDisplayName } from './SessionHistoryPanel'
 import styles from './HistorySearchDrawer.module.css'
@@ -212,52 +213,46 @@ export function HistorySearchDrawer({
           </div>}
         </div>
       </div>
-      {pendingSession && <div className={styles.confirmLayer}>
-        <section className={styles.confirmDialog} role="alertdialog" aria-modal="true" aria-labelledby="history-switch-title" aria-describedby="history-switch-description">
-          <span className={styles.confirmIcon}><AlertTriangle size={22} /></span>
-          <div className={styles.confirmCopy}>
-            <strong id="history-switch-title">确认切换历史对话？</strong>
-            <span className={styles.confirmTarget}>{sessionDisplayName(pendingSession)}</span>
-            <p id="history-switch-description">切换前会保存当前对话。智能体运行期间切换可能造成状态异常，请确认当前运行已经结束。</p>
-          </div>
-          <div className={styles.confirmActions}>
-            <button type="button" onClick={() => setPendingSessionId('')}>取消</button>
-            <button type="button" className={styles.confirmButton} onClick={confirmSwitch}>确认切换</button>
-          </div>
-        </section>
-      </div>}
-      {deleteTarget && <div className={styles.confirmLayer}>
-        <section className={styles.confirmDialog} role="alertdialog" aria-modal="true" aria-labelledby="history-delete-title" aria-describedby="history-delete-description">
-          <span className={`${styles.confirmIcon} ${styles.deleteConfirmIcon}`}><Trash2 size={21} /></span>
-          <div className={styles.confirmCopy}>
-            <strong id="history-delete-title">确认删除这条历史对话？</strong>
-            <span className={styles.confirmTarget}>{sessionDisplayName(deleteTarget)}</span>
-            <p id="history-delete-description">该对话及其完整历史将被永久删除，此操作无法撤销。</p>
-            {mutationError && <p className={styles.mutationError}>{mutationError}</p>}
-          </div>
-          <div className={styles.confirmActions}>
-            <button type="button" disabled={Boolean(pendingAction)} onClick={() => setDeleteSessionId('')}>取消</button>
-            <button type="button" className={styles.deleteConfirmButton} disabled={Boolean(pendingAction)} onClick={() => { void confirmDelete() }}>{pendingAction === 'delete' ? '正在删除…' : '确认删除'}</button>
-          </div>
-        </section>
-      </div>}
-      {deleteAllOpen && <div className={styles.confirmLayer}>
-        <section className={styles.confirmDialog} role="alertdialog" aria-modal="true" aria-labelledby="history-delete-all-title" aria-describedby="history-delete-all-description">
-          <span className={`${styles.confirmIcon} ${styles.deleteConfirmIcon}`}><Trash2 size={21} /></span>
-          <div className={styles.confirmCopy}>
-            <strong id="history-delete-all-title">确认删除全部历史对话？</strong>
-            <span className={styles.confirmTarget}>共 {sessions.length} 条历史对话</span>
-            <p id="history-delete-all-description">当前用户的全部 Web 历史对话及其完整内容将被永久删除，此操作无法撤销。</p>
-            {mutationError && <p className={styles.mutationError}>{mutationError}</p>}
-          </div>
-          <div className={styles.confirmActions}>
-            <button type="button" disabled={Boolean(pendingAction)} onClick={() => setDeleteAllOpen(false)}>取消</button>
-            <button type="button" className={styles.deleteConfirmButton} disabled={Boolean(pendingAction)} onClick={() => { void confirmDeleteAll() }}>{pendingAction === 'delete_all' ? '正在全部删除…' : '确认全部删除'}</button>
-          </div>
-        </section>
-      </div>}
       </>}
     </aside>
     {open && <button className="drawer-backdrop" aria-label="关闭历史对话" onClick={closeDrawer} />}
+    <GlobalConfirmDialog
+      open={Boolean(pendingSession)}
+      title="确认切换历史对话？"
+      detail={pendingSession ? sessionDisplayName(pendingSession) : ''}
+      description="切换前会保存当前对话。智能体运行期间切换可能造成状态异常，请确认当前运行已经结束。"
+      icon={<AlertTriangle size={22} />}
+      confirmLabel="确认切换"
+      onCancel={() => setPendingSessionId('')}
+      onConfirm={confirmSwitch}
+    />
+    <GlobalConfirmDialog
+      open={Boolean(deleteTarget)}
+      title="确认删除这条历史对话？"
+      detail={deleteTarget ? sessionDisplayName(deleteTarget) : ''}
+      description="该对话及其完整历史将被永久删除，此操作无法撤销。"
+      error={mutationError}
+      icon={<Trash2 size={21} />}
+      tone="danger"
+      confirmLabel="确认删除"
+      pendingLabel="正在删除…"
+      pending={pendingAction === 'delete'}
+      onCancel={() => { setDeleteSessionId(''); setMutationError('') }}
+      onConfirm={() => { void confirmDelete() }}
+    />
+    <GlobalConfirmDialog
+      open={deleteAllOpen}
+      title="确认删除全部历史对话？"
+      detail={`共 ${sessions.length} 条历史对话`}
+      description="当前用户的全部 Web 历史对话及其完整内容将被永久删除，此操作无法撤销。"
+      error={mutationError}
+      icon={<Trash2 size={21} />}
+      tone="danger"
+      confirmLabel="确认全部删除"
+      pendingLabel="正在全部删除…"
+      pending={pendingAction === 'delete_all'}
+      onCancel={() => { setDeleteAllOpen(false); setMutationError('') }}
+      onConfirm={() => { void confirmDeleteAll() }}
+    />
   </>
 }

@@ -1,3 +1,5 @@
+import { randomUUID } from './randomId'
+
 export type SessionChannelEvent = {
   type: 'session-deleted'
   user: string
@@ -5,7 +7,7 @@ export type SessionChannelEvent = {
   clientId: string
 }
 
-const pageClientId = `web_${crypto.randomUUID().replaceAll('-', '')}`
+const pageClientId = `web_${randomUUID().replaceAll('-', '')}`
 const channelName = 'kemo-agent-sessions-v1'
 
 export function getPageClientId() {

@@ -1715,8 +1715,15 @@ button,select,.select-like,.role-chip,.state-pill,.status-chip,.policy-value{min
 }
 .config-select-popover>button{width:100%;min-height:52px;padding:7px 9px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--text-2);display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;gap:8px;text-align:right;cursor:pointer}
 .config-select-popover>button:hover{background:var(--surface-hover);color:var(--text)}
+.config-select-popover>button:focus-visible{outline:0;background:var(--surface-hover);color:var(--text)}
 .config-select-popover>button.active{background:var(--brand-soft);color:var(--brand)}
 .config-select-popover strong,.config-select-popover small{display:block}.config-select-popover strong{font-size:.78125rem}.config-select-popover small{margin-top:3px;color:var(--muted);font-size:.625rem}
+.vision-routing-select{width:100%}
+.vision-routing-popover{min-width:100%}
+.vision-routing-popover>button>span{min-width:0}
+.vision-routing-popover strong,.vision-routing-popover small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vision-routing-popover svg{justify-self:center}
+.settings-disclosure:has(.vision-routing-select.open){position:relative;z-index:35;overflow:visible}
 .settings-user-lock{margin:12px 12px 0;padding:11px 12px;border:1px solid color-mix(in srgb,var(--amber) 30%,var(--line));border-radius:var(--radius-control);background:color-mix(in srgb,var(--amber) 8%,var(--surface));color:var(--amber);display:grid;grid-template-columns:22px minmax(0,1fr);align-items:center;gap:9px}
 .settings-user-lock strong,.settings-user-lock small{display:block}.settings-user-lock strong{font-size:.75rem}.settings-user-lock small{margin-top:3px;color:var(--muted);font-size:.65625rem}
 .settings-user-list{padding:12px;display:grid;gap:8px}

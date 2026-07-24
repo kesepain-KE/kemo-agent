@@ -88,12 +88,6 @@
 .editorEmpty strong { color: var(--text); font-size: .85rem; }
 .editorEmpty span { font-size: .72rem; }
 .editorActions { min-height: 60px; padding: 10px 12px; display: flex; justify-content: flex-end; align-items: center; gap: 7px; }
-.deleteOverlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: color-mix(in srgb, var(--overlay) 68%, transparent); }
-.deleteDialog { width: min(380px, 100%); padding: 22px; display: flex; flex-direction: column; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 17px; background: var(--surface-elevated); box-shadow: var(--shadow-float); text-align: center; }
-.deleteDialog > svg { color: var(--red); }
-.deleteDialog strong { color: var(--text); font-size: .95rem; }
-.deleteDialog > span { color: var(--muted); font-size: .75rem; }
-.deleteDialog > div { width: 100%; display: flex; justify-content: center; gap: 8px; margin-top: 6px; }
 @media (max-width: 1180px) { .workspace { grid-template-columns: minmax(0, 1fr) 390px; } .rowMeta small { display: none; } }
 @media (max-width: 980px) { .statGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .workspace { grid-template-columns: 1fr; } .editorPanel { min-height: 620px; } }
 @media (max-width: 620px) { .statGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .headerActions { flex-wrap: wrap; } .row { grid-template-columns: 10px minmax(0, 1fr); } .rowMeta { grid-column: 2; justify-content: flex-start; } .rowMeta small { display: block; } .editorActions { flex-wrap: wrap; } }

@@ -1,4 +1,4 @@
-import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react'
+import type { ChangeEvent, ClipboardEvent, KeyboardEvent, ReactNode } from 'react'
 import { useEffect, useRef } from 'react'
 import { BarChart3, BookOpen, Boxes, ChevronDown, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
@@ -8,6 +8,7 @@ export interface AgentComposerProps {
   value: string
   placeholder: string
   currentRound: number
+  totalRounds?: number
   roundLimit: number
   running?: boolean
   stopping?: boolean
@@ -16,8 +17,10 @@ export interface AgentComposerProps {
   conversationMenu?: ReactNode
   notice?: ReactNode
   uploadFeedback?: ReactNode
+  pendingFileCount?: number
+  uploading?: boolean
   onChange: (value: string) => void
-  onUploadFile?: (file: File) => void
+  onUploadFiles?: (files: File[]) => void
   onOpenKnowledge: () => void
   onOpenExpand: () => void
   onOpenCommands: () => void
@@ -30,6 +33,7 @@ export function AgentComposer({
   value,
   placeholder,
   currentRound,
+  totalRounds = currentRound,
   roundLimit,
   running = false,
   stopping = false,
@@ -38,8 +42,10 @@ export function AgentComposer({
   conversationMenu,
   notice,
   uploadFeedback,
+  pendingFileCount = 0,
+  uploading = false,
   onChange,
-  onUploadFile,
+  onUploadFiles,
   onOpenKnowledge,
   onOpenExpand,
   onOpenCommands,
@@ -49,7 +55,10 @@ export function AgentComposer({
 }: AgentComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const canSubmit = !disabled && !stopping && value.trim().length > 0
+  const canSubmit = !disabled
+    && !stopping
+    && !uploading
+    && (value.trim().length > 0 || (!running && pendingFileCount > 0))
   const speech = useSpeechRecognition((text) => {
     const separator = value && !/\s$/.test(value) ? ' ' : ''
     onChange(`${value}${separator}${text}`)
@@ -77,16 +86,27 @@ export function AgentComposer({
     }
   }
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
+    const files = Array.from(event.target.files ?? [])
     event.currentTarget.value = ''
-    if (file) onUploadFile?.(file)
+    if (files.length) onUploadFiles?.(files)
+  }
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (disabled || uploading || !onUploadFiles) return
+    const itemFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+    const files = itemFiles.length ? itemFiles : Array.from(event.clipboardData.files)
+    if (!files.length) return
+    event.preventDefault()
+    onUploadFiles(files)
   }
 
   return (
     <section className={styles.composer} aria-label="消息输入区域">
       {notice}
       {uploadFeedback}
-      <input ref={fileInputRef} type="file" hidden aria-hidden="true" onChange={handleFileChange} />
+      <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFileChange} />
       <textarea
         ref={textareaRef}
         className={styles.input}
@@ -97,11 +117,12 @@ export function AgentComposer({
         aria-label="消息内容"
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
       />
 
       <div className={styles.footer}>
         <div className={styles.tools}>
-          <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || !onUploadFile}>
+          <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || uploading || !onUploadFiles}>
             <Paperclip />
           </ComposerIconButton>
           {speech.supported ? <ComposerIconButton
@@ -125,11 +146,13 @@ export function AgentComposer({
         </div>
 
         <div className={styles.actions}>
-          <div className={styles.stat} title={`当前第 ${currentRound} 轮，上下文轮次上限为 ${roundLimit} 轮`}>
+          <div className={styles.stat} title={`当前上下文 ${currentRound}/${roundLimit} 轮，历史累计 ${totalRounds} 轮`}>
             <BarChart3 aria-hidden="true" />
-            <span className={styles.statRound}>第 {currentRound} 轮</span>
+            <span className={styles.statRound}>上下文 {currentRound} 轮</span>
             <span className={styles.statDivider} aria-hidden="true" />
             <span>{currentRound}/{roundLimit}</span>
+            <span className={styles.statDivider} aria-hidden="true" />
+            <span>历史 {totalRounds}</span>
           </div>
 
           <div className={`${styles.menuWrap} composer-more`}>

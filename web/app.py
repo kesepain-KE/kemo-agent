@@ -48,8 +48,13 @@ class ChatBody(BaseModel):
 
     @model_validator(mode="after")
     def require_input(self) -> "ChatBody":
-        if not self.prompt.strip() and not self.content and not self.plan_id.strip():
-            raise ValueError("prompt、content 和 plan_id 不能同时为空")
+        if (
+            not self.prompt.strip()
+            and not self.content
+            and not self.uploaded_files
+            and not self.plan_id.strip()
+        ):
+            raise ValueError("prompt、content、uploaded_files 和 plan_id 不能同时为空")
         return self
 
 

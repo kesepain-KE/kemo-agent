@@ -38,6 +38,7 @@ from provider.protocol.models import (
 )
 from run.agents import discover_agents
 from run.agent_runner import AgentRunner
+from run.attachments import AttachmentError, describe_uploaded_asset
 from run.config import (
     ConfigError,
     USER_ONLY_SECTIONS,
@@ -109,6 +110,7 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
+from run.guidance import GuidanceMailbox
 from run.process_utils import hidden_subprocess_kwargs
 from run.task_plan_executor import cancel_plan, pause_plan
 from run.tools import apply_runtime_tool_policy, discover_tools
@@ -511,7 +513,7 @@ class ActiveRun:
     user: str
     session_id: str
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    guidance: queue.Queue[str] = field(default_factory=lambda: queue.Queue(maxsize=8))
+    guidance: GuidanceMailbox = field(default_factory=lambda: GuidanceMailbox(maxsize=8))
     started_at: float = field(default_factory=time.monotonic)
 
 
@@ -909,15 +911,18 @@ class WebRunService:
             if active.user != name:
                 raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
             try:
-                active.guidance.put_nowait(text)
+                accepted_current_run, queued = active.guidance.offer(text)
             except queue.Full as exc:
                 raise ConflictError("运行中引导队列已满，请等待当前引导被处理") from exc
-            queued = active.guidance.qsize()
         return {
             "run_id": normalized_run_id,
             "user": name,
             "session_id": active.session_id,
-            "status": "queued",
+            "status": (
+                "accepted_current_run"
+                if accepted_current_run
+                else "queued_next_turn"
+            ),
             "queued": queued,
         }
 
@@ -931,6 +936,7 @@ class WebRunService:
             if active is None or active.user != name:
                 raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
             active.cancel_event.set()
+            active.guidance.close()
         return {
             "run_id": normalized_run_id,
             "user": name,
@@ -1159,13 +1165,18 @@ class WebRunService:
             if not target.is_file():
                 raise NotFoundError(f"上传文件不存在：{relative_path}")
             seen.add(relative_path)
-            normalized.append(
-                {
+            try:
+                normalized.append(describe_uploaded_asset(
+                    self.root,
+                    user,
+                    {
                     "name": target.name,
                     "path": self._project_path(target),
                     "size": target.stat().st_size,
-                }
-            )
+                    },
+                ))
+            except AttachmentError as exc:
+                raise InvalidRequestError(str(exc)) from None
         return normalized
 
     def write_file_text(
@@ -2859,6 +2870,35 @@ class WebRunService:
         def in_selected_page(round_number: int) -> bool:
             return start_round > 0 and start_round <= round_number <= end_round
 
+        def media_artifacts(value: Any) -> list[dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            artifacts: list[dict[str, Any]] = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "")
+                if not path or str(item.get("scope") or "") != "download":
+                    continue
+                artifacts.append(
+                    {
+                        key: item[key]
+                        for key in (
+                            "asset_id",
+                            "type",
+                            "name",
+                            "scope",
+                            "path",
+                            "mime_type",
+                            "size",
+                            "checksum_sha256",
+                            "duration_ms",
+                        )
+                        if key in item
+                    }
+                )
+            return artifacts
+
         raw_metrics = (window.get("data") or {}).get("round_metrics") or []
         round_metrics = []
         if isinstance(raw_metrics, list):
@@ -2869,6 +2909,13 @@ class WebRunService:
                 if not in_selected_page(round_number):
                     continue
                 usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
+                artifacts: list[dict[str, Any]] = []
+                responses = item.get("provider_responses") or []
+                if isinstance(responses, list):
+                    for response in responses:
+                        metadata = response.get("metadata") if isinstance(response, dict) else None
+                        if isinstance(metadata, dict):
+                            artifacts.extend(media_artifacts(metadata.get("artifacts")))
                 round_metrics.append(
                     {
                         "round": round_number,
@@ -2883,6 +2930,7 @@ class WebRunService:
                         "status": str(item.get("status") or "completed"),
                         "cancelled": bool(item.get("cancelled", False)),
                         "cancel_reason": str(item.get("cancel_reason") or ""),
+                        "artifacts": artifacts,
                     }
                 )
         reasoning_by_round: dict[int, str] = {}
@@ -2912,6 +2960,17 @@ class WebRunService:
                         continue
                     arguments_text, arguments_truncated = _tool_text_preview(call.get("arguments") or {})
                     result_text, result_truncated = _tool_text_preview(call.get("result"))
+                    raw_result = call.get("result")
+                    tool_value = (
+                        raw_result.get("result")
+                        if isinstance(raw_result, dict)
+                        else None
+                    )
+                    artifacts = media_artifacts(
+                        tool_value.get("artifacts")
+                        if isinstance(tool_value, dict)
+                        else None
+                    )
                     raw_status = str(call.get("status") or "completed").casefold()
                     status = (
                         "running"
@@ -2931,6 +2990,7 @@ class WebRunService:
                             "arguments_truncated": arguments_truncated,
                             "result_text": result_text,
                             "result_truncated": result_truncated,
+                            "artifacts": artifacts,
                         }
                     )
                 tools_by_round[round_number] = calls
@@ -4889,6 +4949,11 @@ class WebRunService:
             round_limit=round_limit,
             configured_ratio=compression_ratio,
         )
+        active_context_rounds = (
+            max(0, int(current_context.get("rounds") or 0))
+            if current_context.get("available") is True
+            else rounds
+        )
         context_snapshot = current_context.get("context_snapshot")
         if not isinstance(context_snapshot, dict):
             context_snapshot = {
@@ -5019,7 +5084,9 @@ class WebRunService:
                 "usage": usage,
                 "limit": token_limit,
                 "percent": percent,
-                "rounds": rounds,
+                "rounds": active_context_rounds,
+                "session_total_rounds": rounds,
+                "archived_rounds": max(0, rounds - active_context_rounds),
                 "round_limit": round_limit,
             },
             "provider": settings_data["provider"],
@@ -5138,8 +5205,8 @@ class WebRunService:
         normalized_prompt = prompt.strip()
         normalized_content = self.require_content(content)
         normalized_uploaded_files = self.require_uploaded_files(name, uploaded_files)
-        if not normalized_prompt and not normalized_content:
-            raise InvalidRequestError("prompt 和 content 不能同时为空")
+        if not normalized_prompt and not normalized_content and not normalized_uploaded_files:
+            raise InvalidRequestError("prompt、content 和 uploaded_files 不能同时为空")
         normalized_run_id = (
             self.require_run_id(run_id) if run_id else f"run_{uuid.uuid4().hex}"
         )
@@ -5217,11 +5284,14 @@ class WebRunService:
                     )
                 )
                 for event in iterator:
+                    if event.type in {"done", "error"}:
+                        active.guidance.close()
                     if not put(event):
                         break
             except BaseException as exc:
                 put(exc)
             finally:
+                active.guidance.close()
                 if iterator is not None:
                     close = getattr(iterator, "close", None)
                     if callable(close):

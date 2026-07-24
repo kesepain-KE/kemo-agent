@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, mergeHistoryPages, reduceRunEvent, selectDockedPlan } from './ChatPage'
+import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, reduceRunEvent, removeSubmittedUploads, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('成功终态只清除本轮实际发送的附件，并保留运行期间新上传的文件', () => {
+    const sent = { path: 'accounts.json', name: 'accounts.json', size: 12 }
+    const uploadedDuringRun = { path: 'next.zip', name: 'next.zip', size: 24 }
+    expect(removeSubmittedUploads([sent, uploadedDuringRun], [sent])).toEqual([uploadedDuringRun])
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed' } })).toBe(true)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'cancelled' } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
+  })
+
   it('用户消息导航只收集真实用户气泡并保留历史绝对轮次', () => {
     const markers = buildUserMessageMarkers([
       { id: 'history_18_user', kind: 'message', role: 'user', content: '第十八轮问题' },
@@ -270,5 +279,20 @@ describe('reduceRunEvent', () => {
   it('done 生成可持久化的逐轮统计卡片', () => {
     const items = reduceRunEvent([], { type: 'done', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, provider_request_count: 2 }, metadata: { elapsed_ms: 35, tool_calls: 1 } })
     expect(items[0]).toMatchObject({ kind: 'usage', elapsedMs: 35, toolCalls: 1, providerRequestCount: 2, usage: { total_tokens: 12 } })
+  })
+
+  it('媒体事件生成稳定产物卡片并按资产与路径去重', () => {
+    const event = {
+      type: 'media_output' as const,
+      result: {
+        asset_id: 'asset_output_1', type: 'audio', name: 'answer.mp3',
+        scope: 'download', path: 'answer.mp3', mime_type: 'audio/mpeg',
+        size: 128, checksum_sha256: 'a'.repeat(64),
+      },
+    }
+    const once = reduceRunEvent([], event)
+    const twice = reduceRunEvent(once, event)
+    expect(once[0]).toMatchObject({ kind: 'media', artifact: { path: 'answer.mp3', type: 'audio' } })
+    expect(twice).toHaveLength(1)
   })
 })

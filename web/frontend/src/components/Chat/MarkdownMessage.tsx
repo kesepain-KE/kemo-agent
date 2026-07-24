@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { type HTMLAttributes, type ReactNode, useEffect, useRef, useState } from 'react'
+import { Check, Copy, TriangleAlert } from 'lucide-react'
 import ReactMarkdown, { type Components, type UrlTransform } from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import rehypeKatex from 'rehype-katex'
@@ -11,6 +12,7 @@ import remarkMath from 'remark-math'
 import type { PluggableList } from 'unified'
 import 'highlight.js/styles/github-dark.min.css'
 import 'katex/dist/katex.min.css'
+import { randomUUID } from '../../randomId'
 import styles from './MarkdownMessage.module.css'
 
 let mermaidReady = false
@@ -61,7 +63,7 @@ export const safeUrlTransform: UrlTransform = (url) => {
 }
 
 function MermaidDiagram({ chart }: { chart: string }) {
-  const renderId = useRef(`mermaid-${crypto.randomUUID()}`)
+  const renderId = useRef(`mermaid-${randomUUID()}`)
   const [svg, setSvg] = useState('')
   const [error, setError] = useState('')
 
@@ -90,6 +92,110 @@ function MermaidDiagram({ chart }: { chart: string }) {
     return <div className={styles.mermaidLoading}>正在渲染图表…</div>
   }
   return <div className={styles.mermaid} dangerouslySetInnerHTML={{ __html: svg }} />
+}
+
+type MarkdownTreeNode = {
+  type?: string
+  value?: unknown
+  children?: MarkdownTreeNode[]
+}
+
+function codeNodeText(node: unknown): string {
+  if (!node || typeof node !== 'object') return ''
+  const current = node as MarkdownTreeNode
+  if (current.type === 'text') return typeof current.value === 'string' ? current.value : ''
+  return Array.isArray(current.children) ? current.children.map(codeNodeText).join('') : ''
+}
+
+function legacyCopyText(text: string): boolean {
+  if (typeof document.execCommand !== 'function') return false
+  const textarea = document.createElement('textarea')
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  textarea.value = text
+  textarea.readOnly = true
+  textarea.setAttribute('aria-hidden', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.inset = '0 auto auto 0'
+  textarea.style.width = '1px'
+  textarea.style.height = '1px'
+  textarea.style.padding = '0'
+  textarea.style.border = '0'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  try {
+    textarea.focus({ preventScroll: true })
+    textarea.select()
+    textarea.setSelectionRange(0, textarea.value.length)
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    textarea.remove()
+    activeElement?.focus({ preventScroll: true })
+  }
+}
+
+async function copyCodeText(text: string): Promise<void> {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return
+    } catch {
+      // A secure-context clipboard call may still be denied by browser policy.
+      // Fall through to the user-gesture-compatible legacy path.
+    }
+  }
+  if (!legacyCopyText(text)) throw new Error('clipboard_unavailable')
+}
+
+type CopyState = 'idle' | 'copied' | 'error'
+
+function CodeBlock({ code, children, preProps }: {
+  code: string
+  children: ReactNode
+  preProps: HTMLAttributes<HTMLPreElement>
+}) {
+  const [copyState, setCopyState] = useState<CopyState>('idle')
+  const resetTimer = useRef<number | null>(null)
+
+  useEffect(() => {
+    setCopyState('idle')
+    return () => {
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    }
+  }, [code])
+
+  const copy = () => {
+    if (!code) return
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    void copyCodeText(code)
+      .then(() => setCopyState('copied'))
+      .catch(() => setCopyState('error'))
+      .finally(() => {
+        resetTimer.current = window.setTimeout(() => setCopyState('idle'), 1600)
+      })
+  }
+
+  const label = copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败' : '复制'
+  const Icon = copyState === 'copied' ? Check : copyState === 'error' ? TriangleAlert : Copy
+
+  return (
+    <div className={styles.codeBlockWrapper}>
+      <button
+        type="button"
+        className={`${styles.copyButton} ${copyState !== 'idle' ? styles[copyState] : ''}`}
+        onClick={copy}
+        disabled={!code}
+        aria-label={label}
+        title={label}
+      >
+        <Icon size={14} aria-hidden="true" />
+        <span aria-live="polite">{label}</span>
+      </button>
+      <pre {...preProps}>{children}</pre>
+    </div>
+  )
 }
 
 const markdownComponents: Components = {
@@ -126,11 +232,8 @@ const markdownComponents: Components = {
         return <MermaidDiagram chart={chart} />
       }
     }
-    return (
-      <div className={styles.codeBlockWrapper}>
-        <pre {...props}>{children}</pre>
-      </div>
-    )
+    const code = child?.type === 'element' ? codeNodeText(child).replace(/\n$/, '') : ''
+    return <CodeBlock code={code} preProps={props}>{children}</CodeBlock>
   },
   img({ node: _node, src, alt, ...props }) {
     if (!src) return null

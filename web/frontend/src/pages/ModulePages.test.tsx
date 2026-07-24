@@ -155,6 +155,27 @@ describe('V16 module pages', () => {
     expect(screen.queryByRole('button', { name: /删除此记忆/ })).not.toBeInTheDocument()
   })
 
+  it('记忆删除确认框通过全局 Portal 覆盖应用外壳', async () => {
+    server.use(http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({
+      user: 'kesepain',
+      summary: { total: 1, seven_days: 1, one_month: 0, half_year: 0, permanent: 0 },
+      items: [{
+        memory_ref: 'seven_days:removable.md', filename: 'removable.md', tier: 'seven_days',
+        preview: '# 可删除记忆\n等待确认删除。', weight: 1,
+        created_at: '2026-07-22T16:00:00+08:00', content_updated_at: '2026-07-22T16:00:00+08:00',
+        updated_at: '2026-07-22T16:00:00+08:00', last_used_at: null, expires_at: null,
+      }],
+    })))
+    renderPage('memory')
+
+    const title = await screen.findByText('可删除记忆')
+    const row = title.closest('article')!
+    fireEvent.click(within(row).getByRole('button', { name: '删除' }))
+    const dialog = screen.getByRole('alertdialog', { name: '确认删除这条记忆？' })
+    expect(dialog.parentElement?.parentElement).toBe(document.body)
+    expect(within(dialog).getByText('可删除记忆')).toBeInTheDocument()
+  })
+
   it('技能页展示五类库存、查看面板和按归属区分的操作', async () => {
     renderPage('skills')
     expect(await screen.findByRole('heading', { name: '工具与技能' })).toBeInTheDocument()
@@ -305,19 +326,33 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByRole('switch', { name: '流式输出' })).toHaveTextContent('已关闭')
     expect(screen.getByRole('combobox', { name: '思考强度' })).toHaveTextContent('中 — 均衡（推荐）')
+    expect(screen.getByRole('switch', { name: '主模型支持图片输入' })).toHaveAttribute('aria-checked', 'false')
+    const visionRoutingSelect = screen.getByRole('combobox', { name: '图片路由' })
+    expect(visionRoutingSelect).toHaveTextContent('自动 — 主模型优先')
+    expect(visionRoutingSelect).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(visionRoutingSelect)
+    expect(screen.getByRole('listbox', { name: '图片路由选项' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /仅专用视觉模型/ })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('listbox', { name: '图片路由选项' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('默认子智能体模型')).toHaveValue('agent-default')
     expect(screen.getByLabelText('轻量子智能体模型')).toHaveValue('summary-model')
     expect(screen.getByLabelText('推理子智能体模型')).toHaveValue('agent-reasoning')
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
     fireEvent.change(screen.getByLabelText('轻量子智能体模型'), { target: { value: 'summary-model-next' } })
+    fireEvent.click(screen.getByRole('switch', { name: '主模型支持图片输入' }))
+    fireEvent.keyDown(visionRoutingSelect, { key: 'ArrowDown' })
+    fireEvent.click(screen.getByRole('option', { name: /仅专用视觉模型/ }))
+    expect(visionRoutingSelect).toHaveTextContent('仅专用视觉模型')
     fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
     fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     await waitFor(() => expect(savedChanges).toMatchObject({
-      provider: { reasoning_effort: 'high' },
+      provider: { reasoning_effort: 'high', input_modalities: ['text', 'image'] },
       agent_models: { default: 'agent-default', cheap: 'summary-model-next', reasoning: 'agent-reasoning' },
+      multimodal_routing: { vision: 'dedicated' },
     }))
 
     fireEvent.click(screen.getByRole('button', { name: '用户切换 ›' }))

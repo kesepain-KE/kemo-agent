@@ -159,48 +159,6 @@
 .stateBadge { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .625rem; font-weight: 720; white-space: nowrap; }
 .activeBadge { color: var(--brand); background: var(--brand-soft); }
 
-.confirmLayer {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  display: grid;
-  place-items: center;
-  padding: 22px;
-  background: color-mix(in srgb, var(--surface) 82%, transparent);
-  backdrop-filter: blur(8px);
-}
-
-.confirmDialog {
-  width: min(100%, 340px);
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 12px;
-  padding: 18px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-panel);
-  color: var(--text);
-  background: var(--surface-elevated);
-  box-shadow: var(--shadow-float);
-}
-
-.confirmIcon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: var(--radius-control-lg); color: var(--amber); background: var(--amber-soft); }
-.deleteConfirmIcon { color: var(--red); background: var(--red-soft); }
-.confirmCopy { min-width: 0; }
-.confirmCopy strong,
-.confirmTarget { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.confirmCopy strong { font-size: .9375rem; }
-.confirmTarget { margin-top: 7px; color: var(--brand); font-size: .75rem; font-weight: 700; }
-.confirmCopy p { margin: 9px 0 0; color: var(--muted); font-size: .6875rem; line-height: 1.65; }
-.confirmActions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 3px; }
-.confirmActions button { min-height: 38px; border: 1px solid var(--line); border-radius: var(--radius-control-lg); color: var(--text-2); background: var(--surface-2); font: inherit; font-size: .75rem; font-weight: 720; cursor: pointer; }
-.confirmActions button:hover { border-color: var(--brand-line); background: var(--surface-hover); }
-.confirmActions .confirmButton { color: white; border-color: var(--brand); background: var(--brand); }
-.confirmActions .confirmButton:hover { background: color-mix(in srgb, var(--brand) 86%, black); }
-.confirmActions .deleteConfirmButton { color: white; border-color: var(--red); background: var(--red); }
-.confirmActions .deleteConfirmButton:hover:not(:disabled) { border-color: var(--red); background: color-mix(in srgb, var(--red) 86%, black); }
-.confirmActions button:disabled { cursor: not-allowed; opacity: .55; }
-.mutationError { color: var(--red) !important; }
-
 .empty { min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; border: 1px dashed var(--line); border-radius: var(--radius-card); color: var(--muted-2); text-align: center; }
 .empty svg { color: var(--brand); }
 .empty strong { color: var(--text-2); font-size: .8125rem; }

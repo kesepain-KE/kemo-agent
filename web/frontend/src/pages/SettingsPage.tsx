@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, ChevronDown, LockKeyhole, Power, RefreshCw, Save } from 'lucide-react'
@@ -21,14 +21,16 @@ import { useUiStore } from '../store/ui'
 
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime'
 type ProviderType = 'chat' | 'kemo'
-type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_generation'
+type VisionRoutingMode = 'auto' | 'main' | 'dedicated'
+type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_understanding' | 'video_generation'
 type AgentModelProfile = 'default' | 'cheap' | 'reasoning'
 type RestartState = 'idle' | 'confirming' | 'confirming-force' | 'restarting' | 'waiting' | 'failed'
 
 interface UserConfigDraft {
-  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean; reasoning_effort: ReasoningEffort }
+  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean; reasoning_effort: ReasoningEffort; supports_image_input: boolean; supports_audio_input: boolean; supports_video_input: boolean; supports_file_input: boolean }
   agent_models: Record<AgentModelProfile, string>
   multimodal_models: Record<MultimodalKey, string>
+  multimodal_routing: { vision: VisionRoutingMode }
   knowledge: { use_shared: boolean; use_global: boolean }
   kemo_graph: GraphDraft
   skills: { shared_whitelist: string[] }
@@ -83,6 +85,7 @@ const multimodalFields: Array<{ key: MultimodalKey; label: string; description: 
   { key: 'audio_transcription', label: '语音识别', description: '音频转写与语音转文字模型' },
   { key: 'speech_generation', label: '语音生成', description: '文本转语音模型' },
   { key: 'speech_to_speech', label: '语音生语音', description: '语音到语音的转换模型' },
+  { key: 'video_understanding', label: '视频理解', description: '视频分析、时间轴摘要与内容理解模型' },
   { key: 'video_generation', label: '视频生成', description: '文本或素材生成视频的模型' },
 ]
 
@@ -137,6 +140,7 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
   const provider = record(config.provider)
   const agentModels = record(config.agent_models)
   const multimodal = record(config.multimodal_models)
+  const multimodalRouting = record(config.multimodal_routing)
   const knowledge = record(config.knowledge)
   const skills = record(config.skills)
   const expand = record(config.expand)
@@ -151,6 +155,10 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
       api_key: stringValue(provider.api_key),
       stream: booleanValue(provider.stream, true),
       reasoning_effort: normalizeReasoningEffort(provider.reasoning_effort),
+      supports_image_input: stringList(provider.input_modalities).includes('image'),
+      supports_audio_input: stringList(provider.input_modalities).includes('audio'),
+      supports_video_input: stringList(provider.input_modalities).includes('video'),
+      supports_file_input: stringList(provider.input_modalities).includes('file'),
     },
     agent_models: {
       default: stringValue(agentModels.default),
@@ -164,7 +172,13 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
       audio_transcription: stringValue(multimodal.audio_transcription),
       speech_generation: stringValue(multimodal.speech_generation),
       speech_to_speech: stringValue(multimodal.speech_to_speech),
+      video_understanding: stringValue(multimodal.video_understanding),
       video_generation: stringValue(multimodal.video_generation),
+    },
+    multimodal_routing: {
+      vision: ['main', 'dedicated'].includes(stringValue(multimodalRouting.vision))
+        ? stringValue(multimodalRouting.vision) as VisionRoutingMode
+        : 'auto',
     },
     knowledge: {
       use_shared: booleanValue(knowledge.use_shared, true),
@@ -297,6 +311,72 @@ function ProviderSelect({ value, onChange }: { value: ProviderType; onChange: (v
         <span><strong>{option.label}</strong><small>{option.description}</small></span>{value === option.value ? <Check size={16} /> : <i />}
       </button>)}
     </div>}
+  </div>
+}
+
+const visionRoutingOptions: Array<{ value: VisionRoutingMode; label: string; description: string }> = [
+  { value: 'auto', label: '自动 — 主模型优先', description: '主模型支持图片时直接使用，否则切换专用视觉模型' },
+  { value: 'main', label: '仅主模型', description: '始终交给主模型处理；需要确认主模型支持图片输入' },
+  { value: 'dedicated', label: '仅专用视觉模型', description: '始终使用“图片识别”中配置的专用视觉模型' },
+]
+
+function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingMode; onChange: (value: VisionRoutingMode) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const listboxId = useId()
+  const selected = visionRoutingOptions.find((option) => option.value === value) ?? visionRoutingOptions[0]
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnPointerDown)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  return <div className={`config-select-wrap vision-routing-select ${open ? 'open' : ''}`} ref={rootRef}>
+    <button
+      type="button"
+      className={`config-select-trigger ${open ? 'open' : ''}`}
+      role="combobox"
+      aria-label="图片路由"
+      aria-controls={listboxId}
+      aria-expanded={open}
+      aria-haspopup="listbox"
+      onClick={() => setOpen((current) => !current)}
+      onKeyDown={(event) => {
+        if (!open && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+          event.preventDefault()
+          setOpen(true)
+        }
+      }}
+    >
+      <span><strong>{selected.label}</strong><small>{selected.description}</small></span><ChevronDown size={16} />
+    </button>
+    {open ? <div className="config-select-popover vision-routing-popover" id={listboxId} role="listbox" aria-label="图片路由选项">
+      {visionRoutingOptions.map((option) => <button
+        type="button"
+        role="option"
+        aria-selected={value === option.value}
+        className={value === option.value ? 'active' : ''}
+        key={option.value}
+        onClick={() => {
+          onChange(option.value)
+          setOpen(false)
+        }}
+      >
+        <span><strong>{option.label}</strong><small>{option.description}</small></span>
+        {value === option.value ? <Check size={16} /> : <i aria-hidden="true" />}
+      </button>)}
+    </div> : null}
   </div>
 }
 
@@ -441,12 +521,20 @@ export function SettingsPage() {
         if (!['http:', 'https:'].includes(url.protocol)) validation = 'Base URL 只允许 http 或 https。'
       } catch { validation = 'Base URL 格式不正确。' }
     }
+    const inputModalities = ['text']
+    if (userDraft.provider.supports_image_input) inputModalities.push('image')
+    if (userDraft.provider.type === 'kemo') {
+      if (userDraft.provider.supports_audio_input) inputModalities.push('audio')
+      if (userDraft.provider.supports_video_input) inputModalities.push('video')
+      if (userDraft.provider.supports_file_input) inputModalities.push('file')
+    }
     const provider: Record<string, unknown> = {
       type: userDraft.provider.type,
       model: userDraft.provider.model.trim(),
       base_url: userDraft.provider.base_url.trim(),
       stream: userDraft.provider.stream,
       reasoning_effort: userDraft.provider.reasoning_effort,
+      input_modalities: inputModalities,
     }
     if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
     submit({
@@ -455,6 +543,7 @@ export function SettingsPage() {
         provider,
         agent_models: userDraft.agent_models,
         multimodal_models: userDraft.multimodal_models,
+        multimodal_routing: userDraft.multimodal_routing,
       },
     }, validation)
   }
@@ -584,6 +673,12 @@ export function SettingsPage() {
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
             <SettingRow title="思考强度" description="控制主对话和子智能体的推理深度；不可关闭，缺省使用中度" source="user" control={<ReasoningEffortSelect ariaLabel="思考强度" value={userDraft.provider.reasoning_effort} onChange={(reasoningEffort) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, reasoning_effort: reasoningEffort } })} />} />
+            <SettingRow title="主模型支持图片输入" description="只在已确认当前主模型能够接收图片时开启；框架不会根据模型名称猜测" source="user" control={<Toggle checked={userDraft.provider.supports_image_input} label="主模型支持图片输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_image_input: value } })} />} />
+            {userDraft.provider.type === 'kemo' ? <>
+              <SettingRow title="主模型支持音频输入" description="仅 Kemo 模式；仍以网关能力声明为最终依据" source="user" control={<Toggle checked={userDraft.provider.supports_audio_input} label="主模型支持音频输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_audio_input: value } })} />} />
+              <SettingRow title="主模型支持视频输入" description="仅 Kemo 模式；未开启时由视频理解专用模型处理" source="user" control={<Toggle checked={userDraft.provider.supports_video_input} label="主模型支持视频输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_video_input: value } })} />} />
+              <SettingRow title="主模型支持普通文件输入" description="仅 Kemo 模式；未开启时普通文件继续使用 file 工具" source="user" control={<Toggle checked={userDraft.provider.supports_file_input} label="主模型支持普通文件输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_file_input: value } })} />} />
+            </> : null}
           </article>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>子智能体模型</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
@@ -591,7 +686,10 @@ export function SettingsPage() {
           </details>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>多模态模型</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
-            <div>{multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.multimodal_models[field.key]} placeholder="未指定" onChange={(event) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: event.target.value } })} />} />)}</div>
+            <div>
+              <SettingRow title="图片路由" description="自动模式优先主模型，不支持图片时改用专用视觉模型" source="user" control={<VisionRoutingSelect value={userDraft.multimodal_routing.vision} onChange={(vision) => setUserDraft({ ...userDraft, multimodal_routing: { vision } })} />} />
+              {multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.multimodal_models[field.key]} placeholder="未指定" onChange={(event) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: event.target.value } })} />} />)}
+            </div>
           </details>
         </> : null}
 

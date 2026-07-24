@@ -73,6 +73,9 @@ export interface ShellOutletContext {
   chatRuns: Record<string, ChatRunSnapshot>
   beginChatRun: (user: string, sessionId: string, runId: string, historyUserMessages: number) => void
   updateChatRunItems: (user: string, sessionId: string, updater: ChatItemsUpdater) => void
+  queueNextTurnMessage: (user: string, sessionId: string, message: PendingNextTurnMessage) => void
+  setNextTurnMessageStatus: (user: string, sessionId: string, messageId: string, status: PendingNextTurnMessage['status'], error?: string) => void
+  removeNextTurnMessage: (user: string, sessionId: string, messageId: string) => void
   finishChatRun: (user: string, sessionId: string, committed: boolean) => void
   clearChatRun: (user: string, sessionId: string) => void
   setSessionId: (sessionId: string) => void
@@ -88,11 +91,20 @@ export interface ShellOutletContext {
 
 export type ChatItemsUpdater = ChatItem[] | ((items: ChatItem[]) => ChatItem[])
 
+export interface PendingNextTurnMessage {
+  id: string
+  content: string
+  historyUserMessages: number
+  status: 'queued' | 'sending' | 'error'
+  error?: string
+}
+
 export interface ChatRunSnapshot {
   items: ChatItem[]
   phase: 'streaming' | 'awaiting_history' | 'idle'
   runId: string
   historyUserMessages: number
+  nextTurnQueue: PendingNextTurnMessage[]
 }
 
 export function chatRunKey(user: string, sessionId: string) {
@@ -281,6 +293,7 @@ export function AppShell() {
         phase: 'streaming',
         runId,
         historyUserMessages,
+        nextTurnQueue: current[key]?.nextTurnQueue ?? [],
       },
     }))
   }, [])
@@ -288,9 +301,42 @@ export function AppShell() {
   const updateChatRunItems = useCallback((runUser: string, runSessionId: string, updater: ChatItemsUpdater) => {
     const key = chatRunKey(runUser, runSessionId)
     setChatRuns((current) => {
-      const existing = current[key] ?? { items: [], phase: 'idle' as const, runId: '', historyUserMessages: 0 }
+      const existing = current[key] ?? { items: [], phase: 'idle' as const, runId: '', historyUserMessages: 0, nextTurnQueue: [] }
       const items = typeof updater === 'function' ? updater(existing.items) : updater
       return { ...current, [key]: { ...existing, items } }
+    })
+  }, [])
+
+  const queueNextTurnMessage = useCallback((runUser: string, runSessionId: string, message: PendingNextTurnMessage) => {
+    const key = chatRunKey(runUser, runSessionId)
+    setChatRuns((current) => {
+      const existing = current[key] ?? { items: [], phase: 'idle' as const, runId: '', historyUserMessages: message.historyUserMessages, nextTurnQueue: [] }
+      if (existing.nextTurnQueue.some((item) => item.id === message.id)) return current
+      return { ...current, [key]: { ...existing, nextTurnQueue: [...existing.nextTurnQueue, message] } }
+    })
+  }, [])
+
+  const setNextTurnMessageStatus = useCallback((runUser: string, runSessionId: string, messageId: string, status: PendingNextTurnMessage['status'], error?: string) => {
+    const key = chatRunKey(runUser, runSessionId)
+    setChatRuns((current) => {
+      const existing = current[key]
+      if (!existing) return current
+      return {
+        ...current,
+        [key]: {
+          ...existing,
+          nextTurnQueue: existing.nextTurnQueue.map((item) => item.id === messageId ? { ...item, status, error } : item),
+        },
+      }
+    })
+  }, [])
+
+  const removeNextTurnMessage = useCallback((runUser: string, runSessionId: string, messageId: string) => {
+    const key = chatRunKey(runUser, runSessionId)
+    setChatRuns((current) => {
+      const existing = current[key]
+      if (!existing) return current
+      return { ...current, [key]: { ...existing, nextTurnQueue: existing.nextTurnQueue.filter((item) => item.id !== messageId) } }
     })
   }, [])
 
@@ -306,7 +352,11 @@ export function AppShell() {
   const clearChatRun = useCallback((runUser: string, runSessionId: string) => {
     const key = chatRunKey(runUser, runSessionId)
     setChatRuns((current) => {
-      if (!(key in current)) return current
+      const existing = current[key]
+      if (!existing) return current
+      if (existing.nextTurnQueue.length) {
+        return { ...current, [key]: { ...existing, items: [], phase: 'idle', runId: '' } }
+      }
       const next = { ...current }
       delete next[key]
       return next
@@ -718,7 +768,7 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+        <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

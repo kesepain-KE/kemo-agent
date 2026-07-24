@@ -97,6 +97,7 @@ const runEventSchema = z
       'reasoning_delta',
       'tool_call_start',
       'tool_call_result',
+      'media_output',
       'guidance_applied',
       'usage',
       'error',
@@ -738,7 +739,7 @@ export async function submitGuidance(
   user: string,
   runId: string,
   guidance: string,
-): Promise<{ run_id: string; status: string; queued: number }> {
+): Promise<{ run_id: string; status: 'accepted_current_run' | 'queued_next_turn'; queued: number }> {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/guidance`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

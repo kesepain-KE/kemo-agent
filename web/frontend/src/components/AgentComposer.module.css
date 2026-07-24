@@ -111,12 +111,12 @@
 }
 
 .stat {
-  min-width: 11rem;
+  min-width: 16.5rem;
   padding: 0 1rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: .7rem;
+  gap: .55rem;
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface-elevated) 84%, transparent);
   color: var(--muted);

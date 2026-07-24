@@ -346,6 +346,35 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(screen.queryByText(/已上传 note\.md/)).not.toBeInTheDocument())
   })
 
+  it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {
+    let chatBody: { prompt?: string; uploaded_files?: string[] } | undefined
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatBody = JSON.parse(String(init?.body)) as { prompt?: string; uploaded_files?: string[] }
+      return new Response('event: done\ndata: {"type":"done"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    const screenshot = new File(['png'], 'screenshot.png', { type: 'image/png' })
+    const archive = new File(['zip'], 'bundle.zip', { type: 'application/zip' })
+    fireEvent.paste(input, {
+      clipboardData: { items: [], files: [screenshot, archive] },
+    })
+
+    expect(await screen.findByText(/已上传 screenshot\.png/)).toBeInTheDocument()
+    expect(screen.getByText(/已上传 bundle\.zip/)).toBeInTheDocument()
+    const sendButton = screen.getByRole('button', { name: '发送' })
+    expect(sendButton).toBeEnabled()
+    fireEvent.click(sendButton)
+
+    await waitFor(() => expect(chatBody).toEqual(expect.objectContaining({
+      prompt: '',
+      uploaded_files: ['screenshot.png', 'bundle.zip'],
+    })))
+  })
+
   it('对话操作菜单提供保存新建、清空、压缩和重新生成', async () => {
     let compressionCalled = false
     let undoBody: Record<string, unknown> | null = null
@@ -525,6 +554,52 @@ describe('AppShell navigation', () => {
     expect(completedCards[1]).toHaveTextContent('结果放入临时区')
     const footer = guidanceList.previousElementSibling!
     expect(footer).toHaveClass('assistant-turn-footer')
+  })
+
+  it('本轮引导入口关闭后保留消息并自动作为下一轮发送', async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>
+    let chatRequestCount = 0
+    let secondPrompt = ''
+    const encoder = new TextEncoder()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    server.use(
+      http.post('/api/runs/:runId/guidance', ({ params }) => HttpResponse.json({
+        run_id: params.runId,
+        status: 'queued_next_turn',
+        queued: 0,
+      })),
+    )
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequestCount += 1
+      if (chatRequestCount === 1) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { firstStreamController = controller },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      secondPrompt = String(JSON.parse(String(init?.body || '{}')).prompt || '')
+      return new Response('event: text_delta\ndata: {"type":"text_delta","content":"第二轮已收到"}\n\nevent: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '第一轮任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatRequestCount).toBe(1))
+
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '作为第二轮继续处理' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    expect(await screen.findByText('已排队到下一轮')).toBeInTheDocument()
+    expect(screen.getByText('作为第二轮继续处理')).toBeInTheDocument()
+
+    firstStreamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
+    firstStreamController.close()
+
+    await waitFor(() => expect(chatRequestCount).toBe(2))
+    expect(secondPrompt).toBe('作为第二轮继续处理')
+    expect(await screen.findByText('第二轮已收到')).toBeInTheDocument()
+    expect(screen.queryByText('已排队到下一轮')).not.toBeInTheDocument()
   })
 
   it('保存并创建新对话时不在前台同步等待记忆提取', async () => {
@@ -736,7 +811,9 @@ describe('AppShell navigation', () => {
     const historyDrawer = await screen.findByRole('dialog', { name: '历史对话' })
     fireEvent.change(within(historyDrawer).getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '项目' } })
     fireEvent.click(await within(historyDrawer).findByRole('button', { name: '打开对话 项目复盘' }))
-    fireEvent.click(within(historyDrawer).getByRole('button', { name: '确认切换' }))
+    const switchDialog = screen.getByRole('alertdialog', { name: '确认切换历史对话？' })
+    expect(switchDialog.parentElement?.parentElement).toBe(document.body)
+    fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
 
     await waitFor(() => expect(closedSession).toBe('s1'))
     await waitFor(() => expect(getSearch()).toContain('session=s2'))
@@ -783,7 +860,7 @@ describe('AppShell navigation', () => {
     await screen.findByTitle('搜索历史对话')
     expect(screen.queryByText('最近对话')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /全部删除/ })).not.toBeInTheDocument()
-    expect(screen.queryByText('历史 1')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '历史 1' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '收缩侧边栏' }))
     const expandButton = screen.getByRole('button', { name: '展开侧边栏' })

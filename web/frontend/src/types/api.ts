@@ -5,6 +5,7 @@ export type RunEventType =
   | 'reasoning_delta'
   | 'tool_call_start'
   | 'tool_call_result'
+  | 'media_output'
   | 'guidance_applied'
   | 'usage'
   | 'error'
@@ -55,6 +56,19 @@ export interface SessionSummary {
   chain?: 'interactive' | 'message' | 'background' | string
   rounds: number
   updated_at: string
+}
+
+export interface MediaArtifact {
+  asset_id: string
+  type: 'image' | 'audio' | 'video' | 'file' | string
+  name: string
+  scope: 'download'
+  path: string
+  project_path?: string
+  mime_type: string
+  size: number
+  checksum_sha256: string
+  duration_ms?: number
 }
 
 export interface ActiveSessionResponse {
@@ -199,6 +213,7 @@ export interface HistoryResponse {
     status?: 'completed' | 'cancelled' | string
     cancelled?: boolean
     cancel_reason?: string
+    artifacts?: MediaArtifact[]
   }>
   round_traces: Array<{
     round: number
@@ -212,6 +227,7 @@ export interface HistoryResponse {
       arguments_truncated: boolean
       result_text: string
       result_truncated: boolean
+      artifacts?: MediaArtifact[]
     }>
   }>
   pagination?: {
@@ -620,6 +636,8 @@ export interface OverviewResponse {
     limit: number
     percent: number
     rounds: number
+    session_total_rounds: number
+    archived_rounds: number
     round_limit: number
   }
   provider: ProviderSummary
@@ -1155,6 +1173,7 @@ export interface ApiErrorPayload {
 export type ChatItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string }
+  | { id: string; kind: 'media'; artifact: MediaArtifact }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
   | {
       id: string

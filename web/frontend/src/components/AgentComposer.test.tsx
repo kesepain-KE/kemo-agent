@@ -27,9 +27,10 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
 describe('AgentComposer', () => {
   it('展示真实轮次并支持 Enter 发送、Shift+Enter 换行', () => {
     const onSubmit = vi.fn()
-    renderComposer({ value: '检查状态', currentRound: 8, roundLimit: 30, onSubmit })
-    expect(screen.getByText('第 8 轮')).toBeInTheDocument()
+    renderComposer({ value: '检查状态', currentRound: 8, totalRounds: 44, roundLimit: 30, onSubmit })
+    expect(screen.getByText('上下文 8 轮')).toBeInTheDocument()
     expect(screen.getByText('8/30')).toBeInTheDocument()
+    expect(screen.getByText('历史 44')).toBeInTheDocument()
 
     const input = screen.getByRole('textbox', { name: '消息内容' })
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
@@ -50,17 +51,57 @@ describe('AgentComposer', () => {
   })
 
   it('通过隐藏文件选择器把用户选择的文件交给上传处理器', () => {
-    const onUploadFile = vi.fn()
-    const { container } = renderComposer({ onUploadFile })
+    const onUploadFiles = vi.fn()
+    const { container } = renderComposer({ onUploadFiles })
     const uploadButton = screen.getByRole('button', { name: '上传文件' })
     expect(uploadButton).toBeEnabled()
 
     fireEvent.click(uploadButton)
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')
-    const file = new File(['kemo upload'], 'browser-upload.txt', { type: 'text/plain' })
+    const first = new File(['kemo upload'], 'browser-upload.txt', { type: 'text/plain' })
+    const second = new File(['archive'], 'files.zip', { type: 'application/zip' })
     expect(input).not.toBeNull()
-    fireEvent.change(input!, { target: { files: [file] } })
-    expect(onUploadFile).toHaveBeenCalledWith(file)
+    expect(input).toHaveAttribute('multiple')
+    fireEvent.change(input!, { target: { files: [first, second] } })
+    expect(onUploadFiles).toHaveBeenCalledWith([first, second])
+  })
+
+  it('粘贴截图或资源管理器文件时交给上传处理器，纯文本保持浏览器默认行为', () => {
+    const onUploadFiles = vi.fn()
+    renderComposer({ onUploadFiles })
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    const screenshot = new File(['png'], 'image.png', { type: 'image/png' })
+    const archive = new File(['zip'], 'files.zip', { type: 'application/zip' })
+
+    const filePaste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(filePaste, 'clipboardData', {
+      value: {
+        items: [
+          { kind: 'file', getAsFile: () => screenshot },
+          { kind: 'file', getAsFile: () => archive },
+        ],
+        files: [screenshot, archive],
+      },
+    })
+    input.dispatchEvent(filePaste)
+    expect(filePaste.defaultPrevented).toBe(true)
+    expect(onUploadFiles).toHaveBeenCalledWith([screenshot, archive])
+
+    const textPaste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(textPaste, 'clipboardData', { value: { items: [], files: [] } })
+    input.dispatchEvent(textPaste)
+    expect(textPaste.defaultPrevented).toBe(false)
+    expect(onUploadFiles).toHaveBeenCalledTimes(1)
+  })
+
+  it('只有待发送附件时允许发送，上传进行中保持禁用', () => {
+    const onSubmit = vi.fn()
+    const { rerender, props } = renderComposer({ pendingFileCount: 1, onSubmit })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(onSubmit).toHaveBeenCalledOnce()
+
+    rerender(<AgentComposer {...props} pendingFileCount={1} uploading />)
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
   })
 
   it('Boxes 按钮打开拓展面板', () => {
