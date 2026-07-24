@@ -44,7 +44,9 @@
   "memory": {
     "storage_schema_version": 3,
     "extraction_mode": "compression_only",
-    "recovery_max_rounds_per_scan": 2,
+    "recovery_max_rounds_per_scan": 10,
+    "extraction_batch_rounds": 5,
+    "extraction_max_candidates_per_batch": 10,
     "temporary_injection_limits": {
       "half_year": 100,
       "one_month": 200,

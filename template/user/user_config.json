@@ -8,7 +8,8 @@
     "api_key_env": "",
     "model": "",
     "stream": true,
-    "reasoning_effort": "medium"
+    "reasoning_effort": "medium",
+    "input_modalities": ["text"]
   },
 
   "agent_models": {
@@ -24,7 +25,12 @@
     "audio_transcription": "",
     "speech_generation": "",
     "speech_to_speech": "",
+    "video_understanding": "",
     "video_generation": ""
+  },
+
+  "multimodal_routing": {
+    "vision": "auto"
   },
 
   "task_plan": {

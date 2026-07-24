@@ -72,6 +72,28 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 4. 用户人格（`users/<name>/user_soul.md`）
 5. 其他
 
+### 用户指定执行路径
+
+用户明确指定以下内容时，必须视为强约束：
+
+- “先 A，再 B，最后 C”指定执行顺序。
+- “使用 A 工具”“读取 A 文件”指定工具或资源。
+- “只修改前端”“不要修改配置”指定作用范围与禁止事项。
+- “先出方案”“完成此步后等待批准”指定暂停和授权节点。
+- “按此格式输出”指定交付形式。
+
+执行规则：
+
+1. 执行前识别目标、顺序、指定工具、文件范围、禁止事项和暂停节点，并在后续步骤中持续遵守。
+2. 严格按照指定顺序推进，不得提前执行后续步骤，也不得把明确路径降级为普通建议。
+3. 前一步失败时，可以在安全范围内重试或诊断，但不能跳过该步骤继续后续操作。
+4. 认为存在更优方案时，只能提出建议，不能未经允许直接替换、重排、省略或扩展原路径。
+5. 只有安全风险、权限不足、客观不可执行或更高优先级规则冲突时，才可以暂停原路径。
+6. 需要偏离时必须提供具体证据、影响和替代方案，并等待用户决定；未获授权时停在冲突步骤。
+7. 用户后续明确修改路径时，以最新的明确指令为准。
+
+“可以考虑”“例如”“建议”默认属于非强制建议；“必须”“先”“然后”“只允许”“不要”“完成后暂停”属于明确路径约束。
+
 ---
 
 ## 3. 资源位置
@@ -169,7 +191,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 ## 4. 用户配置结构
 
 用户配置文件 `users/<name>/user_config.json` 覆盖全局配置 `config/global_config.json`。
-`provider`、`agent_models`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins`
+`provider`、`agent_models`、`multimodal_models`、`multimodal_routing`、`knowledge`、`skills`、`expand`、`perception`、`plugins`
 是用户专属段，只从用户配置读取，不允许全局配置兜底；其他框架段按对象深合并。
 
 ### 字段说明
@@ -180,7 +202,8 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `provider` | object | LLM 提供商配置 |
 | `agent_models` | object | 子代理 default、cheap、reasoning 三档专用模型；空值继承主模型 |
 | `provider_runtime` | object | 全来源共享的 Provider 请求并发上限与等待超时 |
-| `multimodal_models` | object | 多模态模型名（设计预留） |
+| `multimodal_models` | object | 各多模态能力的专用模型名 |
+| `multimodal_routing` | object | 多模态能力路由策略；图片默认主模型优先、专用模型兜底 |
 | `task_plan` | object | 任务计划配置 |
 | `tools` | object | 工具开关、超时、最大循环次数 |
 | `history` | object | 历史保留策略 |
@@ -236,6 +259,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
 | `reasoning_effort` | string | 思考强度：`minimal`、`low`、`medium`、`high`、`max`；缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
+| `input_modalities` | string[] | 主模型已确认支持的输入模态；必须含 `text`。Chat 只可增加 `image`；Kemo 还可增加 `audio`、`video`、`file` |
 
 Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
 
@@ -244,7 +268,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 `default`、`cheap`、`reasoning` 分别用于普通、轻量和推理型子代理。任一字段留空时继承
 `provider.model`；历史对话摘要使用 `cheap` 档位。
 
-### multimodal_models 子字段（设计预留）
+### multimodal_models 子字段
 
 | 字段 | 说明 |
 |------|------|
@@ -254,9 +278,12 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 | `audio_transcription` | 语音转文字模型 |
 | `speech_generation` | 文生语音模型 |
 | `speech_to_speech` | 语音转语音模型 |
+| `video_understanding` | 视频理解与时间轴摘要模型 |
 | `video_generation` | 视频生成模型 |
 
 不含 embedding 和 rerank。
+
+`multimodal_routing.vision` 支持 `auto`、`main`、`dedicated`。`auto` 会在主模型明确支持图片时直接传图，否则由 `multimodal` 插件使用 `multimodal_models.vision`；Chat 模式不按模型名称猜测能力，Kemo 模式在无显式声明时可读取网关能力。
 
 ### task_plan 子字段
 
@@ -325,6 +352,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
 - `memory.extraction_mode=compression_only` 时，普通提交只登记 `deferred` 游标，保存会话或上下文压缩时才顺序提取。
 - `background` 模式允许 Maintenance 领取普通 `pending` 轮次；`on_commit` 模式同步提取。提取失败可按租约重试，不回滚已提交历史。
+- 待提取轮次按 `memory.extraction_batch_rounds` 组成连续批次，一次交给 `self_improve` 分析；候选统一匹配、去重并通过带稳定 operation_id 的 `upsert_candidates` 批量落盘，成功后才推进到批次末尾游标。
+- `memory.recovery_max_rounds_per_scan` 是单次后台扫描的总轮数预算，`memory.extraction_max_candidates_per_batch` 是单批候选上限；二者不改变临时记忆每日最多加权一次的规则。
 - `disabled` 模式不进行自动提取，Maintenance 也不会领取该用户的记忆任务。
 
 ### 用户指令
@@ -356,10 +385,10 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - **Token 触发**：估算总 token 超过 `token_limit` 时触发。
 - **Provider 触发**：统一协议或兼容 Provider 返回 `context_length_exceeded` 时，自动压缩并重试，最多 2 次。
 - **手动触发**：请求带 `compress=true` 时强制压缩。
-- 压缩时移除最旧轮次，保留最近 `rounds_after_compression` 轮。
-- 所有摘要场景统一由 `context_manage` 处理；记忆提取由引擎沿会话 `memory_processed_round` 游标逐轮完成，随后 `context_manage` 只生成摘要，避免摘要子代理与保存链路重复提取。
-- 摘要缓存在 `history/temp/<window>/context_summary.json` 中；缓存 schema 升级时自动重建。
-- `history/<window>/` 始终保留完整原始记录，`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
+- 压缩时把当前待发送轮次计入 `rounds_after_compression`：正常提交后，Provider 临时工作区总计保留最近 N 轮，而不是额外再保留当前轮次。
+- 所有摘要场景统一由 `context_manage` 处理；正常聊天的自动压缩不在请求主线程同步提取记忆，而是在完整提交后把摘要已覆盖轮次登记到持久化后台队列。手动压缩仍可显式选择同步或队列策略。
+- 摘要缓存在 `history/temp/<window>/context_summary.json` 中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。
+- `history/<window>/` 始终保留完整原始记录和累计轮数；`history/temp/<window>/` 才是受限并会裁剪的 Provider 工作区。`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
 
 ### 轮次结构
 
@@ -580,17 +609,18 @@ system prompt 按以下固定顺序拼接：
 
 ### 多模态
 
-- `MULTIMODAL_CAPABILITIES` 定义了支持的能力集合：vision、image generation/edit、audio ASR/TTS、speech_to_speech、video generation。
-- 多模态模型名通过 `multimodal_models` 配置；专用模型为空时使用 `provider.model`。
+- `MULTIMODAL_CAPABILITIES` 定义了支持的能力集合：vision、image generation/edit、audio ASR/TTS、speech_to_speech、video understanding/generation。
+- 多模态模型名通过 `multimodal_models` 配置；视觉兜底需要明确填写 `multimodal_models.vision`。
 - 不含 embedding 和 rerank。
-- `chat` 模式的可移植基线仅包含文本、工具调用和图片输入；图片直接发送给视觉模型，不先调用识图工具。
-- `kemo` 模式通过 Asset 与能力声明使用网关实际支持的完整多模态能力。
+- `chat` 模式只保证文本、工具和图片识别，只信任 `provider.input_modalities` 的显式图片声明，不根据模型名称猜测。
+- `kemo` 模式支持图片、音频、视频、普通文件和媒体生成；输入/输出模态与 `extensions.operations` 必须同时满足。
+- 主模型明确支持相应输入时优先直传；否则由 `multimodal` 插件调用专用模型。Kemo 大型媒体通过认证 Asset API 传输，生成结果校验后保存到用户下载空间；Base64 和临时 URL 不进入长期历史。
 
 ### 网络与插件环境
 
 - Provider 和基于标准库的 HTTP 请求自动遵循 `HTTP_PROXY` / `HTTPS_PROXY`；留空时直连。
 - TLS 证书校验始终使用系统默认安全策略，不再支持 `HTTP_VERIFY_SSL` 绕过。
-- `TAVILY_API_KEY` 为空时，运行时工具策略会移除 `web_search`；配置有效 Key 后才向 Provider 暴露该工具。
+- `web_search` 始终参与正常的插件发现与白名单过滤；`TAVILY_API_KEY` 为空时，调用会返回配置引导且不会发起网络请求。配置密钥后需重启智能体使环境变量生效。
 
 ---
 
