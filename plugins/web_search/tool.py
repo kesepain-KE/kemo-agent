@@ -31,11 +31,17 @@ def _result(ok: bool, **fields: Any) -> dict[str, Any]:
 
 
 def _get_client() -> TavilyClient:
-    if not HAS_TAVILY:
-        raise RuntimeError("tavily-python 未安装。请执行: pip install tavily-python")
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("TAVILY_API_KEY 环境变量未设置")
+        raise RuntimeError(
+            "网络搜索尚未配置：请在项目 .env 中设置 TAVILY_API_KEY，"
+            "然后重启智能体。获取密钥：https://app.tavily.com/"
+        )
+    if not HAS_TAVILY:
+        raise RuntimeError(
+            "网络搜索依赖尚未安装：请执行 pip install tavily-python，"
+            "然后重启智能体。"
+        )
     return TavilyClient(api_key=api_key)
 
 

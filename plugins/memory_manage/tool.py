@@ -12,6 +12,7 @@ from plugins.memory_manage.memory_ops import (
     get_fragment,
     list_entries,
     search_by_content,
+    search_many,
     search_by_title,
 )
 
@@ -20,6 +21,7 @@ def run(
     action: str,
     tier: str,
     query: str | None = None,
+    queries: list[dict[str, Any]] | None = None,
     filename: str | None = None,
     content: str | None = None,
     new_filename: str | None = None,
@@ -34,6 +36,7 @@ def run(
     if context.get("agent") == "self_improve" and action not in {
         "search_by_title",
         "search_by_content",
+        "search_many",
     }:
         raise PermissionError(
             "self_improve 只能用 memory_manage 搜索；候选和晋升由运行时原子持久化"
@@ -54,6 +57,17 @@ def run(
         return search_by_content(
             root, user, config, tier, query or "",
             limit=limit, context_chars=context_chars, case_sensitive=case_sensitive,
+        )
+    if action == "search_many":
+        return search_many(
+            root,
+            user,
+            config,
+            tier,
+            queries or [],
+            limit=limit,
+            context_chars=context_chars,
+            case_sensitive=case_sensitive,
         )
     if action == "delete":
         if not filename:

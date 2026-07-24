@@ -17,6 +17,7 @@ from run.memory import (
 
 
 MANAGED_TIERS = frozenset((*TIERS, "important"))
+SEARCH_ALL_TIERS = (*TIERS,)
 IMPORTANT_FILENAME = "memory_temporary_important.md"
 IMPORTANT_MEMORY_PLACEHOLDER = """# 临时重要记忆
 
@@ -298,6 +299,109 @@ def search_by_content(
         "matches": matches,
         "total_matches": total_matches,
         "truncated": total_matches > normalized_limit,
+    }
+
+
+def search_many(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    tier: str,
+    queries: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+    context_chars: int = 240,
+    case_sensitive: bool = False,
+) -> dict[str, Any]:
+    """Search title and content for several candidates in one tool call."""
+
+    if tier == "all":
+        tiers = SEARCH_ALL_TIERS
+    else:
+        tiers = (_validate_tier(tier),)
+    if not isinstance(queries, list) or not queries:
+        raise ValueError("search_many 需要非空 queries 数组")
+    if len(queries) > 20:
+        raise ValueError("search_many 单次最多接收 20 个查询")
+    normalized_limit = _bounded_integer(
+        limit,
+        field="limit",
+        minimum=1,
+        maximum=50,
+    )
+    results: list[dict[str, Any]] = []
+    for index, raw_query in enumerate(queries):
+        if not isinstance(raw_query, dict):
+            raise ValueError(f"queries[{index}] 必须是对象")
+        title = str(raw_query.get("title") or "").strip()
+        content = str(raw_query.get("content") or "").strip()
+        if not title and not content:
+            raise ValueError(f"queries[{index}] 至少需要 title 或 content")
+        matches: dict[str, dict[str, Any]] = {}
+        for current_tier in tiers:
+            if title:
+                title_result = search_by_title(
+                    root,
+                    user,
+                    config,
+                    current_tier,
+                    title,
+                    limit=normalized_limit,
+                    case_sensitive=case_sensitive,
+                )
+                for match in title_result["matches"]:
+                    memory_ref = str(match["memory_ref"])
+                    matches[memory_ref] = {
+                        **match,
+                        "tier": current_tier,
+                        "matched_by": ["title"],
+                    }
+            if content:
+                content_result = search_by_content(
+                    root,
+                    user,
+                    config,
+                    current_tier,
+                    content,
+                    limit=normalized_limit,
+                    context_chars=context_chars,
+                    case_sensitive=case_sensitive,
+                )
+                for match in content_result["matches"]:
+                    memory_ref = str(match["memory_ref"])
+                    existing = matches.get(memory_ref)
+                    if existing is None:
+                        matches[memory_ref] = {
+                            **match,
+                            "tier": current_tier,
+                            "matched_by": ["content"],
+                        }
+                    else:
+                        existing["matched_by"] = ["title", "content"]
+                        existing["snippet"] = match.get("snippet")
+        ordered = sorted(
+            matches.values(),
+            key=lambda item: (
+                -len(item.get("matched_by") or []),
+                str(item.get("tier") or ""),
+                str(item.get("filename") or "").casefold(),
+            ),
+        )
+        results.append(
+            {
+                "index": index,
+                "title": title,
+                "content": content,
+                "matches": ordered[:normalized_limit],
+                "total_matches": len(ordered),
+                "truncated": len(ordered) > normalized_limit,
+            }
+        )
+    return {
+        "action": "search_many",
+        "tier": tier,
+        "timezone": "UTC",
+        "results": results,
     }
 
 

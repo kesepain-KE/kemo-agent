@@ -1,7 +1,7 @@
 # web_search
 
 Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点地图和深度研究。
-运行前必须安装 `tavily-python`，并设置 `TAVILY_API_KEY` 环境变量。
+运行前必须安装 `tavily-python`，并设置 `TAVILY_API_KEY` 环境变量。工具在未配置时仍可被发现，调用会返回明确的配置提示且不会发起网络请求。
 
 ## 使用决策
 
