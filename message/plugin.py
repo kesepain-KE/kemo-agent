@@ -410,6 +410,10 @@ def _initial_state() -> dict[str, Any]:
         "latency_ms": None,
         "messages_received_today": 0,
         "messages_sent_today": 0,
+        "input_status": "unknown",
+        "input_restart_count": 0,
+        "input_last_restart_at": None,
+        "input_error": None,
     }
 
 
@@ -430,6 +434,23 @@ def _normalize_state(value: Any) -> dict[str, Any]:
         isinstance(latency, bool) or not isinstance(latency, int) or latency < 0
     ):
         raise MessagePluginError("state.latency_ms 必须是非负整数或 null")
+    if state.get("input_status") not in {
+        "unknown",
+        "starting",
+        "running",
+        "restarting",
+        "stopped",
+    }:
+        raise MessagePluginError(
+            "state.input_status 必须是 unknown/starting/running/restarting/stopped"
+        )
+    restart_count = state.get("input_restart_count")
+    if (
+        isinstance(restart_count, bool)
+        or not isinstance(restart_count, int)
+        or restart_count < 0
+    ):
+        raise MessagePluginError("state.input_restart_count 必须是非负整数")
     return state
 
 
@@ -453,6 +474,11 @@ class FileMessageTransport:
         poll_interval: float = 1.0,
         health_interval: float = 30.0,
         settle_interval: float = 0.2,
+        input_supervision_interval: float = 1.0,
+        input_start_grace: float = 2.0,
+        input_restart_initial_backoff: float = 1.0,
+        input_restart_max_backoff: float = 60.0,
+        input_restart_stable_seconds: float = 30.0,
     ) -> None:
         self.config = config
         self.name = config.platform
@@ -461,6 +487,20 @@ class FileMessageTransport:
         self.poll_interval = max(0.05, float(poll_interval))
         self.health_interval = max(0.05, float(health_interval))
         self.settle_interval = max(0.0, float(settle_interval))
+        self.input_supervision_interval = max(
+            0.05, float(input_supervision_interval)
+        )
+        self.input_start_grace = max(0.0, float(input_start_grace))
+        self.input_restart_initial_backoff = max(
+            0.05, float(input_restart_initial_backoff)
+        )
+        self.input_restart_max_backoff = max(
+            self.input_restart_initial_backoff,
+            float(input_restart_max_backoff),
+        )
+        self.input_restart_stable_seconds = max(
+            0.0, float(input_restart_stable_seconds)
+        )
         self._input = _load_module(config.module_path("input"), config.machine_id, "input")
         self._output = _load_module(config.module_path("output"), config.machine_id, "output")
         self._detect = _load_module(config.module_path("detect"), config.machine_id, "detect")
@@ -477,12 +517,15 @@ class FileMessageTransport:
         self._stop_event = threading.Event()
         self._input_thread: threading.Thread | None = None
         self._poll_thread: threading.Thread | None = None
+        self._input_supervisor_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._input_lifecycle_lock = threading.RLock()
         self._poll_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._pending: dict[str, _PendingEnvelope] = {}
         self._claim_counts: dict[Path, int] = {}
         self._active_claims: set[Path] = set()
+        self._input_started_at = 0.0
         self._running = False
 
     @property
@@ -502,35 +545,47 @@ class FileMessageTransport:
             self.config.buffer_path.parent.mkdir(parents=True, exist_ok=True)
             self.config.buffer_path.touch(exist_ok=True)
             self._ensure_state()
+            self._set_input_state("starting")
             self._running = True
-            self._input_thread = threading.Thread(
-                target=self._run_input,
-                name=f"message-input-{self.name}",
-                daemon=True,
-            )
+            self._input_thread = self._new_input_thread()
             self._poll_thread = threading.Thread(
                 target=self._run_poll,
                 name=f"message-poll-{self.name}",
                 daemon=True,
             )
+            self._input_supervisor_thread = threading.Thread(
+                target=self._run_input_supervisor,
+                name=f"message-input-supervisor-{self.name}",
+                daemon=True,
+            )
+            self._input_started_at = time.monotonic()
             self._input_thread.start()
             self._poll_thread.start()
+            self._input_supervisor_thread.start()
 
     def stop(self) -> None:
         with self._lock:
             if not self._running:
                 return
             self._stop_event.set()
+            supervisor = self._input_supervisor_thread
+        if supervisor is not None and supervisor is not threading.current_thread():
+            supervisor.join(timeout=5.0)
         try:
-            self._input.stop()
+            with self._input_lifecycle_lock:
+                self._input.stop()
         finally:
             for thread in (self._input_thread, self._poll_thread):
                 if thread is not None and thread is not threading.current_thread():
                     thread.join(timeout=5.0)
+            self._set_input_state("stopped")
             with self._lock:
                 self._running = False
                 self._on_message = None
                 self._on_error = None
+                self._input_thread = None
+                self._poll_thread = None
+                self._input_supervisor_thread = None
 
     def send(self, message: OutboundMessage) -> None:
         token = str(message.metadata.get("message_queue_token") or "")
@@ -714,6 +769,13 @@ class FileMessageTransport:
                 self._report_error(exc)
                 return current
 
+    def _new_input_thread(self) -> threading.Thread:
+        return threading.Thread(
+            target=self._run_input,
+            name=f"message-input-{self.name}",
+            daemon=True,
+        )
+
     def _run_input(self) -> None:
         try:
             self._input.start(
@@ -725,6 +787,110 @@ class FileMessageTransport:
         except BaseException as exc:
             if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 self._report_error(exc)
+
+    def _input_is_alive(self) -> bool:
+        probe = getattr(self._input, "is_alive", None)
+        if callable(probe):
+            value = probe()
+            if not isinstance(value, bool):
+                raise MessagePluginError("input.is_alive() 必须返回布尔值")
+            return value
+        thread = self._input_thread
+        return bool(thread is not None and thread.is_alive())
+
+    def _input_last_error(self) -> str | None:
+        reader = getattr(self._input, "last_error", None)
+        if not callable(reader):
+            return None
+        value = reader()
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    def _restart_input(self) -> bool:
+        with self._input_lifecycle_lock:
+            if self._stop_event.is_set():
+                return False
+            restart = getattr(self._input, "restart", None)
+            if callable(restart):
+                restart()
+            else:
+                self._input.stop()
+                previous = self._input_thread
+                if (
+                    previous is not None
+                    and previous is not threading.current_thread()
+                    and previous.is_alive()
+                ):
+                    previous.join(timeout=5.0)
+                if previous is not None and previous.is_alive():
+                    raise MessagePluginError(
+                        "input.stop() 后输入线程仍未退出，已拒绝重复启动"
+                    )
+                thread = self._new_input_thread()
+                self._input_thread = thread
+                thread.start()
+            self._input_started_at = time.monotonic()
+            return True
+
+    def _run_input_supervisor(self) -> None:
+        restart_attempts = 0
+        next_restart_at = 0.0
+        healthy_since: float | None = None
+        while not self._stop_event.is_set():
+            now = time.monotonic()
+            probe_error: BaseException | None = None
+            try:
+                alive = self._input_is_alive()
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    return
+                alive = False
+                probe_error = exc
+
+            if alive:
+                if healthy_since is None:
+                    healthy_since = now
+                    self._set_input_state("running")
+                elif now - healthy_since >= self.input_restart_stable_seconds:
+                    restart_attempts = 0
+                    next_restart_at = 0.0
+            else:
+                healthy_since = None
+                within_start_grace = (
+                    now - self._input_started_at < self.input_start_grace
+                )
+                if not within_start_grace and now >= next_restart_at:
+                    module_error = None
+                    try:
+                        module_error = self._input_last_error()
+                    except BaseException as exc:
+                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                            return
+                        probe_error = probe_error or exc
+                    reason = module_error or (
+                        str(probe_error) if probe_error is not None else "输入模块已停止"
+                    )
+                    self._set_input_state("restarting", error=reason)
+                    restart_attempts += 1
+                    try:
+                        restarted = self._restart_input()
+                        if not restarted:
+                            return
+                        self._set_input_state("starting", restarted=True)
+                    except BaseException as exc:
+                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                            return
+                        self._set_input_state("restarting", error=str(exc))
+                        self._report_error(exc)
+                    exponent = min(restart_attempts - 1, 16)
+                    delay = min(
+                        self.input_restart_max_backoff,
+                        self.input_restart_initial_backoff * (2 ** exponent),
+                    )
+                    next_restart_at = time.monotonic() + delay
+
+            self._stop_event.wait(self.input_supervision_interval)
 
     def _run_poll(self) -> None:
         next_health = 0.0
@@ -878,6 +1044,28 @@ class FileMessageTransport:
             state = self._read_state()
             update(state)
             _atomic_json(self.config.state_path, _normalize_state(state))
+
+    def _set_input_state(
+        self,
+        status: str,
+        *,
+        error: str | None = None,
+        restarted: bool = False,
+    ) -> None:
+        def update(state: dict[str, Any]) -> None:
+            state["input_status"] = status
+            state["input_error"] = error
+            if status == "restarting" and state.get("health") != "dead":
+                state["health"] = "degraded"
+            if restarted:
+                state["input_restart_count"] = (
+                    int(state.get("input_restart_count") or 0) + 1
+                )
+                state["input_last_restart_at"] = (
+                    datetime.now().astimezone().isoformat()
+                )
+
+        self._update_state(update)
 
     def _write_log(
         self, messages: tuple[BufferedMessage, ...], result: "RouteResult"

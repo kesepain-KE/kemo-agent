@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import socket
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 from provider.protocol.errors import StreamProtocolError
+from provider.protocol.assets import AssetDescriptor
 from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
 from provider.protocol.serialization import parse_response, to_json_bytes
 from provider.protocol.streaming import (
@@ -29,6 +36,33 @@ from provider.schema import (
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
+class _MultipartUpload:
+    """Replay-free multipart body that streams one file in bounded chunks."""
+
+    def __init__(self, prefix: bytes, path: Path, suffix: bytes, cancel_event=None) -> None:
+        self.prefix = prefix
+        self.path = path
+        self.suffix = suffix
+        self.cancel_event = cancel_event
+
+    @property
+    def length(self) -> int:
+        return len(self.prefix) + self.path.stat().st_size + len(self.suffix)
+
+    def __iter__(self):
+        yield self.prefix
+        with self.path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise ProviderError(
+                        "Kemo Asset 上传已取消",
+                        category="cancelled",
+                        retryable=False,
+                    )
+                yield chunk
+        yield self.suffix
+
+
 class KemoGatewayAdapter:
     """Send protocol-v1 objects without translating them to Chat Completions."""
 
@@ -39,6 +73,7 @@ class KemoGatewayAdapter:
         self.timeout = float(config.get("timeout", 120))
         self.responses_url = f"{self.base_url}/model/responses"
         self.capabilities_url = f"{self.base_url}/model/capabilities"
+        self.assets_url = f"{self.base_url}/assets"
 
     def _headers(
         self,
@@ -46,10 +81,11 @@ class KemoGatewayAdapter:
         stream: bool,
         last_event_id: str | None = None,
         idempotency_key: str | None = None,
+        content_type: str = "application/json",
     ) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "Accept": "text/event-stream" if stream else "application/json",
             "X-Kemo-Protocol-Version": "1.0",
         }
@@ -59,6 +95,20 @@ class KemoGatewayAdapter:
             headers["Idempotency-Key"] = idempotency_key
             headers["X-Request-ID"] = idempotency_key
         return headers
+
+    @staticmethod
+    def _parse_asset(raw: bytes) -> AssetDescriptor:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("asset"), dict):
+                data = data["asset"]
+            return AssetDescriptor.model_validate(data)
+        except Exception as exc:
+            raise ProviderError(
+                "Kemo gateway 返回了无效的 Asset 描述",
+                category="gateway_protocol_error",
+                body=raw[:1000],
+            ) from exc
 
     def _open(self, request: urllib.request.Request):
         try:
@@ -190,3 +240,158 @@ class KemoGatewayAdapter:
         )
         with self._open(request) as response:
             return parse_response(response.read())
+
+    def upload_asset(
+        self,
+        path: str | Path,
+        *,
+        metadata: dict[str, Any],
+        idempotency_key: str,
+        checksum_sha256: str,
+        mime_type: str,
+        cancel_event: threading.Event | None = None,
+    ) -> AssetDescriptor:
+        target = Path(path).resolve(strict=True)
+        if not target.is_file():
+            raise ProviderError("Kemo Asset 上传目标不是文件", category="asset_error")
+        boundary = "----kemo-agent-" + uuid.uuid4().hex
+        safe_name = target.name.replace('"', "_")
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        prefix = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="metadata"\r\n'
+            "Content-Type: application/json; charset=utf-8\r\n\r\n"
+            f"{metadata_json}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+            f"Content-Type: {mime_type}\r\n\r\n"
+        ).encode("utf-8")
+        suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
+        body = _MultipartUpload(prefix, target, suffix, cancel_event)
+        headers = self._headers(
+            stream=False,
+            idempotency_key=idempotency_key,
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+        headers["Content-Length"] = str(body.length)
+        headers["X-Content-SHA256"] = checksum_sha256
+        request = urllib.request.Request(
+            self.assets_url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        with self._open(request) as response:
+            return self._parse_asset(response.read())
+
+    def get_asset(self, asset_id: str) -> AssetDescriptor:
+        url = f"{self.assets_url}/{urllib.parse.quote(asset_id, safe='')}"
+        request = urllib.request.Request(
+            url,
+            headers=self._headers(stream=False),
+            method="GET",
+        )
+        with self._open(request) as response:
+            return self._parse_asset(response.read())
+
+    def wait_asset_ready(
+        self,
+        asset: AssetDescriptor | str,
+        *,
+        cancel_event: threading.Event | None = None,
+        timeout: float | None = None,
+    ) -> AssetDescriptor:
+        current = asset if isinstance(asset, AssetDescriptor) else self.get_asset(asset)
+        deadline = time.monotonic() + (self.timeout if timeout is None else max(1.0, timeout))
+        while current.status in {"uploading", "processing"}:
+            if cancel_event is not None and cancel_event.wait(0.25):
+                raise ProviderError(
+                    "等待 Kemo Asset 就绪时已取消",
+                    category="cancelled",
+                    retryable=False,
+                )
+            if time.monotonic() >= deadline:
+                raise ProviderTimeoutError(f"等待 Kemo Asset 就绪超时：{current.id}")
+            current = self.get_asset(current.id)
+        if current.status != "ready":
+            message = str((current.error or {}).get("message") or "Asset 不可用")
+            raise ProviderError(
+                f"Kemo Asset {current.id} 状态为 {current.status}：{message}",
+                category="asset_error",
+                retryable=False,
+                body=current.model_dump(mode="json", exclude_none=True),
+            )
+        return current
+
+    def download_asset(
+        self,
+        asset_id: str,
+        destination: str | Path,
+        *,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+        max_bytes: int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Path:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+        url = (
+            f"{self.assets_url}/{urllib.parse.quote(asset_id, safe='')}/content"
+        )
+        request = urllib.request.Request(
+            url,
+            headers=self._headers(stream=False, content_type="application/octet-stream"),
+            method="GET",
+        )
+        digest = hashlib.sha256()
+        received = 0
+        try:
+            with self._open(request) as response, part.open("xb") as handle:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise ProviderError(
+                            "Kemo Asset 下载已取消",
+                            category="cancelled",
+                            retryable=False,
+                        )
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if max_bytes is not None and received > max_bytes:
+                        raise ProviderError(
+                            f"Kemo Asset 下载超过本地限制：{asset_id}",
+                            category="request_too_large",
+                            retryable=False,
+                        )
+                    digest.update(chunk)
+                    handle.write(chunk)
+            actual = digest.hexdigest()
+            if expected_size is not None and received != expected_size:
+                raise ProviderError(
+                    f"Kemo Asset 下载大小不一致：{asset_id}",
+                    category="asset_integrity_error",
+                    retryable=False,
+                )
+            if expected_sha256 and actual != expected_sha256.casefold():
+                raise ProviderError(
+                    f"Kemo Asset 校验和不一致：{asset_id}",
+                    category="asset_integrity_error",
+                    retryable=False,
+                )
+            os.replace(part, target)
+            return target
+        finally:
+            part.unlink(missing_ok=True)
+
+    def delete_asset(self, asset_id: str) -> bool:
+        url = f"{self.assets_url}/{urllib.parse.quote(asset_id, safe='')}"
+        request = urllib.request.Request(
+            url,
+            headers=self._headers(stream=False),
+            method="DELETE",
+        )
+        with self._open(request) as response:
+            response.read()
+        return True

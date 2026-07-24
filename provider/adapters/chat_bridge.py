@@ -20,8 +20,8 @@ class ChatBridgeProvider:
     """Expose the Kemo contract over a standard ``/chat/completions`` API.
 
     This is a selected transport mode, not a fallback for the native Kemo
-    gateway.  Its portable baseline is text/image input, text output, streaming
-    and function tools.  Unsupported Kemo content is rejected by the converter.
+    gateway. Image support depends on the selected model and must be declared
+    by the caller; the bridge itself does not infer model capability.
     """
 
     mode = "chat"
@@ -35,7 +35,7 @@ class ChatBridgeProvider:
     def capabilities(self, model: str) -> ModelCapabilities:
         return ModelCapabilities(
             model=model,
-            input_modalities=["text", "image"],
+            input_modalities=["text"],
             output_modalities=["text"],
             streaming=True,
             reasoning={

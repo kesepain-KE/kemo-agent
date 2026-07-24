@@ -30,3 +30,18 @@ class KemoGatewayProvider:
 
     def cancel(self, response_id: str):
         return self._native.cancel(response_id)
+
+    def upload_asset(self, *args, **kwargs):
+        return self._native.upload_asset(*args, **kwargs)
+
+    def get_asset(self, asset_id: str):
+        return self._native.get_asset(asset_id)
+
+    def wait_asset_ready(self, *args, **kwargs):
+        return self._native.wait_asset_ready(*args, **kwargs)
+
+    def download_asset(self, *args, **kwargs):
+        return self._native.download_asset(*args, **kwargs)
+
+    def delete_asset(self, asset_id: str):
+        return self._native.delete_asset(asset_id)
