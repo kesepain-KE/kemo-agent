@@ -268,17 +268,17 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertEqual(set(graph_replaced.tools), {"clock", "weather"})
 
-    def test_tavily_tool_is_exposed_only_when_api_key_is_available(self) -> None:
+    def test_tavily_tool_remains_exposed_without_api_key(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "web_search", "search")
         self.write_tool(root / "plugins", "clock", "clock")
 
         with patch.dict(os.environ, {"TAVILY_API_KEY": ""}, clear=False):
-            unavailable = apply_runtime_tool_policy(
+            unconfigured = apply_runtime_tool_policy(
                 discover_tools(root, "alice"),
                 {},
             )
-        self.assertEqual(set(unavailable.tools), {"clock"})
+        self.assertEqual(set(unconfigured.tools), {"web_search", "clock"})
 
         with patch.dict(
             os.environ,
@@ -1121,7 +1121,7 @@ class RuntimeFeatureTests(unittest.TestCase):
                             ),
                             usage=Usage(1, 1, 2, source="mock"),
                         )
-                        for index in range(12)
+                        for index in range(3)
                     ],
                     ChatResponse(
                         text=json.dumps(
@@ -1148,7 +1148,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(result["committed"])
         self.assertEqual(result["context"]["rounds_kept"], 10)
         self.assertEqual(result["context"]["rounds_removed"], 2)
-        self.assertEqual(len(summary_provider.requests), 13)
+        # Twelve pending rounds are analyzed in three five-round batches,
+        # followed by one context summary request.
+        self.assertEqual(len(summary_provider.requests), 4)
         self.assertTrue(result["context"]["summary"]["generated"])
         window = load_window(find_window(root, "alice", "cli", "long"))
         self.assertEqual(window["data"]["rounds"], 12)
@@ -1274,13 +1276,6 @@ class RuntimeFeatureTests(unittest.TestCase):
                 ChatResponse(text="reply-2", usage=Usage()),
                 ChatResponse(text="reply-3", usage=Usage()),
                 context_error,
-                *[
-                    ChatResponse(
-                        text=json.dumps({"candidates": []}),
-                        usage=Usage(1, 1, 2),
-                    )
-                    for _ in range(3)
-                ],
                 ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
                 ChatResponse(text="recovered", usage=Usage(3, 1, 4)),
             ]
@@ -1309,15 +1304,110 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
         self.assertEqual(result["text"], "recovered")
         self.assertEqual(result["context"]["api_context_retries"], 1)
-        self.assertEqual(len(provider.requests), 9)
+        self.assertEqual(len(provider.requests), 6)
         archive_path = find_window(root, "alice", "cli", "retry")
         self.assertIsNotNone(archive_path)
         archive = load_window(archive_path)
         _, runtime = load_runtime_window(archive_path, archive)
         self.assertEqual(archive["data"]["rounds"], 4)
-        self.assertEqual(archive["data"]["memory_processed_round"], 3)
-        self.assertEqual(archive["data"]["memory_status"], "deferred")
-        self.assertEqual(runtime["data"]["rounds"], 4)
+        self.assertEqual(archive["data"]["memory_processed_round"], 0)
+        self.assertEqual(archive["data"]["memory_status"], "queued")
+        self.assertEqual(archive["data"]["memory_target_round"], 3)
+        self.assertEqual(runtime["data"]["rounds"], 1)
+        self.assertEqual(runtime["data"]["context"]["round_offset"], 3)
+
+    def test_automatic_round_compression_trims_runtime_and_queues_memory(self) -> None:
+        _, root = self.make_root()
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config.update(
+            {
+                "agents": {
+                    "conserved_rounds": 3,
+                    "max_rounds": 4,
+                    "rounds_after_compression": 2,
+                    "token_limit": 120000,
+                    "token_compression_ratio": 0.6,
+                },
+                "history": {"recent_full_rounds": 1},
+                "memory": {"extraction_mode": "compression_only"},
+            }
+        )
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        summary = {
+            "facts": ["rounds 1-2"],
+            "requirements": [],
+            "decisions": [],
+            "unfinished": [],
+            "tool_results": [],
+            "entities": [],
+            "narrative": "compressed rounds 1-2",
+        }
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(text="reply-1", usage=Usage()),
+                ChatResponse(text="reply-2", usage=Usage()),
+                ChatResponse(text="reply-3", usage=Usage()),
+                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
+                ChatResponse(text="reply-4", usage=Usage()),
+                ChatResponse(text="reply-5", usage=Usage()),
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for index in range(1, 4):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "automatic-compress",
+                        "prompt": f"round-{index}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            fourth = handle_request(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "automatic-compress",
+                    "prompt": "round-4",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+            archive_path = find_window(root, "alice", "web", "automatic-compress")
+            archive = load_window(archive_path)
+            _, runtime = load_runtime_window(archive_path, archive)
+            self.assertEqual(fourth["text"], "reply-4")
+            self.assertEqual(archive["data"]["rounds"], 4)
+            self.assertEqual(runtime["data"]["rounds"], 2)
+            self.assertEqual(runtime["data"]["context"]["round_offset"], 2)
+            self.assertEqual(archive["data"]["memory_status"], "queued")
+            self.assertEqual(archive["data"]["memory_target_round"], 2)
+            self.assertEqual(len(provider.requests), 5)
+
+            fifth = handle_request(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "automatic-compress",
+                    "prompt": "round-5",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(fifth["text"], "reply-5")
+        self.assertTrue(
+            any(
+                message.get("role") == "system"
+                and "已移出完整上下文的历史摘要" in str(message.get("content") or "")
+                and "compressed rounds 1-2" in str(message.get("content") or "")
+                for message in provider.requests[-1].messages
+            )
+        )
 
     def test_cli_stream_reasoning_json_and_interrupt(self) -> None:
         stdout = io.StringIO()

@@ -58,9 +58,11 @@ class SummaryRunner:
         self.fail = fail
         self.narrative = narrative
         self.calls = 0
+        self.inputs: list[dict] = []
 
     def run(self, name, input_data, **kwargs):
         self.calls += 1
+        self.inputs.append(json.loads(json.dumps(input_data, ensure_ascii=False)))
         if self.fail:
             raise RuntimeError("summary unavailable")
         payload = {
@@ -262,9 +264,9 @@ class ContextLifecycleTests(unittest.TestCase):
             system_message={"role": "system", "content": "system"},
             current_user_message={"role": "user", "content": "current"},
         )
-        self.assertEqual([item.number for item in selected.kept_rounds], [4, 5, 6])
-        self.assertEqual([item.number for item in selected.removed_rounds], [1, 2, 3])
-        self.assertEqual(selected.messages[1]["content"].split("-")[0], "u4")
+        self.assertEqual([item.number for item in selected.kept_rounds], [5, 6])
+        self.assertEqual([item.number for item in selected.removed_rounds], [1, 2, 3, 4])
+        self.assertEqual(selected.messages[1]["content"].split("-")[0], "u5")
         self.assertEqual(selected.messages[-1]["content"], "current")
         self.assertEqual(json.dumps(window, ensure_ascii=False, sort_keys=True), snapshot)
 
@@ -282,8 +284,8 @@ class ContextLifecycleTests(unittest.TestCase):
             system_message={"role": "system", "content": "S" * 20},
             current_user_message={"role": "user", "content": "当" * 600},
         )
-        self.assertEqual([item.number for item in selected.kept_rounds], [2, 3, 4])
-        self.assertEqual(len(selected.removed_rounds), 1)
+        self.assertEqual([item.number for item in selected.kept_rounds], [3, 4])
+        self.assertEqual(len(selected.removed_rounds), 2)
         self.assertTrue(selected.token_limit_triggered)
         self.assertTrue(selected.fixed_content_over_budget)
         self.assertTrue(selected.recent_content_over_budget)
@@ -338,6 +340,45 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertTrue(diagnostics["cache_hit"])
         self.assertEqual(provider.calls, 1)
         self.assertEqual(second["source_hash"], first["source_hash"])
+
+    def test_summary_cache_rolls_forward_using_absolute_round_numbers(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        cache_path = Path(temporary.name) / "summary.json"
+        provider = SummaryRunner()
+
+        first_groups = build_round_groups(make_window(2), ContextPolicy())
+        first, first_diagnostics = get_or_create_summary(
+            cache_path=cache_path,
+            groups=first_groups,
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
+        )
+        self.assertTrue(first_diagnostics["generated"])
+        self.assertEqual(first["covered_through_round"], 2)
+
+        second_groups = build_round_groups(make_window(2), ContextPolicy())
+        second, second_diagnostics = get_or_create_summary(
+            cache_path=cache_path,
+            groups=second_groups,
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
+            previous_cache=first,
+            round_offset=2,
+        )
+
+        self.assertTrue(second_diagnostics["generated"])
+        self.assertEqual(second_diagnostics["new_rounds"], [3, 4])
+        self.assertEqual(second["covered_rounds"], [1, 2, 3, 4])
+        self.assertEqual(second["covered_through_round"], 4)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.inputs[1]["previous_summary"], first["summary"])
+        self.assertEqual(
+            [item["round"] for item in provider.inputs[1]["rounds"]],
+            [3, 4],
+        )
 
     def test_summary_failure_and_cancel_leave_existing_cache_untouched(self) -> None:
         temporary = tempfile.TemporaryDirectory()

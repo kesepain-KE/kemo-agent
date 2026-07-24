@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import tempfile
@@ -503,6 +504,61 @@ class UnifiedProtocolTests(unittest.TestCase):
             b"".join(encode_sse(event) for event in stream_events)
         )
         self.assertEqual(len(list(adapter.stream(request))), 2)
+
+    def test_gateway_asset_upload_and_verified_download(self) -> None:
+        payload = b"RIFF0000WAVEasset-body"
+        checksum = hashlib.sha256(payload).hexdigest()
+        adapter = KemoGatewayAdapter(
+            {"base_url": "https://gateway.test/v1", "api_key": "secret", "model": "m"}
+        )
+        seen = []
+
+        class ChunkResponse(FakeHTTPResponse):
+            def read(self, size: int = -1) -> bytes:
+                return self._stream.read(size)
+
+        descriptor = {
+            "protocol_version": "1.0",
+            "id": "asset_audio_1",
+            "object": "kemo.asset",
+            "status": "ready",
+            "purpose": "input",
+            "filename": "voice.wav",
+            "mime_type": "audio/wav",
+            "size": len(payload),
+            "checksum_sha256": checksum,
+            "metadata": {},
+            "extensions": {},
+        }
+
+        def open_request(http_request):
+            seen.append(http_request)
+            if http_request.full_url.endswith("/content"):
+                return ChunkResponse(payload)
+            return ChunkResponse(json.dumps(descriptor).encode("utf-8"))
+
+        adapter._open = open_request
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "voice.wav"
+            source.write_bytes(payload)
+            uploaded = adapter.upload_asset(
+                source,
+                metadata={"user": "alice", "session_id": "s1", "purpose": "input"},
+                idempotency_key="upload_voice_1",
+                checksum_sha256=checksum,
+                mime_type="audio/wav",
+            )
+            body = b"".join(seen[0].data)
+            self.assertIn(payload, body)
+            self.assertEqual(seen[0].get_header("X-content-sha256"), checksum)
+            self.assertEqual(uploaded.id, "asset_audio_1")
+            destination = Path(temporary) / "downloaded.wav"
+            adapter.download_asset(
+                uploaded.id,
+                destination,
+                expected_sha256=checksum,
+            )
+            self.assertEqual(destination.read_bytes(), payload)
 
     def test_run_native_protocol_history_items_and_rejects_chat_only_provider(self) -> None:
         _, root = self.make_root(stream=False)

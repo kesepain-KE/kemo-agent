@@ -11,6 +11,7 @@ from plugins.memory_manage.memory_ops import (
     get_fragment,
     list_entries,
     search_by_content,
+    search_many,
     search_by_title,
 )
 from plugins.memory_manage.tool import run as run_memory_manage
@@ -415,9 +416,52 @@ class MemoryManageTests(unittest.TestCase):
                 self.root, "alice", self.config, "one_month", ""
             )
 
-    def test_manifest_exposes_seven_actions_and_bounded_search_parameters(self) -> None:
+    def test_search_many_matches_a_batch_across_memory_tiers(self) -> None:
+        add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "回答偏好",
+            "用户偏好简洁回答。",
+        )
+        add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            "设备信息",
+            "用户的主力设备是工作站。",
+        )
+
+        result = search_many(
+            self.root,
+            "alice",
+            self.config,
+            "all",
+            [
+                {"title": "回答偏好", "content": "简洁回答"},
+                {"title": "设备", "content": "主力设备"},
+            ],
+        )
+
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(
+            result["results"][0]["matches"][0]["memory_ref"],
+            "seven_days:回答偏好.md",
+        )
+        self.assertEqual(
+            result["results"][0]["matches"][0]["matched_by"],
+            ["title", "content"],
+        )
+        self.assertEqual(
+            result["results"][1]["matches"][0]["memory_ref"],
+            "permanent:设备信息.md",
+        )
+
+    def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.2.0")
+        self.assertEqual(tool.version, "1.3.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),
@@ -426,12 +470,13 @@ class MemoryManageTests(unittest.TestCase):
                 "get",
                 "search_by_title",
                 "search_by_content",
+                "search_many",
                 "add",
                 "edit",
                 "delete",
             },
         )
-        for field in ("limit", "context_chars", "case_sensitive"):
+        for field in ("queries", "limit", "context_chars", "case_sensitive"):
             self.assertIn(field, schema["properties"])
         validate_arguments(
             schema,
@@ -442,6 +487,14 @@ class MemoryManageTests(unittest.TestCase):
                 "limit": 3,
                 "context_chars": 500,
                 "case_sensitive": False,
+            },
+        )
+        validate_arguments(
+            schema,
+            {
+                "action": "search_many",
+                "tier": "all",
+                "queries": [{"title": "树莓派", "content": "主机配置"}],
             },
         )
 

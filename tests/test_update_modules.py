@@ -68,6 +68,26 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertEqual(result["module"], "core")
             self.assertEqual(result["status"], "partial")
 
+    def test_core_syncs_provider_and_english_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            write(source / "provider" / "protocol" / "assets.py", "new assets")
+            write(target / "provider" / "protocol" / "assets.py", "old assets")
+            write(target / "provider" / "obsolete.py", "remove me")
+            write(source / "README_EN.md", "new readme")
+            write(target / "README_EN.md", "old readme")
+
+            core_update.update(source, target, assume_yes=True)
+
+            self.assertEqual(
+                (target / "provider" / "protocol" / "assets.py").read_text(encoding="utf-8"),
+                "new assets",
+            )
+            self.assertFalse((target / "provider" / "obsolete.py").exists())
+            self.assertEqual((target / "README_EN.md").read_text(encoding="utf-8"), "new readme")
+
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -114,12 +134,17 @@ class UpdateModuleTests(unittest.TestCase):
             target = root / "target"
             write(source / "web" / "app.py", "new app")
             write(source / "web" / "frontend" / "src" / "main.tsx", "new frontend")
+            write(source / "provider" / "protocol" / "assets.py", "new assets")
+            write(source / "README_EN.md", "new readme")
             write(target / "web" / "app.py", "old app")
             write(target / "web" / "obsolete.py", "delete")
             write(target / "web" / "node_modules" / "local.js", "preserve")
             write(target / "web" / "dist" / "index.html", "preserve")
             write(target / "web" / "frontend" / "node_modules" / "local.js", "preserve")
             write(target / "web" / "frontend" / "dist" / "index.html", "preserve")
+            write(target / "provider" / "protocol" / "assets.py", "old assets")
+            write(target / "provider" / "obsolete.py", "remove")
+            write(target / "README_EN.md", "old readme")
 
             result = web_update.update(source, target)
 
@@ -130,6 +155,12 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertTrue((target / "web" / "dist" / "index.html").is_file())
             self.assertTrue((target / "web" / "frontend" / "node_modules" / "local.js").is_file())
             self.assertTrue((target / "web" / "frontend" / "dist" / "index.html").is_file())
+            self.assertEqual(
+                (target / "provider" / "protocol" / "assets.py").read_text(encoding="utf-8"),
+                "new assets",
+            )
+            self.assertFalse((target / "provider" / "obsolete.py").exists())
+            self.assertEqual((target / "README_EN.md").read_text(encoding="utf-8"), "new readme")
 
     def test_dispatcher_parses_module_and_component_versions(self) -> None:
         spec = importlib.util.spec_from_file_location("kemo_update_dispatcher", ROOT / "update.py")

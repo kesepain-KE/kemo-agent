@@ -11,7 +11,12 @@ from unittest.mock import patch
 
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
-from run.engine import handle_request, iter_request_events
+from run.engine import (
+    _analyze_memory_batch_resilient,
+    _memory_batch_operation_id,
+    handle_request,
+    iter_request_events,
+)
 from run.history import find_window, load_window
 from run.history_index import find_record as find_history_record
 from run.memory import MemoryStore
@@ -38,6 +43,88 @@ class Provider:
 
 
 class MemoryEngineTests(unittest.TestCase):
+    def test_memory_batch_operation_id_changes_when_round_content_changes(self) -> None:
+        first = _memory_batch_operation_id(
+            "alice",
+            "web",
+            "session",
+            1,
+            2,
+            [{"round": 1, "messages": [{"content": "before"}]}],
+        )
+        repeated = _memory_batch_operation_id(
+            "alice",
+            "web",
+            "session",
+            1,
+            2,
+            [{"round": 1, "messages": [{"content": "before"}]}],
+        )
+        rewritten = _memory_batch_operation_id(
+            "alice",
+            "web",
+            "session",
+            1,
+            2,
+            [{"round": 1, "messages": [{"content": "after"}]}],
+        )
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, rewritten)
+
+    def test_batch_analysis_retries_then_splits_malformed_output(self) -> None:
+        rounds = [
+            {"round": number, "messages": []}
+            for number in range(1, 5)
+        ]
+        failed = {
+            "status": "failed",
+            "candidate_count": 0,
+            "error": {
+                "message": "输出缺少 candidates",
+                "exception_type": "AgentOutputError",
+            },
+        }
+
+        def analyze(**kwargs):
+            current = kwargs["rounds"]
+            if analyze.calls < 2:
+                analyze.calls += 1
+                return dict(failed)
+            analyze.calls += 1
+            numbers = [item["round"] for item in current]
+            return {
+                "status": "completed",
+                "candidate_count": 1,
+                "candidates": [
+                    {
+                        "filename": f"批次-{numbers[0]}",
+                        "content": "批次内容",
+                    }
+                ],
+                "round_start": min(numbers),
+                "round_end": max(numbers),
+                "rounds": numbers,
+                "source": {},
+                "agent": "self_improve",
+                "usage": {},
+                "error": None,
+            }
+
+        analyze.calls = 0
+        with patch("run.engine._analyze_memory_batch", side_effect=analyze) as mocked:
+            result = _analyze_memory_batch_resilient(
+                rounds=rounds,
+                agent_runner=object(),
+                cancel_event=None,
+                source={"source": "round_commit"},
+            )
+
+        self.assertEqual(mocked.call_count, 4)
+        self.assertTrue(result["fallback_split"])
+        self.assertEqual(result["rounds"], [1, 2, 3, 4])
+        self.assertEqual(result["candidate_count"], 2)
+
     def root(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

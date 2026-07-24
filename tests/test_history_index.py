@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from run.history import commit_window, empty_window, list_sessions
+from run.history import commit_window, empty_window, list_sessions, load_window
 from run.history_index import (
     claim_pending_memory,
     claim_pending_summary,
@@ -158,6 +158,44 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(finished["memory_processed_round"], 1)
         self.assertEqual(finished["memory_status"], "completed")
         self.assertNotIn("memory_claim_id", finished)
+
+    def test_memory_claim_can_lease_a_contiguous_round_range(self) -> None:
+        _, root = self.make_root()
+        archive = self.commit_archive(
+            root,
+            source="web",
+            session_id="memory-batch",
+            directory_name="conv_memory_batch",
+            memory_status="pending",
+        )
+        window = load_window(archive)
+        window["text"]["messages"] = [
+            item
+            for round_number in range(1, 6)
+            for item in (
+                {"role": "user", "content": f"问题 {round_number}"},
+                {"role": "assistant", "content": f"回答 {round_number}"},
+            )
+        ]
+        window["data"]["rounds"] = 5
+        window["data"]["memory_processed_round"] = 0
+        commit_window(archive, window)
+
+        claim = claim_pending_memory(root, "alice", max_rounds=5)
+
+        self.assertEqual(claim["memory_claim_round"], 1)
+        self.assertEqual(claim["memory_claim_start_round"], 1)
+        self.assertEqual(claim["memory_claim_end_round"], 5)
+        finished = finish_memory_claim(
+            root,
+            "alice",
+            "web",
+            "memory-batch",
+            claim_id=claim["memory_claim_id"],
+            processed_round=5,
+        )
+        self.assertEqual(finished["memory_processed_round"], 5)
+        self.assertEqual(finished["memory_status"], "completed")
 
     def test_pending_memory_is_not_claimed_while_session_is_running(self) -> None:
         _, root = self.make_root()

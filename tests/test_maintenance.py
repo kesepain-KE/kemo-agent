@@ -390,7 +390,12 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         }
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
-            patch("run.maintenance._analyze_round_memory", return_value=analysis),
+            patch(
+                "run.maintenance._analyze_memory_batch_resilient", return_value=analysis
+            ) as analyze_batch,
+            patch(
+                "run.maintenance._analyze_round_memory", return_value=analysis
+            ) as analyze_round,
             patch(
                 "run.maintenance._persist_round_memory_analysis",
                 return_value=persisted,
@@ -402,6 +407,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         self.assertEqual(queued["pending_rounds"], 3)
         self.assertEqual(first["alice"]["memory_recovery"]["claimed"], 2)
+        self.assertEqual(first["alice"]["memory_recovery"]["batches"], 1)
+        self.assertEqual(analyze_batch.call_count, 1)
+        self.assertEqual(analyze_round.call_count, 1)
         self.assertEqual(after_first["memory_processed_round"], 2)
         self.assertEqual(after_first["memory_status"], "queued")
         self.assertEqual(after_first["memory_target_round"], 3)
@@ -473,7 +481,10 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         }
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
-            patch("run.maintenance._analyze_round_memory", return_value=analysis) as analyze,
+            patch(
+                "run.maintenance._analyze_memory_batch_resilient",
+                return_value=analysis,
+            ) as analyze,
             patch(
                 "run.maintenance._persist_round_memory_analysis",
                 return_value=persisted,
@@ -483,7 +494,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         recovery = result["alice"]["memory_recovery"]
         self.assertEqual(recovery["claimed"], 3)
-        self.assertEqual(analyze.call_count, 3)
+        self.assertEqual(recovery["batches"], 1)
+        self.assertEqual(analyze.call_count, 1)
+        self.assertEqual(len(analyze.call_args.kwargs["rounds"]), 3)
         completed = load_window(archive)["data"]
         self.assertEqual(completed["rounds"], 4)
         self.assertEqual(completed["memory_processed_round"], 3)

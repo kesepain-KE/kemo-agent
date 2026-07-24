@@ -404,6 +404,60 @@ timestamp: 2026-07-18T14:32:25+08:00
         self.assertEqual(state["messages_sent_today"], 2)
         self.assertFalse(errors)
 
+    def test_input_supervisor_restarts_dead_module_without_stopping_queue_poll(self) -> None:
+        (self.directory / "input.py").write_text(
+            "import threading\n"
+            "import time\n"
+            "STOP = threading.Event()\n"
+            "STARTS = 0\n"
+            "RUNNING = False\n"
+            "LAST_ERROR = None\n"
+            "def start(config, message_buffer, files_dir, state_path):\n"
+            "    global STARTS, RUNNING, LAST_ERROR\n"
+            "    STARTS += 1\n"
+            "    RUNNING = True\n"
+            "    STOP.clear()\n"
+            "    if STARTS == 1:\n"
+            "        time.sleep(0.03)\n"
+            "        RUNNING = False\n"
+            "        LAST_ERROR = 'simulated input crash'\n"
+            "        return\n"
+            "    LAST_ERROR = None\n"
+            "    STOP.wait()\n"
+            "    RUNNING = False\n"
+            "def stop():\n"
+            "    STOP.set()\n"
+            "def is_alive():\n"
+            "    return RUNNING\n"
+            "def last_error():\n"
+            "    return LAST_ERROR\n",
+            "utf-8",
+        )
+        transport = FileMessageTransport(
+            MessagePluginConfig.load(self.root, self.directory),
+            poll_interval=0.01,
+            health_interval=60,
+            input_supervision_interval=0.01,
+            input_start_grace=0.01,
+            input_restart_initial_backoff=0.01,
+            input_restart_max_backoff=0.05,
+            input_restart_stable_seconds=0.05,
+        )
+        transport.start(lambda _envelope: None, lambda _name, _exc: None)
+        self.addCleanup(transport.stop)
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if transport._input.STARTS >= 2 and transport._input.is_alive():
+                break
+            time.sleep(0.01)
+
+        self.assertGreaterEqual(transport._input.STARTS, 2)
+        self.assertTrue(transport._input.is_alive())
+        state = json.loads((self.directory / "state.json").read_text("utf-8"))
+        self.assertGreaterEqual(state["input_restart_count"], 1)
+        self.assertIn(state["input_status"], {"starting", "running"})
+
     def test_discovery_reports_invalid_folder_without_hiding_valid_plugin(self) -> None:
         (self.root / "message" / "out" / "broken").mkdir()
         transports, issues = discover_message_plugins(self.root)
@@ -551,6 +605,14 @@ class RouterTests(unittest.TestCase):
         self.assertEqual([item[:2] for item in seen], [("alice", "message:mock")] * 2)
         self.assertTrue(all(item[2].startswith("conv_") for item in seen))
         self.assertNotEqual(seen[0][2], seen[1][2])
+
+    def test_external_chat_reuses_durable_session_after_router_recreation(self) -> None:
+        first = self._router().route(_envelope("persist-1", chat_id="durable-chat"))
+        second = self._router().route(_envelope("persist-2", chat_id="durable-chat"))
+
+        self.assertEqual(first.status, "completed")
+        self.assertEqual(second.status, "completed")
+        self.assertEqual(second.session_id, first.session_id)
 
     def test_new_command_saves_current_session_and_queues_memory_without_model(self) -> None:
         (self.root / "config" / "global_config.json").write_text(

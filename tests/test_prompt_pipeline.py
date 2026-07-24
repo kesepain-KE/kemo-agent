@@ -60,6 +60,27 @@ class CaptureProvider:
 
 
 class PromptPipelineTests(unittest.TestCase):
+    def test_repository_instruction_contract_preserves_user_directed_path_rules(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        global_soul = (root / "config" / "global_soul.md").read_text("utf-8")
+        agents_manual = (root / "agents.md").read_text("utf-8")
+
+        self.assertIn("## 用户明确路径优先", global_soul)
+        self.assertIn("必须按用户指定路径执行", global_soul)
+        self.assertIn("未获授权时停在冲突步骤", global_soul)
+        self.assertLess(global_soul.index("## 硬性底线"), global_soul.index("## 用户明确路径优先"))
+
+        self.assertIn("### 用户指定执行路径", agents_manual)
+        for requirement in (
+            "指定执行顺序",
+            "指定工具或资源",
+            "指定作用范围与禁止事项",
+            "指定暂停和授权节点",
+            "不得提前执行后续步骤",
+            "以最新的明确指令为准",
+        ):
+            self.assertIn(requirement, agents_manual)
+
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path, dict]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

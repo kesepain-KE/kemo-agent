@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import threading
@@ -32,7 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_fourteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_fifteen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -44,6 +45,7 @@ class PluginManifestTests(unittest.TestCase):
                 "get_current_time",
                 "history_search",
                 "memory_manage",
+                "multimodal",
                 "network",
                 "sense_creater",
                 "shell",
@@ -59,7 +61,7 @@ class PluginManifestTests(unittest.TestCase):
             self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 14)
+        self.assertEqual(len(registry.tools), 15)
         expand_schema = registry.get("expand_creater").input_schema
         self.assertEqual(
             set(expand_schema["properties"]["action"]["enum"]),
@@ -575,6 +577,26 @@ class _FakeTavily:
 
 
 class WebSearchPluginTests(unittest.TestCase):
+    def test_missing_api_key_returns_actionable_configuration_error_without_network(self) -> None:
+        with (
+            patch.dict(os.environ, {"TAVILY_API_KEY": ""}, clear=False),
+            patch("plugins.web_search.tool.HAS_TAVILY", True),
+            patch("plugins.web_search.tool.TavilyClient") as client,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"\.env.*TAVILY_API_KEY.*重启智能体"):
+                run_web_search("search", query="kemo", context={})
+        client.assert_not_called()
+
+    def test_missing_dependency_returns_installation_error_without_network(self) -> None:
+        with (
+            patch.dict(os.environ, {"TAVILY_API_KEY": "configured-for-test"}, clear=False),
+            patch("plugins.web_search.tool.HAS_TAVILY", False),
+            patch("plugins.web_search.tool.TavilyClient") as client,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"pip install tavily-python.*重启智能体"):
+                run_web_search("search", query="kemo", context={})
+        client.assert_not_called()
+
     def test_search_parses_domain_lists_and_propagates_timeout(self) -> None:
         client = _FakeTavily()
         with patch("plugins.web_search.tool._get_client", return_value=client):

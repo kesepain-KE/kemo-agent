@@ -290,6 +290,38 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metadata["candidate_filter"]["accepted"], 2)
         self.assertEqual(result.metadata["candidate_filter"]["rejected"], 4)
 
+    def test_context_extraction_uses_configured_batch_candidate_cap(self) -> None:
+        class Context:
+            runner = SimpleNamespace(
+                config={"memory": {"extraction_max_candidates_per_batch": 6}}
+            )
+
+            @staticmethod
+            def run_model(input_data):
+                return _result(
+                    candidates=[
+                        {
+                            "action": "upsert",
+                            "filename": f"偏好{index}",
+                            "content": f"用户长期偏好 {index}",
+                            "durable": True,
+                            "evidence": f"用户证据 {index}",
+                        }
+                        for index in range(8)
+                    ]
+                )
+
+        result = execute_self_improve(
+            Context(),
+            {
+                "trigger": "context_compression",
+                "rounds": [{"round": index} for index in range(1, 6)],
+            },
+        )
+
+        self.assertEqual(len(result.data["candidates"]), 6)
+        self.assertEqual(result.metadata["candidate_filter"]["limit"], 6)
+
     def test_manual_review_persists_candidates_for_main_agent_call(self) -> None:
         class Context:
             runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)

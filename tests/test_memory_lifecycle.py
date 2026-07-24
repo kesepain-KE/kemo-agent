@@ -243,6 +243,24 @@ class MemoryLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 1)
 
+    def test_operation_id_replay_does_not_repeat_update_or_weight(self) -> None:
+        first = self.store.upsert_candidates(
+            [{"filename": "批次事实", "content": "用户维护批次任务。", "action": "upsert"}],
+            operation_id="memory_batch_alice_web_session_1_5",
+            now=self.start,
+        )
+        second = self.store.upsert_candidates(
+            [{"filename": "批次事实", "content": "用户维护批次任务。", "action": "upsert"}],
+            operation_id="memory_batch_alice_web_session_1_5",
+            now=self.start + timedelta(days=1),
+        )
+
+        self.assertFalse(first["replayed"])
+        self.assertTrue(second["replayed"])
+        filename = first["created"][0]
+        self.assertEqual(self.store.load_index("seven_days")[filename]["weight"], 0)
+        self.assertEqual(second["created"], first["created"])
+
     def test_due_upgrade_resets_and_due_failure_deletes(self) -> None:
         upgraded = self.seed_temporary(
             "seven_days", "反复使用", content="会反复使用的记忆。", weight=3, expires_at=self.start

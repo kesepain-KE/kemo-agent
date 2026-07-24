@@ -159,14 +159,26 @@ class WebBackendTests(unittest.TestCase):
             )
         )
         self.assertEqual([event.type for event in events], ["done"])
-        self.assertEqual(
-            captured[0]["uploaded_files"],
-            [{
-                "name": "note (2).txt",
-                "path": "users/alice/file_upload/note (2).txt",
-                "size": 6,
-            }],
+        attached = captured[0]["uploaded_files"][0]
+        self.assertEqual(attached["name"], "note (2).txt")
+        self.assertEqual(attached["path"], "users/alice/file_upload/note (2).txt")
+        self.assertEqual(attached["size"], 6)
+        self.assertEqual(attached["mime_type"], "text/plain")
+        self.assertFalse(attached["is_image"])
+        self.assertRegex(attached["asset_id"], r"^asset_[0-9a-f]{32}$")
+        self.assertRegex(attached["checksum_sha256"], r"^[0-9a-f]{64}$")
+        attachment_only = list(
+            service.stream_chat(
+                "alice",
+                "attachment-only",
+                "",
+                cancel_event=threading.Event(),
+                uploaded_files=[first["path"]],
+            )
         )
+        self.assertEqual([event.type for event in attachment_only], ["done"])
+        self.assertEqual(captured[-1]["prompt"], "")
+        self.assertEqual(captured[-1]["uploaded_files"][0]["name"], "note.txt")
         with self.assertRaisesRegex(Exception, "上传文件不存在"):
             list(
                 service.stream_chat(
@@ -1211,11 +1223,25 @@ class WebBackendTests(unittest.TestCase):
 
         def extract(**kwargs):
             observed.update(kwargs)
-            return {"status": "completed", "candidate_count": 2, "error": None}
+            return {
+                "status": "completed",
+                "candidate_count": 2,
+                "candidates": [],
+                "source": {"source": "round_commit"},
+                "error": None,
+            }
+
+        def persist(**kwargs):
+            return {
+                "status": "completed",
+                "candidate_count": kwargs["analysis"]["candidate_count"],
+                "error": None,
+            }
 
         with (
             patch("web.service.AgentRunner", return_value=object()),
-            patch("run.engine._extract_round_memory", side_effect=extract) as extracted,
+            patch("run.engine._analyze_memory_batch", side_effect=extract) as extracted,
+            patch("run.engine._persist_round_memory_analysis", side_effect=persist),
         ):
             app = create_app(service=WebRunService(root))
             response = self.request(
@@ -1231,11 +1257,13 @@ class WebBackendTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["candidates"], 2)
-        self.assertEqual(observed["round_number"], 2)
-        self.assertEqual(observed["prompt"], "remember latest")
-        self.assertEqual(observed["text"], "answer two")
-        self.assertEqual(observed["reasoning"], "think two")
-        self.assertEqual(observed["tool_records"][0]["name"], "lookup")
+        self.assertEqual(len(observed["rounds"]), 1)
+        extracted_round = observed["rounds"][0]
+        self.assertEqual(extracted_round["round"], 2)
+        self.assertEqual(extracted_round["messages"][0]["content"], "remember latest")
+        self.assertEqual(extracted_round["messages"][1]["content"], "answer two")
+        self.assertEqual(extracted_round["think"]["content"], "think two")
+        self.assertEqual(extracted_round["tools"][0]["name"], "lookup")
         self.assertEqual(extracted.call_count, 1)
         self.assertEqual(repeated.json()["reason"], "already_processed")
         stored = load_window(root / "users" / "alice" / "history" / "window-1")
@@ -1513,11 +1541,26 @@ class WebBackendTests(unittest.TestCase):
             service.submit_guidance("bob", "run_guidance_123", "cross user")
         worker.join(timeout=3)
         self.assertFalse(worker.is_alive())
-        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["status"], "accepted_current_run")
         self.assertEqual(seen, ["adjust target"])
         self.assertEqual(captured[-1].metadata["run_id"], "run_guidance_123")
         with self.assertRaisesRegex(Exception, "运行不存在"):
             service.submit_guidance("alice", "run_guidance_123", "too late")
+
+    def test_web_guidance_after_final_boundary_is_queued_for_next_turn(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        active = ActiveRun("run_guidance_closed", "alice", "guided-session")
+        active.guidance.close()
+        service._active_runs[active.run_id] = active
+
+        response = service.submit_guidance(
+            "alice", active.run_id, "continue as a new turn"
+        )
+
+        self.assertEqual(response["status"], "queued_next_turn")
+        self.assertEqual(response["queued"], 0)
+        self.assertEqual(active.guidance.qsize(), 0)
 
     def test_web_cancel_run_is_user_scoped_and_sets_active_event(self) -> None:
         _, root = self.make_root()
@@ -1599,6 +1642,23 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(parsed[3][1]["result"], {"ok": True})
         self.assertEqual(fake.seen["session_id"], "s1")
         self.assertTrue(fake.cancel_event.is_set())
+
+    def test_chat_route_accepts_uploaded_files_without_text(self) -> None:
+        fake = FakeService(events=[RunEvent(type="done")])
+        response = self.request(
+            create_app(service=fake),
+            "POST",
+            "/api/chat",
+            json={
+                "user": "alice",
+                "session_id": "attachment-only",
+                "prompt": "",
+                "uploaded_files": ["screenshot.png"],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(fake.seen["prompt"], "")
+        self.assertEqual(fake.seen["uploaded_files"], ["screenshot.png"])
 
     def test_plan_chat_route_starts_plan_stream_without_a_prompt(self) -> None:
         fake = FakeService(events=[RunEvent(type="text_delta", content="执行中"), RunEvent(type="done")])
