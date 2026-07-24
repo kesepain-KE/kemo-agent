@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import queue
 import threading
@@ -24,7 +25,10 @@ from provider.factory import (
 )
 from provider.protocol.enums import ResponseStatus, StreamEventType
 from provider.protocol.models import (
+    AudioContent,
     ContentBlock,
+    FileContent,
+    ImageContent,
     KemoRequest,
     KemoResponse,
     MessageItem,
@@ -32,10 +36,12 @@ from provider.protocol.models import (
     TextContent,
     ToolCallItem,
     Usage as ProtocolUsage,
+    VideoContent,
 )
 from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ChatRequest, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
+from run.attachments import AttachmentError, UploadedAssetResolver
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import (
     ContextPolicy,
@@ -44,7 +50,11 @@ from run.context import (
     estimate_tools_tokens,
     select_context,
 )
-from run.context_summary import build_summary_message, get_or_create_summary
+from run.context_summary import (
+    build_summary_message,
+    get_or_create_summary,
+    read_summary_cache,
+)
 from run.history import (
     _trim_to_max_rounds,
     append_round_items,
@@ -59,8 +69,14 @@ from run.history import (
 from run.history_index import find_record as find_history_record
 from run.history_index import set_active as set_active_history_session
 from run.history_index import update_memory_state, update_run_state
-from run.memory import MemoryStore, memory_extraction_mode
+from run.memory import (
+    MemoryStore,
+    memory_extraction_batch_rounds,
+    memory_extraction_mode,
+)
 from run.memory_pipeline import memory_round_payload
+from run.media_outputs import persist_response_media
+from run.multimodal import main_model_supports_input, select_vision_route
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from run.tools import (
@@ -101,6 +117,64 @@ def _required_text(request: dict[str, Any], name: str) -> str:
     return value.strip()
 
 
+def _queue_summary_memory_extraction(
+    *,
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    summary_cache: dict[str, Any],
+    archive_round_number: int,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Queue only the absolute rounds already covered by the rolling summary."""
+
+    raw_covered = summary_cache.get("covered_through_round")
+    if raw_covered is None:
+        covered_rounds = summary_cache.get("covered_rounds")
+        raw_covered = (
+            max(
+                (
+                    int(value)
+                    for value in covered_rounds
+                    if isinstance(value, int) or str(value).isdigit()
+                ),
+                default=0,
+            )
+            if isinstance(covered_rounds, list)
+            else 0
+        )
+    try:
+        target_round = min(
+            max(0, int(archive_round_number)),
+            max(0, int(raw_covered or 0)),
+        )
+    except (TypeError, ValueError):
+        target_round = 0
+    if target_round < 1:
+        return None
+    try:
+        return queue_memory_extraction(
+            root,
+            user,
+            source,
+            session_id,
+            target_round=target_round,
+            reason=reason,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "reason": "memory_queue_registration_failed",
+            "round": target_round,
+            "candidates": 0,
+            "error": {
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            },
+        }
+
+
 def _request_content_blocks(request: dict[str, Any]) -> list[ContentBlock]:
     prompt_value = request.get("prompt", "")
     prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
@@ -127,7 +201,12 @@ def _content_for_message(blocks: list[ContentBlock]) -> str | list[dict[str, Any
     return [block.model_dump(mode="json", exclude_none=True) for block in blocks]
 
 
-def _uploaded_file_context(request: dict[str, Any]) -> str:
+def _uploaded_file_context(
+    request: dict[str, Any],
+    *,
+    vision_route: str | None = None,
+    direct_asset_ids: set[str] | None = None,
+) -> str:
     raw_files = request.get("uploaded_files") or []
     if not isinstance(raw_files, list):
         raise EngineError("请求字段 'uploaded_files' 必须是文件描述数组")
@@ -140,12 +219,40 @@ def _uploaded_file_context(request: dict[str, Any]) -> str:
         if not path:
             raise EngineError("上传文件描述缺少 path")
         size = max(0, int(item.get("size") or 0))
-        lines.append(f"- {name or Path(path).name}：{path}（{size} bytes）")
+        asset_id = str(item.get("asset_id") or "").strip()
+        mime_type = str(item.get("mime_type") or "application/octet-stream").strip()
+        suffix = ""
+        direct = asset_id in (direct_asset_ids or set())
+        media_kind = str(item.get("media_kind") or ("image" if item.get("is_image") else "file"))
+        if media_kind == "image" and asset_id:
+            suffix = (
+                f"；图片资产 {asset_id} 已直接提供给主模型"
+                if direct or vision_route == "main"
+                else f"；图片资产 {asset_id}，需要查看时调用 multimodal 工具"
+            )
+        elif media_kind == "audio" and asset_id:
+            suffix = (
+                f"；音频资产 {asset_id} 已直接提供给主模型"
+                if direct
+                else f"；音频资产 {asset_id}，需要处理时调用 multimodal 工具"
+            )
+        elif media_kind == "video" and asset_id:
+            suffix = (
+                f"；视频资产 {asset_id} 已直接提供给主模型"
+                if direct
+                else f"；视频资产 {asset_id}，需要分析时调用 multimodal 工具"
+            )
+        elif media_kind == "file" and asset_id and direct:
+            suffix = f"；文件资产 {asset_id} 已直接提供给主模型"
+        lines.append(
+            f"- {name or Path(path).name}：{path}（{mime_type}，{size} bytes{suffix}）"
+        )
     if not lines:
         return ""
     return (
         "\n\n[本轮用户上传文件]\n"
-        "以下文件已经由 Web 端保存，可按需使用 file 工具读取其内容：\n"
+        "以下文件已经由 Web 端保存；普通文件可按需使用 file 工具读取，"
+        "并请严格按每项资产说明选择主模型或 multimodal 工具：\n"
         + "\n".join(lines)
     )
 
@@ -162,6 +269,9 @@ def _content_display(blocks: list[ContentBlock]) -> str:
 
 
 def _drain_guidance(channel: Any) -> list[str]:
+    drain = getattr(channel, "drain", None)
+    if callable(drain):
+        return list(drain())
     if channel is None or not callable(getattr(channel, "get_nowait", None)):
         return []
     values: list[str] = []
@@ -173,6 +283,19 @@ def _drain_guidance(channel: Any) -> list[str]:
         if isinstance(value, str) and value.strip():
             values.append(value.strip())
     return values
+
+
+def _drain_or_close_guidance(channel: Any) -> list[str]:
+    drain_or_close = getattr(channel, "drain_or_close", None)
+    if callable(drain_or_close):
+        return list(drain_or_close())
+    return _drain_guidance(channel)
+
+
+def _close_guidance(channel: Any) -> None:
+    close = getattr(channel, "close", None)
+    if callable(close):
+        close()
 
 
 def _append_guidance(messages: list[dict[str, Any]], values: list[str]) -> None:
@@ -404,7 +527,43 @@ def _raise_if_context_length_exceeded(value: Any) -> None:
         )
 
 
-def _events_for_protocol_response(response: KemoResponse) -> Iterator[RunEvent]:
+def _response_media_events(
+    response: KemoResponse,
+    *,
+    provider: Any | None,
+    root: Path | None,
+    user: str,
+    cancel_event: threading.Event | None,
+) -> Iterator[RunEvent]:
+    if provider is None or root is None or not user:
+        return
+    artifacts = persist_response_media(
+        provider,
+        response,
+        root=root,
+        user=user,
+        cancel_event=cancel_event,
+    )
+    if artifacts:
+        response.metadata["artifacts"] = copy.deepcopy(artifacts)
+    for artifact in artifacts:
+        yield RunEvent(
+            type="media_output",
+            request_id=response.request_id,
+            response_id=response.id,
+            result=artifact,
+            metadata={"artifact": artifact},
+        )
+
+
+def _events_for_protocol_response(
+    response: KemoResponse,
+    *,
+    provider: Any | None = None,
+    root: Path | None = None,
+    user: str = "",
+    cancel_event: threading.Event | None = None,
+) -> Iterator[RunEvent]:
     if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
         _raise_if_context_length_exceeded(response.error)
     common = {
@@ -444,6 +603,13 @@ def _events_for_protocol_response(response: KemoResponse) -> Iterator[RunEvent]:
                 metadata={"raw_arguments": item.arguments_raw},
                 **common,
             )
+    yield from _response_media_events(
+        response,
+        provider=provider,
+        root=root,
+        user=user,
+        cancel_event=cancel_event,
+    )
     usage = _protocol_usage_dict(response.usage)
     yield RunEvent(
         type="usage",
@@ -478,7 +644,14 @@ def _events_for_protocol_response(response: KemoResponse) -> Iterator[RunEvent]:
         )
 
 
-def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEvent]:
+def _run_events_for_protocol_event(
+    event: ProviderStreamEvent,
+    *,
+    provider: Any | None = None,
+    root: Path | None = None,
+    user: str = "",
+    cancel_event: threading.Event | None = None,
+) -> Iterator[RunEvent]:
     common = {
         "event_id": event.event_id,
         "sequence": event.sequence,
@@ -553,6 +726,20 @@ def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEv
             "provider_response": payload,
         }
         if response.status in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
+            yield from _response_media_events(
+                response,
+                provider=provider,
+                root=root,
+                user=user,
+                cancel_event=cancel_event,
+            )
+            if response.metadata.get("artifacts"):
+                terminal_metadata["artifacts"] = copy.deepcopy(
+                    response.metadata["artifacts"]
+                )
+                terminal_metadata["provider_response"] = response.model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                )
             yield RunEvent(
                 type="done",
                 usage=_protocol_usage_dict(response.usage),
@@ -571,6 +758,10 @@ def _run_events_for_protocol_event(event: ProviderStreamEvent) -> Iterator[RunEv
 def _provider_events(
     provider: Any,
     protocol_request: KemoRequest,
+    *,
+    root: Path | None = None,
+    user: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[RunEvent]:
     stream = getattr(provider, "stream", None)
     create = getattr(provider, "create", None)
@@ -580,14 +771,26 @@ def _provider_events(
         for protocol_event in stream(protocol_request):
             if not isinstance(protocol_event, ProviderStreamEvent):
                 raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
-            yield from _run_events_for_protocol_event(protocol_event)
+            yield from _run_events_for_protocol_event(
+                protocol_event,
+                provider=provider,
+                root=root,
+                user=user,
+                cancel_event=cancel_event,
+            )
         return
     if not callable(create):
         raise EngineError("Provider 必须实现 Kemo create() 接口")
     response = create(protocol_request)
     if not isinstance(response, KemoResponse):
         raise EngineError("Provider create() 必须返回 KemoResponse")
-    yield from _events_for_protocol_response(response)
+    yield from _events_for_protocol_response(
+        response,
+        provider=provider,
+        root=root,
+        user=user,
+        cancel_event=cancel_event,
+    )
 
 
 def _assistant_tool_message(text: str, calls: list[ToolCall]) -> dict[str, Any]:
@@ -865,18 +1068,14 @@ def _compress_per_round_tool_think(
     }
 
 
-def _analyze_round_memory(
+def _memory_round_data(
     *,
     round_number: int,
     prompt: str,
     text: str,
     reasoning: str,
     tool_records: list[dict[str, Any]],
-    agent_runner: AgentRunner,
-    cancel_event: threading.Event | None,
 ) -> dict[str, Any]:
-    """Analyze one completed round without mutating memory or history state."""
-
     round_data: dict[str, Any] = {
         "round": round_number,
         "messages": [
@@ -896,15 +1095,38 @@ def _analyze_round_memory(
             for record in tool_records
             if isinstance(record, dict)
         ]
+    return round_data
 
-    source = {"source": "round_commit", "round": round_number}
+
+def _analyze_memory_batch(
+    *,
+    rounds: list[dict[str, Any]],
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Analyze a bounded batch of completed rounds without mutating state."""
+
+    if not rounds:
+        raise EngineError("记忆批量分析至少需要一轮对话")
+    round_numbers = [max(0, int(item.get("round") or 0)) for item in rounds]
+    if any(number < 1 for number in round_numbers):
+        raise EngineError("记忆批量分析包含无效轮次")
+    effective_source = dict(
+        source
+        or {
+            "source": "round_commit",
+            "round_start": min(round_numbers),
+            "round_end": max(round_numbers),
+        }
+    )
     try:
         result = agent_runner.run(
             "self_improve",
             {
                 "trigger": "context_compression",
-                "rounds": [round_data],
-                "source": source,
+                "rounds": rounds,
+                "source": effective_source,
             },
             cancel_event=cancel_event,
         )
@@ -915,7 +1137,10 @@ def _analyze_round_memory(
             "status": "completed",
             "candidate_count": len(candidates),
             "candidates": copy.deepcopy(candidates),
-            "source": source,
+            "round_start": min(round_numbers),
+            "round_end": max(round_numbers),
+            "rounds": round_numbers,
+            "source": effective_source,
             "agent": result.agent,
             "usage": dict(result.usage),
             "error": None,
@@ -924,11 +1149,139 @@ def _analyze_round_memory(
         return {
             "status": "failed",
             "candidate_count": 0,
+            "round_start": min(round_numbers),
+            "round_end": max(round_numbers),
+            "rounds": round_numbers,
             "error": {
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
             },
         }
+
+
+def _analyze_round_memory(
+    *,
+    round_number: int,
+    prompt: str,
+    text: str,
+    reasoning: str,
+    tool_records: list[dict[str, Any]],
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for callers that intentionally process one round."""
+
+    return _analyze_memory_batch(
+        rounds=[
+            _memory_round_data(
+                round_number=round_number,
+                prompt=prompt,
+                text=text,
+                reasoning=reasoning,
+                tool_records=tool_records,
+            )
+        ],
+        agent_runner=agent_runner,
+        cancel_event=cancel_event,
+        source={"source": "round_commit", "round": round_number},
+    )
+
+
+def _analyze_memory_batch_resilient(
+    *,
+    rounds: list[dict[str, Any]],
+    agent_runner: AgentRunner,
+    cancel_event: threading.Event | None,
+    source: dict[str, Any] | None = None,
+    retry_once: bool = True,
+) -> dict[str, Any]:
+    """Retry malformed batch output once, then isolate it by contiguous halves."""
+
+    analysis = _analyze_memory_batch(
+        rounds=rounds,
+        agent_runner=agent_runner,
+        cancel_event=cancel_event,
+        source=source,
+    )
+    if analysis.get("status") == "completed":
+        return analysis
+    error = analysis.get("error")
+    exception_type = (
+        str(error.get("exception_type") or "") if isinstance(error, dict) else ""
+    )
+    # Provider connectivity, authentication and cancellation failures should be
+    # retried by their owning scheduler, not multiplied into smaller requests.
+    if exception_type not in {"AgentOutputError", "EngineError"}:
+        return analysis
+    if retry_once:
+        retried = _analyze_memory_batch(
+            rounds=rounds,
+            agent_runner=agent_runner,
+            cancel_event=cancel_event,
+            source=source,
+        )
+        if retried.get("status") == "completed":
+            return retried
+        retry_error = retried.get("error")
+        retry_type = (
+            str(retry_error.get("exception_type") or "")
+            if isinstance(retry_error, dict)
+            else ""
+        )
+        if retry_type not in {"AgentOutputError", "EngineError"}:
+            return retried
+        analysis = retried
+    if len(rounds) <= 1:
+        return analysis
+
+    midpoint = max(1, len(rounds) // 2)
+    parts: list[dict[str, Any]] = []
+    for subset in (rounds[:midpoint], rounds[midpoint:]):
+        numbers = [int(item.get("round") or 0) for item in subset]
+        subset_source = {
+            **dict(source or {}),
+            "round_start": min(numbers),
+            "round_end": max(numbers),
+        }
+        part = _analyze_memory_batch_resilient(
+            rounds=subset,
+            agent_runner=agent_runner,
+            cancel_event=cancel_event,
+            source=subset_source,
+            retry_once=False,
+        )
+        if part.get("status") != "completed":
+            return {
+                **part,
+                "failed_batch": {
+                    "round_start": min(numbers),
+                    "round_end": max(numbers),
+                },
+            }
+        parts.append(part)
+
+    combined_usage = _usage_total()
+    candidates: list[dict[str, Any]] = []
+    round_numbers: list[int] = []
+    for part in parts:
+        candidates.extend(copy.deepcopy(part.get("candidates") or []))
+        round_numbers.extend(int(value) for value in part.get("rounds") or [])
+        part_usage = part.get("usage")
+        if isinstance(part_usage, dict):
+            _record_provider_request(combined_usage, _usage_from_dict(part_usage))
+    return {
+        "status": "completed",
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "round_start": min(round_numbers),
+        "round_end": max(round_numbers),
+        "rounds": round_numbers,
+        "source": dict(source or {}),
+        "agent": str(parts[-1].get("agent") or "self_improve"),
+        "usage": combined_usage,
+        "error": None,
+        "fallback_split": True,
+    }
 
 
 def _persist_round_memory_analysis(
@@ -937,6 +1290,7 @@ def _persist_round_memory_analysis(
     user: str,
     config: dict[str, Any],
     analysis: dict[str, Any],
+    operation_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist a successful analysis after its owning cursor is validated."""
 
@@ -956,9 +1310,23 @@ def _persist_round_memory_analysis(
     if not isinstance(source, dict):
         source = {"source": "round_commit"}
     try:
+        deduplicated: dict[str, dict[str, Any]] = {}
+        unkeyed: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                unkeyed.append(candidate)
+                continue
+            raw_key = candidate.get("filename") or candidate.get("target")
+            key = str(raw_key or "").strip().casefold()
+            if key:
+                deduplicated[key] = candidate
+            else:
+                unkeyed.append(candidate)
+        persisted_candidates = [*deduplicated.values(), *unkeyed]
         persisted = MemoryStore(root, user, config).upsert_candidates(
-            candidates,
+            persisted_candidates,
             source=source,
+            operation_id=operation_id,
         )
     except Exception as exc:
         return {
@@ -976,7 +1344,38 @@ def _persist_round_memory_analysis(
         if key not in {"candidates", "source"}
     }
     result["persisted"] = persisted
+    result["persisted_candidate_count"] = len(persisted_candidates)
     return result
+
+
+def _memory_batch_operation_id(
+    user: str,
+    source: str,
+    session_id: str,
+    round_start: int,
+    round_end: int,
+    rounds: list[dict[str, Any]] | None = None,
+) -> str:
+    payload_digest = hashlib.sha256(
+        json.dumps(
+            rounds or [],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    identity = "\x1f".join(
+        (
+            user,
+            source,
+            session_id,
+            str(round_start),
+            str(round_end),
+            payload_digest,
+        )
+    )
+    return "memory_batch_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _extract_round_memory(
@@ -1103,50 +1502,86 @@ def _extract_memory_backlog(
     extractions: list[dict[str, Any]] = []
     candidates = 0
     usage = _usage_total()
+    batch_size = memory_extraction_batch_rounds(config)
     cancelled_rounds = {
         int(item.get("round") or 0)
         for item in data.get("round_metrics", [])
         if isinstance(item, dict) and item.get("status") == "cancelled"
     }
-    for round_number in range(processed_round + 1, rounds + 1):
-        if round_number in cancelled_rounds:
+    batch_start = processed_round + 1
+    while batch_start <= rounds:
+        batch_end = min(rounds, batch_start + batch_size - 1)
+        batch_rounds: list[dict[str, Any]] = []
+        skipped_rounds: list[int] = []
+        for round_number in range(batch_start, batch_end + 1):
+            if round_number in cancelled_rounds:
+                skipped_rounds.append(round_number)
+                continue
+            payload = memory_round_payload(window, round_number)
+            batch_rounds.append(
+                _memory_round_data(round_number=round_number, **payload)
+            )
+
+        if not batch_rounds:
             extraction = {
                 "status": "skipped",
                 "candidate_count": 0,
-                "reason": "cancelled_round",
+                "reason": "cancelled_rounds",
+                "round_start": batch_start,
+                "round_end": batch_end,
+                "rounds": [],
+                "skipped_rounds": skipped_rounds,
             }
-            extractions.append(extraction)
-            data["memory_processed_round"] = round_number
-            data["memory_status"] = (
-                "completed" if round_number >= rounds else "processing"
+        else:
+            operation_id = _memory_batch_operation_id(
+                user,
+                source,
+                session_id,
+                batch_start,
+                batch_end,
+                batch_rounds,
             )
-            data.pop("memory_error", None)
-            commit_window(directory, window)
-            continue
-        try:
-            extraction = _extract_round_memory(
-                root=root,
-                user=user,
-                config=config,
-                round_number=round_number,
-                agent_runner=agent_runner,
-                cancel_event=cancel_event,
-                **memory_round_payload(window, round_number),
-            )
-        except Exception as exc:
-            extraction = {
-                "status": "failed",
-                "candidate_count": 0,
-                "error": {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                },
+            batch_source = {
+                "source": "round_commit",
+                "channel": source,
+                "session_id": session_id,
+                "round_start": batch_start,
+                "round_end": batch_end,
             }
+            try:
+                analysis = _analyze_memory_batch_resilient(
+                    rounds=batch_rounds,
+                    source=batch_source,
+                    agent_runner=agent_runner,
+                    cancel_event=cancel_event,
+                )
+                extraction = _persist_round_memory_analysis(
+                    root=root,
+                    user=user,
+                    config=config,
+                    analysis=analysis,
+                    operation_id=operation_id,
+                )
+                extraction["skipped_rounds"] = skipped_rounds
+            except Exception as exc:
+                extraction = {
+                    "status": "failed",
+                    "candidate_count": 0,
+                    "round_start": batch_start,
+                    "round_end": batch_end,
+                    "rounds": [int(item["round"]) for item in batch_rounds],
+                    "skipped_rounds": skipped_rounds,
+                    "error": {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    },
+                }
+
         extractions.append(extraction)
         extraction_usage = extraction.get("usage")
         if isinstance(extraction_usage, dict):
             _record_provider_request(usage, _usage_from_dict(extraction_usage))
-        if extraction.get("status") != "completed":
+        if extraction.get("status") not in {"completed", "skipped"}:
             error = (
                 extraction.get("error")
                 if isinstance(extraction.get("error"), dict)
@@ -1172,7 +1607,9 @@ def _extract_memory_backlog(
             return {
                 **base_result,
                 "status": "failed",
-                "round": round_number,
+                "round": batch_start,
+                "round_start": batch_start,
+                "round_end": batch_end,
                 "candidates": candidates,
                 "extraction": extraction,
                 "extractions": extractions,
@@ -1181,9 +1618,9 @@ def _extract_memory_backlog(
             }
 
         candidates += int(extraction.get("candidate_count") or 0)
-        data["memory_processed_round"] = round_number
+        data["memory_processed_round"] = batch_end
         data["memory_status"] = (
-            "completed" if round_number >= rounds else "processing"
+            "completed" if batch_end >= rounds else "processing"
         )
         data.pop("memory_error", None)
         commit_window(directory, window)
@@ -1193,7 +1630,7 @@ def _extract_memory_backlog(
                 user,
                 source,
                 session_id,
-                processed_round=round_number,
+                processed_round=batch_end,
                 status=str(data["memory_status"]),
             )
         except Exception as exc:
@@ -1201,6 +1638,7 @@ def _extract_memory_backlog(
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
             }
+        batch_start = batch_end + 1
     return {
         **base_result,
         "status": "completed",
@@ -1229,10 +1667,11 @@ def _iter_request_events_impl(
         content_blocks = (
             [] if compress_only_requested else _request_content_blocks(request)
         )
-        if not content_blocks and not compress_only_requested:
-            raise EngineError("请求必须包含非空 prompt 或 content[]")
+        has_uploaded_files = bool(request.get("uploaded_files"))
+        if not content_blocks and not has_uploaded_files and not compress_only_requested:
+            raise EngineError("请求必须包含非空 prompt、content[] 或 uploaded_files")
         prompt = _content_display(content_blocks)
-        uploaded_file_context = _uploaded_file_context(request)
+        uploaded_file_context = ""
         source = _required_text(request, "source")
         session_id = _required_text(request, "session_id")
         run_id = str(request.get("run_id") or "")
@@ -1252,6 +1691,97 @@ def _iter_request_events_impl(
             source_policy = MainAgentSourcePolicy.from_config(config)
             runtime_provider = provider_runtime_config(config)
             provider = provider_factory(runtime_provider)
+            uploaded_descriptors = [
+                dict(item)
+                for item in (request.get("uploaded_files") or [])
+                if isinstance(item, dict)
+            ]
+            image_descriptors = [
+                item for item in uploaded_descriptors if bool(item.get("is_image"))
+            ]
+            vision_route: str | None = None
+            provider_media: list[ImageContent | AudioContent | VideoContent | FileContent] = []
+            direct_asset_ids: set[str] = set()
+            resolver = UploadedAssetResolver(base, user, uploaded_descriptors)
+            if image_descriptors:
+                vision_route = select_vision_route(
+                    config,
+                    runtime_provider,
+                    provider,
+                    cancel_event=cancel_event,
+                )
+                if vision_route == "main":
+                    try:
+                        if str(runtime_provider.get("type") or "") == "chat":
+                            provider_media.extend(
+                                resolver.image_content(
+                                    str(item["asset_id"]),
+                                    provider="chat",
+                                )
+                                for item in image_descriptors
+                            )
+                            direct_asset_ids.update(
+                                str(item["asset_id"]) for item in image_descriptors
+                            )
+                    except AttachmentError as exc:
+                        raise EngineError(str(exc)) from None
+            if uploaded_descriptors and str(runtime_provider.get("type") or "") == "kemo":
+                upload_asset = getattr(provider, "upload_asset", None)
+                wait_asset_ready = getattr(provider, "wait_asset_ready", None)
+                for item in uploaded_descriptors:
+                    asset_id = str(item.get("asset_id") or "")
+                    media_kind = str(item.get("media_kind") or "file")
+                    should_direct = (
+                        vision_route == "main"
+                        if media_kind == "image"
+                        else main_model_supports_input(
+                            config,
+                            runtime_provider,
+                            provider,
+                            media_kind,
+                            cancel_event=cancel_event,
+                        )
+                    )
+                    if not asset_id or not should_direct:
+                        continue
+                    if not callable(upload_asset) or not callable(wait_asset_ready):
+                        raise EngineError("Kemo Provider 未实现完整多模态 Asset 客户端")
+                    try:
+                        path, verified = resolver.local_asset(
+                            asset_id, expected_kind=media_kind
+                        )
+                        with provider_request_slot(config, cancel_event=cancel_event):
+                            remote = upload_asset(
+                                path,
+                                metadata={
+                                    "user": user,
+                                    "session_id": session_id,
+                                    "purpose": "input",
+                                    "capability": "conversation",
+                                },
+                                idempotency_key=asset_id,
+                                checksum_sha256=str(verified["checksum_sha256"]),
+                                mime_type=str(verified["mime_type"]),
+                                cancel_event=cancel_event,
+                            )
+                            remote = wait_asset_ready(
+                                remote,
+                                cancel_event=cancel_event,
+                            )
+                        provider_media.append(
+                            resolver.remote_content(
+                                asset_id,
+                                remote_asset_id=str(remote.id),
+                            )
+                        )
+                        direct_asset_ids.add(asset_id)
+                    except (AttachmentError, ProviderError) as exc:
+                        raise EngineError(str(exc)) from None
+            uploaded_file_context = _uploaded_file_context(
+                request,
+                vision_route=vision_route,
+                direct_asset_ids=direct_asset_ids,
+            )
             agent_runner = AgentRunner(
                 base,
                 user,
@@ -1334,28 +1864,32 @@ def _iter_request_events_impl(
             )
             compress_only = bool(request.get("compress_only", False))
             memory_extraction_policy = str(
-                request.get("memory_extraction_policy") or "sync"
+                request.get("memory_extraction_policy")
+                or ("sync" if compress_only else "queue")
             ).strip().casefold()
             if memory_extraction_policy not in {"sync", "queue"}:
                 raise EngineError(
                     "memory_extraction_policy 必须是 sync 或 queue"
                 )
-            queue_compression_memory = (
-                compress_only and memory_extraction_policy == "queue"
-            )
+            queue_compression_memory = memory_extraction_policy == "queue"
             provider_content_blocks = list(content_blocks)
             if uploaded_file_context:
                 provider_content_blocks.append(TextContent(text=uploaded_file_context))
+            provider_content_blocks.extend(provider_media)
             current_user_message = (
                 None
                 if compress_only
                 else {"role": "user", "content": _content_for_message(provider_content_blocks)}
             )
             force_compress = bool(request.get("compress", False) or compress_only)
+            summary_path = runtime_path / "context_summary.json"
+            persisted_summary_cache = read_summary_cache(summary_path)
+            persisted_summary_message = build_summary_message(persisted_summary_cache)
             context_selection = select_context(
                 window=window,
                 policy=context_policy,
                 system_message=system_message,
+                summary_message=persisted_summary_message,
                 current_user_message=current_user_message,
                 tools=tool_schemas,
                 force_compress=force_compress,
@@ -1398,7 +1932,7 @@ def _iter_request_events_impl(
                         _usage_from_dict(raw_memory_usage),
                     )
             subagent_events: list[RunEvent] = []
-            summary_cache = None
+            summary_cache = persisted_summary_cache
             summary_diagnostics: dict[str, Any] = {
                 "cache_hit": False,
                 "generated": False,
@@ -1420,7 +1954,7 @@ def _iter_request_events_impl(
                     else ("manual" if force_compress else "round_limit")
                 )
                 summary_cache, summary_diagnostics = get_or_create_summary(
-                    cache_path=runtime_path / "context_summary.json",
+                    cache_path=summary_path,
                     groups=context_selection.removed_rounds,
                     agent_runner=agent_runner,
                     agent_name=summary_agent,
@@ -1433,6 +1967,15 @@ def _iter_request_events_impl(
                     ),
                     event_callback=subagent_events.append,
                     skip_memory_extraction=True,
+                    previous_cache=summary_cache,
+                    round_offset=max(
+                        0,
+                        int(
+                            (window.get("data", {}).get("context") or {}).get(
+                                "round_offset", 0
+                            )
+                        ),
+                    ),
                 )
                 next_selection = select_context(
                     window=window,
@@ -1560,8 +2103,13 @@ def _iter_request_events_impl(
                     round_number,
                     archive_round_number,
                 )
+                cancelled_runtime_limit = (
+                    max(1, len(context_selection.kept_rounds) + 1)
+                    if summary_cache is not None and context_selection.removed_rounds
+                    else context_policy.max_rounds
+                )
                 runtime_window = _trim_to_max_rounds(
-                    cancelled_window, context_policy.max_rounds
+                    cancelled_window, cancelled_runtime_limit
                 )
                 try:
                     next_summary_message = build_summary_message(summary_cache)
@@ -1605,6 +2153,20 @@ def _iter_request_events_impl(
                 commit_window(window_path, cancelled_archive)
                 commit_window(runtime_path, runtime_window)
                 round_finalized = True
+                if (
+                    queue_compression_memory
+                    and summary_cache is not None
+                    and context_selection.removed_rounds
+                ):
+                    _queue_summary_memory_extraction(
+                        root=base,
+                        user=user,
+                        source=source,
+                        session_id=session_id,
+                        summary_cache=summary_cache,
+                        archive_round_number=archive_round_number,
+                        reason="automatic_compression_cancelled_round",
+                    )
                 try:
                     update_run_state(
                         base,
@@ -1663,6 +2225,30 @@ def _iter_request_events_impl(
             for subagent_event in subagent_events:
                 yield subagent_event
             if compress_only:
+                if summary_cache is not None and context_selection.removed_rounds:
+                    runtime_window = _trim_to_max_rounds(
+                        window,
+                        max(1, len(context_selection.kept_rounds)),
+                    )
+                    runtime_window["data"]["context"] = {
+                        **context_stats,
+                        "round_offset": max(
+                            0,
+                            int(archive_window.get("data", {}).get("rounds") or 0)
+                            - int(runtime_window["data"].get("rounds") or 0),
+                        ),
+                        "workspace_rounds": int(
+                            runtime_window["data"].get("rounds") or 0
+                        ),
+                        "summary_cache": "context_summary.json",
+                    }
+                    runtime_window["data"]["context_snapshot"] = build_context_snapshot(
+                        context_selection,
+                        system_prompt=prompt_bundle.text,
+                        summary_message=build_summary_message(summary_cache),
+                        capacity_tokens=context_policy.token_limit,
+                    )
+                    commit_window(runtime_path, runtime_window)
                 if queue_compression_memory:
                     if bool(summary_diagnostics.get("failed")):
                         compression_memory = {
@@ -1828,6 +2414,7 @@ def _iter_request_events_impl(
                             "parent_request_id": protocol_parent_request_id,
                             "attempt": context_retry_count + 1,
                             "metadata": {
+                                "capability": "conversation",
                                 "user": user,
                                 "source": source,
                                 "session_id": session_id,
@@ -1845,7 +2432,13 @@ def _iter_request_events_impl(
                     iteration_usage: Usage | None = None
                     try:
                         with provider_request_slot(config, cancel_event=cancel_event):
-                            for event in _provider_events(provider, protocol_request):
+                            for event in _provider_events(
+                                provider,
+                                protocol_request,
+                                root=base,
+                                user=user,
+                                cancel_event=cancel_event,
+                            ):
                                 if cancel_event is not None and cancel_event.is_set():
                                     yield commit_cancelled_round()
                                     return
@@ -1889,6 +2482,8 @@ def _iter_request_events_impl(
                                         usage=event.usage,
                                         metadata={"iteration": iteration},
                                     )
+                                elif event.type == "media_output":
+                                    yield event
                                 elif event.type == "error":
                                     _raise_if_context_length_exceeded(event.error)
                                     yield event
@@ -1924,6 +2519,7 @@ def _iter_request_events_impl(
                             window=window,
                             policy=retry_policy,
                             system_message=system_message,
+                            summary_message=build_summary_message(summary_cache),
                             current_user_message=current_user_message,
                             tools=active_tool_schemas,
                             force_compress=True,
@@ -1932,7 +2528,7 @@ def _iter_request_events_impl(
                             raise ContextLengthExceededError(
                                 "Provider 上下文超限，但没有可继续裁剪的历史轮次"
                             ) from exc
-                        if compression_memory is None:
+                        if compression_memory is None and not queue_compression_memory:
                             compression_memory = _extract_memory_backlog(
                                 root=base,
                                 user=user,
@@ -1958,7 +2554,7 @@ def _iter_request_events_impl(
                                 )
                         retry_events: list[RunEvent] = []
                         summary_cache, retry_diagnostics = get_or_create_summary(
-                            cache_path=runtime_path / "context_summary.json",
+                            cache_path=summary_path,
                             groups=retry_selection.removed_rounds,
                             agent_runner=agent_runner,
                             agent_name="context_manage",
@@ -1976,6 +2572,15 @@ def _iter_request_events_impl(
                             ),
                             event_callback=retry_events.append,
                             skip_memory_extraction=True,
+                            previous_cache=summary_cache,
+                            round_offset=max(
+                                0,
+                                int(
+                                    (window.get("data", {}).get("context") or {}).get(
+                                        "round_offset", 0
+                                    )
+                                ),
+                            ),
                         )
                         if summary_cache is None:
                             raise ContextLengthExceededError(
@@ -2022,7 +2627,11 @@ def _iter_request_events_impl(
                 protocol_parent_request_id = protocol_request.request_id
 
                 if not calls:
-                    pending_guidance = _drain_guidance(guidance_channel)
+                    pending_guidance = (
+                        _drain_or_close_guidance(guidance_channel)
+                        if iteration < max_iterations
+                        else []
+                    )
                     if pending_guidance and iteration < max_iterations:
                         messages.append(
                             {"role": "assistant", "content": "".join(iteration_text)}
@@ -2033,9 +2642,11 @@ def _iter_request_events_impl(
                         observed_text.append("\n\n")
                         yield RunEvent(type="text_delta", content="\n\n")
                         continue
+                    _close_guidance(guidance_channel)
                     completed = True
                     break
                 if iteration >= max_iterations:
+                    _close_guidance(guidance_channel)
                     yield error_event(
                         EngineError(f"工具调用超过最大循环次数 {max_iterations}"),
                         phase="tool_loop",
@@ -2114,6 +2725,9 @@ def _iter_request_events_impl(
                                         "knowledge_scopes": list(
                                             source_policy.direct_knowledge_scopes()
                                         ),
+                                        "uploaded_files": copy.deepcopy(
+                                            uploaded_descriptors
+                                        ),
                                     },
                                     timeout=tool_timeout,
                                     cancel_event=cancel_event,
@@ -2176,6 +2790,25 @@ def _iter_request_events_impl(
                             "elapsed_ms": elapsed_ms,
                         },
                     )
+                    tool_value = result_payload.get("result")
+                    tool_artifacts = (
+                        tool_value.get("artifacts")
+                        if isinstance(tool_value, dict)
+                        else None
+                    )
+                    if isinstance(tool_artifacts, list):
+                        for artifact in tool_artifacts:
+                            if isinstance(artifact, dict):
+                                yield RunEvent(
+                                    type="media_output",
+                                    tool_call_id=call.id,
+                                    tool_name=call.name,
+                                    result=copy.deepcopy(artifact),
+                                    metadata={
+                                        "artifact": copy.deepcopy(artifact),
+                                        "source": "tool_result",
+                                    },
+                                )
                     messages.append(
                         {
                             "role": "tool",
@@ -2280,7 +2913,15 @@ def _iter_request_events_impl(
                     "error": str(exc),
                     "exception_type": type(exc).__name__,
                 }
-            runtime_window = _trim_to_max_rounds(window, context_policy.max_rounds)
+            compression_applied = bool(
+                summary_cache is not None and context_selection.removed_rounds
+            )
+            runtime_round_limit = (
+                max(1, len(context_selection.kept_rounds) + 1)
+                if compression_applied
+                else context_policy.max_rounds
+            )
+            runtime_window = _trim_to_max_rounds(window, runtime_round_limit)
             next_summary_message = build_summary_message(summary_cache)
             next_context_selection = select_context(
                 window=runtime_window,
@@ -2336,6 +2977,16 @@ def _iter_request_events_impl(
             commit_window(window_path, archive_window)
             commit_window(runtime_path, runtime_window)
             round_finalized = True
+            if queue_compression_memory and compression_applied:
+                compression_memory = _queue_summary_memory_extraction(
+                    root=base,
+                    user=user,
+                    source=source,
+                    session_id=session_id,
+                    summary_cache=summary_cache,
+                    archive_round_number=archive_round_number,
+                    reason="automatic_compression",
+                )
             history_index_error: dict[str, Any] | None = history_run_error
             try:
                 update_memory_state(
@@ -2343,7 +2994,12 @@ def _iter_request_events_impl(
                     user,
                     source,
                     session_id,
-                    status=initial_memory_status,
+                    status=(
+                        "queued"
+                        if isinstance(compression_memory, dict)
+                        and compression_memory.get("status") == "queued"
+                        else initial_memory_status
+                    ),
                 )
             except Exception as exc:
                 history_index_error = {
@@ -2669,6 +3325,8 @@ def context_status(
         plugin_manifests=registry.plugin_manifests,
         memory_store=memory_store,
     )
+    cache_path = runtime_path / "context_summary.json"
+    summary_cache = read_summary_cache(cache_path)
     selection = select_context(
         window=window,
         policy=policy,
@@ -2677,10 +3335,10 @@ def context_status(
             if prompt_bundle.text
             else None
         ),
+        summary_message=build_summary_message(summary_cache),
         current_user_message=None,
         tools=registry.schemas() or None,
     )
-    cache_path = runtime_path / "context_summary.json"
     persisted = window.get("data", {}).get("context")
     return {
         "user": user,

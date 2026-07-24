@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from run.agent_runner import AgentOutputError, AgentRunResult
-from run.memory import MemoryStore
+from run.memory import MemoryStore, memory_extraction_candidate_limit
 
 
 TRIGGERS = frozenset({"context_compression", "memory_promotion", "manual_review"})
@@ -34,7 +34,9 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
         raise AgentOutputError(f"self_improve 输出缺少 {required} 数组")
     if trigger == "context_compression":
         rounds = input_data.get("rounds") or []
-        candidate_limit = min(5, max(1, len(rounds) * 2))
+        runner = getattr(context, "runner", None)
+        runtime_config = getattr(runner, "config", {}) if runner is not None else {}
+        candidate_limit = memory_extraction_candidate_limit(runtime_config, len(rounds))
         accepted: list[dict[str, Any]] = []
         rejected = 0
         for candidate in result.data["candidates"]:

@@ -6,7 +6,6 @@ import asyncio
 import importlib.util
 import inspect
 import json
-import os
 import sys
 import threading
 import time
@@ -236,8 +235,6 @@ def apply_runtime_tool_policy(
     names = set(registry.tools)
     if not source_policy.plugins.unrestricted:
         names &= set(source_policy.plugins.names)
-    if not os.getenv("TAVILY_API_KEY", "").strip():
-        names.discard("web_search")
     if not history_read_enabled:
         names.discard("history_search")
     return registry.selected(names)

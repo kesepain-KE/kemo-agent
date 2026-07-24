@@ -48,7 +48,8 @@
 
 #### 数量限制
 
-单轮最多返回 2 条，批量调用最多返回 5 条。没有符合条件的信息必须返回 `{"candidates": []}`。
+单轮最多返回 2 条；批量调用按每轮最多 2 条计算，并受
+`memory.extraction_max_candidates_per_batch` 的总上限约束（默认 10 条）。没有符合条件的信息必须返回 `{"candidates": []}`。
 
 `context_compression` 的每个 upsert 候选必须包含 `"durable": true` 和简短
 `"evidence"`；执行器对缺失该标记的候选按不可信内容拒绝落盘。
@@ -97,7 +98,8 @@
 ### 流程
 
 1. 将传入的批量对话数据分解为独立的微记忆碎片
-2. 对每个碎片，通过 `memory_manage` 插件搜索是否命中已有碎片（按标题+内容两段检索）
+2. 汇总整批候选后，只调用一次 `memory_manage action=search_many tier=all`，在
+   `queries` 中同时提交每个候选的标题和内容；禁止逐候选、逐层串行搜索
 3. 命中逻辑：
 
 | 命中层 | 操作 |
@@ -110,6 +112,7 @@
 4. 返回候选数组，由调用方统一写入 MemoryStore：未命中时在 seven_days 创建；命中临时层时按每日锁加权；命中永久层时不修改
 
 提取模式下 `memory_manage` 仅用于搜索，禁止直接 add/edit/delete；避免与调用方持久化重复执行。
+同一批次中指向同一文件的候选必须先融合为一条，再返回最终 `candidates`。
 
 ### 权重更新规则
 

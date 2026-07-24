@@ -20,6 +20,7 @@ USER_ONLY_SECTIONS = frozenset(
         "provider",
         "agent_models",
         "multimodal_models",
+        "multimodal_routing",
         "knowledge",
         "skills",
         "expand",
@@ -35,6 +36,7 @@ MULTIMODAL_CAPABILITIES = frozenset(
         "audio_transcription",
         "speech_generation",
         "speech_to_speech",
+        "video_understanding",
         "video_generation",
     }
 )
@@ -140,6 +142,9 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     )
     merged = merge_user_config(global_config, user_config)
     merged["user"] = user
+    from run.multimodal import validate_multimodal_config
+
+    validate_multimodal_config(merged)
     return merged
 
 

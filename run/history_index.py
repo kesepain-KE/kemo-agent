@@ -429,7 +429,13 @@ def _reconcile_unlocked(root: Path, user: str, index: dict[str, Any]) -> bool:
         claim_limit = min(committed_round, target_round) if target_round else committed_round
         if processed_round < claim_limit or not record.get("memory_claim_id"):
             continue
-        for field in ("memory_claim_id", "memory_claimed_at", "memory_claim_round"):
+        for field in (
+            "memory_claim_id",
+            "memory_claimed_at",
+            "memory_claim_round",
+            "memory_claim_start_round",
+            "memory_claim_end_round",
+        ):
             record.pop(field, None)
         if record.get("memory_status") == "processing":
             record["memory_status"] = "completed"
@@ -760,10 +766,17 @@ def claim_pending_memory(
     worker_id: str | None = None,
     stale_after_seconds: float = MEMORY_CLAIM_STALE_SECONDS,
     statuses: set[str] | frozenset[str] | None = None,
+    max_rounds: int = 1,
 ) -> dict[str, Any] | None:
-    """Atomically lease the next unprocessed committed round for one user."""
+    """Atomically lease the next contiguous range of committed rounds."""
 
     claimable_statuses = set(statuses or {"pending", "failed", "processing"})
+    if isinstance(max_rounds, bool):
+        raise ValueError("max_rounds 必须是正整数")
+    try:
+        batch_size = max(1, min(20, int(max_rounds)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_rounds 必须是正整数") from exc
     with index_lock(root, user):
         path = index_path(root, user)
         index = _normalize_index(_read_json(path))
@@ -818,16 +831,26 @@ def claim_pending_memory(
         _, key, record = min(candidates, key=lambda item: (item[0], item[1]))
         claim_id = worker_id or f"memory_{uuid.uuid4().hex}"
         next_round = max(0, int(record.get("memory_processed_round") or 0)) + 1
+        committed_round = max(0, int(record.get("last_committed_round") or 0))
+        target_round = max(0, int(record.get("memory_target_round") or 0))
+        claim_limit = min(committed_round, target_round) if target_round else committed_round
+        end_round = min(claim_limit, next_round + batch_size - 1)
         record["memory_status"] = "processing"
         record["memory_claim_id"] = claim_id
         record["memory_claimed_at"] = now.isoformat()
+        # Keep the legacy field pinned to the first round so an older worker
+        # cannot accidentally skip the beginning of a range claim.
         record["memory_claim_round"] = next_round
+        record["memory_claim_start_round"] = next_round
+        record["memory_claim_end_round"] = end_round
         record["memory_state_updated_at"] = now.isoformat()
         index["sessions"][key] = record
         written = _write_index_unlocked(root, user, index)
         result = copy.deepcopy(written["sessions"][key])
         result["memory_claim_id"] = claim_id
         result["memory_claim_round"] = next_round
+        result["memory_claim_start_round"] = next_round
+        result["memory_claim_end_round"] = end_round
         return result
 
 
@@ -857,7 +880,21 @@ def finish_memory_claim(
                 int(processed_round),
             )
         claimed_round = max(0, int(record.get("memory_claim_round") or 0))
-        for field in ("memory_claim_id", "memory_claimed_at", "memory_claim_round"):
+        claimed_start = max(
+            0,
+            int(record.get("memory_claim_start_round") or claimed_round),
+        )
+        claimed_end = max(
+            claimed_start,
+            int(record.get("memory_claim_end_round") or claimed_round),
+        )
+        for field in (
+            "memory_claim_id",
+            "memory_claimed_at",
+            "memory_claim_round",
+            "memory_claim_start_round",
+            "memory_claim_end_round",
+        ):
             record.pop(field, None)
         if error is not None:
             previous_error = record.get("memory_last_error")
@@ -868,7 +905,9 @@ def finish_memory_claim(
             )
             diagnostic = {
                 **copy.deepcopy(error),
-                "round": claimed_round,
+                "round": claimed_start,
+                "round_start": claimed_start,
+                "round_end": claimed_end,
                 "occurred_at": _now(),
                 "retry_count": retry_count,
             }

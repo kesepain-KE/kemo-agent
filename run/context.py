@@ -158,12 +158,42 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _media_estimation_projection(value: Any) -> tuple[Any, int]:
+    """Remove binary payload text while retaining a conservative media budget."""
+
+    if isinstance(value, list):
+        projected: list[Any] = []
+        media_tokens = 0
+        for item in value:
+            clean, tokens = _media_estimation_projection(item)
+            projected.append(clean)
+            media_tokens += tokens
+        return projected, media_tokens
+    if not isinstance(value, dict):
+        return value, 0
+    if value.get("kind") == "inline_base64" and isinstance(value.get("data"), str):
+        clean = dict(value)
+        clean["data"] = "[inline media payload]"
+        return clean, 1024
+    if isinstance(value.get("uri"), str) and value["uri"].startswith("data:image/"):
+        clean = dict(value)
+        clean["uri"] = "data:image/[inline media payload]"
+        return clean, 1024
+    projected: dict[str, Any] = {}
+    media_tokens = 0
+    for key, item in value.items():
+        clean, tokens = _media_estimation_projection(item)
+        projected[key] = clean
+        media_tokens += tokens
+    return projected, media_tokens
+
+
 def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
     total = 0
     for message in messages:
-                # 除了聊天完成之外，还要考虑聊天完成中的角色/字段框架
-                # 序列化值。  确切的用法仍然是特定于提供商的。
-        total += 4 + estimate_text_tokens(_stable_json(message))
+        # Binary media is billed provider-specifically; never count Base64 as text.
+        projected, media_tokens = _media_estimation_projection(message)
+        total += 4 + estimate_text_tokens(_stable_json(projected)) + media_tokens
     return total
 
 
@@ -456,9 +486,15 @@ def select_context(
 
     projected_rounds = len(rounds) + (1 if current_user_message is not None else 0)
     round_trigger = projected_rounds >= policy.max_rounds
+    current_round_slots = 1 if current_user_message is not None else 0
+    minimum_history_rounds = max(0, policy.recent_full_rounds - current_round_slots)
     if round_trigger or force_compress:
         keep_count = min(
-            max(policy.rounds_after_compression, policy.recent_full_rounds),
+            max(
+                0,
+                policy.rounds_after_compression - current_round_slots,
+                minimum_history_rounds,
+            ),
             len(rounds),
         )
         kept = rounds[-keep_count:] if keep_count else []
@@ -467,7 +503,7 @@ def select_context(
 
     fixed_tokens = estimate_messages_tokens([*fixed_prefix, *fixed_suffix]) + tool_tokens
     token_trigger = before > policy.token_limit
-    while len(kept) > policy.recent_full_rounds and token_trigger:
+    while len(kept) > minimum_history_rounds and token_trigger:
         candidate_messages = [*fixed_prefix]
         for group in kept:
             candidate_messages.extend(group.messages)
@@ -483,7 +519,7 @@ def select_context(
     after = estimate_messages_tokens(selected_messages) + tool_tokens
     recent_content_over_budget = bool(
         token_trigger
-        and len(kept) <= policy.recent_full_rounds
+        and len(kept) <= minimum_history_rounds
         and after > policy.input_budget
     )
     kept_numbers = {item.number for item in kept}

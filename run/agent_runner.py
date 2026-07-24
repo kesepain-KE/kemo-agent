@@ -389,6 +389,7 @@ class AgentRunner:
                                 "reasoning_effort": runtime["reasoning_effort"]
                             },
                             metadata={
+                                "capability": "conversation",
                                 "user": self.user,
                                 "source": "subagent",
                                 "agent": definition.name,

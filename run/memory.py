@@ -24,6 +24,12 @@ TEMPORARY_TIERS = TIERS[:-1]
 MEMORY_EXTRACTION_MODES = frozenset(
     {"disabled", "compression_only", "background", "on_commit"}
 )
+DEFAULT_EXTRACTION_BATCH_ROUNDS = 5
+DEFAULT_EXTRACTION_MAX_CANDIDATES_PER_BATCH = 10
+MAX_EXTRACTION_BATCH_ROUNDS = 20
+MAX_EXTRACTION_CANDIDATES_PER_BATCH = 40
+MEMORY_OPERATION_SCHEMA_VERSION = 1
+MEMORY_OPERATION_HISTORY_LIMIT = 512
 FILENAME_MAX_CHARS = 50
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
@@ -148,6 +154,57 @@ def memory_extraction_mode(config: dict[str, Any]) -> str:
     return mode
 
 
+def memory_extraction_batch_rounds(config: dict[str, Any]) -> int:
+    """Return the bounded number of contiguous rounds analyzed per model run."""
+
+    raw_memory = config.get("memory") or {}
+    if not isinstance(raw_memory, dict):
+        raise MemoryConfigError("memory 必须是对象")
+    raw_value = raw_memory.get(
+        "extraction_batch_rounds", DEFAULT_EXTRACTION_BATCH_ROUNDS
+    )
+    if isinstance(raw_value, bool):
+        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数")
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数") from exc
+    if value < 1:
+        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数")
+    return min(value, MAX_EXTRACTION_BATCH_ROUNDS)
+
+
+def memory_extraction_candidate_limit(
+    config: dict[str, Any],
+    round_count: int,
+) -> int:
+    """Return the batch candidate cap while retaining the two-per-round policy."""
+
+    raw_memory = config.get("memory") or {}
+    if not isinstance(raw_memory, dict):
+        raise MemoryConfigError("memory 必须是对象")
+    raw_value = raw_memory.get(
+        "extraction_max_candidates_per_batch",
+        DEFAULT_EXTRACTION_MAX_CANDIDATES_PER_BATCH,
+    )
+    if isinstance(raw_value, bool):
+        raise MemoryConfigError(
+            "memory.extraction_max_candidates_per_batch 必须是正整数"
+        )
+    try:
+        configured = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise MemoryConfigError(
+            "memory.extraction_max_candidates_per_batch 必须是正整数"
+        ) from exc
+    if configured < 1:
+        raise MemoryConfigError(
+            "memory.extraction_max_candidates_per_batch 必须是正整数"
+        )
+    bounded = min(configured, MAX_EXTRACTION_CANDIDATES_PER_BATCH)
+    return min(bounded, max(1, int(round_count)) * 2)
+
+
 def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
     raw = (config.get("memory") or {}).get("tiers", DEFAULT_TIERS)
     if not isinstance(raw, dict):
@@ -267,6 +324,52 @@ class MemoryStore:
         self.rules = tier_rules(config)
         self.base = self.root / "users" / user / "improve"
         self._lock = _store_lock(self.root, user)
+
+    def _operation_path(self) -> Path:
+        return self.base / ".memory_operations.json"
+
+    def _load_operations(self) -> dict[str, dict[str, Any]]:
+        path = self._operation_path()
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MemoryError(f"记忆批次操作日志不可读：{path}（{exc}）") from exc
+        if not isinstance(raw, dict) or raw.get("schema_version") != MEMORY_OPERATION_SCHEMA_VERSION:
+            raise MemoryError(f"记忆批次操作日志版本无效：{path}")
+        operations = raw.get("operations")
+        if not isinstance(operations, dict):
+            raise MemoryError(f"记忆批次操作日志 operations 必须是对象：{path}")
+        return {
+            str(key): dict(value)
+            for key, value in operations.items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+
+    def _write_operation_result(
+        self,
+        operation_id: str,
+        result: dict[str, Any],
+        current: datetime,
+    ) -> None:
+        operations = self._load_operations()
+        operations[operation_id] = {
+            "completed_at": iso(current),
+            "result": dict(result),
+        }
+        ordered = sorted(
+            operations.items(),
+            key=lambda item: str(item[1].get("completed_at") or ""),
+            reverse=True,
+        )[:MEMORY_OPERATION_HISTORY_LIMIT]
+        _atomic_json(
+            self._operation_path(),
+            {
+                "schema_version": MEMORY_OPERATION_SCHEMA_VERSION,
+                "operations": dict(ordered),
+            },
+        )
 
     def tier_dir(self, tier: str) -> Path:
         if tier not in TIERS:
@@ -740,6 +843,7 @@ class MemoryStore:
         candidates: list[dict[str, Any]],
         *,
         source: dict[str, Any] | None = None,
+        operation_id: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         del source
@@ -749,6 +853,17 @@ class MemoryStore:
         forgotten: list[str] = []
         rejected = 0
         with self._lock:
+            normalized_operation_id = str(operation_id or "").strip()
+            if len(normalized_operation_id) > 256:
+                raise MemoryError("记忆批次 operation_id 不能超过 256 个字符")
+            if normalized_operation_id:
+                previous = self._load_operations().get(normalized_operation_id)
+                if isinstance(previous, dict) and isinstance(previous.get("result"), dict):
+                    return {
+                        **dict(previous["result"]),
+                        "operation_id": normalized_operation_id,
+                        "replayed": True,
+                    }
             for candidate in candidates:
                 if not isinstance(candidate, dict):
                     rejected += 1
@@ -812,7 +927,20 @@ class MemoryStore:
                         content_changed=changed,
                     )
                 updated.append(filename)
-        return {"created": created, "updated": updated, "forgotten": forgotten, "rejected": rejected}
+            result = {
+                "created": created,
+                "updated": updated,
+                "forgotten": forgotten,
+                "rejected": rejected,
+            }
+            if normalized_operation_id:
+                self._write_operation_result(normalized_operation_id, result, current)
+                return {
+                    **result,
+                    "operation_id": normalized_operation_id,
+                    "replayed": False,
+                }
+            return result
 
     def forget(self, query: str) -> list[str]:
         with self._lock:

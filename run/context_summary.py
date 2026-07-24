@@ -48,12 +48,21 @@ def _source_round(group: RoundGroup) -> dict[str, Any]:
     }
 
 
-def summary_source(groups: list[RoundGroup]) -> list[dict[str, Any]]:
-    return [_source_round(group) for group in groups]
+def summary_source(
+    groups: list[RoundGroup], *, round_offset: int = 0
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for group in groups:
+        item = _source_round(group)
+        item["round"] = max(0, int(round_offset)) + group.number
+        result.append(item)
+    return result
 
 
-def source_hash(groups: list[RoundGroup]) -> str:
-    payload = _stable_json(summary_source(groups)).encode("utf-8")
+def source_hash(groups: list[RoundGroup], *, round_offset: int = 0) -> str:
+    payload = _stable_json(
+        summary_source(groups, round_offset=round_offset)
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -88,6 +97,46 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
     except SummaryError:
         return None
     return value
+
+
+def read_summary_cache(path: Path) -> dict[str, Any] | None:
+    """Read one validated summary cache without exposing mutable internals."""
+
+    value = _read_cache(path)
+    return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+
+
+def _covered_through(cache: dict[str, Any] | None) -> int:
+    if not isinstance(cache, dict):
+        return 0
+    try:
+        explicit = max(0, int(cache.get("covered_through_round") or 0))
+    except (TypeError, ValueError):
+        explicit = 0
+    covered = cache.get("covered_rounds")
+    if not isinstance(covered, list):
+        return explicit
+    numbers: list[int] = []
+    for value in covered:
+        try:
+            numbers.append(max(0, int(value)))
+        except (TypeError, ValueError):
+            continue
+    return max([explicit, *numbers], default=0)
+
+
+def _incremental_hash(
+    previous_cache: dict[str, Any],
+    groups: list[RoundGroup],
+    *,
+    round_offset: int,
+) -> str:
+    previous_identity = previous_cache.get("source_hash") or previous_cache.get("summary")
+    payload = {
+        "previous": previous_identity,
+        "rounds": summary_source(groups, round_offset=round_offset),
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
 def _atomic_write(path: Path, value: dict[str, Any]) -> None:
@@ -148,6 +197,8 @@ def get_or_create_summary(
     response_hook: Callable[[dict[str, Any]], None] | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,
     skip_memory_extraction: bool = False,
+    previous_cache: dict[str, Any] | None = None,
+    round_offset: int = 0,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return an exact cache hit or atomically generate a replacement.
 
@@ -155,15 +206,36 @@ def get_or_create_summary(
     leaves an existing cache untouched.  This is deliberate: the caller then
     proceeds with pure whole-round trimming.
     """
+    offset = max(0, int(round_offset))
+    validated_previous = previous_cache if isinstance(previous_cache, dict) else None
+    previous_covered_through = _covered_through(validated_previous)
+    delta_groups = [
+        group
+        for group in groups
+        if offset + group.number > previous_covered_through
+    ]
     diagnostics: dict[str, Any] = {
         "cache_hit": False,
         "generated": False,
         "failed": False,
-        "covered_rounds": [group.number for group in groups],
+        "covered_rounds": [offset + group.number for group in groups],
+        "new_rounds": [offset + group.number for group in delta_groups],
+        "previous_covered_through_round": previous_covered_through,
     }
     if not groups:
-        return None, diagnostics
-    digest = source_hash(groups)
+        return validated_previous, diagnostics
+    if validated_previous is not None and not delta_groups:
+        diagnostics["cache_hit"] = True
+        return validated_previous, diagnostics
+    digest = (
+        _incremental_hash(
+            validated_previous,
+            delta_groups,
+            round_offset=offset,
+        )
+        if validated_previous is not None
+        else source_hash(delta_groups, round_offset=offset)
+    )
     existing = _read_cache(cache_path)
     if existing and existing.get("source_hash") == digest:
         diagnostics["cache_hit"] = True
@@ -173,16 +245,21 @@ def get_or_create_summary(
         return None, diagnostics
 
     try:
-        rolling: dict[str, Any] | None = None
+        rolling: dict[str, Any] | None = (
+            dict(validated_previous["summary"])
+            if validated_previous is not None
+            and isinstance(validated_previous.get("summary"), dict)
+            else None
+        )
         memory_extractions: list[dict[str, Any]] = []
-        chunks = _chunks(groups, max(256, chunk_token_budget))
+        chunks = _chunks(delta_groups, max(256, chunk_token_budget))
         diagnostics["chunks"] = len(chunks)
         for chunk in chunks:
             if cancel_event is not None and cancel_event.is_set():
                 raise SummaryError("cancelled")
             model_input = {
                 "previous_summary": rolling,
-                "rounds": summary_source(chunk),
+                "rounds": summary_source(chunk, round_offset=offset),
                 "trigger": trigger,
             }
             if skip_memory_extraction:
@@ -204,10 +281,32 @@ def get_or_create_summary(
             raise SummaryError("摘要结果为空")
         if cancel_event is not None and cancel_event.is_set():
             raise SummaryError("cancelled")
+        previous_rounds = (
+            validated_previous.get("covered_rounds", [])
+            if validated_previous is not None
+            and isinstance(validated_previous.get("covered_rounds"), list)
+            else []
+        )
+        covered_rounds = sorted(
+            {
+                *(
+                    int(number)
+                    for number in previous_rounds
+                    if isinstance(number, int) or str(number).isdigit()
+                ),
+                *(offset + group.number for group in delta_groups),
+            }
+        )
         value = {
             "schema_version": SUMMARY_SCHEMA_VERSION,
             "source_hash": digest,
-            "covered_rounds": [group.number for group in groups],
+            "previous_source_hash": (
+                validated_previous.get("source_hash")
+                if validated_previous is not None
+                else None
+            ),
+            "covered_rounds": covered_rounds,
+            "covered_through_round": max(covered_rounds, default=0),
             "created_at": _now(),
             "summary": rolling,
             "memory_extractions": memory_extractions,

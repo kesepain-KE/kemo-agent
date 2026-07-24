@@ -15,7 +15,10 @@ from provider.factory import create_provider
 from run.agent_runner import AgentRunner
 from run.config import load_config
 from run.engine import (
+    _analyze_memory_batch_resilient,
     _analyze_round_memory,
+    _memory_batch_operation_id,
+    _memory_round_data,
     _persist_round_memory_analysis,
     _session_lock,
     compress_context,
@@ -33,6 +36,7 @@ from run.history_index import (
 from run.memory import (
     MemoryStore,
     contains_sensitive_credential,
+    memory_extraction_batch_rounds,
     memory_extraction_mode,
 )
 from run.memory_pipeline import memory_round_payload
@@ -43,7 +47,7 @@ from run.users import list_users
 BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
 IMPORTANT_MEMORY_INPUT_LIMIT = 200
-MEMORY_RECOVERY_ROUNDS_PER_SCAN = 2
+MEMORY_RECOVERY_ROUNDS_PER_SCAN = 10
 HISTORY_SUMMARY_CHUNK_CHARS = 48_000
 HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 512
 
@@ -417,27 +421,41 @@ class MaintenanceScheduler:
             limit = max(1, min(20, int(raw_limit)))
         except (TypeError, ValueError):
             limit = MEMORY_RECOVERY_ROUNDS_PER_SCAN
+        batch_size = memory_extraction_batch_rounds(config)
         runner: AgentRunner | None = None
         processed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
         claimed = 0
+        batches = 0
 
-        for _ in range(limit):
+        while claimed < limit:
             if self._stop_event.is_set():
                 break
             claim = claim_pending_memory(
                 self.root,
                 user,
                 statuses=claimable_statuses,
+                max_rounds=min(batch_size, limit - claimed),
             )
             if claim is None:
                 break
-            claimed += 1
             source = str(claim.get("source") or "")
             session_id = str(claim.get("session_id") or "")
             archive_name = str(claim.get("archive_window") or "")
             claim_id = str(claim.get("memory_claim_id") or "")
-            round_number = int(claim.get("memory_claim_round") or 0)
+            round_start = int(
+                claim.get("memory_claim_start_round")
+                or claim.get("memory_claim_round")
+                or 0
+            )
+            round_end = int(
+                claim.get("memory_claim_end_round")
+                or claim.get("memory_claim_round")
+                or round_start
+            )
+            claimed_count = max(1, round_end - round_start + 1)
+            claimed += claimed_count
+            batches += 1
             target_round = max(0, int(claim.get("memory_target_round") or 0))
             claim_remaining_status = (
                 "queued"
@@ -452,23 +470,28 @@ class MaintenanceScheduler:
             identity = {
                 "source": source,
                 "session_id": session_id,
-                "round": round_number,
+                "round": round_start,
+                "round_start": round_start,
+                "round_end": round_end,
             }
             extraction: dict[str, Any] | None = None
             extraction_error: dict[str, Any] | None = None
             archive_committed = False
             stale_result = False
+            analysis: dict[str, Any] | None = None
+            batch_rounds: list[dict[str, Any]] = []
+            skipped_rounds: list[int] = []
             try:
                 if (
                     not source
                     or not session_id
                     or not claim_id
-                    or round_number < 1
+                    or round_start < 1
+                    or round_end < round_start
                     or not archive_name
                     or Path(archive_name).name != archive_name
                 ):
                     raise MaintenanceError("记忆恢复领取记录缺少有效会话身份")
-                payload: dict[str, Any] | None = None
                 with _session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
                     data = window.get("data") or {}
@@ -476,18 +499,39 @@ class MaintenanceScheduler:
                         raise MaintenanceError("记忆恢复领取记录与归档身份不一致")
                     archive_rounds = max(0, int(data.get("rounds") or 0))
                     archive_cursor = max(0, int(data.get("memory_processed_round") or 0))
-                    if round_number > archive_rounds:
+                    if round_end > archive_rounds:
                         raise MaintenanceError(
-                            f"待提取轮次 {round_number} 超过归档轮数 {archive_rounds}"
+                            f"待提取轮次 {round_start}-{round_end} 超过归档轮数 {archive_rounds}"
                         )
-                    if archive_cursor >= round_number:
+                    if archive_cursor >= round_end:
                         extraction = {
                             "status": "already_processed",
                             "candidate_count": 0,
+                            "round_start": round_start,
+                            "round_end": round_end,
                         }
                     else:
-                        payload = memory_round_payload(window, round_number)
-                if payload is not None:
+                        if archive_cursor != round_start - 1:
+                            raise MaintenanceError(
+                                f"记忆提取游标已变化：{archive_cursor} != {round_start - 1}"
+                            )
+                        cancelled_rounds = {
+                            int(item.get("round") or 0)
+                            for item in data.get("round_metrics", [])
+                            if isinstance(item, dict)
+                            and item.get("status") == "cancelled"
+                        }
+                        for round_number in range(round_start, round_end + 1):
+                            if round_number in cancelled_rounds:
+                                skipped_rounds.append(round_number)
+                                continue
+                            batch_rounds.append(
+                                _memory_round_data(
+                                    round_number=round_number,
+                                    **memory_round_payload(window, round_number),
+                                )
+                            )
+                if batch_rounds:
                     if runner is None:
                         runner = AgentRunner(
                             self.root,
@@ -495,12 +539,33 @@ class MaintenanceScheduler:
                             config=config,
                             provider_factory=self.provider_factory,
                         )
-                    analysis = _analyze_round_memory(
-                        round_number=round_number,
-                        agent_runner=runner,
-                        cancel_event=self._stop_event,
-                        **payload,
-                    )
+                    if len(batch_rounds) == 1:
+                        only_round = batch_rounds[0]
+                        messages = only_round.get("messages") or []
+                        analysis = _analyze_round_memory(
+                            round_number=int(only_round["round"]),
+                            prompt=str((messages[0] or {}).get("content") or ""),
+                            text=str((messages[1] or {}).get("content") or ""),
+                            reasoning=str(
+                                ((only_round.get("think") or {}).get("content") or "")
+                            ),
+                            tool_records=list(only_round.get("tools") or []),
+                            agent_runner=runner,
+                            cancel_event=self._stop_event,
+                        )
+                    else:
+                        analysis = _analyze_memory_batch_resilient(
+                            rounds=batch_rounds,
+                            agent_runner=runner,
+                            cancel_event=self._stop_event,
+                            source={
+                                "source": "round_commit",
+                                "channel": source,
+                                "session_id": session_id,
+                                "round_start": round_start,
+                                "round_end": round_end,
+                            },
+                        )
                     if analysis.get("status") != "completed":
                         raw_error = analysis.get("error")
                         extraction_error = (
@@ -514,6 +579,16 @@ class MaintenanceScheduler:
                         raise MaintenanceError(
                             str(extraction_error.get("message") or "记忆提取失败")
                         )
+                elif extraction is None:
+                    extraction = {
+                        "status": "skipped",
+                        "candidate_count": 0,
+                        "reason": "cancelled_rounds",
+                        "round_start": round_start,
+                        "round_end": round_end,
+                        "rounds": [],
+                        "skipped_rounds": skipped_rounds,
+                    }
 
                 with _session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
@@ -530,27 +605,48 @@ class MaintenanceScheduler:
                     if (
                         not isinstance(current_claim, dict)
                         or current_claim.get("memory_claim_id") != claim_id
-                        or int(current_claim.get("memory_claim_round") or 0)
-                        != round_number
+                        or int(
+                            current_claim.get("memory_claim_start_round")
+                            or current_claim.get("memory_claim_round")
+                            or 0
+                        )
+                        != round_start
+                        or int(
+                            current_claim.get("memory_claim_end_round")
+                            or current_claim.get("memory_claim_round")
+                            or 0
+                        )
+                        != round_end
                     ):
                         stale_result = True
                         raise MaintenanceError("记忆提取 claim 已失效，丢弃陈旧结果")
-                    if archive_cursor >= round_number:
+                    if archive_cursor >= round_end:
                         extraction = {
                             "status": "already_processed",
                             "candidate_count": 0,
+                            "round_start": round_start,
+                            "round_end": round_end,
                         }
-                    elif archive_cursor != round_number - 1:
+                    elif archive_cursor != round_start - 1:
                         raise MaintenanceError(
-                            f"记忆提取游标已变化：{archive_cursor} != {round_number - 1}"
+                            f"记忆提取游标已变化：{archive_cursor} != {round_start - 1}"
                         )
-                    elif payload is not None:
+                    elif analysis is not None:
                         extraction = _persist_round_memory_analysis(
                             root=self.root,
                             user=user,
                             config=config,
                             analysis=analysis,
+                            operation_id=_memory_batch_operation_id(
+                                user,
+                                source,
+                                session_id,
+                                round_start,
+                                round_end,
+                                batch_rounds,
+                            ),
                         )
+                        extraction["skipped_rounds"] = skipped_rounds
                         if extraction.get("status") != "completed":
                             raw_error = extraction.get("error")
                             extraction_error = (
@@ -573,13 +669,13 @@ class MaintenanceScheduler:
                         source,
                         session_id,
                         claim_id=claim_id,
-                        processed_round=round_number,
+                        processed_round=round_end,
                         remaining_status=claim_remaining_status,
                     )
                     if finished is None:
                         raise MaintenanceError("记忆提取 claim 在提交时已失效")
                     data["memory_processed_round"] = int(
-                        finished.get("memory_processed_round") or round_number
+                        finished.get("memory_processed_round") or round_end
                     )
                     data["memory_status"] = str(
                         finished.get("memory_status") or claim_remaining_status
@@ -658,6 +754,7 @@ class MaintenanceScheduler:
         return {
             "mode": extraction_mode,
             "claimed": claimed,
+            "batches": batches,
             "processed": processed,
             "failed": failed,
         }
