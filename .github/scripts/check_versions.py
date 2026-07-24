@@ -25,7 +25,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", default="", help="可选发布标签，例如 v0.1.0")
+    parser.add_argument("--tag", default="", help="可选发布标签，例如 v0.2.0")
     args = parser.parse_args(argv)
 
     errors: list[str] = []
@@ -67,6 +67,16 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"README 版本徽章未指向 {version}")
     if f"当前版本：`{version}`" not in readme:
         errors.append(f"README 当前版本文本未指向 {version}")
+
+    readme_en = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+    if f"img.shields.io/badge/version-{badge_version}-" not in readme_en:
+        errors.append(f"README_EN 版本徽章未指向 {version}")
+    if f"Current version: `{version}`" not in readme_en:
+        errors.append(f"README_EN 当前版本文本未指向 {version}")
+
+    cli_text = (ROOT / "cli.py").read_text(encoding="utf-8")
+    if f'VERSION = "{version}"' not in cli_text:
+        errors.append(f"CLI 版本未指向 {version}")
 
     tag = args.tag.strip()
     if not tag and os.getenv("GITHUB_REF_TYPE") == "tag":

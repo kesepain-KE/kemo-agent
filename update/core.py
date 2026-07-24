@@ -21,6 +21,7 @@ MODULE_NAME = "core"
 
 DIRECTORIES = (
     "run",
+    "provider",
     "cron",
     "template",
     "tests",
@@ -41,6 +42,7 @@ FILES = (
     "version.json",
     "agents.md",
     "user_create.py",
+    "README_EN.md",
 )
 
 REGISTER_FILES = (
