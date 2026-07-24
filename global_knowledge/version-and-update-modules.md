@@ -47,16 +47,19 @@ python update.py --module all
 
 ```text
 读取本地/远程 version.json
+  → 校验根版本与四个组件版本
   → 用户确认
   → 浅克隆远程仓库
   → 创建本地备份
+  → 从克隆源码加载最新 update/ 板块实现
   → 按 core → agents → plugins → web 执行选中板块
   → core：尝试用户骨架与旧记忆迁移、刷新 pip 依赖
   → web：npm install + npm run build
+  → 全部成功后原子提交 version.json
   → 输出逐板块汇总
 ```
 
-任一板块返回 `failed` 时，全量更新结束为失败。`partial` 会保留警告并继续汇总。
+任一板块返回 `failed` 或 `partial` 时，本轮更新结束为失败，保留旧版本号并显示更新前备份位置。已经复制的代码不会被自动回滚，可在排除问题后直接重新执行更新，或使用备份手动恢复。
 
 ## core — 核心与公共资源
 
@@ -78,7 +81,9 @@ python update.py --module all
 
 ### 覆盖的根文件
 
-`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`config/global_soul.md`、`.env.example`、`LICENSE`、`README.md`（兼容小写名）、`README_EN.md`、`kemo-agent.jpg`、`version.json`、`agents.md`、`user_create.py`。
+`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`requirements-dev.txt`、`config/global_soul.md`、`.env.example`、`LICENSE`、`README.md`（兼容小写名）、`README_EN.md`、`kemo-agent.ico`、`kemo-agent.jpg`、`kemo-web-UI.png`、`agents.md`、`restart.py`、`start_web.py`、`user_create.py`。
+
+`version.json` 不由 core 提前覆盖，而是由总调度器在所选板块、迁移、依赖刷新和 Web 构建全部成功后单独提交。
 
 ### 特殊处理
 
@@ -112,16 +117,23 @@ python update.py --module all
 - `web/frontend/node_modules/`
 - `web/frontend/dist/`
 
-同步完成后默认在 `web/frontend/` 执行 `npm install` 和 `npm run build`。没有 npm 时，只有已有非空 `dist/` 才允许跳过构建继续使用。
+同步完成后默认在 `web/frontend/` 执行 `npm install` 和 `npm run build`。由于 Git 仓库不跟踪 `dist/`，没有 npm 时不能把旧构建产物视为更新成功；更新器会保留旧版本号并提示安装 Node.js。
 
-从 `0.1.x` 首次升级到 `0.2.x` 时，旧 core 清单尚不知道 `provider/` 和 `README_EN.md`。默认的全量更新会在 core 刷新更新模块后，由 web 板块补齐这两项兼容迁移，因此不需要再次使用 `--force` 更新。
+从 `0.1.x` 首次升级到 `0.2.x` 时，旧 core 清单尚不知道 `provider/` 和 `README_EN.md`。旧调度器默认执行全量更新时，会在 core 刷新更新模块后，由新版 web 板块补齐这两项兼容迁移，因此不需要再次使用 `--force` 更新。`0.2.x` 新调度器会显式关闭该桥接，单独更新 web 时不会越界修改 core。
+
+## 版本提交规则
+
+- 全量更新：所有步骤成功后写入远程完整版本文档，包括根版本和四个组件版本。
+- 单板块更新：只推进对应 `components.<module>.version`，根版本及其他组件保持不变。
+- `failed`、`partial`、依赖安装失败、Web 构建失败或版本写入失败：不提交新版本号。
+- 使用同目录临时文件并通过原子替换写入，避免中断时留下半个 JSON 文件。
 
 ## 当前未纳入板块自动同步的路径
 
 下列路径不在四个板块当前清单中，也不应被文档误认为会随 core 更新：
 
 - `shared_knowledge/`
-- 根目录 `start_web.py`、`restart.py`、`.gitignore`
+- 根目录 `.gitignore`
 - `config/` 中除 `global_soul.md` 和交互处理的 `global_config.json` 之外的文件
 - `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 之外的模块数据
 - `users/`、`tmp/`、`message/out/` 等运行数据
