@@ -1,0 +1,220 @@
+{
+  "main": {
+    "id": "27ef9dd8806b09c2",
+    "type": "split",
+    "children": [
+      {
+        "id": "881e500349db6f73",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "740ce34e3a13ba9b",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "关系图谱"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "14edc7ad2f4ebbd2",
+    "type": "split",
+    "children": [
+      {
+        "id": "0c104df8818d0323",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a0333abe176a18db",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "文件列表"
+            }
+          },
+          {
+            "id": "f926418ebee7b888",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "搜索"
+            }
+          },
+          {
+            "id": "e5165d4bec66097a",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "书签"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "right": {
+    "id": "f653ab762480e8c0",
+    "type": "split",
+    "children": [
+      {
+        "id": "8021113f7a9f99b8",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1cc50ce9640ddcda",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "反向链接"
+            }
+          },
+          {
+            "id": "25cd961c3a621902",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "出链"
+            }
+          },
+          {
+            "id": "e14f4bdaea8f2d17",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "标签"
+            }
+          },
+          {
+            "id": "1c801713054e93f5",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "添加笔记属性"
+            }
+          },
+          {
+            "id": "4960ab42095a9081",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "大纲"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:打开快速切换": false,
+      "graph:查看关系图谱": false,
+      "canvas:新建白板": false,
+      "daily-notes:打开/创建今天的日记": false,
+      "templates:插入模板": false,
+      "command-palette:打开命令面板": false,
+      "bases:新建数据库": false
+    }
+  },
+  "active": "740ce34e3a13ba9b",
+  "lastOpenFiles": [
+    "message/message-总览.md.bak",
+    "global_knowledge-全局知识库.md.bak",
+    "原理/原理-运行原理.md.bak",
+    "原理/原理-上下文管理.md.bak",
+    "run/run-总览.md.bak",
+    "provider/provider-总览.md.bak",
+    "improve/improve-总览.md.bak",
+    "config/config-总览.md.bak",
+    "kemo-agent-模块索引.md.bak",
+    "05-调用关系/总调用关系.md",
+    "archive/tests-测试.md.bak",
+    "infra/infra-repo-scripts.md.bak",
+    "infra/infra-repo-scripts.md",
+    "infra/infra-ci-cd.md",
+    "infra/infra-总览.md",
+    "run/run-memory.md",
+    "cron-executor-missing-transport-registry.md",
+    "cron-executor-transport-registry-编程方案.md",
+    "网页重启功能编程方案.md",
+    "plugins/plugins-task_plan.md",
+    "run/run-history_index.md",
+    "cli/user-create.md",
+    "cli/setup-wizard.md",
+    "plugins/plugins-external_message.md",
+    "template/template-总览.md",
+    "agents/agents-registry.md",
+    "global_knowledge-全局知识库.md",
+    "plugins/plugins-sense_creater.md",
+    "plugins/plugins-expand_creater.md",
+    "run/run-总览.md",
+    "原理/原理-PromptBundle编排.md",
+    "run/run-prompt.md",
+    "plugins/plugins-manifest.md",
+    "archive/web-Web运行目录.md",
+    "plugins/plugins-knowledge_search.md",
+    "plugins/plugins-skill_creater.md",
+    "未命名.canvas"
+  ]
+}

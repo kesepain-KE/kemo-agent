@@ -1,0 +1,126 @@
+---
+type: domain_overview
+project: kemo-agent
+domain: provider
+module: provider-总览
+layer: L1
+status: active
+updated: 2026-08-04
+source: "provider/provider-总览.md"
+updated: 2026-07-21
+verified: true
+tags: [kemo-agent, provider, API, 总览, chat, kemo, 双模式, reasoning_effort]
+---
+# provider — 外部 API 适配（总览）
+
+`E:\code\kemo-agent\provider/` — 双模式 Provider 架构：`chat` 标准兼容 + `kemo` 原生网关。
+
+## Provider 类型
+
+| 类型 | 模式 | 说明 |
+|------|------|------|
+| `chat` | `mode="chat"` | ChatBridgeProvider，访问 `/v1/chat/completions`，文本/工具循环/图片输入基线 |
+| `kemo` | `mode="kemo"` | KemoGatewayProvider，原生 Kemo 协议，Asset/多模态/Provider State/流恢复 |
+
+两种模式在一次 Run 开始前固定，不得跨协议自动回退。
+
+## 源文件导航
+
+| 文件 | 说明 |
+|------|------|
+| `schema.py` | 遗留数据契约（仅保留 ProviderError/ProviderTimeoutError/ProviderAuthError） |
+| `factory.py` | `create_provider()` 按 `type` 路由，返回 `ProviderAdapter` |
+| `kemo_gateway.py` | `KemoGatewayProvider` — 原生 Kemo 网关传输（mode="kemo"） |
+| `adapters/chat_bridge.py` | **新增** `ChatBridgeProvider` — Chat Completions 标准兼容（mode="chat"） |
+| `adapters/base.py` | `ProviderAdapter` 协议 + `AsyncProviderFacade` 异步门面 |
+| `adapters/compat.py` | `chat_response_to_kemo()` / `kemo_response_to_chat()` / `chat_stream_to_protocol()` 类型转换 |
+| `adapters/gateway.py` | Gateway 原生协议适配器 |
+| `openai_chat.py` | 已废弃，功能由 `chat_bridge.py` 替代 |
+
+## 协议层（provider/protocol/）
+
+| 文件 | 说明 |
+|------|------|
+| `models.py` | KemoRequest / KemoResponse / MessageItem / ToolCallItem / ToolResultItem / ContentBlock 等核心模型 |
+| `enums.py` | ResponseStatus / StreamEventType / MessageRole / MeasurementMode 枚举 |
+| `streaming.py` | ProviderStreamEvent 流式事件定义 |
+| `errors.py` | 协议错误类型 |
+| `assets.py` | 资产（图片/文件）引用模型 |
+| `serialization.py` | 协议序列化工具 |
+| `validation.py` | 协议校验工具 |
+
+## 公开 API
+
+`provider/__init__.py` 公开：
+
+```python
+from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
+from provider.protocol.streaming import ProviderStreamEvent
+from provider.schema import ProviderAuthError, ProviderError, ProviderTimeoutError
+```
+
+## 调用链
+
+```
+engine._iter_request_events_impl
+  → provider.create(KemoRequest) / provider.stream(KemoRequest)
+  → KemoResponse / ProviderStreamEvent
+  → RunEvent(event_id/request_id/response_id/item_id)
+```
+
+无旧版 fallback 路径。`AgentRunner` 也使用 KemoRequest/KemoResponse 协议。
+
+## 兼容性
+
+### provider/protocol/enums.py — Python 3.10 StrEnum 兼容（2026-07-26）
+
+Python 3.11+ 标准库 `enum.StrEnum` 在 3.10 中不可用。新增兼容导入：
+
+```python
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.10 compatibility
+    from enum import Enum
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return self.value
+```
+
+影响所有使用 `StrEnum` 的枚举类型：`ResponseStatus`、`StreamEventType`、`MessageRole`、`MeasurementMode`。
+
+## 相关笔记
+
+- [[provider-factory]]
+- [[provider-kemo_gateway]]
+- [[provider-schema]]
+- [[原理-运行原理]]
+
+## reasoning_effort 全链路（2026-07-26）
+
+Provider 全链路新增 `reasoning_effort` 支持，五种思考强度：`minimal`/`low`/`medium`/`high`/`max`。
+
+### 链路
+
+```text
+用户配置 reasoning_effort
+  → run/config.py: provider_runtime_config() → normalize_reasoning_effort()
+  → run/engine.py: ChatRequest.extra["reasoning_effort"]
+  → provider/adapters/compat.py: chat_request_to_kemo()
+    → KemoRequest.reasoning = ReasoningConfig(enabled=True, effort=...)
+    → KemoRequest.provider_options["reasoning_effort"]
+  → provider/adapters/compat.py: kemo_request_to_chat()
+    → ChatRequest.extra["reasoning_effort"]
+  → provider/adapters/chat_bridge.py
+    → ProviderCapabilities.reasoning.supported = True
+    → efforts = ["minimal", "low", "medium", "high", "max"]
+```
+
+### normalize_reasoning_effort
+
+```python
+def normalize_reasoning_effort(value) -> str
+```
+
+- 缺失、`None`、`"none"`、`""`、非法值 → 统一回退为 `"medium"`
+- 合法值：`"minimal"`/`"low"`/`"medium"`/`"high"`/`"max"`
+- 大小写不敏感

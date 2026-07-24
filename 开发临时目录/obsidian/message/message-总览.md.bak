@@ -1,0 +1,91 @@
+---
+type: domain_overview
+project: kemo-agent
+domain: message
+module: message-总览
+layer: L1
+updated: 2026-08-04
+status: active
+summary: message — 外部消息路由（总览）
+source: "message/message-总览.md"
+updated: 2026-07-22
+verified: true
+tags: [kemo-agent, message, 消息路由, 总览]
+---
+# message — 外部消息路由（总览）
+
+平台无关核心。`E:\code\kemo-agent\message/` — 7 个源文件（含 plugin.py）。
+
+## 源文件导航
+
+- schema.py — MessageEnvelope / OutboundMessage 统一契约
+- transport.py — Transport 协议 / TransportRegistry / MockTransport / TransportPolicy（含 bound_user）
+- identity.py — IdentityBinding / IdentityResolver / filter_tool_registry
+- state.py — ProcessedMessageStore（幂等去重，含 claim_many / complete_many）
+- [[message-router|router.py]] — MessageRouter（RunEvent 聚合 + 出站发送 + request_payload 钩子）
+- [[message-plugin|plugin.py]] — FileMessageTransport / 文件夹插件运行时 / Markdown 消息队列
+
+## 宿主
+
+- [[run-runtime_host|runtime_host.py]] — RuntimeHost（Cron + Router + Transport + 文件夹插件统一托管）
+
+## 核心链路
+
+### 传统 Transport 路径
+
+```
+Transport 收到消息
+→ MessageEnvelope
+→ IdentityResolver 映射内部用户
+→ ProcessedMessageStore.claim（幂等）
+→ _session_lock（同会话串行）
+→ iter_request_events（工具权限交集过滤）
+→ 聚合 RunEvent
+→ OutboundMessage.reply
+→ Transport.send
+```
+
+### 文件夹插件路径（message/out/<platform>/）
+
+```
+input.py 收到平台消息 → 写入 message.md / files/
+→ FileMessageTransport 领取并解析队列
+→ MessageEnvelope
+→ message.json.bound_user 绑定内部用户（不经 IdentityResolver）
+→ ProcessedMessageStore.claim_many（多键幂等）
+→ MessageRouter → iter_request_events
+→ OutboundMessage → output.py.send
+→ finalize() 写日志、清理附件、释放领取文件
+```
+
+## 会话隔离
+
+```
+source     = message:<platform>
+session_id = <chat_type>:<external_chat_id>
+```
+
+同用户共享记忆，不同平台/聊天类型/聊天 ID 隔离上下文。
+
+## 身份绑定
+
+### 传统 Transport
+
+```json
+{"platform": "...", "external_user_id": "...", "internal_user": "...",
+ "chat_type": "private", "external_chat_id": "..."}
+```
+
+匹配字段越多优先级越高。未绑定拒绝。
+
+### 文件夹插件
+
+使用 `message.json.bound_user` 将整个平台实例绑定到一个内部用户，不逐条绑定外部账号。
+
+## 原理引用
+
+- 运行原理
+- 消息路由
+- 定时任务
+- 计划任务
+- 感知与拓展

@@ -1,0 +1,109 @@
+---
+type: component
+project: kemo-agent
+domain: 原理
+module: 原理-运行原理
+updated: 2026-08-04
+scope: project
+status: active
+summary: 原理：智能体运行原理
+source: "原理/原理-运行原理.md"
+updated: 2026-07-18
+verified: true
+tags: [kemo-agent, 原理, 运行原理, 引擎]
+corrections: 2026-07-18 核验 run/engine.py 源码后补充：多轮摘要循环、运行中引导、工具去重、取消/失败保护
+---
+# 原理：智能体运行原理
+
+对应源码：`E:\code\kemo-agent\run\engine.py`
+
+## 结论
+
+当前运行核心是：
+
+1. 读取配置与 Provider
+2. 领取会话锁（`_session_lock` — 按 source+user+session_id 纬度串行）
+3. 审核记忆到期（`MemoryStore.review_due` → 达标升级/不达标删除）
+4. 构建 14 段 `PromptBundle`
+5. 选择上下文窗口 + 摘要生成（多轮循环至预算达标）
+6. 进入模型→工具→模型循环（含工具去重、运行中引导）
+7. 成功后提交历史、加权记忆、提交记忆提取
+8. 失败/取消/超时 → 不写历史、不加权记忆
+
+## 新的关键输入
+
+这轮运行原理已经明确接入：
+
+- `build_prompt_bundle()`
+- `discover_tools()` / `plugin_manifests`
+- `select_context()`
+- `select_knowledge_index()`
+- `registered_sources.select_expand()`
+- `select_perception()`
+
+## 主入口
+
+- `iter_request_events()`
+- `stream_request()`
+- `handle_request()`
+- `context_status()`
+- `compress_context()`
+
+## 核心流程
+
+```mermaid
+flowchart TD
+    A[请求进入] --> B[load_config / provider]
+    B --> C[prepare_window + 会话锁]
+    B --> D[MemoryStore.review_due]
+    D --> E[build_prompt_bundle]
+    E --> F[select_context]
+    F --> G{有移除的轮次?}
+    G -->|是| H[get_or_create_summary\n多轮循环至预算达标]
+    H --> F
+    G -->|否| I[provider 对话循环]
+    I --> J{工具调用?}
+    J -->|是| K[工具执行\n去重+引导注入]
+    K --> I
+    J -->|否| L{未消费引导?}
+    L -->|是| M[注入运行中引导<br>继续对话]
+    M --> I
+    L -->|否| N[commit_window]
+    N --> O[MemoryStore.mark_used]
+    N --> P[submit_memory_extraction]
+    
+    style D fill:#f0f0f0
+    style H fill:#f0f0f0
+    style K fill:#e8ffe8
+    style M fill:#e8ffe8
+```
+
+## 重要约束
+
+- **会话锁**：同一 `(source, user, session_id)` 串行执行，确保历史一致性
+- **成功提交后才写历史**：Provider 失败或取消不会污染历史文件
+- **记忆加权只在成功提交后**：`MemoryStore.mark_used()` 在主模型成功后才调用。取消/失败/Provider 出错 → 记忆不加权
+- **摘要多轮循环**：一次压缩不满足预算时，最多循环 `removed_rounds + 1` 次，直到稳定
+- **运行中引导**：通过 `_guidance_queue` 注入，在工具边界生效。未消费的引导在无工具调用时追加为下轮用户消息
+- **工具去重**：相同 `(name, arguments)` 签名跨迭代重用结果，防止重复执行
+- **摘要是派生缓存**：`context_summary.json` 是只读缓存，不替代原历史。`compress_only` 模式不会修改历史
+- **Provider 超时/取消 → 空事件流**：`cancel_event.is_set()` 后直接 return，不产生 done 事件
+
+## 已验证的源码行为（run/engine.py）
+
+| 行为 | 源码位置 |
+|------|---------|
+| 会话锁 | `_session_lock(base, user, source, session_id)` |
+| 多轮摘要 | `for _ in range(max_summary_passes)` |
+| 工具去重 | `signature = f"{call.name}:{json.dumps(arguments, sort_keys=True)}"` → `seen_calls[signature]` |
+| 引导注入 | `_drain_guidance(channel)` → `_append_guidance(messages, values)` |
+| 取消保护 | `if cancel_event is not None and cancel_event.is_set(): return` |
+| 成功才提交 | `commit_window()` → `mark_used()` → `submit_memory_extraction()`（都在工具循环 completed 之后） |
+
+## 相关笔记
+
+- [[原理-总览]]
+- [[原理-PromptBundle编排]]
+- [[原理-上下文管理]]
+- [[原理-工具调用]]
+- [[原理-记忆升级权重]]
