@@ -109,7 +109,9 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `storage_schema_version` | int | `3` | 记忆存储格式版本号 |
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许 Maintenance 每轮后台提取；`on_commit` 每轮同步提取 |
-| `recovery_max_rounds_per_scan` | int | `2` | Maintenance 每轮扫描最多补提取的会话轮数。运行时限制为 1–20 |
+| `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
+| `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
+| `extraction_max_candidates_per_batch` | int | `10` | 每批最多保留的记忆候选；同时受“每轮最多 2 条”限制，运行时硬上限为 40 |
 | `important_memory_max_chars` | int | `5000` | 临时重要记忆文件最大字符数。超出后需 `memory_temporary_important` 子代理压缩 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
 
@@ -235,7 +237,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|-------------------|-----------------|
 | 作用域 | 所有用户 | 单个用户 |
 | 覆盖性 | 默认值 | 可覆盖全局值 |
-| 用户独有字段 | 无 | `provider`、`agent_models`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins`、`agent_runtime`（部分） |
+| 用户独有字段 | 无 | `provider`、`agent_models`、`multimodal_models`、`multimodal_routing`、`knowledge`、`skills`、`expand`、`perception`、`plugins`、`agent_runtime`（部分） |
 | 修改方式 | 直接编辑文件 | Web 配置面板或直接编辑文件 |
 
 ### 白名单规则

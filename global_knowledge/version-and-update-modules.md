@@ -7,13 +7,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.1.0"},
-    "agents": {"version": "0.1.0"},
-    "plugins": {"version": "0.1.0"},
-    "web": {"version": "0.1.0"}
+    "core": {"version": "0.2.0"},
+    "agents": {"version": "0.2.0"},
+    "plugins": {"version": "0.2.0"},
+    "web": {"version": "0.2.0"}
   }
 }
 ```
@@ -67,6 +67,7 @@ python update.py --module all
 | 目录 | 内容 |
 |------|------|
 | `run/` | 对话、历史、Prompt、记忆、工具与运行时核心 |
+| `provider/` | Chat/Kemo Provider、协议适配与多模态 Asset 客户端 |
 | `cron/` | 定时任务执行和调度 |
 | `template/` | 各类创建模板 |
 | `tests/` | 后端测试 |
@@ -77,7 +78,7 @@ python update.py --module all
 
 ### 覆盖的根文件
 
-`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`config/global_soul.md`、`.env.example`、`LICENSE`、`README.md`（兼容小写名）、`kemo-agent.jpg`、`version.json`、`agents.md`、`user_create.py`。
+`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`config/global_soul.md`、`.env.example`、`LICENSE`、`README.md`（兼容小写名）、`README_EN.md`、`kemo-agent.jpg`、`version.json`、`agents.md`、`user_create.py`。
 
 ### 特殊处理
 
@@ -113,11 +114,12 @@ python update.py --module all
 
 同步完成后默认在 `web/frontend/` 执行 `npm install` 和 `npm run build`。没有 npm 时，只有已有非空 `dist/` 才允许跳过构建继续使用。
 
+从 `0.1.x` 首次升级到 `0.2.x` 时，旧 core 清单尚不知道 `provider/` 和 `README_EN.md`。默认的全量更新会在 core 刷新更新模块后，由 web 板块补齐这两项兼容迁移，因此不需要再次使用 `--force` 更新。
+
 ## 当前未纳入板块自动同步的路径
 
 下列路径不在四个板块当前清单中，也不应被文档误认为会随 core 更新：
 
-- `provider/`
 - `shared_knowledge/`
 - 根目录 `start_web.py`、`restart.py`、`.gitignore`
 - `config/` 中除 `global_soul.md` 和交互处理的 `global_config.json` 之外的文件

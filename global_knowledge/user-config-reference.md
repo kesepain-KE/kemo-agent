@@ -9,7 +9,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 目录和数据文件职责见 `user-directory-skeleton.md`；环境变量兜底和密钥优先级见 `env-reference.md`。配置保存后，当前 Run 不会中途改变 Provider 或权限，下一次 Run 才使用新的合并结果；需要重建 RuntimeHost 组件的参数应重启服务。
 
 配置分两类：
-- **用户独有段**：`provider`、`agent_models`、`multimodal_models`、`knowledge`、`skills`、`expand`、`perception`、`plugins` — 只从用户配置读取，全局配置不兜底
+- **用户独有段**：`provider`、`agent_models`、`multimodal_models`、`multimodal_routing`、`knowledge`、`skills`、`expand`、`perception`、`plugins` — 只从用户配置读取，全局配置不兜底
 - **框架覆盖段**：其余段按对象深合并，用户配置中的字段覆盖全局默认值，未提供的字段继承全局值
 
 ---
@@ -35,6 +35,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
 | `reasoning_effort` | string | `"medium"` | 思考强度：`minimal`、`low`、`medium`、`high`、`max`。缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
+| `input_modalities` | string[] | `["text"]` | 主模型已确认支持的输入模态；必须包含 `text`。Chat 只允许增加 `image`；Kemo 还可声明 `audio`、`video`、`file`，并会与网关能力声明交叉验证 |
 
 ### 密钥优先级
 
@@ -64,7 +65,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 ## multimodal_models — 多模态模型覆盖
 
-默认全部为空字符串，留空时使用 `provider.model` 作为兜底。按需填写特定能力的模型名。
+默认全部为空字符串。专用多模态工具只调用明确填写的能力模型，避免把不支持该操作的主模型当作兜底；主模型直传由 `provider.input_modalities` 和 Kemo 网关能力共同决定。
 
 | 字段 | 说明 |
 |------|------|
@@ -74,9 +75,18 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `audio_transcription` | 语音转文字 |
 | `speech_generation` | 文生语音 |
 | `speech_to_speech` | 语音生语音 |
+| `video_understanding` | 视频理解、时间轴摘要 |
 | `video_generation` | 视频生成 |
 
-> 不含 embedding 和 rerank。`chat` 模式的可移植基线仅包含文本、工具和图片输入；`kemo` 模式通过 Asset 与能力声明使用网关实际支持的完整多模态能力。
+> 不含 embedding 和 rerank。Chat 模式只保证文本、工具和图片识别。音频、视频、普通文件输入及所有媒体生成/转换只在 Kemo 模式启用；Kemo 同时校验输入/输出模态与 `extensions.operations`，不会跨协议自动回退。
+
+## multimodal_routing — 多模态路由
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `vision` | `"auto"` | `auto` = 主模型支持图片时优先直传，否则使用专用视觉模型；`main` = 仅主模型；`dedicated` = 仅 `multimodal_models.vision` |
+
+图片文件在后端经过上传目录约束、真实格式与大小检查后，Chat 请求才会临时内联，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
 
 ---
 
@@ -207,6 +217,9 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许后台提取；`on_commit` 每轮同步提取 |
+| `recovery_max_rounds_per_scan` | int | 10 | Maintenance 每次扫描最多补提取的总轮数，范围 1–20 |
+| `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
+| `extraction_max_candidates_per_batch` | int | 10 | 每批候选总上限；仍受每轮最多 2 条限制 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days` |
 | `important_memory_max_chars` | int | 5000 | 临时重要记忆文件最大字符数 |
 | `history_read_enabled` | bool | true | 是否允许智能体使用 `history_search` 工具 |
@@ -294,9 +307,10 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 | 配置组 | 主要字段 |
 |--------|---------|
-| `provider` | type, base_url, api_key, api_key_env, model, stream, reasoning_effort |
+| `provider` | type, base_url, api_key, api_key_env, model, stream, reasoning_effort, input_modalities |
 | `agent_models` | default, cheap, reasoning |
-| `multimodal_models` | vision, image_generation, image_edit, audio_transcription, speech_generation, speech_to_speech, video_generation |
+| `multimodal_models` | vision, image_generation, image_edit, audio_transcription, speech_generation, speech_to_speech, video_understanding, video_generation |
+| `multimodal_routing` | vision |
 | `knowledge` | use_shared, use_global |
 | `skills` | shared_whitelist |
 | `expand` | global_whitelist, shared_whitelist |

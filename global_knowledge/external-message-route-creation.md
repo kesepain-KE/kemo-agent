@@ -60,9 +60,25 @@ def start(config: dict, buffer_path: str, files_path: str, state_path: str) -> N
 
 def stop() -> None:
     """幂等停止，释放线程、事件循环和网络资源。"""
+
+# 长期运行模块应同时实现以下可选生命周期接口：
+def is_alive() -> bool:
+    """接收循环仍能继续工作时返回 True。"""
+
+def restart() -> None:
+    """确认旧实例完全退出后，使用最近一次启动参数重新启动。"""
+
+def last_error() -> str | None:
+    """返回接收循环最近一次顶层异常。"""
 ```
 
 `start()` 由框架线程调用。平台模块不能自行执行主智能体，也不能在这里实现 `/new`、`/clear`、`/compress` 等核心指令；斜杠消息应原样进入平台中立路由。
+
+核心兼容只实现 `start()/stop()` 的旧模块：此时通过调用 `start()` 的框架线程判断存活。自行创建后台线程或事件循环的模块必须实现 `is_alive()`，否则 `start()` 返回后核心无法区分“模块在后台正常工作”和“接收循环已经退出”。
+
+核心使用独立监督线程检查输入生命周期，监督不会阻塞 `message.md` 文件队列轮询。输入死亡后按指数退避自动重启；RuntimeHost 停止期间禁止拉起。实现 `restart()` 时，模块必须保证旧长轮询、Webhook、线程和事件循环已经退出，不能产生两个并行消费者。没有 `restart()` 时，核心退回到 `stop()` 后重新调用 `start()`。
+
+自动重启不得清空平台积压消息。平台 SDK 中类似 `drop_pending_updates` 的选项必须关闭，除非用户明确要求丢弃历史积压。网络重试必须设置超时，不能无限阻塞 `stop()`。
 
 ### output.py
 
@@ -118,11 +134,27 @@ MIME 决定输入方式：文本附件最多读取 100,000 字符；图片、音
   "error": null,
   "latency_ms": null,
   "messages_received_today": 0,
-  "messages_sent_today": 0
+  "messages_sent_today": 0,
+  "input_status": "unknown",
+  "input_restart_count": 0,
+  "input_last_restart_at": null,
+  "input_error": null
 }
 ```
 
-计数必须是非负整数。框架会维护每日计数、检测时间、错误和延迟；模块可增加私有字段，但不能破坏标准字段类型。
+计数必须是非负整数。框架会维护每日计数、检测时间、错误、延迟和输入监督状态；模块可增加私有字段，但不能破坏标准字段类型。`input_status` 取值为 `unknown`、`starting`、`running`、`restarting`、`stopped`。
+
+## 长存活与历史会话
+
+外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，写入 `users/<user>/history/data.json`；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。
+
+- 私聊按外部聊天 ID 隔离。
+- 群聊默认以整个群的聊天 ID 共享一个会话。
+- `/new` 关闭当前会话并为同一外部聊天建立新会话。
+- `/clear` 只清空当前外部聊天绑定的会话。
+- 平台模块不得自行生成或缓存内部 `session_id`，也不得把输入线程重启解释为新对话。
+
+`message.md` 是接收与核心路由之间的持久缓冲。平台收到消息后必须先完整追加队列，再确认本地处理成功；文件写入应加锁并保证单条 YAML 块不会被并发写坏。平台输入模块不要直接改写 `state.json` 的标准字段，消息计数和 `last_message_at` 由核心领取队列后统一维护，避免与健康检测发生覆盖竞争。
 
 ## 创建流程
 
@@ -130,7 +162,7 @@ MIME 决定输入方式：文本附件最多读取 100,000 字符；图片、音
 2. 将平台 Token 放入环境变量或模块私有且被忽略的凭据文件，不放进 `message.json`。
 3. 实现三模块合同和可恢复 `message.md` 写入。
 4. 正确处理文本、命令、群聊、回复 ID、附件 MIME、重名附件和时区。
-5. 测试连接检测、入站去重、出站失败、重启恢复和优雅停止。
+5. 测试连接检测、入站去重、出站失败、输入线程自动拉起、积压消息保留、历史会话跨重启延续和优雅停止。
 6. 重新发现模块，检查 Web 外部消息页中的健康状态和日志。
 
 ## 安全边界
