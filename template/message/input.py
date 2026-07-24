@@ -2,6 +2,7 @@
 Telegram Bot inbound message handler.
 
 Protocol: start(config, buffer_path, files_path, state_path) / stop()
+Optional lifecycle: is_alive() / restart() / last_error()
   - config: dict from message.json (raw)
   - buffer_path: path to message.md queue file
   - files_path: path to files/ directory
@@ -17,7 +18,6 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,11 +33,13 @@ _LOOP: asyncio.AbstractEventLoop | None = None
 _THREAD: threading.Thread | None = None
 _STOP_EVENT = threading.Event()
 _LOCK = threading.Lock()
+_LIFECYCLE_LOCK = threading.RLock()
+_LAST_ERROR: str | None = None
+_START_ARGS: tuple[dict, str, str, str] | None = None
 
 _MACHINE_ID: str = ""
 _BUFFER_PATH: Path | None = None
 _FILES_PATH: Path | None = None
-_PLUGIN_DIR: Path | None = None
 
 
 def _write_message(message_data: dict, body: str) -> None:
@@ -185,20 +187,6 @@ async def _build_message(update: Any) -> tuple[dict, str] | None:
     return message_data, text
 
 
-def _update_last_message_at(timestamp: str) -> None:
-    """更新 state.json 中的 last_message_at。"""
-    try:
-        state_path = (_PLUGIN_DIR / "state.json") if _PLUGIN_DIR else None
-        if state_path and state_path.is_file():
-            state = json.loads(state_path.read_text("utf-8"))
-            state["last_message_at"] = timestamp
-            tmp = state_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", "utf-8")
-            tmp.replace(state_path)
-    except Exception:
-        pass
-
-
 async def _run_bot(token: str) -> None:
     """运行 Telegram Bot Application (async 主循环)。"""
     from telegram import Update
@@ -213,7 +201,6 @@ async def _run_bot(token: str) -> None:
                 return
             message_data, body = result
             _write_message(message_data, body)
-            _update_last_message_at(message_data["timestamp"])
         except Exception as exc:
             print(f"[Telegram input] 消息处理异常：{exc}")
 
@@ -225,49 +212,91 @@ async def _run_bot(token: str) -> None:
     global _BOT_APP
     _BOT_APP = app
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    initialized = False
+    try:
+        await app.initialize()
+        initialized = True
+        await app.start()
+        # 自动重启后必须继续消费平台积压，不能清空离线期间的消息。
+        await app.updater.start_polling(drop_pending_updates=False)
 
-    while not _STOP_EVENT.is_set():
-        await asyncio.sleep(0.5)
-
-    await app.updater.stop()
-    await app.stop()
-    await app.shutdown()
+        while not _STOP_EVENT.is_set():
+            await asyncio.sleep(0.5)
+    finally:
+        if app.updater.running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
+        if initialized:
+            await app.shutdown()
 
 
 def start(config: dict, buffer_path: str, files_path: str, state_path: str) -> None:
     """在后台线程中启动 Telegram Bot 长轮询。"""
-    global _THREAD, _BUFFER_PATH, _FILES_PATH, _MACHINE_ID, _PLUGIN_DIR
+    global _THREAD, _BUFFER_PATH, _FILES_PATH, _MACHINE_ID
+    global _LAST_ERROR, _START_ARGS
 
-    _BUFFER_PATH = Path(buffer_path)
-    _FILES_PATH = Path(files_path)
-    _PLUGIN_DIR = Path(__file__).resolve().parent
-    _MACHINE_ID = config.get("machine_id", "tg-mybot-001")
-    _STOP_EVENT.clear()
-    token = load_token()
+    with _LIFECYCLE_LOCK:
+        if _THREAD is not None and _THREAD.is_alive():
+            return
+        _BUFFER_PATH = Path(buffer_path)
+        _FILES_PATH = Path(files_path)
+        _MACHINE_ID = config.get("machine_id", "tg-mybot-001")
+        _START_ARGS = (dict(config), buffer_path, files_path, state_path)
+        _LAST_ERROR = None
+        _STOP_EVENT.clear()
+        token = load_token()
 
-    def _run() -> None:
-        global _LOOP
-        _LOOP = asyncio.new_event_loop()
-        asyncio.set_event_loop(_LOOP)
-        try:
-            _LOOP.run_until_complete(_run_bot(token))
-        finally:
-            _LOOP.close()
-            _LOOP = None
+        def _run() -> None:
+            global _LOOP, _LAST_ERROR
+            _LOOP = asyncio.new_event_loop()
+            asyncio.set_event_loop(_LOOP)
+            try:
+                _LOOP.run_until_complete(_run_bot(token))
+            except BaseException as exc:
+                with _LIFECYCLE_LOCK:
+                    _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+            finally:
+                _LOOP.close()
+                _LOOP = None
 
-    _THREAD = threading.Thread(target=_run, daemon=True, name="telegram-bot")
-    _THREAD.start()
+        _THREAD = threading.Thread(target=_run, daemon=True, name="telegram-bot")
+        _THREAD.start()
+
+
+def is_alive() -> bool:
+    """供核心监督器查询接收循环是否仍在运行。"""
+    with _LIFECYCLE_LOCK:
+        return _THREAD is not None and _THREAD.is_alive()
+
+
+def last_error() -> str | None:
+    """返回接收线程最近一次顶层异常，未发生异常时返回 None。"""
+    with _LIFECYCLE_LOCK:
+        return _LAST_ERROR
+
+
+def restart() -> None:
+    """在确认旧线程退出后，使用最近一次参数重新启动。"""
+    with _LIFECYCLE_LOCK:
+        args = _START_ARGS
+    if args is None:
+        raise RuntimeError("input.start() 尚未调用，无法重启")
+    stop()
+    start(*args)
 
 
 def stop() -> None:
     """优雅停止 Telegram Bot。"""
     global _BOT_APP, _THREAD, _LOOP
     _STOP_EVENT.set()
-    if _THREAD and _THREAD.is_alive():
-        _THREAD.join(timeout=15)
-    _BOT_APP = None
-    _THREAD = None
-    _LOOP = None
+    with _LIFECYCLE_LOCK:
+        thread = _THREAD
+    if thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=15)
+    if thread is not None and thread.is_alive():
+        raise RuntimeError("Telegram 输入线程未能在 15 秒内停止")
+    with _LIFECYCLE_LOCK:
+        _BOT_APP = None
+        _THREAD = None
+        _LOOP = None

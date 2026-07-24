@@ -7,6 +7,10 @@
   "latency_ms": 0,
   "messages_received_today": 0,
   "messages_sent_today": 0,
+  "input_status": "unknown",
+  "input_restart_count": 0,
+  "input_last_restart_at": null,
+  "input_error": null,
   "_bot_info": {
     "id": 0,
     "username": "",
