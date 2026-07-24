@@ -1,0 +1,94 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 330;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, #11131b 48%, transparent);
+  backdrop-filter: blur(8px);
+  animation: layerIn .16s ease-out;
+}
+
+.dialog {
+  width: min(440px, 100%);
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 13px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, var(--line));
+  border-radius: var(--radius-floating);
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-elevated) 98%, transparent);
+  box-shadow: 0 28px 80px rgba(14, 17, 31, .3);
+  backdrop-filter: blur(22px);
+  animation: dialogIn .18s cubic-bezier(.2, .8, .2, 1);
+}
+
+.dialog.danger { border-color: color-mix(in srgb, var(--red) 34%, var(--line)); }
+
+.icon {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-control-lg);
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.danger .icon { color: var(--red); background: var(--red-soft); }
+
+.copy { min-width: 0; }
+.copy strong,
+.detail { display: block; }
+.copy strong { color: var(--text); font-size: 1rem; }
+.detail { margin-top: 6px; overflow: hidden; color: var(--brand); font-size: .75rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.copy p { margin: 7px 0 0; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+
+.error {
+  grid-column: 1 / -1;
+  padding: 9px 11px;
+  border-radius: var(--radius-control);
+  color: var(--red);
+  background: var(--red-soft);
+  font-size: .6875rem;
+  line-height: 1.5;
+}
+
+.actions {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin-top: 3px;
+}
+
+.actions button {
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control-lg);
+  color: var(--text-2);
+  background: var(--surface-2);
+  font: inherit;
+  font-size: .75rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.actions button:hover:not(:disabled) { border-color: var(--brand-line); background: var(--surface-hover); }
+.actions button:disabled { cursor: wait; opacity: .58; }
+.actions .confirm { border-color: var(--brand); color: #fff; background: var(--brand); }
+.danger .actions .confirm { border-color: var(--red); background: var(--red); }
+.actions .confirm:hover:not(:disabled) { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 86%, black); }
+.danger .actions .confirm:hover:not(:disabled) { border-color: var(--red); background: color-mix(in srgb, var(--red) 86%, black); }
+
+@keyframes layerIn { from { opacity: 0; } }
+@keyframes dialogIn { from { opacity: 0; transform: translateY(8px) scale(.985); } }
+
+@media (max-width: 620px) {
+  .overlay { padding: 12px; }
+  .dialog { grid-template-columns: 42px minmax(0, 1fr); padding: 18px; }
+  .icon { width: 42px; height: 42px; }
+}
