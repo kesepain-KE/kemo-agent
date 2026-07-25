@@ -21,10 +21,12 @@ from starlette.middleware.sessions import SessionMiddleware
 from events import RunEvent, TERMINAL_EVENTS
 from run.config import project_root
 from web.auth import (
+    AuthFailureLimiter,
     WEB_SESSION_MAX_AGE_SECONDS,
     WebAuthConfig,
     WebAuthError,
     WebAuthenticator,
+    resolve_client_ip,
 )
 from web.service import (
     AVATAR_MAX_BYTES,
@@ -61,6 +63,10 @@ class ChatBody(BaseModel):
 class LoginBody(BaseModel):
     username: str
     password: str
+
+
+class TokenLoginBody(BaseModel):
+    token: str
 
 
 class GuidanceBody(BaseModel):
@@ -178,7 +184,9 @@ def create_app(
     app.state.web_service = backend
     configured_auth = auth_config or WebAuthConfig()
     authenticator = WebAuthenticator(configured_auth)
+    auth_limiter = AuthFailureLimiter(configured_auth)
     app.state.web_auth = configured_auth
+    app.state.web_auth_limiter = auth_limiter
     restart_lock = threading.Lock()
     app.state.restart_requested = False
 
@@ -189,16 +197,6 @@ def create_app(
             path in {"/api/health", "/api/logo"}
             or path.startswith("/api/auth/")
         )
-        query_token = request.query_params.get("token", "")
-        if query_token:
-            try:
-                authenticator.authenticate_token(query_token)
-                authenticator.establish(request.session, "token")
-            except WebAuthError as exc:
-                return JSONResponse(
-                    status_code=exc.status,
-                    content=_error_body(exc.code, str(exc), exc.status),
-                )
         if (
             configured_auth.enabled
             and (path == "/api" or path.startswith("/api/"))
@@ -239,6 +237,7 @@ def create_app(
         return JSONResponse(
             status_code=exc.status,
             content=_error_body(exc.code, str(exc), exc.status),
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -276,10 +275,54 @@ def create_app(
         session = request.session if configured_auth.enabled else None
         return authenticator.status(session)
 
+    def auth_client_ip(request: Request) -> str:
+        peer = request.client.host if request.client is not None else "unknown"
+        return resolve_client_ip(
+            peer,
+            request.headers.get("x-forwarded-for", ""),
+            configured_auth.trusted_proxies,
+        )
+
+    @app.post("/api/auth/token")
+    async def auth_token(body: TokenLoginBody, request: Request) -> dict[str, Any]:
+        client_ip = auth_client_ip(request)
+        auth_limiter.check(client_ip, "token")
+        try:
+            authenticator.authenticate_token(body.token)
+        except WebAuthError as exc:
+            if exc.code == "invalid_credentials":
+                auth_limiter.failure(client_ip, "token")
+            raise
+        auth_limiter.success(client_ip, "token")
+        if configured_auth.requires_both:
+            authenticator.establish_token_stage(request.session)
+        else:
+            authenticator.establish(request.session, "token")
+            auth_limiter.clear_ip(client_ip)
+        return authenticator.status(request.session)
+
     @app.post("/api/auth/login")
     async def auth_login(body: LoginBody, request: Request) -> dict[str, Any]:
-        authenticator.authenticate_password(body.username, body.password)
-        authenticator.establish(request.session, "password")
+        if configured_auth.requires_both and not authenticator.token_stage_verified(
+            request.session
+        ):
+            raise WebAuthError(
+                "auth_stage_required",
+                "请先完成访问令牌验证",
+                409,
+            )
+        client_ip = auth_client_ip(request)
+        auth_limiter.check(client_ip, "password")
+        try:
+            authenticator.authenticate_password(body.username, body.password)
+        except WebAuthError as exc:
+            if exc.code == "invalid_credentials":
+                auth_limiter.failure(client_ip, "password")
+            raise
+        auth_limiter.success(client_ip, "password")
+        method = "token+password" if configured_auth.requires_both else "password"
+        authenticator.establish(request.session, method)
+        auth_limiter.clear_ip(client_ip)
         return authenticator.status(request.session)
 
     @app.post("/api/auth/logout")
@@ -293,8 +336,22 @@ def create_app(
         return {"users": backend.users()}
 
     @app.get("/api/users/{user}/files/{scope}")
-    async def files(user: str, scope: str) -> dict[str, Any]:
-        return backend.files(user, scope)
+    async def files(
+        user: str,
+        scope: str,
+        path: str = Query(default="", max_length=500),
+        search: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=6, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return backend.files(
+            user,
+            scope,
+            path=path,
+            search=search,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.post("/api/users/{user}/files/{scope}/upload")
     async def upload_file(
@@ -384,8 +441,18 @@ def create_app(
         return FileResponse(target)
 
     @app.get("/api/tmp")
-    async def tmp_files() -> dict[str, Any]:
-        return backend.tmp_files()
+    async def tmp_files(
+        path: str = Query(default="", max_length=500),
+        search: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=6, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return backend.tmp_files(
+            path=path,
+            search=search,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.post("/api/tmp/upload")
     async def upload_tmp_file(
@@ -544,6 +611,19 @@ def create_app(
             session_id,
             source=source,
             client_id=client_id,
+        )
+
+    @app.post("/api/users/{user}/sessions/{session_id}/summary/retry")
+    async def retry_session_summary(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.retry_session_summary,
+            user,
+            session_id,
+            source=source,
         )
 
     @app.post("/api/users/{user}/sessions/{session_id}/lease")
@@ -784,6 +864,14 @@ def create_app(
     async def settings(user: str) -> dict[str, Any]:
         value = backend.settings(user)
         return {**value, "authentication": configured_auth.public_summary()}
+
+    @app.get("/api/version")
+    async def version_info() -> dict[str, Any]:
+        return backend.version_info()
+
+    @app.get("/api/version/check")
+    async def version_check(refresh: bool = Query(False)) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.version_check, refresh=refresh)
 
     @app.get("/api/users/{user}/prompt/sections")
     async def prompt_sections(user: str) -> dict[str, Any]:
