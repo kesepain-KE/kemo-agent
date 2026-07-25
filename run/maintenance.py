@@ -14,15 +14,14 @@ from zoneinfo import ZoneInfo
 from provider.factory import ProviderCongestionError, create_provider
 from run.agent_runner import AgentRunner
 from run.config import load_config
-from run.engine import (
-    _analyze_memory_batch_resilient,
-    _analyze_round_memory,
-    _memory_batch_operation_id,
-    _memory_round_data,
-    _persist_round_memory_analysis,
-    _session_lock,
-    compress_context,
-    context_status,
+from run.context_service import context_status
+from run.engine import compress_context
+from run.memory_analysis import (
+    analyze_memory_batch_resilient,
+    analyze_round_memory,
+    memory_batch_operation_id,
+    memory_round_data,
+    persist_round_memory_analysis,
 )
 from run.history import commit_window, load_window
 from run.history_index import (
@@ -42,6 +41,7 @@ from run.memory import (
     memory_extraction_mode,
 )
 from run.memory_pipeline import memory_round_payload
+from run.session_runtime import session_lock
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
 
@@ -328,7 +328,7 @@ class MaintenanceScheduler:
             ):
                 raise MaintenanceError("历史摘要领取记录缺少有效会话身份")
             archive_path = history_directory(self.root, user) / archive_name
-            with _session_lock(self.root, user, source, session_id):
+            with session_lock(self.root, user, source, session_id):
                 window = load_window(archive_path)
                 data = window.get("data") or {}
                 if data.get("source") != source or data.get("session_id") != session_id:
@@ -601,7 +601,7 @@ class MaintenanceScheduler:
                     or Path(archive_name).name != archive_name
                 ):
                     raise MaintenanceError("记忆恢复领取记录缺少有效会话身份")
-                with _session_lock(self.root, user, source, session_id):
+                with session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
                     data = window.get("data") or {}
                     if data.get("source") != source or data.get("session_id") != session_id:
@@ -635,7 +635,7 @@ class MaintenanceScheduler:
                                 skipped_rounds.append(round_number)
                                 continue
                             batch_rounds.append(
-                                _memory_round_data(
+                                memory_round_data(
                                     round_number=round_number,
                                     **memory_round_payload(window, round_number),
                                 )
@@ -651,7 +651,7 @@ class MaintenanceScheduler:
                     if len(batch_rounds) == 1:
                         only_round = batch_rounds[0]
                         messages = only_round.get("messages") or []
-                        analysis = _analyze_round_memory(
+                        analysis = analyze_round_memory(
                             round_number=int(only_round["round"]),
                             prompt=str((messages[0] or {}).get("content") or ""),
                             text=str((messages[1] or {}).get("content") or ""),
@@ -663,7 +663,7 @@ class MaintenanceScheduler:
                             cancel_event=self._stop_event,
                         )
                     else:
-                        analysis = _analyze_memory_batch_resilient(
+                        analysis = analyze_memory_batch_resilient(
                             rounds=batch_rounds,
                             agent_runner=runner,
                             cancel_event=self._stop_event,
@@ -699,7 +699,7 @@ class MaintenanceScheduler:
                         "skipped_rounds": skipped_rounds,
                     }
 
-                with _session_lock(self.root, user, source, session_id):
+                with session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
                     data = window.setdefault("data", {})
                     archive_cursor = max(
@@ -741,12 +741,12 @@ class MaintenanceScheduler:
                             f"记忆提取游标已变化：{archive_cursor} != {round_start - 1}"
                         )
                     elif analysis is not None:
-                        extraction = _persist_round_memory_analysis(
+                        extraction = persist_round_memory_analysis(
                             root=self.root,
                             user=user,
                             config=config,
                             analysis=analysis,
-                            operation_id=_memory_batch_operation_id(
+                            operation_id=memory_batch_operation_id(
                                 user,
                                 source,
                                 session_id,
@@ -840,7 +840,7 @@ class MaintenanceScheduler:
                     }
                     finished = None
                 try:
-                    with _session_lock(self.root, user, source, session_id):
+                    with session_lock(self.root, user, source, session_id):
                         window = load_window(archive_path)
                         data = window.setdefault("data", {})
                         diagnostic = (

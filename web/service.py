@@ -62,15 +62,9 @@ from run.cron_store import (
     CronStore,
     normalize_task,
 )
-from run.engine import (
-    _extract_memory_backlog,
-    _session_lock,
-    compress_context,
-    iter_request_events,
-)
+from run.engine import compress_context, iter_request_events
 from run.history import (
     HistoryError,
-    commit_window,
     delete_all_sessions as delete_all_history_sessions,
     delete_session as delete_history_session,
     empty_window,
@@ -114,6 +108,8 @@ from run.task_plan_store import (
     PlanStore,
     normalize_plan,
 )
+from run.memory_analysis import extract_memory_backlog
+from run.session_runtime import session_lock
 from run.guidance import GuidanceMailbox
 from run.process_utils import hidden_subprocess_kwargs
 from run.task_plan_executor import cancel_plan, pause_plan
@@ -2920,10 +2916,10 @@ class WebRunService:
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再提取记忆")
 
-        with _session_lock(self.root, name, normalized_source, normalized_session):
+        with session_lock(self.root, name, normalized_source, normalized_session):
             window = load_window(directory)
             if max(0, int((window.get("data") or {}).get("rounds") or 0)) < 1:
-                return _extract_memory_backlog(
+                return extract_memory_backlog(
                     root=self.root,
                     user=name,
                     source=normalized_source,
@@ -2936,7 +2932,7 @@ class WebRunService:
                 )
             config = load_config(name, self.root)
             runner = AgentRunner(self.root, name, config=config)
-            return _extract_memory_backlog(
+            return extract_memory_backlog(
                 root=self.root,
                 user=name,
                 source=normalized_source,
