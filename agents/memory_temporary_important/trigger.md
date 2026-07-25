@@ -1,93 +1,49 @@
 # 注册信息
 
 - **名称**: memory_temporary_important
-- **触发**: 三路 — ① cron 模块 `recurring` 每隔 `agents.important_memory_review_hours`（默认 3h）定时巡检 ② cron 模块 `daily` 每天 `agents.daily_memory_review_time`（默认 02:00 北京时间）每日整理 ③ 主智能体通过 `subagent_dispatch` 主动唤起（用户要求手动触发临时重要记忆巡检时）
-- **职责**: 操作 A（periodic_scan）：通过 memory_manage 插件自行读取三层全量临时记忆 → 筛选重要碎片 → 去重永久 → 写入热画像 → 删除已提取源碎片；操作 B（daily_consolidate）：读取热画像 → 整合优化 → 超限压缩
+- **触发**: 三路 — ① cron 每隔 `agents.important_memory_review_hours` 定时巡检 ② cron 每天 `agents.daily_memory_review_time` 整理 ③ 主智能体通过 `subagent_dispatch` 手动唤起
+- **职责**: 维护可重建的临时重要记忆热画像；临时碎片继续正常生命周期，只在完全被永久记忆覆盖或受控融合后清理副本
 - **模型**: cheap
-- **工具**: memory_manage（用于自行读取全量记忆、删除碎片、更新 data.json）
+- **工具**: memory_manage（只读 `list/get`；所有持久化由运行时原子完成）
 
 # 操作信息
 
 ## 调用方式
 
-三路均可调用：
+| trigger | 调用方 | 说明 |
+|---------|--------|------|
+| `periodic_scan` | cron / 主智能体 | 全量重建热画像、永久语义去重与受控协调 |
+| `daily_consolidate` | cron / 主智能体 | 精简热画像并同步保留的来源引用，不修改永久记忆 |
 
-| 调用方 | 路径 | 说明 |
-|--------|------|------|
-| cron `CronScheduler` | `AgentRunner.run()` 直调，`exec_mode: "subagent"` | 按 schedule 自动触发 periodic_scan / daily_consolidate |
-| 主智能体 | `subagent_dispatch` 工具（`allowed_callers: ["main_agent"]`） | 用户手动要求触发巡检或每日整理时主动调用 |
+同时到期时，`periodic_scan` 优先。
 
-两个 cron 任务通过 `trigger` 字段区分：
+## periodic_scan
 
-| trigger | 任务 | 调度方式 |
-|---------|------|----------|
-| `periodic_scan` | 定时巡检 | recurring，间隔 N 小时 |
-| `daily_consolidate` | 每日整理 | daily，固定时间 |
+1. 读取当前 `important` 正文及 `featured_sources`。
+2. `list/get` 三层临时碎片和永久记忆全文；禁止用空查询代替全量列出。
+3. 只有同时具备长期价值、用户证据、不可从系统重读且近期高频有用的内容才进入热画像。
+4. 永久层完全覆盖时返回 `drop_duplicate`；部分覆盖时返回带完整融合正文的 `merge_permanent`；未覆盖的高价值碎片进入 `featured`。
+5. `featured` 必须是新热画像的完整来源快照。进入热画像不会删除临时源碎片，也不会阻断正常晋升。
+6. 任一列表截断时保持旧正文和旧来源，不返回永久协调项。
 
-如果两个任务同时到期，cron 模块显式将 `periodic_scan` 排在 `daily_consolidate` 前执行。
+## daily_consolidate
 
-## 操作 A：定时巡检（trigger = `"periodic_scan"`）
+读取当前热画像及来源，精简和合并表述。正文中被移除的条目必须从 `featured` 同步移除；`permanent_reconciliations` 必须为空。
 
-### 输入
+## 输出
 
-子代理自行通过 `memory_manage` 插件读取数据，不依赖外部传入：
-
-1. 对 `seven_days`、`one_month`、`half_year` 分别调 `memory_manage(action="list", tier=..., limit=500)`，读取包含 `filename`、`weight`、`expires_at` 的条目摘要
-2. 对摘要中的每个条目调 `memory_manage(action="get", tier=..., filename=...)` 读取完整 Markdown 正文，再按重要特征筛选
-3. 调 `memory_manage(action="list", tier="permanent", limit=500)` 读取永久记忆摘要；对每个永久条目逐条调 `memory_manage(action="get", tier="permanent", filename=...)` 获取全文做语义去重
-4. 任一次 `list` 返回 `truncated=true` 时停止删除操作，保持当前热画像并报告该层超过单次列出上限
-
-### 流程
-
-1. 用 `list` 读取三层临时记忆摘要
-2. 用 `get` 逐条读取全文，再按重要记忆特征筛选
-3. 用永久记忆的 `list` 摘要和逐条 `get` 全文做语义去重
-4. 生成热画像 Markdown
-5. 对每个已提取碎片调 `memory_manage(action="delete", tier=..., filename=...)`
-6. 检测无更多符合特征的碎片 → 结束
-
-### 优先级
-
-高于操作 B。同时到期时优先执行。
-
-## 操作 B：每日整理（trigger = `"daily_consolidate"`）
-
-### 输入
-
-调用 `memory_manage(action="get", tier="important", filename="memory_temporary_important.md")` 读取现有热画像全文。
-
-### 流程
-
-1. 检查记忆条目是否可整合优化
-2. 可整合 → 先整合
-3. 检查是否超过 `memory.important_memory_max_chars`
-4. 超限 → 压缩；仍超限 → 删最不重要条目
-5. 运行完毕
-
-字符限制以配置文件为准，硬编码 2000 仅作兜底。
-
-## 重要记忆特征
-
-满足以下任一条件的微记忆碎片视为重要。此清单应与 self_improve 的「该记」清单保持同步：
-
-| # | 条件 | 示例 |
-|---|------|------|
-| 1 | explicit=true | 用户明确要求记住 |
-| 2 | 用户身份与偏好 | 姓名、年级、习惯 |
-| 3 | 项目与资产 | votx-agent、树莓派、J1900-ITX |
-| 4 | 架构与设计决策 | "芦荟大卸八块"拆分哲学，设计决策归此类 |
-| 5 | 纠正与规则 | 用户纠正的行为规则 |
-| 6 | 配置值与配置偏好 | 端口策略、超时默认值等 |
-| 7 | 拓展模块（expand） | 全局拓展、共享拓展、用户拓展的用途与配置 |
-| 8 | 活跃碎片（权重 ≥ 晋升阈值 50%） | seven_days≥1、one_month≥5、half_year≥30 |
-| 9 | 涉及关联项目 | llm-adapter-kemo、kemo-graph、new-api |
+```json
+{
+  "content": "完整热画像 Markdown",
+  "featured": [{"tier": "seven_days", "filename": "example.md"}],
+  "permanent_reconciliations": []
+}
+```
 
 ## 注意事项
 
-- 子代理通过 memory_manage 插件自行读写，不依赖外部数据
-- 列出整层必须调用 `memory_manage(action="list", ...)`；需要正文时调用 `memory_manage(action="get", ...)`，禁止空查询搜索
-- 与永久记忆语义重复的不进入热画像
-- 提取后必须调用 `memory_manage(action="delete", tier=..., filename=...)` 删除源碎片
-- **防丢失**：操作 A 提取时若热画像已接近字符上限且新碎片无法完整保留，则不删除该源碎片；操作 B 压缩时优先精简表述而非删除条目，删除作为最后手段
-- 不得记录密码、API Key、Token 等敏感凭据
-- 字符限制以 `memory.important_memory_max_chars` 配置为准
+- `memory_manage` 只允许 `list/get`，不得直接增删改。
+- 热画像是派生视图，临时碎片才是权威来源。
+- 普通临时 Prompt 会跳过已进入热画像的来源，避免重复注入；来源仍会继续加权、到期和晋升。
+- 完全覆盖副本的清理、部分覆盖的永久融合、热画像与来源索引写入由 executor 在同一事务中执行。
+- 不得记录敏感凭据。

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from plugins.memory_manage.memory_ops import write_important_memory
+from plugins.memory_manage.memory_ops import apply_important_memory_view
 from run.agent_runner import AgentOutputError, AgentRunResult
 from run.memory import contains_sensitive_credential
 
@@ -38,16 +38,33 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
     if contains_sensitive_credential(body):
         raise AgentOutputError("临时重要记忆包含疑似敏感凭据，已拒绝持久化")
 
-    if trigger == "daily_consolidate":
-        limit = _important_memory_limit(context.runner.config)
-        if len(body) > limit:
-            raise AgentOutputError(
-                f"每日整理后的临时重要记忆超过字符上限：{len(body)} > {limit}"
-            )
+    featured = result.data.get("featured")
+    reconciliations = result.data.get("permanent_reconciliations")
+    if not isinstance(featured, list):
+        raise AgentOutputError("memory_temporary_important 输出缺少 featured 数组")
+    if not isinstance(reconciliations, list):
+        raise AgentOutputError(
+            "memory_temporary_important 输出缺少 permanent_reconciliations 数组"
+        )
+    if trigger == "daily_consolidate" and reconciliations:
+        raise AgentOutputError("每日整理不得执行永久记忆协调")
 
-    write_important_memory(
-        context.runner.root,
-        context.runner.user,
-        body,
-    )
+    limit = _important_memory_limit(context.runner.config)
+    if len(body) > limit:
+        raise AgentOutputError(
+            f"临时重要记忆超过字符上限：{len(body)} > {limit}"
+        )
+
+    try:
+        update = apply_important_memory_view(
+            context.runner.root,
+            context.runner.user,
+            context.runner.config,
+            body,
+            featured,
+            reconciliations,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise AgentOutputError(f"临时重要记忆更新失败：{exc}") from exc
+    result.metadata["important_memory_update"] = update
     return result

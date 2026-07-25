@@ -14,7 +14,16 @@ def _clean(value: Any, *, field: str, minimum: int, maximum: int) -> str:
     if not isinstance(value, str):
         raise AgentOutputError(f"history_summary 输出 {field} 必须是字符串")
     text = " ".join(value.split()).strip()
-    if _CONTROL_RE.search(text) or not minimum <= len(text) <= maximum:
+    if _CONTROL_RE.search(text):
+        raise AgentOutputError(f"history_summary 输出 {field} 包含不可见控制字符")
+    overflow_tolerance = max(12, maximum // 3)
+    if len(text) > maximum:
+        if len(text) > maximum + overflow_tolerance:
+            raise AgentOutputError(
+                f"history_summary 输出 {field} 长度必须为 {minimum}–{maximum} 个可见字符"
+            )
+        text = text[:maximum].rstrip(" ，。；：、,.!！?？;:")
+    if len(text) < minimum:
         raise AgentOutputError(
             f"history_summary 输出 {field} 长度必须为 {minimum}–{maximum} 个可见字符"
         )

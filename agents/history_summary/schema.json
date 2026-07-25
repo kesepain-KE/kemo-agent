@@ -52,12 +52,12 @@
       "title": {
         "type": "string",
         "minLength": 8,
-        "maxLength": 24
+        "maxLength": 36
       },
       "summary": {
         "type": "string",
         "minLength": 30,
-        "maxLength": 120
+        "maxLength": 160
       }
     },
     "additionalProperties": false

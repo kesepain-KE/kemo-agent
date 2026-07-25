@@ -107,9 +107,9 @@
 | seven_days | 检查 `last_weight_date` 是否不等于今天 → 是则 weight+1，更新日期 |
 | one_month | 同上 |
 | half_year | 同上 |
-| permanent | **不修改**（永久记忆靠自己生长，除非用户明确要求） |
+| permanent | **不返回候选、不修改**；只有用户本轮明确要求记住（`explicit=true`）时才允许更新永久正文 |
 
-4. 返回候选数组，由调用方统一写入 MemoryStore：未命中时在 seven_days 创建；命中临时层时按每日锁加权；命中永久层时不修改
+4. 返回候选数组，由调用方统一写入 MemoryStore：未命中时在 seven_days 创建；命中临时层时按每日锁加权；命中永久层且不是本轮显式记忆请求时，必须省略该候选。运行时也会拒绝普通候选覆盖永久正文
 
 提取模式下 `memory_manage` 仅用于搜索，禁止直接 add/edit/delete；避免与调用方持久化重复执行。
 同一批次中指向同一文件的候选必须先融合为一条，再返回最终 `candidates`。

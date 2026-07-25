@@ -46,7 +46,7 @@
   6. 没有合格信息时返回空 candidates[]
 
 权重规则: 每天最多+1，通过 last_weight_date（日期字符串）比较
-永久记忆: 不自动修改，除非用户 explicit=true
+永久记忆: 普通命中时不返回候选且运行时拒绝覆盖；只有用户本轮明确要求记住、`explicit=true` 时才允许更新
 ```
 
 ### 模式二：记忆晋升（trigger = `"memory_promotion"`）

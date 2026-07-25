@@ -1,6 +1,6 @@
 # memory_temporary_important
 
-临时重要记忆子代理。负责两种触发模式：定时巡检（提取重要碎片到热画像）和每日整理（整合优化/压缩超限记忆）。
+临时重要记忆子代理。它维护的是可重建的「热画像视图」，不是临时记忆到永久记忆之间的独立存储层。临时微记忆仍是权威来源并继续正常加权、到期和晋升；热画像只负责把近期高价值内容提前注入 Prompt。
 
 所有阈值均从 `config/global_config.json` 读取，不做硬编码。
 
@@ -10,55 +10,37 @@
 
 ### 触发条件
 
-每隔 `global_config.json → agents.important_memory_review_hours`（默认 3）小时触发一次。
-主智能体也可以在用户明确要求手动巡检时，通过 `subagent_dispatch` 传入
-`{"trigger": "periodic_scan"}` 主动触发。
+每隔 `global_config.json → agents.important_memory_review_hours`（默认 3）小时触发一次。主智能体也可以在用户明确要求手动巡检时，通过 `subagent_dispatch` 传入 `{"trigger": "periodic_scan"}` 主动触发。
 
-### 输入
+### 热画像准入条件
 
-| 字段 | 来源 | 说明 |
-|------|------|------|
-| 临时记忆摘要与全文 | `seven_days` / `one_month` / `half_year` 三层的微记忆碎片 | 先用 `list` 读取摘要，再逐条用 `get` 读取全文后筛选 |
-| 永久记忆摘要与全文 | `permanent` 层碎片 | 先用 `list` 读取摘要，再逐条用 `get` 读取全文做语义去重 |
+候选必须同时满足以下硬门槛：
 
-### 重要记忆特征定义
+1. 是有用户证据的稳定事实、偏好、长期目标、设计决策或行为规则，不是助手猜测；
+2. 预计跨会话仍有价值，且不能直接从当前代码、配置、工具注册表或任务状态重新读取；
+3. 近期需要频繁进入主 Prompt，遗漏后会明显影响连续协作。
 
-微记忆碎片符合以下**任一条件**即视为「重要」，应被提取到热画像。
+优先收录用户身份与交流偏好、当前长期项目的关键约束、反复强调的禁止事项、架构/工作方式决策和高活跃碎片。权重达到晋升阈值一半只是活跃信号，不能单独绕过三个硬门槛。一次性测试、运行进度、报错猜测、未确认状态和敏感凭据不得进入热画像。
 
-重要记忆特征应与 self_improve 的「该记」清单保持同步，不得出现一个子代理认为重要而另一个不认为重要的情况。
+该标准必须与 self_improve 的记忆价值硬门槛保持一致。
 
-1. **显式记忆** — 用户明确要求长期记住的内容（`explicit=true` 的候选）
-2. **用户身份与偏好** — 姓名、年级、身份（学生干部）、习惯、工作方式、交流偏好
-3. **项目与资产** — 项目名称/路径（votx-agent、kemo-agent、kemo-graph 等）、硬件资产（树莓派、J1900-ITX、玩客云、E5-2690v3 等）、部署环境信息
-4. **架构与设计决策** — 用户明确表达的技术偏好（如"芦荟大卸八块"的拆分哲学）、组件关系、禁止事项。设计决策归此类
-5. **纠正与规则** — 用户纠正助手行为的规则、改进指令
-6. **配置值与配置偏好** — 用户设定的配置项及其值、配置风格偏好（如端口策略、超时默认值等）
-7. **拓展模块（expand）** — 用户添加的全局拓展、共享拓展、用户拓展的用途、接入方式和配置信息
-8. **活跃碎片** — 权重 ≥ 各层级晋升阈值一半的碎片（seven_days ≥ 1、one_month ≥ 5、half_year ≥ 30）
-9. **涉及其他项目** — llm-adapter-kemo、kemo-graph、new-api 中转站等关联项目的信息
+### 读取与分类
 
-### 流程
+1. 先读取 `important/memory_temporary_important.md`，同时取得 `featured_sources`，作为失败时保持旧视图的依据。
+2. 对 `seven_days`、`one_month`、`half_year` 分别调用 `list(limit=500)`，再逐条调用 `get` 读取完整正文。
+3. 对 `permanent` 调用 `list(limit=500)` 并逐条 `get`，对每个临时候选做语义覆盖判断。
+4. 永久记忆完全覆盖临时碎片：不进入热画像，输出 `drop_duplicate` 协调项。
+5. 永久记忆只覆盖一部分：输出 `merge_permanent` 协调项，并提供包含旧永久事实与新增稳定事实的完整融合正文；不进入热画像。
+6. 永久记忆未覆盖且满足热画像门槛：写入完整新热画像，并在 `featured` 中登记其 `tier` 与 `filename`。
+7. 不满足热画像门槛：不进入 `featured`，保持原临时碎片不变。
 
-1. 对 `seven_days`、`one_month`、`half_year` 三层分别调用 `memory_manage(action="list", tier=..., limit=500)`，读取条目摘要；不得使用空查询搜索代替列出
-2. 对摘要中的每个条目调用 `memory_manage(action="get", tier=..., filename=...)`，读取完整 Markdown 正文
-3. 结合完整正文以及摘要中的 `filename`、`weight`、`expires_at`，按上述重要记忆特征筛选碎片
-4. 调用 `memory_manage(action="list", tier="permanent", limit=500)` 读取永久记忆摘要
-5. 对永久记忆摘要中的每个条目调用 `memory_manage(action="get", tier="permanent", filename=...)` 获取正文，完成语义去重；与永久记忆**语义重复**的内容不进入热画像
-6. 如果任一次 `list` 返回 `truncated=true`，不得基于不完整数据删除源碎片；保持当前热画像并明确报告该层条目超过单次列出上限
-7. 将筛选并去重后的碎片合并，生成/更新热画像 Markdown
-8. **删除已被提取的源碎片**：对每个被提取的微记忆碎片，调用 `memory_manage(action="delete", tier=..., filename=...)` 删除其 Markdown 文件，并更新对应层级的 `data.json`（移除该条目的权重和到期时间记录）
-9. 当检测到没有符合重要记忆特征的微记忆碎片后，流程结束
+### 强制约束
 
-### 防丢失规则
-
-提取即删除意味着被提取的碎片不再走正常权重晋升流程（7d→30d→180d→permanent），而是进入热画像。为防止记忆在热画像中被压缩裁剪后彻底丢失：
-
-- **操作 A 提取时**：如果热画像当前字符数已接近 `memory.important_memory_max_chars` 上限，且新碎片无法被完整保留，则**不删除该源碎片**，让它继续留在临时层走正常晋升流程。只删除确认已完整进入热画像的源碎片。
-- **操作 B 压缩时**：优先通过精简表述和合并同主题来控制字符数，尽可能保留所有条目的核心信息。只有当精简后仍超限时，才从热画像中移除最不重要的条目。被移除的条目信息丢失是不可逆的，应作为最后手段。
-
-### 与操作 B 的优先级
-
-如果操作 A 和操作 B 同时触发（在运行队列中相遇），**优先执行操作 A**，操作 B 排队在后。
+- 禁止调用 `memory_manage add/edit/delete`。子代理只负责读取和返回决策，热画像、来源索引、永久融合及临时副本清理由运行时统一原子持久化。
+- `featured` 是当前热画像的完整来源快照，不是本轮增量；从热画像移除的条目必须同时从 `featured` 移除，使其恢复普通临时 Prompt 注入。
+- 热画像中的内容不得超过 `memory.important_memory_max_chars`，不得收录没有对应临时源碎片的事实。
+- 任一次 `list` 返回 `truncated=true` 时，不得输出任何永久协调项；返回原热画像和原 `featured_sources`，避免基于不完整数据清理记忆。
+- 临时源碎片进入热画像后不得删除，仍继续走 `7d→30d→180d→permanent` 生命周期。
 
 ---
 
@@ -66,23 +48,15 @@
 
 ### 触发条件
 
-每天到达 `global_config.json → agents.daily_memory_review_time`（默认 `"02:00"`，北京时间）时触发。
-主智能体也可以在用户明确要求立即整理临时重要记忆时，通过 `subagent_dispatch`
-传入 `{"trigger": "daily_consolidate"}` 主动触发。
+每天到达 `global_config.json → agents.daily_memory_review_time`（默认 `02:00`，北京时间）时触发。主智能体也可以传入 `{"trigger": "daily_consolidate"}` 主动触发。
 
 ### 流程
 
-1. 调用 `memory_manage(action="get", tier="important", filename="memory_temporary_important.md")` 读取当前热画像全文；不得使用空查询搜索
-2. 检查记忆条目是否可以整合优化（合并同主题、精简冗余表述、统一格式）
-3. 如果可以整合，先执行一次整合优化
-4. 检查总字符数是否超过 `global_config.json → memory.important_memory_max_chars`（默认 2000）
-5. 如果超限：压缩记忆（合并同类项、精简次要细节）
-6. 如果压缩后仍超限：删除最不重要的记忆条目，直到 ≤ 限制值
-7. 运行完毕
-
-### 兜底机制
-
-字符限制以 `global_config.json → memory.important_memory_max_chars` 的实际配置值为准。仅当配置文件读取失败或值为 0 时，使用硬编码兜底值 2000。
+1. 调用 `get` 读取当前热画像及 `featured_sources`。
+2. 合并同主题、精简冗余并统一格式，但不得引入源碎片中不存在的新事实。
+3. 优先精简表述；仍超限时移除最低价值条目。
+4. 输出正文仍保留的完整 `featured` 来源；被移除条目的来源也必须移除。
+5. 每日整理的 `permanent_reconciliations` 必须为空数组。
 
 ---
 
@@ -90,17 +64,37 @@
 
 ```json
 {
-  "content": "完整的新热画像 Markdown 正文。无保留内容时为空字符串。"
+  "content": "完整的新热画像 Markdown 正文",
+  "featured": [
+    {"tier": "seven_days", "filename": "用户沟通偏好.md"}
+  ],
+  "permanent_reconciliations": [
+    {
+      "action": "drop_duplicate",
+      "tier": "one_month",
+      "filename": "重复偏好.md",
+      "permanent_filename": "用户偏好.md"
+    },
+    {
+      "action": "merge_permanent",
+      "tier": "half_year",
+      "filename": "偏好新增细节.md",
+      "permanent_filename": "用户偏好.md",
+      "content": "融合后的完整永久记忆正文"
+    }
+  ]
 }
 ```
 
-- **文件不可删除**：即使当前没有符合重要特征的碎片，也必须保留占位文本（如"暂无可提取的重要记忆"），不得返回空字符串导致文件被删除。
-- 非空 → 原子写入 `memory_temporary_important.md`
+- 三个字段始终必填；无内容时分别返回占位正文和空数组。
+- `featured` 只能引用当前三层临时记忆中真实存在的文件。
+- 永久协调只能由 `periodic_scan` 输出；每日整理必须返回空数组。
+- 即使无内容也不得删除或清空 `memory_temporary_important.md`。
 
 ---
 
 ## 四、安全规则
 
-- 不得记录密码、API Key、Token、Cookie、私钥或验证码
-- 不得记录密钥文件的路径或内容片段
-- 涉及私密信息但不确定时，不入热画像
+- 不得记录密码、API Key、Token、Cookie、私钥或验证码。
+- 不得记录密钥文件的路径或内容片段。
+- 涉及私密信息但不确定时，不入热画像。
