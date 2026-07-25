@@ -51,11 +51,28 @@ def _atomic_text(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _important_path(root: Path, user: str) -> Path:
     return root / "users" / user / IMPORTANT_FILENAME
 
 
-def _important_entry(root: Path, user: str) -> list[dict[str, Any]]:
+def _important_entry(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
     path = _important_path(root, user)
     if path.is_symlink():
         raise MemoryError("临时重要记忆文件不能是符号链接")
@@ -65,6 +82,14 @@ def _important_entry(root: Path, user: str) -> list[dict[str, Any]]:
         return []
     if not content:
         return []
+    store = MemoryStore(root, user, config)
+    featured_sources = []
+    for filename in sorted(store.load_important_view_sources(), key=str.casefold):
+        location = store.locate(filename)
+        if location is not None and location.tier in TEMPORARY_TIERS:
+            featured_sources.append(
+                {"tier": location.tier, "filename": location.filename}
+            )
     return [
         {
             "filename": IMPORTANT_FILENAME,
@@ -73,6 +98,7 @@ def _important_entry(root: Path, user: str) -> list[dict[str, Any]]:
             "weight": 0,
             "updated_at": path.stat().st_mtime,
             "expires_at": None,
+            "featured_sources": featured_sources,
         }
     ]
 
@@ -80,7 +106,7 @@ def _important_entry(root: Path, user: str) -> list[dict[str, Any]]:
 def _tier_entries(root: Path, user: str, config: dict[str, Any], tier: str) -> list[dict[str, Any]]:
     _validate_tier(tier)
     if tier == "important":
-        return _important_entry(root, user)
+        return _important_entry(root, user, config)
     return MemoryStore(root, user, config).load_tier(tier)
 
 
@@ -114,7 +140,7 @@ def list_entries(
     _validate_tier(tier)
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
     if tier == "important":
-        names = [IMPORTANT_FILENAME] if _important_entry(root, user) else []
+        names = [IMPORTANT_FILENAME] if _important_entry(root, user, config) else []
         entries = [
             {
                 "memory_ref": _memory_ref(tier, filename),
@@ -180,7 +206,7 @@ def get_fragment(
         if not isinstance(filename, str) or filename.strip().casefold() != IMPORTANT_FILENAME.casefold():
             raise FileNotFoundError(f"记忆不存在：{tier}/{filename}")
         normalized = IMPORTANT_FILENAME
-        entries = _important_entry(root, user)
+        entries = _important_entry(root, user, config)
         if not entries:
             raise FileNotFoundError(f"记忆不存在：{tier}/{IMPORTANT_FILENAME}")
         item = entries[0]
@@ -212,6 +238,9 @@ def get_fragment(
         "content_updated_at": item.get("content_updated_at"),
         "last_used_at": item.get("last_used_at"),
         "expires_at": item.get("expires_at") if tier in TEMPORARY_TIERS else None,
+        "featured_sources": item.get("featured_sources", [])
+        if tier == "important"
+        else None,
         "timezone": "UTC",
     }
 
@@ -568,3 +597,140 @@ def write_important_memory(root: Path, user: str, content: str) -> None:
     if contains_sensitive_credential(body):
         raise MemoryError("临时重要记忆包含疑似敏感凭据")
     _atomic_text(path, body)
+
+
+def apply_important_memory_view(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    content: str,
+    featured: list[dict[str, Any]],
+    reconciliations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Atomically publish the hot view and reconcile permanent duplicates.
+
+    Temporary fragments mirrored by the view remain authoritative and continue
+    their normal lifecycle.  Only a separately declared permanent reconciliation
+    may remove a temporary source.
+    """
+
+    body = content.strip() or IMPORTANT_MEMORY_PLACEHOLDER
+    if contains_sensitive_credential(body):
+        raise MemoryError("临时重要记忆包含疑似敏感凭据")
+    if not isinstance(featured, list) or not isinstance(reconciliations, list):
+        raise MemoryError("临时重要记忆来源和永久协调结果必须是数组")
+
+    store = MemoryStore(root, user, config)
+    important_path = _important_path(root, user)
+    featured_names: list[str] = []
+    actions: list[dict[str, Any]] = []
+    source_keys: set[tuple[str, str]] = set()
+    target_names: set[str] = set()
+
+    with store._lock:
+        for index, raw in enumerate(featured):
+            if not isinstance(raw, dict):
+                raise MemoryError(f"featured[{index}] 必须是对象")
+            tier = str(raw.get("tier") or "").strip()
+            if tier not in TEMPORARY_TIERS:
+                raise MemoryError(f"featured[{index}].tier 不是临时层")
+            filename = normalize_memory_filename(raw.get("filename"))
+            location = store.locate_in_tier(tier, filename)
+            if location is None:
+                raise MemoryError(f"临时重要记忆来源不存在：{tier}/{filename}")
+            featured_names.append(location.filename)
+
+        for index, raw in enumerate(reconciliations):
+            if not isinstance(raw, dict):
+                raise MemoryError(f"permanent_reconciliations[{index}] 必须是对象")
+            action = str(raw.get("action") or "").strip().casefold()
+            if action not in {"drop_duplicate", "merge_permanent"}:
+                raise MemoryError(
+                    f"permanent_reconciliations[{index}].action 无效"
+                )
+            tier = str(raw.get("tier") or "").strip()
+            if tier not in TEMPORARY_TIERS:
+                raise MemoryError(
+                    f"permanent_reconciliations[{index}].tier 不是临时层"
+                )
+            filename = normalize_memory_filename(raw.get("filename"))
+            source = store.locate_in_tier(tier, filename)
+            if source is None:
+                raise MemoryError(f"永久协调来源不存在：{tier}/{filename}")
+            source_key = (tier, source.filename)
+            if source_key in source_keys:
+                raise MemoryError(f"永久协调来源重复：{tier}/{source.filename}")
+            source_keys.add(source_key)
+
+            permanent_filename = normalize_memory_filename(
+                raw.get("permanent_filename")
+            )
+            target = store.locate_in_tier("permanent", permanent_filename)
+            if target is None:
+                raise MemoryError(f"永久协调目标不存在：{permanent_filename}")
+            if action == "merge_permanent":
+                merged_content = str(raw.get("content") or "").strip()
+                if not merged_content:
+                    raise MemoryError("永久记忆融合内容不能为空")
+                if contains_sensitive_credential(merged_content):
+                    raise MemoryError("永久记忆融合内容包含疑似敏感凭据")
+                if target.filename in target_names:
+                    raise MemoryError(f"同一永久记忆不能在单次巡检中重复融合：{target.filename}")
+                target_names.add(target.filename)
+            else:
+                merged_content = None
+            actions.append(
+                {
+                    "action": action,
+                    "source": source,
+                    "target": target,
+                    "content": merged_content,
+                }
+            )
+
+        reconciled_names = {item["source"].filename for item in actions}
+        featured_names = list(
+            dict.fromkeys(
+                filename
+                for filename in featured_names
+                if filename not in reconciled_names
+            )
+        )
+
+        paths = {important_path, store.important_view_path()}
+        for item in actions:
+            source = item["source"]
+            paths.add(source.path)
+            paths.add(store.path(source.tier))
+            paths.add(item["target"].path)
+        snapshots = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in paths
+        }
+
+        try:
+            _atomic_text(important_path, body)
+            store.set_important_view_sources(featured_names)
+            for item in actions:
+                if item["action"] == "merge_permanent":
+                    _atomic_text(item["target"].path, item["content"])
+                store._delete_location(item["source"])
+        except Exception:
+            for path, previous in snapshots.items():
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic_bytes(path, previous)
+            raise
+
+    return {
+        "featured": featured_names,
+        "reconciled": [
+            {
+                "action": item["action"],
+                "filename": item["source"].filename,
+                "permanent_filename": item["target"].filename,
+            }
+            for item in actions
+        ],
+    }

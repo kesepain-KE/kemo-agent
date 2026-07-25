@@ -17,7 +17,7 @@ from provider.protocol.models import (
     TextContent,
     VideoOutputConfig,
 )
-from run.attachments import UploadedAssetResolver
+from run.attachments import RunAssetResolver, describe_local_asset
 from run.config import load_config, provider_runtime_config
 from run.media_outputs import persist_response_media
 
@@ -117,22 +117,29 @@ def run(
     size: str = "",
     duration_seconds: float | None = None,
     asset_roles: list[str] | None = None,
+    paths: list[str] | None = None,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     if action not in _ACTION_CAPABILITY:
         raise ValueError(f"不支持的 action：{action}")
     ids = [str(value) for value in (asset_ids or []) if str(value)]
+    local_paths = [str(value).strip() for value in (paths or []) if str(value).strip()]
     normalized_instruction = str(instruction or "").strip()
     if not normalized_instruction:
         raise ValueError("instruction 不能为空")
     expected_kind = _INPUT_KIND.get(action)
-    if expected_kind and (not ids or len(ids) > 8):
-        raise ValueError(f"{action} 的 asset_ids 必须包含 1 至 8 个 {expected_kind} 资产")
-    if action in {"generate_image", "generate_speech"} and ids:
+    input_count = len(ids) + len(local_paths)
+    if input_count > 8:
+        raise ValueError("asset_ids 与 paths 合计最多 8 项")
+    if expected_kind and (input_count < 1 or input_count > 8):
+        raise ValueError(
+            f"{action} 的 asset_ids 与 paths 合计必须包含 1 至 8 个 {expected_kind} 资产"
+        )
+    if action in {"generate_image", "generate_speech"} and input_count:
         raise ValueError(f"{action} 不接受输入资产")
-    if asset_roles is not None and len(asset_roles) != len(ids):
-        raise ValueError("asset_roles 数量必须与 asset_ids 一致")
+    if asset_roles is not None and len(asset_roles) != input_count:
+        raise ValueError("asset_roles 数量必须与 asset_ids 和 paths 的总数一致")
 
     root = Path(str(context["root"])).resolve()
     user = str(context["user"])
@@ -173,7 +180,12 @@ def run(
     descriptors = context.get("uploaded_files") or []
     if not isinstance(descriptors, list):
         raise ValueError("当前 Run 的附件上下文无效")
-    resolver = UploadedAssetResolver(root, user, descriptors)
+    local_descriptors = [
+        describe_local_asset(root, user, {"path": value}) for value in local_paths
+    ]
+    descriptors = [*descriptors, *local_descriptors]
+    ids.extend(str(item["asset_id"]) for item in local_descriptors)
+    resolver = RunAssetResolver(root, user, descriptors)
     media = []
     multimodal_assets: list[dict[str, str]] = []
     if ids:
@@ -279,6 +291,7 @@ def run(
         "text": text,
         "artifacts": artifacts,
         "asset_ids": ids,
+        "paths": local_paths,
         "model": model,
         "usage": response.usage.model_dump(mode="json", exclude_none=True),
     }

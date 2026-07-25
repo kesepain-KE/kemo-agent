@@ -41,6 +41,13 @@ def run(
         raise PermissionError(
             "self_improve 只能用 memory_manage 搜索；候选和晋升由运行时原子持久化"
         )
+    if context.get("agent") == "memory_temporary_important" and action not in {
+        "list",
+        "get",
+    }:
+        raise PermissionError(
+            "memory_temporary_important 只能读取记忆；热视图与永久协调由运行时原子持久化"
+        )
     config = load_config(user, root)
     if action == "list":
         return list_entries(root, user, config, tier, limit=limit)

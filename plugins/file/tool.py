@@ -6,6 +6,7 @@ import locale
 import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,15 @@ def _read_with_encoding(path: Path, encoding: str) -> tuple[str, str]:
     return _normalize_newlines(text), used_encoding
 
 
+def _read_preserving_format(path: Path, encoding: str) -> tuple[str, str]:
+    """读取编辑源文本，保留 BOM、换行符和末尾换行。"""
+    try:
+        data = path.read_bytes()
+    except IsADirectoryError:
+        raise IsADirectoryError(f"目标是目录，不能作为文件读取: {path}") from None
+    return _read_with_encoding_bytes(data, encoding, replace=False)
+
+
 def _read(path: Path, encoding: str) -> str:
     return _read_with_encoding(path, encoding)[0]
 
@@ -135,8 +145,82 @@ def _line_parts(value: str) -> tuple[str, str]:
     return value, ""
 
 
-def _column(value: str, column: int) -> int:
-    return max(1, min(int(column), len(value) + 1)) - 1
+def _column(value: str, column: int, *, label: str = "列号") -> int:
+    requested = int(column)
+    maximum = len(value) + 1
+    if requested < 1 or requested > maximum:
+        raise ValueError(f"{label} {requested} 超出范围 (有效范围 1-{maximum})")
+    return requested - 1
+
+
+def _newline_tokens(text: str) -> list[str]:
+    return re.findall(r"\r\n|\r|\n", text)
+
+
+def _newline_style(text: str) -> str:
+    endings = _newline_tokens(text)
+    if not endings:
+        return "none"
+    unique = set(endings)
+    if len(unique) > 1:
+        return "mixed"
+    return {"\r\n": "CRLF", "\n": "LF", "\r": "CR"}[endings[0]]
+
+
+def _dominant_newline(text: str) -> str:
+    endings = _newline_tokens(text)
+    if not endings:
+        return "\n"
+    counts = {ending: endings.count(ending) for ending in ("\r\n", "\n", "\r")}
+    return max(counts, key=counts.get)
+
+
+def _newline_near(text: str, start: int, end: int, fallback: str) -> str:
+    within = _newline_tokens(text[start:end])
+    if within:
+        return within[0]
+    after = re.search(r"\r\n|\r|\n", text[end:])
+    if after:
+        return after.group(0)
+    before = list(re.finditer(r"\r\n|\r|\n", text[:start]))
+    return before[-1].group(0) if before else fallback
+
+
+def _convert_newlines(text: str, ending: str) -> str:
+    return _normalize_newlines(text).replace("\n", ending)
+
+
+def _strip_trailing_newlines(text: str) -> str:
+    return re.sub(r"(?:\r\n|\r|\n)+\Z", "", text)
+
+
+def _normalized_with_boundaries(text: str) -> tuple[str, list[int]]:
+    """返回 LF 视图及每个视图边界在原文本中的字符偏移。"""
+    normalized: list[str] = []
+    boundaries = [0]
+    index = 0
+    while index < len(text):
+        if text.startswith("\r\n", index):
+            normalized.append("\n")
+            index += 2
+        elif text[index] == "\r":
+            normalized.append("\n")
+            index += 1
+        else:
+            normalized.append(text[index])
+            index += 1
+        boundaries.append(index)
+    return "".join(normalized), boundaries
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_bytes(data)
+        shutil.copymode(path, temp)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 # ── 读取 ──────────────────────────────────────────────────────────
@@ -266,7 +350,8 @@ def _run_append(path: str, content: str = "", encoding: str = "", **_kw: Any) ->
 
 def _run_edit(
     path: str,
-    content: str = "",
+    content: str | None = None,
+    new_text: str | None = None,
     edit_mode: str = "replace_text",
     old_text: str = "",
     expected_count: int = 1,
@@ -281,9 +366,19 @@ def _run_edit(
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"文件不存在: {path}")
-    original, used_encoding = _read_with_encoding(p, encoding or "utf-8")
+    if content is not None and new_text is not None and content != new_text:
+        raise ValueError("content 与 new_text 同时提供时必须完全一致")
+    if content is None and new_text is None:
+        raise ValueError("edit 需要提供 new_text（旧版调用可继续使用 content）")
+    replacement_text = new_text if new_text is not None else content
+    assert replacement_text is not None
+
+    original, used_encoding = _read_preserving_format(p, encoding or "utf-8")
     original_lines = original.splitlines(keepends=True)
     total_lines = len(original_lines)
+    dominant_ending = _dominant_newline(original)
+    replacements = 1
+    changed_lines = 0
 
     if edit_mode == "insert":
         idx = line - 1
@@ -291,15 +386,20 @@ def _run_edit(
             raise ValueError(f"插入行号 {line} 超出范围 (共 {total_lines} 行)")
         body, ending = _line_parts(original_lines[idx])
         col = _column(body, column)
-        original_lines[idx] = body[:col] + content + body[col:] + ending
-        new_text = "".join(original_lines)
+        inserted = _convert_newlines(replacement_text, ending or dominant_ending)
+        original_lines[idx] = body[:col] + inserted + body[col:] + ending
+        updated = "".join(original_lines)
+        changed_lines = 1
     elif edit_mode == "replace_line":
         idx = line - 1
         if idx < 0 or idx >= total_lines:
             raise ValueError(f"行号 {line} 超出范围 (共 {total_lines} 行)")
         _, ending = _line_parts(original_lines[idx])
-        original_lines[idx] = content + ending
-        new_text = "".join(original_lines)
+        body = _strip_trailing_newlines(replacement_text)
+        body = _convert_newlines(body, ending or dominant_ending)
+        original_lines[idx] = body + ending
+        updated = "".join(original_lines)
+        changed_lines = 1
     elif edit_mode == "replace_range":
         start_index = line - 1
         end_index = (end_line or line) - 1
@@ -307,32 +407,73 @@ def _run_edit(
             raise ValueError(f"替换行范围无效: {line}-{end_line or line} (共 {total_lines} 行)")
         first, _ = _line_parts(original_lines[start_index])
         last, last_ending = _line_parts(original_lines[end_index])
-        start_column = _column(first, column)
-        finish_column = _column(last, end_column or (len(last) + 1))
+        start_column = _column(first, column, label="起始列号")
+        finish_column = _column(last, end_column or (len(last) + 1), label="结束列号")
         if start_index == end_index and finish_column < start_column:
             raise ValueError("结束列不能早于起始列")
-        replacement = first[:start_column] + content + last[finish_column:] + last_ending
+        body = _strip_trailing_newlines(replacement_text)
+        body = _convert_newlines(body, last_ending or dominant_ending)
+        replacement = first[:start_column] + body + last[finish_column:] + last_ending
         original_lines[start_index:end_index + 1] = [replacement]
-        new_text = "".join(original_lines)
+        updated = "".join(original_lines)
+        changed_lines = end_index - start_index + 1
     elif edit_mode == "replace_text":
         if not old_text:
             raise ValueError("replace_text 模式需要 old_text")
-        occurrences = original.count(old_text)
+        normalized, boundaries = _normalized_with_boundaries(original)
+        normalized_old = _normalize_newlines(old_text)
+        occurrences = normalized.count(normalized_old)
         if expected_count >= 0 and occurrences != expected_count:
             raise ValueError(f"期望匹配 {expected_count} 次，实际匹配 {occurrences} 次")
-        new_text = original.replace(old_text, content)
+        matches: list[tuple[int, int]] = []
+        cursor = 0
+        while normalized_old and (match := normalized.find(normalized_old, cursor)) >= 0:
+            matches.append((boundaries[match], boundaries[match + len(normalized_old)]))
+            cursor = match + len(normalized_old)
+        pieces: list[str] = []
+        cursor = 0
+        touched_lines: set[int] = set()
+        for start, end in matches:
+            pieces.append(original[cursor:start])
+            ending = _newline_near(original, start, end, dominant_ending)
+            pieces.append(_convert_newlines(replacement_text, ending))
+            touched_lines.add(original.count("\n", 0, start) + original.count("\r", 0, start) - original.count("\r\n", 0, start) + 1)
+            cursor = end
+        pieces.append(original[cursor:])
+        updated = "".join(pieces)
+        replacements = occurrences
+        changed_lines = len(touched_lines)
     else:
         raise ValueError(f"未知编辑模式: {edit_mode}")
 
+    changed = updated != original
+    if not changed:
+        return _result(
+            True,
+            path=path,
+            original_chars=len(original),
+            new_chars=len(updated),
+            mode=edit_mode,
+            changed=False,
+            replacements=0,
+            changed_lines=0,
+            newline_style=_newline_style(original),
+            backup_created=False,
+        )
+
     if create_backup:
         shutil.copy2(p, p.with_suffix(p.suffix + ".bak"))
-    p.write_text(new_text, used_encoding)
+    _atomic_write_bytes(p, updated.encode(used_encoding))
     return _result(
         True,
         path=path,
         original_chars=len(original),
-        new_chars=len(new_text),
+        new_chars=len(updated),
         mode=edit_mode,
+        changed=True,
+        replacements=replacements,
+        changed_lines=changed_lines,
+        newline_style=_newline_style(updated),
         backup_created=create_backup,
     )
 

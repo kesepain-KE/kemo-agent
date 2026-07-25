@@ -6,12 +6,15 @@
 ## 使用原则
 
 1. **未知大文件先检查**：先用 `stat` 查看文件大小。`read` 和 `read_range` 默认最多读取 50 MB，超过限制会返回 `truncated=true`；读取日志尾部优先使用 `read_range` 的 `tail`，它不会全量加载文件。
-2. **编辑前先读取**：用 `edit` 前先确认当前内容。`edit` 默认创建 `.bak` 备份，除非明确不需要，否则保持 `create_backup=true`。
+2. **编辑前后均要读取**：用 `edit` 前先读取并确认当前内容，编辑后重新读取目标范围验证结果。`edit` 默认创建 `.bak` 备份，除非明确不需要，否则保持 `create_backup=true`。
 3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。`delete` 只删除文件，不删除目录。
 4. **搜索与浏览分工**：找文件或搜索代码使用 `search`；查看目录树使用 `tree_dir`；查看单层目录使用 `list_dir`。
 5. **目录复制须显式授权**：复制目录必须设置 `recursive=true`。文件和目录都不能复制或移动到自身子目录。
 6. **编码回退**：默认 UTF-8，解码失败时尝试 UTF-8 BOM 和操作系统首选编码；可通过 `encoding` 显式指定。
 7. **文件校验**：下载、复制或移动后可用 `hash` 计算 MD5、SHA1 或 SHA256 校验完整性。
+8. **小改动禁止整文件覆盖**：已有文件的小范围修改必须使用 `edit`，不要用 `write` 重写全文。精确文本块使用 `replace_text`，单行使用 `replace_line`，连续多行或指定列范围使用 `replace_range`，在某行某列插入时使用 `insert`。
+9. **精确替换优先**：编辑的新内容推荐使用 `new_text`；`content` 只为兼容旧调用保留。`replace_text` 默认保持 `expected_count=1`，匹配失败后重新读取目标内容，不要直接改成 `-1`。只有用户明确要求批量替换时才使用 `expected_count=-1`。
+10. **不要手工补行尾**：`replace_line` 和 `replace_range` 会保留目标区域原有的行尾，`new_text` 末尾无需附加换行。编辑器会保留文件编码、BOM、LF/CRLF/CR 和末尾换行；未修改区域不会被统一改写。
 
 ## 参数说明
 
@@ -32,7 +35,7 @@
 | `read_range` | `start_line`/`end_line`：行范围；`tail`：尾部 N 行；`max_lines`：最大返回行数；`max_bytes`：最大扫描字节数 |
 | `write` | `content`：覆盖写入内容 |
 | `append` | `content`：追加内容 |
-| `edit` | `edit_mode`、`content`、`old_text`、`expected_count`、`line`、`column`、`end_line`、`end_column`、`create_backup` |
+| `edit` | `edit_mode`、`new_text`（推荐）/`content`（兼容）、`old_text`、`expected_count`、`line`、`column`、`end_line`、`end_column`、`create_backup` |
 | `list_dir` | 无 |
 | `tree_dir` | `max_depth`、`max_entries`、`include_hidden` |
 | `search` | `query`、`mode`、`file_glob`、`regex`、`max_results`、`context_lines`、`include_hidden`、`max_file_bytes` |
@@ -61,6 +64,10 @@
 | `exists` | exists | 路径是否存在 |
 | `hash`/`algorithm` | hash | 十六进制哈希值及算法 |
 | `backup_created` | edit | 是否创建 `.bak` 备份 |
+| `changed` | edit | 文件内容是否实际发生变化；无变化时不会写盘或创建备份 |
+| `replacements` | edit | 实际替换次数 |
+| `changed_lines` | edit | 本次触及的原始行数 |
+| `newline_style` | edit | 编辑后换行风格：LF、CRLF、CR、mixed 或 none |
 | `results` | search | 匹配结果数组 |
 | `skipped_large` | search | 因超过单文件大小限制而跳过的文件数组 |
 | `entries` | list_dir/tree_dir | 目录条目数组或目录树条目数 |
@@ -82,7 +89,8 @@
         "description": "操作类型"
       },
       "path": {"type": "string", "minLength": 1, "description": "文件或目录路径"},
-      "content": {"type": "string", "description": "write/append/edit 写入的内容"},
+      "content": {"type": "string", "description": "write/append 写入内容；edit 旧版新文本参数，仅为兼容保留"},
+      "new_text": {"type": "string", "description": "edit 的新文本（推荐）；可传空字符串删除匹配内容"},
       "encoding": {"type": "string", "description": "文本编码，默认 utf-8，失败时尝试系统编码"},
       "start_line": {"type": "integer", "minimum": 0, "description": "read_range 起始行号（1-based；0 表示默认）"},
       "end_line": {"type": "integer", "minimum": 0, "description": "read_range 结束行号或 edit replace_range 结束行号"},
@@ -115,7 +123,7 @@
     "required": ["action", "path"],
     "additionalProperties": false
   },
-  "version": "1.1.0",
+  "version": "1.2.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }
