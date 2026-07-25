@@ -987,6 +987,24 @@ def list_sessions(root: Path, user: str, source: str) -> list[dict[str, Any]]:
             "summary_completed_round": int(record.get("summary_completed_round") or 0),
             "summary_retry_at": str(record.get("summary_retry_at") or ""),
             "summary_retry_count": max(0, int(record.get("summary_retry_count") or 0)),
+            "summary_attempt_count": max(0, int(record.get("summary_attempt_count") or 0)),
+            "summary_consecutive_failures": max(
+                0, int(record.get("summary_consecutive_failures") or 0)
+            ),
+            "summary_max_attempts": max(1, int(record.get("summary_max_attempts") or 5)),
+            "summary_last_attempt_at": str(record.get("summary_last_attempt_at") or ""),
+            "summary_recovered_at": str(record.get("summary_recovered_at") or ""),
+            "summary_last_error": copy.deepcopy(
+                record.get("summary_last_error")
+                if isinstance(record.get("summary_last_error"), dict)
+                else None
+            ),
+            "summary_checkpoint_next_chunk": max(
+                0, int(record.get("summary_checkpoint_next_chunk") or 0)
+            ),
+            "summary_checkpoint_total_chunks": max(
+                0, int(record.get("summary_checkpoint_total_chunks") or 0)
+            ),
             "state": str(record.get("lifecycle") or "open"),
             "run_state": str(record.get("run_state") or "idle"),
             "chain": str(record.get("chain") or ""),

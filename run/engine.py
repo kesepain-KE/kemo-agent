@@ -41,7 +41,7 @@ from provider.protocol.models import (
 from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ChatRequest, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
-from run.attachments import AttachmentError, UploadedAssetResolver
+from run.attachments import AttachmentError, RunAssetResolver
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import (
     ContextPolicy,
@@ -250,8 +250,8 @@ def _uploaded_file_context(
     if not lines:
         return ""
     return (
-        "\n\n[本轮用户上传文件]\n"
-        "以下文件已经由 Web 端保存；普通文件可按需使用 file 工具读取，"
+        "\n\n[本轮输入资产]\n"
+        "以下文件已经由 Web、外部消息或运行工具登记；普通文件可按需使用 file 工具读取，"
         "并请严格按每项资产说明选择主模型或 multimodal 工具：\n"
         + "\n".join(lines)
     )
@@ -1697,19 +1697,30 @@ def _iter_request_events_impl(
                 if isinstance(item, dict)
             ]
             image_descriptors = [
-                item for item in uploaded_descriptors if bool(item.get("is_image"))
+                item
+                for item in uploaded_descriptors
+                if str(item.get("media_kind") or "") == "image"
+                or bool(item.get("is_image"))
+            ]
+            inline_images = [
+                item for item in content_blocks if isinstance(item, ImageContent)
             ]
             vision_route: str | None = None
             provider_media: list[ImageContent | AudioContent | VideoContent | FileContent] = []
             direct_asset_ids: set[str] = set()
-            resolver = UploadedAssetResolver(base, user, uploaded_descriptors)
-            if image_descriptors:
+            resolver = RunAssetResolver(base, user, uploaded_descriptors)
+            if image_descriptors or inline_images:
                 vision_route = select_vision_route(
                     config,
                     runtime_provider,
                     provider,
                     cancel_event=cancel_event,
                 )
+                if vision_route == "dedicated" and inline_images:
+                    raise EngineError(
+                        "主模型未声明图片输入能力，inline content 图片不能直接发送；"
+                        "请将图片登记为运行资产，或把本地路径交给 multimodal 工具"
+                    )
                 if vision_route == "main":
                     try:
                         if str(runtime_provider.get("type") or "") == "chat":
@@ -1725,6 +1736,27 @@ def _iter_request_events_impl(
                             )
                     except AttachmentError as exc:
                         raise EngineError(str(exc)) from None
+            inline_media_kinds = {
+                "audio"
+                if isinstance(item, AudioContent)
+                else "video"
+                if isinstance(item, VideoContent)
+                else "file"
+                for item in content_blocks
+                if isinstance(item, (AudioContent, VideoContent, FileContent))
+            }
+            for media_kind in sorted(inline_media_kinds):
+                if not main_model_supports_input(
+                    config,
+                    runtime_provider,
+                    provider,
+                    media_kind,
+                    cancel_event=cancel_event,
+                ):
+                    raise EngineError(
+                        f"主模型未声明 {media_kind} 输入能力，不能直接接收 inline content；"
+                        "请将媒体登记为运行资产后调用 multimodal 工具"
+                    )
             if uploaded_descriptors and str(runtime_provider.get("type") or "") == "kemo":
                 upload_asset = getattr(provider, "upload_asset", None)
                 wait_asset_ready = getattr(provider, "wait_asset_ready", None)
@@ -1992,18 +2024,32 @@ def _iter_request_events_impl(
                 if removed_after == removed_before:
                     break
 
-            def commit_cancelled_round() -> RunEvent:
-                """Persist the interrupted request as a real, terminal conversation round."""
+            def commit_terminal_round(
+                *,
+                status: str,
+                reason: str,
+                marker: str,
+                pending_message: str,
+                pending_exception_type: str,
+                pending_status: str = "not_executed",
+            ) -> RunEvent:
+                """Persist a controlled stop as a real, terminal conversation round."""
 
                 nonlocal round_finalized, history_run_registered
+                cancelled = status == "cancelled"
                 if round_finalized:
                     return RunEvent(
                         type="done",
                         usage=dict(usage_total),
                         metadata={
                             "committed": True,
-                            "status": "cancelled",
-                            "cancelled": True,
+                            "status": status,
+                            "stop_reason": reason,
+                            **(
+                                {"cancelled": True, "cancel_reason": reason}
+                                if cancelled
+                                else {}
+                            ),
                             "run_id": run_id,
                         },
                     )
@@ -2022,14 +2068,14 @@ def _iter_request_events_impl(
                             "id": call_id,
                             "name": str(pending.get("name") or "unknown_tool"),
                             "arguments": copy.deepcopy(pending.get("arguments") or {}),
-                            "status": "cancelled",
+                            "status": pending_status,
                             "duplicate": False,
                             "result": {
                                 "ok": False,
                                 "error": {
-                                    "message": "工具调用因用户紧急停止而取消",
-                                    "exception_type": "ToolCancelledError",
-                                    "cancelled": True,
+                                    "message": pending_message,
+                                    "exception_type": pending_exception_type,
+                                    **({"cancelled": True} if cancelled else {}),
                                 },
                             },
                             "iteration": int(pending.get("iteration") or 1),
@@ -2045,13 +2091,12 @@ def _iter_request_events_impl(
                 ) + 1
                 elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
                 partial_text = "".join(observed_text).rstrip()
-                marker = "[本轮已由用户紧急停止]"
-                cancelled_text = f"{partial_text}\n\n{marker}" if partial_text else marker
+                terminal_text = f"{partial_text}\n\n{marker}" if partial_text else marker
                 reasoning = "".join(observed_reasoning)
                 cancelled_window["text"]["messages"].extend(
                     [
                         {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": cancelled_text},
+                        {"role": "assistant", "content": terminal_text},
                     ]
                 )
                 cancelled_window["think"]["rounds"].append(
@@ -2068,11 +2113,11 @@ def _iter_request_events_impl(
                         for block in content_blocks
                     ],
                     reasoning=reasoning,
-                    text=cancelled_text,
+                    text=terminal_text,
                     tool_records=cancelled_records,
-                    # A cancelled Provider response may end before it can expose a
-                    # complete native output item list.  Synthesize every call/result
-                    # pair from the records so the durable item protocol has no orphan.
+                    # A controlled stop may happen before the Provider exposes a
+                    # complete native output item list. Synthesize every call/result
+                    # pair from records so the durable item protocol has no orphan.
                     provider_responses=[],
                 )
                 cancelled_window["data"]["rounds"] = round_number
@@ -2080,19 +2125,21 @@ def _iter_request_events_impl(
                 if not isinstance(metrics, list):
                     metrics = []
                     cancelled_window["data"]["round_metrics"] = metrics
-                metrics.append(
-                    {
-                        "round": round_number,
-                        "usage": dict(usage_total),
-                        "elapsed_ms": elapsed_ms,
-                        "tool_calls": len(cancelled_records),
-                        "guidance": list(consumed_guidance),
-                        "provider_responses": copy.deepcopy(provider_responses),
-                        "status": "cancelled",
-                        "cancelled": True,
-                        "cancel_reason": "user_emergency_stop",
-                    }
-                )
+                terminal_metric = {
+                    "round": round_number,
+                    "usage": dict(usage_total),
+                    "elapsed_ms": elapsed_ms,
+                    "tool_calls": len(cancelled_records),
+                    "guidance": list(consumed_guidance),
+                    "provider_responses": copy.deepcopy(provider_responses),
+                    "status": status,
+                    "stop_reason": reason,
+                }
+                if cancelled:
+                    terminal_metric.update(
+                        {"cancelled": True, "cancel_reason": reason}
+                    )
+                metrics.append(terminal_metric)
                 _merge_usage(
                     cancelled_window["data"]["token_usage"],
                     _usage_from_dict(usage_total),
@@ -2165,7 +2212,7 @@ def _iter_request_events_impl(
                         session_id=session_id,
                         summary_cache=summary_cache,
                         archive_round_number=archive_round_number,
-                        reason="automatic_compression_cancelled_round",
+                        reason=f"automatic_compression_{status}_round",
                     )
                 try:
                     update_run_state(
@@ -2192,27 +2239,41 @@ def _iter_request_events_impl(
                         )
                     except Exception:
                         pass
+                terminal_metadata = {
+                    "text": terminal_text,
+                    "reasoning": reasoning,
+                    "usage": dict(usage_total),
+                    "model": runtime_provider["model"],
+                    "user": user,
+                    "source": source,
+                    "session_id": session_id,
+                    "window": window_path.name,
+                    "tool_calls": len(cancelled_records),
+                    "elapsed_ms": elapsed_ms,
+                    "run_id": run_id,
+                    "guidance_count": len(consumed_guidance),
+                    "committed": True,
+                    "status": status,
+                    "stop_reason": reason,
+                }
+                if cancelled:
+                    terminal_metadata.update(
+                        {"cancelled": True, "cancel_reason": reason}
+                    )
                 return RunEvent(
                     type="done",
                     usage=dict(usage_total),
-                    metadata={
-                        "text": cancelled_text,
-                        "reasoning": reasoning,
-                        "usage": dict(usage_total),
-                        "model": runtime_provider["model"],
-                        "user": user,
-                        "source": source,
-                        "session_id": session_id,
-                        "window": window_path.name,
-                        "tool_calls": len(cancelled_records),
-                        "elapsed_ms": elapsed_ms,
-                        "run_id": run_id,
-                        "guidance_count": len(consumed_guidance),
-                        "committed": True,
-                        "status": "cancelled",
-                        "cancelled": True,
-                        "cancel_reason": "user_emergency_stop",
-                    },
+                    metadata=terminal_metadata,
+                )
+
+            def commit_cancelled_round() -> RunEvent:
+                return commit_terminal_round(
+                    status="cancelled",
+                    reason="user_emergency_stop",
+                    marker="[本轮已由用户紧急停止]",
+                    pending_message="工具调用因用户紧急停止而取消",
+                    pending_exception_type="ToolCancelledError",
+                    pending_status="cancelled",
                 )
 
             if cancel_event is not None and cancel_event.is_set():
@@ -2359,13 +2420,19 @@ def _iter_request_events_impl(
                         projected_tokens = current_local_tokens
                         measurement = "local_estimate"
                     if projected_tokens > context_policy.token_limit:
-                        context_error = error_event(
-                            EngineError(
-                                "当前工具循环已超过上下文上限；为避免拆散工具消息组，本轮已停止"
+                        terminal_event = commit_terminal_round(
+                            status="limited",
+                            reason="tool_context_limit",
+                            marker=(
+                                "[本轮工具循环已达到上下文保护上限；"
+                                "为避免拆散工具消息组，本轮已停止]"
                             ),
-                            phase="context",
+                            pending_message=(
+                                "工具调用因本轮达到上下文保护上限而未执行"
+                            ),
+                            pending_exception_type="ToolContextLimitExceeded",
                         )
-                        context_error.metadata["context_guard"] = {
+                        terminal_event.metadata["context_guard"] = {
                             "measurement": measurement,
                             "provider_input_tokens": last_provider_input_tokens,
                             "previous_local_tokens": last_sent_local_tokens,
@@ -2379,7 +2446,7 @@ def _iter_request_events_impl(
                                 iteration=iteration - 1,
                             ),
                         }
-                        yield context_error
+                        yield terminal_event
                         return
                 else:
                     active_tool_schemas = tool_schemas
@@ -2647,9 +2714,17 @@ def _iter_request_events_impl(
                     break
                 if iteration >= max_iterations:
                     _close_guidance(guidance_channel)
-                    yield error_event(
-                        EngineError(f"工具调用超过最大循环次数 {max_iterations}"),
-                        phase="tool_loop",
+                    yield commit_terminal_round(
+                        status="limited",
+                        reason="max_tool_iterations",
+                        marker=(
+                            f"[本轮工具循环已达到最大次数 {max_iterations}，"
+                            "本轮已停止]"
+                        ),
+                        pending_message=(
+                            "工具调用因本轮工具循环达到最大次数而未执行"
+                        ),
+                        pending_exception_type="ToolLoopLimitExceeded",
                     )
                     return
 
@@ -2822,7 +2897,13 @@ def _iter_request_events_impl(
                 pending_guidance_ack.extend(pending_guidance)
 
             if not completed:
-                yield error_event(EngineError("模型工具循环未完成"), phase="tool_loop")
+                yield commit_terminal_round(
+                    status="limited",
+                    reason="tool_loop_incomplete",
+                    marker="[本轮工具循环未能正常收束，本轮已停止]",
+                    pending_message="工具调用因本轮工具循环未能正常收束而未执行",
+                    pending_exception_type="ToolLoopIncomplete",
+                )
                 return
             if cancel_event is not None and cancel_event.is_set():
                 yield commit_cancelled_round()

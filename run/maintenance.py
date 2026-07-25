@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from provider.factory import create_provider
+from provider.factory import ProviderCongestionError, create_provider
 from run.agent_runner import AgentRunner
 from run.config import load_config
 from run.engine import (
@@ -28,10 +28,12 @@ from run.history import commit_window, load_window
 from run.history_index import (
     claim_pending_memory,
     claim_pending_summary,
+    defer_summary_claim,
     find_record,
     finish_memory_claim,
     finish_summary_claim,
     history_directory,
+    update_summary_checkpoint,
 )
 from run.memory import (
     MemoryStore,
@@ -203,12 +205,20 @@ class MaintenanceScheduler:
         provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         on_error: Callable[[str, Exception], None] | None = None,
+        history_summary_enabled: bool = True,
+        summary_max_attempts: int = 5,
+        summary_retry_delays: tuple[int, ...] = (30, 120, 600, 1800),
     ) -> None:
         self.root = root.resolve()
         self.poll_interval = max(1.0, float(poll_interval))
         self.provider_factory = provider_factory
         self.tool_registry_factory = tool_registry_factory
         self.on_error = on_error
+        self.history_summary_enabled = bool(history_summary_enabled)
+        self.summary_max_attempts = max(1, int(summary_max_attempts))
+        self.summary_retry_delays = tuple(
+            max(1, int(value)) for value in summary_retry_delays
+        ) or (30,)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
@@ -284,9 +294,10 @@ class MaintenanceScheduler:
         force: bool,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "history_summary": self._recover_pending_summary(user),
             "memory_recovery": self._recover_pending_memory(user),
         }
+        if self.history_summary_enabled:
+            result["history_summary"] = self.process_next_summary(user)
 
         next_context = self._next_context_review.setdefault(
             user, current + CONTEXT_REVIEW_INTERVAL
@@ -296,7 +307,7 @@ class MaintenanceScheduler:
             self._next_context_review[user] = current + CONTEXT_REVIEW_INTERVAL
         return result
 
-    def _recover_pending_summary(self, user: str) -> dict[str, Any]:
+    def process_next_summary(self, user: str) -> dict[str, Any]:
         claim = claim_pending_summary(self.root, user)
         if claim is None:
             return {"claimed": 0, "processed": [], "failed": []}
@@ -337,9 +348,36 @@ class MaintenanceScheduler:
                 config=config,
                 provider_factory=self.provider_factory,
             )
-            rolling: dict[str, str] | None = None
             chunks = _summary_chunks(rounds)
-            for chunk in chunks:
+            checkpoint = claim.get("summary_checkpoint")
+            checkpoint_round = (
+                max(0, int(checkpoint.get("target_round") or 0))
+                if isinstance(checkpoint, dict)
+                else 0
+            )
+            start_chunk = max(0, int(claim.get("summary_checkpoint_next_chunk") or 0))
+            checkpoint_total = max(
+                0, int(claim.get("summary_checkpoint_total_chunks") or 0)
+            )
+            if (
+                not isinstance(checkpoint, dict)
+                or checkpoint_round != target_round
+                or checkpoint_total != len(chunks)
+                or start_chunk > len(chunks)
+            ):
+                rolling: dict[str, str] | None = None
+                start_chunk = 0
+            else:
+                rolling = {
+                    "title": str(checkpoint.get("title") or "").strip(),
+                    "summary": str(checkpoint.get("summary") or "").strip(),
+                }
+                if not rolling["title"] or not rolling["summary"]:
+                    rolling = None
+                    start_chunk = 0
+            for chunk_index, chunk in enumerate(
+                chunks[start_chunk:], start=start_chunk
+            ):
                 if self._stop_event.is_set():
                     raise MaintenanceError("历史摘要任务已取消")
                 result = runner.run(
@@ -358,6 +396,19 @@ class MaintenanceScheduler:
                     "title": str(result.data.get("title") or "").strip(),
                     "summary": str(result.data.get("summary") or "").strip(),
                 }
+                checkpoint_result = update_summary_checkpoint(
+                    self.root,
+                    user,
+                    source,
+                    session_id,
+                    claim_id=claim_id,
+                    next_chunk=chunk_index + 1,
+                    total_chunks=len(chunks),
+                    title=rolling["title"],
+                    summary=rolling["summary"],
+                )
+                if checkpoint_result is None:
+                    raise MaintenanceError("历史摘要领取已失效")
             if not rolling:
                 raise MaintenanceError("历史摘要结果为空")
             finished = finish_summary_claim(
@@ -369,19 +420,70 @@ class MaintenanceScheduler:
                 title=rolling["title"],
                 summary=rolling["summary"],
                 completed_round=target_round,
+                max_attempts=self.summary_max_attempts,
+                retry_delays=self.summary_retry_delays,
             )
             if finished is None:
                 raise MaintenanceError("历史摘要领取已失效")
             return {
                 "claimed": 1,
-                "processed": [{**identity, "status": "completed", "chunks": len(chunks)}],
+                "processed": [{
+                    **identity,
+                    "status": "completed",
+                    "chunks": len(chunks),
+                    "resumed_from_chunk": start_chunk,
+                }],
                 "failed": [],
+            }
+        except ProviderCongestionError as exc:
+            error = {"message": str(exc), "exception_type": type(exc).__name__}
+            try:
+                defer_summary_claim(
+                    self.root,
+                    user,
+                    source,
+                    session_id,
+                    claim_id=claim_id,
+                    error=error,
+                    delay_seconds=30,
+                )
+            except Exception as index_exc:
+                error["index_error"] = {
+                    "message": str(index_exc),
+                    "exception_type": type(index_exc).__name__,
+                }
+            self._report_error(f"history_summary:{user}:congestion", exc)
+            return {
+                "claimed": 1,
+                "processed": [],
+                "failed": [{**identity, "deferred": True, "error": error}],
             }
         except Exception as exc:
             error = {"message": str(exc), "exception_type": type(exc).__name__}
             raw_output_preview = _safe_agent_output_preview(exc)
             if raw_output_preview:
                 error["raw_output_preview"] = raw_output_preview
+            if self._stop_event.is_set():
+                try:
+                    defer_summary_claim(
+                        self.root,
+                        user,
+                        source,
+                        session_id,
+                        claim_id=claim_id,
+                        error=error,
+                        delay_seconds=1,
+                    )
+                except Exception as index_exc:
+                    error["index_error"] = {
+                        "message": str(index_exc),
+                        "exception_type": type(index_exc).__name__,
+                    }
+                return {
+                    "claimed": 1,
+                    "processed": [],
+                    "failed": [{**identity, "deferred": True, "error": error}],
+                }
             try:
                 finish_summary_claim(
                     self.root,
@@ -390,6 +492,8 @@ class MaintenanceScheduler:
                     session_id,
                     claim_id=claim_id,
                     error=error,
+                    max_attempts=self.summary_max_attempts,
+                    retry_delays=self.summary_retry_delays,
                 )
             except Exception as index_exc:
                 error["index_error"] = {
@@ -398,6 +502,11 @@ class MaintenanceScheduler:
                 }
             self._report_error(f"maintenance:{user}:history_summary", exc)
             return {"claimed": 1, "processed": [], "failed": [{**identity, "error": error}]}
+
+    def _recover_pending_summary(self, user: str) -> dict[str, Any]:
+        """Compatibility alias for callers predating the dedicated scheduler."""
+
+        return self.process_next_summary(user)
 
     def _recover_pending_memory(self, user: str) -> dict[str, Any]:
         config = load_config(user, self.root)

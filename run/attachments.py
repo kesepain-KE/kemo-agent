@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import stat
@@ -64,6 +65,13 @@ def _upload_root(root: Path, user: str) -> Path:
     return (root / "users" / user / "file_upload").resolve()
 
 
+def _project_or_absolute_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def _is_link_or_junction(path: Path) -> bool:
     if path.is_symlink():
         return True
@@ -120,6 +128,87 @@ def _safe_uploaded_path(root: Path, user: str, value: Any) -> tuple[Path, str]:
     if not resolved.is_file():
         raise AttachmentError(f"上传附件不是文件：{value}")
     return resolved, resolved.relative_to(root_resolved).as_posix()
+
+
+def _message_files_root(root: Path, user: str, source: Any) -> tuple[Path, Path, str]:
+    source_name = str(source or "").strip()
+    if not source_name or Path(source_name).name != source_name:
+        raise AttachmentError("外部消息附件缺少有效来源模块")
+    root_resolved = root.resolve()
+    plugin_dir = (root_resolved / "message" / "out" / source_name).resolve()
+    expected_parent = (root_resolved / "message" / "out").resolve()
+    try:
+        plugin_dir.relative_to(expected_parent)
+    except ValueError:
+        raise AttachmentError("外部消息附件来源越出 message/out") from None
+    config_path = plugin_dir / "message.json"
+    try:
+        config = json.loads(config_path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AttachmentError(f"无法验证外部消息附件来源：{source_name}（{exc}）") from exc
+    if not isinstance(config, dict) or str(config.get("bound_user") or "") != user:
+        raise AttachmentError("外部消息附件来源与当前用户不匹配")
+    files_dir = str(config.get("files_dir") or "").strip()
+    relative_root = Path(files_dir)
+    if not files_dir or relative_root.is_absolute() or ".." in relative_root.parts:
+        raise AttachmentError("外部消息模块 files_dir 无效")
+    files_root = (plugin_dir / relative_root).resolve()
+    try:
+        files_root.relative_to(plugin_dir)
+    except ValueError:
+        raise AttachmentError("外部消息模块 files_dir 越出模块目录") from None
+    return plugin_dir, files_root, source_name
+
+
+def _safe_message_path(
+    root: Path,
+    user: str,
+    source: Any,
+    value: Any,
+) -> tuple[Path, str, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise AttachmentError("外部消息附件缺少有效 path")
+    root_resolved = root.resolve()
+    plugin_dir, files_root, source_name = _message_files_root(root_resolved, user, source)
+    raw = Path(value.strip())
+    if raw.is_absolute():
+        candidate = raw
+    else:
+        root_candidate = Path(os.path.abspath(root_resolved / raw))
+        try:
+            root_candidate.relative_to(plugin_dir)
+            candidate = root_candidate
+        except ValueError:
+            candidate = Path(os.path.abspath(plugin_dir / raw))
+    _reject_linked_path(candidate, files_root)
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(files_root)
+    except FileNotFoundError:
+        raise AttachmentError(f"外部消息附件不存在：{value}") from None
+    except ValueError:
+        raise AttachmentError("外部消息附件必须位于对应模块的 files_dir") from None
+    if not resolved.is_file():
+        raise AttachmentError(f"外部消息附件不是文件：{value}")
+    return resolved, resolved.relative_to(root_resolved).as_posix(), source_name
+
+
+def _safe_local_path(root: Path, value: Any) -> tuple[Path, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise AttachmentError("本地媒体缺少有效 path")
+    root_resolved = root.resolve()
+    raw = Path(value.strip()).expanduser()
+    candidate = raw if raw.is_absolute() else root_resolved / raw
+    candidate = Path(os.path.abspath(candidate))
+    if _is_link_or_junction(candidate):
+        raise AttachmentError("本地媒体路径不能是符号链接或目录联接")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError:
+        raise AttachmentError(f"本地媒体不存在：{value}") from None
+    if not resolved.is_file():
+        raise AttachmentError(f"本地媒体不是文件：{value}")
+    return resolved, _project_or_absolute_path(root_resolved, resolved)
 
 
 def _sha256(path: Path) -> str:
@@ -214,6 +303,74 @@ def describe_uploaded_asset(root: Path, user: str, value: dict[str, Any]) -> dic
         "is_audio": media_kind == "audio",
         "is_video": media_kind == "video",
         "is_file": media_kind == "file",
+        "origin": "web_upload",
+        "cleanup_policy": "retain",
+    }
+
+
+def describe_message_asset(
+    root: Path,
+    user: str,
+    value: dict[str, Any],
+    *,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Validate one external-message attachment and issue a Run-scoped asset handle."""
+
+    source_value = source if source is not None else str(value.get("source") or "")
+    path, project_path, source_name = _safe_message_path(
+        root, user, source_value, value.get("path")
+    )
+    size = path.stat().st_size
+    checksum = _sha256(path)
+    _, files_root, _ = _message_files_root(root, user, source_name)
+    relative = path.relative_to(files_root).as_posix()
+    asset_id = "asset_" + hashlib.sha256(
+        f"message\0{user}\0{source_name}\0{relative}\0{checksum}".encode("utf-8")
+    ).hexdigest()[:32]
+    media_kind, mime_type = _media_kind_and_mime(path)
+    return {
+        "asset_id": asset_id,
+        "name": str(value.get("name") or path.name),
+        "path": project_path,
+        "mime_type": mime_type,
+        "size": size,
+        "checksum_sha256": checksum,
+        "media_kind": media_kind,
+        "is_image": media_kind == "image",
+        "is_audio": media_kind == "audio",
+        "is_video": media_kind == "video",
+        "is_file": media_kind == "file",
+        "origin": "message_attachment",
+        "source": source_name,
+        "cleanup_policy": "transport_owned",
+    }
+
+
+def describe_local_asset(root: Path, user: str, value: dict[str, Any]) -> dict[str, Any]:
+    """Validate an explicit local path for direct use by the multimodal tool."""
+
+    path, display_path = _safe_local_path(root, value.get("path"))
+    size = path.stat().st_size
+    checksum = _sha256(path)
+    asset_id = "asset_" + hashlib.sha256(
+        f"local\0{user}\0{path}\0{checksum}".encode("utf-8")
+    ).hexdigest()[:32]
+    media_kind, mime_type = _media_kind_and_mime(path)
+    return {
+        "asset_id": asset_id,
+        "name": str(value.get("name") or path.name),
+        "path": display_path,
+        "mime_type": mime_type,
+        "size": size,
+        "checksum_sha256": checksum,
+        "media_kind": media_kind,
+        "is_image": media_kind == "image",
+        "is_audio": media_kind == "audio",
+        "is_video": media_kind == "video",
+        "is_file": media_kind == "file",
+        "origin": "local_path",
+        "cleanup_policy": "retain",
     }
 
 
@@ -225,8 +382,8 @@ def describe_uploaded_assets(
     return [describe_uploaded_asset(root, user, value) for value in values]
 
 
-class UploadedAssetResolver:
-    """Resolve only the uploaded assets explicitly attached to the current Run."""
+class RunAssetResolver:
+    """Resolve Web, external-message and explicit local assets for one Run/tool call."""
 
     def __init__(self, root: Path, user: str, descriptors: Iterable[dict[str, Any]]) -> None:
         self.root = root.resolve()
@@ -246,10 +403,25 @@ class UploadedAssetResolver:
         descriptor = self._descriptors.get(str(asset_id or ""))
         if descriptor is None:
             raise AttachmentError(f"附件不属于当前 Run 或不存在：{asset_id}")
-        verified = describe_uploaded_asset(self.root, self.user, descriptor)
+        origin = str(descriptor.get("origin") or "web_upload")
+        if origin == "web_upload":
+            verified = describe_uploaded_asset(self.root, self.user, descriptor)
+            path, _ = _safe_uploaded_path(self.root, self.user, verified["path"])
+        elif origin == "message_attachment":
+            verified = describe_message_asset(self.root, self.user, descriptor)
+            path, _, _ = _safe_message_path(
+                self.root,
+                self.user,
+                verified.get("source"),
+                verified["path"],
+            )
+        elif origin == "local_path":
+            verified = describe_local_asset(self.root, self.user, descriptor)
+            path, _ = _safe_local_path(self.root, verified["path"])
+        else:
+            raise AttachmentError(f"不支持的运行资产来源：{origin}")
         if verified["asset_id"] != asset_id:
-            raise AttachmentError(f"附件内容已经变化，请重新上传：{asset_id}")
-        path, _ = _safe_uploaded_path(self.root, self.user, verified["path"])
+            raise AttachmentError(f"附件内容已经变化，请重新登记：{asset_id}")
         media_kind = str(verified.get("media_kind") or "file")
         if expected_kind is not None and media_kind != expected_kind:
             raise AttachmentError(
@@ -324,3 +496,7 @@ class UploadedAssetResolver:
         if media_kind == "video":
             return VideoContent(**common)
         return FileContent(filename=str(verified.get("name") or ""), **common)
+
+
+# 兼容既有导入；新代码应使用更准确的 RunAssetResolver。
+UploadedAssetResolver = RunAssetResolver

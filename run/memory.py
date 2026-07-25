@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -30,6 +31,8 @@ MAX_EXTRACTION_BATCH_ROUNDS = 20
 MAX_EXTRACTION_CANDIDATES_PER_BATCH = 40
 MEMORY_OPERATION_SCHEMA_VERSION = 1
 MEMORY_OPERATION_HISTORY_LIMIT = 512
+IMPORTANT_VIEW_SCHEMA_VERSION = 1
+IMPORTANT_VIEW_INDEX_FILENAME = "important_view.json"
 FILENAME_MAX_CHARS = 50
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
@@ -327,6 +330,110 @@ class MemoryStore:
 
     def _operation_path(self) -> Path:
         return self.base / ".memory_operations.json"
+
+    def important_view_path(self) -> Path:
+        return self.base / IMPORTANT_VIEW_INDEX_FILENAME
+
+    def load_important_view_sources(self) -> frozenset[str]:
+        """Return temporary fragment identities mirrored by the hot-memory view.
+
+        The view index is derived cache metadata.  A missing or malformed file must
+        never make the authoritative memory tiers unavailable, so prompt assembly
+        falls back to injecting all temporary fragments.
+        """
+
+        path = self.important_view_path()
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+        except FileNotFoundError:
+            return frozenset()
+        except (OSError, json.JSONDecodeError) as exc:
+            LOGGER.warning(
+                "忽略不可读的临时重要记忆来源索引：user=%s path=%s error=%s",
+                self.user,
+                path,
+                exc,
+            )
+            return frozenset()
+        if not isinstance(raw, dict) or raw.get("schema_version") != IMPORTANT_VIEW_SCHEMA_VERSION:
+            LOGGER.warning("忽略版本无效的临时重要记忆来源索引：%s", path)
+            return frozenset()
+        sources = raw.get("sources")
+        if not isinstance(sources, list):
+            LOGGER.warning("忽略 sources 无效的临时重要记忆来源索引：%s", path)
+            return frozenset()
+        normalized: set[str] = set()
+        for source in sources:
+            try:
+                if isinstance(source, dict):
+                    filename = normalize_memory_filename(source.get("filename"))
+                    expected_hash = str(source.get("sha256") or "").strip().casefold()
+                else:
+                    filename = normalize_memory_filename(source)
+                    expected_hash = ""
+                location = self.locate(filename)
+                if location is None or location.tier not in TEMPORARY_TIERS:
+                    continue
+                if expected_hash:
+                    actual_hash = hashlib.sha256(location.path.read_bytes()).hexdigest()
+                    if actual_hash != expected_hash:
+                        continue
+                normalized.add(location.filename)
+            except (MemoryError, OSError):
+                LOGGER.warning("跳过无效的临时重要记忆来源：%s", source)
+        return frozenset(normalized)
+
+    def important_view_is_current(self) -> bool:
+        """Return false when a derived source changed or left temporary storage."""
+
+        path = self.important_view_path()
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+        except FileNotFoundError:
+            # Preserve pre-index installations until the first periodic rebuild.
+            return True
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(raw, dict) or raw.get("schema_version") != IMPORTANT_VIEW_SCHEMA_VERSION:
+            return False
+        sources = raw.get("sources")
+        if not isinstance(sources, list):
+            return False
+        return len(self.load_important_view_sources()) == len(sources)
+
+    def set_important_view_sources(
+        self,
+        filenames: list[str],
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Replace the hot-view source index after validating live temp fragments."""
+
+        current = now or utc_now()
+        normalized = list(
+            dict.fromkeys(normalize_memory_filename(filename) for filename in filenames)
+        )
+        with self._lock:
+            sources: list[dict[str, str]] = []
+            for filename in normalized:
+                location = self.locate(filename)
+                if location is None or location.tier not in TEMPORARY_TIERS:
+                    raise MemoryError(f"临时重要记忆来源不是有效临时碎片：{filename}")
+                sources.append(
+                    {
+                        "filename": location.filename,
+                        "sha256": hashlib.sha256(location.path.read_bytes()).hexdigest(),
+                    }
+                )
+            _atomic_json(
+                self.important_view_path(),
+                {
+                    "schema_version": IMPORTANT_VIEW_SCHEMA_VERSION,
+                    "updated_at": iso(current),
+                    "sources": sources,
+                },
+            )
+        return normalized
 
     def _load_operations(self) -> dict[str, dict[str, Any]]:
         path = self._operation_path()
@@ -850,6 +957,7 @@ class MemoryStore:
         current = now or utc_now()
         created: list[str] = []
         updated: list[str] = []
+        skipped_permanent: list[str] = []
         forgotten: list[str] = []
         rejected = 0
         with self._lock:
@@ -907,6 +1015,9 @@ class MemoryStore:
                     continue
                 old_content = location.path.read_text("utf-8").strip()
                 changed = old_content != content
+                if location.tier == "permanent" and not explicit:
+                    skipped_permanent.append(filename)
+                    continue
                 if explicit and location.tier != "permanent":
                     if changed:
                         _atomic_text(location.path, content)
@@ -930,6 +1041,7 @@ class MemoryStore:
             result = {
                 "created": created,
                 "updated": updated,
+                "skipped_permanent": skipped_permanent,
                 "forgotten": forgotten,
                 "rejected": rejected,
             }
@@ -1036,8 +1148,13 @@ class MemoryStore:
             all_paths = [self.fragment_path(tier, item["filename"]) for item in items]
         else:
             index = self.load_index(tier)
+            featured_sources = self.load_important_view_sources()
             ordered = sorted(
-                index.items(),
+                (
+                    (filename, meta)
+                    for filename, meta in index.items()
+                    if filename not in featured_sources
+                ),
                 key=lambda pair: (
                     -int(pair[1]["weight"]),
                     pair[0].casefold(),
@@ -1063,8 +1180,11 @@ class MemoryStore:
                         selected.append(entry)
                     if max_files is not None and len(selected) >= max_files:
                         break
-            original_items = len(index)
-            all_paths = [self.fragment_path(tier, filename) for filename in index]
+            eligible_names = [
+                filename for filename in index if filename not in featured_sources
+            ]
+            original_items = len(eligible_names)
+            all_paths = [self.fragment_path(tier, filename) for filename in eligible_names]
 
         def line(item: dict[str, Any]) -> str:
             if tier == "permanent":

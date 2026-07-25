@@ -34,6 +34,7 @@ from message.transport import (
 )
 from provider.factory import create_provider
 from run.config import read_json_object
+from run.history_summary_scheduler import HistorySummaryScheduler
 from run.maintenance import MaintenanceScheduler
 from run.task_plan_scheduler import TaskPlanScheduler
 from run.tools import ToolRegistry, discover_tools
@@ -53,6 +54,16 @@ def _positive_seconds(value: Any, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return seconds if seconds >= 1 else fallback
+
+
+def _positive_int(value: Any, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number >= 1 else fallback
 
 
 def _system_update_rate(config: dict[str, Any], key: str) -> float:
@@ -107,6 +118,7 @@ class RuntimeHost:
         tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
         cron_scheduler: CronScheduler | None = None,
         maintenance_scheduler: MaintenanceScheduler | None = None,
+        history_summary_scheduler: HistorySummaryScheduler | None = None,
         task_plan_scheduler: TaskPlanScheduler | None = None,
         router: MessageRouter | None = None,
         on_result: Callable[[RouteResult], None] | None = None,
@@ -191,12 +203,53 @@ class RuntimeHost:
             on_error=self._handle_error,
             transport_registry=self.router.transports,
         )
+        summary_config = self.config.get("history_summary") or {}
+        if not isinstance(summary_config, dict):
+            summary_config = {}
+        raw_retry_delays = summary_config.get(
+            "retry_delays_seconds", [30, 120, 600, 1800]
+        )
+        if not isinstance(raw_retry_delays, list):
+            raw_retry_delays = [30, 120, 600, 1800]
+        retry_delays = tuple(
+            int(value)
+            for value in raw_retry_delays
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value >= 1
+        ) or (30, 120, 600, 1800)
         self.maintenance = maintenance_scheduler or MaintenanceScheduler(
             self.root,
             poll_interval=_positive_seconds(cron_config.get("poll_interval", 30), 30.0),
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
+            history_summary_enabled=False,
+            summary_max_attempts=_positive_int(
+                summary_config.get("max_attempts", 5), 5
+            ),
+            summary_retry_delays=retry_delays,
+        )
+        summary_processor = getattr(self.maintenance, "process_next_summary", None)
+        if not callable(summary_processor):
+            summary_processor = lambda user: {
+                "claimed": 0,
+                "processed": [],
+                "failed": [],
+            }
+        self.history_summaries = (
+            history_summary_scheduler
+            or HistorySummaryScheduler(
+                self.root,
+                processor=summary_processor,
+                poll_interval=_positive_seconds(
+                    summary_config.get("poll_interval", 5), 5.0
+                ),
+                max_jobs_per_cycle=_positive_int(
+                    summary_config.get("max_jobs_per_cycle", 1), 1
+                ),
+                on_error=self._handle_error,
+            )
         )
         self.task_plans = task_plan_scheduler or TaskPlanScheduler(
             self.root,
@@ -213,6 +266,9 @@ class RuntimeHost:
         self._components["cron"] = ComponentStatus("cron", "scheduler")
         self._components["maintenance"] = ComponentStatus(
             "maintenance", "scheduler"
+        )
+        self._components["history_summaries"] = ComponentStatus(
+            "history_summaries", "scheduler"
         )
         self._components["task_plans"] = ComponentStatus(
             "task_plans", "scheduler"
@@ -319,12 +375,16 @@ class RuntimeHost:
                 self._set_component("maintenance", "starting")
                 self.maintenance.start()
                 self._set_component("maintenance", "running")
+                self._set_component("history_summaries", "starting")
+                self.history_summaries.start()
+                self._set_component("history_summaries", "running")
                 self._set_component("task_plans", "starting")
                 self.task_plans.start()
                 self._set_component("task_plans", "running")
             else:
                 self._set_component("background", "stopped")
                 self._set_component("maintenance", "stopped")
+                self._set_component("history_summaries", "stopped")
                 self._set_component("task_plans", "stopped")
 
             if self.cron_enabled:
@@ -395,9 +455,16 @@ class RuntimeHost:
         except Exception as exc:
             self._set_component("maintenance", "failed", exc)
 
+        try:
+            self.history_summaries.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+            self._set_component("history_summaries", "stopped")
+        except Exception as exc:
+            self._set_component("history_summaries", "failed", exc)
+
         if (
             self._components["cron"].state == "stopped"
             and self._components["maintenance"].state == "stopped"
+            and self._components["history_summaries"].state == "stopped"
             and self._components["task_plans"].state == "stopped"
         ):
             self._set_component("background", "stopped")
@@ -418,6 +485,7 @@ class RuntimeHost:
             return {
                 "state": self._state,
                 "components": components,
+                "history_summaries": self.history_summaries.status(),
                 "task_plans": self.task_plans.status(),
             }
 

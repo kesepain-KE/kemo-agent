@@ -14,11 +14,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import copy
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import threading
+import time
 import uuid
 from typing import Any, Iterator
 
@@ -31,9 +33,14 @@ INDEX_LOCK_FILENAME = ".data.index.lock"
 MEMORY_CLAIM_STALE_SECONDS = 15 * 60
 MEMORY_RETRY_DELAY_SECONDS = 30
 SUMMARY_CLAIM_STALE_SECONDS = 15 * 60
+SUMMARY_DEFAULT_MAX_ATTEMPTS = 5
+SUMMARY_DEFAULT_RETRY_DELAYS = (30, 120, 600, 1800)
 _KEY_SEPARATOR = "\x1f"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
+_ATOMIC_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2)
+_TRANSIENT_REPLACE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
+_TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32, 33})
 
 
 def _now() -> str:
@@ -137,6 +144,24 @@ def index_lock(root: Path, user: str) -> Iterator[None]:
             yield
 
 
+def _replace_with_retry(source: Path, target: Path) -> None:
+    """Atomically replace a file, tolerating brief cross-platform file locks."""
+
+    for attempt in range(len(_ATOMIC_REPLACE_RETRY_DELAYS) + 1):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            transient = (
+                exc.errno in _TRANSIENT_REPLACE_ERRNOS
+                or getattr(exc, "winerror", None)
+                in _TRANSIENT_WINDOWS_REPLACE_ERRORS
+            )
+            if not transient or attempt >= len(_ATOMIC_REPLACE_RETRY_DELAYS):
+                raise
+            time.sleep(_ATOMIC_REPLACE_RETRY_DELAYS[attempt])
+
+
 def _atomic_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -146,7 +171,7 @@ def _atomic_write(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -1048,7 +1073,17 @@ def queue_summary(
         record["summary_status"] = "queued"
         record["summary_target_round"] = target_round
         record["summary_state_updated_at"] = _now()
-        for field in ("summary_claim_id", "summary_claimed_at", "summary_retry_at", "summary_error"):
+        record["summary_retry_count"] = 0
+        record["summary_consecutive_failures"] = 0
+        for field in (
+            "summary_claim_id",
+            "summary_claimed_at",
+            "summary_retry_at",
+            "summary_error",
+            "summary_checkpoint",
+            "summary_checkpoint_next_chunk",
+            "summary_checkpoint_total_chunks",
+        ):
             record.pop(field, None)
         index["sessions"][key] = record
         _write_index_unlocked(root, user, index)
@@ -1082,7 +1117,7 @@ def claim_pending_summary(
                 claimed_at = _timestamp(record.get("summary_claimed_at"))
                 if claimed_at is not None and (now - claimed_at).total_seconds() < max(1.0, stale_after_seconds):
                     continue
-            elif status == "failed":
+            elif status in {"failed", "retry_wait"}:
                 retry_at = _timestamp(record.get("summary_retry_at"))
                 if retry_at is not None and now < retry_at:
                     continue
@@ -1098,6 +1133,10 @@ def claim_pending_summary(
         record["summary_status"] = "processing"
         record["summary_claim_id"] = claim_id
         record["summary_claimed_at"] = now.isoformat()
+        record["summary_last_attempt_at"] = now.isoformat()
+        record["summary_attempt_count"] = max(
+            0, int(record.get("summary_attempt_count") or 0)
+        ) + 1
         record["summary_state_updated_at"] = now.isoformat()
         index["sessions"][key] = record
         written = _write_index_unlocked(root, user, index)
@@ -1117,6 +1156,8 @@ def finish_summary_claim(
     summary: str | None = None,
     completed_round: int | None = None,
     error: dict[str, Any] | None = None,
+    max_attempts: int = SUMMARY_DEFAULT_MAX_ATTEMPTS,
+    retry_delays: tuple[int, ...] = SUMMARY_DEFAULT_RETRY_DELAYS,
 ) -> dict[str, Any] | None:
     """Finish a summary lease without allowing stale workers to overwrite data."""
 
@@ -1132,11 +1173,21 @@ def finish_summary_claim(
         now = datetime.now(timezone.utc)
         if error is not None:
             retry_count = max(0, int(record.get("summary_retry_count") or 0)) + 1
-            delay = 30 if retry_count == 1 else 120 if retry_count == 2 else 600
-            record["summary_status"] = "failed"
+            record["summary_max_attempts"] = max(1, int(max_attempts))
             record["summary_retry_count"] = retry_count
-            record["summary_retry_at"] = (now + timedelta(seconds=delay)).isoformat()
+            record["summary_consecutive_failures"] = retry_count
             record["summary_error"] = copy.deepcopy(error)
+            record["summary_last_error"] = copy.deepcopy(error)
+            if retry_count >= max(1, int(max_attempts)):
+                record["summary_status"] = "exhausted"
+                record.pop("summary_retry_at", None)
+            else:
+                delays = tuple(max(1, int(value)) for value in retry_delays) or (30,)
+                delay = delays[min(retry_count - 1, len(delays) - 1)]
+                record["summary_status"] = "retry_wait"
+                record["summary_retry_at"] = (
+                    now + timedelta(seconds=delay)
+                ).isoformat()
         else:
             normalized_title = str(title or "").strip()
             normalized_summary = str(summary or "").strip()
@@ -1147,12 +1198,129 @@ def finish_summary_claim(
                 record["title_source"] = "auto"
             record["summary"] = normalized_summary
             record["summary_status"] = "completed"
+            record["summary_max_attempts"] = max(1, int(max_attempts))
             record["summary_completed_round"] = max(0, int(completed_round))
             record["summary_updated_at"] = now.isoformat()
+            if max(0, int(record.get("summary_attempt_count") or 0)) > 1:
+                record["summary_recovered_at"] = now.isoformat()
             record["summary_retry_count"] = 0
+            record["summary_consecutive_failures"] = 0
             record.pop("summary_retry_at", None)
             record.pop("summary_error", None)
+            record.pop("summary_checkpoint", None)
+            record.pop("summary_checkpoint_next_chunk", None)
+            record.pop("summary_checkpoint_total_chunks", None)
         record["summary_state_updated_at"] = now.isoformat()
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
+def defer_summary_claim(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    claim_id: str,
+    error: dict[str, Any],
+    delay_seconds: int = 30,
+) -> dict[str, Any] | None:
+    """Release a lease without consuming an automatic retry attempt."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
+            return None
+        record.pop("summary_claim_id", None)
+        record.pop("summary_claimed_at", None)
+        record["summary_attempt_count"] = max(
+            0, int(record.get("summary_attempt_count") or 0) - 1
+        )
+        now = datetime.now(timezone.utc)
+        record["summary_status"] = "retry_wait"
+        record["summary_retry_at"] = (
+            now + timedelta(seconds=max(1, int(delay_seconds)))
+        ).isoformat()
+        record["summary_error"] = copy.deepcopy(error)
+        record["summary_last_error"] = copy.deepcopy(error)
+        record["summary_state_updated_at"] = now.isoformat()
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
+def update_summary_checkpoint(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    claim_id: str,
+    next_chunk: int,
+    total_chunks: int,
+    title: str,
+    summary: str,
+) -> dict[str, Any] | None:
+    """Persist rolling summary progress while the current lease is valid."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
+            return None
+        record["summary_checkpoint"] = {
+            "title": str(title).strip(),
+            "summary": str(summary).strip(),
+            "target_round": max(0, int(record.get("summary_target_round") or 0)),
+        }
+        record["summary_checkpoint_next_chunk"] = max(0, int(next_chunk))
+        record["summary_checkpoint_total_chunks"] = max(0, int(total_chunks))
+        record["summary_state_updated_at"] = _now()
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
+def retry_summary(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Immediately requeue one incomplete closed-session summary."""
+
+    with index_lock(root, user):
+        path = index_path(root, user)
+        index = _normalize_index(_read_json(path))
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict):
+            return None
+        target_round = max(0, int(record.get("summary_target_round") or 0))
+        completed_round = max(0, int(record.get("summary_completed_round") or 0))
+        status = str(record.get("summary_status") or "none")
+        if (
+            record.get("lifecycle") != "closed"
+            or target_round < 1
+            or completed_round >= target_round
+            or not record.get("archive_window")
+            or status not in {"failed", "retry_wait", "exhausted"}
+        ):
+            return None
+        record["summary_status"] = "queued"
+        record["summary_retry_count"] = 0
+        record["summary_consecutive_failures"] = 0
+        record["summary_state_updated_at"] = _now()
+        for field in (
+            "summary_claim_id",
+            "summary_claimed_at",
+            "summary_retry_at",
+            "summary_error",
+        ):
+            record.pop(field, None)
         index["sessions"][key] = record
         return _write_index_unlocked(root, user, index)["sessions"][key]
 

@@ -559,7 +559,11 @@ def build_prompt_bundle(
 
     if settings.important_memory_max_chars > 0:
         important_path = root / "users" / user / "memory_temporary_important.md"
-        important = read_optional_text(important_path)
+        important = (
+            read_optional_text(important_path)
+            if store.important_view_is_current()
+            else ""
+        )
         injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
         if injected:
             memory_files.append("memory_temporary_important.md")
