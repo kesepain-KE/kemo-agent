@@ -9,6 +9,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from run.agent_runner import AgentOutputError
+from provider.factory import ProviderCongestionError
 from run.history import commit_window, empty_window, load_window, queue_memory_extraction
 from run.history_index import (
     close_session,
@@ -104,7 +105,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "第一行普通文本 第二行仍不是 JSON",
         )
         record = find_record(root, "alice", "web", "conv_failed")
-        self.assertEqual(record["summary_status"], "failed")
+        self.assertEqual(record["summary_status"], "retry_wait")
         self.assertEqual(record["summary_retry_count"], 1)
         self.assertTrue(record["summary_retry_at"])
         self.assertEqual(
@@ -150,6 +151,87 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             record["summary_error"]["raw_output_preview"],
             "[输出包含疑似敏感内容，已隐藏]",
         )
+
+    def test_summary_retry_resumes_from_persisted_chunk_checkpoint(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        archive = root / "users" / "alice" / "history" / "conv_chunked"
+        window = empty_window("alice", "web", "conv_chunked")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "第一轮" + "甲" * 26_000},
+            {"role": "assistant", "content": "第一答" + "乙" * 26_000},
+            {"role": "user", "content": "第二轮" + "丙" * 26_000},
+            {"role": "assistant", "content": "第二答" + "丁" * 26_000},
+        ]
+        window["data"].update(
+            {"rounds": 2, "memory_processed_round": 2, "memory_status": "completed"}
+        )
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "conv_chunked")
+        queue_summary(root, "alice", "web", "conv_chunked")
+        scheduler = MaintenanceScheduler(root, summary_retry_delays=(1,))
+
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.side_effect = [
+                SimpleNamespace(data={"title": "分块摘要第一阶段结果", "summary": "第一块历史内容已经完成摘要并写入持久断点，后续失败时无需重新处理。"}),
+                AgentOutputError("第二块暂时失败"),
+            ]
+            first = scheduler.process_next_summary("alice")
+        self.assertEqual(first["failed"][0]["round"], 2)
+        checkpointed = find_record(root, "alice", "web", "conv_chunked")
+        self.assertEqual(checkpointed["summary_checkpoint_next_chunk"], 1)
+        self.assertEqual(checkpointed["summary_checkpoint_total_chunks"], 2)
+
+        index = json.loads(index_path(root, "alice").read_text("utf-8"))
+        index["sessions"][session_key("web", "conv_chunked")]["summary_retry_at"] = "2000-01-01T00:00:00+00:00"
+        index_path(root, "alice").write_text(json.dumps(index), "utf-8")
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.return_value = SimpleNamespace(
+                data={"title": "分块摘要断点恢复完成", "summary": "第二块从持久断点继续处理，最终摘要成功写回且没有重复调用第一块内容。"}
+            )
+            second = scheduler.process_next_summary("alice")
+
+        self.assertEqual(second["processed"][0]["resumed_from_chunk"], 1)
+        self.assertEqual(runner_type.return_value.run.call_count, 1)
+        payload = runner_type.return_value.run.call_args.args[1]
+        self.assertEqual(payload["previous_summary"]["title"], "分块摘要第一阶段结果")
+        recovered = find_record(root, "alice", "web", "conv_chunked")
+        self.assertEqual(recovered["summary_status"], "completed")
+        self.assertTrue(recovered["summary_recovered_at"])
+
+    def test_provider_congestion_defers_without_consuming_retry(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        archive = root / "users" / "alice" / "history" / "conv_congested"
+        window = empty_window("alice", "web", "conv_congested")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "生成摘要"},
+            {"role": "assistant", "content": "等待可用模型槽位"},
+        ]
+        window["data"].update({"rounds": 1, "memory_processed_round": 1})
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "conv_congested")
+        queue_summary(root, "alice", "web", "conv_congested")
+
+        with patch("run.maintenance.AgentRunner") as runner_type:
+            runner_type.return_value.run.side_effect = ProviderCongestionError("Provider 繁忙")
+            result = MaintenanceScheduler(root).process_next_summary("alice")
+
+        self.assertTrue(result["failed"][0]["deferred"])
+        record = find_record(root, "alice", "web", "conv_congested")
+        self.assertEqual(record["summary_status"], "retry_wait")
+        self.assertEqual(record["summary_attempt_count"], 0)
+        self.assertEqual(record.get("summary_retry_count", 0), 0)
 
     def test_pending_committed_round_is_recovered_once(self) -> None:
         temporary = tempfile.TemporaryDirectory()

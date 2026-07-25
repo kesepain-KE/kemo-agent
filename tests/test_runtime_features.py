@@ -447,6 +447,91 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
 
+    def test_tool_loop_limit_commits_terminal_round_and_can_continue(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        global_path = root / "config" / "global_config.json"
+        config = json.loads(global_path.read_text("utf-8"))
+        config["tools"]["max_iterations"] = 1
+        global_path.write_text(json.dumps(config), "utf-8")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="正在查询",
+                    tool_calls=[
+                        ToolCall(id="pending-limit", name="lookup", arguments={"value": "x"})
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(10, 2, 12),
+                )
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "tool-limit",
+                        "prompt": "开始",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        terminal = events[-1]
+        self.assertEqual(terminal.type, "done")
+        self.assertTrue(terminal.metadata["committed"])
+        self.assertEqual(terminal.metadata["status"], "limited")
+        self.assertEqual(terminal.metadata["stop_reason"], "max_tool_iterations")
+        self.assertEqual(terminal.metadata["tool_calls"], 1)
+        window_path = find_window(root, "alice", "cli", "tool-limit")
+        window = load_window(window_path)
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["stop_reason"],
+            "max_tool_iterations",
+        )
+        self.assertEqual(window["text"]["messages"][0]["content"], "开始")
+        self.assertIn("最大次数 1", window["text"]["messages"][1]["content"])
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["status"], "not_executed")
+        self.assertEqual(
+            calls[0]["result"]["error"]["exception_type"],
+            "ToolLoopLimitExceeded",
+        )
+        durable_items = window["items"]["items"]
+        call_item = next(item for item in durable_items if item["type"] == "tool_call")
+        result_item = next(item for item in durable_items if item["type"] == "tool_result")
+        self.assertEqual(call_item["call_id"], "pending-limit")
+        self.assertEqual(result_item["call_id"], "pending-limit")
+        self.assertTrue(result_item["is_error"])
+
+        continue_provider = ScriptedProvider(
+            responses=[ChatResponse(text="继续完成", usage=Usage(5, 2, 7))]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            continued = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "tool-limit",
+                        "prompt": "继续",
+                    },
+                    root=root,
+                    provider_factory=lambda _: continue_provider,
+                )
+            )
+        self.assertEqual(continued[-1].type, "done")
+        resumed = load_window(window_path)
+        self.assertEqual(resumed["data"]["rounds"], 2)
+        self.assertEqual(resumed["text"]["messages"][-2]["content"], "继续")
+        self.assertEqual(resumed["text"]["messages"][-1]["content"], "继续完成")
+
     def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
@@ -545,9 +630,12 @@ class RuntimeFeatureTests(unittest.TestCase):
                 )
             )
 
-        error = events[-1]
-        self.assertEqual(error.type, "error")
-        guard = error.metadata["context_guard"]
+        terminal = events[-1]
+        self.assertEqual(terminal.type, "done")
+        self.assertTrue(terminal.metadata["committed"])
+        self.assertEqual(terminal.metadata["status"], "limited")
+        self.assertEqual(terminal.metadata["stop_reason"], "tool_context_limit")
+        guard = terminal.metadata["context_guard"]
         self.assertEqual(guard["measurement"], "provider_plus_increment")
         self.assertEqual(guard["provider_input_tokens"], 1_000)
         self.assertEqual(guard["incremental_tokens"], 110_000)
@@ -560,6 +648,15 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(file_diagnostic["path"], "large.txt")
         self.assertGreater(file_diagnostic["result_chars"], 0)
         self.assertNotIn("result", file_diagnostic)
+        window = load_window(
+            find_window(root, "alice", "cli", "provider-context-overflow")
+        )
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["stop_reason"],
+            "tool_context_limit",
+        )
 
     def test_completed_round_extracts_memory_after_history_commit(self) -> None:
         _, root = self.make_root()

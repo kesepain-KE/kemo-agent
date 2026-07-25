@@ -193,6 +193,30 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual([(item["filename"], item["content"]) for item in permanent], [(filename, "用户明确喜欢川菜。")])
         self.assertFalse((self.store.tier_dir("permanent") / "data.json").exists())
 
+    def test_non_explicit_candidate_cannot_overwrite_permanent_memory(self) -> None:
+        filename = self.add(
+            "稳定偏好",
+            "用户偏好简洁回复。",
+            explicit=True,
+        )
+        result = self.store.upsert_candidates(
+            [
+                {
+                    "filename": filename,
+                    "content": "助手猜测用户偏好冗长回复。",
+                    "explicit": False,
+                    "action": "upsert",
+                }
+            ],
+            now=self.start + timedelta(days=1),
+        )
+        self.assertEqual(result["skipped_permanent"], [filename])
+        self.assertEqual(result["updated"], [])
+        self.assertEqual(
+            self.store.fragment_path("permanent", filename).read_text("utf-8").strip(),
+            "用户偏好简洁回复。",
+        )
+
     def test_sensitive_credentials_are_rejected(self) -> None:
         self.assertTrue(contains_sensitive_credential("API Key: sk-abcdefghijk"))
         result = self.store.upsert_candidates(

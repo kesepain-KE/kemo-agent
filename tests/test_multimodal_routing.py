@@ -13,7 +13,12 @@ from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.assets import AssetDescriptor
 from provider.protocol.models import ImageContent, KemoResponse, MessageItem, ModelCapabilities, TextContent
 from provider.schema import ChatResponse
-from run.attachments import AttachmentError, UploadedAssetResolver, describe_uploaded_asset
+from run.attachments import (
+    AttachmentError,
+    UploadedAssetResolver,
+    describe_message_asset,
+    describe_uploaded_asset,
+)
 from run.engine import handle_request
 from run.context import estimate_messages_tokens
 from run.multimodal import configured_input_modalities, select_vision_route
@@ -270,6 +275,114 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertEqual(result["analysis"], "图片里有一只猫")
         self.assertEqual(result["model"], "vision-model")
         self.assertEqual(fake.request.model, "vision-model")
+
+    def test_dedicated_plugin_accepts_absolute_image_path_as_direct_input(self) -> None:
+        root, _ = self.make_root(vision="vision-model")
+        from plugins.multimodal import tool
+
+        absolute_image = root / "absolute-screen.png"
+        absolute_image.write_bytes(_PNG)
+
+        class FakeVisualProvider:
+            def __init__(self):
+                self.request = None
+
+            def create(self, request):
+                self.request = request
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[MessageItem(
+                        id="msg_absolute_visual_result",
+                        role=MessageRole.ASSISTANT,
+                        phase=MessagePhase.FINAL_ANSWER,
+                        content=[TextContent(text="绝对路径图片已识别")],
+                    )],
+                )
+
+        fake = FakeVisualProvider()
+        with patch.object(tool, "create_provider", return_value=fake):
+            result = tool.run(
+                "analyze_image",
+                instruction="描述图片",
+                paths=[str(absolute_image.resolve())],
+                context={
+                    "root": str(root),
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "absolute-path",
+                    "uploaded_files": [],
+                },
+            )
+        media = fake.request.input[0].content[1]
+        self.assertIsInstance(media, ImageContent)
+        self.assertEqual(media.source.kind, "inline_base64")
+        self.assertEqual(result["paths"], [str(absolute_image.resolve())])
+        self.assertRegex(result["asset_ids"][0], r"^asset_[0-9a-f]{32}$")
+
+    def test_inline_image_is_not_sent_to_text_only_main_model(self) -> None:
+        root, _ = self.make_root(input_modalities=["text"], vision="vision-model")
+        provider = RecordingProvider()
+        with self.assertRaisesRegex(Exception, "inline content 图片不能直接发送"):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "inline-image-text-main",
+                    "content": [{
+                        "type": "image",
+                        "source": {
+                            "kind": "inline_base64",
+                            "data": "iVBORw0KGgp0ZXN0LWltYWdlLXBheWxvYWQ=",
+                        },
+                        "mime_type": "image/png",
+                    }],
+                    "stream": False,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        self.assertEqual(provider.requests, [])
+
+    def test_external_message_asset_uses_dedicated_route_without_image_on_main(self) -> None:
+        root, _ = self.make_root(input_modalities=["text"], vision="vision-model")
+        plugin = root / "message" / "out" / "qq"
+        files = plugin / "files"
+        files.mkdir(parents=True)
+        (plugin / "message.json").write_text(
+            json.dumps({"bound_user": "alice", "files_dir": "files"}),
+            "utf-8",
+        )
+        external_image = files / "photo.png"
+        external_image.write_bytes(_PNG)
+        descriptor = describe_message_asset(
+            root,
+            "alice",
+            {"path": "files/photo.png", "name": "photo.png"},
+            source="qq",
+        )
+        provider = RecordingProvider()
+        result = handle_request(
+            {
+                "user": "alice",
+                "source": "message:qq",
+                "session_id": "external-image",
+                "prompt": "识别图片",
+                "uploaded_files": [descriptor],
+                "stream": False,
+            },
+            root=root,
+            provider_factory=lambda _: provider,
+        )
+        self.assertEqual(result["text"], "看到了图片")
+        chat = kemo_request_to_chat(provider.requests[0])
+        user_message = next(
+            item for item in reversed(chat.messages) if item["role"] == "user"
+        )
+        self.assertIsInstance(user_message["content"], str)
+        self.assertIn(descriptor["asset_id"], user_message["content"])
+        self.assertIn("需要查看时调用 multimodal 工具", user_message["content"])
 
     def test_kemo_generation_downloads_verified_artifact(self) -> None:
         root, _ = self.make_root()

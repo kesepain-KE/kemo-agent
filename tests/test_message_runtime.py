@@ -32,6 +32,7 @@ from message.transport import (
 )
 from run.history import commit_window, empty_window, session_messages
 from run.history_index import find_record, get_active, get_or_reserve_active
+from run.attachments import RunAssetResolver
 from run.runtime_host import RuntimeHost
 from run.cron_store import CronStore
 from run.tools import ToolDefinition, ToolRegistry
@@ -292,7 +293,7 @@ timestamp: 2026-07-18T14:31:25+08:00
 
     def test_file_queue_batch_attachment_route_send_log_and_cleanup(self) -> None:
         image = self.directory / "files" / "p1_0.png"
-        image.write_bytes(b"png-data")
+        image.write_bytes(b"\x89PNG\r\n\x1a\nmessage-image")
         text_file = self.directory / "files" / "p1_1.txt"
         text_file.write_text("TEXT_ATTACHMENT", "utf-8")
         config = MessagePluginConfig.load(self.root, self.directory)
@@ -363,8 +364,14 @@ timestamp: 2026-07-18T14:32:25+08:00
         self.assertIn("第二条群消息", group.text)
         private = next(item for item in received if item.chat_type == "private")
         payload = transport.request_payload(private)
-        self.assertEqual(payload["content"][0]["type"], "image")
-        self.assertEqual(payload["content"][0]["source"]["kind"], "inline_base64")
+        self.assertEqual(payload["content"], [])
+        self.assertEqual(len(payload["assets"]), 1)
+        self.assertEqual(payload["assets"][0]["origin"], "message_attachment")
+        self.assertEqual(payload["assets"][0]["media_kind"], "image")
+        resolved, _ = RunAssetResolver(
+            self.root, "alice", payload["assets"]
+        ).local_asset(payload["assets"][0]["asset_id"], expected_kind="image")
+        self.assertEqual(resolved, image.resolve())
         self.assertIn("TEXT_ATTACHMENT", payload["prompt"])
 
         for envelope in received:
@@ -839,6 +846,18 @@ class FakeMaintenance(FakeCron):
     pass
 
 
+class FakeSummaryScheduler(FakeCron):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wakes = 0
+
+    def wake(self) -> None:
+        self.wakes += 1
+
+    def status(self) -> dict[str, object]:
+        return {"running": self.running}
+
+
 class HostTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary, self.root = _root("alice")
@@ -875,6 +894,7 @@ class HostTests(unittest.TestCase):
             registry=registry,
             cron_scheduler=fake_cron or FakeCron(),
             maintenance_scheduler=FakeMaintenance(),
+            history_summary_scheduler=FakeSummaryScheduler(),
             provider_factory=lambda cfg: None,
             tool_registry_factory=lambda root, user: ToolRegistry({}),
             router=MessageRouter(
@@ -905,6 +925,7 @@ class HostTests(unittest.TestCase):
         self.assertTrue(host.running)
         self.assertEqual(cron.started, 1)
         self.assertEqual(host.maintenance.started, 1)
+        self.assertEqual(host.history_summaries.started, 1)
         self.assertEqual(len(CronStore(self.root, "alice").list_tasks()), 0)
         self.assertEqual(
             len(CronStore(self.root, "__system__", system=True).list_tasks()),
@@ -915,6 +936,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.state, "stopped")
         self.assertEqual(cron.stopped, 1)
         self.assertEqual(host.maintenance.stopped, 1)
+        self.assertEqual(host.history_summaries.stopped, 1)
 
     def test_runtime_host_cron_poll_honors_shortest_system_update_rate(self) -> None:
         host = RuntimeHost(
@@ -933,6 +955,25 @@ class HostTests(unittest.TestCase):
         self.assertIs(host.cron._transport_registry, host.router.transports)
         self.assertEqual(host.maintenance.poll_interval, 30)
 
+    def test_history_summary_config_invalid_values_use_safe_defaults(self) -> None:
+        host = RuntimeHost(
+            self.root,
+            config={
+                "history_summary": {
+                    "poll_interval": "bad",
+                    "max_jobs_per_cycle": "bad",
+                    "max_attempts": False,
+                    "retry_delays_seconds": [0, "bad"],
+                }
+            },
+            message_config={},
+            registry=TransportRegistry(),
+        )
+        self.assertEqual(host.history_summaries.poll_interval, 5)
+        self.assertEqual(host.history_summaries.max_jobs_per_cycle, 1)
+        self.assertEqual(host.maintenance.summary_max_attempts, 5)
+        self.assertEqual(host.maintenance.summary_retry_delays, (30, 120, 600, 1800))
+
     def test_background_switch_disables_cron_and_maintenance(self) -> None:
         cron = FakeCron()
         host = self._host(cron=False, fake_cron=cron)
@@ -940,6 +981,7 @@ class HostTests(unittest.TestCase):
         try:
             self.assertEqual(cron.started, 0)
             self.assertEqual(host.maintenance.started, 0)
+            self.assertEqual(host.history_summaries.started, 0)
             self.assertEqual(host.status()["components"]["background"]["state"], "stopped")
         finally:
             host.stop()

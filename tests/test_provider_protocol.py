@@ -29,6 +29,7 @@ from provider.protocol.models import (
     KemoResponse,
     Measurement,
     MessageItem,
+    ModelCapabilities,
     ReasoningItem,
     TextContent,
     ToolCallItem,
@@ -128,6 +129,13 @@ class NativeProvider:
     def create(self, request: KemoRequest) -> KemoResponse:
         self.requests.append(request)
         return make_response(request, response_id=f"resp_{len(self.requests)}")
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        return ModelCapabilities(
+            model=model,
+            input_modalities=["text", "image"],
+            output_modalities=["text"],
+        )
 
     def stream(self, request: KemoRequest):
         self.requests.append(request)

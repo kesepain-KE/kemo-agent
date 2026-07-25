@@ -276,6 +276,39 @@ class MemoryManageTests(unittest.TestCase):
                 context=context,
             )
 
+    def test_important_memory_agent_can_read_but_cannot_mutate_directly(self) -> None:
+        add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "source",
+            "stable source",
+        )
+        context = {
+            "root": str(self.root),
+            "user": "alice",
+            "agent": "memory_temporary_important",
+            "agent_trigger": "periodic_scan",
+        }
+        listed = run_memory_manage("list", "seven_days", context=context)
+        self.assertEqual(listed["total"], 1)
+        with self.assertRaises(PermissionError):
+            run_memory_manage(
+                "delete",
+                "seven_days",
+                filename="source.md",
+                context=context,
+            )
+        with self.assertRaises(PermissionError):
+            run_memory_manage(
+                "add",
+                "seven_days",
+                filename="blocked",
+                content="must be persisted by runtime",
+                context=context,
+            )
+
     def test_list_and_get_return_bounded_metadata_and_exact_content(self) -> None:
         filenames = []
         for index in range(4):
@@ -461,7 +494,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.3.0")
+        self.assertEqual(tool.version, "1.4.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),

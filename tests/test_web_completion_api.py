@@ -59,11 +59,19 @@ class WebCompletionApiTests(unittest.TestCase):
         self.assertEqual(body["summary"]["total_files"], 2)
         self.assertEqual(body["summary"]["total_dirs"], 1)
         self.assertEqual(
-            [(item["type"], item["name"]) for item in body["tree"]],
+            [(item["type"], item["name"]) for item in body["entries"]],
             [("directory", "nested"), ("file", "root.bin")],
         )
+        self.assertEqual(body["pagination"]["page_size"], 6)
+        self.assertEqual(body["pagination"]["total_items"], 2)
+        nested_listing = self.request(
+            app,
+            "GET",
+            "/api/users/alice/files/file_upload",
+            params={"path": "nested"},
+        ).json()
         self.assertEqual(
-            body["tree"][0]["children"][0]["relative_path"],
+            nested_listing["entries"][0]["relative_path"],
             "nested/a.txt",
         )
 
@@ -241,45 +249,39 @@ class WebCompletionApiTests(unittest.TestCase):
             self.request(app, "GET", "/api/users/alice/avatar").status_code,
             401,
         )
-        token = {"token": "token"}
-        missing = self.request(
-            app,
-            "GET",
-            "/api/users/alice/avatar",
-            params=token,
-        )
-        self.assertEqual(missing.status_code, 204)
+        async def authenticated_requests():
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                login = await client.post("/api/auth/token", json={"token": "token"})
+                missing = await client.get("/api/users/alice/avatar")
+                png = b"\x89PNG\r\n\x1a\n" + b"image-data"
+                uploaded = await client.post(
+                    "/api/users/alice/avatar",
+                    files={"file": ("avatar.png", png, "image/png")},
+                )
+                avatar = await client.get("/api/users/alice/avatar")
+                spoofed = await client.post(
+                    "/api/users/alice/avatar",
+                    files={"file": ("fake.png", b"not-an-image", "image/png")},
+                )
+                oversized = b"\x89PNG\r\n\x1a\n" + b"x" * AVATAR_MAX_BYTES
+                too_large = await client.post(
+                    "/api/users/alice/avatar",
+                    files={"file": ("large.png", oversized, "image/png")},
+                )
+                return login, missing, uploaded, avatar, spoofed, too_large, png
 
-        png = b"\x89PNG\r\n\x1a\n" + b"image-data"
-        uploaded = self.request(
-            app,
-            "POST",
-            "/api/users/alice/avatar",
-            params=token,
-            files={"file": ("avatar.png", png, "image/png")},
+        login, missing, uploaded, avatar, spoofed, too_large, png = asyncio.run(
+            authenticated_requests()
         )
+        self.assertEqual(login.status_code, 200)
+        self.assertNotIn("token=", str(login.request.url))
+        self.assertEqual(missing.status_code, 204)
         self.assertEqual(uploaded.status_code, 200)
         self.assertEqual(uploaded.json()["format"], "image/png")
-        avatar = self.request(app, "GET", "/api/users/alice/avatar", params=token)
         self.assertEqual(avatar.content, png)
         self.assertTrue(avatar.headers["content-type"].startswith("image/png"))
-
-        spoofed = self.request(
-            app,
-            "POST",
-            "/api/users/alice/avatar",
-            params=token,
-            files={"file": ("fake.png", b"not-an-image", "image/png")},
-        )
         self.assertEqual(spoofed.status_code, 400)
-        oversized = b"\x89PNG\r\n\x1a\n" + b"x" * AVATAR_MAX_BYTES
-        too_large = self.request(
-            app,
-            "POST",
-            "/api/users/alice/avatar",
-            params=token,
-            files={"file": ("large.png", oversized, "image/png")},
-        )
         self.assertEqual(too_large.status_code, 400)
 
     def test_user_and_global_soul_read_write_contract(self) -> None:

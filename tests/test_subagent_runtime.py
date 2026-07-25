@@ -264,6 +264,28 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(caught.exception.raw_text, "second invalid")
         self.assertIn("JSON 修复失败", str(caught.exception))
 
+    def test_history_summary_safely_truncates_slightly_overlong_fields(self) -> None:
+        title = "历史摘要轻微超长内容会安全截断处理结果"
+        summary = "这是一段用于验证历史摘要轻微超过长度限制时可以安全截断的内容，系统不会因此额外调用一次模型修复格式，同时仍会保留足够完整且可读的会话信息。" * 2
+        provider = MockProvider(
+            text=json.dumps({"title": title, "summary": summary}, ensure_ascii=False)
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_summary_trim",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+                },
+                max_tokens=512,
+            )
+        self.assertLessEqual(len(result.data["title"]), 24)
+        self.assertLessEqual(len(result.data["summary"]), 120)
+        self.assertEqual(len(provider.requests), 1)
+
     def test_runner_uses_loose_input_but_rejects_invalid_output_timeout_and_cancel(self) -> None:
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
             loose = self.runner(MockProvider()).run("context_manage", {"rounds": []})

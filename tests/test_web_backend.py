@@ -23,10 +23,16 @@ from run.history import (
     runtime_window_path,
     synthesize_items,
 )
+from run.history_index import (
+    claim_pending_summary,
+    close_session,
+    finish_summary_claim,
+    queue_summary,
+)
 from run.prompt import PROMPT_SECTION_ORDER
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
-from web.auth import WebAuthConfig, WebAuthConfigError
+from web.auth import WebAuthConfig, WebAuthConfigError, resolve_client_ip
 from web.service import ActiveRun, WebRunService, _usage_cache_tokens
 
 
@@ -131,6 +137,61 @@ class FakeService:
 
 
 class WebBackendTests(unittest.TestCase):
+    def test_file_space_lists_six_items_per_page_for_all_areas(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        download_root = root / "users" / "alice" / "download"
+        tmp_root = root / "tmp"
+        for directory in (upload_root, download_root, tmp_root):
+            directory.mkdir(parents=True, exist_ok=True)
+            for index in range(7):
+                (directory / f"item-{index}.txt").write_text(str(index), "utf-8")
+        nested = upload_root / "screenshots"
+        nested.mkdir()
+        (nested / "target.png").write_bytes(b"png")
+        service = WebRunService(root)
+
+        first = service.files("alice", "file_upload", page=1, page_size=6)
+        self.assertEqual(len(first["entries"]), 6)
+        self.assertEqual(first["entries"][0]["type"], "directory")
+        self.assertEqual(first["pagination"]["total_items"], 8)
+        self.assertEqual(first["pagination"]["total_pages"], 2)
+        self.assertTrue(first["pagination"]["has_next"])
+
+        last = service.files("alice", "file_upload", page=99, page_size=6)
+        self.assertEqual(last["pagination"]["page"], 2)
+        self.assertEqual(len(last["entries"]), 2)
+        self.assertFalse(last["pagination"]["has_next"])
+
+        nested_page = service.files(
+            "alice", "file_upload", path="screenshots", page=1, page_size=6
+        )
+        self.assertEqual(
+            [entry["relative_path"] for entry in nested_page["entries"]],
+            ["screenshots/target.png"],
+        )
+        search_page = service.files(
+            "alice", "file_upload", search="target", page=1, page_size=6
+        )
+        self.assertEqual(
+            [entry["relative_path"] for entry in search_page["entries"]],
+            ["screenshots/target.png"],
+        )
+
+        download_page = service.files("alice", "download", page=1, page_size=6)
+        tmp_page = service.tmp_files(page=1, page_size=6)
+        self.assertEqual(len(download_page["entries"]), 6)
+        self.assertEqual(len(tmp_page["entries"]), 6)
+
+        response = self.request(
+            create_app(service=service),
+            "GET",
+            "/api/users/alice/files/file_upload?page=2&page_size=6",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["pagination"]["page"], 2)
+        self.assertEqual(len(response.json()["entries"]), 2)
+
     def test_upload_avoids_overwrite_and_chat_validates_attached_file_paths(self) -> None:
         _, root = self.make_root()
         captured: list[dict[str, Any]] = []
@@ -231,6 +292,113 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
+
+    def test_version_endpoint_returns_sanitized_read_only_manifest(self) -> None:
+        _, root = self.make_root()
+        (root / "version.json").write_text(
+            json.dumps(
+                {
+                    "name": "kemo-agent",
+                    "version": "0.2.0",
+                    "schema_version": 1,
+                    "private_note": "must not leak",
+                    "components": {
+                        "web": {"version": "0.2.1", "description": "Web 前端+后端", "secret": "hidden"},
+                        "core": {"version": "0.2.0", "description": "核心引擎"},
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+        response = self.request(
+            create_app(root=root, service=WebRunService(root)),
+            "GET",
+            "/api/version",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["version"], "0.2.0")
+        self.assertEqual(response.json()["schema_version"], 1)
+        self.assertTrue(response.json()["read_only"])
+        self.assertEqual(
+            [item["id"] for item in response.json()["components"]],
+            ["core", "web"],
+        )
+        self.assertNotIn("must not leak", response.text)
+        self.assertNotIn("hidden", response.text)
+
+    def test_version_check_reports_remote_updates_without_changing_files(self) -> None:
+        _, root = self.make_root()
+        local = {
+            "name": "kemo-agent",
+            "version": "0.2.0",
+            "schema_version": 1,
+            "components": {
+                "core": {"version": "0.2.0", "description": "核心引擎"},
+                "agents": {"version": "0.2.0", "description": "子代理系统"},
+                "plugins": {"version": "0.2.0", "description": "工具插件生态"},
+                "web": {"version": "0.2.0", "description": "Web 前端+后端"},
+            },
+        }
+        remote = copy.deepcopy(local)
+        remote["version"] = "0.3.0"
+        remote["components"]["core"]["version"] = "0.3.0"
+        remote["components"]["web"]["version"] = "0.3.0"
+        (root / "version.json").write_text(json.dumps(local, ensure_ascii=False), "utf-8")
+        fetches: list[tuple[str, float]] = []
+
+        def fetcher(url: str, timeout: float) -> dict[str, Any]:
+            fetches.append((url, timeout))
+            return remote
+
+        service = WebRunService(root, version_manifest_fetcher=fetcher)
+        app = create_app(root=root, service=service)
+        response = self.request(app, "GET", "/api/version/check")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "update_available")
+        self.assertEqual(payload["local_version"], "0.2.0")
+        self.assertEqual(payload["remote_version"], "0.3.0")
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["commands"]["all"], f"{'python' if os.name == 'nt' else 'python3'} update.py --module all")
+        self.assertEqual(
+            [item["id"] for item in payload["components"] if item["status"] == "update_available"],
+            ["core", "web"],
+        )
+        self.assertEqual(len(fetches), 1)
+        self.assertEqual(json.loads((root / "version.json").read_text("utf-8")), local)
+
+        cached = self.request(app, "GET", "/api/version/check")
+        self.assertEqual(cached.status_code, 200, cached.text)
+        self.assertEqual(len(fetches), 1)
+        refreshed = self.request(app, "GET", "/api/version/check?refresh=true")
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(len(fetches), 2)
+
+    def test_version_check_reports_invalid_remote_manifest_as_failure(self) -> None:
+        _, root = self.make_root()
+        manifest = {
+            "name": "kemo-agent",
+            "version": "0.2.0",
+            "schema_version": 1,
+            "components": {
+                component: {"version": "0.2.0", "description": component}
+                for component in ("core", "agents", "plugins", "web")
+            },
+        }
+        (root / "version.json").write_text(json.dumps(manifest), "utf-8")
+        service = WebRunService(
+            root,
+            version_manifest_fetcher=lambda _url, _timeout: {"version": "not-a-version"},
+        )
+        response = self.request(
+            create_app(root=root, service=service),
+            "GET",
+            "/api/version/check",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "check_failed")
+        self.assertEqual(response.json()["error"]["code"], "invalid_version_manifest")
 
     def test_restart_endpoint_launches_detached_helper_for_requested_port(self) -> None:
         _, root = self.make_root()
@@ -449,6 +617,40 @@ class WebBackendTests(unittest.TestCase):
         disabled = WebAuthConfig()
         self.assertFalse(disabled.enabled)
         self.assertEqual(disabled.public_summary()["enabled"], False)
+        unlimited = WebAuthConfig.from_env({"WEB_AUTH_IP_MAX_FAILURES": ""})
+        self.assertEqual(unlimited.ip_max_failures, 0)
+        limited = WebAuthConfig.from_env(
+            {
+                "WEB_AUTH_IP_MAX_FAILURES": "5",
+                "WEB_AUTH_IP_WINDOW_SECONDS": "600",
+                "WEB_AUTH_IP_LOCK_SECONDS": "900",
+                "WEB_AUTH_TRUSTED_PROXIES": "127.0.0.1,10.0.0.0/8",
+            }
+        )
+        self.assertEqual(limited.ip_max_failures, 5)
+        self.assertTrue(limited.public_summary()["ip_rate_limit_enabled"])
+        with self.assertRaisesRegex(WebAuthConfigError, "必须是整数"):
+            WebAuthConfig.from_env({"WEB_AUTH_IP_MAX_FAILURES": "five"})
+        with self.assertRaisesRegex(WebAuthConfigError, "无效 IP"):
+            WebAuthConfig.from_env({"WEB_AUTH_TRUSTED_PROXIES": "not-an-ip"})
+
+    def test_client_ip_only_trusts_forwarded_header_from_configured_proxy(self) -> None:
+        self.assertEqual(
+            resolve_client_ip("203.0.113.9", "198.51.100.8", ("127.0.0.1",)),
+            "203.0.113.9",
+        )
+        self.assertEqual(
+            resolve_client_ip("127.0.0.1", "198.51.100.8", ("127.0.0.1",)),
+            "198.51.100.8",
+        )
+        self.assertEqual(
+            resolve_client_ip(
+                "127.0.0.1",
+                "198.51.100.8, 10.0.0.2",
+                ("127.0.0.1", "10.0.0.0/8"),
+            ),
+            "198.51.100.8",
+        )
 
     def test_token_and_password_auth_protect_business_api_and_persist_session(self) -> None:
         fake = FakeService()
@@ -475,16 +677,28 @@ class WebBackendTests(unittest.TestCase):
                     "/api/users",
                     headers={"Authorization": "Bearer token-secret"},
                 )
-                wrong = await client.get("/api/auth/status?token=wrong")
-                bootstrap = await client.get(
-                    "/api/auth/status?token=token-secret"
+                wrong = await client.post("/api/auth/token", json={"token": "wrong"})
+                password_before_token = await client.post(
+                    "/api/auth/login",
+                    json={"username": "alice", "password": "password-secret"},
+                )
+                token_step = await client.post(
+                    "/api/auth/token", json={"token": "token-secret"}
+                )
+                denied_after_token = await client.get("/api/users")
+                login = await client.post(
+                    "/api/auth/login",
+                    json={"username": "alice", "password": "password-secret"},
                 )
                 allowed = await client.get("/api/users")
                 settings = await client.get("/api/users/alice/settings")
                 refreshed = await client.get("/api/auth/status")
                 logout = await client.post("/api/auth/logout")
                 denied_again = await client.get("/api/users")
-                login = await client.post(
+                token_step_again = await client.post(
+                    "/api/auth/token", json={"token": "token-secret"}
+                )
+                login_again = await client.post(
                     "/api/auth/login",
                     json={"username": "alice", "password": "password-secret"},
                 )
@@ -496,13 +710,17 @@ class WebBackendTests(unittest.TestCase):
                     "denied_chat": denied_chat,
                     "header_only": header_only,
                     "wrong": wrong,
-                    "bootstrap": bootstrap,
+                    "password_before_token": password_before_token,
+                    "token_step": token_step,
+                    "denied_after_token": denied_after_token,
                     "allowed": allowed,
                     "settings": settings,
                     "refreshed": refreshed,
                     "logout": logout,
                     "denied_again": denied_again,
                     "login": login,
+                    "token_step_again": token_step_again,
+                    "login_again": login_again,
                     "allowed_by_password": allowed_by_password,
                 }
 
@@ -517,8 +735,14 @@ class WebBackendTests(unittest.TestCase):
         self.assertIsNone(fake.cancel_event)
         self.assertEqual(result["header_only"].status_code, 401)
         self.assertEqual(result["wrong"].status_code, 401)
-        self.assertEqual(result["bootstrap"].status_code, 200)
-        cookie = result["bootstrap"].headers["set-cookie"]
+        self.assertEqual(result["password_before_token"].status_code, 409)
+        self.assertEqual(result["token_step"].status_code, 200)
+        self.assertFalse(result["token_step"].json()["authenticated"])
+        self.assertEqual(result["token_step"].json()["stage"], "password")
+        self.assertEqual(result["denied_after_token"].status_code, 401)
+        self.assertEqual(result["login"].status_code, 200)
+        self.assertTrue(result["login"].json()["authenticated"])
+        cookie = result["token_step"].headers["set-cookie"]
         self.assertIn("kemo_test_session=", cookie)
         self.assertIn("httponly", cookie.lower())
         self.assertIn("samesite=lax", cookie.lower())
@@ -530,8 +754,80 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(result["refreshed"].json()["authenticated"])
         self.assertEqual(result["logout"].status_code, 200)
         self.assertEqual(result["denied_again"].status_code, 401)
-        self.assertEqual(result["login"].status_code, 200)
+        self.assertEqual(result["token_step_again"].status_code, 200)
+        self.assertEqual(result["login_again"].status_code, 200)
         self.assertEqual(result["allowed_by_password"].status_code, 200)
+
+    def test_password_only_authentication_establishes_full_session(self) -> None:
+        app = create_app(
+            service=FakeService(),
+            auth_config=WebAuthConfig(
+                username="alice",
+                password="password-secret",
+                session_secret="session-secret",
+            ),
+        )
+
+        async def invoke():
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                status = await client.get("/api/auth/status")
+                login = await client.post(
+                    "/api/auth/login",
+                    json={"username": "alice", "password": "password-secret"},
+                )
+                allowed = await client.get("/api/users")
+                return status, login, allowed
+
+        status, login, allowed = asyncio.run(invoke())
+        self.assertEqual(status.json()["stage"], "password")
+        self.assertFalse(status.json()["requires_both"])
+        self.assertTrue(login.json()["authenticated"])
+        self.assertEqual(login.json()["stage"], "authenticated")
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_authentication_failures_are_limited_per_ip_and_stage(self) -> None:
+        app = create_app(
+            service=FakeService(),
+            auth_config=WebAuthConfig(
+                access_token="token-secret",
+                session_secret="session-secret",
+                ip_max_failures=2,
+                ip_window_seconds=60,
+                ip_lock_seconds=30,
+            ),
+        )
+
+        async def invoke():
+            first_transport = httpx.ASGITransport(
+                app=app,
+                raise_app_exceptions=False,
+                client=("198.51.100.10", 1234),
+            )
+            second_transport = httpx.ASGITransport(
+                app=app,
+                raise_app_exceptions=False,
+                client=("198.51.100.11", 1234),
+            )
+            async with httpx.AsyncClient(transport=first_transport, base_url="http://test") as first:
+                first_failure = await first.post("/api/auth/token", json={"token": "wrong"})
+                locked = await first.post("/api/auth/token", json={"token": "wrong"})
+                blocked_correct = await first.post(
+                    "/api/auth/token", json={"token": "token-secret"}
+                )
+            async with httpx.AsyncClient(transport=second_transport, base_url="http://test") as second:
+                other_ip = await second.post(
+                    "/api/auth/token", json={"token": "token-secret"}
+                )
+            return first_failure, locked, blocked_correct, other_ip
+
+        first_failure, locked, blocked_correct, other_ip = asyncio.run(invoke())
+        self.assertEqual(first_failure.status_code, 401)
+        self.assertEqual(locked.status_code, 429)
+        self.assertEqual(locked.json()["error"]["code"], "auth_rate_limited")
+        self.assertEqual(locked.headers["retry-after"], "30")
+        self.assertEqual(blocked_correct.status_code, 429)
+        self.assertEqual(other_ip.status_code, 200)
 
     def test_user_config_api_is_redacted_and_read_only(self) -> None:
         _, root = self.make_root()
@@ -561,7 +857,7 @@ class WebBackendTests(unittest.TestCase):
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 denied = await client.get("/api/users/alice/config/full")
-                await client.get("/api/auth/status?token=view-token")
+                await client.post("/api/auth/token", json={"token": "view-token"})
                 loaded = await client.get("/api/users/alice/config/full")
                 blocked = await client.put(
                     "/api/users/alice/config",
@@ -605,7 +901,9 @@ class WebBackendTests(unittest.TestCase):
             async with httpx.AsyncClient(
                 transport=first_transport, base_url="http://test"
             ) as first_client:
-                login = await first_client.get("/api/auth/status?token=token")
+                login = await first_client.post(
+                    "/api/auth/token", json={"token": "token"}
+                )
                 cookie = first_client.cookies.get("instance_one")
             async with httpx.AsyncClient(
                 transport=second_transport, base_url="http://test"
@@ -1462,6 +1760,62 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(bulk_response.status_code, 409)
         self.assertEqual(bulk_response.json()["error"]["code"], "conflict")
         self.assertTrue(window_dir.is_dir())
+
+    def test_history_summary_manual_retry_api_requeues_and_wakes_worker(self) -> None:
+        _, root = self.make_root()
+        archive = root / "users" / "alice" / "history" / "summary-window"
+        window = empty_window("alice", "web", "summary-retry")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "请总结"},
+            {"role": "assistant", "content": "稍后生成摘要"},
+        ]
+        window["data"]["rounds"] = 1
+        commit_window(archive, window)
+        close_session(root, "alice", "web", "summary-retry")
+        queue_summary(root, "alice", "web", "summary-retry")
+        claim = claim_pending_summary(root, "alice")
+        finish_summary_claim(
+            root,
+            "alice",
+            "web",
+            "summary-retry",
+            claim_id=claim["summary_claim_id"],
+            error={"message": "首次生成失败"},
+        )
+        wakes: list[bool] = []
+        service = WebRunService(root, summary_waker=lambda: wakes.append(True))
+        app = create_app(service=service)
+
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/summary-retry/summary/retry",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["queued"])
+        self.assertEqual(response.json()["session"]["summary_status"], "queued")
+        self.assertEqual(wakes, [True])
+        missing = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/missing/summary/retry",
+        )
+        self.assertEqual(missing.status_code, 404)
+
+        open_window = empty_window("alice", "web", "open-summary")
+        open_window["text"]["messages"] = [{"role": "user", "content": "尚未关闭"}]
+        open_window["data"]["rounds"] = 1
+        commit_window(
+            root / "users" / "alice" / "history" / "open-summary-window",
+            open_window,
+        )
+        conflict = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/open-summary/summary/retry",
+        )
+        self.assertEqual(conflict.status_code, 409)
 
     def test_not_found_invalid_source_and_cross_user_session(self) -> None:
         _, root = self.make_root()

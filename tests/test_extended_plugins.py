@@ -173,6 +173,188 @@ class FilePluginTests(unittest.TestCase):
             self.assertEqual(decoded["content"], japanese)
             self.assertEqual(decoded["encoding"], "cp932")
 
+    def test_edit_preserves_newline_styles_bom_and_untouched_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            cases = {
+                "lf.txt": (b"alpha\nbeta\n", b"one\ntwo\n", "LF"),
+                "crlf.txt": (b"alpha\r\nbeta\r\n", b"one\r\ntwo\r\n", "CRLF"),
+                "cr.txt": (b"alpha\rbeta\r", b"one\rtwo\r", "CR"),
+            }
+            for filename, (source, expected, style) in cases.items():
+                with self.subTest(filename=filename):
+                    target = root / filename
+                    target.write_bytes(source)
+                    result = run_file(
+                        "edit",
+                        filename,
+                        edit_mode="replace_text",
+                        old_text="alpha\nbeta",
+                        new_text="one\ntwo",
+                        create_backup=False,
+                        context=context,
+                    )
+                    self.assertEqual(target.read_bytes(), expected)
+                    self.assertEqual(result["newline_style"], style)
+                    self.assertTrue(result["changed"])
+
+            mixed = root / "mixed.txt"
+            mixed.write_bytes(b"a\r\nb\nc\rd")
+            result = run_file(
+                "edit",
+                "mixed.txt",
+                edit_mode="replace_text",
+                old_text="b\nc",
+                new_text="B\nC",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(mixed.read_bytes(), b"a\r\nB\nC\rd")
+            self.assertEqual(result["newline_style"], "mixed")
+
+            bom = root / "bom.txt"
+            bom.write_bytes(b"\xef\xbb\xbfalpha\r\nbeta\r\n")
+            run_file(
+                "edit",
+                "bom.txt",
+                edit_mode="replace_text",
+                old_text="alpha",
+                new_text="ALPHA",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(bom.read_bytes(), b"\xef\xbb\xbfALPHA\r\nbeta\r\n")
+
+    def test_line_and_range_edits_do_not_add_blank_lines_or_change_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+
+            with_eof = root / "with-eof.txt"
+            with_eof.write_bytes(b"A\r\nB\r\n")
+            run_file(
+                "edit",
+                with_eof.name,
+                edit_mode="replace_line",
+                line=1,
+                new_text="X\n",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(with_eof.read_bytes(), b"X\r\nB\r\n")
+
+            without_eof = root / "without-eof.txt"
+            without_eof.write_bytes(b"A\nB")
+            run_file(
+                "edit",
+                without_eof.name,
+                edit_mode="replace_line",
+                line=2,
+                new_text="X\n",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(without_eof.read_bytes(), b"A\nX")
+
+            ranged = root / "range.txt"
+            ranged.write_bytes(b"A\r\nB\r\nC\r\n")
+            run_file(
+                "edit",
+                ranged.name,
+                edit_mode="replace_range",
+                line=1,
+                end_line=2,
+                new_text="X\nY\n",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(ranged.read_bytes(), b"X\r\nY\r\nC\r\n")
+
+    def test_edit_new_text_compatibility_deletion_bounds_and_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            target = root / "edit.txt"
+            target.write_bytes(b"alpha beta\n")
+
+            legacy = run_file(
+                "edit",
+                target.name,
+                edit_mode="replace_text",
+                old_text="alpha",
+                content="ALPHA",
+                create_backup=False,
+                context=context,
+            )
+            self.assertTrue(legacy["changed"])
+            deleted = run_file(
+                "edit",
+                target.name,
+                edit_mode="replace_text",
+                old_text=" beta",
+                new_text="",
+                create_backup=False,
+                context=context,
+            )
+            self.assertEqual(target.read_bytes(), b"ALPHA\n")
+            self.assertEqual(deleted["replacements"], 1)
+
+            before = target.read_bytes()
+            with self.assertRaisesRegex(ValueError, "必须完全一致"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="replace_text",
+                    old_text="ALPHA",
+                    content="one",
+                    new_text="two",
+                    context=context,
+                )
+            with self.assertRaisesRegex(ValueError, "超出范围"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="insert",
+                    line=1,
+                    column=100,
+                    new_text="x",
+                    context=context,
+                )
+            self.assertEqual(target.read_bytes(), before)
+
+            noop = run_file(
+                "edit",
+                target.name,
+                edit_mode="replace_text",
+                old_text="ALPHA",
+                new_text="ALPHA",
+                context=context,
+            )
+            self.assertFalse(noop["changed"])
+            self.assertFalse(noop["backup_created"])
+            self.assertFalse((root / "edit.txt.bak").exists())
+
+    def test_atomic_edit_failure_keeps_original_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            target = root / "atomic.txt"
+            target.write_bytes(b"before\r\n")
+            with patch("plugins.file.tool.os.replace", side_effect=OSError("replace failed")):
+                result = run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="replace_text",
+                    old_text="before",
+                    new_text="after",
+                    create_backup=False,
+                    context=context,
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(target.read_bytes(), b"before\r\n")
+            self.assertEqual(list(root.glob(".atomic.txt.*.tmp")), [])
+
     def test_search_supports_source_files_and_reports_large_skips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -235,7 +417,7 @@ class FilePluginTests(unittest.TestCase):
         registry = discover_tools(PROJECT_ROOT, "alice")
         schema = registry.get("file").input_schema
         self.assertEqual(set(schema["properties"]["action"]["enum"]), set(FILE_ACTIONS))
-        for name in ("recursive", "max_bytes", "max_file_bytes", "algorithm"):
+        for name in ("recursive", "max_bytes", "max_file_bytes", "algorithm", "new_text"):
             self.assertIn(name, schema["properties"])
         self.assertEqual(schema["properties"]["max_bytes"]["maximum"], 536_870_912)
 
