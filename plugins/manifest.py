@@ -78,6 +78,15 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
         raise PluginManifestError(f"插件 version 必须是非空字符串：{path}")
     if not isinstance(raw["enabled"], bool):
         raise PluginManifestError(f"插件 enabled 必须是布尔值：{path}")
+    timeout_policy = raw.get("timeout_policy", "argument_or_default")
+    if not isinstance(timeout_policy, str) or timeout_policy not in {
+        "argument_or_default",
+        "agent_runtime",
+    }:
+        raise PluginManifestError(
+            "插件 timeout_policy 必须是 argument_or_default 或 agent_runtime："
+            f"{path}"
+        )
     entrypoint = raw["entrypoint"]
     if not isinstance(entrypoint, str):
         raise PluginManifestError(f"插件 entrypoint 必须是字符串：{path}")

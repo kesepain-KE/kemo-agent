@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import inspect
 import json
+import math
 import sys
 import threading
 import time
@@ -33,6 +34,11 @@ class ToolTimeoutError(ToolError):
 
 class ToolCancelledError(ToolError):
     """The user explicitly cancelled the run while a tool was executing."""
+
+
+_TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
+_TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
+_AGENT_TOOL_WATCHDOG_GRACE = 5.0
 
 
 def tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
@@ -117,6 +123,7 @@ class ToolDefinition:
     entrypoint: str
     source: str
     directory: Path
+    timeout_policy: str = "argument_or_default"
     overrides: list[str] = field(default_factory=list)
     _callable: Callable[..., Any] | None = field(default=None, repr=False)
 
@@ -205,6 +212,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
         entrypoint=str(raw["entrypoint"]),
         source="plugins",
         directory=manifest.descriptor.path.parent,
+        timeout_policy=str(raw.get("timeout_policy") or "argument_or_default"),
     )
 
 
@@ -275,6 +283,46 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> Non
                 raise ToolValidationError(f"参数 {name} 大于最大值 {rule['maximum']}")
 
 
+def _positive_timeout(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ToolValidationError(f"{field} 必须是正数")
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolValidationError(f"{field} 必须是正数") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ToolValidationError(f"{field} 必须是正数")
+    return timeout
+
+
+def resolve_tool_timeout(
+    tool: ToolDefinition,
+    arguments: dict[str, Any],
+    *,
+    default_timeout: float,
+    context: dict[str, Any] | None = None,
+) -> float:
+    """Resolve one tool watchdog deadline from its declared runtime policy."""
+
+    default = _positive_timeout(default_timeout, field="tools.timeout")
+    if tool.timeout_policy not in _TIMEOUT_POLICIES:
+        raise ToolValidationError(
+            f"工具 {tool.name} timeout_policy 无效：{tool.timeout_policy}"
+        )
+    if tool.timeout_policy == "agent_runtime":
+        runtime_timeout = (context or {}).get("agent_timeout", default)
+        return _positive_timeout(
+            runtime_timeout,
+            field="agent_runtime.default_timeout",
+        ) + _AGENT_TOOL_WATCHDOG_GRACE
+
+    properties = tool.input_schema.get("properties") or {}
+    timeout_rule = properties.get("timeout")
+    if "timeout" in arguments and isinstance(timeout_rule, dict):
+        return _positive_timeout(arguments["timeout"], field="参数 timeout")
+    return default
+
+
 def _invoke(function: Callable[..., Any], arguments: dict[str, Any], context: dict[str, Any]) -> Any:
     signature = inspect.signature(function)
     kwargs = dict(arguments)
@@ -297,23 +345,45 @@ def execute_tool(
     validate_arguments(tool.input_schema, arguments)
     if cancel_event is not None and cancel_event.is_set():
         raise ToolCancelledError("工具调用因用户紧急停止而取消")
+    effective_timeout = resolve_tool_timeout(
+        tool,
+        arguments,
+        default_timeout=timeout,
+        context=context,
+    )
+    tool_cancel_event = threading.Event()
     invocation_context = dict(context)
-    if cancel_event is not None:
-        invocation_context["cancel_event"] = cancel_event
+    invocation_context["tool_timeout"] = effective_timeout
+    invocation_context["cancel_event"] = tool_cancel_event
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{tool.name}")
     future = executor.submit(
         _invoke, tool.load_callable(), arguments, invocation_context
     )
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + effective_timeout
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
+                tool_cancel_event.set()
                 future.cancel()
                 raise ToolCancelledError("工具调用因用户紧急停止而取消")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                tool_cancel_event.set()
                 future.cancel()
-                raise ToolTimeoutError(f"工具 {tool.name} 执行超时（{timeout:g}s）")
+                cleanup_deadline = time.monotonic() + _TOOL_TIMEOUT_CLEANUP_GRACE
+                while not future.done():
+                    cleanup_remaining = cleanup_deadline - time.monotonic()
+                    if cleanup_remaining <= 0:
+                        break
+                    try:
+                        future.result(timeout=min(0.05, cleanup_remaining))
+                    except FutureTimeout:
+                        continue
+                    except BaseException:
+                        break
+                raise ToolTimeoutError(
+                    f"工具 {tool.name} 执行超时（{effective_timeout:g}s）"
+                )
             try:
                 return future.result(timeout=min(0.1, remaining))
             except FutureTimeout:
