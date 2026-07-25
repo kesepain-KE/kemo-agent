@@ -103,7 +103,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 全局配置 | `config/global_config.json` | 框架全局默认值 |
 | 消息配置 | `config/message_config.json` | 外部账号绑定与 Transport 配置（可选，不存在时使用默认值） |
 | 外部消息插件 | `message/out/<platform>/` | 文件夹级平台适配器、文件消息队列、附件、状态与日志 |
-| 外部消息附件 | `message/out/<platform>/files/` | 各平台消息模块的收发文件存放处。文件名保留原始名称（可能来自不同操作系统和设备），智能体在处理附件时应使用绝对路径。例：`message/out/telegram/files/` |
+| 外部消息附件 | `message/out/<platform>/files/` | 各平台消息模块的收发文件存放处。核心会把入站附件登记为当前 Run 的资产；智能体优先使用 `asset_id`，明确的绝对路径也可直接交给多模态工具。例：`message/out/telegram/files/` |
 | 全局人格 | `config/global_soul.md` | 安全底线，不可覆盖 |
 | 用户配置 | `users/<name>/user_config.json` | 覆盖全局配置 |
 | 用户人格 | `users/<name>/user_soul.md` | 用户偏好与风格 |
@@ -145,7 +145,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - RuntimeHost 启动时只扫描 `message/out/` 的直接子目录，并只加载 `message.json` 明确声明的 `input`、`output`、`detect` 三个模块；目录中的其他 Python 文件不会被核心自动执行。
 - `message.json.bound_user` 将整个平台插件绑定到一个现有内部用户；传统 Transport 仍使用 `config/message_config.json` 的外部身份映射。
 - `message.md` 是可恢复的文件队列。群聊中同一外部会话的累积消息合并为一次 Run；私聊逐条处理。
-- 附件必须位于插件的 `files_dir` 内。图片、音频和 PDF 转换为 Kemo Content Blocks；文本文件直接并入请求；视频和未知类型仅注入文件说明。
+- 附件必须使用非空的插件目录相对路径并位于该插件的 `files_dir` 内。文本文件正文直接并入请求；其他文件统一登记为带 `asset_id`、校验和、来源和媒体类型的当前 Run 资产，再由主模型能力路由或 `multimodal` 工具处理。平台模块不得自行决定是否把图片 Base64 直传主模型。
 - 每条终态结果写入 `log/YYYY-MM-DD.md`，随后删除本批次已处理附件；健康检测结果与收发计数写入 `state.json`。
 
 ### 插件发现规则
@@ -297,7 +297,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 
 ## 5. 工具使用规则
 
-- **`action` 必填参数**：以下工具使用统一的 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会导致调用失败并报「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、`task_time`、`expand_creater`、`external_message`、`sense_creater`、`skill_creater`。特别注意 `file` 工具的所有操作（读、写、编辑、搜索、复制、移动、删除等）都必须带 `action`——例如编辑文件应传 `action: "edit"`，编辑内容参数名为 `content`（不是 `new_text`），模式参数为 `edit_mode`。
+- **`action` 必填参数**：以下工具使用统一的 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会导致调用失败并报「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、`task_time`、`expand_creater`、`external_message`、`sense_creater`、`skill_creater`。特别注意 `file` 工具的所有操作（读、写、编辑、搜索、复制、移动、删除等）都必须带 `action`；编辑文件应传 `action: "edit"`、`edit_mode` 和推荐的新内容参数 `new_text`，旧参数 `content` 仅作兼容。
+- **文件编辑安全流程**：已有文件的小范围修改禁止使用 `write` 覆盖全文。编辑前先读取目标范围；精确文本块使用 `replace_text`，单行使用 `replace_line`，连续多行使用 `replace_range`。`replace_line`/`replace_range` 的 `new_text` 末尾不要主动附加换行。`replace_text` 默认使用 `expected_count=1`；匹配失败后重新读取，禁止直接改成 `-1` 强行替换，只有用户明确要求批量替换时才可使用 `expected_count=-1`。编辑后必须重新读取目标范围验证格式和内容。
 - **`scope` 必填参数**：`expand_creater` 和 `skill_creater` 的 `scope` 为必填，漏传会报「缺少必填参数：scope」。取值仅 `"user"`（当前用户私有的拓展/技能）或 `"shared"`（所有用户共享），不存在 `"global"`。创建前应在流程中向用户确认 scope，不得自行猜测。
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
@@ -344,12 +345,20 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 永久层只保存 Markdown，不存在 `data.json`。
 - 当前文件检索只使用文件名，不接入关键词、实体、向量或 `kemo-graph`。
 
+### 临时重要热画像
+
+- `memory_temporary_important.md` 是从临时微记忆派生的可重建热视图，不是第五个生命周期挡位，也不是永久记忆的前置层。
+- `improve/important_view.json` 保存热画像当前引用的临时源文件名及内容摘要。临时源仍是权威数据，继续正常加权、到期和晋升。
+- 已进入热画像且内容摘要仍匹配的源碎片不再重复注入普通临时记忆段；任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容恢复正常注入，等待下次巡检重建。
+- 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像、来源索引、永久融合和临时副本清理由运行时统一原子持久化，子代理不得直接增删改记忆文件。
+- 普通记忆提取不得覆盖已有永久正文；只有用户本轮明确要求记住的 `explicit=true` 候选才允许更新永久记忆。
+
 ### 注入
 
 - 永久记忆全部注入，不设置文件数量上限。
 - 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
-- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
+- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。普通临时段跳过其有效来源引用以避免重复注入。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
 - `memory.extraction_mode=compression_only` 时，普通提交只登记 `deferred` 游标，保存会话或上下文压缩时才顺序提取。
 - `background` 模式允许 Maintenance 领取普通 `pending` 轮次；`on_commit` 模式同步提取。提取失败可按租约重试，不回滚已提交历史。
 - 待提取轮次按 `memory.extraction_batch_rounds` 组成连续批次，一次交给 `self_improve` 分析；候选统一匹配、去重并通过带稳定 operation_id 的 `upsert_candidates` 批量落盘，成功后才推进到批次末尾游标。
@@ -409,7 +418,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 |--------|------|------|
 | `context_manage` | `agents/context_manage/` | 统一处理轮次、Token、API 超限和逐轮工具/思考压缩 |
 | `self_improve` | `agents/self_improve/` | 记忆提取与自我改进 |
-| `memory_temporary_important` | `agents/memory_temporary_important/` | 临时重要记忆处理 |
+| `memory_temporary_important` | `agents/memory_temporary_important/` | 维护可重建热画像、来源索引与永久重复协调 |
 | `task_plan` | `agents/task_plan/` | 任务计划生成与执行 |
 | `time_plan` | `agents/time_plan/` | 定时任务处理 |
 | `history_summary` | `agents/history_summary/` | 为已关闭历史对话生成卡片标题与摘要 |
@@ -592,10 +601,13 @@ system prompt 按以下固定顺序拼接：
 ### Web 启动与认证
 
 - Web 监听参数优先级为：显式 CLI 参数 > `WEB_HOST` / `WEB_PORT` > `127.0.0.1:1357`。
-- `WEB_ACCESS_TOKEN` 启用 Token 认证；访问 URL 使用 `?token=...` 建立会话，Web 不读取 `Authorization: Bearer`。
+- `WEB_ACCESS_TOKEN` 启用 Token 认证；登录页通过 `POST /api/auth/token` 请求体验证，Token 不进入 URL、Cookie 或浏览器存储，Web 不读取 `Authorization: Bearer`。
 - `WEB_USERNAME` 与 `WEB_PASSWORD` 必须同时配置；它们表示 Web 页面使用者，与内部多用户目录无关。
+- 只启用 Token 或账号密码时，完成对应验证即可进入；两者同时启用时必须先 Token、再账号密码，不能用任一单因素会话绕过。第一阶段状态有效 5 分钟。
 - `WEB_SESSION_SECRET` 为空时启动过程自动生成 64 字符随机密钥；签名会话默认有效期 2 小时。
 - `WEB_SESSION_COOKIE_NAME` 用于多实例 Cookie 隔离。
+- `WEB_AUTH_IP_MAX_FAILURES` 按“客户端 IP + 认证阶段”限制失败次数，留空或 `0` 表示不限；统计窗口和锁定时间分别由 `WEB_AUTH_IP_WINDOW_SECONDS`、`WEB_AUTH_IP_LOCK_SECONDS` 控制，达到上限返回 429 与 `Retry-After`。限制状态仅存在当前 Web 进程内。
+- `WEB_AUTH_TRUSTED_PROXIES` 是逗号分隔的可信代理 IP/CIDR；只有直连来源命中该列表时才解析 `X-Forwarded-For`，留空时始终采用直连 IP。
 - Web 使用 HttpOnly 签名会话 Cookie。未认证请求只能访问静态前端、`/api/health`、`/api/logo` 和 `/api/auth/*`，其余业务 API 统一返回 401。
 - Settings 和 Health 只返回认证状态，不返回 Token、用户名、密码、Session Secret 或 Cookie 内容。
 - Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
@@ -615,6 +627,8 @@ system prompt 按以下固定顺序拼接：
 - `chat` 模式只保证文本、工具和图片识别，只信任 `provider.input_modalities` 的显式图片声明，不根据模型名称猜测。
 - `kemo` 模式支持图片、音频、视频、普通文件和媒体生成；输入/输出模态与 `extensions.operations` 必须同时满足。
 - 主模型明确支持相应输入时优先直传；否则由 `multimodal` 插件调用专用模型。Kemo 大型媒体通过认证 Asset API 传输，生成结果校验后保存到用户下载空间；Base64 和临时 URL 不进入长期历史。
+- Web 上传、外部消息附件和显式本地路径使用统一的运行资产解析。外部消息媒体不能绕过能力判断成为 inline Content Block；不支持该模态的主模型只接收资产说明，由专用工具读取资产。
+- `multimodal.paths` 接受绝对路径或相对项目根目录的明确本地媒体路径。路径经存在性、普通文件、类型、签名和大小校验后，Chat 图片直接编码给专用视觉模型，Kemo 媒体通过 Asset API 上传。路径输入调用的是专用多模态模型，不等于把媒体发送给主模型。
 
 ### 网络与插件环境
 

@@ -93,6 +93,12 @@
   "runtime_host": {
     "enable_background_scheduler": true
   },
+  "history_summary": {
+    "poll_interval": 5,
+    "max_jobs_per_cycle": 1,
+    "max_attempts": 5,
+    "retry_delays_seconds": [30, 120, 600, 1800]
+  },
   "message": {
     "max_workers": 8,
     "max_queued_messages": 20
