@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +67,15 @@ def run(
             raise ValueError(f"{agent} 必须同步调用，以便完成校验和持久化")
         payload = invocation.payload
         if wait:
-            result = AgentRunner(root, user, config=config).run(agent, payload)
+            cancel_event = context.get("cancel_event")
+            if not isinstance(cancel_event, threading.Event):
+                cancel_event = None
+            run_kwargs = (
+                {"cancel_event": cancel_event} if cancel_event is not None else {}
+            )
+            result = AgentRunner(root, user, config=config).run(
+                agent, payload, **run_kwargs
+            )
             persisted = None
             if isinstance(result.data, dict):
                 persisted = persist_main_agent_result(

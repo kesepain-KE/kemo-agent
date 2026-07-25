@@ -74,6 +74,7 @@
 - `self_improve` 由主智能体调用时只允许 `manual_review`；压缩提取和记忆晋升模式属于引擎/调度器私有入口。
 - `context_manage` 是引擎内部代理，不出现在公开列表中；手动压缩必须走 `/compress` 对应的会话管线。
 - 其他公开子代理只获得自身 `agent-config.json` 声明的能力以及调用方显式输入，不会继承主智能体的工具权限。
+- 同步调用遵循 `agent_runtime.default_timeout`，不会被普通 `tools.timeout` 提前截断；达到子代理期限后框架自动请求取消，并如实返回 `timed_out` 或 `timed_out_running` 状态。
 
 ## Tool
 
@@ -142,6 +143,7 @@
   },
   "version": "1.0.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "timeout_policy": "agent_runtime"
 }
 ```

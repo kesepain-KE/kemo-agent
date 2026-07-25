@@ -13,7 +13,7 @@ HTTP 网络请求与网页正文读取。支持五种 REST 请求方法和三种
    - 提取网页正文、阅读文章 → `read`（不是 `get`）
 2. **选择 read 策略**：一般网页使用默认 `auto`，先本地解析，失败或正文为空时回退 reader；只允许本地解析时使用 `direct`；明确使用第三方服务时使用 `reader`。
 3. **选择 reader 服务**：`jina` 最稳定且通用，是 `auto` 的默认服务；`markdown_new` 输出干净 Markdown，适合存档；`defuddle` 擅长去广告和干扰内容。
-4. **控制超时与大小**：`timeout` 默认来自 `global_config.json → tools.timeout`；`max_chars` 仅供 `read` 使用，默认 20000、上限 100000；`max_bytes` 供其他 action 使用，默认 2MB、上限 10MB。
+4. **控制超时与大小**：未显式提供时，`timeout` 默认来自 `global_config.json → tools.timeout`；显式有效值会同时覆盖网络请求期限和框架外层看门狗。`max_chars` 仅供 `read` 使用，默认 20000、上限 100000；`max_bytes` 供其他 action 使用，默认 2MB、上限 10MB。
 5. **处理错误**：失败时读取 `error` 字段，不盲目重复请求。HTTP 错误会返回状态原因，连接错误会返回连接失败原因。
 
 ## 输出字段
