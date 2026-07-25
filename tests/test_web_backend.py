@@ -1395,7 +1395,7 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch("web.service.AgentRunner", return_value=object()),
             patch(
-                "run.engine._extract_round_memory",
+                "run.conversation_runtime._extract_round_memory",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -1538,8 +1538,8 @@ class WebBackendTests(unittest.TestCase):
 
         with (
             patch("web.service.AgentRunner", return_value=object()),
-            patch("run.engine._analyze_memory_batch", side_effect=extract) as extracted,
-            patch("run.engine._persist_round_memory_analysis", side_effect=persist),
+            patch("run.memory_analysis.analyze_memory_batch", side_effect=extract) as extracted,
+            patch("run.memory_analysis.persist_round_memory_analysis", side_effect=persist),
         ):
             app = create_app(service=WebRunService(root))
             response = self.request(

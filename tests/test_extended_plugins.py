@@ -62,6 +62,10 @@ class PluginManifestTests(unittest.TestCase):
 
         registry = discover_tools(PROJECT_ROOT, "alice")
         self.assertEqual(len(registry.tools), 15)
+        self.assertEqual(
+            registry.get("subagent_dispatch").timeout_policy,
+            "agent_runtime",
+        )
         expand_schema = registry.get("expand_creater").input_schema
         self.assertEqual(
             set(expand_schema["properties"]["action"]["enum"]),

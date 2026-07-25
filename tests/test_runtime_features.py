@@ -23,7 +23,6 @@ from provider.adapters.compat import (
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunResult
 from run.engine import (
-    _extract_round_memory,
     compress_context,
     context_status,
     handle_request,
@@ -31,13 +30,16 @@ from run.engine import (
 )
 from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
+from run.memory_analysis import extract_round_memory
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ToolCancelledError,
     ToolDefinition,
+    ToolTimeoutError,
     apply_runtime_tool_policy,
     discover_tools,
     execute_tool,
+    resolve_tool_timeout,
 )
 
 
@@ -220,6 +222,100 @@ class RuntimeFeatureTests(unittest.TestCase):
         finally:
             timer.cancel()
         self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_explicit_tool_timeout_overrides_global_default(self) -> None:
+        observed: dict[str, Any] = {}
+
+        def run_with_timeout(timeout: float, *, context: dict[str, Any]) -> dict[str, Any]:
+            time.sleep(0.08)
+            observed.update(context)
+            return {"timeout": timeout}
+
+        tool = ToolDefinition(
+            name="timeout_tool",
+            description="timeout",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "timeout": {"type": "number", "minimum": 0.01, "maximum": 3600}
+                },
+                "additionalProperties": False,
+            },
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=run_with_timeout,
+        )
+        result = execute_tool(
+            tool,
+            {"timeout": 0.2},
+            context={"root": str(Path.cwd()), "user": "alice"},
+            timeout=0.05,
+        )
+        self.assertEqual(result, {"timeout": 0.2})
+        self.assertEqual(observed["tool_timeout"], 0.2)
+        self.assertIsInstance(observed["cancel_event"], threading.Event)
+        self.assertFalse(observed["cancel_event"].is_set())
+
+    def test_omitted_tool_timeout_uses_global_default_and_signals_cleanup(self) -> None:
+        observed_cancel = threading.Event()
+
+        def wait_for_cancel(*, context: dict[str, Any]) -> None:
+            if context["cancel_event"].wait(1):
+                observed_cancel.set()
+
+        tool = ToolDefinition(
+            name="timeout_tool",
+            description="timeout",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=wait_for_cancel,
+        )
+        with self.assertRaisesRegex(ToolTimeoutError, r"0\.03s"):
+            execute_tool(
+                tool,
+                {},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=0.03,
+            )
+        self.assertTrue(observed_cancel.wait(0.2))
+
+    def test_subagent_tool_uses_agent_runtime_watchdog(self) -> None:
+        tool = ToolDefinition(
+            name="subagent_dispatch",
+            description="subagent",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            timeout_policy="agent_runtime",
+            _callable=lambda: None,
+        )
+        timeout = resolve_tool_timeout(
+            tool,
+            {},
+            default_timeout=0.05,
+            context={"agent_timeout": 0.2},
+        )
+        self.assertEqual(timeout, 5.2)
+        tool._callable = lambda: (time.sleep(0.08), "completed")[1]
+        self.assertEqual(
+            execute_tool(
+                tool,
+                {},
+                context={"agent_timeout": 0.2},
+                timeout=0.02,
+            ),
+            "completed",
+        )
 
     def test_history_search_registration_obeys_memory_switch(self) -> None:
         _, root = self.make_root()
@@ -559,8 +655,11 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.engine.estimate_messages_tokens", side_effect=inflated_messages),
-            patch("run.engine.estimate_tools_tokens", return_value=0),
+            patch(
+                "run.conversation_runtime.estimate_messages_tokens",
+                side_effect=inflated_messages,
+            ),
+            patch("run.conversation_runtime.estimate_tools_tokens", return_value=0),
         ):
             events = list(
                 iter_request_events(
@@ -614,8 +713,11 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.engine.estimate_messages_tokens", side_effect=growing_messages),
-            patch("run.engine.estimate_tools_tokens", return_value=0),
+            patch(
+                "run.conversation_runtime.estimate_messages_tokens",
+                side_effect=growing_messages,
+            ),
+            patch("run.conversation_runtime.estimate_tools_tokens", return_value=0),
         ):
             events = list(
                 iter_request_events(
@@ -683,7 +785,10 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.engine._extract_round_memory", side_effect=extract_after_commit),
+            patch(
+                "run.conversation_runtime._extract_round_memory",
+                side_effect=extract_after_commit,
+            ),
         ):
             result = handle_request(
                 {
@@ -739,7 +844,7 @@ class RuntimeFeatureTests(unittest.TestCase):
                 )
 
         runner = Runner()
-        result = _extract_round_memory(
+        result = extract_round_memory(
             root=root,
             user="alice",
             config=config,
@@ -758,7 +863,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             (root / "users" / "alice" / "improve" / "seven_days" / "device.md").is_file()
         )
 
-        failed = _extract_round_memory(
+        failed = extract_round_memory(
             root=root,
             user="alice",
             config=config,

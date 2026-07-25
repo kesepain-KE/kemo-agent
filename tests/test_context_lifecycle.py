@@ -10,7 +10,8 @@ from provider.schema import Usage
 from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
 from run.context_summary import build_summary_message, get_or_create_summary
-from run.engine import _compress_per_round_tool_think, _copy_committed_round_to_archive
+from run.context_service import compress_per_round_tool_think
+from run.session_runtime import copy_committed_round_to_archive
 from run.history import (
     _trim_to_max_rounds,
     commit_window,
@@ -224,7 +225,7 @@ class ContextLifecycleTests(unittest.TestCase):
         ]
         runtime["data"]["context"] = {"round_offset": 3}
 
-        _copy_committed_round_to_archive(archive, runtime, 3, 6)
+        copy_committed_round_to_archive(archive, runtime, 3, 6)
 
         self.assertEqual(archive["data"]["rounds"], 6)
         self.assertEqual(archive["data"]["round_metrics"][-1]["round"], 6)
@@ -435,7 +436,7 @@ class ContextLifecycleTests(unittest.TestCase):
         window = make_window(5, with_tools=True)
         window["items"] = {"items": []}
         runner = SummaryRunner()
-        diagnostics = _compress_per_round_tool_think(
+        diagnostics = compress_per_round_tool_think(
             window=window,
             conserved_rounds=2,
             agent_runner=runner,
@@ -472,7 +473,7 @@ class ContextLifecycleTests(unittest.TestCase):
             ]
         }
 
-        diagnostics = _compress_per_round_tool_think(
+        diagnostics = compress_per_round_tool_think(
             window=window,
             conserved_rounds=2,
             agent_runner=SummaryRunner(narrative=""),

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 import threading
 import unittest
@@ -11,13 +10,12 @@ from unittest.mock import patch
 
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
-from run.engine import (
-    _analyze_memory_batch_resilient,
-    _memory_batch_operation_id,
-    handle_request,
-    iter_request_events,
-)
+from run.engine import handle_request, iter_request_events
 from run.history import find_window, load_window
+from run.memory_analysis import (
+    analyze_memory_batch_resilient,
+    memory_batch_operation_id,
+)
 from run.history_index import find_record as find_history_record
 from run.memory import MemoryStore
 
@@ -44,7 +42,7 @@ class Provider:
 
 class MemoryEngineTests(unittest.TestCase):
     def test_memory_batch_operation_id_changes_when_round_content_changes(self) -> None:
-        first = _memory_batch_operation_id(
+        first = memory_batch_operation_id(
             "alice",
             "web",
             "session",
@@ -52,7 +50,7 @@ class MemoryEngineTests(unittest.TestCase):
             2,
             [{"round": 1, "messages": [{"content": "before"}]}],
         )
-        repeated = _memory_batch_operation_id(
+        repeated = memory_batch_operation_id(
             "alice",
             "web",
             "session",
@@ -60,7 +58,7 @@ class MemoryEngineTests(unittest.TestCase):
             2,
             [{"round": 1, "messages": [{"content": "before"}]}],
         )
-        rewritten = _memory_batch_operation_id(
+        rewritten = memory_batch_operation_id(
             "alice",
             "web",
             "session",
@@ -112,8 +110,8 @@ class MemoryEngineTests(unittest.TestCase):
             }
 
         analyze.calls = 0
-        with patch("run.engine._analyze_memory_batch", side_effect=analyze) as mocked:
-            result = _analyze_memory_batch_resilient(
+        with patch("run.memory_analysis.analyze_memory_batch", side_effect=analyze) as mocked:
+            result = analyze_memory_batch_resilient(
                 rounds=rounds,
                 agent_runner=object(),
                 cancel_event=None,
@@ -228,7 +226,10 @@ class MemoryEngineTests(unittest.TestCase):
         request["session_id"] = "index-error"
         with (
             patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False),
-            patch("run.engine.update_memory_state", side_effect=RuntimeError("index failed")),
+            patch(
+                "run.conversation_runtime.update_memory_state",
+                side_effect=RuntimeError("index failed"),
+            ),
         ):
             result = handle_request(request, root=root, provider_factory=lambda _: Provider())
 

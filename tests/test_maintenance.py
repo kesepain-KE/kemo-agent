@@ -283,9 +283,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             }
 
         with (
-            patch("run.maintenance._analyze_round_memory", side_effect=analyze),
+            patch("run.maintenance.analyze_round_memory", side_effect=analyze),
             patch(
-                "run.maintenance._persist_round_memory_analysis",
+                "run.maintenance.persist_round_memory_analysis",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -334,7 +334,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         )
         commit_window(archive, window)
 
-        with patch("run.maintenance._analyze_round_memory") as extract:
+        with patch("run.maintenance.analyze_round_memory") as extract:
             result = MaintenanceScheduler(root).scan_once()
 
         recovery = result["alice"]["memory_recovery"]
@@ -386,7 +386,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         with (
             patch(
-                "run.maintenance._analyze_round_memory",
+                "run.maintenance.analyze_round_memory",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -396,7 +396,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 },
             ) as extract,
             patch(
-                "run.maintenance._persist_round_memory_analysis",
+                "run.maintenance.persist_round_memory_analysis",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -473,13 +473,13 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
             patch(
-                "run.maintenance._analyze_memory_batch_resilient", return_value=analysis
+                "run.maintenance.analyze_memory_batch_resilient", return_value=analysis
             ) as analyze_batch,
             patch(
-                "run.maintenance._analyze_round_memory", return_value=analysis
+                "run.maintenance.analyze_round_memory", return_value=analysis
             ) as analyze_round,
             patch(
-                "run.maintenance._persist_round_memory_analysis",
+                "run.maintenance.persist_round_memory_analysis",
                 return_value=persisted,
             ),
         ):
@@ -564,11 +564,11 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
             patch(
-                "run.maintenance._analyze_memory_batch_resilient",
+                "run.maintenance.analyze_memory_batch_resilient",
                 return_value=analysis,
             ) as analyze,
             patch(
-                "run.maintenance._persist_round_memory_analysis",
+                "run.maintenance.persist_round_memory_analysis",
                 return_value=persisted,
             ),
         ):
@@ -635,7 +635,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 "exception_type": "AgentOutputError",
             },
         }
-        with patch("run.maintenance._analyze_round_memory", return_value=failure):
+        with patch("run.maintenance.analyze_round_memory", return_value=failure):
             first = MaintenanceScheduler(root).scan_once()
 
         self.assertEqual(first["alice"]["memory_recovery"]["claimed"], 1)
@@ -669,11 +669,11 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         }
         with (
             patch(
-                "run.maintenance._analyze_round_memory",
+                "run.maintenance.analyze_round_memory",
                 return_value=success_analysis,
             ),
             patch(
-                "run.maintenance._persist_round_memory_analysis",
+                "run.maintenance.persist_round_memory_analysis",
                 return_value=success_persisted,
             ),
         ):
@@ -729,12 +729,12 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "error": None,
         }
         with (
-            patch("run.maintenance._analyze_round_memory", return_value=analysis),
+            patch("run.maintenance.analyze_round_memory", return_value=analysis),
             patch(
                 "run.maintenance.find_record",
                 return_value={"memory_claim_id": "newer-worker", "memory_claim_round": 1},
             ),
-            patch("run.maintenance._persist_round_memory_analysis") as persist,
+            patch("run.maintenance.persist_round_memory_analysis") as persist,
         ):
             result = MaintenanceScheduler(root).scan_once()
 

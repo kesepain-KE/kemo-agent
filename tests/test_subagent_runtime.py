@@ -295,12 +295,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     "context_manage",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
-            with self.assertRaises(AgentTimeoutError):
+            timeout_events = []
+            with self.assertRaises(AgentTimeoutError) as raised:
                 self.runner(MockProvider(delay=0.2)).run(
                     "context_manage",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                     timeout=0.02,
+                    event_callback=timeout_events.append,
                 )
+            self.assertTrue(raised.exception.process_terminated)
+            self.assertEqual(timeout_events[-1].metadata["status"], "timed_out")
+            self.assertTrue(timeout_events[-1].metadata["cancel_requested"])
+            self.assertTrue(timeout_events[-1].metadata["process_terminated"])
             cancelled = threading.Event()
             cancelled.set()
             with self.assertRaises(AgentCancelledError):
@@ -396,6 +402,29 @@ class SubAgentRuntimeTests(unittest.TestCase):
         scheduler.wait(third, 1)
         with self.assertRaises(AgentQueueError):
             scheduler.submit("context_manage", {"rounds": [], "trigger": "manual"})
+
+    def test_scheduler_preserves_subagent_timeout_status(self) -> None:
+        registry = discover_agents(self.root)
+        runner = StubRunner(registry, [])
+
+        def timed_out(*args, **kwargs):
+            del args, kwargs
+            raise AgentTimeoutError(
+                "timed out",
+                process_terminated=True,
+            )
+
+        runner.run = timed_out
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        task = scheduler.submit("self_improve", {"value": 1})
+        with self.assertRaises(AgentQueueError):
+            scheduler.wait(task, 1)
+        snapshot = scheduler.get(task)
+        self.assertEqual(snapshot["status"], "timed_out")
+        self.assertEqual(snapshot["error"]["exception_type"], "AgentTimeoutError")
+        self.assertTrue(snapshot["error"]["cancel_requested"])
+        self.assertTrue(snapshot["error"]["process_terminated"])
 
 
 if __name__ == "__main__":
