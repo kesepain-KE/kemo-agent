@@ -48,6 +48,7 @@ import {
   patchPreferences,
   patchUserConfig,
   releaseSessionLease,
+  retrySessionSummary,
   touchSessionLease,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
@@ -418,11 +419,13 @@ export function AppShell() {
     if (!historyDrawerOpen) return
     const sessions = sessionsQuery.data?.sessions ?? []
     const hasPendingSummary = sessions.some(
-      (session) => session.summary_status === 'queued' || session.summary_status === 'processing',
+      (session) => ['queued', 'processing'].includes(session.summary_status || ''),
     )
     let delay = hasPendingSummary ? 2_000 : 0
     if (!delay) {
-      const failed = sessions.filter((session) => session.summary_status === 'failed')
+      const failed = sessions.filter(
+        (session) => ['failed', 'retry_wait'].includes(session.summary_status || ''),
+      )
       if (!failed.length) return
       const retryTimes = failed
         .map((session) => Date.parse(session.summary_retry_at || ''))
@@ -620,6 +623,12 @@ export function AppShell() {
       queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
       setSessionId('')
     }
+  }
+
+  const retryHistorySummary = async (targetSessionId: string) => {
+    if (!user) throw new Error('当前没有可用用户')
+    await retrySessionSummary(user, targetSessionId)
+    await sessionsQuery.refetch()
   }
 
   const deleteAllHistorySessions = async () => {
@@ -851,6 +860,7 @@ export function AppShell() {
         onSelectSession={(targetSessionId) => { void selectHistorySession(targetSessionId) }}
         onDeleteSession={deleteHistorySession}
         onDeleteAllSessions={deleteAllHistorySessions}
+        onRetrySummary={retryHistorySummary}
       />
 
       {commandOpen && <div className="command-layer show" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false) }}>

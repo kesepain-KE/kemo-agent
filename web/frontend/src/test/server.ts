@@ -10,13 +10,85 @@ const sourcePolicy = {
   kemo_graph: { requested: false, connected: false, effective: false, status: 'disabled', replacement_active: false, replaces_knowledge: false, replaces_memory: false },
 }
 
+const userFileEntries = [
+  { type: 'directory', name: 'screenshots', relative_path: 'screenshots', parent_path: '', size: 3072, updated_at: 2, extension: '', child_count: 2 },
+  { type: 'directory', name: 'release', relative_path: 'screenshots/release', parent_path: 'screenshots', size: 2048, updated_at: 2, extension: '', child_count: 1 },
+  { type: 'file', name: 'final-shot.png', relative_path: 'screenshots/release/final-shot.png', parent_path: 'screenshots/release', size: 2048, updated_at: 2, extension: '.png', child_count: 0 },
+  { type: 'file', name: 'shot.png', relative_path: 'screenshots/shot.png', parent_path: 'screenshots', size: 1024, updated_at: 1, extension: '.png', child_count: 0 },
+  { type: 'file', name: 'readme.txt', relative_path: 'readme.txt', parent_path: '', size: 128, updated_at: 1, extension: '.txt', child_count: 0 },
+]
+
+function pagedFiles(request: Request, entries: typeof userFileEntries, summary: { total_files: number; total_dirs: number; total_size: number }) {
+  const params = new URL(request.url).searchParams
+  const path = params.get('path') ?? ''
+  const search = (params.get('search') ?? '').trim().toLocaleLowerCase()
+  const pageSize = Number(params.get('page_size') ?? 6)
+  const requestedPage = Number(params.get('page') ?? 1)
+  const filtered = entries.filter((entry) => search
+    ? `${entry.name} ${entry.relative_path}`.toLocaleLowerCase().includes(search)
+    : entry.parent_path === path)
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const page = Math.min(Math.max(1, requestedPage), totalPages)
+  return {
+    summary,
+    entries: filtered.slice((page - 1) * pageSize, page * pageSize),
+    path,
+    search,
+    pagination: {
+      page,
+      page_size: pageSize,
+      total_items: filtered.length,
+      total_pages: totalPages,
+      has_previous: page > 1,
+      has_next: page < totalPages,
+    },
+  }
+}
+
 export const handlers = [
   http.post('/api/system/restart', async ({ request }) => {
     const body = await request.json() as { port: number }
     return HttpResponse.json({ ok: true, port: body.port, helper_pid: 4321 })
   }),
   http.get('/api/health', () => HttpResponse.json({ status: 'ok', service: 'kemo-agent-web', version: 1 })),
-  http.get('/api/auth/status', () => HttpResponse.json({ enabled: false, authenticated: true, methods: { token: false, password: false }, session_cookie_configured: false })),
+  http.get('/api/version', () => HttpResponse.json({
+    name: 'kemo-agent',
+    version: '0.2.0',
+    schema_version: 1,
+    read_only: true,
+    components: [
+      { id: 'core', version: '0.2.0', description: '核心引擎' },
+      { id: 'agents', version: '0.2.0', description: '子代理系统' },
+      { id: 'plugins', version: '0.2.0', description: '工具插件生态' },
+      { id: 'web', version: '0.2.0', description: 'Web 前端+后端' },
+    ],
+  })),
+  http.get('/api/version/check', () => HttpResponse.json({
+    status: 'update_available',
+    checked_at: '2026-07-25T13:30:00+08:00',
+    local_version: '0.2.0',
+    remote_version: '0.3.0',
+    read_only: true,
+    source: 'https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/version.json',
+    components: [
+      { id: 'core', description: '核心引擎', local_version: '0.2.0', remote_version: '0.3.0', status: 'update_available' },
+      { id: 'agents', description: '子代理系统', local_version: '0.2.0', remote_version: '0.2.0', status: 'up_to_date' },
+      { id: 'plugins', description: '工具插件生态', local_version: '0.2.0', remote_version: '0.2.1', status: 'update_available' },
+      { id: 'web', description: 'Web 前端+后端', local_version: '0.2.0', remote_version: '0.3.0', status: 'update_available' },
+    ],
+    commands: {
+      check: 'python update.py --check',
+      all: 'python update.py --module all',
+      recommended: 'python update.py --module all',
+      modules: {
+        core: 'python update.py --module core',
+        agents: 'python update.py --module agents',
+        plugins: 'python update.py --module plugins',
+        web: 'python update.py --module web',
+      },
+    },
+  })),
+  http.get('/api/auth/status', () => HttpResponse.json({ enabled: false, authenticated: true, stage: 'none', requires_both: false, methods: { token: false, password: false }, session_cookie_configured: false })),
   http.post('/api/auth/logout', () => HttpResponse.json({ authenticated: false })),
   http.post('/api/runs/:runId/guidance', ({ params }) => HttpResponse.json({ run_id: params.runId, status: 'accepted_current_run', queued: 1 })),
   http.post('/api/runs/:runId/cancel', ({ params }) => HttpResponse.json({ run_id: params.runId, user: 'kesepain', session_id: 's1', status: 'stopping' })),
@@ -187,7 +259,7 @@ export const handlers = [
     return HttpResponse.json({ enabled: body.enabled })
   }),
   http.delete('/api/users/kesepain/sense/:module', ({ params }) => HttpResponse.json({ module: params.module, deleted: true })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
     user: 'kesepain',
     config: {
@@ -228,18 +300,11 @@ export const handlers = [
   http.get('/api/users/kesepain/prompt/sections', () => HttpResponse.json({ user: 'kesepain', total_chars: 120, sections: [{ name: 'user_soul', status: 'injected', original_items: 1, injected_items: 1, original_chars: 20, injected_chars: 20, truncated: false, source_files: ['users/kesepain/user_soul.md'] }], source_policy: sourcePolicy, source_selection: {}, expand: { global: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} }, shared: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} }, user: { mode: 'all', discovered: [], selected: [], filtered: [], invalid: [], unmatched: [], health_status: {} } } })),
   http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({ user: 'kesepain', summary: { total: 0, seven_days: 0, one_month: 0, half_year: 0, permanent: 0 }, items: [] })),
   http.get('/api/users/kesepain/memory/important', () => HttpResponse.json({ user: 'kesepain', path: 'users/kesepain/memory_temporary_important.md', content: '', size: 0 })),
-  http.get('/api/users/kesepain/files/:scope', ({ params }) => HttpResponse.json({
+  http.get('/api/users/kesepain/files/:scope', ({ params, request }) => HttpResponse.json({
     user: 'kesepain',
     scope: params.scope,
     root: `users/kesepain/${params.scope}`,
-    summary: { total_files: 3, total_dirs: 2, total_size: 3200 },
-    tree: [
-      { type: 'directory', name: 'screenshots', relative_path: 'screenshots', children: [
-        { type: 'directory', name: 'release', relative_path: 'screenshots/release', children: [{ type: 'file', name: 'final-shot.png', relative_path: 'screenshots/release/final-shot.png', size: 2048, updated_at: 2, extension: '.png' }] },
-        { type: 'file', name: 'shot.png', relative_path: 'screenshots/shot.png', size: 1024, updated_at: 1, extension: '.png' },
-      ] },
-      { type: 'file', name: 'readme.txt', relative_path: 'readme.txt', size: 128, updated_at: 1, extension: '.txt' },
-    ],
+    ...pagedFiles(request, userFileEntries, { total_files: 3, total_dirs: 2, total_size: 3200 }),
   })),
   http.post('/api/users/kesepain/files/:scope/upload', ({ request, params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, path: new URL(request.url).searchParams.get('path'), size: 1, updated: true })),
   http.patch('/api/users/kesepain/files/:scope/move', ({ request, params }) => {
@@ -252,7 +317,10 @@ export const handlers = [
   }),
   http.delete('/api/users/kesepain/files/:scope/all', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, deleted_paths: ['readme.txt', 'screenshots/shot.png', 'screenshots/release/final-shot.png'], deleted_count: 3 })),
   http.delete('/api/users/kesepain/files/:scope', ({ request, params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, path: new URL(request.url).searchParams.get('path'), deleted: true })),
-  http.get('/api/tmp', () => HttpResponse.json({ root: 'tmp', summary: { total_files: 1, total_dirs: 0, total_size: 64 }, tree: [{ type: 'file', name: 'cache.tmp', relative_path: 'cache.tmp', size: 64, updated_at: 1, extension: '.tmp' }] })),
+  http.get('/api/tmp', ({ request }) => HttpResponse.json({
+    root: 'tmp',
+    ...pagedFiles(request, [{ type: 'file', name: 'cache.tmp', relative_path: 'cache.tmp', parent_path: '', size: 64, updated_at: 1, extension: '.tmp', child_count: 0 }], { total_files: 1, total_dirs: 0, total_size: 64 }),
+  })),
   http.delete('/api/tmp', ({ request }) => HttpResponse.json({ path: new URL(request.url).searchParams.get('path'), deleted: true })),
   http.post('/api/tmp/delete-many', async ({ request }) => {
     const body = await request.json() as { paths: string[] }

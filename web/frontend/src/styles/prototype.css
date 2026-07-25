@@ -1679,6 +1679,33 @@ button,select,.select-like,.role-chip,.state-pill,.status-chip,.policy-value{min
 }
 
 .settings-nav{display:grid;gap:8px}
+.settings-version-name{font-size:.875rem;font-weight:780;color:var(--text)}
+.settings-version-value{display:inline-flex;align-items:center;justify-content:center;min-width:92px;height:34px;padding:0 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--text);font-size:.75rem;font-weight:780;font-variant-numeric:tabular-nums;white-space:nowrap}
+.settings-version-value.primary{border-color:color-mix(in srgb,var(--brand) 24%,var(--line));background:var(--brand-soft);color:var(--brand)}
+.settings-version-readonly{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 11px;border-radius:999px;background:var(--surface-3);color:var(--muted);font-size:.6875rem;font-weight:760}
+.settings-version-empty{padding:24px 14px;text-align:center;color:var(--muted);font-size:.78125rem}
+.settings-version-check-section{overflow:hidden}
+.settings-version-check-head{min-height:72px;padding:13px 16px;display:grid;grid-template-columns:40px minmax(0,1fr) auto;align-items:center;gap:12px;border-bottom:1px solid var(--line);background:var(--surface)}
+.settings-version-check-icon{width:40px;height:40px;display:grid;place-items:center;border-radius:var(--radius-control-lg);color:var(--brand);background:var(--brand-soft)}
+.settings-version-check-copy{min-width:0}.settings-version-check-copy strong,.settings-version-check-copy small{display:block}.settings-version-check-copy strong{font-size:.8125rem;color:var(--text)}.settings-version-check-copy small{margin-top:4px;color:var(--muted);font-size:.6875rem;line-height:1.45}
+.settings-version-check-result{margin:13px 16px 0;padding:12px 13px;display:grid;gap:4px;border:1px solid var(--line);border-radius:var(--radius-control-lg);background:var(--surface-2)}
+.settings-version-check-section>.settings-version-check-result:last-child{margin-bottom:16px;border-radius:var(--radius-control-lg)}
+.settings-version-check-result strong{font-size:.8125rem;color:var(--text)}.settings-version-check-result span{font-size:.71875rem;line-height:1.5;color:var(--muted)}
+.settings-version-check-result.success{border-color:color-mix(in srgb,var(--green) 25%,var(--line));background:var(--green-soft)}.settings-version-check-result.success strong{color:var(--green)}
+.settings-version-check-result.available{border-color:color-mix(in srgb,var(--brand) 28%,var(--line));background:var(--brand-soft)}.settings-version-check-result.available strong{color:var(--brand)}
+.settings-version-check-result.info{border-color:color-mix(in srgb,var(--amber) 28%,var(--line));background:var(--amber-soft)}.settings-version-check-result.info strong{color:var(--amber)}
+.settings-version-check-result.error{border-color:color-mix(in srgb,var(--red) 25%,var(--line));background:var(--red-soft)}.settings-version-check-result.error strong{color:var(--red)}
+.settings-version-components{margin:12px 16px 0;border:1px solid var(--line);border-radius:var(--radius-control-lg);overflow:hidden;background:var(--surface)}
+.settings-version-component{min-height:50px;padding:9px 12px;display:grid;grid-template-columns:minmax(140px,1fr) auto 70px;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.settings-version-component:last-child{border-bottom:0}
+.settings-version-component>span strong,.settings-version-component>span small{display:block}.settings-version-component>span strong{font-size:.75rem;color:var(--text)}.settings-version-component>span small{margin-top:2px;font-size:.625rem;color:var(--muted)}
+.settings-version-component>code{color:var(--text-2);font-size:.6875rem;font-variant-numeric:tabular-nums}.settings-version-component>b{justify-self:end;color:var(--muted);font-size:.65625rem}.settings-version-component.update_available>b{color:var(--brand)}.settings-version-component.local_newer>b{color:var(--amber)}
+.settings-version-command{margin:12px 16px 16px;padding:12px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:var(--radius-control-lg);background:var(--surface-2)}
+.settings-version-command>span{min-width:0}.settings-version-command>span small,.settings-version-command>span code{display:block}.settings-version-command>span small{margin-bottom:5px;color:var(--muted);font-size:.625rem}.settings-version-command>span code{overflow:auto;color:var(--text);font-size:.75rem;white-space:nowrap}.settings-version-copy-error{grid-column:1/-1;color:var(--red);font-size:.65625rem}
+@media(max-width:780px){
+  .settings-version-check-head{grid-template-columns:40px minmax(0,1fr)}.settings-version-check-head>.module-btn{grid-column:1/-1;width:100%;justify-content:center}
+  .settings-version-component{grid-template-columns:minmax(0,1fr) auto}.settings-version-component>b{grid-column:2}.settings-version-component>code{grid-row:2;grid-column:1/-1}
+  .settings-version-command{grid-template-columns:1fr}.settings-version-command>.module-btn{width:100%;justify-content:center}
+}
 
 /* V18 — right-aligned configuration controls and explicit user switching. */
 @media(min-width:1121px){

@@ -33,6 +33,7 @@ import type {
   SessionMemoryExtractionResponse,
   SessionUndoLastRoundResponse,
   SessionRenameResponse,
+  SessionSummary,
   SessionsResponse,
   SettingsResponse,
   SkillsResponse,
@@ -44,6 +45,8 @@ import type {
   TmpFilesDeleteResponse,
   UserFilesResponse,
   UsersResponse,
+  VersionCheckResponse,
+  VersionResponse,
 } from '../types/api'
 
 const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -156,6 +159,16 @@ export async function closeSession(
   const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/close${suffix}`,
+    { method: 'POST' },
+  )
+}
+
+export async function retrySessionSummary(
+  user: string,
+  sessionId: string,
+): Promise<{ queued: boolean; session: SessionSummary }> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/summary/retry`,
     { method: 'POST' },
   )
 }
@@ -276,8 +289,12 @@ export async function getAuthStatus(): Promise<AuthStatusResponse> {
   return requestJson('/api/auth/status')
 }
 
-export async function bootstrapAuth(token: string): Promise<AuthStatusResponse> {
-  return requestJson(`/api/auth/status?token=${encodeURIComponent(token)}`)
+export async function loginWithToken(token: string): Promise<AuthStatusResponse> {
+  return requestJson('/api/auth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  })
 }
 
 export async function loginAuth(
@@ -438,6 +455,15 @@ export async function getSettings(user: string): Promise<SettingsResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/settings`)
 }
 
+export async function getVersion(): Promise<VersionResponse> {
+  return requestJson('/api/version')
+}
+
+export async function getVersionCheck(refresh = false): Promise<VersionCheckResponse> {
+  const query = refresh ? '?refresh=true' : ''
+  return requestJson(`/api/version/check${query}`)
+}
+
 export async function getUserConfig(user: string): Promise<ConfigFullResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/config/full`)
 }
@@ -503,8 +529,13 @@ export async function updateImportantMemory(user: string, content: string): Prom
 export async function getUserFiles(
   user: string,
   scope: 'file_upload' | 'download',
+  path = '',
+  search = '',
+  page = 1,
+  pageSize = 6,
 ): Promise<UserFilesResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}`)
+  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize) })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}?${query.toString()}`)
 }
 
 export function getUserFileDownloadUrl(
@@ -569,8 +600,9 @@ export async function createUserDirectory(user: string, scope: 'file_upload' | '
   return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/directory?path=${encodeURIComponent(path)}`, { method: 'POST' })
 }
 
-export async function getTmpFiles(): Promise<TmpFilesResponse> {
-  return requestJson('/api/tmp')
+export async function getTmpFiles(path = '', search = '', page = 1, pageSize = 6): Promise<TmpFilesResponse> {
+  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize) })
+  return requestJson(`/api/tmp?${query.toString()}`)
 }
 
 export async function deleteTmpFile(path: string): Promise<FileDeleteResponse> {

@@ -372,9 +372,9 @@
 .browserFooter {
   min-height: 42px;
   padding: 0 12px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(220px, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control-lg);
@@ -382,6 +382,33 @@
   color: var(--muted);
   font-size: .625rem;
 }
+
+.browserFooter > span:last-child { text-align: right; }
+
+.pagination {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.pagination button {
+  min-height: 28px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: .625rem;
+  cursor: pointer;
+}
+
+.pagination button:hover:not(:disabled) { border-color: var(--brand-line); color: var(--brand); }
+.pagination button:disabled { cursor: not-allowed; opacity: .42; }
+.pagination strong { min-width: 45px; color: var(--text); text-align: center; }
 
 .browserPanel :global(.empty-panel) {
   min-height: 210px;
@@ -508,6 +535,8 @@
   .fileActions span { display: none; }
   .fileActions button,
   .fileActions a { width: 30px; padding: 0; }
-  .browserFooter { align-items: flex-start; flex-direction: column; justify-content: center; padding-top: 8px; padding-bottom: 8px; }
+  .browserFooter { grid-template-columns: 1fr; justify-items: stretch; padding-top: 8px; padding-bottom: 8px; }
+  .browserFooter > span,
+  .browserFooter > span:last-child { text-align: center; }
   .headerSearch { width: min(100%, 260px); }
 }

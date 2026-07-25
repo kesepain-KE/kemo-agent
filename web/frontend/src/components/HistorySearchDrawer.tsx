@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, History, LoaderCircle, MessageSquareText, Search, Trash2, X } from 'lucide-react'
+import { AlertTriangle, History, LoaderCircle, MessageSquareText, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import type { SessionSummary } from '../types/api'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import { formatDateTime } from './ModuleUi'
@@ -19,6 +19,7 @@ export interface HistorySearchDrawerProps {
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void> | void
   onDeleteAllSessions: () => Promise<void> | void
+  onRetrySummary: (sessionId: string) => Promise<void> | void
 }
 
 export function HistorySearchDrawer({
@@ -34,12 +35,14 @@ export function HistorySearchDrawer({
   onSelectSession,
   onDeleteSession,
   onDeleteAllSessions,
+  onRetrySummary,
 }: HistorySearchDrawerProps) {
   const [query, setQuery] = useState('')
   const [pendingSessionId, setPendingSessionId] = useState('')
   const [deleteSessionId, setDeleteSessionId] = useState('')
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const [pendingAction, setPendingAction] = useState<'delete' | 'delete_all' | ''>('')
+  const [retryingSessionId, setRetryingSessionId] = useState('')
   const [mutationError, setMutationError] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const normalizedQuery = query.trim().toLocaleLowerCase()
@@ -62,6 +65,7 @@ export function HistorySearchDrawer({
       setDeleteSessionId('')
       setDeleteAllOpen(false)
       setPendingAction('')
+      setRetryingSessionId('')
       setMutationError('')
     }
   }, [open])
@@ -113,6 +117,18 @@ export function HistorySearchDrawer({
       setPendingAction('')
     }
   }
+  const retrySummary = async (sessionId: string) => {
+    if (retryingSessionId) return
+    setRetryingSessionId(sessionId)
+    setMutationError('')
+    try {
+      await onRetrySummary(sessionId)
+    } catch (error) {
+      setMutationError(error instanceof Error ? error.message : '重新生成历史摘要失败')
+    } finally {
+      setRetryingSessionId('')
+    }
+  }
 
   return <>
     <aside className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="历史对话" aria-hidden={!open}>
@@ -157,6 +173,7 @@ export function HistorySearchDrawer({
         {chatRunning && <div className={styles.notice}>当前对话正在运行，结束或停止后才能切换历史对话。</div>}
         {switchingSessionId && <div className={styles.progressNotice}><LoaderCircle size={15} />正在保存当前对话并切换…</div>}
         {actionError && <div className={styles.errorNotice}>{actionError}</div>}
+        {mutationError && !deleteTarget && !deleteAllOpen && <div className={styles.errorNotice}>{mutationError}</div>}
 
         <div className={styles.results}>
           {loading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>正在加载历史对话</strong></div>}
@@ -165,6 +182,13 @@ export function HistorySearchDrawer({
             const active = session.session_id === activeSessionId
             const switching = session.session_id === switchingSessionId
             const displayName = sessionDisplayName(session)
+            const summaryStatus = session.summary_status || ''
+            const canRetrySummary = ['failed', 'retry_wait', 'exhausted'].includes(summaryStatus)
+            const attempt = Math.max(0, session.summary_attempt_count || session.summary_retry_count || 0)
+            const maxAttempts = Math.max(1, session.summary_max_attempts || 5)
+            const completedChunks = Math.max(0, session.summary_checkpoint_next_chunk || 0)
+            const totalChunks = Math.max(0, session.summary_checkpoint_total_chunks || 0)
+            const retryAt = session.summary_retry_at ? formatDateTime(session.summary_retry_at) : ''
             return <article
               key={session.session_id}
               className={`${styles.sessionCard} ${active ? styles.activeCard : ''}`}
@@ -181,29 +205,43 @@ export function HistorySearchDrawer({
                 <span className={styles.cardIcon}>{switching ? <LoaderCircle className={styles.spinning} size={18} /> : <MessageSquareText size={18} />}</span>
                 <span className={styles.cardCopy}>
                   <strong>{displayName}</strong>
-                  {session.summary?.trim()
-                    ? <span>{session.summary}</span>
-                    : ['queued', 'processing'].includes(session.summary_status || '')
-                      ? <span>正在生成摘要…</span>
-                      : session.summary_status === 'failed'
-                        ? <span className={styles.summaryFailed}>摘要生成失败，后台将自动重试</span>
-                      : null}
+                  {['queued', 'processing'].includes(summaryStatus)
+                    ? <span>正在生成摘要{totalChunks > 1 ? ` · ${Math.min(completedChunks, totalChunks)}/${totalChunks}` : ''}…</span>
+                    : summaryStatus === 'exhausted'
+                      ? <span className={styles.summaryFailed}>摘要生成失败 · 已停止自动重试</span>
+                      : ['failed', 'retry_wait'].includes(summaryStatus)
+                        ? <span className={styles.summaryFailed}>摘要生成失败 · 第 {attempt}/{maxAttempts} 次{retryAt ? ` · ${retryAt} 自动重试` : ' · 等待自动重试'}</span>
+                        : session.summary?.trim()
+                          ? <span>{session.summary}</span>
+                          : null}
                   <small>{session.rounds} 轮 · {formatDateTime(session.updated_at)}</small>
                 </span>
                 <span className={`${styles.stateBadge} ${active ? styles.activeBadge : ''}`}>
                   {active ? '当前对话' : session.state === 'closed' ? '已保存' : '历史对话'}
                 </span>
               </button>
-              <button
-                type="button"
-                className={styles.deleteButton}
-                aria-label={`删除对话 ${displayName}`}
-                title={`删除 ${displayName}`}
-                disabled={Boolean(switchingSessionId) || Boolean(pendingAction) || (chatRunning && active)}
-                onClick={() => beginDelete(session.session_id)}
-              >
-                <Trash2 size={15} />
-              </button>
+              <span className={styles.cardActions}>
+                {canRetrySummary && <button
+                  type="button"
+                  className={styles.retryButton}
+                  aria-label={`重新生成摘要 ${displayName}`}
+                  title="立即重新生成摘要"
+                  disabled={Boolean(retryingSessionId) || Boolean(pendingAction)}
+                  onClick={() => { void retrySummary(session.session_id) }}
+                >
+                  <RotateCcw className={retryingSessionId === session.session_id ? styles.spinning : ''} size={15} />
+                </button>}
+                <button
+                  type="button"
+                  className={styles.deleteButton}
+                  aria-label={`删除对话 ${displayName}`}
+                  title={`删除 ${displayName}`}
+                  disabled={Boolean(switchingSessionId) || Boolean(pendingAction) || Boolean(retryingSessionId) || (chatRunning && active)}
+                  onClick={() => beginDelete(session.session_id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </span>
             </article>
           })}
           {!loading && !error && filteredSessions.length === 0 && <div className={styles.empty}>

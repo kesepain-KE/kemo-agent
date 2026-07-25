@@ -5,6 +5,7 @@ import {
   Archive,
   Braces,
   CheckSquare,
+  ChevronLeft,
   ChevronRight,
   Clipboard,
   Download,
@@ -42,7 +43,7 @@ import {
   ModuleFrame,
   RefreshActionButton,
 } from '../components/ModuleUi'
-import type { FileTreeNode } from '../types/api'
+import type { FileListEntry } from '../types/api'
 import styles from './FilesPage.module.css'
 
 type FileArea = 'file_upload' | 'download' | 'tmp'
@@ -87,50 +88,19 @@ const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg
 const archiveExtensions = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz'])
 const codeExtensions = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.json', '.yaml', '.yml', '.css', '.scss', '.html', '.xml', '.sh', '.ps1'])
 const documentExtensions = new Set(['.md', '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.log'])
+const FILES_PER_PAGE = 6
 
-function parentPathOf(path: string): string {
-  const slash = path.lastIndexOf('/')
-  return slash < 0 ? '' : path.slice(0, slash)
-}
-
-function flattenTree(nodes: FileTreeNode[]): FileEntry[] {
-  const entries: FileEntry[] = []
-
-  const visit = (node: FileTreeNode): { size: number; updatedAt: number } => {
-    if (node.type === 'file') {
-      entries.push({
-        type: 'file',
-        name: node.name,
-        relativePath: node.relative_path,
-        parentPath: parentPathOf(node.relative_path),
-        extension: node.extension,
-        size: node.size,
-        updatedAt: node.updated_at,
-        childCount: 0,
-      })
-      return { size: node.size, updatedAt: node.updated_at }
-    }
-
-    const children = node.children.map(visit)
-    const aggregate = {
-      size: children.reduce((sum, child) => sum + child.size, 0),
-      updatedAt: children.reduce((latest, child) => Math.max(latest, child.updatedAt), 0),
-    }
-    entries.push({
-      type: 'directory',
-      name: node.name,
-      relativePath: node.relative_path,
-      parentPath: parentPathOf(node.relative_path),
-      extension: '',
-      size: aggregate.size,
-      updatedAt: aggregate.updatedAt,
-      childCount: node.children.length,
-    })
-    return aggregate
+function toFileEntry(entry: FileListEntry): FileEntry {
+  return {
+    type: entry.type,
+    name: entry.name,
+    relativePath: entry.relative_path,
+    parentPath: entry.parent_path,
+    extension: entry.extension,
+    size: entry.size,
+    updatedAt: entry.updated_at,
+    childCount: entry.child_count,
   }
-
-  nodes.forEach(visit)
-  return entries
 }
 
 function fileKind(entry: FileEntry): { label: string; className: string } {
@@ -165,6 +135,7 @@ export function FilesPage() {
   const [currentPath, setCurrentPath] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [page, setPage] = useState(1)
   const [selectedPath, setSelectedPath] = useState('')
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set())
   const [notice, setNotice] = useState('')
@@ -172,40 +143,39 @@ export function FilesPage() {
   const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
+  const normalizedSearch = searchQuery.trim()
   const userFilesQuery = useQuery({
-    queryKey: ['user-files', user, area],
-    queryFn: () => getUserFiles(user, area as UserFileArea),
+    queryKey: ['user-files', user, area, currentPath, normalizedSearch, page],
+    queryFn: () => getUserFiles(user, area as UserFileArea, currentPath, normalizedSearch, page, FILES_PER_PAGE),
     enabled: Boolean(user) && area !== 'tmp',
   })
   const tmpFilesQuery = useQuery({
-    queryKey: ['tmp-files'],
-    queryFn: getTmpFiles,
+    queryKey: ['tmp-files', currentPath, normalizedSearch, page],
+    queryFn: () => getTmpFiles(currentPath, normalizedSearch, page, FILES_PER_PAGE),
     enabled: area === 'tmp',
   })
   const activeQuery = area === 'tmp' ? tmpFilesQuery : userFilesQuery
   const data = activeQuery.data
-  const allEntries = useMemo(() => flattenTree(data?.tree ?? []), [data?.tree])
-  const normalizedSearch = searchQuery.trim().toLocaleLowerCase()
-  const visibleEntries = useMemo(() => {
-    const filtered = normalizedSearch
-      ? allEntries.filter((entry) => `${entry.name} ${entry.relativePath}`.toLocaleLowerCase().includes(normalizedSearch))
-      : allEntries.filter((entry) => entry.parentPath === currentPath)
-    return [...filtered].sort((left, right) => {
-      if (left.type !== right.type) return left.type === 'directory' ? -1 : 1
-      return left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' })
-    })
-  }, [allEntries, currentPath, normalizedSearch])
-  const selectedEntry = allEntries.find((entry) => entry.relativePath === selectedPath) ?? null
+  const visibleEntries = useMemo(() => (data?.entries ?? []).map(toFileEntry), [data?.entries])
+  const selectedEntry = visibleEntries.find((entry) => entry.relativePath === selectedPath) ?? null
   const visibleFilePaths = visibleEntries.filter((entry) => entry.type === 'file').map((entry) => entry.relativePath)
   const allVisibleSelected = Boolean(visibleFilePaths.length) && visibleFilePaths.every((path) => selectedPaths.has(path))
   const areaRoot = data?.root || areaLabels[area].detail.replace('<user>', user || '—')
 
   useEffect(() => {
     if (selectedPath && !selectedEntry) setSelectedPath('')
-    if (currentPath && !allEntries.some((entry) => entry.type === 'directory' && entry.relativePath === currentPath)) {
-      setCurrentPath('')
+  }, [selectedEntry, selectedPath])
+
+  useEffect(() => {
+    if (data?.pagination.page && data.pagination.page !== page) setPage(data.pagination.page)
+  }, [data?.pagination.page, page])
+
+  useEffect(() => {
+    if (data && !normalizedSearch && data.path !== currentPath) {
+      setCurrentPath(data.path)
+      setSelectedPath('')
     }
-  }, [allEntries, currentPath, selectedEntry, selectedPath])
+  }, [currentPath, data, normalizedSearch])
 
   const refreshFiles = async () => {
     if (area === 'tmp') await queryClient.invalidateQueries({ queryKey: ['tmp-files'] })
@@ -262,6 +232,7 @@ export function FilesPage() {
     setArea(next)
     setCurrentPath('')
     setSearchQuery('')
+    setPage(1)
     setSelectedPath('')
     setSelectedPaths(new Set())
     setDeleteRequest(null)
@@ -272,6 +243,7 @@ export function FilesPage() {
   const enterDirectory = (path: string) => {
     setCurrentPath(path)
     setSearchQuery('')
+    setPage(1)
     setSelectedPath('')
   }
 
@@ -387,11 +359,11 @@ export function FilesPage() {
               <input
                 autoFocus
                 value={searchQuery}
-                onChange={(event) => { setSearchQuery(event.target.value); setSelectedPath('') }}
+                onChange={(event) => { setSearchQuery(event.target.value); setPage(1); setSelectedPath('') }}
                 placeholder={`搜索${areaLabels[area].label}`}
                 aria-label={`搜索${areaLabels[area].label}`}
               />
-              <button type="button" onClick={() => { setSearchOpen(false); setSearchQuery('') }} aria-label="关闭搜索"><X size={14} /></button>
+              <button type="button" onClick={() => { setSearchOpen(false); setSearchQuery(''); setPage(1) }} aria-label="关闭搜索"><X size={14} /></button>
             </label>
           ) : (
             <button className="module-btn" type="button" onClick={() => setSearchOpen(true)}><Search size={15} />在当前区域搜索</button>
@@ -473,12 +445,12 @@ export function FilesPage() {
           </div>
 
           <div className={`${styles.fileHeader} ${styles.withCheckbox}`}>
-            <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label={`选择当前列表全部${areaLabels[area].label}文件`} disabled={!visibleFilePaths.length} />
+            <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label={`选择当前页全部${areaLabels[area].label}文件`} disabled={!visibleFilePaths.length} />
             <span>名称与相对路径</span><span>类型</span><span>修改时间</span><span>大小</span><span>操作</span>
           </div>
 
           {activeQuery.isLoading ? (
-            <div className={styles.loading}>正在读取{rootLabel}文件树…</div>
+            <div className={styles.loading}>正在读取{rootLabel}文件列表…</div>
           ) : visibleEntries.length ? (
             <div className={styles.fileList}>
               {visibleEntries.map((entry) => {
@@ -519,8 +491,27 @@ export function FilesPage() {
             />
           )}
           <footer className={styles.browserFooter}>
-            <span>{normalizedSearch ? `搜索到 ${visibleEntries.length} 项` : `当前目录 ${visibleEntries.length} 项`}</span>
-            <span>区域总计 {data?.summary.total_files ?? 0} 个文件、{data?.summary.total_dirs ?? 0} 个文件夹</span>
+            <span>{normalizedSearch ? `搜索到 ${data?.pagination.total_items ?? 0} 项` : `当前目录 ${data?.pagination.total_items ?? 0} 项`}</span>
+            <nav className={styles.pagination} aria-label="文件列表分页">
+              <button
+                type="button"
+                onClick={() => { setPage((current) => Math.max(1, current - 1)); setSelectedPath('') }}
+                disabled={!data?.pagination.has_previous || activeQuery.isFetching}
+                aria-label="上一页"
+              >
+                <ChevronLeft size={14} />上一页
+              </button>
+              <strong>{data?.pagination.page ?? page} / {data?.pagination.total_pages ?? 1}</strong>
+              <button
+                type="button"
+                onClick={() => { setPage((current) => current + 1); setSelectedPath('') }}
+                disabled={!data?.pagination.has_next || activeQuery.isFetching}
+                aria-label="下一页"
+              >
+                下一页<ChevronRight size={14} />
+              </button>
+            </nav>
+            <span>每页 {FILES_PER_PAGE} 项 · 区域总计 {data?.summary.total_files ?? 0} 个文件、{data?.summary.total_dirs ?? 0} 个文件夹</span>
           </footer>
         </article>
 

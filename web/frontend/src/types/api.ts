@@ -46,11 +46,19 @@ export interface SessionSummary {
   window: string
   title: string
   summary?: string
-  summary_status?: 'none' | 'queued' | 'processing' | 'completed' | 'failed' | string
+  summary_status?: 'none' | 'queued' | 'processing' | 'retry_wait' | 'completed' | 'failed' | 'exhausted' | string
   summary_target_round?: number
   summary_completed_round?: number
   summary_retry_at?: string
   summary_retry_count?: number
+  summary_attempt_count?: number
+  summary_consecutive_failures?: number
+  summary_max_attempts?: number
+  summary_last_attempt_at?: string
+  summary_recovered_at?: string
+  summary_last_error?: { message?: string; exception_type?: string; [key: string]: unknown } | null
+  summary_checkpoint_next_chunk?: number
+  summary_checkpoint_total_chunks?: number
   state?: 'open' | 'closed' | string
   run_state?: 'idle' | 'running' | 'failed' | string
   chain?: 'interactive' | 'message' | 'background' | string
@@ -114,6 +122,8 @@ export interface UsersResponse {
 export interface AuthStatusResponse {
   enabled: boolean
   authenticated: boolean
+  stage: 'none' | 'token' | 'password' | 'authenticated'
+  requires_both: boolean
   methods: {
     token: boolean
     password: boolean
@@ -126,6 +136,7 @@ export interface AuthenticationSummary {
   token_enabled: boolean
   password_enabled: boolean
   session_cookie_configured: boolean
+  ip_rate_limit_enabled: boolean
 }
 
 export interface SessionsResponse {
@@ -526,6 +537,46 @@ export interface SettingsResponse {
   provenance: Record<string, 'user' | 'global' | 'default'>
 }
 
+export interface VersionResponse {
+  name: string
+  version: string
+  schema_version: number
+  components: Array<{
+    id: string
+    version: string
+    description: string
+  }>
+  read_only: true
+}
+
+export type VersionCheckStatus = 'up_to_date' | 'update_available' | 'local_newer' | 'check_failed'
+
+export interface VersionCheckResponse {
+  status: VersionCheckStatus
+  checked_at: string
+  local_version?: string
+  remote_version?: string
+  components?: Array<{
+    id: 'core' | 'agents' | 'plugins' | 'web'
+    description: string
+    local_version: string
+    remote_version: string
+    status: 'up_to_date' | 'update_available' | 'local_newer'
+  }>
+  commands?: {
+    check: string
+    all: string
+    recommended: string
+    modules: Record<'core' | 'agents' | 'plugins' | 'web', string>
+  }
+  source?: string
+  error?: {
+    code: string
+    message: string
+  }
+  read_only: true
+}
+
 export interface ConfigFullResponse {
   user: string
   config: Record<string, unknown>
@@ -891,21 +942,16 @@ export interface RuntimeStatusResponse {
   }
 }
 
-export type FileTreeNode =
-  | {
-      type: 'directory'
-      name: string
-      relative_path: string
-      children: FileTreeNode[]
-    }
-  | {
-      type: 'file'
-      name: string
-      relative_path: string
-      size: number
-      updated_at: number
-      extension: string
-    }
+export interface FileListEntry {
+  type: 'directory' | 'file'
+  name: string
+  relative_path: string
+  parent_path: string
+  size: number
+  updated_at: number
+  extension: string
+  child_count: number
+}
 
 export interface FileTreeSummary {
   total_files: number
@@ -913,18 +959,31 @@ export interface FileTreeSummary {
   total_size: number
 }
 
-export interface UserFilesResponse {
-  user: string
-  scope: 'file_upload' | 'download'
-  root: string
-  summary: FileTreeSummary
-  tree: FileTreeNode[]
+export interface FileListPagination {
+  page: number
+  page_size: number
+  total_items: number
+  total_pages: number
+  has_previous: boolean
+  has_next: boolean
 }
 
-export interface TmpFilesResponse {
-  root: 'tmp' | string
+export interface FileListResponseBase {
+  root: string
   summary: FileTreeSummary
-  tree: FileTreeNode[]
+  entries: FileListEntry[]
+  path: string
+  search: string
+  pagination: FileListPagination
+}
+
+export interface UserFilesResponse extends FileListResponseBase {
+  user: string
+  scope: 'file_upload' | 'download'
+}
+
+export interface TmpFilesResponse extends FileListResponseBase {
+  root: 'tmp' | string
 }
 
 export interface FileDeleteResponse {

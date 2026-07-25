@@ -8,6 +8,7 @@ describe('reduceRunEvent', () => {
     const uploadedDuringRun = { path: 'next.zip', name: 'next.zip', size: 24 }
     expect(removeSubmittedUploads([sent, uploadedDuringRun], [sent])).toEqual([uploadedDuringRun])
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed' } })).toBe(true)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'limited' } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'cancelled' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
   })
@@ -274,6 +275,54 @@ describe('reduceRunEvent', () => {
       streaming: false,
       content: '部分结果\n\n[本轮已由用户紧急停止]',
     })
+  })
+
+  it('工具循环受限会保留终止正文并结束尚未执行的工具卡片', () => {
+    const items = reduceRunEvent([
+      { id: 'u1', kind: 'message', role: 'user', content: '继续读取' },
+      { id: 't1', kind: 'tool', callId: 'call-1', name: 'file', status: 'running' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '读取中', streaming: true },
+    ], {
+      type: 'done',
+      metadata: {
+        committed: true,
+        status: 'limited',
+        stop_reason: 'max_tool_iterations',
+        text: '读取中\n\n[本轮工具循环已达到最大次数 80，本轮已停止]',
+      },
+    })
+
+    expect(items[1]).toMatchObject({
+      kind: 'tool',
+      status: 'error',
+      result: { ok: false, error: { exception_type: 'ToolLoopLimitExceeded' } },
+    })
+    expect(items[2]).toMatchObject({
+      kind: 'message',
+      role: 'assistant',
+      streaming: false,
+      content: '读取中\n\n[本轮工具循环已达到最大次数 80，本轮已停止]',
+    })
+  })
+
+  it('历史中的未执行和拦截工具按错误状态恢复', () => {
+    const items = buildHistoryItems({
+      user: 'kesepain', source: 'web', session_id: 'limited',
+      messages: [
+        { role: 'user', content: '开始' },
+        { role: 'assistant', content: '[本轮工具循环已达到最大次数 80，本轮已停止]' },
+      ],
+      round_metrics: [{ round: 1, usage: {}, elapsed_ms: 1, tool_calls: 2, guidance: [] }],
+      round_traces: [{ round: 1, reasoning: '', tools: [
+        { call_id: 'one', name: 'file', status: 'not_executed', elapsed_ms: 0, arguments_text: '{}', arguments_truncated: false, result_text: '{}', result_truncated: false, artifacts: [] },
+        { call_id: 'two', name: 'file', status: 'identical_call_blocked', elapsed_ms: 0, arguments_text: '{}', arguments_truncated: false, result_text: '{}', result_truncated: false, artifacts: [] },
+      ] }],
+      pagination: { limit: 20, total_rounds: 1, first_round: 1, last_round: 1, has_more_before: false, next_before: null },
+    })
+    expect(items.filter((item) => item.kind === 'tool')).toEqual([
+      expect.objectContaining({ callId: 'one', status: 'error' }),
+      expect.objectContaining({ callId: 'two', status: 'error' }),
+    ])
   })
 
   it('done 生成可持久化的逐轮统计卡片', () => {

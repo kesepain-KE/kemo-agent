@@ -128,8 +128,11 @@
 .sessionSelect:hover:not(:disabled) { background: color-mix(in srgb, var(--brand-soft) 28%, transparent); }
 .sessionSelect:disabled { cursor: not-allowed; opacity: .62; }
 .sessionSelect:focus-visible,
+.retryButton:focus-visible,
 .deleteButton:focus-visible { border-color: transparent !important; outline: 0 !important; box-shadow: none !important; }
 
+.cardActions { display: grid; align-content: center; gap: 3px; }
+.retryButton,
 .deleteButton {
   width: 32px;
   height: 32px;
@@ -143,7 +146,9 @@
   cursor: pointer;
   transition: color .16s ease, border-color .16s ease, background .16s ease;
 }
+.retryButton:hover:not(:disabled) { color: var(--brand); border-color: var(--brand-line); background: var(--brand-soft); }
 .deleteButton:hover:not(:disabled) { color: var(--red); border-color: color-mix(in srgb, var(--red) 25%, var(--line)); background: var(--red-soft); }
+.retryButton:disabled,
 .deleteButton:disabled { cursor: not-allowed; opacity: .4; }
 
 .cardIcon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: var(--radius-control-lg); color: var(--brand); background: var(--brand-soft); }

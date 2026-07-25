@@ -1,13 +1,15 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ChevronDown, LockKeyhole, Power, RefreshCw, Save } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Power, RefreshCw, Save } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   getGlobalConfig,
   getSettings,
   getUserConfig,
+  getVersion,
+  getVersionCheck,
   patchGlobalConfig,
   patchPreferences,
   patchUserConfig,
@@ -18,8 +20,9 @@ import { ReasoningEffortSelect } from '../components/ReasoningEffortSelect'
 import { normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
 import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
+import { copyText } from '../utils/clipboard'
 
-type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime'
+type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'version'
 type ProviderType = 'chat' | 'kemo'
 type VisionRoutingMode = 'auto' | 'main' | 'dedicated'
 type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_understanding' | 'video_generation'
@@ -74,6 +77,7 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'memory', label: '记忆与上下文' },
   { id: 'permissions', label: '权限边界' },
   { id: 'runtime', label: '运行限制' },
+  { id: 'version', label: '版本查看' },
 ]
 
 const settingsTabIds = new Set<SettingsTab>(settingsTabs.map((item) => item.id))
@@ -120,6 +124,17 @@ function numberValue(value: unknown, fallback: number) {
 
 function booleanValue(value: unknown, fallback: boolean) {
   return typeof value === 'boolean' ? value : fallback
+}
+
+function versionLabel(value: string) {
+  const normalized = String(value || '').trim().replace(/^v/i, '')
+  return normalized ? `v${normalized}` : '未声明'
+}
+
+function versionCheckTime(value: string) {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value || '未知'
+  return parsed.toLocaleString('zh-CN', { hour12: false })
 }
 
 function stringList(value: unknown) {
@@ -425,6 +440,13 @@ export function SettingsPage() {
   const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
   const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
   const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: Boolean(user) })
+  const versionQuery = useQuery({ queryKey: ['version'], queryFn: getVersion })
+  const versionCheckQuery = useQuery({
+    queryKey: ['version-check'],
+    queryFn: () => getVersionCheck(),
+    enabled: tab === 'version',
+    staleTime: 180_000,
+  })
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
   const [initialApiKey, setInitialApiKey] = useState('')
@@ -433,7 +455,13 @@ export function SettingsPage() {
   const [restartState, setRestartState] = useState<RestartState>('idle')
   const [restartMessage, setRestartMessage] = useState('')
   const [restartCanForce, setRestartCanForce] = useState(false)
+  const [versionCopyState, setVersionCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const restartTimerRef = useRef<number | null>(null)
+
+  const versionCheckMutation = useMutation({
+    mutationFn: () => getVersionCheck(true),
+    onSuccess: (data) => client.setQueryData(['version-check'], data),
+  })
 
   useEffect(() => () => {
     if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
@@ -496,9 +524,9 @@ export function SettingsPage() {
   const refreshAll = () => {
     setSavedLabel('')
     setFormError('')
-    void Promise.all([settingsQuery.refetch(), userConfigQuery.refetch(), globalConfigQuery.refetch()])
+    void Promise.all([settingsQuery.refetch(), userConfigQuery.refetch(), globalConfigQuery.refetch(), versionQuery.refetch()])
   }
-  const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching
+  const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching || versionQuery.isFetching
 
   const submit = (request: SaveRequest, validationError = '') => {
     if (validationError) {
@@ -631,6 +659,22 @@ export function SettingsPage() {
   const closeRestartConfirmation = () => {
     setRestartState((current) => current === 'confirming-force' ? 'failed' : 'idle')
   }
+  const versionCheck = versionCheckQuery.data
+  const versionChecking = versionCheckQuery.isFetching || versionCheckMutation.isPending
+  const checkVersionNow = () => {
+    setVersionCopyState('idle')
+    versionCheckMutation.mutate()
+  }
+  const copyVersionUpdateCommand = async () => {
+    const command = versionCheck?.commands?.recommended
+    if (!command) return
+    try {
+      await copyText(command)
+      setVersionCopyState('copied')
+    } catch {
+      setVersionCopyState('failed')
+    }
+  }
 
   return <ModuleFrame
     kicker="Configuration Overview"
@@ -639,6 +683,7 @@ export function SettingsPage() {
     actions={<RefreshActionButton pending={settingsRefreshing} label="重新读取" pendingLabel="读取中…" onClick={refreshAll} />}
   >
     {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
+    {tab === 'version' && versionQuery.isError ? <ModuleError message="版本信息读取失败，请检查 version.json。" /> : null}
     {formError ? <ModuleError message={formError} /> : null}
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="配置分类">
@@ -828,7 +873,84 @@ export function SettingsPage() {
           </div>, document.body) : null}
         </> : null}
 
-        {(userConfigQuery.isLoading || globalConfigQuery.isLoading) && tab !== 'appearance' && tab !== 'users' ? <div className="settings-loading">正在读取结构化配置…</div> : null}
+        {tab === 'version' && versionQuery.data ? <>
+          <article className="setting-section version-overview-section">
+            <div className="setting-section-head"><strong>当前版本</strong><span>只读展示项目内的版本声明，不提供检查、下载或更新功能。</span></div>
+            <SettingRow title="项目" description="当前运行的智能体框架" control={<span className="settings-version-name">{versionQuery.data.name}</span>} />
+            <SettingRow title="正式版本" description="来自项目根目录 version.json" control={<span className="settings-version-value primary">{versionLabel(versionQuery.data.version)}</span>} />
+            <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || '未声明'}</span>} />
+            <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">只读</span>} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>组件版本</strong><span>分别查看核心引擎、子代理、插件生态和 Web 界面的版本声明。</span></div>
+            {versionQuery.data.components.map((component) => <SettingRow
+              key={component.id}
+              title={component.description || component.id}
+              description={`组件标识：${component.id}`}
+              control={<span className="settings-version-value">{versionLabel(component.version)}</span>}
+            />)}
+            {!versionQuery.data.components.length ? <div className="settings-version-empty">version.json 尚未声明组件版本。</div> : null}
+          </article>
+          <article className="setting-section settings-version-check-section">
+            <div className="setting-section-head"><strong>云端版本检查</strong><span>只比较 GitHub 正式版本，不会下载文件、修改代码或执行更新。</span></div>
+            <div className="settings-version-check-head">
+              <span className="settings-version-check-icon"><Cloud size={20} /></span>
+              <span className="settings-version-check-copy">
+                <strong>{versionChecking && !versionCheck ? '正在连接 GitHub…' : '检查是否存在新版本'}</strong>
+                <small>{versionCheck?.checked_at ? `上次检查：${versionCheckTime(versionCheck.checked_at)}` : '进入此栏目后自动检查，也可以随时手动重新检查。'}</small>
+              </span>
+              <button type="button" className="module-btn" disabled={versionChecking} onClick={checkVersionNow}>
+                <RefreshCw className={versionChecking ? 'spin' : ''} size={14} />
+                {versionChecking ? '检查中…' : versionCheck ? '重新检查' : '检查新版本'}
+              </button>
+            </div>
+
+            {versionCheckQuery.isError || versionCheckMutation.isError ? <div className="settings-version-check-result error" role="status">
+              <strong>版本检查请求失败</strong>
+              <span>Web 服务暂时无法完成请求，请稍后重新检查。</span>
+            </div> : null}
+
+            {versionCheck?.status === 'check_failed' ? <div className="settings-version-check-result error" role="status">
+              <strong>无法完成云端版本检查</strong>
+              <span>{versionCheck.error?.message || '云端版本信息暂时不可用，请稍后重试。'}</span>
+            </div> : null}
+
+            {versionCheck?.status === 'up_to_date' ? <div className="settings-version-check-result success" role="status">
+              <strong>当前已是最新版本</strong>
+              <span>本地 {versionLabel(versionCheck.local_version || '')} · 云端 {versionLabel(versionCheck.remote_version || '')}</span>
+            </div> : null}
+
+            {versionCheck?.status === 'local_newer' ? <div className="settings-version-check-result info" role="status">
+              <strong>本地版本高于云端正式版本</strong>
+              <span>本地 {versionLabel(versionCheck.local_version || '')} · 云端 {versionLabel(versionCheck.remote_version || '')}，无需执行更新。</span>
+            </div> : null}
+
+            {versionCheck?.status === 'update_available' ? <>
+              <div className="settings-version-check-result available" role="status">
+                <strong>发现新版本 {versionLabel(versionCheck.remote_version || '')}</strong>
+                <span>当前为 {versionLabel(versionCheck.local_version || '')}。网页端不会替您更新，请在项目根目录的终端中执行下方命令。</span>
+              </div>
+              <div className="settings-version-components" aria-label="云端组件版本差异">
+                {(versionCheck.components || []).map((component) => <div key={component.id} className={`settings-version-component ${component.status}`}>
+                  <span><strong>{component.description}</strong><small>{component.id}</small></span>
+                  <code>{versionLabel(component.local_version)} → {versionLabel(component.remote_version)}</code>
+                  <b>{component.status === 'update_available' ? '待更新' : component.status === 'local_newer' ? '本地较新' : '已是最新'}</b>
+                </div>)}
+              </div>
+              {versionCheck.commands?.recommended ? <div className="settings-version-command">
+                <span><small>推荐：完整更新</small><code>{versionCheck.commands.recommended}</code></span>
+                <button type="button" className="module-btn" onClick={() => void copyVersionUpdateCommand()} aria-label="复制更新命令">
+                  {versionCopyState === 'copied' ? <Check size={14} /> : <Copy size={14} />}
+                  {versionCopyState === 'copied' ? '已复制' : '复制命令'}
+                </button>
+                {versionCopyState === 'failed' ? <small className="settings-version-copy-error">复制失败，请手动选择命令。</small> : null}
+              </div> : null}
+            </> : null}
+          </article>
+        </> : null}
+
+        {versionQuery.isLoading && tab === 'version' ? <div className="settings-loading">正在读取版本信息…</div> : null}
+        {(userConfigQuery.isLoading || globalConfigQuery.isLoading) && tab !== 'appearance' && tab !== 'users' && tab !== 'version' ? <div className="settings-loading">正在读取结构化配置…</div> : null}
       </div>
     </div>
   </ModuleFrame>

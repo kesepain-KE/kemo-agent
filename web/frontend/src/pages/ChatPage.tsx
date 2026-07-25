@@ -287,21 +287,41 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
   }
   if (event.type === 'done') {
     let guidanceRemaining = Number(event.metadata?.guidance_count || 0)
-    const cancelled = event.metadata?.status === 'cancelled' || event.metadata?.cancelled === true
-    const cancelledText = String(event.metadata?.text || '[本轮已由用户紧急停止]')
+    const terminalStatus = String(event.metadata?.status || '').toLowerCase()
+    const cancelled = terminalStatus === 'cancelled' || event.metadata?.cancelled === true
+    const limited = terminalStatus === 'limited'
+    const controlledStop = cancelled || limited
+    const stopReason = String(event.metadata?.stop_reason || '')
+    const limitedToolError = stopReason === 'tool_context_limit'
+      ? { message: '工具调用因本轮达到上下文保护上限而未执行', exception_type: 'ToolContextLimitExceeded' }
+      : stopReason === 'tool_loop_incomplete'
+        ? { message: '工具调用因本轮工具循环未能正常收束而未执行', exception_type: 'ToolLoopIncomplete' }
+        : { message: '工具调用因本轮工具循环达到最大次数而未执行', exception_type: 'ToolLoopLimitExceeded' }
+    const terminalText = String(event.metadata?.text || (cancelled
+      ? '[本轮已由用户紧急停止]'
+      : '[本轮因运行保护限制而停止]'))
     const completed = items.map((item) => {
       if (item.kind === 'message') {
         return {
           ...item,
-          content: cancelled && item.role === 'assistant' && item.streaming
-            ? cancelledText
+          content: controlledStop && item.role === 'assistant' && item.streaming
+            ? terminalText
             : item.content,
           streaming: false,
         }
       }
       if (item.kind === 'reasoning') return { ...item, streaming: false }
-      if (cancelled && item.kind === 'tool' && item.status === 'running') {
-        return { ...item, status: 'error' as const, result: { ok: false, error: { message: '工具调用因用户紧急停止而取消', cancelled: true } } }
+      if (controlledStop && item.kind === 'tool' && item.status === 'running') {
+        return {
+          ...item,
+          status: 'error' as const,
+          result: {
+            ok: false,
+            error: cancelled
+              ? { message: '工具调用因用户紧急停止而取消', cancelled: true }
+              : limitedToolError,
+          },
+        }
       }
       if (item.kind === 'guidance') {
         if (item.status === 'accepted') {
@@ -319,23 +339,23 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       }
       return item
     })
-    const withCancelledText = cancelled && !completed.some((item) => item.kind === 'message' && item.role === 'assistant')
-      ? [...completed, { id: eventId('assistant'), kind: 'message' as const, role: 'assistant' as const, content: cancelledText }]
+    const withTerminalText = controlledStop && !completed.some((item) => item.kind === 'message' && item.role === 'assistant')
+      ? [...completed, { id: eventId('assistant'), kind: 'message' as const, role: 'assistant' as const, content: terminalText }]
       : completed
-    return event.usage ? [...withCancelledText, {
+    return event.usage ? [...withTerminalText, {
       id: eventId('usage'), kind: 'usage', usage: event.usage,
       elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
       toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
       providerRequestCount: event.usage.provider_request_count === undefined ? undefined : Number(event.usage.provider_request_count),
-    }] : completed
+    }] : withTerminalText
   }
   return items
 }
 
 function historyToolStatus(status: string): 'running' | 'success' | 'error' {
   if (status === 'running') return 'running'
-  if (status === 'error' || status === 'cancelled') return 'error'
-  return 'success'
+  if (status === 'completed' || status === 'success' || status === 'duplicate_reused') return 'success'
+  return 'error'
 }
 
 export function buildHistoryItems(history: HistoryResponse | undefined): ChatItem[] {

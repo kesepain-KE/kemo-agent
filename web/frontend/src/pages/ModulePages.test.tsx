@@ -295,7 +295,7 @@ describe('V16 module pages', () => {
     expect(within(within(summary).getByText('已启用').closest('article')!).getByText('0')).toBeInTheDocument()
   })
 
-  it('配置页使用六个纵向栏目并提供结构化字段编辑', async () => {
+  it('配置页提供七个纵向栏目、结构化字段编辑和只读版本查看', async () => {
     let savedChanges: Record<string, unknown> | undefined
     server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
       const body = await request.json() as { changes: Record<string, unknown> }
@@ -368,6 +368,17 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('switch', { name: '使用共享知识库' })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByLabelText('插件白名单输入')).toBeInTheDocument()
 
+    fireEvent.click(screen.getByRole('button', { name: '版本查看 ›' }))
+    expect(await screen.findByText('当前版本')).toBeInTheDocument()
+    expect(screen.getAllByText('v0.2.0').length).toBeGreaterThanOrEqual(5)
+    expect(screen.getByText('Schema 1')).toBeInTheDocument()
+    expect(screen.getAllByText('核心引擎').length).toBeGreaterThan(0)
+    expect(screen.getByText('只读')).toBeInTheDocument()
+    expect(await screen.findByText('发现新版本 v0.3.0')).toBeInTheDocument()
+    expect(screen.getByText('python update.py --module all')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '复制更新命令' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '立即更新' })).not.toBeInTheDocument()
+
     fireEvent.click(screen.getByRole('button', { name: '运行限制 ›' }))
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
     expect(screen.getByLabelText('每轮最大工具循环')).toHaveValue(80)
@@ -427,6 +438,55 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('alertdialog', { name: '确认删除文件' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('已删除 1 个全局临时文件')).toBeInTheDocument()
+  })
+
+  it('文件空间固定每页六项并通过接口切换页面', async () => {
+    const requestedPages: number[] = []
+    server.use(http.get('/api/users/kesepain/files/file_upload', ({ request }) => {
+      const params = new URL(request.url).searchParams
+      const page = Number(params.get('page') ?? 1)
+      const pageSize = Number(params.get('page_size') ?? 6)
+      requestedPages.push(page)
+      const allEntries = Array.from({ length: 8 }, (_, index) => ({
+        type: 'file' as const,
+        name: `page-file-${index + 1}.txt`,
+        relative_path: `page-file-${index + 1}.txt`,
+        parent_path: '',
+        size: index + 1,
+        updated_at: index + 1,
+        extension: '.txt',
+        child_count: 0,
+      }))
+      const entries = allEntries.slice((page - 1) * pageSize, page * pageSize)
+      return HttpResponse.json({
+        user: 'kesepain',
+        scope: 'file_upload',
+        root: 'users/kesepain/file_upload',
+        summary: { total_files: 8, total_dirs: 0, total_size: 36 },
+        entries,
+        path: '',
+        search: '',
+        pagination: {
+          page,
+          page_size: pageSize,
+          total_items: 8,
+          total_pages: 2,
+          has_previous: page > 1,
+          has_next: page < 2,
+        },
+      })
+    }))
+
+    renderPage('files')
+    expect((await screen.findAllByText('page-file-1.txt')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('page-file-7.txt')).not.toBeInTheDocument()
+    expect(screen.getByText('1 / 2')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    expect((await screen.findAllByText('page-file-7.txt')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('page-file-1.txt')).not.toBeInTheDocument()
+    expect(screen.getByText('2 / 2')).toBeInTheDocument()
+    expect(requestedPages).toContain(1)
+    expect(requestedPages).toContain(2)
   })
 
   it('重启被运行态拦截后允许经二次确认强制重启', async () => {
