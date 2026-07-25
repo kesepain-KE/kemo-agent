@@ -23,12 +23,21 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| 对话引擎 | `run/engine.py` | 主循环：prompt 组装 → provider 调用 → 工具循环 → 历史提交 |
+| 对话公共门面 | `run/engine.py` | 对 Web、CLI、Cron、外部消息稳定公开对话、上下文与压缩 API |
+| 对话运行时 | `run/conversation_runtime.py` | 主循环编排：prompt → provider → 工具循环 → 终态提交 |
+| Provider 事件 | `run/provider_events.py` | Provider 协议响应、流事件、媒体产物到统一 RunEvent 的转换 |
+| 请求输入 | `run/request_input.py` | 请求字段、Content Block 与上传资产说明的验证和规范化 |
+| Run 状态 | `run/run_state.py` | 显式承载单次运行的身份、依赖与可变轮次状态 |
+| 轮次终态 | `run/round_finalizer.py` | 取消、工具上限和上下文上限等受控停止轮次的持久化 |
+| 会话运行态 | `run/session_runtime.py` | 会话级锁与完整归档提交辅助 |
 | 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
+| 上下文服务 | `run/context_service.py` | 上下文状态查询和临时工作区工具/思考压缩 |
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
 | 历史管理 | `run/history.py` | 用户可见完整归档与 `history/temp/<window>/` Provider 临时工作区的创建、裁剪、恢复和提交 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
-| 记忆管道 | `run/engine.py`、`run/memory_pipeline.py` | 按模式登记状态，并在提交、保存或压缩边界沿 `memory_processed_round` 顺序提取 |
+| 记忆分析 | `run/memory_analysis.py` | 批量分析、韧性重试、持久化与 `memory_processed_round` 游标推进 |
+| 记忆管道 | `run/conversation_runtime.py`、`run/memory_pipeline.py` | 按模式登记状态，并在提交、保存或压缩边界顺序提取 |
+| Usage 聚合 | `run/usage.py` | 多次 Provider 请求计量合并与缓存命中统计 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
 | Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
 | 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
@@ -131,7 +140,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 外部消息状态 | `users/<name>/message_state/` | 外部消息处理状态（`processed.json`） |
 | Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
 | 记忆存储标记 | `users/<name>/improve/storage.json` | 记忆存储 schema 版本标记 |
-| Web 服务 | `web/` | 前端（React + Vite）+ 后端（Flask），开发服务器默认 `:5173` |
+| Web 服务 | `web/` | 前端（React + Vite）+ 后端（FastAPI），开发服务器默认 `:5173` |
 | 全局版本 | `version.json` | 5 组版本号（core/agents/plugins/web/all），启动时展示 |
 | 更新系统 | `update.py` + `update/` | 8 板块覆盖策略，版本对比，远程拉取 |
 | CLI 入口 | `cli.py` | 纯命令行交互，用户选择 → 对话 |
@@ -303,15 +312,16 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
 - 不重复执行已经产生副作用的工具调用（框架层有签名去重）。
-- 工具执行有超时限制（`tools.timeout`，默认 240 秒）。
+- 工具执行有超时限制：未显式提供 `timeout` 时使用 `tools.timeout`（默认 240 秒）；工具 Schema 声明且调用方显式提供有效 `timeout` 时，该值同时覆盖插件内部期限和框架外层看门狗期限。
 - 工具循环有最大次数限制（`tools.max_iterations`，默认 80 次）；该值统计 Provider 迭代，不等同于工具卡片数量。
 - 单个工具以“工具名称 + 完整参数”作为调用签名；同一签名连续请求超过
   `tools.consecutive_identical_call_limit`（默认 8 次）后阻止继续执行。工具或参数变化会将连续计数重置为 1。
 - 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
   Provider 工具 schema 中临时移除；其他工具穿插执行会重置连续失败计数。
-- 用户取消时立即停止，不继续执行后续工具调用。
+- 用户取消时立即向当前工具发送独立取消信号，不继续执行后续工具调用；工具超时也会发送取消信号并留出短暂清理窗口，但不会误取消整个对话。
 - 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout`，不注入主对话历史。
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
+- 插件工具清单的可选 `timeout_policy` 默认为 `argument_or_default`；只有自身管理子智能体整体期限的调度工具使用 `agent_runtime`，普通插件不得借此绕过工具超时边界。
 
 ---
 
@@ -471,7 +481,8 @@ users/<user>/agents/<name>/
 - 新骨架只允许显式白名单中的 `shared_skills` 进入子代理提示词；不再注入用户技能和三层 Expand。
 - 知识能力只注入授权范围内的完整索引文件；正文关键词检索链路已删除，由外部 kemo-graph 承担后续检索能力。
 - `subagent_dispatch` 不会下发给子代理，避免递归调度链。
-- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；新骨架运行时采用宽松 object Schema，详细输入输出约定记录在 `trigger.md`。
+- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；默认上限来自 `agent_runtime.default_timeout`，同步调度工具的外层看门狗会晚于该期限触发，不能被普通 `tools.timeout` 提前截断。
+- 子代理达到期限后运行时会自动请求协作式取消并等待清理；已退出记为 `timed_out`，未在清理窗口内退出记为 `timed_out_running`。Python 线程不能被不安全地强杀，后一状态必须保留真实诊断信息。
 - 主智能体不得把子代理内部指令视为用户指令。
 - 用户主配置关闭知识、技能、Expand 或感知时，不会收缩子代理 `agent-config.json` 已授予的能力。
 
@@ -562,7 +573,7 @@ system prompt 按以下固定顺序拼接：
 - 同一用户可共享记忆和知识库，但不同来源与会话的对话历史互相隔离。
 - 不假设拥有未注入的其他会话内容；`memory.history_read_enabled=true` 时可使用历史搜索工具。
 - 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。
-- 会话级锁（`_session_lock`）保证同一 user/source/session_id 的请求串行执行。
+- 会话级锁（`run/session_runtime.py:session_lock`）保证同一 user/source/session_id 的请求串行执行。
 
 ---
 

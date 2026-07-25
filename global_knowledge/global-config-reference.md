@@ -2,7 +2,7 @@
 
 > 文档版本：v2.2
 > 最后核对：2026-07-25
-> 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/prompt.py`、`run/runtime_host.py`
+> 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/conversation_runtime.py`、`run/context_service.py`、`run/prompt.py`、`run/runtime_host.py`
 
 kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用户共享这些默认值，用户级 `user_config.json` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
 
@@ -34,7 +34,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `true` | 全局工具开关。`false` 时所有 Provider 工具 schema 均不注册，智能体只能纯文本对话 |
-| `timeout` | int | `240` | 单次工具调用的超时秒数（秒） |
+| `timeout` | int | `240` | 单次工具调用未提供 `timeout` 参数时的默认秒数；工具 Schema 声明且调用方显式提供有效 `timeout` 时，以显式值为准，插件内部期限与框架看门狗使用同一有效值 |
 | `max_iterations` | int | `80` | 单轮对话中 Provider 迭代的最大次数。该值统计 Provider 迭代次数，不等同于工具卡片数量。达到上限后抛出 `EngineError` |
 | `consecutive_identical_call_limit` | int | `8` | 同一工具使用完全相同参数连续请求的允许次数；工具或参数变化后重新计数。超过后阻止继续执行 |
 
@@ -164,7 +164,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `queue_maxsize` | int | `50` | 用户级 `AgentScheduler` 的有界队列最大长度；0 表示无界 |
-| `default_timeout` | int | `600` | 子代理执行默认超时秒数 |
+| `default_timeout` | int | `600` | 子代理整体执行默认超时秒数；达到期限后自动发送协作式取消并等待清理，同步调度不会被普通工具默认超时提前截断 |
 
 > 注意：每个用户的 `AgentScheduler` 使用实例级串行锁和独立有界队列，不再由一个进程级锁串行所有用户。
 

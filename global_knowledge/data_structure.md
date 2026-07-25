@@ -38,6 +38,8 @@ kemo-agent/
 
 ```text
 入口（Web / CLI / 外部消息 / Cron）
+  → run/engine.py 稳定公共门面
+  → conversation_runtime / run_state / request_input / provider_events 领域运行模块
   → user + source + session_id 会话隔离
   → 全局配置与用户配置合并
   → 人格、子代理、插件、技能、知识索引、记忆、计划、拓展、感知拼接

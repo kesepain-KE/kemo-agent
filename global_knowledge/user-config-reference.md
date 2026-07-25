@@ -117,7 +117,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `timeout` | int | 240 | 单次工具调用超时（秒） |
+| `timeout` | int | 240 | 工具未显式提供 `timeout` 时的默认秒数；显式有效参数会覆盖此值，并同时作用于插件内部期限和框架看门狗 |
 | `max_iterations` | int | 80 | 单轮最大 Provider 迭代次数 |
 | `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
 
@@ -235,7 +235,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `queue_maxsize` | int | 50 | 用户级 `AgentScheduler` 有界队列最大长度；0 表示无界 |
-| `default_timeout` | int | 600 | 子代理默认超时（秒） |
+| `default_timeout` | int | 600 | 子代理整体默认超时（秒）；到期自动请求协作式取消并等待清理，不受普通工具默认超时提前截断 |
 
 ---
 

@@ -122,3 +122,4 @@ def execute(context, input_data: dict):
 
 主智能体通过 `subagent_dispatch` 的 `list/call/status/cancel` 调用公开代理。同步任务使用 `wait=true`；长任务可后台提交并查询状态。调用前读取目标 `trigger.md`，按照约定构造结构化输入。
 
+子智能体整体期限来自 `agent_runtime.default_timeout`，与其内部每次工具调用的 `tools.timeout` 相互独立。同步调用的 `subagent_dispatch` 使用子智能体期限作为外层看门狗基准，不会在普通工具默认期限到达时提前返回。子智能体整体超时后框架会自动发送取消信号并等待短暂清理：执行线程已经退出时记录 `timed_out`，仍未退出时记录 `timed_out_running`，不得把后者描述成已经强制终止。
