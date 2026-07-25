@@ -24,7 +24,6 @@ from run.task_plan_store import (
     PlanValidationError,
 )
 from run.tools import (
-    ToolError,
     ToolRegistry,
     apply_runtime_tool_policy,
     discover_tools,
@@ -89,6 +88,7 @@ def execute_plan(
             else ToolRegistry({})
         )
     tool_timeout = float((cfg.get("tools") or {}).get("timeout", 240))
+    agent_timeout = (cfg.get("agent_runtime") or {}).get("default_timeout", 600)
 
     store = PlanStore(root, user)
 
@@ -317,6 +317,7 @@ def execute_plan(
                         "session_id": plan.get("session_id", ""),
                         "window": "",
                         "tool_timeout": tool_timeout,
+                        "agent_timeout": agent_timeout,
                         "plan_id": plan_id,
                         "step_id": step_id,
                     },

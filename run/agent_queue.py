@@ -11,11 +11,24 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
 from events import RunEvent
-from run.agent_runner import AgentCancelledError, AgentRunResult, AgentRunner
+from run.agent_runner import (
+    AgentCancelledError,
+    AgentRunResult,
+    AgentRunner,
+    AgentTimeoutError,
+)
 
 
-TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
-_TERMINAL = {"completed", "failed", "cancelled"}
+TaskStatus = Literal[
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "timed_out_running",
+]
+_TERMINAL = {"completed", "failed", "cancelled", "timed_out", "timed_out_running"}
 
 
 class AgentQueueError(RuntimeError):
@@ -280,13 +293,27 @@ class AgentScheduler:
                     if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                         raise
                     with self._lock:
-                        task.status = (
-                            "cancelled" if isinstance(exc, AgentCancelledError) else "failed"
-                        )
+                        if isinstance(exc, AgentCancelledError):
+                            task.status = "cancelled"
+                        elif isinstance(exc, AgentTimeoutError):
+                            task.status = (
+                                "timed_out"
+                                if exc.process_terminated
+                                else "timed_out_running"
+                            )
+                        else:
+                            task.status = "failed"
                         task.error = {
                             "message": str(exc),
                             "exception_type": type(exc).__name__,
                         }
+                        if isinstance(exc, AgentTimeoutError):
+                            task.error.update(
+                                {
+                                    "cancel_requested": True,
+                                    "process_terminated": exc.process_terminated,
+                                }
+                            )
                         task.finished_at = datetime.now(timezone.utc).isoformat()
                 finally:
                     task.done_event.set()

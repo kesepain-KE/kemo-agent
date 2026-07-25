@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import math
 import re
 import sys
 import threading
@@ -48,6 +49,9 @@ from run.tools import (
 )
 
 
+_AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
+
+
 class AgentRunError(RuntimeError):
     pass
 
@@ -63,7 +67,9 @@ class AgentOutputError(AgentRunError):
 
 
 class AgentTimeoutError(AgentRunError):
-    pass
+    def __init__(self, message: str, *, process_terminated: bool = False) -> None:
+        super().__init__(message)
+        self.process_terminated = bool(process_terminated)
 
 
 class AgentCancelledError(AgentRunError):
@@ -332,6 +338,9 @@ class AgentRunner:
         max_iterations = definition.capabilities.max_tool_iterations
         tool_config = self.config.get("tools") or {}
         tool_timeout = float(tool_config.get("timeout", 240))
+        agent_timeout = (self.config.get("agent_runtime") or {}).get(
+            "default_timeout", 600
+        )
         raw_identical_call_limit = tool_config.get(
             "consecutive_identical_call_limit", 8
         )
@@ -469,6 +478,7 @@ class AgentRunner:
                                 "agent": definition.name,
                                 "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
+                                "agent_timeout": agent_timeout,
                                 "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
                             },
                             timeout=tool_timeout,
@@ -560,11 +570,17 @@ class AgentRunner:
         if not isinstance(input_data, dict):
             raise AgentInputError("子代理输入必须是 JSON 对象")
         validate_json_schema(input_data, definition.input_schema)
-        stopped = cancel_event or threading.Event()
-        if stopped.is_set():
+        caller_cancel_event = cancel_event
+        stopped = threading.Event()
+        if caller_cancel_event is not None and caller_cancel_event.is_set():
             raise AgentCancelledError(f"子代理 {name} 已取消")
-        effective_timeout = float(timeout if timeout is not None else definition.timeout)
-        if effective_timeout <= 0:
+        try:
+            effective_timeout = float(
+                timeout if timeout is not None else definition.timeout
+            )
+        except (TypeError, ValueError) as exc:
+            raise AgentRunError("子代理 timeout 必须是正数") from exc
+        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
             raise AgentRunError("子代理 timeout 必须是正数")
         prompt_bundle = build_agent_prompt_bundle(
             self.root,
@@ -595,14 +611,32 @@ class AgentRunner:
         deadline = time.monotonic() + effective_timeout
         try:
             while True:
-                if stopped.is_set():
+                if caller_cancel_event is not None and caller_cancel_event.is_set():
+                    stopped.set()
                     future.cancel()
                     raise AgentCancelledError(f"子代理 {name} 已取消")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    stopped.set()
+                    future.cancel()
+                    cleanup_deadline = (
+                        time.monotonic() + _AGENT_TIMEOUT_CLEANUP_GRACE
+                    )
+                    while not future.done():
+                        cleanup_remaining = cleanup_deadline - time.monotonic()
+                        if cleanup_remaining <= 0:
+                            break
+                        time.sleep(min(0.05, cleanup_remaining))
+                    process_terminated = future.done()
+                    state = (
+                        "执行线程已退出"
+                        if process_terminated
+                        else "执行线程未在清理宽限期内退出"
+                    )
                     raise AgentTimeoutError(
                         f"子代理 {name} 执行超时（{effective_timeout:g}s）；"
-                        "运行线程未被强制终止，请主智能体查看子代理运行日志后决定是否取消"
+                        f"已自动请求取消，{state}",
+                        process_terminated=process_terminated,
                     )
                 if future.done():
                     result = future.result()
@@ -621,21 +655,26 @@ class AgentRunner:
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                 raise
-            status = (
-                "cancelled"
-                if isinstance(exc, AgentCancelledError)
-                else "timed_out_running"
-                if isinstance(exc, AgentTimeoutError)
-                else "failed"
-            )
+            if isinstance(exc, AgentCancelledError):
+                status = "cancelled"
+            elif isinstance(exc, AgentTimeoutError):
+                status = (
+                    "timed_out"
+                    if exc.process_terminated
+                    else "timed_out_running"
+                )
+            else:
+                status = "failed"
             detail = {"error": str(exc), "exception_type": type(exc).__name__}
             if isinstance(exc, AgentTimeoutError):
                 detail.update(
                     {
-                        "process_terminated": False,
-                        "action_required": "inspect_subagent_logs",
+                        "cancel_requested": True,
+                        "process_terminated": exc.process_terminated,
                     }
                 )
+                if not exc.process_terminated:
+                    detail["action_required"] = "inspect_runtime_logs"
             _event(
                 event_callback,
                 agent=name,
