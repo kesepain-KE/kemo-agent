@@ -1,7 +1,7 @@
 # global_config.json 配置项手册
 
-> 文档版本：v2.1
-> 最后核对：2026-07-23
+> 文档版本：v2.2
+> 最后核对：2026-07-25
 > 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/prompt.py`、`run/runtime_host.py`
 
 kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用户共享这些默认值，用户级 `user_config.json` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
@@ -49,6 +49,21 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `schema_version` | int | `1` | 历史数据格式版本号 |
 | `recent_full_rounds` | int | `3` | 保留完整工具日志和思考过程的最近轮数。超过此数的旧轮次会被 `context_manage` 逐轮压缩 |
 | `consecutive_tool_fail_limit` | int | `5` | 同名工具连续失败的容忍上限。达到后本轮从 Provider 工具 schema 中临时移除该工具；其他工具穿插执行会重置连续失败计数 |
+
+---
+
+## history_summary — 历史摘要后台调度
+
+历史摘要使用独立持久调度线程，不占用 Web 请求线程，也不进入有容量上限的子代理内存队列。会话关闭并排队后，即使用户关闭网页，任务仍会由运行中的 RuntimeHost 继续处理。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `poll_interval` | number | `5` | 持久摘要任务扫描间隔（秒），最小为 1 |
+| `max_jobs_per_cycle` | int | `1` | 每个扫描周期最多领取的摘要任务数；多用户之间轮转领取，避免单用户长期独占 |
+| `max_attempts` | int | `5` | 单个摘要任务的自动尝试上限；达到上限后进入 `exhausted`，等待用户手动重试 |
+| `retry_delays_seconds` | int[] | `[30, 120, 600, 1800]` | 各次失败后的退避时间；超出数组长度时沿用最后一个值。Provider 拥塞和服务停止只推迟任务，不消耗失败次数 |
+
+长对话会分块生成摘要，并在每块完成后写入持久断点。进程重启或中途失败后从最近断点继续，不重复处理已经成功的分块。修改本段配置后需要重启运行时宿主才能应用到调度线程。
 
 ---
 
@@ -112,12 +127,14 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
 | `extraction_max_candidates_per_batch` | int | `10` | 每批最多保留的记忆候选；同时受“每轮最多 2 条”限制，运行时硬上限为 40 |
-| `important_memory_max_chars` | int | `5000` | 临时重要记忆文件最大字符数。超出后需 `memory_temporary_important` 子代理压缩 |
+| `important_memory_max_chars` | int | `5000` | 临时重要热画像最大字符数。热画像是临时碎片的可重建派生视图，不改变源碎片生命周期；超出后由 `memory_temporary_important` 精简 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
 
 ### temporary_injection_limits — 临时记忆注入上限
 
 按**文件数量**截断，优先保留高权重层级。仅限制单次 Prompt 注入，不限制磁盘存储数量。
+
+已被 `improve/important_view.json` 有效引用的临时碎片由热画像段承载，普通临时记忆段会跳过这些来源，避免同一事实重复注入。源文件仍保留并继续正常加权、到期和晋升；任一来源发生变化时旧热画像暂停注入，直到下次巡检重建。
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|

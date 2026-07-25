@@ -48,13 +48,21 @@ Provider 和使用标准网络栈的模块可继承代理。TLS 证书验证使�
 |------|--------|------|
 | `WEB_HOST` | `127.0.0.1` | 监听地址；`0.0.0.0` 会暴露到可达网络 |
 | `WEB_PORT` | `1357` | 1–65535；端口冲突时启动器可继续探测后续端口 |
-| `WEB_ACCESS_TOKEN` | 空 | 非空时启用 URL Token 登录，使用 `?token=...` 建立会话 |
+| `WEB_ACCESS_TOKEN` | 空 | 非空时启用 Token 登录；登录页通过 `POST /api/auth/token` 的请求体提交，不放入 URL |
 | `WEB_USERNAME` | 空 | Web 页面登录用户名，与内部 `users/<name>` 无关 |
 | `WEB_PASSWORD` | 空 | Web 页面登录密码，必须与 `WEB_USERNAME` 同时设置或同时留空 |
 | `WEB_SESSION_SECRET` | 启动时随机生成 | 签名会话密钥；多进程或需要重启后保持登录时应显式设置强随机值 |
 | `WEB_SESSION_COOKIE_NAME` | `kemo_agent_session` | Session Cookie 名称；同域多实例应使用不同名称 |
+| `WEB_AUTH_IP_MAX_FAILURES` | `0` | 单个 IP 在同一认证阶段允许的失败次数；留空或 `0` 表示不限次数 |
+| `WEB_AUTH_IP_WINDOW_SECONDS` | `600` | 失败次数统计窗口，单位秒，必须大于 `0` |
+| `WEB_AUTH_IP_LOCK_SECONDS` | `900` | 达到失败上限后的锁定时间，单位秒，必须大于 `0` |
+| `WEB_AUTH_TRUSTED_PROXIES` | 空 | 可信反向代理 IP/CIDR，逗号分隔；仅直连来源命中时才读取 `X-Forwarded-For` |
 
-同时配置 Token 和用户名密码时，两种方式都可以建立已认证会话。业务接口使用 HttpOnly 签名 Cookie，不把密钥返回前端。
+认证流程按配置确定：只配置 Token 时验证 Token 后进入；只配置用户名密码时登录后进入；两者同时配置时必须先验证 Token，再验证用户名和密码，不能任选其一。双重认证的 Token 中间状态有效 5 分钟，完整签名会话默认有效 2 小时。
+
+失败限制按“客户端 IP + 认证阶段”分别统计 Token 和用户名密码。达到上限时接口返回 HTTP 429 与 `Retry-After`；该状态保存在当前 Web 进程内，重启后清空。未配置可信代理时一律使用直连 IP，避免客户端伪造转发头绕过限制。
+
+Token 与密码只出现在对应 POST 请求体中；浏览器所有者仍可在开发者工具的当次网络请求里查看自己输入的值，这是浏览器端无法隐藏的。服务端 Cookie 只保存签名认证状态，不保存 Token、用户名或密码。
 
 ## 示例
 
@@ -69,6 +77,10 @@ WEB_USERNAME=
 WEB_PASSWORD=
 WEB_SESSION_SECRET=
 WEB_SESSION_COOKIE_NAME=kemo_agent_session
+WEB_AUTH_IP_MAX_FAILURES=
+WEB_AUTH_IP_WINDOW_SECONDS=600
+WEB_AUTH_IP_LOCK_SECONDS=900
+WEB_AUTH_TRUSTED_PROXIES=
 
 HTTP_PROXY=
 HTTPS_PROXY=

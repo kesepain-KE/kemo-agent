@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -28,6 +27,7 @@ from message.transport import (
     TransportError,
     TransportPolicy,
 )
+from run.attachments import describe_message_asset
 from run.users import user_dir
 
 if TYPE_CHECKING:
@@ -617,9 +617,10 @@ class FileMessageTransport:
         )
 
     def request_payload(self, envelope: MessageEnvelope) -> dict[str, Any]:
-        """Build Engine prompt/content fields from validated local attachments."""
+        """Build Engine prompt and Run assets from validated local attachments."""
         prompt_parts = [envelope.text] if envelope.text.strip() else []
         content: list[dict[str, Any]] = []
+        assets: list[dict[str, Any]] = []
         for raw in envelope.attachments:
             path = self._attachment_path(str(raw.get("path") or ""))
             mime = str(raw.get("mime") or "application/octet-stream").lower()
@@ -644,30 +645,22 @@ class FileMessageTransport:
                     text = text[:_MAX_TEXT_ATTACHMENT_CHARS] + "\n…（附件内容已截断）"
                 prompt_parts.append(f"[文本附件：{name} | {mime}]\n{text}")
                 continue
-            if mime.startswith("video/"):
-                prompt_parts.append(
-                    f"[视频附件暂未自动解析：{name} | {mime} | {size} bytes]"
+            assets.append(
+                describe_message_asset(
+                    self.config.root,
+                    self.config.bound_user,
+                    {
+                        "path": str(raw.get("path") or ""),
+                        "name": name,
+                    },
+                    source=self.config.directory.name,
                 )
-                continue
-            if mime.startswith("image/"):
-                kind = "image"
-            elif mime.startswith("audio/"):
-                kind = "audio"
-            elif mime == "application/pdf":
-                kind = "file"
-            else:
-                prompt_parts.append(f"[文件附件：{name} | {mime} | {size} bytes]")
-                continue
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            block: dict[str, Any] = {
-                "type": kind,
-                "source": {"kind": "inline_base64", "data": encoded},
-                "mime_type": mime,
-            }
-            if kind == "file":
-                block["filename"] = name
-            content.append(block)
-        return {"prompt": "\n\n".join(prompt_parts), "content": content}
+            )
+        return {
+            "prompt": "\n\n".join(prompt_parts),
+            "content": content,
+            "assets": assets,
+        }
 
     def finalize(self, result: "RouteResult") -> None:
         token = str(result.envelope.metadata.get("message_queue_token") or "")

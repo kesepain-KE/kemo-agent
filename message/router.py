@@ -283,6 +283,14 @@ class MessageRouter:
                 if not isinstance(content, list):
                     raise MessageRouteError("Transport content 必须是数组")
                 request["content"] = content
+                assets = prepared.get("assets")
+                if assets is None:
+                    assets = prepared.get("uploaded_files") or []
+                if not isinstance(assets, list) or not all(
+                    isinstance(item, dict) for item in assets
+                ):
+                    raise MessageRouteError("Transport assets 必须是对象数组")
+                request["uploaded_files"] = assets
             chunks: list[str] = []
             terminal_seen = False
             route_error: dict[str, Any] | None = None

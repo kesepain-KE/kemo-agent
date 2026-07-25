@@ -86,7 +86,9 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 |------|--------|------|
 | `vision` | `"auto"` | `auto` = 主模型支持图片时优先直传，否则使用专用视觉模型；`main` = 仅主模型；`dedicated` = 仅 `multimodal_models.vision` |
 
-图片文件在后端经过上传目录约束、真实格式与大小检查后，Chat 请求才会临时内联，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
+路由对 Web 上传与外部消息资产一致生效。外部消息模块不能自行将图片作为 inline Content Block 发送给主模型。`multimodal` 工具还接受 `paths`：绝对路径或相对项目根目录的明确本地媒体会先登记、验证，再直接交给专用能力模型；这不会改变主模型的 `input_modalities` 声明。
+
+图片文件在后端经过来源目录约束或显式本地路径登记、真实格式与大小检查后，Chat 请求才会临时内联，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
 
 ---
 
@@ -221,7 +223,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
 | `extraction_max_candidates_per_batch` | int | 10 | 每批候选总上限；仍受每轮最多 2 条限制 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days` |
-| `important_memory_max_chars` | int | 5000 | 临时重要记忆文件最大字符数 |
+| `important_memory_max_chars` | int | 5000 | 临时重要热画像最大字符数；热画像只镜像高价值临时碎片，不截断其正常生命周期 |
 | `history_read_enabled` | bool | true | 是否允许智能体使用 `history_search` 工具 |
 
 ---
