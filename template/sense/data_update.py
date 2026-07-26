@@ -1,6 +1,8 @@
 """感知模块数据采集模板。
 
-复制到 ``global_sense/<name>/data_update.py`` 后实现 ``collect()``。
+这是可替换的最小适配样例，不是内部架构要求。可以只实现一个极小采集，
+也可以重写整个文件或从模块目录内的完整工程导入实现；框架只调用零参数
+``update()``（兼容 ``main()``），不会限制目录中的其他文件。
 RuntimeHost 会按配置周期在隔离子进程中调用零参数 ``update()``；Windows
 后台调用由框架隐藏终端，模块不需要设置 ``CREATE_NO_WINDOW`` 或启动守护进程。
 
@@ -29,9 +31,9 @@ HOST_TZ = timezone(timedelta(hours=8))
 
 
 def collect() -> dict[str, Any]:
-    """采集只读感知数据；请替换为真实实现。"""
+    """可选样例钩子；也可以删除此函数并让 update() 调用其他内部实现。"""
 
-    # TODO: 在此读取本机状态、传感器或外部 API。
+    # TODO: 直接实现极小采集，或导入模块目录内的任意内部工程。
     return {}
 
 
@@ -50,17 +52,20 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def render_markdown(data: dict[str, Any], update_time: str) -> str:
-    """把结构化结果渲染为有界 Markdown；可按模块需要调整。"""
+    """可选样例：产生有界 Prompt 数据出口；允许完全替换。"""
 
+    rendered = (
+        f"```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
+        if data
+        else "暂无数据"
+    )
     return f"""# 感知模块名称
 
 > 自动采集时间：{update_time}
 
 ## 数据
 
-```json
-{json.dumps(data, ensure_ascii=False, indent=2)}
-```
+{rendered}
 """
 
 
@@ -88,6 +93,7 @@ def update() -> dict[str, Any]:
         write_manifest_health(healthy=True, update_time=now)
         result: dict[str, Any] = {
             "ok": True,
+            "status": "ok",
             "time": now,
             "errors": [],
             "size": len(content),
@@ -98,7 +104,7 @@ def update() -> dict[str, Any]:
             write_manifest_health(healthy=False, update_time=now)
         except Exception as health_exc:
             error = f"{error}；写回异常健康状态失败：{health_exc}"
-        result = {"ok": False, "time": now, "error": error}
+        result = {"ok": False, "status": "error", "time": now, "error": error}
 
     atomic_write(
         STATUS_PATH,

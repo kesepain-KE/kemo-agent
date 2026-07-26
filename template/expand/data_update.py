@@ -10,10 +10,10 @@ RuntimeHost 会在隔离子进程中调用零参数 update()；Windows 后台调
 - 输出文件是 input_data.md（而非 sense.md）
 - expand 有操控层（start_expand.py），sense 只有感知层
 
-== 修 改 指 南 ==
-1. 修改 collect()：实现实际的数据采集，返回 dict
-2. 修改标题：update() 中的 "# 拓展模块名称" 改为模块实际名称
-3. 不需要修改 update() 的格式化和写文件逻辑
+== 自由实现 ==
+本文件只是可替换的最小适配样例。可以保留这些辅助函数、缩成更小入口、
+重写整个文件，或调用模块目录内的完整工程。框架只要求零参数 update()
+（兼容 main()）最终刷新清单声明的数据出口并返回明确状态，不规定内部结构。
 """
 
 import json
@@ -22,6 +22,7 @@ import sys
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_MD = BASE_DIR / "input_data.md"
@@ -30,16 +31,33 @@ MANIFEST_PATH = BASE_DIR / "expand.json"
 HOST_TZ = timezone(timedelta(hours=8))  # 北京时间，按需修改
 
 
-def collect() -> dict:
+def collect() -> Any:
     """
-    【必须修改】采集拓展数据，返回 dict。
+    可选样例钩子；也可以删除并让 update() 调用其他内部实现。
 
-    示例返回值:
-        {"volume": 54, "muted": false}
+    可以返回任意 JSON 兼容值用于生成 Prompt 摘要；大型内容保存在模块
+    目录内由实际工程自行选择的位置。
     """
-    data: dict = {}
-    # TODO: 在此实现实际采集逻辑
+    data: Any = {}
+    # TODO: 直接实现极小采集，或导入模块目录内的任意内部工程。
     return data
+
+
+def render_markdown(data: Any, *, update_time: str) -> str:
+    """可选样例：产生小型 Prompt 视图；允许完全替换。"""
+
+    if isinstance(data, str):
+        rendered = data.strip() or "暂无数据"
+    else:
+        rendered = f"```json\n{json.dumps(data, ensure_ascii=False, indent=2, default=str)}\n```"
+    return f"# 拓展模块名称\n\n> 自动采集时间：{update_time}\n\n## 数据\n\n{rendered}\n"
+
+
+def collect_resources(data: Any) -> list[dict[str, str]]:
+    """可选样例：声明模块内资源路径，不限制实际保存位置。"""
+
+    del data
+    return []
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -73,17 +91,7 @@ def update():
     try:
         data = collect()
 
-        # ── 修改此处标题为模块实际名称 ──
-        content = f"""# 拓展模块名称
-
-> 自动采集时间：{now}
-
-## 数据
-
-```json
-{json.dumps(data, ensure_ascii=False, indent=2)}
-```
-"""
+        content = render_markdown(data, update_time=now)
         atomic_write(INPUT_MD, content)
         write_manifest_health(healthy=True, update_time=now)
         result = {
@@ -91,6 +99,7 @@ def update():
             "time": now,
             "errors": [],
             "size": len(content),
+            "resources": collect_resources(data),
         }
     except Exception as exc:
         error = str(exc)

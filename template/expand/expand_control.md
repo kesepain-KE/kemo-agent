@@ -8,10 +8,9 @@
 
 # 拓展操控工具
 
-助手通过调用 `start_expand.py` 中的 Python 函数操控拓展模块。
-所有命令通过 `execute(command, params)` 统一入口调度，返回 JSON 字符串。
+助手使用 `expand_call` 工具调用本模块，不通过 Shell 拼接 JSON 参数。
+清单声明的操控入口提供 `execute(command, params)` 协议适配，内部实现方式不受限制。
+`input_data.md` 只承载采集状态；本次操控结果和文件产物直接通过工具结果返回。
 
-## 可用命令
-
-### example_action(param: str)
-描述此操作的功能。
+在此按模块真实能力记录可用命令。每项说明命令名、参数、返回值、失败形式、
+权限要求和副作用；没有固定命令数量、命名方式或内部调度结构。

@@ -26,82 +26,21 @@ _MAX_EXPLAIN_CHARS = 2_000
 _MAX_MARKDOWN_CHARS = 100_000
 _MAX_CODE_CHARS = 500_000
 _CREATE_FILES = ("sense.json", "sense.md", "data_update.py")
+_BUNDLED_SENSE_TEMPLATE = Path(__file__).resolve().parents[2] / "template" / "sense"
 
 
-_DATA_UPDATE_TEMPLATE = '''#!/usr/bin/env python3
-"""数据更新入口：运行后刷新 sense.md 和 sense.json 健康状态。
+def _bundled_template(name: str) -> str:
+    """Use the root Sense skeleton as the single production template source."""
 
-在 collect_data() 中接入系统接口、传感器或外部 API。不要在源码中硬编码凭据，
-需要认证时应从环境变量读取。
-"""
-
-from __future__ import annotations
-
-import json
-import os
-import uuid
-from datetime import datetime
-from pathlib import Path
-from typing import Any
-from zoneinfo import ZoneInfo
-
-
-BEIJING = ZoneInfo("Asia/Shanghai")
-
-
-def collect_data() -> dict[str, Any]:
-    """采集感知数据；请替换为真实、只读的数据采集逻辑。"""
-
-    # TODO: 对接实际数据源并返回结构化数据。
-    return {}
-
-
-def render_markdown(data: dict[str, Any], status: str = "正常") -> str:
-    """把采集结果渲染为将要注入 system prompt 的 Markdown。"""
-
-    now = datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["# 感知数据", "", f"> 最后更新: {now}", f"> 状态: {status}", ""]
-    if not data:
-        lines.append("暂无数据")
-        return "\\n".join(lines) + "\\n"
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"## {key}")
-            lines.extend(f"- {child_key}: {child_value}" for child_key, child_value in value.items())
-        else:
-            lines.append(f"- **{key}**: {value}")
-        lines.append("")
-    return "\\n".join(lines).rstrip() + "\\n"
-
-
-def atomic_write(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    path = _BUNDLED_SENSE_TEMPLATE / name
     try:
-        with temporary.open("w", encoding="utf-8", newline="\\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def update() -> None:
-    base = Path(__file__).resolve().parent
-    data = collect_data()
-    atomic_write(base / "sense.md", render_markdown(data))
-
-    manifest_path = base / "sense.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    manifest["recent_update"] = datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M:%S")
-    manifest["health"] = "正常"
-    atomic_write(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\\n")
-    print(json.dumps({"status": "ok", "updated": "sense.md"}, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    update()
-'''
+        content = path.read_text("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"根目录感知模板不可读：{path}") from exc
+    content = content.strip()
+    if not content:
+        raise RuntimeError(f"根目录感知模板为空：{path}")
+    return content
 
 
 def _is_link(path: Path) -> bool:
@@ -331,7 +270,7 @@ def _run_create(
     sense_body = _required_text(sense_content, "sense_content", _MAX_MARKDOWN_CHARS)
     if data_update is not None and not isinstance(data_update, str):
         raise ValueError("data_update 必须是字符串")
-    update_source = (data_update or "").strip() or _DATA_UPDATE_TEMPLATE
+    update_source = (data_update or "").strip() or _bundled_template("data_update.py")
     if len(update_source) > _MAX_CODE_CHARS:
         raise ValueError(f"data_update 超过最大长度 {_MAX_CODE_CHARS}")
     try:
@@ -382,8 +321,8 @@ def _run_create(
         "files": list(_CREATE_FILES),
         "valid": True,
         "next_steps": [
-            "在 data_update.py 的 collect_data() 中填充实际数据采集逻辑",
-            "运行 data_update.py 初始化 sense.md 数据",
+            "按实际复杂度在模块目录内自由实现；data_update.py 可直接采集，也可作为内部工程适配入口",
+            "运行清单声明的更新入口初始化 sense.md 数据",
         ],
     }
 

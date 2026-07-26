@@ -1,15 +1,8 @@
-"""
-子代理执行入口模板。
+"""子代理自定义执行入口示例。
 
-== 用途 ==
-复制到 agents/<name>/executor.py 后，框架通过 execute(context, input_data) 调用此文件。
-此模板不能直接运行——需要按实际子代理修改 VALID_TRIGGERS 和核心逻辑。
-
-== 修 改 指 南 ==
-1. 修改 VALID_TRIGGERS：替换 {"default"} 为实际触发值，如 {"context_compression", "memory_promotion"}
-2. 修改 execute() 内部：在 context.run_model() 前后加入预处理/后处理
-3. 如需调用其他子代理：使用 context.runner.run_agent("子代理名", data)
-4. 如需读写记忆：使用 MemoryStore(context.runner.root, context.runner.user, context.runner.config)
+本文件可删除；没有 ``executor.py`` 时框架使用内置 LLM 执行器。保留时可以完全
+重写，或让 ``execute()`` 作为适配器导入代理目录内任意层级模块或完整工程。
+框架只要求最终函数合同，不要求保留 ``VALID_TRIGGERS`` 或本示例的组织方式。
 
 == context 对象 ==
   - context.run_model(input_data) → AgentRunResult：调用 LLM 生成回复
@@ -27,9 +20,7 @@ from typing import Any
 from run.agent_runner import AgentOutputError, AgentRunResult
 
 
-# ═══════════════════════════════════════════════════
-# 修改此处：定义合法的 trigger 值
-# ═══════════════════════════════════════════════════
+# 可选样例校验；允许删除并采用其他内部路由方式。
 VALID_TRIGGERS = frozenset({"default"})
 
 
@@ -46,10 +37,8 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
             f"my_agent trigger 必须是 {', '.join(sorted(VALID_TRIGGERS))}"
         )
 
-    # ── 在此插入预处理逻辑 ──
+    # 可直接运行模型，也可转交当前代理目录内的任意可信内部工程。
 
     result = context.run_model(input_data)
-
-    # ── 在此插入后处理逻辑（校验输出、写记忆等）──
 
     return result

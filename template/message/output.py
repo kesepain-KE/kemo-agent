@@ -1,5 +1,7 @@
-"""
-Telegram Bot outbound message sender.
+"""Telegram 出站适配示例。
+
+可以完全替换本文件，或让 ``send()`` 调用模块内任意内部工程；框架只关心
+最终入口合同，不规定 SDK、包结构或业务实现方式。
 
 Protocol: send(payload) -> bool
   payload dict fields:

@@ -1,5 +1,7 @@
-"""
-Telegram Bot health check.
+"""Telegram 健康检测适配示例。
+
+可以完全替换本文件，或把 ``check()`` 作为内部工程的薄适配入口。检测必须
+保持轻量且无消费消息等副作用，目录的其他内部文件不由框架自动加载。
 
 Protocol: check(config, state) -> dict
   - config: dict from message.json (raw)

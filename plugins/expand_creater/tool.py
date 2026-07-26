@@ -51,135 +51,28 @@ _CREATE_FILES = (
 _MAX_EXPLAIN_CHARS = 2_000
 _MAX_MARKDOWN_CHARS = 100_000
 _MAX_CODE_CHARS = 500_000
-
-
-_START_EXPAND_TEMPLATE = '''#!/usr/bin/env python3
-"""智能体操控外部拓展的唯一入口。
-
-智能体通过 shell 执行此脚本并传入 JSON 指令，接口见 expand_control.md 操作层。
-
-用法:
-    python start_expand.py '{"action": "example"}'
-"""
-
-from __future__ import annotations
-
-import json
-import sys
-from typing import Any
-
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-
-def execute(command: dict[str, Any]) -> dict[str, Any]:
-    """执行操控指令；请在这里接入实际硬件、API 或外部服务。"""
-
-    action = command.get("action")
-    # TODO: 按 expand_control.md 操作层实现实际指令。
-    return {
-        "status": "not_implemented",
-        "action": action,
-        "message": "start_expand.py 尚未接入实际拓展逻辑",
-    }
-
-
-def main() -> None:
-    if len(sys.argv) != 2:
-        print(json.dumps({"status": "error", "message": "用法: python start_expand.py '<json指令>'"}, ensure_ascii=False))
-        raise SystemExit(1)
-    try:
-        command = json.loads(sys.argv[1])
-    except json.JSONDecodeError as exc:
-        result = {"status": "error", "message": f"JSON 解析失败: {exc}"}
-    else:
-        if not isinstance(command, dict):
-            result = {"status": "error", "message": "JSON 指令必须是对象"}
-        else:
-            result = execute(command)
-    print(json.dumps(result, ensure_ascii=False))
-    if result.get("status") == "error":
-        raise SystemExit(1)
-
-
-if __name__ == "__main__":
-    main()
-'''
-
-
-_DATA_UPDATE_TEMPLATE = '''#!/usr/bin/env python3
-"""数据采集入口：运行后刷新 input_data.md 和 expand.json 健康状态。"""
-
-from __future__ import annotations
-
-import json
-import os
-import sys
-import uuid
-from datetime import datetime
-from pathlib import Path
-from typing import Any
-
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-
-def collect() -> dict[str, Any]:
-    """采集外部数据；请替换为真实硬件、API 或服务读取逻辑。"""
-
-    # TODO: 返回要注入主智能体 Prompt 的结构化数据。
-    return {}
-
-
-def render_markdown(data: dict[str, Any]) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["# 数据采集", "", f"> 最后更新: {now}", ""]
-    if not data:
-        lines.append("暂无数据")
-        return "\\n".join(lines) + "\\n"
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"## {key}")
-            lines.extend(f"- {child_key}: {child_value}" for child_key, child_value in value.items())
-        else:
-            lines.append(f"- **{key}**: {value}")
-        lines.append("")
-    return "\\n".join(lines).rstrip() + "\\n"
-
-
-def atomic_write(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def update() -> None:
-    base = Path(__file__).resolve().parent
-    data = collect()
-    atomic_write(base / "input_data.md", render_markdown(data))
-
-    manifest_path = base / "expand.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["input_health"] = "正常"
-    manifest["recent_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    atomic_write(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\\n")
-    print(json.dumps({"status": "ok", "updated": "input_data.md"}, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    update()
-'''
+_BUNDLED_EXPAND_TEMPLATE = Path(__file__).resolve().parents[2] / "template" / "expand"
 
 
 _INPUT_DATA_TEMPLATE = "# 数据采集\n\n> 运行 data_update.py 后自动刷新\n\n暂无数据\n"
+
+
+def _bundled_template(name: str, fallback: str = "") -> str:
+    """Use the root Expand skeleton as the single production template source."""
+
+    path = _BUNDLED_EXPAND_TEMPLATE / name
+    try:
+        content = path.read_text("utf-8")
+    except (OSError, UnicodeError) as exc:
+        if fallback:
+            return fallback
+        raise RuntimeError(f"根目录拓展模板不可读：{path}") from exc
+    content = content.strip()
+    if content:
+        return content
+    if fallback:
+        return fallback
+    raise RuntimeError(f"根目录拓展模板为空：{path}")
 
 
 def _is_link(path: Path) -> bool:
@@ -474,8 +367,8 @@ def _run_create(
         raise ValueError("start_expand 必须是字符串")
     if data_update is not None and not isinstance(data_update, str):
         raise ValueError("data_update 必须是字符串")
-    start_code = (start_expand or "").strip() or _START_EXPAND_TEMPLATE
-    update_code = (data_update or "").strip() or _DATA_UPDATE_TEMPLATE
+    start_code = (start_expand or "").strip() or _bundled_template("start_expand.py")
+    update_code = (data_update or "").strip() or _bundled_template("data_update.py")
     for field, source in (("start_expand", start_code), ("data_update", update_code)):
         if len(source) > _MAX_CODE_CHARS:
             raise ValueError(f"{field} 超过最大长度 {_MAX_CODE_CHARS}")
@@ -499,12 +392,11 @@ def _run_create(
         "explain": explain_text,
         "open_input": open_input,
         "input_data": "input_data.md",
-        "input_health": "正常",
+        "input_health": "异常",
         "start_update": "data_update.py",
         "open_control": True,
         "start_expand": "start_expand.py",
         "start_control": "expand_control.md",
-        "recent_update": datetime.now().strftime(_TIME_FORMAT),
     }
     control = f"## 注入层\n\n{injection_text}\n\n## 操作层\n\n{operations_text}\n"
     temporary = base / f".{name}.{uuid.uuid4().hex}.tmp"
@@ -515,7 +407,10 @@ def _run_create(
         _write_text(temporary / "expand_control.md", control)
         _write_text(temporary / "start_expand.py", start_code)
         _write_text(temporary / "data_update.py", update_code)
-        _write_text(temporary / "input_data.md", _INPUT_DATA_TEMPLATE)
+        _write_text(
+            temporary / "input_data.md",
+            _bundled_template("input_data.md", _INPUT_DATA_TEMPLATE),
+        )
         if module_dir.exists() or _is_link(module_dir):
             raise FileExistsError(f"拓展模块已存在：{scope}:{name}")
         os.rename(temporary, module_dir)
@@ -539,9 +434,9 @@ def _run_create(
         "files": list(_CREATE_FILES),
         "valid": True,
         "next_steps": [
-            "在 start_expand.py 的 execute() 中填充实际操控逻辑",
-            "在 data_update.py 的 collect() 中填充实际数据采集逻辑",
-            "运行 data_update.py 初始化 input_data.md",
+            "按实际复杂度在模块目录内自由实现；声明入口可以直接处理，也可以适配完整内部工程",
+            "保持 Prompt 数据出口有界，操控入口返回结构化结果",
+            "运行清单声明的更新入口初始化 input_data.md",
         ],
     }
 

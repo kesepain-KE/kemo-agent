@@ -1,5 +1,7 @@
-"""
-Telegram Bot inbound message handler.
+"""Telegram 入站适配示例。
+
+这是可完全替换的协议样例，不规定消息模块的内部结构。复杂实现可以保留在
+当前模块目录的任意包或完整工程中，由本入口转交；框架只调用下列生命周期合同。
 
 Protocol: start(config, buffer_path, files_path, state_path) / stop()
 Optional lifecycle: is_alive() / restart() / last_error()
@@ -8,7 +10,7 @@ Optional lifecycle: is_alive() / restart() / last_error()
   - files_path: path to files/ directory
   - state_path: path to state.json
 
-Architecture:
+This example:
   start() launches an asyncio event loop in a daemon thread.
   The bot uses python-telegram-bot's Application.polling to receive updates.
   Each incoming message is parsed and written to message.md as YAML front matter blocks.

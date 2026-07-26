@@ -80,13 +80,14 @@ def _read_with_encoding(path: Path, encoding: str) -> tuple[str, str]:
     return _normalize_newlines(text), used_encoding
 
 
-def _read_preserving_format(path: Path, encoding: str) -> tuple[str, str]:
+def _read_preserving_format(path: Path, encoding: str) -> tuple[str, str, bytes]:
     """读取编辑源文本，保留 BOM、换行符和末尾换行。"""
     try:
         data = path.read_bytes()
     except IsADirectoryError:
         raise IsADirectoryError(f"目标是目录，不能作为文件读取: {path}") from None
-    return _read_with_encoding_bytes(data, encoding, replace=False)
+    text, used_encoding = _read_with_encoding_bytes(data, encoding, replace=False)
+    return text, used_encoding, data
 
 
 def _read(path: Path, encoding: str) -> str:
@@ -109,7 +110,7 @@ def _count_lines_fast(path: Path, sample_size: int = 65_536) -> tuple[int, bool]
         return 0, False
     with path.open("rb") as handle:
         sample = handle.read(min(size, sample_size))
-    newline_count = sample.count(b"\n")
+    newline_count = len(re.findall(rb"\r\n|\r|\n", sample))
     if size <= sample_size:
         return newline_count + (0 if sample.endswith((b"\n", b"\r")) else 1), False
     if newline_count == 0:
@@ -223,6 +224,73 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _next_backup_path(path: Path) -> Path:
+    first = path.with_suffix(path.suffix + ".bak")
+    if not first.exists():
+        return first
+    index = 1
+    while True:
+        candidate = path.with_suffix(path.suffix + f".bak.{index}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _line_entries(lines: list[str], start_index: int) -> list[dict[str, Any]]:
+    return [
+        {"line": start_index + offset + 1, "text": value}
+        for offset, value in enumerate(lines)
+    ]
+
+
+def _preview_lines(text: str, line: int, radius: int = 2) -> list[dict[str, Any]]:
+    lines = text.splitlines()
+    if not lines:
+        return []
+    start = max(0, min(len(lines) - 1, int(line) - 1) - max(0, radius))
+    end = min(len(lines), max(start + 1, int(line) + max(0, radius)))
+    return _line_entries(lines[start:end], start)
+
+
+def _validate_expected_hash(expected_hash: str, actual_hash: str) -> None:
+    expected = str(expected_hash or "").strip().casefold()
+    if not expected:
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("expected_hash 必须是 64 位 SHA256 十六进制字符串")
+    if expected != actual_hash:
+        raise ValueError("文件已在读取后发生变化，expected_hash 不匹配，拒绝写入；请重新读取")
+
+
+def _validate_expected_text(expected: str | None, actual: str, *, label: str) -> None:
+    if expected is None:
+        raise ValueError(f"{label} 必须提供 expected_old_text，防止行号误判覆盖错误内容")
+    normalized_expected = _normalize_newlines(expected)
+    normalized_actual = _normalize_newlines(actual)
+    if normalized_expected != normalized_actual:
+        raise ValueError(
+            f"{label} 的 expected_old_text 与当前目标区域不一致，拒绝写入；"
+            "请重新使用 read_range 获取带行号内容"
+        )
+
+
+def _range_text(
+    lines: list[str],
+    start_index: int,
+    end_index: int,
+    start_column: int,
+    finish_column: int,
+) -> str:
+    first, _ = _line_parts(lines[start_index])
+    last, _ = _line_parts(lines[end_index])
+    if start_index == end_index:
+        return first[start_column:finish_column]
+    parts = [first[start_column:]]
+    parts.extend(_line_parts(lines[index])[0] for index in range(start_index + 1, end_index))
+    parts.append(last[:finish_column])
+    return "\n".join(parts)
+
+
 # ── 读取 ──────────────────────────────────────────────────────────
 
 def _run_read(path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any) -> dict[str, Any]:
@@ -236,6 +304,11 @@ def _run_read(path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any) -> 
     read_size = min(file_size, limit)
     with p.open("rb") as handle:
         raw = handle.read(read_size)
+    snapshot_hash = (
+        hashlib.sha256(raw).hexdigest()
+        if read_size == file_size
+        else ""
+    )
     content, used_encoding = _read_with_encoding_bytes(
         raw,
         encoding or "utf-8",
@@ -246,6 +319,8 @@ def _run_read(path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any) -> 
         True,
         path=path,
         content=content,
+        sha256=snapshot_hash,
+        sha256_complete=read_size == file_size,
         size=file_size,
         read_bytes=len(raw),
         truncated=file_size > limit,
@@ -282,6 +357,11 @@ def _run_read_range(
                 previous = handle.read(1)
             handle.seek(start_offset)
             raw = handle.read(read_size)
+        snapshot_hash = (
+            hashlib.sha256(raw).hexdigest()
+            if read_size == file_size
+            else ""
+        )
         if start_offset and previous not in (b"\n", b"\r"):
             newline_positions = [position for marker in (b"\n", b"\r") if (position := raw.find(marker)) >= 0]
             raw = raw[min(newline_positions) + 1:] if newline_positions else b""
@@ -289,10 +369,17 @@ def _run_read_range(
         lines = text.splitlines()
         selected = lines[-min(requested_tail, len(lines)):]
         total_lines, estimated = _count_lines_fast(p)
+        selected_start = max(0, total_lines - len(selected))
         return _result(
             True,
             path=path,
             content=selected,
+            lines=_line_entries(selected, selected_start),
+            start_line=(selected_start + 1 if selected else 0),
+            end_line=(selected_start + len(selected) if selected else 0),
+            line_numbers_estimated=estimated,
+            sha256=snapshot_hash,
+            sha256_complete=read_size == file_size,
             total_lines=total_lines,
             total_lines_estimated=estimated,
             shown=len(selected),
@@ -304,6 +391,11 @@ def _run_read_range(
     read_size = min(file_size, limit)
     with p.open("rb") as handle:
         raw = handle.read(read_size)
+    snapshot_hash = (
+        hashlib.sha256(raw).hexdigest()
+        if read_size == file_size
+        else ""
+    )
     text, used_encoding = _read_with_encoding_bytes(
         raw,
         encoding or "utf-8",
@@ -320,6 +412,12 @@ def _run_read_range(
         True,
         path=path,
         content=selected,
+        lines=_line_entries(selected, start),
+        start_line=(start + 1 if selected else 0),
+        end_line=(start + len(selected) if selected else 0),
+        line_numbers_estimated=False,
+        sha256=snapshot_hash,
+        sha256_complete=read_size == file_size,
         total_lines=total_lines,
         total_lines_estimated=estimated,
         shown=len(selected),
@@ -354,6 +452,8 @@ def _run_edit(
     new_text: str | None = None,
     edit_mode: str = "replace_text",
     old_text: str = "",
+    expected_old_text: str | None = None,
+    expected_hash: str = "",
     expected_count: int = 1,
     line: int = 1,
     column: int = 1,
@@ -368,12 +468,21 @@ def _run_edit(
         raise FileNotFoundError(f"文件不存在: {path}")
     if content is not None and new_text is not None and content != new_text:
         raise ValueError("content 与 new_text 同时提供时必须完全一致")
-    if content is None and new_text is None:
+    delete_mode = edit_mode in {"delete_line", "delete_range"}
+    if delete_mode and (content not in (None, "") or new_text not in (None, "")):
+        raise ValueError(f"{edit_mode} 不接受 new_text/content；删除范围由行号决定")
+    if not delete_mode and content is None and new_text is None:
         raise ValueError("edit 需要提供 new_text（旧版调用可继续使用 content）")
-    replacement_text = new_text if new_text is not None else content
+    replacement_text = "" if delete_mode else (new_text if new_text is not None else content)
     assert replacement_text is not None
+    if edit_mode == "replace_range" and replacement_text == "":
+        raise ValueError("replace_range 不接受空 new_text；删除整行请使用 delete_range")
 
-    original, used_encoding = _read_preserving_format(p, encoding or "utf-8")
+    original, used_encoding, original_bytes = _read_preserving_format(
+        p, encoding or "utf-8"
+    )
+    before_hash = hashlib.sha256(original_bytes).hexdigest()
+    _validate_expected_hash(expected_hash, before_hash)
     original_lines = original.splitlines(keepends=True)
     total_lines = len(original_lines)
     dominant_ending = _dominant_newline(original)
@@ -386,6 +495,8 @@ def _run_edit(
             raise ValueError(f"插入行号 {line} 超出范围 (共 {total_lines} 行)")
         body, ending = _line_parts(original_lines[idx])
         col = _column(body, column)
+        if not str(expected_hash or "").strip():
+            raise ValueError("insert 必须提供 read/read_range 返回的 expected_hash")
         inserted = _convert_newlines(replacement_text, ending or dominant_ending)
         original_lines[idx] = body[:col] + inserted + body[col:] + ending
         updated = "".join(original_lines)
@@ -394,7 +505,12 @@ def _run_edit(
         idx = line - 1
         if idx < 0 or idx >= total_lines:
             raise ValueError(f"行号 {line} 超出范围 (共 {total_lines} 行)")
-        _, ending = _line_parts(original_lines[idx])
+        current_body, ending = _line_parts(original_lines[idx])
+        _validate_expected_text(
+            expected_old_text,
+            current_body,
+            label=f"replace_line 第 {line} 行",
+        )
         body = _strip_trailing_newlines(replacement_text)
         body = _convert_newlines(body, ending or dominant_ending)
         original_lines[idx] = body + ending
@@ -411,10 +527,53 @@ def _run_edit(
         finish_column = _column(last, end_column or (len(last) + 1), label="结束列号")
         if start_index == end_index and finish_column < start_column:
             raise ValueError("结束列不能早于起始列")
+        _validate_expected_text(
+            expected_old_text,
+            _range_text(
+                original_lines,
+                start_index,
+                end_index,
+                start_column,
+                finish_column,
+            ),
+            label=f"replace_range 第 {line}-{end_line or line} 行",
+        )
         body = _strip_trailing_newlines(replacement_text)
         body = _convert_newlines(body, last_ending or dominant_ending)
         replacement = first[:start_column] + body + last[finish_column:] + last_ending
         original_lines[start_index:end_index + 1] = [replacement]
+        updated = "".join(original_lines)
+        changed_lines = end_index - start_index + 1
+    elif edit_mode in {"delete_line", "delete_range"}:
+        start_index = line - 1
+        if edit_mode == "delete_line" and end_line not in {0, line}:
+            raise ValueError("delete_line 只能删除 line 指定的一行")
+        end_index = (
+            start_index
+            if edit_mode == "delete_line"
+            else (end_line or line) - 1
+        )
+        if (
+            start_index < 0
+            or start_index >= total_lines
+            or end_index < start_index
+            or end_index >= total_lines
+        ):
+            raise ValueError(
+                f"删除行范围无效: {line}-{end_line or line} (共 {total_lines} 行)"
+            )
+        if column != 1 or end_column not in {0}:
+            raise ValueError(f"{edit_mode} 只删除完整行，不接受 column/end_column")
+        current = "\n".join(
+            _line_parts(original_lines[index])[0]
+            for index in range(start_index, end_index + 1)
+        )
+        _validate_expected_text(
+            expected_old_text,
+            current,
+            label=f"{edit_mode} 第 {line}-{end_line or line} 行",
+        )
+        del original_lines[start_index:end_index + 1]
         updated = "".join(original_lines)
         changed_lines = end_index - start_index + 1
     elif edit_mode == "replace_text":
@@ -459,11 +618,19 @@ def _run_edit(
             changed_lines=0,
             newline_style=_newline_style(original),
             backup_created=False,
+            backup_path="",
+            before_hash=before_hash,
+            after_hash=before_hash,
+            preview=_preview_lines(original, line),
         )
 
+    backup_path: Path | None = None
     if create_backup:
-        shutil.copy2(p, p.with_suffix(p.suffix + ".bak"))
-    _atomic_write_bytes(p, updated.encode(used_encoding))
+        backup_path = _next_backup_path(p)
+        shutil.copy2(p, backup_path)
+    updated_bytes = updated.encode(used_encoding)
+    after_hash = hashlib.sha256(updated_bytes).hexdigest()
+    _atomic_write_bytes(p, updated_bytes)
     return _result(
         True,
         path=path,
@@ -475,6 +642,10 @@ def _run_edit(
         changed_lines=changed_lines,
         newline_style=_newline_style(updated),
         backup_created=create_backup,
+        backup_path=str(backup_path) if backup_path is not None else "",
+        before_hash=before_hash,
+        after_hash=after_hash,
+        preview=_preview_lines(updated, line),
     )
 
 

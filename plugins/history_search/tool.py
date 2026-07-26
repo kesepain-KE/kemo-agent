@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Pattern
+from zoneinfo import ZoneInfo
 
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _WINDOW_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(?:-|$)")
 _ROLES = frozenset({"any", "user", "assistant"})
 _MATCH_MODES = frozenset({"substring", "word", "exact"})
+_BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 def _normalize_date(value: str, *, field: str) -> str | None:
@@ -26,12 +28,59 @@ def _normalize_date(value: str, *, field: str) -> str | None:
     return normalized
 
 
-def _in_time_range(dirname: str, since: str | None, until: str | None) -> bool:
+def _parse_history_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _history_date(dirname: str, data: dict[str, Any]) -> str | None:
+    """Return the conversation start date in Beijing time with legacy fallback."""
+
+    for field in ("created_at", "updated_at"):
+        parsed = _parse_history_time(data.get(field))
+        if parsed is not None:
+            return parsed.astimezone(_BEIJING).date().isoformat()
+    if _WINDOW_PATTERN.match(dirname):
+        return dirname[:10]
+    return None
+
+
+def _history_sort_time(dirname: str, data: dict[str, Any]) -> float:
+    """Prefer the latest metadata timestamp; opaque directory names are not dates."""
+
+    for field in ("updated_at", "created_at"):
+        parsed = _parse_history_time(data.get(field))
+        if parsed is not None:
+            return parsed.timestamp()
+    if _WINDOW_PATTERN.match(dirname):
+        try:
+            return datetime.fromisoformat(dirname[:10]).replace(
+                tzinfo=_BEIJING
+            ).timestamp()
+        except ValueError:
+            pass
+    return float("-inf")
+
+
+def _in_time_range(
+    window_date: str | None,
+    since: str | None,
+    until: str | None,
+) -> bool:
     """Return whether a committed history window is inside the date range."""
 
-    if not _WINDOW_PATTERN.match(dirname):
-        return False
-    window_date = dirname[:10]
+    if window_date is None:
+        return since is None and until is None
     if since and window_date < since:
         return False
     if until and window_date > until:
@@ -195,22 +244,35 @@ def run(
     if not history_dir.is_dir():
         return result
 
-    matches: list[dict[str, Any]] = []
-    total_matches = 0
-    for directory in sorted(history_dir.iterdir(), key=lambda item: item.name, reverse=True):
+    candidates: list[tuple[float, str, Path, dict[str, Any]]] = []
+    for directory in history_dir.iterdir():
         if (
             not directory.is_dir()
+            or directory.name == "temp"
             or directory.is_symlink()
             or getattr(directory, "is_junction", lambda: False)()
-            or not _in_time_range(directory.name, since_value, until_value)
         ):
             continue
         try:
             data = json.loads((directory / "data.json").read_text("utf-8"))
-            text = json.loads((directory / "text.json").read_text("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict) or data.get("complete") is not True:
+            continue
+        window_date = _history_date(directory.name, data)
+        if not _in_time_range(window_date, since_value, until_value):
+            continue
+        candidates.append(
+            (_history_sort_time(directory.name, data), directory.name, directory, data)
+        )
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    matches: list[dict[str, Any]] = []
+    total_matches = 0
+    for _, _, directory, data in candidates:
+        try:
+            text = json.loads((directory / "text.json").read_text("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if not isinstance(text, dict) or not isinstance(text.get("messages"), list):
             continue

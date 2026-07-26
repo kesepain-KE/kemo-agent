@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
+import time
 from typing import Any
 
 from provider.factory import create_provider, provider_request_slot
@@ -17,6 +19,7 @@ from provider.protocol.models import (
     TextContent,
     VideoOutputConfig,
 )
+from provider.schema import ProviderError
 from run.attachments import RunAssetResolver, describe_local_asset
 from run.config import load_config, provider_runtime_config
 from run.media_outputs import persist_response_media
@@ -46,6 +49,111 @@ _OUTPUT_MODALITY = {
     "convert_speech": "audio",
     "generate_video": "video",
 }
+_RETRY_SAFE_ACTIONS = frozenset(
+    {"analyze_image", "transcribe_audio", "analyze_video"}
+)
+_TRANSIENT_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_MAX_TRANSIENT_ATTEMPTS = 2
+_RETRY_BASE_SECONDS = 0.5
+_TOOL_TIMEOUT_RESERVE_SECONDS = 5.0
+
+
+def _provider_response_error(response: Any) -> ProviderError:
+    error = getattr(response, "error", None)
+    message = str(getattr(error, "message", "") or "").strip()
+    category = str(
+        getattr(error, "type", "")
+        or getattr(error, "code", "")
+        or "provider_response_error"
+    )
+    status_code = getattr(error, "provider_status", None)
+    retryable = bool(getattr(error, "retryable", False))
+    exc = ProviderError(
+        message or f"多模态模型返回非成功状态：{response.status}",
+        category=category,
+        status_code=status_code if isinstance(status_code, int) else None,
+        retryable=retryable,
+    )
+    retry_after_ms = getattr(error, "retry_after_ms", None)
+    if isinstance(retry_after_ms, int) and retry_after_ms >= 0:
+        exc.retry_after_ms = retry_after_ms
+    return exc
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    if not isinstance(exc, ProviderError):
+        return False
+    if exc.retryable:
+        return True
+    return exc.status_code in _TRANSIENT_STATUS_CODES
+
+
+def _wait_before_retry(exc: BaseException, attempt: int, cancel_event: Any) -> None:
+    raw_retry_after = getattr(exc, "retry_after_ms", None)
+    if isinstance(raw_retry_after, int) and raw_retry_after >= 0:
+        delay = min(10.0, raw_retry_after / 1000.0)
+    else:
+        base = _RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1))
+        delay = min(2.0, base) + random.uniform(0.0, min(0.25, base * 0.25))
+    if cancel_event is not None and callable(getattr(cancel_event, "wait", None)):
+        if cancel_event.wait(delay):
+            raise ProviderError(
+                "多模态调用已取消",
+                category="cancelled",
+                retryable=False,
+            )
+        return
+    time.sleep(delay)
+
+
+def _create_with_retry(
+    provider: Any,
+    request: KemoRequest,
+    *,
+    config: dict[str, Any],
+    action: str,
+    cancel_event: Any,
+) -> tuple[Any, int]:
+    max_attempts = (
+        _MAX_TRANSIENT_ATTEMPTS if action in _RETRY_SAFE_ACTIONS else 1
+    )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with provider_request_slot(config, cancel_event=cancel_event):
+                response = provider.create(request)
+            if response.status != ResponseStatus.COMPLETED:
+                raise _provider_response_error(response)
+            return response, attempt
+        except ProviderError as exc:
+            exc.attempt_count = attempt
+            if attempt >= max_attempts or not _is_transient_error(exc):
+                raise
+            _wait_before_retry(exc, attempt, cancel_event)
+    raise RuntimeError("多模态调用未产生结果")
+
+
+def _multimodal_provider_timeout(
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    context: dict[str, Any],
+) -> float:
+    provider_config = config.get("provider") or {}
+    configured = (
+        isinstance(provider_config, dict) and "timeout" in provider_config
+    )
+    raw_tool_timeout = context.get("tool_timeout", 240.0)
+    try:
+        tool_timeout = float(raw_tool_timeout)
+    except (TypeError, ValueError):
+        tool_timeout = 240.0
+    budget = max(1.0, tool_timeout - _TOOL_TIMEOUT_RESERVE_SECONDS)
+    if configured:
+        try:
+            provider_timeout = float(runtime.get("timeout", 120.0))
+        except (TypeError, ValueError):
+            provider_timeout = 120.0
+        return min(max(1.0, provider_timeout), budget)
+    return min(600.0, budget)
 
 
 def _assistant_text(response: Any) -> str:
@@ -145,6 +253,7 @@ def run(
     user = str(context["user"])
     config = load_config(user, root)
     runtime = provider_runtime_config(config)
+    runtime["timeout"] = _multimodal_provider_timeout(config, runtime, context)
     provider_type = str(runtime.get("type") or "")
     capability = _ACTION_CAPABILITY[action]
     if provider_type != "kemo" and action != "analyze_image":
@@ -240,7 +349,7 @@ def run(
             "你是独立的多模态处理模块，只执行本次指定操作，不调用工具。"
             "必须如实处理媒体；无法确认时明确说明，不得猜测。"
         ),
-        generation=GenerationConfig(max_output_tokens=4096),
+        generation=GenerationConfig(max_output_tokens=10_000),
         output=_output_config(
             action,
             output_format=output_format,
@@ -267,12 +376,13 @@ def run(
             ),
         },
     )
-    with provider_request_slot(config, cancel_event=cancel_event):
-        response = provider.create(request)
-    if response.status != ResponseStatus.COMPLETED:
-        error = getattr(response, "error", None)
-        message = getattr(error, "message", "") if error is not None else ""
-        raise RuntimeError(message or f"多模态模型返回非成功状态：{response.status}")
+    response, attempts = _create_with_retry(
+        provider,
+        request,
+        config=config,
+        action=action,
+        cancel_event=cancel_event,
+    )
     with provider_request_slot(config, cancel_event=cancel_event):
         artifacts = persist_response_media(
             provider,
@@ -293,6 +403,7 @@ def run(
         "asset_ids": ids,
         "paths": local_paths,
         "model": model,
+        "attempts": attempts,
         "usage": response.usage.model_dump(mode="json", exclude_none=True),
     }
     if action in {"analyze_image", "analyze_video"}:

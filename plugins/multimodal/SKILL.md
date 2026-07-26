@@ -11,6 +11,9 @@
 - 输入理解优先由明确支持对应模态的主模型完成；本工具负责专用模型回退和生成类能力。
 - `paths` 支持绝对路径和相对项目根目录的路径。路径会先验证文件存在、普通文件类型、媒体签名与大小，再直接编码（Chat 图片）或上传（Kemo Asset）给专用模型；不要先把路径改写成 Markdown 图片。
 - 不得猜测路径。只有路径由用户明确提供、当前 Run 的工具结果返回，或已经通过文件工具确认时才能使用。
+- 图片在请求前会完整解码校验；Chat 图片通道只接受 JPEG、PNG、WEBP 和 GIF，其他图片格式应先明确提示用户转换。
+- `analyze_image`、`transcribe_audio`、`analyze_video` 遇到可重试的瞬时上游错误时最多再尝试一次；生成与编辑类动作不自动重试，避免重复计费或产生重复产物。
+- 专用调用默认使用当前工具期限并预留收尾时间；用户显式配置 `provider.timeout` 时尊重该值，但不会越过工具期限。
 
 ## Action
 
@@ -72,7 +75,7 @@
     "required": ["action", "instruction"],
     "additionalProperties": false
   },
-  "version": "2.1.0",
+  "version": "2.2.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }
