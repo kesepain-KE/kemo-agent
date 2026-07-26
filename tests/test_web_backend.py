@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
+from run.attachments import history_attachment_descriptors
 from run.cron_store import CronStore, normalize_task
 from run.history import (
     commit_window,
@@ -225,6 +226,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(attached["path"], "users/alice/file_upload/note (2).txt")
         self.assertEqual(attached["size"], 6)
         self.assertEqual(attached["mime_type"], "text/plain")
+        self.assertEqual(attached["scope"], "file_upload")
+        self.assertEqual(attached["relative_path"], "note (2).txt")
         self.assertFalse(attached["is_image"])
         self.assertRegex(attached["asset_id"], r"^asset_[0-9a-f]{32}$")
         self.assertRegex(attached["checksum_sha256"], r"^[0-9a-f]{64}$")
@@ -962,9 +965,16 @@ class WebBackendTests(unittest.TestCase):
 
     def test_users_sessions_and_history_use_real_service(self) -> None:
         _, root = self.make_root()
+        upload = root / "users" / "alice" / "file_upload" / "history-note.txt"
+        upload.parent.mkdir(parents=True, exist_ok=True)
+        upload.write_bytes(b"history attachment")
+        service = WebRunService(root)
+        attachment = history_attachment_descriptors(
+            service.require_uploaded_files("alice", ["history-note.txt"])
+        )[0]
         window = empty_window("alice", "web", "s1")
         window["text"]["messages"] = [
-            {"role": "user", "content": "hello"},
+            {"role": "user", "content": "hello", "attachments": [attachment]},
             {"role": "assistant", "content": "world"},
         ]
         window["think"]["rounds"] = [{"round": 1, "content": "inspect first"}]
@@ -989,12 +999,25 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(sessions.json()["sessions"][0]["session_id"], "s1")
         history = self.request(app, "GET", "/api/users/alice/sessions/s1/history")
         self.assertEqual(len(history.json()["messages"]), 2)
+        returned_attachment = history.json()["messages"][0]["attachments"][0]
+        self.assertEqual(returned_attachment["name"], "history-note.txt")
+        self.assertEqual(returned_attachment["relative_path"], "history-note.txt")
+        self.assertTrue(returned_attachment["available"])
+        self.assertNotIn("path", returned_attachment)
         trace = history.json()["round_traces"][0]
         self.assertEqual(trace["reasoning"], "inspect first")
         self.assertEqual(trace["tools"][0]["call_id"], "call-1")
         self.assertEqual(trace["tools"][0]["status"], "success")
         self.assertEqual(len(trace["tools"][0]["result_text"]), 5000)
         self.assertTrue(trace["tools"][0]["result_truncated"])
+
+        upload.unlink()
+        missing_history = self.request(
+            app, "GET", "/api/users/alice/sessions/s1/history"
+        ).json()
+        self.assertFalse(
+            missing_history["messages"][0]["attachments"][0]["available"]
+        )
 
     def test_history_paginates_complete_rounds_from_newest_to_oldest(self) -> None:
         _, root = self.make_root()
@@ -2578,7 +2601,9 @@ class WebBackendTests(unittest.TestCase):
             )
             (module / "data_update.py").write_text(
                 "from pathlib import Path\n"
-                f"Path('input_data.md').write_text('# {scope} data\\nrefreshed', encoding='utf-8')\n",
+                "def update():\n"
+                f"    Path('input_data.md').write_text('# {scope} data\\nrefreshed', encoding='utf-8')\n"
+                "    return {'ok': True}\n",
                 "utf-8",
             )
             (module / "start_expand.py").write_text("print('ok')\n", "utf-8")
@@ -2862,6 +2887,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(refreshed_expand.status_code, 200)
         self.assertTrue(refreshed_expand.json()["updated"])
         self.assertIn("refreshed", refreshed_expand.json()["item"]["collected_markdown"])
+        self.assertEqual(
+            refreshed_expand.json()["item"]["runtime"]["update"]["status"],
+            "completed",
+        )
 
         disabled_expand = self.request(
             app,

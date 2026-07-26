@@ -209,6 +209,39 @@ function sessionLabel(sessionId: string) {
   return sessionId
 }
 
+const LAST_ACTIVE_USER_KEY = 'kemo-last-active-user'
+
+export function readLastActiveUser() {
+  try {
+    return window.localStorage.getItem(LAST_ACTIVE_USER_KEY)?.trim() || ''
+  } catch {
+    return ''
+  }
+}
+
+export function persistLastActiveUser(user: string) {
+  const normalized = user.trim()
+  if (!normalized) return
+  try {
+    window.localStorage.setItem(LAST_ACTIVE_USER_KEY, normalized)
+  } catch {
+    // Browser storage can be disabled; the URL remains the in-page source of truth.
+  }
+}
+
+export function resolveCurrentUser(
+  requestedUser: string,
+  rememberedUser: string,
+  users: ReadonlyArray<{ name: string }> | undefined,
+) {
+  const requested = requestedUser.trim()
+  if (requested) return requested
+  if (!users) return ''
+  const remembered = rememberedUser.trim()
+  if (remembered && users.some((item) => item.name === remembered)) return remembered
+  return users[0]?.name || ''
+}
+
 export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -220,7 +253,8 @@ export function AppShell() {
   const authStatus = queryClient.getQueryData<AuthStatusResponse>(['auth-status'])
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: getUsers })
   const healthQuery = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
-  const user = params.get('user') || usersQuery.data?.users[0]?.name || ''
+  const [rememberedUser, setRememberedUser] = useState(readLastActiveUser)
+  const user = resolveCurrentUser(params.get('user') || '', rememberedUser, usersQuery.data?.users)
   const sessionId = params.get('session') || ''
   const sessionsQuery = useQuery({
     queryKey: ['sessions', user],
@@ -370,6 +404,12 @@ export function AppShell() {
   }, [ui.theme, ui.fontSize])
 
   useEffect(() => {
+    if (!user || !usersQuery.data?.users.some((item) => item.name === user)) return
+    persistLastActiveUser(user)
+    if (rememberedUser !== user) setRememberedUser(user)
+  }, [rememberedUser, user, usersQuery.data?.users])
+
+  useEffect(() => {
     if (!preferencesQuery.data) return
     ui.setTheme(preferencesQuery.data.appearance.theme)
     ui.setFontSize(preferencesQuery.data.appearance.font_size)
@@ -456,6 +496,8 @@ export function AppShell() {
 
   const setUser = (nextUser: string) => {
     if (chatRunning || nextUser === user) return
+    persistLastActiveUser(nextUser)
+    setRememberedUser(nextUser)
     const next = new URLSearchParams()
     next.set('user', nextUser)
     setParams(next)

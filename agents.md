@@ -40,6 +40,8 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | Usage 聚合 | `run/usage.py` | 多次 Provider 请求计量合并与缓存命中统计 |
 | 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
 | Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
+| 拓展运行时 | `run/expand_runtime.py` | 三层拓展授权、隔离操控、采集/操控诊断与文件产物发布 |
+| 模块子进程 | `run/module_runtime.py` | 感知/拓展采集与拓展操控共用的有界、可取消跨平台子进程协议 |
 | 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
 | Prompt 组装 | `run/prompt.py` | 所有 prompt 段的确定性拼接 |
 | 配置加载 | `run/config.py` | .env 加载 + 双层 JSON 合并 + provider 运行时配置 |
@@ -148,6 +150,14 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 环境安装 | `setup.py` / `requirements.txt` | 依赖安装与环境初始化 |
 | 事件定义 | `events.py` | 统一事件类型（text_delta / tool_call_result / usage / error / done） |
 | 环境变量 | `.env` | 启动级参数和密钥兜底 |
+
+### 模块工作区自由与最小合同
+
+- 感知、拓展、外部消息、技能、子代理和工具插件都采用“最小框架合同 + 内部自由工作区”。清单、主说明文件、数据出口和声明入口是框架交互边界，不是完整目录清单，也不是建议的工程规模。
+- 每个模块目录都可以按需求包含任意普通文件、任意层级子目录、第三方源码或完整工程。极小能力可以保持单文件，大型项目可以原样保留，只在框架要求的位置提供薄适配入口；不得为了迎合模板强行拆分简单实现，也不得把完整工程挤进一个入口文件。
+- 框架只发现并处理明确约定的内容：感知/拓展读取清单声明项，消息路由加载 `message.json` 声明的适配入口，技能发现 `SKILL.md`，子代理发现包合同与可选执行器，插件发现 `SKILL.md` 中声明的工具。其余内部文件不会仅因存在而自动注册、注入 Prompt 或执行。
+- 创建器和模板只负责建立可发现的最小骨架。创建成功后，可继续使用正常文件、Shell 或代码工具在模块目录内完善实现、迁入已有项目；校验器不得以“模板未列出”为由拒绝、删除额外文件或要求合并目录。
+- “内部自由”不代表绕过合同和安全边界。清单字段、声明入口签名、Prompt 可见范围、调用权限、生命周期和返回协议仍需满足各模块规则；不得路径越界、借符号链接逃逸、硬编码凭据或加载不可信代码。不同模块仍按各自运行方式接受白名单、超时、取消、隔离或主进程信任边界约束。
 
 ### 外部消息插件发现规则
 
@@ -307,7 +317,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 ## 5. 工具使用规则
 
 - **`action` 必填参数**：以下工具使用统一的 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会导致调用失败并报「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、`task_time`、`expand_creater`、`external_message`、`sense_creater`、`skill_creater`。特别注意 `file` 工具的所有操作（读、写、编辑、搜索、复制、移动、删除等）都必须带 `action`；编辑文件应传 `action: "edit"`、`edit_mode` 和推荐的新内容参数 `new_text`，旧参数 `content` 仅作兼容。
-- **文件编辑安全流程**：已有文件的小范围修改禁止使用 `write` 覆盖全文。编辑前先读取目标范围；精确文本块使用 `replace_text`，单行使用 `replace_line`，连续多行使用 `replace_range`。`replace_line`/`replace_range` 的 `new_text` 末尾不要主动附加换行。`replace_text` 默认使用 `expected_count=1`；匹配失败后重新读取，禁止直接改成 `-1` 强行替换，只有用户明确要求批量替换时才可使用 `expected_count=-1`。编辑后必须重新读取目标范围验证格式和内容。
+- **文件编辑安全流程**：已有文件的小范围修改禁止使用 `write` 覆盖全文。编辑前先读取目标范围，使用 `read_range.lines` 的显式行号，不得靠数组位置猜测。精确文本块使用 `replace_text`；单行/连续范围使用 `replace_line`/`replace_range`，并必须传入最近读取到的 `expected_old_text`；插入操作必须传入读取结果的 `sha256` 作为 `expected_hash`。删除完整行使用 `delete_line`/`delete_range`，禁止通过空 `replace_range` 隐式删除。`replace_line`/`replace_range` 的 `new_text` 末尾不要主动附加换行。`replace_text` 默认使用 `expected_count=1`；匹配或前置校验失败后重新读取，禁止直接改成 `-1` 强行替换。编辑后先检查返回的带行号 `preview`，再重新读取目标范围验证格式和内容；默认编号备份不得关闭或覆盖。
 - **`scope` 必填参数**：`expand_creater` 和 `skill_creater` 的 `scope` 为必填，漏传会报「缺少必填参数：scope」。取值仅 `"user"`（当前用户私有的拓展/技能）或 `"shared"`（所有用户共享），不存在 `"global"`。创建前应在流程中向用户确认 scope，不得自行猜测。
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
@@ -407,6 +417,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 压缩时把当前待发送轮次计入 `rounds_after_compression`：正常提交后，Provider 临时工作区总计保留最近 N 轮，而不是额外再保留当前轮次。
 - 所有摘要场景统一由 `context_manage` 处理；正常聊天的自动压缩不在请求主线程同步提取记忆，而是在完整提交后把摘要已覆盖轮次登记到持久化后台队列。手动压缩仍可显式选择同步或队列策略。
 - 摘要缓存在 `history/temp/<window>/context_summary.json` 中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。
+- `context_manage` 使用严格输出 Schema；摘要输入以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 8192 tokens。JSON 缺失、截断或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
 - `history/<window>/` 始终保留完整原始记录和累计轮数；`history/temp/<window>/` 才是受限并会裁剪的 Provider 工作区。`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
 
 ### 轮次结构
@@ -537,6 +548,9 @@ users/<user>/agents/<name>/
 - 系统自动注册临时重要记忆巡检、每日整理、每 30 秒一次的 self_improve 到期晋升检查，以及感知/拓展数据刷新任务。
 - 记忆类系统任务按用户分别执行；感知只以 `__system__` 身份刷新全局层。拓展任务先以 `__system__` 身份各刷新一次全局层和共享层，再按用户身份只刷新对应的 `users/<user>/expand/`，不得跨用户聚合执行。
 - 模块更新脚本在独立 Python 子进程中运行，优先调用 `update()`，兼容调用 `main()`；超时、非零退出码、`False`、`{ok: false}` 或失败状态均记为失败。
+- 拓展的 `input_data.md` 只承载长期采集摘要或资源索引；完整 JSON/CSV/HTML、图片、音视频和大型日志保存在模块内并按需读取，不能自动全部注入 Prompt。
+- 主智能体使用 `expand_call` 操控当前用户获准使用的三层拓展。调用参数经 stdin 进入隔离子进程；操控结果直接进入当前工具结果，不绕写 `input_data.md`。大型结果必须以模块内 artifact 返回并由框架校验后发布到用户下载空间。
+- `_runtime.json` 由框架维护，只保存采集/操控状态、耗时、受限资源索引和截断错误，不保存完整参数、原始数据或凭据，也不进入 Prompt。
 
 ---
 

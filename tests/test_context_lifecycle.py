@@ -311,6 +311,39 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIn('"compressed": true', groups[0].messages[2]["content"])
         self.assertNotIn('"compressed": true', groups[-1].messages[2]["content"])
 
+    def test_legacy_empty_message_keeps_round_boundary_without_invalid_native_item(self) -> None:
+        window = empty_window("alice", "web", "legacy-empty")
+        window["data"]["rounds"] = 1
+        window["items"]["items"] = [
+            {
+                "id": "msg_empty_user",
+                "type": "message",
+                "status": "completed",
+                "role": "user",
+                "content": [],
+                "metadata": {"round": 1},
+                "extensions": {},
+            },
+            {
+                "id": "msg_answer",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "text", "text": "旧回复"}],
+                "metadata": {"round": 1},
+                "extensions": {},
+            },
+        ]
+
+        groups = build_round_groups(window, ContextPolicy())
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual([item["role"] for item in groups[0].messages], ["user", "assistant"])
+        legacy_user = groups[0].messages[0]
+        self.assertIn("历史兼容", legacy_user["content"])
+        self.assertNotIn("_kemo_message", legacy_user)
+
     def test_summary_cache_generation_and_exact_reuse(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

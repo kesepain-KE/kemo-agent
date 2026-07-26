@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import sys
 import tempfile
@@ -33,12 +34,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_fifteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_sixteen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
             names,
             [
+                "expand_call",
                 "expand_creater",
                 "external_message",
                 "file",
@@ -61,7 +63,7 @@ class PluginManifestTests(unittest.TestCase):
             self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 15)
+        self.assertEqual(len(registry.tools), 16)
         self.assertEqual(
             registry.get("subagent_dispatch").timeout_policy,
             "agent_runtime",
@@ -91,6 +93,20 @@ class PluginManifestTests(unittest.TestCase):
             {"get", "post", "put", "delete", "patch", "read"},
         )
         self.assertEqual(network_schema["properties"]["max_bytes"]["maximum"], 10_000_000)
+        file_schema = registry.get("file").input_schema
+        self.assertEqual(
+            set(file_schema["properties"]["edit_mode"]["enum"]),
+            {
+                "insert",
+                "replace_line",
+                "replace_range",
+                "replace_text",
+                "delete_line",
+                "delete_range",
+            },
+        )
+        self.assertIn("expected_old_text", file_schema["properties"])
+        self.assertIn("expected_hash", file_schema["properties"])
 
     def test_more_than_one_tool_block_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -128,6 +144,11 @@ class FilePluginTests(unittest.TestCase):
             self.assertEqual(run_file("exists", "docs", context=context)["type"], "dir")
             ranged = run_file("read_range", "docs/a.txt", start_line=2, context=context)
             self.assertEqual(ranged["content"], ["beta"])
+            self.assertEqual(ranged["lines"], [{"line": 2, "text": "beta"}])
+            self.assertEqual(
+                ranged["sha256"],
+                hashlib.sha256((root / "docs" / "a.txt").read_bytes()).hexdigest(),
+            )
             edited = run_file(
                 "edit",
                 "docs/a.txt",
@@ -159,6 +180,8 @@ class FilePluginTests(unittest.TestCase):
             self.assertTrue(limited["truncated"])
             self.assertEqual(limited["read_bytes"], 12)
             self.assertEqual(limited["size"], (root / "large.log").stat().st_size)
+            self.assertEqual(limited["sha256"], "")
+            self.assertFalse(limited["sha256_complete"])
 
             (root / "unicode.txt").write_text("你你", "utf-8")
             unicode_limited = run_file("read", "unicode.txt", max_bytes=4, context=context)
@@ -169,6 +192,8 @@ class FilePluginTests(unittest.TestCase):
             self.assertEqual(tail["content"], ["line-097", "line-098", "line-099"])
             self.assertTrue(tail["tail_mode"])
             self.assertTrue(tail["total_lines_estimated"] is False)
+            self.assertEqual(tail["sha256"], "")
+            self.assertFalse(tail["sha256_complete"])
 
             japanese = "日本語のテキスト"
             (root / "locale.txt").write_bytes(japanese.encode("cp932"))
@@ -242,6 +267,7 @@ class FilePluginTests(unittest.TestCase):
                 with_eof.name,
                 edit_mode="replace_line",
                 line=1,
+                expected_old_text="A",
                 new_text="X\n",
                 create_backup=False,
                 context=context,
@@ -255,6 +281,7 @@ class FilePluginTests(unittest.TestCase):
                 without_eof.name,
                 edit_mode="replace_line",
                 line=2,
+                expected_old_text="B",
                 new_text="X\n",
                 create_backup=False,
                 context=context,
@@ -269,6 +296,7 @@ class FilePluginTests(unittest.TestCase):
                 edit_mode="replace_range",
                 line=1,
                 end_line=2,
+                expected_old_text="A\nB",
                 new_text="X\nY\n",
                 create_backup=False,
                 context=context,
@@ -338,6 +366,88 @@ class FilePluginTests(unittest.TestCase):
             self.assertFalse(noop["changed"])
             self.assertFalse(noop["backup_created"])
             self.assertFalse((root / "edit.txt.bak").exists())
+
+    def test_guarded_line_edits_explicit_deletion_and_versioned_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            target = root / "guarded.txt"
+            target.write_bytes(b"A\r\n\tB\r\nC\r\nD\r\n")
+
+            snapshot = run_file(
+                "read_range",
+                target.name,
+                start_line=2,
+                end_line=3,
+                context=context,
+            )
+            self.assertEqual(
+                snapshot["lines"],
+                [{"line": 2, "text": "\tB"}, {"line": 3, "text": "C"}],
+            )
+            before = target.read_bytes()
+            with self.assertRaisesRegex(ValueError, "expected_old_text"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="replace_line",
+                    line=2,
+                    expected_old_text="B",
+                    new_text="X",
+                    context=context,
+                )
+            self.assertEqual(target.read_bytes(), before)
+
+            target.write_bytes(before.replace(b"D", b"external"))
+            with self.assertRaisesRegex(ValueError, "expected_hash 不匹配"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="insert",
+                    line=2,
+                    column=1,
+                    expected_hash=snapshot["sha256"],
+                    new_text="//",
+                    context=context,
+                )
+
+            current = run_file("read", target.name, context=context)
+            first = run_file(
+                "edit",
+                target.name,
+                edit_mode="delete_line",
+                line=2,
+                expected_old_text="\tB",
+                expected_hash=current["sha256"],
+                context=context,
+            )
+            self.assertEqual(target.read_bytes(), b"A\r\nC\r\nexternal\r\n")
+            self.assertTrue(Path(first["backup_path"]).name.endswith(".bak"))
+
+            second = run_file(
+                "edit",
+                target.name,
+                edit_mode="delete_range",
+                line=2,
+                end_line=3,
+                expected_old_text="C\nexternal",
+                context=context,
+            )
+            self.assertEqual(target.read_bytes(), b"A\r\n")
+            self.assertTrue(Path(second["backup_path"]).name.endswith(".bak.1"))
+            self.assertEqual((root / "guarded.txt.bak").read_bytes(), before.replace(b"D", b"external"))
+            self.assertEqual((root / "guarded.txt.bak.1").read_bytes(), b"A\r\nC\r\nexternal\r\n")
+
+            with self.assertRaisesRegex(ValueError, "delete_range"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="replace_range",
+                    line=1,
+                    expected_old_text="A",
+                    new_text="",
+                    context=context,
+                )
 
     def test_atomic_edit_failure_keeps_original_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

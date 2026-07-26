@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,8 +13,15 @@ from unittest.mock import patch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.assets import AssetDescriptor
-from provider.protocol.models import ImageContent, KemoResponse, MessageItem, ModelCapabilities, TextContent
-from provider.schema import ChatResponse
+from provider.protocol.models import (
+    ImageContent,
+    KemoResponse,
+    MessageItem,
+    ModelCapabilities,
+    TextContent,
+    text_from_content,
+)
+from provider.schema import ChatResponse, ProviderError
 from run.attachments import (
     AttachmentError,
     UploadedAssetResolver,
@@ -21,10 +30,17 @@ from run.attachments import (
 )
 from run.engine import handle_request
 from run.context import estimate_messages_tokens
-from run.multimodal import configured_input_modalities, select_vision_route
+from run.history import find_window, load_window
+from run.multimodal import (
+    _capability_cache,
+    configured_input_modalities,
+    select_vision_route,
+)
 
 
-_PNG = b"\x89PNG\r\n\x1a\n" + b"test-image-payload"
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class RecordingProvider:
@@ -110,6 +126,29 @@ class MultimodalRoutingTests(unittest.TestCase):
                 changed["asset_id"], provider="chat"
             )
 
+    def test_uploaded_asset_rejects_corrupted_image_with_valid_header(self) -> None:
+        root, descriptor = self.make_root()
+        (root / descriptor["path"]).write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"corrupted-payload"
+        )
+        changed = describe_uploaded_asset(root, "alice", descriptor)
+        with self.assertRaisesRegex(AttachmentError, "真实图片"):
+            UploadedAssetResolver(root, "alice", [changed]).image_content(
+                changed["asset_id"], provider="chat"
+            )
+
+    def test_chat_image_route_rejects_bmp_with_clear_message(self) -> None:
+        from PIL import Image
+
+        root, _ = self.make_root()
+        bmp = root / "users" / "alice" / "file_upload" / "screen.bmp"
+        Image.new("RGB", (1, 1), color="white").save(bmp, format="BMP")
+        descriptor = describe_uploaded_asset(root, "alice", {"path": str(bmp)})
+        with self.assertRaisesRegex(AttachmentError, "Chat 图片通道不支持"):
+            UploadedAssetResolver(root, "alice", [descriptor]).image_content(
+                descriptor["asset_id"], provider="chat"
+            )
+
     def test_uploaded_asset_cannot_escape_user_upload_root(self) -> None:
         root, _ = self.make_root()
         outside = root / "outside.png"
@@ -192,6 +231,128 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertIsInstance(user_message["content"], list)
         self.assertTrue(any(item.get("type") == "image_url" for item in user_message["content"]))
 
+    def test_attachment_only_round_persists_reference_and_next_round_is_valid(self) -> None:
+        root, descriptor = self.make_root(input_modalities=["text", "image"])
+        provider = RecordingProvider()
+
+        first = handle_request(
+            {
+                "user": "alice",
+                "source": "web",
+                "session_id": "attachment-only-history",
+                "prompt": "",
+                "uploaded_files": [descriptor],
+                "stream": False,
+            },
+            root=root,
+            provider_factory=lambda _: provider,
+        )
+        second = handle_request(
+            {
+                "user": "alice",
+                "source": "web",
+                "session_id": "attachment-only-history",
+                "prompt": "继续说明上一张图片",
+                "uploaded_files": [],
+                "stream": False,
+            },
+            root=root,
+            provider_factory=lambda _: provider,
+        )
+
+        self.assertEqual(first["text"], "看到了图片")
+        self.assertEqual(second["text"], "看到了图片")
+        historical_messages = [
+            item
+            for item in provider.requests[1].input
+            if isinstance(item, MessageItem)
+        ]
+        self.assertEqual(
+            [str(item.role) for item in historical_messages],
+            ["user", "assistant", "user"],
+        )
+        historical_user_text = text_from_content(historical_messages[0].content)
+        self.assertIn("[本轮输入资产]", historical_user_text)
+        self.assertIn(descriptor["path"], historical_user_text)
+
+        window_path = find_window(root, "alice", "web", "attachment-only-history")
+        self.assertIsNotNone(window_path)
+        assert window_path is not None
+        window = load_window(window_path)
+        user_items = [
+            item
+            for item in window["items"]["items"]
+            if item.get("type") == "message" and item.get("role") == "user"
+        ]
+        self.assertTrue(user_items[0]["content"])
+        persisted = json.dumps(user_items[0]["content"], ensure_ascii=False)
+        self.assertIn(descriptor["path"], persisted)
+        self.assertNotIn("inline_base64", persisted)
+
+        history_attachment = {
+            "asset_id": descriptor["asset_id"],
+            "name": descriptor["name"],
+            "media_kind": descriptor["media_kind"],
+            "mime_type": descriptor["mime_type"],
+            "size": descriptor["size"],
+            "checksum_sha256": descriptor["checksum_sha256"],
+            "scope": "file_upload",
+            "relative_path": descriptor["relative_path"],
+        }
+        self.assertEqual(
+            window["text"]["messages"][0]["attachments"],
+            [history_attachment],
+        )
+        self.assertEqual(
+            user_items[0]["metadata"]["input_attachments"],
+            [history_attachment],
+        )
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["input_attachments"],
+            [history_attachment],
+        )
+        self.assertNotIn("path", history_attachment)
+
+    def test_non_image_attachment_only_round_can_continue(self) -> None:
+        root, _ = self.make_root(input_modalities=["text", "image"])
+        note = root / "users" / "alice" / "file_upload" / "note.txt"
+        note.write_text("attachment body", "utf-8")
+        descriptor = describe_uploaded_asset(root, "alice", {"path": str(note)})
+        provider = RecordingProvider()
+
+        handle_request(
+            {
+                "user": "alice",
+                "source": "web",
+                "session_id": "file-only-history",
+                "prompt": "",
+                "uploaded_files": [descriptor],
+                "stream": False,
+            },
+            root=root,
+            provider_factory=lambda _: provider,
+        )
+        handle_request(
+            {
+                "user": "alice",
+                "source": "web",
+                "session_id": "file-only-history",
+                "prompt": "继续",
+                "uploaded_files": [],
+                "stream": False,
+            },
+            root=root,
+            provider_factory=lambda _: provider,
+        )
+
+        messages = [
+            item
+            for item in provider.requests[1].input
+            if isinstance(item, MessageItem)
+        ]
+        self.assertEqual([str(item.role) for item in messages], ["user", "assistant", "user"])
+        self.assertIn(descriptor["path"], text_from_content(messages[0].content))
+
     def test_auto_chat_route_uses_dedicated_model_without_explicit_declaration(self) -> None:
         config = {
             "provider": {"type": "chat", "input_modalities": ["text"]},
@@ -234,6 +395,36 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertEqual(select_vision_route(config, runtime, provider), "dedicated")
         self.assertEqual(provider.calls, 0)
 
+    def test_failed_gateway_capability_lookup_is_not_negatively_cached(self) -> None:
+        class RecoveringCapabilityProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def capabilities(self, model: str) -> ModelCapabilities:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("temporary failure", retryable=True)
+                return ModelCapabilities(
+                    model=model,
+                    input_modalities=["text", "image"],
+                )
+
+        _capability_cache.clear()
+        self.addCleanup(_capability_cache.clear)
+        provider = RecoveringCapabilityProvider()
+        config = {
+            "provider": {"type": "kemo"},
+            "multimodal_routing": {"vision": "auto"},
+        }
+        runtime = {
+            "type": "kemo",
+            "base_url": "http://recovering-gateway.test",
+            "model": "vision-main",
+        }
+        self.assertEqual(select_vision_route(config, runtime, provider), "dedicated")
+        self.assertEqual(select_vision_route(config, runtime, provider), "main")
+        self.assertEqual(provider.calls, 2)
+
     def test_dedicated_plugin_uses_configured_vision_model(self) -> None:
         root, descriptor = self.make_root(vision="vision-model")
         from plugins.multimodal import tool
@@ -274,7 +465,165 @@ class MultimodalRoutingTests(unittest.TestCase):
             )
         self.assertEqual(result["analysis"], "图片里有一只猫")
         self.assertEqual(result["model"], "vision-model")
+        self.assertEqual(result["attempts"], 1)
         self.assertEqual(fake.request.model, "vision-model")
+        self.assertEqual(fake.request.generation.max_output_tokens, 10_000)
+
+    def test_dedicated_analysis_retries_one_transient_provider_error(self) -> None:
+        root, descriptor = self.make_root(vision="vision-model")
+        from plugins.multimodal import tool
+
+        class RecoveringVisualProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError(
+                        "temporary upstream failure",
+                        category="upstream_error",
+                        status_code=502,
+                        retryable=True,
+                    )
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[MessageItem(
+                        id="msg_recovered_visual_result",
+                        role=MessageRole.ASSISTANT,
+                        phase=MessagePhase.FINAL_ANSWER,
+                        content=[TextContent(text="第二次识别成功")],
+                    )],
+                )
+
+        fake = RecoveringVisualProvider()
+        with (
+            patch.object(tool, "create_provider", return_value=fake),
+            patch.object(tool, "_wait_before_retry"),
+        ):
+            result = tool.run(
+                "analyze_image",
+                [descriptor["asset_id"]],
+                "描述图片",
+                context={
+                    "root": str(root),
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "retry-vision",
+                    "uploaded_files": [descriptor],
+                },
+            )
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["analysis"], "第二次识别成功")
+
+    def test_dedicated_analysis_does_not_retry_non_transient_error(self) -> None:
+        root, descriptor = self.make_root(vision="vision-model")
+        from plugins.multimodal import tool
+
+        class RejectingVisualProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, _request):
+                self.calls += 1
+                raise ProviderError(
+                    "invalid image",
+                    category="invalid_request",
+                    status_code=400,
+                    retryable=False,
+                )
+
+        fake = RejectingVisualProvider()
+        with patch.object(tool, "create_provider", return_value=fake):
+            with self.assertRaises(ProviderError) as raised:
+                tool.run(
+                    "analyze_image",
+                    [descriptor["asset_id"]],
+                    "描述图片",
+                    context={
+                        "root": str(root),
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "reject-vision",
+                        "uploaded_files": [descriptor],
+                    },
+                )
+        self.assertEqual(fake.calls, 1)
+        self.assertEqual(raised.exception.attempt_count, 1)
+
+    def test_generation_action_does_not_retry_even_when_error_is_transient(self) -> None:
+        from plugins.multimodal import tool
+
+        class FailingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, _request):
+                self.calls += 1
+                raise ProviderError(
+                    "temporary upstream failure",
+                    status_code=503,
+                    retryable=True,
+                )
+
+        provider = FailingProvider()
+        with self.assertRaises(ProviderError) as raised:
+            tool._create_with_retry(
+                provider,
+                object(),
+                config={},
+                action="generate_image",
+                cancel_event=None,
+            )
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(raised.exception.attempt_count, 1)
+
+    def test_cancellation_stops_multimodal_retry_before_second_attempt(self) -> None:
+        from plugins.multimodal import tool
+
+        class FailingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, _request):
+                self.calls += 1
+                raise ProviderError("temporary failure", retryable=True)
+
+        provider = FailingProvider()
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaisesRegex(ProviderError, "已取消"):
+            tool._create_with_retry(
+                provider,
+                object(),
+                config={},
+                action="analyze_image",
+                cancel_event=cancel,
+            )
+        self.assertEqual(provider.calls, 1)
+
+    def test_multimodal_timeout_uses_tool_budget_unless_explicitly_configured(self) -> None:
+        from plugins.multimodal import tool
+
+        self.assertEqual(
+            tool._multimodal_provider_timeout(
+                {"provider": {"type": "chat"}},
+                {"timeout": 120},
+                {"tool_timeout": 240},
+            ),
+            235,
+        )
+        self.assertEqual(
+            tool._multimodal_provider_timeout(
+                {"provider": {"type": "chat", "timeout": 75}},
+                {"timeout": 75},
+                {"tool_timeout": 240},
+            ),
+            75,
+        )
 
     def test_dedicated_plugin_accepts_absolute_image_path_as_direct_input(self) -> None:
         root, _ = self.make_root(vision="vision-model")
@@ -393,7 +742,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         config_path.write_text(json.dumps(config), "utf-8")
         from plugins.multimodal import tool
 
-        payload = b"\x89PNG\r\n\x1a\n" + b"generated-image"
+        payload = _PNG
         checksum = hashlib.sha256(payload).hexdigest()
 
         class FakeImageProvider:

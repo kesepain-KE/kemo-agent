@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import threading
@@ -36,6 +37,11 @@ from run.attachments import RunAssetResolver
 from run.runtime_host import RuntimeHost
 from run.cron_store import CronStore
 from run.tools import ToolDefinition, ToolRegistry
+
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _root(*users: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -293,7 +299,7 @@ timestamp: 2026-07-18T14:31:25+08:00
 
     def test_file_queue_batch_attachment_route_send_log_and_cleanup(self) -> None:
         image = self.directory / "files" / "p1_0.png"
-        image.write_bytes(b"\x89PNG\r\n\x1a\nmessage-image")
+        image.write_bytes(_PNG)
         text_file = self.directory / "files" / "p1_1.txt"
         text_file.write_text("TEXT_ATTACHMENT", "utf-8")
         config = MessagePluginConfig.load(self.root, self.directory)

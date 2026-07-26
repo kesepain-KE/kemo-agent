@@ -27,17 +27,22 @@ class HistorySearchPluginTests(unittest.TestCase):
         messages: list[dict[str, object]],
         *,
         complete: bool = True,
+        created_at: str = "",
+        updated_at: str = "",
     ) -> None:
         window = self.history / name
         window.mkdir()
+        data = {
+            "complete": complete,
+            "source": "web",
+            "session_id": f"session-{name}",
+        }
+        if created_at:
+            data["created_at"] = created_at
+        if updated_at:
+            data["updated_at"] = updated_at
         (window / "data.json").write_text(
-            json.dumps(
-                {
-                    "complete": complete,
-                    "source": "web",
-                    "session_id": f"session-{name}",
-                }
-            ),
+            json.dumps(data),
             "utf-8",
         )
         (window / "text.json").write_text(
@@ -83,6 +88,40 @@ class HistorySearchPluginTests(unittest.TestCase):
         )
         self.assertEqual(result["matches"][0]["match_index"], 0)
         self.assertNotIn("context", result["matches"][0])
+
+    def test_opaque_windows_use_metadata_dates_and_sort_by_updated_time(self) -> None:
+        self.write_window(
+            "conv_z_older",
+            [{"role": "user", "content": "opaque needle older"}],
+            created_at="2026-07-19T16:30:00+00:00",
+            updated_at="2026-07-20T01:00:00+00:00",
+        )
+        self.write_window(
+            "conv_a_newer",
+            [{"role": "assistant", "content": "opaque needle newer"}],
+            created_at="2026-07-21T01:00:00Z",
+            updated_at="2026-07-21T02:00:00Z",
+        )
+        self.write_window(
+            "conv_no_timestamp",
+            [{"role": "user", "content": "opaque needle without date"}],
+        )
+
+        all_matches = run("opaque needle", context=self.context)
+        self.assertEqual(all_matches["total_matches"], 3)
+        self.assertEqual(
+            [item["window"] for item in all_matches["matches"]],
+            ["conv_a_newer", "conv_z_older", "conv_no_timestamp"],
+        )
+
+        beijing_day = run(
+            "opaque needle",
+            since="2026-07-20",
+            until="2026-07-20",
+            context=self.context,
+        )
+        self.assertEqual(beijing_day["total_matches"], 1)
+        self.assertEqual(beijing_day["matches"][0]["window"], "conv_z_older")
 
     def test_word_exact_substring_and_regex_modes(self) -> None:
         self.write_window(
@@ -181,7 +220,7 @@ class HistorySearchPluginTests(unittest.TestCase):
             for item in discover_plugin_manifests(PROJECT_ROOT)
             if item.tool["name"] == "history_search"
         )
-        self.assertEqual(manifest.tool["version"], "1.1.0")
+        self.assertEqual(manifest.tool["version"], "1.1.1")
         self.assertEqual(
             set(manifest.tool["input_schema"]["properties"]),
             {

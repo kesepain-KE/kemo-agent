@@ -113,6 +113,19 @@ export interface SessionCloseResponse {
 export interface HistoryMessage {
   role: 'user' | 'assistant' | 'system' | 'tool' | string
   content: string
+  attachments?: InputAttachment[]
+}
+
+export interface InputAttachment {
+  asset_id: string
+  name: string
+  media_kind: 'image' | 'audio' | 'video' | 'file'
+  mime_type: string
+  size: number
+  checksum_sha256: string
+  scope: 'file_upload' | 'external'
+  relative_path: string
+  available: boolean
 }
 
 export interface UsersResponse {
@@ -1161,6 +1174,24 @@ export interface SoulResponse {
 
 export type ExpandScope = 'global' | 'shared' | 'user'
 
+export interface ExpandRuntimeSection {
+  status?: 'completed' | 'failed'
+  last_attempt?: string
+  last_success?: string | null
+  duration_ms?: number
+  last_command?: string
+  resource_count?: number
+  resources?: Array<{
+    path: string
+    kind: string
+    label: string
+    mime_type: string
+    size: number
+    updated_at: number
+  }>
+  error?: { type?: string; message?: string } | null
+}
+
 export interface ExpandModuleSummary {
   id: string
   scope: ExpandScope
@@ -1189,6 +1220,11 @@ export interface ExpandModuleSummary {
   collected_markdown: string
   injected_markdown: string
   injected_tokens: number
+  runtime?: {
+    schema_version: number
+    update?: ExpandRuntimeSection
+    control?: ExpandRuntimeSection
+  }
   files: InventoryFile[]
   updated_at: number
 }
@@ -1230,7 +1266,7 @@ export interface ApiErrorPayload {
 }
 
 export type ChatItem =
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; streaming?: boolean; edited?: boolean; originalContent?: string }
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string }
   | { id: string; kind: 'media'; artifact: MediaArtifact }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
@@ -1249,6 +1285,6 @@ export type ChatItem =
       elapsedMs?: number
     }
   | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
-  | { id: string; kind: 'task_plan'; plan: PlanSummary }
+  | { id: string; kind: 'task_plan'; plan: PlanSummary; presentation?: 'record' | 'reference' }
   | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; finalized?: boolean }
   | { id: string; kind: 'error'; content: string }

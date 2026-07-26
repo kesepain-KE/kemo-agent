@@ -3,15 +3,38 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { delay, http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AppShell } from './AppShell'
+import { AppShell, persistLastActiveUser, readLastActiveUser, resolveCurrentUser } from './AppShell'
 import { ChatPage } from '../pages/ChatPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { server } from '../test/server'
+import { useChatDraftStore } from '../store/chatDrafts'
 import type { SessionSummary } from '../types/api'
 
 afterEach(() => {
+  useChatDraftStore.getState().clearAll()
+  localStorage.removeItem('kemo-last-active-user')
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+describe('AppShell user persistence', () => {
+  it('URL 用户优先于浏览器中保存的上次用户', () => {
+    expect(resolveCurrentUser('alice', 'bob', [{ name: 'alice' }, { name: 'bob' }])).toBe('alice')
+  })
+
+  it('没有 URL 用户时恢复浏览器上次选择的有效用户', () => {
+    expect(resolveCurrentUser('', 'bob', [{ name: 'alice' }, { name: 'bob' }, { name: 'carol' }])).toBe('bob')
+  })
+
+  it('上次用户已删除时回退到当前用户列表第一项', () => {
+    expect(resolveCurrentUser('', 'removed', [{ name: 'alice' }, { name: 'bob' }])).toBe('alice')
+  })
+
+  it('浏览器缓存只保存最近用户名', () => {
+    persistLastActiveUser(' bob ')
+    expect(readLastActiveUser()).toBe('bob')
+    expect(localStorage.getItem('kemo-last-active-user')).toBe('bob')
+  })
 })
 
 function renderApp(path = '/chat') {
@@ -54,6 +77,7 @@ describe('AppShell navigation', () => {
   it('加载真实用户并展示空聊天入口', async () => {
     renderApp('/chat')
     await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
+    await waitFor(() => expect(localStorage.getItem('kemo-last-active-user')).toBe('kesepain'))
     expect(screen.getByText(/当前用户的配置、历史、知识/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换当前用户' })).toBeInTheDocument()
     expect(screen.getByText('核心工作区')).toBeInTheDocument()
@@ -344,6 +368,120 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(chatBody?.uploaded_files).toEqual(['note.md']))
     await waitFor(() => expect(screen.queryByText(/已上传 note\.md/)).not.toBeInTheDocument())
+    expect(screen.getByLabelText('附件：note.md')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('')
+  })
+
+  it('历史图片附件显示缩略图和下载入口', async () => {
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: 's1',
+      messages: [
+        {
+          role: 'user', content: '请识别这张图', attachments: [{
+            asset_id: 'asset_photo', name: 'photo.png', media_kind: 'image',
+            mime_type: 'image/png', size: 1024, checksum_sha256: 'abc',
+            scope: 'file_upload', relative_path: 'photo.png', available: true,
+          }],
+        },
+        { role: 'assistant', content: '图片识别完成' },
+      ],
+      round_metrics: [], round_traces: [],
+    })))
+
+    renderApp('/chat?user=kesepain&session=s1')
+
+    const card = await screen.findByLabelText('附件：photo.png')
+    expect(within(card).getByRole('img', { name: 'photo.png' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '下载附件 photo.png' })).toBeInTheDocument()
+  })
+
+  it('源文件已清理时保留灰色附件空气泡', async () => {
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: 's1',
+      messages: [
+        {
+          role: 'user', content: '', attachments: [{
+            asset_id: 'asset_removed', name: 'removed.png', media_kind: 'image',
+            mime_type: 'image/png', size: 2048, checksum_sha256: 'def',
+            scope: 'file_upload', relative_path: 'removed.png', available: false,
+          }],
+        },
+        { role: 'assistant', content: '此前已处理该图片' },
+      ],
+      round_metrics: [], round_traces: [],
+    })))
+
+    renderApp('/chat?user=kesepain&session=s1')
+
+    const card = await screen.findByLabelText('已清理附件：removed.png')
+    expect(within(card).getByText(/源文件已清理/)).toBeInTheDocument()
+    expect(within(card).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: /下载附件/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('[附件] removed.png')).not.toBeInTheDocument()
+  })
+
+  it('切换到其他页面后保留当前会话的未发送文本和附件', async () => {
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '这段内容还没有发送' } })
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    expect(fileInput).not.toBeNull()
+    fireEvent.change(fileInput!, { target: { files: [new File(['draft'], 'draft-note.md', { type: 'text/markdown' })] } })
+    expect(await screen.findByText(/已上传 draft-note\.md/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
+    expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: /^对话$/ }))
+
+    expect(await screen.findByRole('textbox', { name: '消息内容' })).toHaveValue('这段内容还没有发送')
+    expect(screen.getByText(/已上传 draft-note\.md/)).toBeInTheDocument()
+  })
+
+  it('上传过程中切换页面时仍把完成结果写回原会话草稿', async () => {
+    let releaseUpload!: () => void
+    const uploadGate = new Promise<void>((resolve) => { releaseUpload = resolve })
+    server.use(http.post('/api/users/kesepain/files/file_upload/upload', async ({ request }) => {
+      await uploadGate
+      return HttpResponse.json({
+        user: 'kesepain',
+        scope: 'file_upload',
+        path: new URL(request.url).searchParams.get('path'),
+        size: 4,
+        updated: true,
+      })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    fireEvent.change(fileInput!, { target: { files: [new File(['late'], 'late.png', { type: 'image/png' })] } })
+    expect(await screen.findByText('正在上传 1 个文件…')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
+    await screen.findByRole('heading', { name: '配置' })
+    releaseUpload()
+    fireEvent.click(screen.getByRole('link', { name: /^对话$/ }))
+
+    expect(await screen.findByText(/已上传 late\.png/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上传文件' })).toBeEnabled()
+  })
+
+  it('聊天请求失败时恢复本次文本并保留待发送附件', async () => {
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      return HttpResponse.json({ error: { message: 'Provider 暂时不可用' } }, { status: 502 })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    fireEvent.change(fileInput!, { target: { files: [new File(['retry'], 'retry.txt', { type: 'text/plain' })] } })
+    expect(await screen.findByText(/已上传 retry\.txt/)).toBeInTheDocument()
+    fireEvent.change(composer, { target: { value: '失败后需要恢复' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('失败后需要恢复'))
+    expect(screen.getByText(/已上传 retry\.txt/)).toBeInTheDocument()
   })
 
   it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {
@@ -495,6 +633,71 @@ describe('AppShell navigation', () => {
     expect(screen.getByText('最新一轮已撤销；修改内容后发送将创建新的最新一轮。')).toBeInTheDocument()
   })
 
+  it('唯一第一轮编辑后保持对话布局并可在原会话重新发送', async () => {
+    const welcomeText = /当前用户的配置、历史、知识、任务与技能运行态已载入/
+    let undoBody: Record<string, unknown> | null = null
+    let chatBody: Record<string, unknown> | null = null
+    let historyMessages = [
+      { role: 'user', content: '第一轮原问题' },
+      { role: 'assistant', content: '第一轮原回答' },
+    ]
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatBody = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+      historyMessages = [
+        { role: 'user', content: '修改后的第一轮问题' },
+        { role: 'assistant', content: '修改后的第一轮回答' },
+      ]
+      return new Response(
+        'event: text_delta\ndata: {"type":"text_delta","content":"修改后的第一轮回答"}\n\n'
+        + 'event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: historyMessages,
+        round_metrics: [], round_traces: [],
+      })),
+      http.post('/api/users/kesepain/sessions/s1/undo-last-round', async ({ request }) => {
+        undoBody = await request.json() as Record<string, unknown>
+        historyMessages = []
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', found: true,
+          rolled_back: true, round: 1, remaining_rounds: 0, prompt: '第一轮原问题',
+          content: [{ type: 'text', text: '第一轮原问题' }],
+        })
+      }),
+    )
+
+    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('第一轮原回答')
+    fireEvent.click(screen.getByRole('button', { name: '编辑后重发' }))
+
+    await waitFor(() => expect(undoBody).toEqual({ expected_round: 1, prompt: '第一轮原问题' }))
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    await waitFor(() => expect(input).toHaveValue('第一轮原问题'))
+    await waitFor(() => expect(screen.queryByText('第一轮原回答')).not.toBeInTheDocument())
+    expect(screen.queryByText(welcomeText)).not.toBeInTheDocument()
+    expect(screen.getByText('最新一轮已撤销；修改内容后发送将创建新的最新一轮。')).toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: '修改后的第一轮问题' } })
+    const sendButton = screen.getByRole('button', { name: '发送' })
+    expect(sendButton).toBeEnabled()
+    fireEvent.click(sendButton)
+
+    await waitFor(() => expect(chatBody).toMatchObject({
+      session_id: 's1',
+      prompt: '修改后的第一轮问题',
+    }))
+    expect(getSearch()).toContain('session=s1')
+    expect(await screen.findByText('修改后的第一轮回答')).toBeInTheDocument()
+    expect(screen.queryByText(welcomeText)).not.toBeInTheDocument()
+  })
+
   it('运行中只在输入框上方展示最新引导并在结束后归档到 Token 统计下方', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let markChatStarted!: () => void
@@ -554,6 +757,63 @@ describe('AppShell navigation', () => {
     expect(completedCards[1]).toHaveTextContent('结果放入临时区')
     const footer = guidanceList.previousElementSibling!
     expect(footer).toHaveClass('assistant-turn-footer')
+  })
+
+  it('任务计划终态卡片归档到执行轮次的 Token 统计与引导之间', async () => {
+    const pendingPlan = {
+      plan_id: 'plan_12345678', title: '终态归档验收', description: '验证计划卡片位置', status: 'pending', auto_accept: false,
+      reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', revision: 1, created_at: '', updated_at: '',
+      progress: { completed: 0, total: 1, percent: 0 },
+      steps: [{ step_id: 'step_1', title: '执行验收', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }],
+    }
+    const completedPlan = {
+      ...pendingPlan,
+      status: 'completed', revision: 4,
+      progress: { completed: 1, total: 1, percent: 100 },
+      steps: [{ ...pendingPlan.steps[0], status: 'completed', finished_at: '2026-07-26T12:00:00+08:00' }],
+    }
+    server.use(
+      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+        user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 0, completed_plans: 1 },
+        plans: [completedPlan], cron_tasks: [], executions: [],
+      })),
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [
+          { role: 'user', content: '创建任务计划' },
+          { role: 'assistant', content: '新计划已生成：完整步骤' },
+          { role: 'user', content: '【任务计划连续执行】\n计划 ID：plan_12345678\n起始步骤：step_1' },
+          { role: 'assistant', content: '任务计划执行完成。' },
+        ],
+        round_metrics: [
+          { round: 1, usage: { prompt_tokens: 10, completion_tokens: 2 }, elapsed_ms: 10, tool_calls: 1, guidance: [] },
+          { round: 2, usage: { prompt_tokens: 20, completion_tokens: 4 }, elapsed_ms: 20, tool_calls: 1, guidance: ['执行时补充说明'] },
+        ],
+        round_traces: [{
+          round: 1, reasoning: '', tools: [{
+            call_id: 'create-plan', name: 'subagent_dispatch', status: 'completed', elapsed_ms: 5,
+            arguments_text: '{}', arguments_truncated: false,
+            result_text: JSON.stringify({ ok: true, result: { plan: pendingPlan } }), result_truncated: false,
+          }],
+        }],
+        pagination: { limit: 20, total_rounds: 2, first_round: 1, last_round: 2, has_more_before: false, next_before: null },
+      })),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const planCard = await screen.findByLabelText('已创建任务计划：终态归档验收')
+    expect(screen.getAllByLabelText('已创建任务计划：终态归档验收')).toHaveLength(1)
+    expect(screen.queryByLabelText('任务计划：终态归档验收')).not.toBeInTheDocument()
+    const executionTurn = screen.getByText('任务计划执行完成。').closest('.assistant-turn')
+    expect(executionTurn).not.toBeNull()
+    expect(executionTurn).toContainElement(planCard)
+    const usage = within(executionTurn as HTMLElement).getByRole('group', { name: '第 2 轮运行统计' })
+    const guidance = within(executionTurn as HTMLElement).getByText('执行时补充说明').closest('.guidance-message')
+    if (!guidance) throw new Error('expected archived guidance card')
+    expect(usage.compareDocumentPosition(planCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(planCard.compareDocumentPosition(guidance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('任务计划已创建，请在发送框上方查看并确认。')).toBeInTheDocument()
+    expect(screen.queryByText('新计划已生成：完整步骤')).not.toBeInTheDocument()
   })
 
   it('本轮引导入口关闭后保留消息并自动作为下一轮发送', async () => {

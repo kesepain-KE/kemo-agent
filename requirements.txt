@@ -3,6 +3,7 @@
 
 fastapi>=0.110.0,<0.140.0
 itsdangerous>=2.2.0,<3.0.0
+Pillow>=10.0.0,<13.0.0
 PyYAML>=6.0.0,<7.0.0
 python-multipart>=0.0.20,<0.1.0
 pydantic>=2.0.0,<3.0.0

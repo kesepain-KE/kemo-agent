@@ -8,6 +8,9 @@ import {
   ListChecks,
   Copy,
   Download,
+  File as FileIcon,
+  FileX2,
+  Image as ImageIcon,
   Pencil,
   RotateCcw,
   Save,
@@ -30,9 +33,12 @@ import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { randomUUID } from '../randomId'
+import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
+
+export type { PendingUploadedFile } from '../store/chatDrafts'
 
 function createSessionId() {
   return `web_${randomUUID()}`
@@ -46,12 +52,6 @@ const EMPTY_CHAT_ITEMS: ChatItem[] = []
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 const HISTORY_PAGE_SIZE = 20
 
-export interface PendingUploadedFile {
-  path: string
-  name: string
-  size: number
-}
-
 export function removeSubmittedUploads(
   current: PendingUploadedFile[],
   submitted: PendingUploadedFile[],
@@ -59,6 +59,26 @@ export function removeSubmittedUploads(
   if (!submitted.length) return current
   const submittedPaths = new Set(submitted.map((file) => file.path))
   return current.filter((file) => !submittedPaths.has(file.path))
+}
+
+function pendingInputAttachment(file: PendingUploadedFile): InputAttachment {
+  const mimeType = file.mimeType || 'application/octet-stream'
+  const mediaKind = file.mediaKind
+    || (mimeType.startsWith('image/') ? 'image'
+      : mimeType.startsWith('audio/') ? 'audio'
+        : mimeType.startsWith('video/') ? 'video'
+          : 'file')
+  return {
+    asset_id: `pending:${file.path}`,
+    name: file.name,
+    media_kind: mediaKind,
+    mime_type: mimeType,
+    size: file.size,
+    checksum_sha256: '',
+    scope: 'file_upload',
+    relative_path: file.path,
+    available: true,
+  }
 }
 
 export function isSuccessfulRunCompletion(event: RunEvent) {
@@ -92,6 +112,55 @@ function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaAr
         <span><strong>{artifact.name}</strong><small>{artifact.mime_type} · {formatBytes(artifact.size)}</small></span>
         <a href={url} download={artifact.name}><Download size={14} />下载</a>
       </div>
+    </article>
+  )
+}
+
+function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
+  const [unavailable, setUnavailable] = useState(!attachment.available)
+  const downloadable = attachment.scope === 'file_upload' && Boolean(attachment.relative_path) && !unavailable
+  const url = downloadable
+    ? getUserFileDownloadUrl(user, 'file_upload', attachment.relative_path)
+    : ''
+
+  useEffect(() => setUnavailable(!attachment.available), [attachment.asset_id, attachment.available, attachment.relative_path])
+
+  const download = async () => {
+    if (!url) return
+    try {
+      const response = await fetch(url, { credentials: 'same-origin' })
+      if (!response.ok) {
+        setUnavailable(true)
+        return
+      }
+      const blobUrl = URL.createObjectURL(await response.blob())
+      const anchor = document.createElement('a')
+      anchor.href = blobUrl
+      anchor.download = attachment.name
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
+    } catch {
+      setUnavailable(true)
+    }
+  }
+
+  const image = attachment.media_kind === 'image'
+  return (
+    <article className={`user-attachment-card ${image ? 'image' : 'file'}${unavailable ? ' unavailable' : ''}`} aria-label={`${unavailable ? '已清理附件' : '附件'}：${attachment.name}`}>
+      {image && !unavailable ? (
+        <div className="user-attachment-preview">
+          <img src={url} alt={attachment.name} loading="lazy" onError={() => setUnavailable(true)} />
+        </div>
+      ) : (
+        <span className="user-attachment-icon" aria-hidden="true">
+          {unavailable ? <FileX2 size={20} /> : image ? <ImageIcon size={20} /> : <FileIcon size={20} />}
+        </span>
+      )}
+      <span className="user-attachment-copy">
+        <strong title={attachment.name}>{attachment.name}</strong>
+        <small>{unavailable ? `源文件已清理 · ${attachment.mime_type}` : `${attachment.mime_type} · ${formatBytes(attachment.size)}`}</small>
+      </span>
+      {downloadable ? <button type="button" onClick={() => { void download() }} aria-label={`下载附件 ${attachment.name}`}><Download size={14} />下载</button> : null}
     </article>
   )
 }
@@ -157,7 +226,11 @@ export function buildUserMessageMarkers(items: ChatItem[], firstRound = 1): User
     if (item.kind !== 'message' || item.role !== 'user') continue
     const historicalRound = /^history_(\d+)_user$/.exec(item.id)?.[1]
     const round = historicalRound ? Number(historicalRound) : nextRound
-    markers.push({ id: item.id, content: item.content, round })
+    markers.push({
+      id: item.id,
+      content: item.content || item.attachments?.map((attachment) => `[附件] ${attachment.name}`).join('；') || '附件消息',
+      round,
+    })
     nextRound = Math.max(nextRound, round + 1)
   }
   return markers
@@ -383,7 +456,7 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
         result.push({ id: `history_execution_${round}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
         continue
       }
-      result.push({ id: `history_${round}_user`, kind: 'message', role: 'user', content: message.content })
+      result.push({ id: `history_${round}_user`, kind: 'message', role: 'user', content: message.content, attachments: message.attachments })
       continue
     }
 
@@ -480,10 +553,87 @@ export function dropLastLiveRound(items: ChatItem[]) {
   return items
 }
 
-const terminalPlanStatuses = new Set(['completed', 'rejected', 'cancelled'])
+const terminalPlanStatuses = new Set(['completed', 'failed', 'rejected', 'cancelled'])
 
 export function selectDockedPlan(plans: PlanSummary[]) {
   return [...plans].reverse().find((plan) => !terminalPlanStatuses.has(plan.status))
+}
+
+function isConversationBoundary(item: ChatItem) {
+  return item.kind === 'execution_marker'
+    || item.kind === 'message' && item.role === 'user'
+}
+
+function containingBoundaryId(items: ChatItem[], itemIndex: number) {
+  for (let index = itemIndex; index >= 0; index -= 1) {
+    if (isConversationBoundary(items[index])) return items[index].id
+  }
+  return null
+}
+
+function boundaryEndIndex(items: ChatItem[], boundaryId: string | null) {
+  const start = boundaryId === null
+    ? -1
+    : items.findIndex((item) => item.id === boundaryId)
+  for (let index = start + 1; index < items.length; index += 1) {
+    if (isConversationBoundary(items[index])) return index
+  }
+  return items.length
+}
+
+export function archiveTerminalPlansInConversation(
+  items: ChatItem[],
+  plans: PlanSummary[],
+) {
+  let result = [...items]
+  const latestPlans = new Map<string, PlanSummary>()
+  for (const plan of plans) {
+    const current = latestPlans.get(plan.plan_id)
+    if (!current || plan.revision >= current.revision) latestPlans.set(plan.plan_id, plan)
+  }
+  for (const plan of latestPlans.values()) {
+    if (!terminalPlanStatuses.has(plan.status)) continue
+    const matchingIndexes = result
+      .map((item, index) => item.kind === 'task_plan' && item.plan.plan_id === plan.plan_id ? index : -1)
+      .filter((index) => index >= 0)
+    const executionMarker = [...result]
+      .reverse()
+      .find((item) => item.kind === 'execution_marker' && item.planId === plan.plan_id)
+    const boundaryId = executionMarker?.id
+      ?? (matchingIndexes.length ? containingBoundaryId(result, matchingIndexes.at(-1)!) : undefined)
+    if (boundaryId === undefined) continue
+
+    result = result.map((item) => item.kind === 'task_plan' && item.plan.plan_id === plan.plan_id
+      ? { ...item, plan, presentation: 'reference' as const }
+      : item)
+    const insertionIndex = boundaryEndIndex(result, boundaryId)
+    result.splice(insertionIndex, 0, {
+      id: `terminal_task_plan_${plan.plan_id}_${boundaryId ?? 'opening'}`,
+      kind: 'task_plan',
+      plan,
+      presentation: 'record',
+    })
+  }
+  return result
+}
+
+type AssistantMessageItem = Extract<ChatItem, { kind: 'message' }>
+type UsageItem = Extract<ChatItem, { kind: 'usage' }>
+type TaskPlanItem = Extract<ChatItem, { kind: 'task_plan' }>
+
+export function partitionAssistantTurnItems(items: ChatItem[]) {
+  return {
+    assistantMessages: items.filter(
+      (item): item is AssistantMessageItem => item.kind === 'message' && item.role === 'assistant',
+    ),
+    usageItems: items.filter((item): item is UsageItem => item.kind === 'usage'),
+    planItems: items.filter(
+      (item): item is TaskPlanItem => item.kind === 'task_plan' && item.presentation !== 'reference',
+    ),
+    finalizedGuidance: items.filter(
+      (item): item is GuidanceItem => item.kind === 'guidance' && Boolean(item.finalized),
+    ),
+  }
 }
 
 function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; docked: boolean; onOpen: () => void }) {
@@ -613,8 +763,24 @@ export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
-  const [draft, setDraft] = useState('')
-  const [editingSource, setEditingSource] = useState<{ id: string; content: string } | null>(null)
+  const draftKey = chatDraftKey(user, sessionId)
+  const draftSnapshot = useChatDraftStore((state) => state.drafts[draftKey] ?? EMPTY_CHAT_DRAFT)
+  const setDraftText = useChatDraftStore((state) => state.setText)
+  const setDraftUploads = useChatDraftStore((state) => state.setPendingUploads)
+  const setDraftUploadFeedback = useChatDraftStore((state) => state.setUploadFeedback)
+  const setDraftUploading = useChatDraftStore((state) => state.setUploading)
+  const moveDraft = useChatDraftStore((state) => state.moveDraft)
+  const clearDraft = useChatDraftStore((state) => state.clearDraft)
+  const { text: draft, uploadFeedback, pendingUploads, uploading } = draftSnapshot
+  const setDraft = (value: string | ((current: string) => string)) => setDraftText(draftKey, value)
+  const setUploadFeedback = (value: typeof uploadFeedback) => setDraftUploadFeedback(draftKey, value)
+  const setPendingUploads = (value: PendingUploadedFile[] | ((current: PendingUploadedFile[]) => PendingUploadedFile[])) => setDraftUploads(draftKey, value)
+  const [editingSource, setEditingSource] = useState<{
+    id: string
+    content: string
+    sessionId: string
+    remainingRounds: number
+  } | null>(null)
   const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
   const [copiedItem, setCopiedItem] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
@@ -625,9 +791,6 @@ export function ChatPage() {
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
-  const [uploadFeedback, setUploadFeedback] = useState<{ tone: 'pending' | 'success' | 'error'; text: string } | null>(null)
-  const [pendingUploads, setPendingUploads] = useState<PendingUploadedFile[]>([])
-  const [uploading, setUploading] = useState(false)
   const [showFollowOutput, setShowFollowOutput] = useState(false)
   const [stopping, setStopping] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -635,13 +798,11 @@ export function ChatPage() {
   const followOutputRef = useRef(true)
   const loadingEarlierRef = useRef(false)
   const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
-  const uploadContextRef = useRef(`${user}\u0000${sessionId}`)
   const submittedUploadsRef = useRef(new Map<string, PendingUploadedFile[]>())
   const consumingNextTurnRef = useRef(false)
   const locallyCommittedSessionRef = useRef('')
   const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
-  uploadContextRef.current = `${user}\u0000${sessionId}`
   const liveSessionId = sessionId || lastAttemptSessionRef.current
   const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
   const effectiveRunId = activeRunId || liveRun?.runId || ''
@@ -721,9 +882,6 @@ export function ChatPage() {
     setEditedSources(new Set())
     setCopiedItem('')
     if (!running) setActiveRunId('')
-    setUploadFeedback(null)
-    setPendingUploads([])
-    setUploading(false)
     setKnowledgeDrawerOpen(false)
     setExpandDrawerOpen(false)
     setConversationBusy('')
@@ -779,12 +937,18 @@ export function ChatPage() {
     const hasContent = Boolean(options.content?.length)
     if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && running) || uploading) return false
     const activeSession = options.sessionId || sessionId || createSessionId()
+    const submissionDraftKey = draftKey
+    let finalDraftKey = submissionDraftKey
     lastAttemptSessionRef.current = activeSession
     const runId = `run_${randomUUID().replaceAll('-', '')}`
     if (uploadedFiles.length) {
       submittedUploadsRef.current.set(runId, uploadedFiles.map((file) => ({ ...file })))
     }
+    const editingHistoryUserMessages = editingSource?.sessionId === activeSession
+      ? editingSource.remainingRounds
+      : undefined
     const historyUserMessages = options.historyUserMessages
+      ?? editingHistoryUserMessages
       ?? (activeSession === sessionId ? persistedUserMessages : 0)
     beginChatRun(user, activeSession, runId, historyUserMessages)
     setDraft('')
@@ -794,18 +958,21 @@ export function ChatPage() {
     followOutputRef.current = true
     setShowFollowOutput(false)
     if (editingSource) setEditedSources((current) => new Set(current).add(editingSource.id))
-    const displayedPrompt = prompt || uploadedFiles.map((file) => `[附件] ${file.name}`).join('\n')
+    const displayedPrompt = prompt
     const userMessageId = options.userMessageId || eventId('user')
     updateChatRunItems(user, activeSession, (current) => current.some((item) => item.id === userMessageId)
       ? current
       : [...current, {
         id: userMessageId, kind: 'message', role: 'user', content: displayedPrompt,
+        attachments: uploadedFiles.map(pendingInputAttachment),
         edited: Boolean(editingSource), originalContent: editingSource?.content,
       }])
     setEditingSource(null)
     const controller = new AbortController()
     setChatAbortController(controller)
     let committed = false
+    let successful = false
+    let restoreDraftAfterFailure = false
     try {
       await streamChat({
         user,
@@ -819,12 +986,16 @@ export function ChatPage() {
         onEvent: (event) => {
           if (event.type === 'done') {
             committed = event.metadata?.committed !== false
+            successful = isSuccessfulRunCompletion(event)
+            const terminalStatus = String(event.metadata?.status || 'completed').toLowerCase()
+            restoreDraftAfterFailure = ['failed', 'error'].includes(terminalStatus)
             const submitted = submittedUploadsRef.current.get(runId) ?? []
             submittedUploadsRef.current.delete(runId)
-            if (isSuccessfulRunCompletion(event) && submitted.length) {
-              setPendingUploads((current) => removeSubmittedUploads(current, submitted))
+            if (successful && submitted.length) {
+              setDraftUploads(submissionDraftKey, (current) => removeSubmittedUploads(current, submitted))
             }
           } else if (event.type === 'error') {
+            restoreDraftAfterFailure = true
             submittedUploadsRef.current.delete(runId)
           }
           updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
@@ -833,6 +1004,8 @@ export function ChatPage() {
       await refreshSessions()
       if (!sessionId) {
         locallyCommittedSessionRef.current = activeSession
+        finalDraftKey = chatDraftKey(user, activeSession)
+        moveDraft(submissionDraftKey, finalDraftKey)
         setSessionId(activeSession)
       }
       if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
@@ -840,10 +1013,14 @@ export function ChatPage() {
       refreshOverview()
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
+        restoreDraftAfterFailure = true
         updateChatRunItems(user, activeSession, (current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
       }
     } finally {
       submittedUploadsRef.current.delete(runId)
+      if (restoreDraftAfterFailure && promptOverride === undefined && prompt) {
+        setDraftText(finalDraftKey, (current) => current || prompt)
+      }
       finishChatRun(user, activeSession, committed)
       setChatAbortController(null)
       setActiveRunId('')
@@ -887,12 +1064,12 @@ export function ChatPage() {
     }
     const accepted = files.slice(0, remainingSlots)
     const skipped = files.length - accepted.length
-    const batchContext = uploadContextRef.current
+    const batchDraftKey = draftKey
     const uploadUser = user
     const results: Array<PendingUploadedFile | Error | undefined> = new Array(accepted.length)
     let cursor = 0
-    setUploading(true)
-    setUploadFeedback({ tone: 'pending', text: `正在上传 ${accepted.length} 个文件…` })
+    setDraftUploading(batchDraftKey, true)
+    setDraftUploadFeedback(batchDraftKey, { tone: 'pending', text: `正在上传 ${accepted.length} 个文件…` })
     try {
       const worker = async () => {
         while (cursor < accepted.length) {
@@ -906,6 +1083,14 @@ export function ChatPage() {
               path,
               name: path.split('/').at(-1) || file.name,
               size: result.size ?? file.size,
+              mimeType: file.type || 'application/octet-stream',
+              mediaKind: file.type.startsWith('image/')
+                ? 'image'
+                : file.type.startsWith('audio/')
+                  ? 'audio'
+                  : file.type.startsWith('video/')
+                    ? 'video'
+                    : 'file',
             }
           } catch (error) {
             results[index] = error instanceof Error ? error : new Error('上传失败')
@@ -915,21 +1100,21 @@ export function ChatPage() {
       await Promise.all(Array.from({ length: Math.min(3, accepted.length) }, () => worker()))
       const uploaded = results.filter((item): item is PendingUploadedFile => Boolean(item) && !(item instanceof Error))
       const failures = results.filter((item): item is Error => item instanceof Error)
-      if (uploadContextRef.current === batchContext) {
-        if (uploaded.length) setPendingUploads((current) => [...current, ...uploaded].slice(0, 20))
-        const messages: string[] = []
-        if (failures.length) messages.push(`${failures.length} 个文件上传失败：${failures[0].message}`)
-        if (skipped) messages.push(`${skipped} 个文件因每轮 20 项限制未上传`)
-        setUploadFeedback(messages.length ? { tone: 'error', text: messages.join('；') } : null)
-      }
+      if (uploaded.length) setDraftUploads(batchDraftKey, (current) => [...current, ...uploaded].slice(0, 20))
+      const messages: string[] = []
+      if (failures.length) messages.push(`${failures.length} 个文件上传失败：${failures[0].message}`)
+      if (skipped) messages.push(`${skipped} 个文件因每轮 20 项限制未上传`)
+      setDraftUploadFeedback(batchDraftKey, messages.length ? { tone: 'error', text: messages.join('；') } : null)
       if (uploaded.length) await queryClient.invalidateQueries({ queryKey: ['user-files', uploadUser, 'file_upload'] })
     } finally {
-      if (uploadContextRef.current === batchContext) setUploading(false)
+      setDraftUploading(batchDraftKey, false)
     }
   }
   const newConversation = async () => {
+    const previousDraftKey = draftKey
     abortChatRun()
     await createNewSession()
+    clearDraft(previousDraftKey)
     if (liveSessionId) clearChatRun(user, liveSessionId)
     setConversationMenuOpen(false)
   }
@@ -1045,7 +1230,12 @@ export function ChatPage() {
       }
       const editableContent = undo.prompt || content
       setDraft(editableContent)
-      setEditingSource({ id, content })
+      setEditingSource({
+        id,
+        content,
+        sessionId: targetSession,
+        remainingRounds: Math.max(0, undo.remaining_rounds),
+      })
       setConversationFeedback({ tone: 'success', text: '最新一轮已撤销，原问题已放回输入框，可修改后重新发送。' })
       window.requestAnimationFrame(() => {
         const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')
@@ -1385,14 +1575,24 @@ export function ChatPage() {
     })
     setExpandDrawerOpen(false)
   }
-  const conversationBlocks = groupConversationItems(items)
-  const userMessageMarkers = buildUserMessageMarkers(items, historyData?.pagination?.first_round ?? 1)
+  const conversationItems = archiveTerminalPlansInConversation(
+    items,
+    [
+      ...persistedPlans
+        .filter((plan) => plan.session_id === sessionId)
+        .map(resolvePlan),
+      ...renderedSessionPlans,
+    ],
+  )
+  const conversationBlocks = groupConversationItems(conversationItems)
+  const userMessageMarkers = buildUserMessageMarkers(conversationItems, historyData?.pagination?.first_round ?? 1)
+  const showWelcome = items.length === 0 && !editingSource
 
   return (
-    <div className={`view chat-view active${items.length === 0 ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
+    <div className={`view chat-view active${showWelcome ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
       <div className="chat-scroll-stage">
         <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
-        {items.length === 0 && (!sessionId || !historyQuery.isLoading) && (
+        {showWelcome && (!sessionId || !historyQuery.isLoading) && (
           <section className="welcome">
             <div className="welcome-top">
               <article className="greeting-card">
@@ -1460,11 +1660,18 @@ export function ChatPage() {
                   <article className="message user" data-user-message-id={item.id}>
                     <UserMessageAvatar avatarUrl={userAvatarUrl} />
                     <div className="message-body">
-                      <div className="bubble"><PlainTextMessage content={item.content} /></div>
+                      {item.content ? <div className="bubble"><PlainTextMessage content={item.content} /></div> : null}
+                      {item.attachments?.length ? (
+                        <div className="user-attachment-list">
+                          {item.attachments.map((attachment, index) => (
+                            <UserAttachmentCard key={attachment.asset_id || `${attachment.name}_${index}`} user={user} attachment={attachment} />
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="message-actions">
                         {item.edited ? <span className="edited-label">编辑后重发</span> : null}
                         {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
-                        {!running && lastUserMessage?.id === item.id ? <button onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
+                        {!running && item.content && lastUserMessage?.id === item.id ? <button onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
                         <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
                       </div>
                     </div>
@@ -1473,18 +1680,10 @@ export function ChatPage() {
               )
             }
 
-            const assistantMessages = block.items.filter(
-              (item): item is Extract<ChatItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant',
-            )
-            const usageItems = block.items.filter(
-              (item): item is Extract<ChatItem, { kind: 'usage' }> => item.kind === 'usage',
-            )
+            const { assistantMessages, usageItems, planItems, finalizedGuidance } = partitionAssistantTurnItems(block.items)
             const assistantText = assistantMessages.map((item) => item.content).filter(Boolean).join('\n\n')
             const assistantCopyId = assistantMessages.at(-1)?.id || block.id
             const hasPlanBubble = block.items.some((item) => item.kind === 'task_plan')
-            const finalizedGuidance = block.items.filter(
-              (item): item is GuidanceItem => item.kind === 'guidance' && Boolean(item.finalized),
-            )
             return (
               <article key={block.id} className="assistant-turn">
                 <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
@@ -1495,10 +1694,7 @@ export function ChatPage() {
                     if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
                     if (item.kind === 'media') return <MediaArtifactCard key={item.id} user={user} artifact={item.artifact} />
                     if (item.kind === 'usage') return null
-                    if (item.kind === 'task_plan') {
-                      const plan = resolvePlan(item.plan)
-                      return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
-                    }
+                    if (item.kind === 'task_plan') return null
                     if (item.kind === 'guidance') return null
                     if (item.kind === 'error') return <div key={item.id} className="chat-error">{item.content}</div>
                     if (item.role !== 'assistant') return null
@@ -1523,12 +1719,15 @@ export function ChatPage() {
                       )}
                     </div>
                   )}
+                  {planItems.map((item) => {
+                    const plan = resolvePlan(item.plan)
+                    return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
+                  })}
                   {finalizedGuidance.length > 0 && <div className="assistant-guidance-list">{finalizedGuidance.map((item) => <GuidanceMessage key={item.id} item={item} placement="completed" />)}</div>}
                 </div>
               </article>
             )
           })}
-          {items.length > 0 && persistedSessionPlans.map((plan) => <TaskPlanRecord key={`persisted_${plan.plan_id}`} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />)}
         </div>
         {showFollowOutput && items.length > 0 ? <button className="chat-follow-output" type="button" onClick={resumeFollowingOutput}><ChevronDown size={15} />继续跟随最新回复</button> : null}
         </div>

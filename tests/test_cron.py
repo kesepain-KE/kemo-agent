@@ -443,7 +443,9 @@ class ExecutorTests(unittest.TestCase):
             (directory / "data_update.py").write_text(
                 "from pathlib import Path\n"
                 "def update():\n"
-                f"    Path(__file__).with_name('updated.txt').write_text('{marker}', 'utf-8')\n",
+                f"    Path(__file__).with_name('updated.txt').write_text('{marker}', 'utf-8')\n"
+                "    return {'ok': True, 'resources': [{"
+                "'path': 'updated.txt', 'kind': 'document', 'label': '采集结果'}]}\n",
                 "utf-8",
             )
 
@@ -465,6 +467,9 @@ class ExecutorTests(unittest.TestCase):
         )
         self.assertTrue((modules[0][0] / "updated.txt").is_file())
         self.assertTrue((modules[1][0] / "updated.txt").is_file())
+        global_runtime = json.loads((modules[0][0] / "_runtime.json").read_text("utf-8"))
+        self.assertEqual(global_runtime["update"]["status"], "completed")
+        self.assertEqual(global_runtime["update"]["resources"][0]["path"], "updated.txt")
         self.assertFalse((modules[2][0] / "updated.txt").exists())
         self.assertFalse((modules[3][0] / "updated.txt").exists())
 

@@ -18,11 +18,36 @@ from run.history_index import (
     queue_summary,
     session_key,
 )
-from run.maintenance import MaintenanceScheduler
+from run.context import estimate_text_tokens
+from run.maintenance import (
+    HISTORY_SUMMARY_CHUNK_TOKENS,
+    MaintenanceScheduler,
+    _summary_chunks,
+)
 from run.memory import MemoryStore, normalize_memory_filename
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):
+    def test_summary_chunks_hard_split_one_oversized_round_without_data_loss(self) -> None:
+        user_text = "用户内容。" * 15_000
+        assistant_text = "助手结果。" * 15_000
+        chunks = _summary_chunks(
+            [{"round": 1, "user": user_text, "assistant": assistant_text}]
+        )
+
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            tokens = estimate_text_tokens(
+                json.dumps(chunk, ensure_ascii=False, default=str)
+            )
+            self.assertLessEqual(tokens, HISTORY_SUMMARY_CHUNK_TOKENS)
+        pieces = [item for chunk in chunks for item in chunk]
+        self.assertEqual("".join(item["user"] for item in pieces), user_text)
+        self.assertEqual(
+            "".join(item["assistant"] for item in pieces),
+            assistant_text,
+        )
+
     def test_closed_session_summary_is_generated_in_background(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -65,7 +90,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(record["title"], "历史会话后台摘要功能")
         self.assertEqual(record["summary_status"], "completed")
         self.assertIn("异步生成", record["summary"])
-        self.assertEqual(runner_type.return_value.run.call_args.kwargs["max_tokens"], 512)
+        run_kwargs = runner_type.return_value.run.call_args.kwargs
+        self.assertEqual(run_kwargs["max_tokens"], 10_000)
+        self.assertTrue(run_kwargs["structured_output_tool"])
 
     def test_failed_summary_preserves_safe_output_preview(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -164,12 +191,10 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         window = empty_window("alice", "web", "conv_chunked")
         window["text"]["messages"] = [
             {"role": "user", "content": "第一轮" + "甲" * 26_000},
-            {"role": "assistant", "content": "第一答" + "乙" * 26_000},
-            {"role": "user", "content": "第二轮" + "丙" * 26_000},
-            {"role": "assistant", "content": "第二答" + "丁" * 26_000},
+            {"role": "assistant", "content": "第一答"},
         ]
         window["data"].update(
-            {"rounds": 2, "memory_processed_round": 2, "memory_status": "completed"}
+            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
         )
         commit_window(archive, window)
         close_session(root, "alice", "web", "conv_chunked")
@@ -182,7 +207,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 AgentOutputError("第二块暂时失败"),
             ]
             first = scheduler.process_next_summary("alice")
-        self.assertEqual(first["failed"][0]["round"], 2)
+        self.assertEqual(first["failed"][0]["round"], 1)
         checkpointed = find_record(root, "alice", "web", "conv_chunked")
         self.assertEqual(checkpointed["summary_checkpoint_next_chunk"], 1)
         self.assertEqual(checkpointed["summary_checkpoint_total_chunks"], 2)

@@ -58,6 +58,12 @@ function layerIcon(scope: ExpandScope) {
   return <UserRound size={19} />
 }
 
+function runtimeLabel(status?: string) {
+  if (status === 'completed') return '最近成功'
+  if (status === 'failed') return '最近失败'
+  return '暂无记录'
+}
+
 function SummaryCard({ icon, label, value, detail, tone = 'purple' }: {
   icon: ReactNode
   label: string
@@ -301,8 +307,8 @@ export function ExpandPage() {
           <div className={styles.metadata}>
             <span><small>模块 ID</small><strong>{selected.name}</strong></span>
             <span><small>更新机制</small><strong>{selected.start_update || '未配置'}</strong></span>
-            <span><small>数据健康</small><strong>{selected.input_health}</strong></span>
-            <span><small>操作入口</small><strong>{selected.start_expand || '未配置'}</strong></span>
+            <span title={selected.runtime?.update?.error?.message || ''}><small>采集运行</small><strong>{selected.input_health} · {runtimeLabel(selected.runtime?.update?.status)}</strong></span>
+            <span title={selected.runtime?.control?.error?.message || ''}><small>操控运行</small><strong>{runtimeLabel(selected.runtime?.control?.status)}</strong></span>
           </div>
 
           <div className={styles.detailCards}>

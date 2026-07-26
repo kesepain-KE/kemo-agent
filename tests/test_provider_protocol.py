@@ -35,6 +35,7 @@ from provider.protocol.models import (
     ToolCallItem,
     ToolResultItem,
     Usage,
+    text_from_content,
 )
 from provider.protocol.serialization import parse_request, parse_response, to_json_bytes
 from provider.protocol.streaming import (
@@ -459,6 +460,33 @@ class UnifiedProtocolTests(unittest.TestCase):
         reasoning = [item for item in request.input if isinstance(item, ReasoningItem)]
         self.assertEqual([item.id for item in reasoning], ["rs_valid"])
         self.assertEqual(reasoning[0].summary, "valid summary")
+
+    def test_chat_bridge_rebuilds_legacy_empty_native_message(self) -> None:
+        chat = ChatRequest(
+            model="test",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "[历史兼容：旧附件消息]",
+                    "_kemo_message": {
+                        "id": "msg_legacy_empty",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "user",
+                        "content": [],
+                        "metadata": {"round": 1},
+                        "extensions": {},
+                    },
+                }
+            ],
+        )
+
+        request = chat_request_to_kemo(chat)
+
+        messages = [item for item in request.input if isinstance(item, MessageItem)]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(text_from_content(messages[0].content), "[历史兼容：旧附件消息]")
+        self.assertNotEqual(messages[0].id, "msg_legacy_empty")
 
     def test_gateway_native_json_and_sse_transport(self) -> None:
         request = make_request()

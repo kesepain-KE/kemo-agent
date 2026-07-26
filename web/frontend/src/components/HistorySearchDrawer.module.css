@@ -158,6 +158,7 @@
 .cardCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cardCopy strong { font-size: .8125rem; }
 .cardCopy span { margin-top: 4px; color: var(--muted); font-size: .6875rem; }
+.cardCopy .summaryText { cursor: help; }
 .cardCopy .summaryFailed { color: var(--amber); }
 .cardCopy small { margin-top: 5px; color: var(--muted-2); font-size: .625rem; }
 
@@ -169,6 +170,38 @@
 .empty strong { color: var(--text-2); font-size: .8125rem; }
 .empty span { max-width: 240px; font-size: .6875rem; line-height: 1.55; }
 .spinning { animation: spin .85s linear infinite; }
+
+.summaryTooltip {
+  position: fixed;
+  z-index: 240;
+  display: grid;
+  gap: 6px;
+  max-height: min(260px, calc(100vh - 24px));
+  padding: 11px 13px;
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  color: var(--text);
+  background: var(--surface-elevated);
+  box-shadow: 0 14px 38px color-mix(in srgb, #000 24%, transparent), var(--shadow-soft);
+  pointer-events: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.summaryTooltip small {
+  color: var(--brand);
+  font-size: .625rem;
+  font-weight: 760;
+  letter-spacing: .04em;
+}
+.summaryTooltip strong {
+  color: var(--text-2);
+  font-size: .75rem;
+  font-weight: 560;
+  line-height: 1.65;
+}
+.tooltipAbove { transform: translate(-50%, -100%); }
+.tooltipBelow { transform: translateX(-50%); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 

@@ -45,9 +45,10 @@ class ExpandCreaterPluginTests(unittest.TestCase):
                 {
                     "name", "explain", "open_input", "input_data", "input_health",
                     "start_update", "open_control", "start_expand", "start_control",
-                    "recent_update",
                 },
             )
+            self.assertEqual(manifest["input_health"], "异常")
+            self.assertNotIn("recent_update", manifest)
             self.assertTrue(read_expand_meta(module).valid)
             validation = run("validate", "user", name="smart_lights", context=context)
             self.assertTrue(validation["valid"], validation["errors"])
@@ -70,8 +71,27 @@ class ExpandCreaterPluginTests(unittest.TestCase):
                 timeout=10,
                 check=False,
             )
-            self.assertEqual(control_process.returncode, 0, control_process.stderr)
-            self.assertEqual(json.loads(control_process.stdout)["status"], "not_implemented")
+            self.assertEqual(control_process.returncode, 1, control_process.stderr)
+            control_result = json.loads(control_process.stdout)
+            self.assertFalse(control_result["ok"])
+            self.assertIn("未知命令", control_result["error"])
+
+            stdin_process = subprocess.run(
+                [sys.executable, str(module / "start_expand.py")],
+                cwd=module,
+                input=json.dumps(
+                    {"command": "example_action", "params": {"param": "中文与引号\""}},
+                    ensure_ascii=False,
+                ),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(stdin_process.returncode, 1, stdin_process.stderr)
+            stdin_result = json.loads(stdin_process.stdout)
+            self.assertEqual(stdin_result["data"]["param"], '中文与引号"')
 
             update_process = subprocess.run(
                 [sys.executable, str(module / "data_update.py")],
@@ -83,8 +103,8 @@ class ExpandCreaterPluginTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(update_process.returncode, 0, update_process.stderr)
-            self.assertEqual(json.loads(update_process.stdout)["status"], "ok")
-            self.assertIn("最后更新", (module / "input_data.md").read_text("utf-8"))
+            self.assertTrue(json.loads(update_process.stdout)["ok"])
+            self.assertIn("自动采集时间", (module / "input_data.md").read_text("utf-8"))
             self.assertTrue(run("validate", "user", name="smart_lights", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):
@@ -119,7 +139,7 @@ class ExpandCreaterPluginTests(unittest.TestCase):
 
             manifest_path = module / "expand.json"
             manifest = json.loads(manifest_path.read_text("utf-8"))
-            manifest.pop("recent_update")
+            self.assertNotIn("recent_update", manifest)
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), "utf-8")
             self.assertTrue(read_expand_meta(module).valid)
             self.assertTrue(run("validate", "shared", name="weather_station", context=context)["valid"])

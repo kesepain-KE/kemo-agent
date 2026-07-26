@@ -254,9 +254,9 @@ export interface MarkdownMessageProps {
 }
 
 export function MarkdownMessage({ content, streaming = false, className = '' }: MarkdownMessageProps) {
-  const remarkPlugins = streaming
-    ? [remarkGfm, remarkMath]
-    : [remarkGfm, remarkMath, remarkBreaks, remarkEmoji]
+  const remarkPlugins: PluggableList = streaming
+    ? [[remarkGfm, { singleTilde: false }], remarkMath]
+    : [[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks, remarkEmoji]
   const rehypePlugins: PluggableList = streaming
     ? []
     : [[rehypeSanitize, markdownSchema], rehypeKatex, rehypeHighlight]

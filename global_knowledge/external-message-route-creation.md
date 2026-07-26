@@ -2,20 +2,13 @@
 
 外部消息模块把 Telegram 等平台适配到统一消息合同。框架只扫描 `message/out/` 的直接子目录，并且只加载 `message.json` 声明的 input、output、detect 三个 Python 模块。
 
-## 标准结构
+## 最小框架合同与自由实现
 
-```text
-message/out/<module>/
-├── message.json       # 严格静态清单，不放密钥
-├── input.py           # start()/stop()，把平台消息写入文件队列
-├── output.py          # send(payload) -> True
-├── detect.py          # check(config, state) -> state
-├── message.md         # 可恢复入站队列
-├── state.json         # 健康和计数
-├── files/             # 入站附件
-├── log/               # 终态日志
-└── ...                # 平台自有 helper/config；核心不会自动执行
-```
+`message/out/<module>/` 是一个完整的平台模块工作区，不是固定文件模板。框架只要求存在 `message.json`，并按清单加载 input、output、detect 三个适配入口，使用清单声明的消息缓冲、附件目录和日志目录；`state.json` 是核心约定的运行状态文件。
+
+这些入口和路径可以使用清单允许的模块内相对路径，不要求平铺在根目录。模块内部可以自由包含平台 SDK 封装、协议实现、数据库、资源、测试、构建文件、任意层级包或完整开源项目。入口可以直接实现极小平台，也可以只作为内部工程的薄适配器。框架不会扫描或自动执行未声明的内部 Python 文件，也不会因模板未列出额外文件而拒绝模块。
+
+根目录 `template/message/` 只是一个面向 Telegram 的适配示例，用于展示合同和生命周期处理，不是所有平台的标准架构，更不是“复制后只改名称”即可适配任意平台。接入其他平台时可以完全替换示例源码，只保留最终合同语义。
 
 新增模块后需要让 RuntimeHost 重新发现消息插件，通常通过消息模块刷新或重启 RuntimeHost 完成。一个进程内 `machine_id` 和 `platform` 都必须唯一。
 
@@ -50,7 +43,7 @@ message/out/<module>/
 
 `capabilities` 可选值只有 `receive_text`、`send_text`、`receive_file`、`send_file`，并且前两项必需。`allowed_tools=null` 表示不增加 Transport 级工具限制，仍受用户插件配置约束；空数组表示该入口不开放工具。
 
-## 三模块合同
+## 三入口合同
 
 ### input.py
 
@@ -162,7 +155,7 @@ attachments:
 
 1. 确认平台、唯一 `machine_id`、绑定用户和收发能力。
 2. 将平台 Token 放入环境变量或模块私有且被忽略的凭据文件，不放进 `message.json`。
-3. 实现三模块合同和可恢复 `message.md` 写入。
+3. 建立最小清单合同；按实际复杂度自由组织内部工程，并让三个声明入口适配框架协议。
 4. 正确处理文本、命令、群聊、回复 ID、附件 MIME、重名附件和时区。
 5. 测试附件非空相对路径、`files_dir` 越界拒绝、资产登记、文本主模型不接收图片数据、连接检测、入站去重、出站失败、输入线程自动拉起、积压消息保留、历史会话跨重启延续和优雅停止。
 6. 重新发现模块，检查 Web 外部消息页中的健康状态和日志。
@@ -173,3 +166,4 @@ attachments:
 - 使用 `allowed_tools` 最小化外部入口权限。
 - 不记录 Token、Cookie 或完整凭据；日志中的用户内容和附件也应按隐私数据管理。
 - 输入线程、检测和输出都必须有超时，并能在 RuntimeHost 关闭时退出。
+- 模块可以保留任意内部工程结构，但声明路径和运行时读写必须留在模块作用域；被入口导入的代码与入口具有相同信任级别，不能加载不可信项目。

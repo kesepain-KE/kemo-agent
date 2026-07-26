@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import cli
 from events import RunEvent
+from provider.factory import ProviderCongestionError
 from provider.adapters.compat import (
     chat_response_to_kemo,
     chat_stream_to_protocol,
@@ -30,7 +31,7 @@ from run.engine import (
 )
 from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
-from run.memory_analysis import extract_round_memory
+from run.memory_analysis import extract_memory_backlog, extract_round_memory
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ToolCancelledError,
@@ -878,6 +879,51 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"]["exception_type"], "RuntimeError")
 
+    def test_failed_round_is_skipped_by_later_memory_extraction(self) -> None:
+        _, root = self.make_root(stream=True)
+        provider = ScriptedProvider(streams=[[
+            RunEvent(type="error", error={"message": "upstream unavailable"})
+        ]])
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "failed-memory",
+                        "prompt": "do not extract this failed round",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        class RejectingRunner:
+            def run(self, *args, **kwargs):
+                del args, kwargs
+                raise AssertionError("failed round must not reach memory agent")
+
+        path = find_window(root, "alice", "cli", "failed-memory")
+        window = load_window(path)
+        result = extract_memory_backlog(
+            root=root,
+            user="alice",
+            source="cli",
+            session_id="failed-memory",
+            directory=path,
+            window=window,
+            config={"memory": {"extraction_mode": "compression_only"}},
+            agent_runner=RejectingRunner(),  # type: ignore[arg-type]
+            cancel_event=None,
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidates"], 0)
+        self.assertEqual(
+            result["extraction"]["reason"], "failed_rounds"
+        )
+        self.assertEqual(result["extraction"]["skipped_rounds"], [1])
+
     def test_runtime_guidance_is_injected_at_tool_boundary_and_persisted(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
@@ -1011,7 +1057,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             iterator.close()
         self.assertIsNone(find_window(root, "alice", "cli", "incremental-tool"))
 
-    def test_stream_without_done_yields_error_and_does_not_commit(self) -> None:
+    def test_stream_without_done_yields_error_and_commits_failed_round(self) -> None:
         _, root = self.make_root(stream=True)
 
         class EmptyStreamProvider:
@@ -1035,11 +1081,98 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
         self.assertEqual([event.type for event in events], ["error"])
         self.assertIn("缺少 done 终态", events[0].error["message"])
-        self.assertIsNone(find_window(root, "alice", "cli", "missing-done"))
+        self.assertTrue(events[0].metadata["committed"])
+        self.assertEqual(events[0].metadata["status"], "failed")
+        window = load_window(find_window(root, "alice", "cli", "missing-done"))
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
-    def test_error_does_not_commit_and_cancel_commits_terminal_round(self) -> None:
+    def test_provider_congestion_commits_failed_round(self) -> None:
+        _, root = self.make_root()
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation_runtime.provider_request_slot",
+                side_effect=ProviderCongestionError("provider busy"),
+            ),
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "provider-busy",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: ScriptedProvider(),
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["error"])
+        self.assertEqual(events[0].metadata["status"], "failed")
+        self.assertEqual(
+            events[0].metadata["stop_reason"], "provider_congestion"
+        )
+        window = load_window(find_window(root, "alice", "cli", "provider-busy"))
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_unrecoverable_context_error_commits_failed_round(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[
+                ProviderError(
+                    "oversized request",
+                    status_code=400,
+                    category="context_length_exceeded",
+                )
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "context-unrecoverable",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["error"])
+        self.assertTrue(events[0].metadata["committed"])
+        self.assertEqual(
+            events[0].metadata["stop_reason"],
+            "provider_context_recovery_failed",
+        )
+        window = load_window(
+            find_window(root, "alice", "cli", "context-unrecoverable")
+        )
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_error_and_cancel_both_commit_terminal_rounds(self) -> None:
         _, root = self.make_root(stream=True)
-        error_provider = ScriptedProvider(streams=[[RunEvent(type="text_delta", content="partial"), RunEvent(type="error", error={"message": "boom"})]])
+        error_provider = ScriptedProvider(streams=[[
+            RunEvent(type="text_delta", content="partial"),
+            RunEvent(
+                type="tool_call_start",
+                tool_call_id="pending-error",
+                tool_name="lookup",
+                arguments={"value": "x"},
+            ),
+            RunEvent(
+                type="error",
+                error={
+                    "message": "sensitive upstream body",
+                    "code": "rate_limit",
+                    "provider_status": 429,
+                },
+            ),
+        ]])
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
@@ -1048,8 +1181,37 @@ class RuntimeFeatureTests(unittest.TestCase):
                     provider_factory=lambda _: error_provider,
                 )
             )
-        self.assertEqual(events[-1].type, "error")
-        self.assertIsNone(find_window(root, "alice", "cli", "err"))
+        self.assertEqual([event.type for event in events], [
+            "text_delta",
+            "tool_call_start",
+            "error",
+        ])
+        self.assertTrue(events[-1].metadata["committed"])
+        self.assertEqual(events[-1].metadata["status"], "failed")
+        self.assertEqual(events[-1].metadata["stop_reason"], "provider_error_event")
+        error_path = find_window(root, "alice", "cli", "err")
+        error_window = load_window(error_path)
+        self.assertEqual(error_window["data"]["rounds"], 1)
+        self.assertIn("partial", error_window["text"]["messages"][1]["content"])
+        self.assertIn(
+            "模型服务错误中断",
+            error_window["text"]["messages"][1]["content"],
+        )
+        failed_metric = error_window["data"]["round_metrics"][0]
+        self.assertEqual(failed_metric["status"], "failed")
+        self.assertEqual(failed_metric["failure"]["code"], "rate_limit")
+        self.assertEqual(failed_metric["failure"]["provider_status"], 429)
+        self.assertNotIn(
+            "sensitive upstream body",
+            json.dumps(error_window, ensure_ascii=False),
+        )
+        failed_call = error_window["tool"]["rounds"][0]["calls"][0]
+        self.assertEqual(failed_call["id"], "pending-error")
+        self.assertEqual(failed_call["status"], "failed")
+        self.assertEqual(
+            failed_call["result"]["error"]["exception_type"],
+            "ProviderRunInterrupted",
+        )
 
         cancel = threading.Event()
         cancel_provider = ScriptedProvider(
@@ -1120,6 +1282,60 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
+
+    def test_failed_duplicate_call_executes_again_and_preserves_retry_metadata(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("1", "lookup", {"value": "x"}),
+                        ToolCall("2", "lookup", {"value": "x"}),
+                    ],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", usage=Usage()),
+            ]
+        )
+        failure = ProviderError(
+            "temporary tool provider failure",
+            category="upstream_error",
+            status_code=502,
+            retryable=True,
+        )
+        failure.attempt_count = 2
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation_runtime.execute_tool",
+                side_effect=[failure, {"value": "x"}],
+            ) as mocked_execute,
+        ):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "failed-duplicate",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(mocked_execute.call_count, 2)
+        window = load_window(find_window(root, "alice", "cli", "failed-duplicate"))
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertFalse(calls[0]["duplicate"])
+        self.assertFalse(calls[1]["duplicate"])
+        self.assertEqual(calls[0]["status"], "failed")
+        self.assertEqual(calls[1]["status"], "completed")
+        error = calls[0]["result"]["error"]
+        self.assertEqual(error["category"], "upstream_error")
+        self.assertEqual(error["status_code"], 502)
+        self.assertTrue(error["retryable"])
+        self.assertEqual(error["attempt_count"], 2)
 
     def test_cancelled_round_pairs_pending_tool_call_with_cancel_result(self) -> None:
         _, root = self.make_root(stream=True)

@@ -63,6 +63,7 @@ from run.cron_store import (
     normalize_task,
 )
 from run.engine import compress_context, iter_request_events
+from run.expand_runtime import read_expand_runtime, record_expand_runtime
 from run.history import (
     HistoryError,
     delete_all_sessions as delete_all_history_sessions,
@@ -107,6 +108,11 @@ from run.task_plan_store import (
     PlanNotFoundError,
     PlanStore,
     normalize_plan,
+)
+from run.module_runtime import (
+    module_update_timeout,
+    record_module_health,
+    run_module_updater,
 )
 from run.memory_analysis import extract_memory_backlog
 from run.session_runtime import session_lock
@@ -2154,6 +2160,11 @@ class WebRunService:
                     (float(item.get("updated_at") or 0) for item in files),
                     default=0.0,
                 )
+                runtime_state = (
+                    read_expand_runtime(module)
+                    if module_path_safe and module.is_dir()
+                    else {"schema_version": 1}
+                )
                 items.append(
                     {
                         "id": f"{scope}:{module_name}",
@@ -2183,6 +2194,7 @@ class WebRunService:
                         "collected_markdown": collected_markdown,
                         "injected_markdown": injected_markdown,
                         "injected_tokens": estimate_text_tokens(injected_markdown),
+                        "runtime": runtime_state,
                         "files": files,
                         "updated_at": updated_at,
                     }
@@ -2282,7 +2294,12 @@ class WebRunService:
         ):
             parts.append(f"## 数据采集\n{collected_markdown}")
         if health.get("open_control") and control_injection:
-            parts.append(f"## 操控能力\n{control_injection}")
+            parts.append(
+                "## 操控能力\n"
+                f"{control_injection}\n\n"
+                f"调用入口：使用 `expand_call`，传入 `scope={scope}`、"
+                f"`module={module_name}`，具体命令和参数按需读取操作层。"
+            )
         return f"[{scope}:{module_name}]\n" + "\n\n".join(parts) if parts else ""
 
     def _expand_module_directory(
@@ -2348,27 +2365,43 @@ class WebRunService:
             updater.resolve().relative_to(target.resolve())
         except ValueError:
             raise InvalidRequestError("拓展模块更新入口越出模块目录") from None
-        try:
-            completed = subprocess.run(
-                [sys.executable, updater.name],
-                cwd=str(target),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-                check=False,
-                **hidden_subprocess_kwargs(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise WebServiceError(f"拓展模块更新超时：{normalized_scope}:{logical_name}") from exc
-        except OSError as exc:
-            raise WebServiceError(f"拓展模块更新入口执行失败：{normalized_scope}:{logical_name}") from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "未知错误").strip()[:1000]
+        config = load_config(name, self.root)
+        started = time.monotonic()
+        result = run_module_updater(
+            updater,
+            target,
+            timeout=module_update_timeout(config),
+        )
+        duration_ms = round((time.monotonic() - started) * 1000)
+        if result.get("ok") is not True:
+            reason = str(result.get("reason") or "未知错误")
+            try:
+                record_module_health(target / "expand.json", "expand", healthy=False)
+                record_expand_runtime(
+                    target,
+                    "update",
+                    ok=False,
+                    duration_ms=duration_ms,
+                    error=reason,
+                )
+            except Exception as state_exc:
+                reason = f"{reason}；写回运行状态失败：{state_exc}"
             raise WebServiceError(
-                f"拓展模块更新失败：{normalized_scope}:{logical_name}（{detail}）"
+                f"拓展模块更新失败：{normalized_scope}:{logical_name}（{reason[-1000:]}）"
             )
+        try:
+            record_module_health(target / "expand.json", "expand", healthy=True)
+            record_expand_runtime(
+                target,
+                "update",
+                ok=True,
+                duration_ms=duration_ms,
+                result=result.get("result"),
+            )
+        except Exception as exc:
+            raise WebServiceError(
+                f"拓展模块更新成功，但运行状态写回失败：{normalized_scope}:{logical_name}"
+            ) from exc
         refreshed = self.expands(name)
         refreshed_module = next(
             (
@@ -3112,6 +3145,98 @@ class WebRunService:
             return artifacts
 
         raw_metrics = (window.get("data") or {}).get("round_metrics") or []
+        input_attachments_by_round: dict[int, list[dict[str, Any]]] = {}
+
+        def input_attachments(value: Any) -> list[dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            attachments: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            upload_root = (self.root / "users" / name / "file_upload").resolve()
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                asset_id = str(item.get("asset_id") or "")
+                attachment_name = Path(str(item.get("name") or "attachment")).name[:255]
+                media_kind = str(item.get("media_kind") or "file").lower()
+                if media_kind not in {"image", "audio", "video", "file"}:
+                    media_kind = "file"
+                scope = str(item.get("scope") or "external")
+                relative_path = str(item.get("relative_path") or "").replace("\\", "/").strip("/")
+                available = False
+                if scope == "file_upload" and relative_path:
+                    try:
+                        _, target = _safe_relative_target(upload_root, relative_path)
+                        _reject_link_path(upload_root, target)
+                        expected_size = max(0, int(item.get("size") or 0))
+                        available = (
+                            not target.is_symlink()
+                            and target.is_file()
+                            and (not expected_size or target.stat().st_size == expected_size)
+                        )
+                    except (OSError, WebServiceError):
+                        available = False
+                else:
+                    scope = "external"
+                    relative_path = ""
+                key = asset_id or f"{scope}\0{relative_path}\0{attachment_name}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                attachments.append(
+                    {
+                        "asset_id": asset_id,
+                        "name": attachment_name,
+                        "media_kind": media_kind,
+                        "mime_type": str(
+                            item.get("mime_type") or "application/octet-stream"
+                        ),
+                        "size": max(0, int(item.get("size") or 0)),
+                        "checksum_sha256": str(item.get("checksum_sha256") or ""),
+                        "scope": scope,
+                        "relative_path": relative_path,
+                        "available": available,
+                    }
+                )
+            return attachments
+
+        if isinstance(raw_metrics, list):
+            for metric in raw_metrics:
+                if not isinstance(metric, dict):
+                    continue
+                round_number = int(metric.get("round") or 0)
+                values = input_attachments(metric.get("input_attachments"))
+                if round_number > 0 and values:
+                    input_attachments_by_round[round_number] = values
+        raw_items = (window.get("items") or {}).get("items") or []
+        if isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict) or raw_item.get("role") != "user":
+                    continue
+                metadata = raw_item.get("metadata")
+                if not isinstance(metadata, dict):
+                    continue
+                round_number = int(metadata.get("round") or 0)
+                values = input_attachments(metadata.get("input_attachments"))
+                if round_number > 0 and values:
+                    input_attachments_by_round.setdefault(round_number, values)
+
+        decorated_messages: list[dict[str, Any]] = []
+        selected_round = max(0, start_round - 1)
+        for raw_message in selected_messages:
+            message = dict(raw_message)
+            if message.get("role") == "user":
+                selected_round += 1
+                values = input_attachments(message.get("attachments"))
+                if not values:
+                    values = input_attachments_by_round.get(selected_round, [])
+                if values:
+                    message["attachments"] = values
+                else:
+                    message.pop("attachments", None)
+            decorated_messages.append(message)
+        selected_messages = decorated_messages
+
         round_metrics = []
         if isinstance(raw_metrics, list):
             for item in raw_metrics:

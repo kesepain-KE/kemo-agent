@@ -14,6 +14,7 @@ from provider.protocol.models import (
     KemoResponse,
     Measurement,
     MessageItem,
+    ToolCallItem,
     Usage,
     text_from_content,
 )
@@ -140,19 +141,24 @@ class SubAgentRuntimeTests(unittest.TestCase):
             },
         )
         context_definition = registry.get("context_manage")
+        self.assertEqual(context_definition.version, "1.1.0")
         self.assertEqual(context_definition.instruction_file, "AGENT.md")
         self.assertEqual(context_definition.trigger_file, "trigger.md")
         self.assertIn("按完整对话轮", context_definition.trigger_registration)
         self.assertEqual(context_definition.model_profile, "cheap")
         self.assertEqual(context_definition.timeout, 600.0)
+        self.assertEqual(context_definition.input_schema["type"], "object")
+        self.assertTrue(context_definition.input_schema["additionalProperties"])
         self.assertEqual(
-            context_definition.input_schema,
-            {"type": "object", "additionalProperties": True},
+            context_definition.output_schema["required"],
+            list(SUMMARY),
         )
+        self.assertFalse(context_definition.output_schema["additionalProperties"])
         task_definition = registry.get("task_plan")
         self.assertEqual(task_definition.capabilities.knowledge_scopes, ("global", "shared"))
         self.assertEqual(task_definition.capabilities.knowledge_body_access, "none")
         summary_definition = registry.get("history_summary")
+        self.assertEqual(summary_definition.version, "1.1.0")
         self.assertEqual(summary_definition.output_schema["required"], ["title", "summary"])
         self.assertFalse(summary_definition.output_schema["additionalProperties"])
 
@@ -246,23 +252,173 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertIn("没有按照 JSON", repair_payload["_format_repair"]["previous_output"])
         self.assertEqual(provider.requests[1].generation.max_output_tokens, 512)
 
-    def test_history_summary_preserves_raw_output_after_failed_repair(self) -> None:
+    def test_history_summary_recovers_labelled_text_without_second_request(self) -> None:
+        provider = MockProvider(
+            text=(
+                "标题：历史摘要普通文本恢复\n"
+                "摘要：模型即使没有返回 JSON，系统也能从明确标签中恢复标题和摘要内容。"
+            )
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_labelled_summary",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "整理历史", "assistant": "已完成"}],
+                },
+            )
+        self.assertEqual(result.data["title"], "历史摘要普通文本恢复")
+        self.assertIn("明确标签", result.data["summary"])
+        self.assertEqual(
+            result.metadata["history_summary_recovery"],
+            "labelled_text",
+        )
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_context_manage_repairs_truncated_json_once(self) -> None:
+        provider = MockProvider(
+            texts=[
+                '{"facts":["unfinished response"]',
+                json.dumps(SUMMARY, ensure_ascii=False),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                max_tokens=1024,
+            )
+        self.assertEqual(result.data, SUMMARY)
+        self.assertTrue(result.metadata["format_repaired"])
+        self.assertIn("疑似被截断", result.metadata["format_error"])
+        self.assertEqual(len(provider.requests), 2)
+        repair_payload = json.loads(
+            text_from_content(provider.requests[1].input[0].content)
+        )
+        self.assertTrue(repair_payload["_format_repair"]["required"])
+        self.assertIn("确保 JSON 完整闭合", repair_payload["_format_repair"]["instruction"])
+        self.assertEqual(provider.requests[1].generation.max_output_tokens, 1024)
+
+    def test_context_manage_repairs_schema_overflow_once(self) -> None:
+        overflow = {**SUMMARY, "facts": [f"fact-{index}" for index in range(13)]}
+        provider = MockProvider(
+            texts=[
+                json.dumps(overflow, ensure_ascii=False),
+                json.dumps(SUMMARY, ensure_ascii=False),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        self.assertEqual(result.data, SUMMARY)
+        self.assertIn("元素数量不能大于 12", result.metadata["format_error"])
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_context_manage_failed_repair_preserves_last_raw_output(self) -> None:
         provider = MockProvider(texts=["first invalid", "second invalid"])
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
             with self.assertRaises(AgentOutputError) as caught:
                 self.runner(provider).run(
-                    "history_summary",
-                    {
-                        "trigger": "session_closed",
-                        "session_id": "conv_summary_test",
-                        "target_round": 1,
-                        "previous_summary": None,
-                        "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
-                    },
-                    max_tokens=512,
+                    "context_manage",
+                    {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
         self.assertEqual(caught.exception.raw_text, "second invalid")
         self.assertIn("JSON 修复失败", str(caught.exception))
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_context_manage_extracts_json_object_from_surrounding_text(self) -> None:
+        provider = MockProvider(
+            text=(
+                "摘要如下：\n"
+                + json.dumps(SUMMARY, ensure_ascii=False)
+                + "\n以上为完整结果。"
+            )
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        self.assertEqual(result.data, SUMMARY)
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_history_summary_falls_back_after_failed_repair(self) -> None:
+        provider = MockProvider(texts=["first invalid", "second invalid"])
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_summary_test",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+                },
+                max_tokens=512,
+            )
+        self.assertEqual(result.data["title"], "关于问题的历史对话")
+        self.assertIn("完整内容已保存在历史记录中", result.data["summary"])
+        self.assertEqual(
+            result.metadata["history_summary_recovery"],
+            "deterministic_fallback",
+        )
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_history_summary_accepts_strict_structured_output_tool(self) -> None:
+        expected = {
+            "title": "历史摘要结构化输出",
+            "summary": "历史摘要通过严格工具参数提交，避免普通文本格式不稳定导致解析失败。",
+        }
+
+        class StructuredProvider(MockProvider):
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[
+                        ToolCallItem(
+                            id="call_structured_output",
+                            call_id="structured_output_1",
+                            name="submit_structured_output",
+                            arguments=expected,
+                        )
+                    ],
+                    usage=Usage(
+                        input_tokens=2,
+                        output_tokens=1,
+                        total_tokens=3,
+                        measurement=Measurement(mode="provider", exact=True),
+                    ),
+                )
+
+        provider = StructuredProvider()
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            result = self.runner(provider).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_structured_summary",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "生成摘要", "assistant": "完成"}],
+                },
+                max_tokens=1024,
+                structured_output_tool=True,
+            )
+        self.assertEqual(result.data, expected)
+        self.assertEqual(result.metadata["structured_output_transport"], "tool")
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(
+            provider.requests[0].tools[-1].name,
+            "submit_structured_output",
+        )
 
     def test_history_summary_safely_truncates_slightly_overlong_fields(self) -> None:
         title = "历史摘要轻微超长内容会安全截断处理结果"

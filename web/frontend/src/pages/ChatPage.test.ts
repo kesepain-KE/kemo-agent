@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, reduceRunEvent, removeSubmittedUploads, selectDockedPlan } from './ChatPage'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
@@ -24,6 +24,36 @@ describe('reduceRunEvent', () => {
     expect(markers).toEqual([
       { id: 'history_18_user', content: '第十八轮问题', round: 18 },
       { id: 'user_live', content: '最新问题', round: 20 },
+    ])
+  })
+
+  it('历史用户消息保留附件元数据，纯附件消息导航使用文件名', () => {
+    const attachment = {
+      asset_id: 'asset_history_image',
+      name: 'board.png',
+      media_kind: 'image' as const,
+      mime_type: 'image/png',
+      size: 128,
+      checksum_sha256: 'abc',
+      scope: 'file_upload' as const,
+      relative_path: 'board.png',
+      available: true,
+    }
+    const items = buildHistoryItems({
+      user: 'kesepain', source: 'web', session_id: 's1',
+      messages: [
+        { role: 'user', content: '', attachments: [attachment] },
+        { role: 'assistant', content: '已识别图片' },
+      ],
+      round_metrics: [], round_traces: [],
+    })
+
+    expect(items[0]).toMatchObject({
+      id: 'history_1_user', kind: 'message', role: 'user', content: '',
+      attachments: [attachment],
+    })
+    expect(buildUserMessageMarkers(items)).toEqual([
+      { id: 'history_1_user', content: '[附件] board.png', round: 1 },
     ])
   })
 
@@ -52,6 +82,49 @@ describe('reduceRunEvent', () => {
     })
     expect(selectDockedPlan([plan('running-old', 'running'), plan('done', 'completed'), plan('pending-new', 'pending')])?.plan_id).toBe('pending-new')
     expect(selectDockedPlan([plan('done', 'completed'), plan('cancelled', 'cancelled')])).toBeUndefined()
+    expect(selectDockedPlan([plan('failed', 'failed')])).toBeUndefined()
+  })
+
+  it('终态计划迁移到对应执行轮次并保持统计、计划、引导顺序', () => {
+    const pendingPlan: PlanSummary = {
+      plan_id: 'plan_12345678', title: '验收计划', description: '', status: 'pending', auto_accept: false, reminder: '', source: 'web', session_id: 's1',
+      current_step: 'step_1', revision: 1, created_at: '', updated_at: '', progress: { completed: 0, total: 1, percent: 0 },
+      steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }],
+    }
+    const completedPlan: PlanSummary = {
+      ...pendingPlan,
+      status: 'completed',
+      revision: 4,
+      progress: { completed: 1, total: 1, percent: 100 },
+      steps: [{ ...pendingPlan.steps[0], status: 'completed', finished_at: '2026-07-26T12:00:00+08:00' }],
+    }
+    const items: ChatItem[] = [
+      { id: 'user-create', kind: 'message', role: 'user', content: '创建计划' },
+      { id: 'plan-create', kind: 'task_plan', plan: pendingPlan },
+      { id: 'assistant-create', kind: 'message', role: 'assistant', content: '新计划已生成：完整步骤' },
+      { id: 'usage-create', kind: 'usage', usage: { total_tokens: 10 } },
+      { id: 'execute-plan', kind: 'execution_marker', planId: pendingPlan.plan_id },
+      { id: 'assistant-result', kind: 'message', role: 'assistant', content: '计划执行完成' },
+      { id: 'guidance-result', kind: 'guidance', content: '继续检查结果', status: 'completed', finalized: true },
+      { id: 'usage-result', kind: 'usage', usage: { total_tokens: 20 } },
+    ]
+
+    const archived = archiveTerminalPlansInConversation(items, [pendingPlan, completedPlan])
+    const blocks = groupConversationItems(archived)
+    const creationTurn = blocks[1]
+    const executionTurn = blocks[2]
+    expect(creationTurn.kind).toBe('assistant')
+    expect(executionTurn.kind).toBe('assistant')
+    if (creationTurn.kind !== 'assistant' || executionTurn.kind !== 'assistant') throw new Error('expected assistant turns')
+    expect(creationTurn.items.find((item) => item.kind === 'task_plan')).toMatchObject({ presentation: 'reference' })
+    expect(partitionAssistantTurnItems(creationTurn.items).planItems).toHaveLength(0)
+    expect(creationTurn.items.some((item) => item.kind === 'task_plan')).toBe(true)
+
+    const sections = partitionAssistantTurnItems(executionTurn.items)
+    expect(sections.usageItems.map((item) => item.id)).toEqual(['usage-result'])
+    expect(sections.planItems).toHaveLength(1)
+    expect(sections.planItems[0]).toMatchObject({ plan: { plan_id: pendingPlan.plan_id, status: 'completed' }, presentation: 'record' })
+    expect(sections.finalizedGuidance.map((item) => item.id)).toEqual(['guidance-result'])
   })
 
   it('消息流中的计划详情压缩为轻量确认文本', () => {

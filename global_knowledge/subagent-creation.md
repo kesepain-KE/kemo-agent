@@ -13,17 +13,13 @@
 
 名称必须匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$` 并与目录名一致。
 
-## 标准包
+## 最小包合同与自由实现
 
-```text
-<agent-root>/<name>/
-├── agent.json
-├── agent-config.json
-├── AGENT.md
-├── trigger.md
-├── executor.py          # 可选；不存在时使用 builtin:llm
-└── schema.json          # 可选输入/输出 JSON Schema
-```
+框架合同由 `agent.json`、`agent-config.json`、`AGENT.md` 和 `trigger.md` 构成；`executor.py` 与 `schema.json` 均可选。它们只是发现、权限、Prompt、调用和输入输出边界，不是子代理内部工程的完整结构。
+
+子代理目录可以自由包含任意模块、包、配置、资源、测试或完整工程。没有 `executor.py` 时使用内置 LLM 执行器；需要自定义逻辑时，根入口 `executor.py` 可以保持很薄并导入目录内任意层级的内部实现。未被入口导入或未被合同引用的文件不会自动加载、注入 Prompt 或执行，也不会仅因模板未列出而被校验器拒绝。
+
+`subagent_dispatch action=create` 只原子建立安全的数据型最小包。创建成功后可以继续使用正常文件或代码工具完善目录、增加 `schema.json` 或可信执行代码；创建接口的 `definition` 不承担传输完整工程的职责。
 
 ### agent.json
 
@@ -108,6 +104,8 @@ def execute(context, input_data: dict):
 
 执行器应检查 trigger、取消信号和输出格式。`schema.json` 若存在，必须且只能包含 `input_schema` 与 `output_schema` 两个对象；缺失时使用宽松对象 Schema。
 
+自定义执行器会被主进程直接导入，不具备代码沙箱。内部工程自由不改变这一信任边界：只能放入可信代码，不得在导入阶段启动线程、发起网络请求或产生其他副作用；长期任务仍必须响应 `context.cancel_event` 和整体超时。
+
 ## 创建流程
 
 1. 判断是否真的需要独立推理与权限边界。
@@ -115,8 +113,8 @@ def execute(context, input_data: dict):
 3. 确认是否访问全局/共享知识以及是否继承历史。
 4. 确认名称、职责、完整 instruction 和明确触发条件。
 5. 使用 `subagent_dispatch action=list` 查重并最终确认。
-6. 使用 `action=create` 原子创建用户代理；创建后立即发现校验。
-7. 用最小输入试运行，验证 JSON 输出、超时、取消和工具权限。
+6. 使用 `action=create` 原子创建最小用户代理包；按需求继续在目录内自由添加内部模块或已有工程，然后重新发现校验。
+7. 用最小输入试运行，验证 JSON 输出、超时、取消、工具权限和自定义入口导入行为。
 
 ## 调用规则
 

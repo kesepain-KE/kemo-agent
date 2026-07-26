@@ -34,6 +34,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `api_key_env` | string | — | 从环境变量读取密钥的变量名。当 `api_key` 为空时生效，如 `"KEMO_API_KEY"` |
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
+| `timeout` | number | `120` | 普通 Provider 请求超时秒数。专用多模态调用未显式配置时会改用当前工具期限并预留 5 秒收尾；显式配置后仍受工具期限上限约束 |
 | `reasoning_effort` | string | `"medium"` | 思考强度：`minimal`、`low`、`medium`、`high`、`max`。缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
 | `input_modalities` | string[] | `["text"]` | 主模型已确认支持的输入模态；必须包含 `text`。Chat 只允许增加 `image`；Kemo 还可声明 `audio`、`video`、`file`，并会与网关能力声明交叉验证 |
 
@@ -88,7 +89,9 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 路由对 Web 上传与外部消息资产一致生效。外部消息模块不能自行将图片作为 inline Content Block 发送给主模型。`multimodal` 工具还接受 `paths`：绝对路径或相对项目根目录的明确本地媒体会先登记、验证，再直接交给专用能力模型；这不会改变主模型的 `input_modalities` 声明。
 
-图片文件在后端经过来源目录约束或显式本地路径登记、真实格式与大小检查后，Chat 请求才会临时内联，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
+图片文件在后端经过来源目录约束或显式本地路径登记、完整解码、真实格式与大小检查后，Chat 请求才会临时内联；Chat 图片仅接受 JPEG、PNG、WEBP 和 GIF，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
+
+识别类动作（图片理解、音频转写、视频理解）只对明确标记为可重试的瞬时错误进行一次额外尝试。生成、编辑和转换类动作不自动重试，避免重复计费或产生重复产物。失败结果不会进入同参数工具结果缓存，因此智能体根据错误分类决定再次调用时会真正发起新请求；同名工具连续失败保护仍然生效。
 
 ---
 

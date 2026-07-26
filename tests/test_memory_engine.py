@@ -188,12 +188,18 @@ class MemoryEngineTests(unittest.TestCase):
             [],
         )
 
-    def test_provider_failure_does_not_submit_but_cancel_commits_terminal_round(self) -> None:
+    def test_provider_failure_and_cancel_commit_without_extracting_memory(self) -> None:
         root = self.root()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(self.request(), root=root, provider_factory=lambda _: Provider(fail=True))
-        self.assertIsNone(find_window(root, "alice", "cli", "s"))
+        archive = load_window(find_window(root, "alice", "cli", "s"))
+        self.assertEqual(archive["data"]["rounds"], 1)
+        self.assertEqual(archive["data"]["round_metrics"][0]["status"], "failed")
+        self.assertEqual(
+            MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
+            [],
+        )
 
         stopped = threading.Event()
         iterator = iter_request_events(
@@ -205,8 +211,11 @@ class MemoryEngineTests(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["done"])
         self.assertEqual(events[0].metadata["status"], "cancelled")
         archive = load_window(find_window(root, "alice", "cli", "s"))
-        self.assertEqual(archive["data"]["rounds"], 1)
-        self.assertEqual(archive["data"]["round_metrics"][0]["status"], "cancelled")
+        self.assertEqual(archive["data"]["rounds"], 2)
+        self.assertEqual(
+            [item["status"] for item in archive["data"]["round_metrics"]],
+            ["failed", "cancelled"],
+        )
 
     def test_committed_round_persists_history_without_extraction_queue(self) -> None:
         root = self.root()

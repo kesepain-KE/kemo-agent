@@ -45,6 +45,16 @@ describe('MarkdownMessage', () => {
     expect(screen.getByRole('button', { name: '复制' })).toBeInTheDocument()
   })
 
+  it.each([false, true])('keeps single-tilde ranges as text while preserving standard strikethrough (streaming=%s)', (streaming) => {
+    const { container } = render(
+      <MarkdownMessage content={'1~12）：VBAT → PC13~15\n\n~~已废弃~~'} streaming={streaming} />,
+    )
+
+    expect(screen.getByText('1~12）：VBAT → PC13~15')).toBeInTheDocument()
+    expect(container.querySelectorAll('del')).toHaveLength(1)
+    expect(container.querySelector('del')).toHaveTextContent('已废弃')
+  })
+
   it('copies highlighted code through the secure clipboard API', async () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)

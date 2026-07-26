@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { AlertTriangle, History, LoaderCircle, MessageSquareText, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import type { SessionSummary } from '../types/api'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
@@ -20,6 +21,14 @@ export interface HistorySearchDrawerProps {
   onDeleteSession: (sessionId: string) => Promise<void> | void
   onDeleteAllSessions: () => Promise<void> | void
   onRetrySummary: (sessionId: string) => Promise<void> | void
+}
+
+interface SummaryPreview {
+  text: string
+  top: number
+  left: number
+  width: number
+  placement: 'above' | 'below'
 }
 
 export function HistorySearchDrawer({
@@ -44,6 +53,7 @@ export function HistorySearchDrawer({
   const [pendingAction, setPendingAction] = useState<'delete' | 'delete_all' | ''>('')
   const [retryingSessionId, setRetryingSessionId] = useState('')
   const [mutationError, setMutationError] = useState('')
+  const [summaryPreview, setSummaryPreview] = useState<SummaryPreview | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const filteredSessions = useMemo(
@@ -67,12 +77,18 @@ export function HistorySearchDrawer({
       setPendingAction('')
       setRetryingSessionId('')
       setMutationError('')
+      setSummaryPreview(null)
     }
   }, [open])
+
+  useEffect(() => {
+    setSummaryPreview(null)
+  }, [normalizedQuery, sessions])
 
   const pendingSession = sessions.find((session) => session.session_id === pendingSessionId)
   const deleteTarget = sessions.find((session) => session.session_id === deleteSessionId)
   const closeDrawer = () => {
+    setSummaryPreview(null)
     setPendingSessionId('')
     setDeleteSessionId('')
     setDeleteAllOpen(false)
@@ -129,6 +145,24 @@ export function HistorySearchDrawer({
       setRetryingSessionId('')
     }
   }
+  const showSummaryPreview = (text: string, element: HTMLElement) => {
+    const rect = element.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const width = Math.min(420, Math.max(240, viewportWidth - 24))
+    const halfWidth = width / 2
+    const left = Math.min(
+      viewportWidth - halfWidth - 12,
+      Math.max(halfWidth + 12, rect.left + rect.width / 2),
+    )
+    const placement = rect.top >= 180 ? 'above' : 'below'
+    setSummaryPreview({
+      text,
+      top: placement === 'above' ? rect.top - 8 : rect.bottom + 8,
+      left,
+      width,
+      placement,
+    })
+  }
 
   return <>
     <aside className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="历史对话" aria-hidden={!open}>
@@ -175,7 +209,7 @@ export function HistorySearchDrawer({
         {actionError && <div className={styles.errorNotice}>{actionError}</div>}
         {mutationError && !deleteTarget && !deleteAllOpen && <div className={styles.errorNotice}>{mutationError}</div>}
 
-        <div className={styles.results}>
+        <div className={styles.results} onScroll={() => setSummaryPreview(null)}>
           {loading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>正在加载历史对话</strong></div>}
           {error && !loading && <div className={styles.empty}><History size={22} /><strong>历史对话加载失败</strong><span>关闭后重新打开即可再次加载。</span></div>}
           {!loading && !error && filteredSessions.map((session) => {
@@ -198,7 +232,12 @@ export function HistorySearchDrawer({
                 className={styles.sessionSelect}
                 disabled={chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
                 aria-label={`打开对话 ${displayName}`}
+                onFocus={(event) => {
+                  if (session.summary?.trim()) showSummaryPreview(session.summary, event.currentTarget)
+                }}
+                onBlur={() => setSummaryPreview(null)}
                 onClick={() => {
+                  setSummaryPreview(null)
                   if (!active) setPendingSessionId(session.session_id)
                 }}
               >
@@ -212,7 +251,11 @@ export function HistorySearchDrawer({
                       : ['failed', 'retry_wait'].includes(summaryStatus)
                         ? <span className={styles.summaryFailed}>摘要生成失败 · 第 {attempt}/{maxAttempts} 次{retryAt ? ` · ${retryAt} 自动重试` : ' · 等待自动重试'}</span>
                         : session.summary?.trim()
-                          ? <span>{session.summary}</span>
+                          ? <span
+                              className={styles.summaryText}
+                              onMouseEnter={(event) => showSummaryPreview(session.summary || '', event.currentTarget)}
+                              onMouseLeave={() => setSummaryPreview(null)}
+                            >{session.summary}</span>
                           : null}
                   <small>{session.rounds} 轮 · {formatDateTime(session.updated_at)}</small>
                 </span>
@@ -254,6 +297,17 @@ export function HistorySearchDrawer({
       </>}
     </aside>
     {open && <button className="drawer-backdrop" aria-label="关闭历史对话" onClick={closeDrawer} />}
+    {open && summaryPreview ? createPortal(
+      <span
+        className={`${styles.summaryTooltip} ${summaryPreview.placement === 'above' ? styles.tooltipAbove : styles.tooltipBelow}`}
+        role="tooltip"
+        style={{ top: summaryPreview.top, left: summaryPreview.left, width: summaryPreview.width }}
+      >
+        <small>历史摘要</small>
+        <strong>{summaryPreview.text}</strong>
+      </span>,
+      document.body,
+    ) : null}
     <GlobalConfirmDialog
       open={Boolean(pendingSession)}
       title="确认切换历史对话？"

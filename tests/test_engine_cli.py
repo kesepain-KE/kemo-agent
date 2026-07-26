@@ -19,6 +19,7 @@ from provider.protocol.models import (
     text_from_content,
 )
 from run.engine import handle_request
+from run.attachments import describe_uploaded_asset
 from run.history import find_window, load_window, runtime_window_path
 
 
@@ -187,8 +188,9 @@ class EngineAndCLITests(unittest.TestCase):
         )
         self.assertEqual(temp["data"]["context"]["round_offset"], 3)
 
-    def test_provider_failure_does_not_create_window(self) -> None:
+    def test_provider_failure_commits_round_and_next_request_continues(self) -> None:
         _, root = self.make_root()
+        seen: list = []
 
         class FailingProvider(MockProvider):
             def create(self, request):
@@ -201,7 +203,130 @@ class EngineAndCLITests(unittest.TestCase):
                     root=root,
                     provider_factory=lambda _: FailingProvider([]),
                 )
-        self.assertIsNone(find_window(root, "alice", "cli", "fail"))
+        path = find_window(root, "alice", "cli", "fail")
+        self.assertIsNotNone(path)
+        failed_window = load_window(path)
+        self.assertEqual(failed_window["data"]["rounds"], 1)
+        self.assertEqual(failed_window["text"]["messages"][0]["content"], "one")
+        self.assertIn(
+            "模型服务错误中断",
+            failed_window["text"]["messages"][1]["content"],
+        )
+        failed_metric = failed_window["data"]["round_metrics"][0]
+        self.assertEqual(failed_metric["status"], "failed")
+        self.assertEqual(
+            failed_metric["failure"]["exception_type"], "RuntimeError"
+        )
+        self.assertEqual(
+            failed_metric["failure"]["message"], "模型服务调用未完成"
+        )
+        self.assertNotIn("failed", json.dumps(failed_metric["failure"]))
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "fail",
+                    "prompt": "continue",
+                },
+                root=root,
+                provider_factory=lambda _: MockProvider(seen),
+            )
+
+        self.assertEqual(result["text"], "reply:continue")
+        resumed_window = load_window(path)
+        self.assertEqual(resumed_window["data"]["rounds"], 2)
+        history_messages = [
+            item for item in seen[0].input if isinstance(item, MessageItem)
+        ]
+        self.assertEqual(
+            [str(item.role) for item in history_messages],
+            ["user", "assistant", "user"],
+        )
+        self.assertIn(
+            "模型服务错误中断",
+            text_from_content(history_messages[1].content),
+        )
+
+    def test_provider_failure_with_attachment_only_keeps_valid_history(self) -> None:
+        _, root = self.make_root()
+        upload = root / "users" / "alice" / "file_upload"
+        upload.mkdir(parents=True, exist_ok=True)
+        note = upload / "failure-note.txt"
+        note.write_text("attachment body", "utf-8")
+        descriptor = describe_uploaded_asset(root, "alice", {"path": str(note)})
+
+        class FailingProvider(MockProvider):
+            def create(self, request):
+                raise RuntimeError("failed")
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "attachment-fail",
+                        "prompt": "",
+                        "uploaded_files": [descriptor],
+                    },
+                    root=root,
+                    provider_factory=lambda _: FailingProvider([]),
+                )
+
+        path = find_window(root, "alice", "web", "attachment-fail")
+        self.assertIsNotNone(path)
+        assert path is not None
+        failed_window = load_window(path)
+        user_item = next(
+            item
+            for item in failed_window["items"]["items"]
+            if item.get("type") == "message" and item.get("role") == "user"
+        )
+        self.assertTrue(user_item["content"])
+        self.assertIn(
+            descriptor["path"],
+            json.dumps(user_item["content"], ensure_ascii=False),
+        )
+        failed_attachment = user_item["metadata"]["input_attachments"][0]
+        self.assertEqual(failed_attachment["asset_id"], descriptor["asset_id"])
+        self.assertEqual(failed_attachment["relative_path"], "failure-note.txt")
+        self.assertEqual(
+            failed_window["text"]["messages"][0]["attachments"],
+            [failed_attachment],
+        )
+        self.assertEqual(
+            failed_window["data"]["round_metrics"][0]["input_attachments"],
+            [failed_attachment],
+        )
+        self.assertNotIn("path", failed_attachment)
+
+        seen: list = []
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "attachment-fail",
+                    "prompt": "继续",
+                },
+                root=root,
+                provider_factory=lambda _: MockProvider(seen),
+            )
+
+        self.assertEqual(result["text"], "reply:继续")
+        history_messages = [
+            item for item in seen[0].input if isinstance(item, MessageItem)
+        ]
+        self.assertEqual(
+            [str(item.role) for item in history_messages],
+            ["user", "assistant", "user"],
+        )
+        self.assertIn(
+            descriptor["path"],
+            text_from_content(history_messages[0].content),
+        )
 
     def test_cli_single_stdin_json_and_interactive_use_run_contract(self) -> None:
         _, root = self.make_root()
