@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 import threading
-import uuid
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -18,68 +15,13 @@ from run.config import load_config
 from run.cron_store import CronError, CronStore, CronValidationError, now_beijing
 from run.engine import handle_request
 from run.history_index import new_conversation_id
-from run.process_utils import hidden_subprocess_kwargs
+from run.expand_runtime import record_expand_runtime
+from run.module_runtime import (
+    module_update_timeout as _module_update_timeout,
+    record_module_health as _record_module_health,
+    run_module_updater,
+)
 from run.tools import ToolRegistry, discover_tools
-
-
-_DEFAULT_MODULE_UPDATE_TIMEOUT = 120.0
-_MODULE_RESULT_PREFIX = "__KEMO_MODULE_UPDATE_RESULT__="
-_MODULE_UPDATE_RUNNER = r'''
-from __future__ import annotations
-
-import importlib.util
-import json
-import sys
-from pathlib import Path
-
-PREFIX = "__KEMO_MODULE_UPDATE_RESULT__="
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-
-def emit(payload: dict, *, stream) -> None:
-    print(PREFIX + json.dumps(payload, ensure_ascii=False), file=stream, flush=True)
-
-
-try:
-    update_path = Path(sys.argv[1]).resolve()
-    module_root = Path(sys.argv[2]).resolve()
-    sys.path.insert(0, str(module_root))
-    if update_path.parent != module_root:
-        sys.path.insert(0, str(update_path.parent))
-    spec = importlib.util.spec_from_file_location("__kemo_module_update__", str(update_path))
-    if spec is None or spec.loader is None:
-        raise ImportError("无法创建模块加载器")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    updater = getattr(module, "update", None)
-    if not callable(updater):
-        updater = getattr(module, "main", None)
-    if not callable(updater):
-        raise AttributeError("更新脚本必须提供可调用的 update() 或 main()")
-    result = updater()
-    if result is False:
-        raise RuntimeError("更新脚本返回 False")
-    if isinstance(result, dict):
-        status = str(result.get("status") or "").strip().casefold()
-        if result.get("ok") is False or status in {"error", "failed", "failure"}:
-            reason = result.get("error") or result.get("message") or result.get("reason")
-            raise RuntimeError(str(reason or "更新脚本返回失败状态"))
-    emit({"ok": True}, stream=sys.stdout)
-except BaseException as exc:
-    emit(
-        {
-            "ok": False,
-            "reason": str(exc) or type(exc).__name__,
-            "exception_type": type(exc).__name__,
-        },
-        stream=sys.stderr,
-    )
-    raise SystemExit(1)
-'''
 
 
 def _parse_subagent_prompt(prompt: str) -> tuple[str, dict[str, Any]]:
@@ -309,132 +251,21 @@ def _is_link_or_junction(path: Path) -> bool:
         return True
 
 
-def _module_update_timeout(config: dict[str, Any]) -> float:
-    task_config = config.get("task_cron_system") or {}
-    if not isinstance(task_config, dict):
-        return _DEFAULT_MODULE_UPDATE_TIMEOUT
-    raw = task_config.get("module_update_timeout", _DEFAULT_MODULE_UPDATE_TIMEOUT)
-    if isinstance(raw, bool):
-        return _DEFAULT_MODULE_UPDATE_TIMEOUT
-    try:
-        seconds = float(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_MODULE_UPDATE_TIMEOUT
-    if seconds <= 0:
-        return _DEFAULT_MODULE_UPDATE_TIMEOUT
-    return min(seconds, 3600.0)
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _record_module_health(
-    manifest_path: Path,
-    category: str,
-    *,
-    healthy: bool,
-) -> None:
-    if _is_link_or_junction(manifest_path):
-        raise OSError(f"{manifest_path.name} 不能是符号链接或目录联接")
-    payload = json.loads(manifest_path.read_text("utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{manifest_path.name} 顶层必须是 JSON 对象")
-    payload["health" if category == "sense" else "input_health"] = (
-        "正常" if healthy else "异常"
-    )
-    if healthy:
-        payload["recent_update"] = datetime.fromisoformat(now_beijing()).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    _atomic_write_json(manifest_path, payload)
-
-
-def _process_detail(completed: subprocess.CompletedProcess[str]) -> str:
-    detail = (completed.stderr or completed.stdout or "").strip()
-    return detail[-1000:] if detail else "更新子进程未返回可识别结果"
-
-
-def _runner_payload(completed: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
-    outputs = (
-        (completed.stdout, completed.stderr)
-        if completed.returncode == 0
-        else (completed.stderr, completed.stdout)
-    )
-    for output in outputs:
-        for line in reversed((output or "").splitlines()):
-            if not line.startswith(_MODULE_RESULT_PREFIX):
-                continue
-            try:
-                payload = json.loads(line[len(_MODULE_RESULT_PREFIX):])
-            except json.JSONDecodeError:
-                return None
-            return payload if isinstance(payload, dict) else None
-    return None
-
-
 def _run_module_updater(
     update_path: Path,
     module_root: Path,
     *,
     timeout: float,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-c",
-                _MODULE_UPDATE_RUNNER,
-                str(update_path),
-                str(module_root),
-            ],
-            cwd=str(module_root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-            **hidden_subprocess_kwargs(),
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "reason": f"更新脚本执行超时（{timeout:g} 秒）",
-            "exception_type": "TimeoutExpired",
-        }
-    except OSError as exc:
-        return {
-            "ok": False,
-            "reason": f"无法启动更新子进程：{exc}",
-            "exception_type": type(exc).__name__,
-        }
-    payload = _runner_payload(completed)
-    if completed.returncode != 0:
-        if payload and payload.get("ok") is False:
-            return payload
-        return {
-            "ok": False,
-            "reason": _process_detail(completed),
-            "exception_type": "ChildProcessError",
-        }
-    if not payload or payload.get("ok") is not True:
-        return {
-            "ok": False,
-            "reason": _process_detail(completed),
-            "exception_type": "ChildProcessError",
-        }
-    return {"ok": True}
+    """Backward-compatible public seam for module updater tests and callers."""
+
+    return run_module_updater(
+        update_path,
+        module_root,
+        timeout=timeout,
+        cancel_event=cancel_event,
+    )
 
 
 def _update_modules(
@@ -561,13 +392,27 @@ def _update_modules(
             reject(logical_name, f"start_update 文件不存在：{start_update}")
             continue
 
+        run_started = time.monotonic()
         run_result = _run_module_updater(
             update_path,
             module_root,
             timeout=_module_update_timeout(config),
+            cancel_event=cancel_event,
         )
+        duration_ms = round((time.monotonic() - run_started) * 1000)
         if run_result.get("ok") is not True:
             reason = str(run_result.get("reason") or "更新脚本执行失败")
+            if category == "expand":
+                try:
+                    record_expand_runtime(
+                        module_root,
+                        "update",
+                        ok=False,
+                        duration_ms=duration_ms,
+                        error=reason,
+                    )
+                except Exception as runtime_exc:
+                    reason = f"{reason}；写回运行诊断失败：{runtime_exc}"
             try:
                 _record_module_health(manifest_path, category, healthy=False)
             except Exception as health_exc:
@@ -583,6 +428,18 @@ def _update_modules(
         except Exception as exc:
             reject(logical_name, f"更新成功但健康状态写回失败：{exc}", exc)
             continue
+        if category == "expand":
+            try:
+                record_expand_runtime(
+                    module_root,
+                    "update",
+                    ok=True,
+                    duration_ms=duration_ms,
+                    result=run_result.get("result"),
+                )
+            except Exception as exc:
+                reject(logical_name, f"更新成功但运行诊断写回失败：{exc}", exc)
+                continue
         updated.append(logical_name)
 
     status = "completed" if not failed else ("partial" if updated else "failed")

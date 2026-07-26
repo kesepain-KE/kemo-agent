@@ -1,0 +1,70 @@
+{
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "previous_summary": {
+        "oneOf": [
+          {"type": "null"},
+          {"type": "object", "additionalProperties": true}
+        ]
+      },
+      "rounds": {
+        "type": "array",
+        "items": {"type": "object", "additionalProperties": true}
+      },
+      "trigger": {"type": "string"},
+      "skip_memory_extraction": {"type": "boolean"}
+    },
+    "additionalProperties": true
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "facts",
+      "requirements",
+      "decisions",
+      "unfinished",
+      "tool_results",
+      "entities",
+      "narrative"
+    ],
+    "properties": {
+      "facts": {
+        "type": "array",
+        "maxItems": 12,
+        "items": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "requirements": {
+        "type": "array",
+        "maxItems": 10,
+        "items": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "decisions": {
+        "type": "array",
+        "maxItems": 10,
+        "items": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "unfinished": {
+        "type": "array",
+        "maxItems": 10,
+        "items": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "tool_results": {
+        "type": "array",
+        "maxItems": 12,
+        "items": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "entities": {
+        "type": "array",
+        "maxItems": 20,
+        "items": {"type": "string", "minLength": 1, "maxLength": 120}
+      },
+      "narrative": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      }
+    },
+    "additionalProperties": false
+  }
+}
