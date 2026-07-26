@@ -50,6 +50,7 @@ from run.tools import (
 
 
 _AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
+_STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
 
 
 class AgentRunError(RuntimeError):
@@ -162,9 +163,20 @@ def validate_json_schema(value: Any, schema: dict[str, Any], *, location: str = 
             child = properties.get(name)
             if isinstance(child, dict):
                 validate_json_schema(item, child, location=f"{location}.{name}")
-    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, item in enumerate(value):
-            validate_json_schema(item, schema["items"], location=f"{location}[{index}]")
+    elif isinstance(value, list):
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise AgentInputError(f"{location} 元素数量不能小于 {minimum}")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise AgentInputError(f"{location} 元素数量不能大于 {maximum}")
+        if isinstance(schema.get("items"), dict):
+            for index, item in enumerate(value):
+                validate_json_schema(
+                    item,
+                    schema["items"],
+                    location=f"{location}[{index}]",
+                )
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -174,15 +186,36 @@ def _parse_json_object(text: str) -> dict[str, Any]:
         cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
         value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
+    except json.JSONDecodeError as original_error:
+        decoder = json.JSONDecoder()
+        candidate_starts = [match.start() for match in re.finditer(r"\{", cleaned)]
+        candidate_errors: list[json.JSONDecodeError] = []
+        for start in candidate_starts:
+            try:
+                candidate, _ = decoder.raw_decode(cleaned, start)
+            except json.JSONDecodeError as candidate_error:
+                candidate_errors.append(candidate_error)
+                continue
+            if isinstance(candidate, dict):
+                return candidate
+        if not candidate_starts:
             raise AgentOutputError("子代理响应中没有 JSON 对象") from None
-        try:
-            value = json.loads(cleaned[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise AgentOutputError(f"子代理 JSON 无效：{exc}") from exc
+        diagnostic_error = (
+            max(candidate_errors, key=lambda error: error.pos)
+            if candidate_errors
+            else original_error
+        )
+        candidate = cleaned[candidate_starts[0] :].rstrip()
+        likely_truncated = (
+            not candidate.endswith("}")
+            or "unterminated string" in diagnostic_error.msg.casefold()
+            or diagnostic_error.pos >= max(0, len(candidate) - 2)
+        )
+        if likely_truncated:
+            raise AgentOutputError(
+                f"子代理 JSON 疑似被截断：{diagnostic_error}"
+            ) from diagnostic_error
+        raise AgentOutputError(f"子代理 JSON 无效：{diagnostic_error}") from diagnostic_error
     if not isinstance(value, dict):
         raise AgentOutputError("子代理输出必须是 JSON 对象")
     return value
@@ -211,6 +244,7 @@ class AgentExecutionContext:
     model_override: str | None
     max_tokens: int | None
     task_id: str
+    structured_output_tool: bool
 
     def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
         return self.runner._run_model(self, input_data)
@@ -317,6 +351,12 @@ class AgentRunner:
             + "\n\n[output_schema]\n"
             + json.dumps(definition.output_schema, ensure_ascii=False, sort_keys=True)
         )
+        if context.structured_output_tool:
+            system += (
+                "\n\n[structured_output_transport]\n"
+                f"必须调用 {_STRUCTURED_OUTPUT_TOOL_NAME} 一次提交最终结果；"
+                "工具参数必须符合 output_schema。不要把最终结果作为普通文本输出。"
+            )
         items: list[Any] = [
             MessageItem.text(
                 MessageRole.USER,
@@ -332,6 +372,7 @@ class AgentRunner:
         }
         tool_records: list[dict[str, Any]] = []
         final_text = ""
+        final_data: dict[str, Any] | None = None
         final_model = runtime["model"]
         response_ids: list[str] = []
         parent_request_id: str | None = None
@@ -372,6 +413,24 @@ class AgentRunner:
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
             request_id = f"req_{uuid.uuid4().hex}"
             tool_schemas = context.tool_registry.schemas(exclude=failures.unavailable)
+            tool_definitions = self._tool_definitions(tool_schemas)
+            if context.structured_output_tool:
+                if any(
+                    tool.name == _STRUCTURED_OUTPUT_TOOL_NAME
+                    for tool in tool_definitions
+                ):
+                    raise AgentRunError(
+                        f"子代理工具名与内部结构化输出工具冲突："
+                        f"{_STRUCTURED_OUTPUT_TOOL_NAME}"
+                    )
+                tool_definitions.append(
+                    ToolDefinition(
+                        name=_STRUCTURED_OUTPUT_TOOL_NAME,
+                        description="提交符合输出 Schema 的最终结构化结果。",
+                        parameters=definition.output_schema,
+                        strict=True,
+                    )
+                )
             try:
                 with provider_request_slot(
                     self.config,
@@ -386,7 +445,7 @@ class AgentRunner:
                             stream=False,
                             system_prompt=system,
                             input=list(items),
-                            tools=self._tool_definitions(tool_schemas),
+                            tools=tool_definitions,
                             generation={"max_output_tokens": context.max_tokens},
                             reasoning=ReasoningConfig(
                                 enabled=True,
@@ -423,6 +482,42 @@ class AgentRunner:
             calls = [item for item in response.output if isinstance(item, ToolCallItem)]
             messages = [item for item in response.output if isinstance(item, MessageItem)]
             items.extend(response.output)
+            structured_calls = [
+                call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
+            ]
+            if structured_calls:
+                raw_structured = json.dumps(
+                    structured_calls[0].arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if len(structured_calls) != 1 or len(calls) != 1:
+                    raise AgentOutputError(
+                        "子代理结构化输出必须且只能调用一次提交工具",
+                        raw_text=raw_structured,
+                    )
+                try:
+                    validate_json_schema(
+                        structured_calls[0].arguments,
+                        definition.output_schema,
+                    )
+                except AgentInputError as exc:
+                    raise AgentOutputError(
+                        str(exc),
+                        raw_text=raw_structured,
+                    ) from exc
+                final_data = dict(structured_calls[0].arguments)
+                final_text = raw_structured
+                tool_records.append(
+                    {
+                        "id": structured_calls[0].call_id,
+                        "name": _STRUCTURED_OUTPUT_TOOL_NAME,
+                        "arguments": structured_calls[0].arguments,
+                        "status": "structured_output",
+                        "iteration": iteration,
+                    }
+                )
+                break
             if not calls:
                 final_text = "".join(text_from_content(item.content) for item in messages)
                 break
@@ -529,13 +624,16 @@ class AgentRunner:
                 )
         else:
             raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
-        try:
-            data = _parse_json_object(final_text)
-            validate_json_schema(data, definition.output_schema)
-        except AgentOutputError as exc:
-            raise AgentOutputError(str(exc), raw_text=final_text) from exc
-        except AgentInputError as exc:
-            raise AgentOutputError(str(exc), raw_text=final_text) from exc
+        if final_data is None:
+            try:
+                data = _parse_json_object(final_text)
+                validate_json_schema(data, definition.output_schema)
+            except AgentOutputError as exc:
+                raise AgentOutputError(str(exc), raw_text=final_text) from exc
+            except AgentInputError as exc:
+                raise AgentOutputError(str(exc), raw_text=final_text) from exc
+        else:
+            data = final_data
         return AgentRunResult(
             agent=definition.name,
             data=data,
@@ -551,6 +649,9 @@ class AgentRunner:
                 "prompt": context.prompt_bundle.diagnostics,
                 "tool_calls": tool_records,
                 "response_ids": response_ids,
+                "structured_output_transport": (
+                    "tool" if final_data is not None else "text"
+                ),
             },
         )
 
@@ -565,6 +666,7 @@ class AgentRunner:
         event_callback: Callable[[RunEvent], None] | None = None,
         task_id: str = "",
         max_tokens: int | None = None,
+        structured_output_tool: bool = False,
     ) -> AgentRunResult:
         definition = self.refresh_registry().get(name)
         if not isinstance(input_data, dict):
@@ -603,6 +705,7 @@ class AgentRunner:
             model_override=model_override,
             max_tokens=max_tokens,
             task_id=task_id,
+            structured_output_tool=bool(structured_output_tool),
         )
         function = _load_executor(definition)
         _event(event_callback, agent=name, status="started", task_id=task_id)

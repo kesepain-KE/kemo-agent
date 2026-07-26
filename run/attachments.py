@@ -8,8 +8,11 @@ import json
 import mimetypes
 import os
 import stat
+import warnings
 from pathlib import Path
 from typing import Any, Iterable
+
+from PIL import Image, ImageSequence, UnidentifiedImageError
 
 from provider.protocol.assets import ResolvedAsset
 from provider.protocol.models import (
@@ -34,6 +37,16 @@ _IMAGE_SUFFIX_MIME = {
     ".webp": "image/webp",
     ".bmp": "image/bmp",
 }
+_PIL_IMAGE_MIME = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "GIF": "image/gif",
+    "WEBP": "image/webp",
+    "BMP": "image/bmp",
+}
+_CHAT_IMAGE_MIME = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
 _AUDIO_SUFFIX_MIME = {
     ".wav": "audio/wav",
     ".mp3": "audio/mpeg",
@@ -277,7 +290,31 @@ def _signature_matches(path: Path, media_kind: str, data: bytes) -> bool:
 
 def validate_media_file(path: Path, media_kind: str) -> bool:
     with path.open("rb") as handle:
-        return _signature_matches(path, media_kind, handle.read(64))
+        if not _signature_matches(path, media_kind, handle.read(64)):
+            return False
+    if media_kind != "image":
+        return True
+    expected_mime = _IMAGE_SUFFIX_MIME.get(path.suffix.casefold())
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                detected_mime = _PIL_IMAGE_MIME.get(
+                    str(image.format or "").upper()
+                )
+                image.verify()
+            with Image.open(path) as image:
+                for frame in ImageSequence.Iterator(image):
+                    frame.load()
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        OSError,
+        SyntaxError,
+        UnidentifiedImageError,
+    ):
+        return False
+    return detected_mime == expected_mime
 
 
 def describe_uploaded_asset(root: Path, user: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -295,6 +332,8 @@ def describe_uploaded_asset(root: Path, user: str, value: dict[str, Any]) -> dic
         "asset_id": asset_id,
         "name": path.name,
         "path": project_path,
+        "scope": "file_upload",
+        "relative_path": relative,
         "mime_type": mime_type,
         "size": size,
         "checksum_sha256": checksum,
@@ -306,6 +345,54 @@ def describe_uploaded_asset(root: Path, user: str, value: dict[str, Any]) -> dic
         "origin": "web_upload",
         "cleanup_policy": "retain",
     }
+
+
+def history_attachment_descriptors(values: Any) -> list[dict[str, Any]]:
+    """Return durable, UI-safe metadata without inline data or absolute paths."""
+
+    if not isinstance(values, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        asset_id = str(raw.get("asset_id") or "").strip()
+        name = Path(str(raw.get("name") or "attachment")).name[:255]
+        media_kind = str(raw.get("media_kind") or "file").strip().lower()
+        if media_kind not in {"image", "audio", "video", "file"}:
+            media_kind = "file"
+        mime_type = str(raw.get("mime_type") or "application/octet-stream").strip()
+        scope = str(raw.get("scope") or "").strip()
+        relative_path = str(raw.get("relative_path") or "").replace("\\", "/").strip("/")
+        if not relative_path and str(raw.get("origin") or "") == "web_upload":
+            project_path = str(raw.get("path") or "").replace("\\", "/")
+            marker = "/file_upload/"
+            if marker in f"/{project_path}":
+                relative_path = f"/{project_path}".split(marker, 1)[1].strip("/")
+            scope = scope or "file_upload"
+        if relative_path and any(part in {"", ".", ".."} for part in relative_path.split("/")):
+            relative_path = ""
+        if scope != "file_upload":
+            scope = "external"
+            relative_path = ""
+        key = asset_id or f"{scope}\0{relative_path}\0{name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            {
+                "asset_id": asset_id,
+                "name": name,
+                "media_kind": media_kind,
+                "mime_type": mime_type,
+                "size": max(0, int(raw.get("size") or 0)),
+                "checksum_sha256": str(raw.get("checksum_sha256") or "").strip(),
+                "scope": scope,
+                "relative_path": relative_path,
+            }
+        )
+    return result
 
 
 def describe_message_asset(
@@ -454,6 +541,11 @@ class RunAssetResolver:
         verified, path, mime_type, size = self._validated(
             asset_id, expected_kind="image"
         )
+        if str(provider).casefold() == "chat" and mime_type not in _CHAT_IMAGE_MIME:
+            raise AttachmentError(
+                f"Chat 图片通道不支持 {path.suffix or mime_type} 格式；"
+                "请转换为 JPEG、PNG、WEBP 或 GIF"
+            )
         data = path.read_bytes()
         return ResolvedAsset(
             asset_id=asset_id,

@@ -10,6 +10,7 @@ from typing import Any
 
 from events import RunEvent
 from provider.protocol.models import ContentBlock
+from run.attachments import history_attachment_descriptors
 from run.context import (
     ContextPolicy,
     ContextSelection,
@@ -29,6 +30,47 @@ from run.prompt import PromptBundle
 from run.run_state import RoundState, RunDependencies, RunIdentity
 from run.session_runtime import copy_committed_round_to_archive
 from run.usage import merge_usage, usage_from_dict
+
+
+_FAILURE_DETAIL_FIELDS = (
+    "exception_type",
+    "phase",
+    "type",
+    "code",
+    "category",
+    "provider_status",
+    "status_code",
+    "retryable",
+    "retry_after_ms",
+)
+
+
+def _safe_failure_detail(error: Any) -> dict[str, Any]:
+    """Keep useful failure classification without persisting provider bodies."""
+
+    if isinstance(error, BaseException):
+        source: dict[str, Any] = {
+            "exception_type": type(error).__name__,
+            "category": getattr(error, "category", ""),
+            "status_code": getattr(error, "status_code", None),
+            "retryable": getattr(error, "retryable", None),
+        }
+    elif isinstance(error, dict):
+        source = dict(error)
+        nested = error.get("details")
+        if isinstance(nested, dict):
+            for key in _FAILURE_DETAIL_FIELDS:
+                source.setdefault(key, nested.get(key))
+    else:
+        source = {"exception_type": type(error).__name__}
+    detail: dict[str, Any] = {"message": "模型服务调用未完成"}
+    for key in _FAILURE_DETAIL_FIELDS:
+        value = source.get(key)
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            detail[key] = value
+        elif isinstance(value, str) and value.strip():
+            detail[key] = value.strip()[:160]
+    return detail
 
 
 def queue_summary_memory_extraction(
@@ -124,6 +166,7 @@ class TerminalRoundCommitter:
         pending_message: str,
         pending_exception_type: str,
         pending_status: str = "not_executed",
+        failure: dict[str, Any] | None = None,
     ) -> RunEvent:
         """Persist a controlled stop as a real, terminal conversation round."""
 
@@ -135,6 +178,9 @@ class TerminalRoundCommitter:
         session_id = identity.session_id
         run_id = identity.run_id
         request = context.request
+        history_attachments = history_attachment_descriptors(
+            request.get("uploaded_files") or []
+        )
         content_blocks = context.content_blocks
         prompt = context.prompt
         window = context.window
@@ -209,7 +255,15 @@ class TerminalRoundCommitter:
         reasoning = "".join(context.state.observed_reasoning)
         cancelled_window["text"]["messages"].extend(
             [
-                {"role": "user", "content": prompt},
+                {
+                    "role": "user",
+                    "content": prompt,
+                    **(
+                        {"attachments": copy.deepcopy(history_attachments)}
+                        if history_attachments
+                        else {}
+                    ),
+                },
                 {"role": "assistant", "content": terminal_text},
             ]
         )
@@ -233,6 +287,9 @@ class TerminalRoundCommitter:
             # complete native output item list. Synthesize every call/result
             # pair from records so the durable item protocol has no orphan.
             provider_responses=[],
+            user_metadata={"input_attachments": history_attachments}
+            if history_attachments
+            else None,
         )
         cancelled_window["data"]["rounds"] = round_number
         metrics = cancelled_window["data"].setdefault("round_metrics", [])
@@ -248,11 +305,18 @@ class TerminalRoundCommitter:
             "context.state.provider_responses": copy.deepcopy(context.state.provider_responses),
             "status": status,
             "stop_reason": reason,
+            **(
+                {"input_attachments": copy.deepcopy(history_attachments)}
+                if history_attachments
+                else {}
+            ),
         }
         if cancelled:
             terminal_metric.update(
                 {"cancelled": True, "cancel_reason": reason}
             )
+        if failure:
+            terminal_metric["failure"] = copy.deepcopy(failure)
         metrics.append(terminal_metric)
         merge_usage(
             cancelled_window["data"]["token_usage"],
@@ -374,6 +438,8 @@ class TerminalRoundCommitter:
             terminal_metadata.update(
                 {"cancelled": True, "cancel_reason": reason}
             )
+        if failure:
+            terminal_metadata["failure"] = copy.deepcopy(failure)
         return RunEvent(
             type="done",
             usage=dict(context.state.usage_total),
@@ -388,4 +454,23 @@ class TerminalRoundCommitter:
             pending_message="工具调用因用户紧急停止而取消",
             pending_exception_type="ToolCancelledError",
             pending_status="cancelled",
+        )
+
+    def commit_failed_round(
+        self,
+        error: Any,
+        *,
+        reason: str = "provider_error",
+    ) -> RunEvent:
+        return self.commit_terminal_round(
+            status="failed",
+            reason=reason,
+            marker=(
+                "[本轮因模型服务错误中断；当前进度已保存，"
+                "可在下一轮继续]"
+            ),
+            pending_message="工具调用因模型服务错误中断",
+            pending_exception_type="ProviderRunInterrupted",
+            pending_status="failed",
+            failure=_safe_failure_detail(error),
         )

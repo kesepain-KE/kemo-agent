@@ -17,6 +17,8 @@ from run.context import RoundGroup, estimate_text_tokens
 
 
 SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_CHUNK_TOKEN_BUDGET = 64_000
+SUMMARY_MAX_OUTPUT_TOKENS = 8_192
 SUMMARY_KEYS = (
     "facts",
     "requirements",
@@ -192,7 +194,7 @@ def get_or_create_summary(
     agent_name: str,
     trigger: str,
     cancel_event: threading.Event | None = None,
-    chunk_token_budget: int = 24000,
+    chunk_token_budget: int = SUMMARY_CHUNK_TOKEN_BUDGET,
     max_tokens: int = 2048,
     response_hook: Callable[[dict[str, Any]], None] | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,

@@ -149,6 +149,7 @@ def _history_message_item(
     content: Any,
     *,
     round_number: int,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blocks = content if isinstance(content, list) else _text_content(content)
     item: dict[str, Any] = {
@@ -157,7 +158,11 @@ def _history_message_item(
         "status": "completed",
         "role": role,
         "content": blocks,
-        "metadata": {"round": round_number, "history_source": "legacy"},
+        "metadata": {
+            "round": round_number,
+            "history_source": "legacy",
+            **copy.deepcopy(metadata or {}),
+        },
         "extensions": {},
     }
     if role == "assistant":
@@ -199,9 +204,15 @@ def synthesize_items(window: dict[str, Any]) -> dict[str, Any]:
             value for value in group if value.get("role") not in {"user", "assistant"}
         ]
         for message in user_messages:
+            input_attachments = message.get("attachments")
             items.append(
                 _history_message_item(
-                    "user", message.get("content"), round_number=round_number
+                    "user",
+                    message.get("content"),
+                    round_number=round_number,
+                    metadata={"input_attachments": input_attachments}
+                    if isinstance(input_attachments, list) and input_attachments
+                    else None,
                 )
             )
         think = think_rounds.get(round_number) or {}
@@ -277,6 +288,7 @@ def append_round_items(
     text: str,
     tool_records: list[dict[str, Any]],
     provider_responses: list[dict[str, Any]],
+    user_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Append one committed round while preserving native Provider output Items."""
 
@@ -294,7 +306,7 @@ def append_round_items(
             "status": "completed",
             "role": "user",
             "content": user_content,
-            "metadata": {"round": round_number},
+            "metadata": {"round": round_number, **copy.deepcopy(user_metadata or {})},
             "extensions": {},
         }
     )

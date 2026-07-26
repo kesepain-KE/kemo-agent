@@ -703,7 +703,12 @@ class PromptSourceRegistry:
                         control_text = read_required_text(control_path)
                         injection_layer = _extract_expand_injection_layer(control_text)
                         if injection_layer:
-                            module_pieces.append(f"## 操控能力\n{injection_layer}")
+                            module_pieces.append(
+                                "## 操控能力\n"
+                                f"{injection_layer}\n\n"
+                                f"调用入口：使用 `expand_call`，传入 `scope={scope}`、"
+                                f"`module={module}`，具体命令和参数按需读取操作层。"
+                            )
                             files.append(relative_path(control_path, self.root))
             except PromptSourceError:
                 scope_diagnostics = diagnostics[scope]

@@ -437,10 +437,11 @@ def extract_memory_backlog(
     candidates = 0
     usage = new_usage_total()
     batch_size = memory_extraction_batch_rounds(config)
-    cancelled_rounds = {
-        int(item.get("round") or 0)
+    non_extractable_rounds = {
+        int(item.get("round") or 0): str(item.get("status") or "")
         for item in data.get("round_metrics", [])
-        if isinstance(item, dict) and item.get("status") == "cancelled"
+        if isinstance(item, dict)
+        and item.get("status") in {"cancelled", "failed"}
     }
     batch_start = processed_round + 1
     while batch_start <= rounds:
@@ -448,17 +449,28 @@ def extract_memory_backlog(
         batch_rounds: list[dict[str, Any]] = []
         skipped_rounds: list[int] = []
         for round_number in range(batch_start, batch_end + 1):
-            if round_number in cancelled_rounds:
+            if round_number in non_extractable_rounds:
                 skipped_rounds.append(round_number)
                 continue
             payload = memory_round_payload(window, round_number)
             batch_rounds.append(memory_round_data(round_number=round_number, **payload))
 
         if not batch_rounds:
+            skipped_statuses = {
+                non_extractable_rounds[number] for number in skipped_rounds
+            }
             extraction = {
                 "status": "skipped",
                 "candidate_count": 0,
-                "reason": "cancelled_rounds",
+                "reason": (
+                    "cancelled_rounds"
+                    if skipped_statuses == {"cancelled"}
+                    else (
+                        "failed_rounds"
+                        if skipped_statuses == {"failed"}
+                        else "non_extractable_rounds"
+                    )
+                ),
                 "round_start": batch_start,
                 "round_end": batch_end,
                 "rounds": [],

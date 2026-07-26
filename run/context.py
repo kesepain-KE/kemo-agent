@@ -239,8 +239,16 @@ def _text_rounds(messages: Any) -> list[list[dict[str, Any]]]:
     return groups
 
 
+_LEGACY_EMPTY_MESSAGE = (
+    "[历史兼容：该轮消息内容未被旧版本保存；如果该轮仅包含附件，"
+    "附件详情已无法从这条旧记录恢复]"
+)
+
+
 def _content_value(content: Any) -> str | list[dict[str, Any]]:
     blocks = content if isinstance(content, list) else []
+    if not blocks:
+        return _LEGACY_EMPTY_MESSAGE
     if blocks and all(
         isinstance(block, dict) and block.get("type") == "text" for block in blocks
     ):
@@ -285,8 +293,12 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
                 message: dict[str, Any] = {
                     "role": item["role"],
                     "content": _content_value(item.get("content")),
-                    "_kemo_message": item,
                 }
+                # Old attachment-only rounds were persisted with content=[]. Do not
+                # forward that invalid native item to MessageItem validation; the
+                # compatibility text above preserves the round boundary instead.
+                if isinstance(item.get("content"), list) and item["content"]:
+                    message["_kemo_message"] = item
                 if pending_reasoning is not None and item["role"] == "assistant":
                     message["_kemo_reasoning"] = pending_reasoning
                     pending_reasoning = None

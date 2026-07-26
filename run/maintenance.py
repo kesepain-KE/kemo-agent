@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from provider.factory import ProviderCongestionError, create_provider
 from run.agent_runner import AgentRunner
 from run.config import load_config
+from run.context import estimate_text_tokens
 from run.context_service import context_status
 from run.engine import compress_context
 from run.memory_analysis import (
@@ -50,8 +51,8 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
 IMPORTANT_MEMORY_INPUT_LIMIT = 200
 MEMORY_RECOVERY_ROUNDS_PER_SCAN = 10
-HISTORY_SUMMARY_CHUNK_CHARS = 48_000
-HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 512
+HISTORY_SUMMARY_CHUNK_TOKENS = 24_000
+HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 10_000
 
 
 class MaintenanceError(RuntimeError):
@@ -142,18 +143,82 @@ def _summary_rounds(window: dict[str, Any], target_round: int) -> list[dict[str,
     return result
 
 
+def _split_summary_text(text: str, token_budget: int) -> list[str]:
+    value = str(text or "")
+    if not value:
+        return []
+    budget = max(256, int(token_budget))
+    parts: list[str] = []
+    remaining = value
+    while remaining:
+        if estimate_text_tokens(remaining) <= budget:
+            parts.append(remaining)
+            break
+        low = 1
+        high = len(remaining)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if estimate_text_tokens(remaining[:middle]) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        cut = max(1, low)
+        search_start = max(1, int(cut * 0.75))
+        preferred = max(
+            remaining.rfind("\n", search_start, cut),
+            remaining.rfind("。", search_start, cut),
+            remaining.rfind("！", search_start, cut),
+            remaining.rfind("？", search_start, cut),
+        )
+        if preferred >= search_start:
+            cut = preferred + 1
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:]
+    return parts
+
+
+def _summary_round_parts(
+    item: dict[str, Any],
+    token_budget: int,
+) -> list[dict[str, Any]]:
+    if estimate_text_tokens(json.dumps(item, ensure_ascii=False, default=str)) <= token_budget:
+        return [item]
+    round_number = max(0, int(item.get("round") or 0))
+    empty_tokens = estimate_text_tokens(
+        json.dumps(
+            {"round": round_number, "user": "", "assistant": ""},
+            ensure_ascii=False,
+        )
+    )
+    text_budget = max(256, token_budget - empty_tokens - 64)
+    parts = [
+        {"round": round_number, "user": value, "assistant": ""}
+        for value in _split_summary_text(str(item.get("user") or ""), text_budget)
+    ]
+    parts.extend(
+        {"round": round_number, "user": "", "assistant": value}
+        for value in _split_summary_text(
+            str(item.get("assistant") or ""),
+            text_budget,
+        )
+    )
+    return parts or [{"round": round_number, "user": "", "assistant": ""}]
+
+
 def _summary_chunks(rounds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
-    current_chars = 0
-    for item in rounds:
-        size = len(json.dumps(item, ensure_ascii=False, default=str))
-        if current and current_chars + size > HISTORY_SUMMARY_CHUNK_CHARS:
-            chunks.append(current)
-            current = []
-            current_chars = 0
-        current.append(item)
-        current_chars += size
+    for raw_item in rounds:
+        for item in _summary_round_parts(raw_item, HISTORY_SUMMARY_CHUNK_TOKENS):
+            candidate = [*current, item]
+            candidate_tokens = estimate_text_tokens(
+                json.dumps(candidate, ensure_ascii=False, default=str)
+            )
+            if current and candidate_tokens > HISTORY_SUMMARY_CHUNK_TOKENS:
+                chunks.append(current)
+                current = [item]
+            else:
+                current = candidate
     if current:
         chunks.append(current)
     return chunks
@@ -375,6 +440,8 @@ class MaintenanceScheduler:
                 if not rolling["title"] or not rolling["summary"]:
                     rolling = None
                     start_chunk = 0
+            recovery_modes: list[str] = []
+            output_transports: list[str] = []
             for chunk_index, chunk in enumerate(
                 chunks[start_chunk:], start=start_chunk
             ):
@@ -391,7 +458,21 @@ class MaintenanceScheduler:
                     },
                     cancel_event=self._stop_event,
                     max_tokens=HISTORY_SUMMARY_MAX_OUTPUT_TOKENS,
+                    structured_output_tool=True,
                 )
+                result_metadata = getattr(result, "metadata", {})
+                if not isinstance(result_metadata, dict):
+                    result_metadata = {}
+                recovery = str(
+                    result_metadata.get("history_summary_recovery") or ""
+                ).strip()
+                if recovery:
+                    recovery_modes.append(recovery)
+                transport = str(
+                    result_metadata.get("structured_output_transport") or ""
+                ).strip()
+                if transport:
+                    output_transports.append(transport)
                 rolling = {
                     "title": str(result.data.get("title") or "").strip(),
                     "summary": str(result.data.get("summary") or "").strip(),
@@ -432,6 +513,8 @@ class MaintenanceScheduler:
                     "status": "completed",
                     "chunks": len(chunks),
                     "resumed_from_chunk": start_chunk,
+                    "recovery_modes": recovery_modes,
+                    "output_transports": output_transports,
                 }],
                 "failed": [],
             }

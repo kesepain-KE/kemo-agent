@@ -88,7 +88,10 @@ def _gateway_capabilities(
         except Exception:
             declared = None
     with _capability_lock:
-        _capability_cache[key] = (now + _CAPABILITY_CACHE_TTL, declared)
+        if declared is None:
+            _capability_cache.pop(key, None)
+        else:
+            _capability_cache[key] = (now + _CAPABILITY_CACHE_TTL, declared)
     return declared
 
 

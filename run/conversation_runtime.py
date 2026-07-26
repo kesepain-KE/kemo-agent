@@ -29,7 +29,11 @@ from provider.protocol.models import (
 )
 from provider.schema import ChatRequest, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunner
-from run.attachments import AttachmentError, RunAssetResolver
+from run.attachments import (
+    AttachmentError,
+    RunAssetResolver,
+    history_attachment_descriptors,
+)
 from run.config import load_config, project_root, provider_runtime_config
 from run.context import (
     ContextPolicy,
@@ -39,6 +43,8 @@ from run.context import (
     select_context,
 )
 from run.context_summary import (
+    SUMMARY_CHUNK_TOKEN_BUDGET,
+    SUMMARY_MAX_OUTPUT_TOKENS,
     build_summary_message,
     get_or_create_summary,
     read_summary_cache,
@@ -209,6 +215,28 @@ def _tool_context_diagnostics(
     return diagnostics
 
 
+def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
+    """Preserve safe retry classification for the next model iteration."""
+
+    detail: dict[str, Any] = {
+        "message": str(exc),
+        "exception_type": type(exc).__name__,
+    }
+    for field in (
+        "category",
+        "status_code",
+        "retryable",
+        "retry_after_ms",
+        "attempt_count",
+    ):
+        value = getattr(exc, field, None)
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            detail[field] = value
+        elif isinstance(value, str) and value.strip():
+            detail[field] = value.strip()[:160]
+    return detail
+
+
 def _ensure_fixed_content_fits(
     selection: Any,
     *,
@@ -238,6 +266,24 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
         if section.name in {"permanent_memory", "important_memory"}
         or section.name.startswith("temporary_memory:")
     )
+
+
+def _committed_failure_event(
+    event: RunEvent,
+    terminal_event: RunEvent,
+) -> RunEvent:
+    """Expose durable failure state without replacing the public error terminal."""
+
+    event.metadata = {
+        **event.metadata,
+        "committed": True,
+        "status": "failed",
+        "stop_reason": terminal_event.metadata.get(
+            "stop_reason", "provider_error"
+        ),
+        "failure": copy.deepcopy(terminal_event.metadata.get("failure") or {}),
+    }
+    return event
 
 
 def _iter_request_events_impl(
@@ -298,6 +344,7 @@ def _iter_request_events_impl(
                 for item in (request.get("uploaded_files") or [])
                 if isinstance(item, dict)
             ]
+            history_attachments = history_attachment_descriptors(uploaded_descriptors)
             image_descriptors = [
                 item
                 for item in uploaded_descriptors
@@ -416,6 +463,15 @@ def _iter_request_events_impl(
                 vision_route=vision_route,
                 direct_asset_ids=direct_asset_ids,
             )
+            durable_user_content_blocks = list(content_blocks)
+            if uploaded_file_context:
+                # Keep a stable attachment reference in history, but never persist
+                # transient inline Base64 or remote Provider Asset blocks generated
+                # for this request. This also guarantees that attachment-only rounds
+                # remain valid MessageItems when the next round rebuilds context.
+                durable_user_content_blocks.append(
+                    TextContent(text=uploaded_file_context)
+                )
             agent_runner = AgentRunner(
                 base,
                 user,
@@ -511,9 +567,7 @@ def _iter_request_events_impl(
                     "memory_extraction_policy 必须是 sync 或 queue"
                 )
             queue_compression_memory = memory_extraction_policy == "queue"
-            provider_content_blocks = list(content_blocks)
-            if uploaded_file_context:
-                provider_content_blocks.append(TextContent(text=uploaded_file_context))
+            provider_content_blocks = list(durable_user_content_blocks)
             provider_content_blocks.extend(provider_media)
             current_user_message = (
                 None
@@ -598,8 +652,14 @@ def _iter_request_events_impl(
                     agent_name=summary_agent,
                     trigger=summary_trigger,
                     cancel_event=cancel_event,
-                    chunk_token_budget=max(256, context_policy.input_budget // 2),
-                    max_tokens=min(4096, max(256, context_policy.output_reserve)),
+                    chunk_token_budget=min(
+                        SUMMARY_CHUNK_TOKEN_BUDGET,
+                        max(256, context_policy.input_budget // 2),
+                    ),
+                    max_tokens=min(
+                        SUMMARY_MAX_OUTPUT_TOKENS,
+                        max(256, context_policy.output_reserve),
+                    ),
                     response_hook=lambda raw: _record_provider_request(
                         summary_usage, _usage_from_dict(raw)
                     ),
@@ -636,7 +696,7 @@ def _iter_request_events_impl(
                     dependencies=dependencies,
                     state=round_state,
                     request=request,
-                    content_blocks=content_blocks,
+                    content_blocks=durable_user_content_blocks,
                     prompt=prompt,
                     window=window,
                     archive_window=archive_window,
@@ -654,6 +714,7 @@ def _iter_request_events_impl(
             )
             commit_terminal_round = terminal_committer.commit_terminal_round
             commit_cancelled_round = terminal_committer.commit_cancelled_round
+            commit_failed_round = terminal_committer.commit_failed_round
 
             if cancel_event is not None and cancel_event.is_set():
                 yield commit_cancelled_round()
@@ -751,7 +812,8 @@ def _iter_request_events_impl(
             guidance_channel = request.get("_guidance_queue")
             pending_guidance_ack: list[str] = []
             protocol_parent_request_id: str | None = None
-            usage_total = copy.deepcopy(summary_usage)
+            usage_total.clear()
+            usage_total.update(copy.deepcopy(summary_usage))
             if compression_usage.get("provider_request_count", 0):
                 _record_provider_request(
                     usage_total,
@@ -933,7 +995,18 @@ def _iter_request_events_impl(
                                     yield event
                                 elif event.type == "error":
                                     _raise_if_context_length_exceeded(event.error)
-                                    yield event
+                                    if iteration_usage is not None:
+                                        _record_provider_request(
+                                            usage_total, iteration_usage
+                                        )
+                                        iteration_usage = None
+                                    terminal_event = commit_failed_round(
+                                        event.error,
+                                        reason="provider_error_event",
+                                    )
+                                    yield _committed_failure_event(
+                                        event, terminal_event
+                                    )
                                     return
                                 elif event.type == "done":
                                     iteration_done = event
@@ -942,17 +1015,41 @@ def _iter_request_events_impl(
                         if cancel_event is not None and cancel_event.is_set():
                             yield commit_cancelled_round()
                             return
-                        yield error_event(exc, phase="provider")
+                        terminal_event = commit_failed_round(
+                            exc,
+                            reason="provider_congestion",
+                        )
+                        yield _committed_failure_event(
+                            error_event(exc, phase="provider"), terminal_event
+                        )
                         return
                     except BaseException as exc:
                         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                             raise
+                        context_length_error = _is_context_length_exceeded(exc)
                         if (
-                            iteration != 1
+                            not context_length_error
+                            or iteration != 1
                             or context_retry_count >= 2
-                            or not _is_context_length_exceeded(exc)
                         ):
-                            raise
+                            if iteration_usage is not None:
+                                _record_provider_request(
+                                    usage_total, iteration_usage
+                                )
+                                iteration_usage = None
+                            terminal_event = commit_failed_round(
+                                exc,
+                                reason=(
+                                    "provider_context_limit"
+                                    if context_length_error
+                                    else "provider_exception"
+                                ),
+                            )
+                            yield _committed_failure_event(
+                                error_event(exc, phase="provider"),
+                                terminal_event,
+                            )
+                            return
                         context_retry_count += 1
                         divisor = 2**context_retry_count
                         retry_policy = replace(
@@ -1007,8 +1104,14 @@ def _iter_request_events_impl(
                             agent_name="context_manage",
                             trigger="api_context_length",
                             cancel_event=cancel_event,
-                            chunk_token_budget=max(256, retry_policy.input_budget // 2),
-                            max_tokens=min(4096, max(256, retry_policy.output_reserve)),
+                            chunk_token_budget=min(
+                                SUMMARY_CHUNK_TOKEN_BUDGET,
+                                max(256, retry_policy.input_budget // 2),
+                            ),
+                            max_tokens=min(
+                                SUMMARY_MAX_OUTPUT_TOKENS,
+                                max(256, retry_policy.output_reserve),
+                            ),
                             response_hook=lambda raw: (
                                 _record_provider_request(
                                     summary_usage, _usage_from_dict(raw)
@@ -1054,7 +1157,17 @@ def _iter_request_events_impl(
                             yield retry_event
 
                 if iteration_done is None:
-                    yield error_event(EngineError("Provider 事件流缺少 done 终态"), phase="provider")
+                    exc = EngineError("Provider 事件流缺少 done 终态")
+                    if iteration_usage is not None:
+                        _record_provider_request(usage_total, iteration_usage)
+                        iteration_usage = None
+                    terminal_event = commit_failed_round(
+                        exc,
+                        reason="provider_missing_terminal",
+                    )
+                    yield _committed_failure_event(
+                        error_event(exc, phase="provider"), terminal_event
+                    )
                     return
                 if iteration_usage is None:
                     iteration_usage = _usage_from_dict(iteration_done.usage)
@@ -1197,13 +1310,15 @@ def _iter_request_events_impl(
                                 result_payload = {
                                     "ok": False,
                                     "error": {
-                                        "message": str(exc),
-                                        "exception_type": type(exc).__name__,
+                                        **_tool_error_payload(exc),
                                         **({"cancelled": True} if cancelled_tool else {}),
                                     },
                                 }
                                 status = "cancelled" if cancelled_tool else "failed"
-                            seen_calls[signature] = copy.deepcopy(result_payload)
+                            if result_payload.get("ok") is True:
+                                seen_calls[signature] = copy.deepcopy(result_payload)
+                            else:
+                                seen_calls.pop(signature, None)
                         failure_count = failures.record(
                             call.name,
                             succeeded=bool(result_payload.get("ok")),
@@ -1299,7 +1414,15 @@ def _iter_request_events_impl(
             reasoning = "".join(all_reasoning)
             window["text"]["messages"].extend(
                 [
-                    {"role": "user", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        **(
+                            {"attachments": copy.deepcopy(history_attachments)}
+                            if history_attachments
+                            else {}
+                        ),
+                    },
                     {"role": "assistant", "content": text},
                 ]
             )
@@ -1310,12 +1433,15 @@ def _iter_request_events_impl(
                 round_number=round_number,
                 user_content=[
                     block.model_dump(mode="json", exclude_none=True)
-                    for block in content_blocks
+                    for block in durable_user_content_blocks
                 ],
                 reasoning=reasoning,
                 text=text,
                 tool_records=tool_records,
                 provider_responses=provider_responses,
+                user_metadata={"input_attachments": history_attachments}
+                if history_attachments
+                else None,
             )
             window["data"]["rounds"] = round_number
             round_metrics = window["data"].setdefault("round_metrics", [])
@@ -1330,6 +1456,11 @@ def _iter_request_events_impl(
                     "tool_calls": len(tool_records),
                     "guidance": list(consumed_guidance),
                     "provider_responses": copy.deepcopy(provider_responses),
+                    **(
+                        {"input_attachments": copy.deepcopy(history_attachments)}
+                        if history_attachments
+                        else {}
+                    ),
                 }
             )
             window["data"]["context"] = {
@@ -1641,7 +1772,20 @@ def _iter_request_events_impl(
         except (KeyboardInterrupt, GeneratorExit):
             raise
         except BaseException as exc:
-            yield error_event(exc, phase="run")
+            if (
+                isinstance(exc, ContextLengthExceededError)
+                and terminal_committer is not None
+                and not round_state.finalized
+            ):
+                terminal_event = terminal_committer.commit_failed_round(
+                    exc,
+                    reason="provider_context_recovery_failed",
+                )
+                yield _committed_failure_event(
+                    error_event(exc, phase="provider"), terminal_event
+                )
+            else:
+                yield error_event(exc, phase="run")
         finally:
             if (
                 cancel_event is not None
