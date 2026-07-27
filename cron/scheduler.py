@@ -14,6 +14,7 @@ from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
 from provider.factory import create_provider, provider_semaphore_status
 from run.cron_store import CronStore, CronValidationError, normalize_task
+from run.log_store import LogStore
 from run.tools import ToolRegistry, discover_tools
 
 
@@ -82,6 +83,30 @@ def _system_result_summary(result: Any) -> dict[str, Any]:
         nested_summary = _system_result_summary(nested)
         if nested_summary:
             summary["data"] = nested_summary
+    memory_update = result.get("memory_update")
+    if isinstance(memory_update, dict):
+        featured = memory_update.get("featured")
+        reconciled = memory_update.get("reconciled")
+        summary["memory_update"] = {
+            "featured": (
+                [str(item) for item in featured[:100]]
+                if isinstance(featured, list)
+                else []
+            ),
+            "reconciled": (
+                [
+                    {
+                        key: str(item.get(key))
+                        for key in ("action", "filename", "permanent_filename")
+                        if item.get(key) is not None
+                    }
+                    for item in reconciled[:100]
+                    if isinstance(item, dict)
+                ]
+                if isinstance(reconciled, list)
+                else []
+            ),
+        }
     return summary
 
 
@@ -114,12 +139,28 @@ def _append_system_execution(
             else None
         ),
     }
+    structured_store: LogStore | None = None
+    try:
+        structured_store = LogStore(root)
+        structured_store.append_cron(record)
+    except Exception:
+        # The structured store is an observability sink; it must never stop
+        # the scheduler or prevent the legacy audit file from being written.
+        structured_store = None
     directory = root / "cron" / "task_cron_system" / "log"
     try:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{executed_at.astimezone(BEIJING):%Y-%m-%d}.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if structured_store is not None:
+            try:
+                structured_store.mark_legacy_source(path)
+            except Exception:
+                # A stale migration fingerprint only costs a later idempotent
+                # import; it must not turn successful log persistence into a
+                # scheduler failure.
+                pass
     except OSError:
         # Diagnostics persistence must never stop the scheduler itself.
         return
@@ -550,20 +591,65 @@ class CronScheduler:
                 continue
             if self._should_backoff():
                 break
+            task_id = str(task.get("task_id") or "")
+            started_at = datetime.now(BEIJING)
+            started = time.monotonic()
             try:
                 result = execute_cron_task(
                     root=self.root,
                     user=user,
-                    task_id=str(task.get("task_id") or ""),
+                    task_id=task_id,
                     provider_factory=self.provider_factory,
                     tool_registry_factory=self.tool_registry_factory,
                     cancel_event=self._stop_event,
                     transport_registry=self._transport_registry,
                 )
                 executed += 1
+                try:
+                    result_status = str(result.get("status") or "completed")
+                    LogStore(self.root).append_cron(
+                        {
+                            "schema_version": 1,
+                            "executed_at": started_at.isoformat(),
+                            "user": user,
+                            "task_id": task_id,
+                            "status": (
+                                "success"
+                                if result_status in {"enabled", "completed"}
+                                else result_status
+                            ),
+                            "duration_ms": round(
+                                (time.monotonic() - started) * 1000
+                            ),
+                            "result": _system_result_summary(result),
+                            "error": None,
+                        }
+                    )
+                except Exception:
+                    pass
                 if self.on_task_executed:
                     self.on_task_executed(user, task["task_id"], result)
             except Exception as exc:
+                try:
+                    LogStore(self.root).append_cron(
+                        {
+                            "schema_version": 1,
+                            "executed_at": started_at.isoformat(),
+                            "user": user,
+                            "task_id": task_id,
+                            "status": "failed",
+                            "duration_ms": round(
+                                (time.monotonic() - started) * 1000
+                            ),
+                            "result": {},
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        }
+                    )
+                except Exception:
+                    pass
                 if self.on_error:
                     self.on_error(user, exc)
         return executed

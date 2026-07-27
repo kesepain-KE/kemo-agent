@@ -231,12 +231,20 @@ def _execute_memory_review(
         cancel_event=cancel_event,
         task_id=task_id,
     )
-    return {
+    response = {
         "status": "completed",
         "action": trigger,
         "user": user,
         "data": result.data if isinstance(getattr(result, "data", None), dict) else {},
     }
+    update = (
+        result.metadata.get("important_memory_update")
+        if isinstance(getattr(result, "metadata", None), dict)
+        else None
+    )
+    if isinstance(update, dict):
+        response["memory_update"] = update
+    return response
 
 
 def _is_link_or_junction(path: Path) -> bool:
