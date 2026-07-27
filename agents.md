@@ -611,6 +611,11 @@ system prompt 按以下固定顺序拼接：
 - `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。
 - `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
+- Web 保存 Provider 配置后，只有重新读取到已落盘的 `provider.type=kemo` 才允许通过
+  `GET /model/models?task=llm` 拉取当前密钥可用模型；`chat`、未保存配置、缺少凭据、鉴权失败或
+  非法目录响应均不得产生可用模型列表。
+- 模型目录是短期界面数据，不新增 `user_config.json` 字段，不批量写入模型，也不覆盖当前
+  `provider.model`。用户从目录选择模型后，仍通过原有 `provider.model` 字段显式保存。
 
 ### 密钥优先级
 

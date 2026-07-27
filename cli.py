@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 DEFAULT_SOURCE = "cli"
 DEFAULT_SESSION = "default"
 

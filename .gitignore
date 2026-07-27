@@ -68,6 +68,8 @@ users/_template/
 # Expand / Sense / Skills — only register.py is tracked
 global_expand/*
 !global_expand/register.py
+!global_expand/kemo_gateway_status/
+!global_expand/kemo_gateway_status/**
 global_sense/*
 !global_sense/register.py
 shared_expand/*
