@@ -21,6 +21,14 @@ from provider.adapters.compat import (
     chat_stream_to_protocol,
     kemo_request_to_chat,
 )
+from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.protocol.models import (
+    KemoResponse,
+    MessageItem,
+    ProviderState,
+    ReasoningItem,
+    ToolCallItem,
+)
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunResult
 from run.engine import (
@@ -482,6 +490,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             responses=[
                 ChatResponse(
                     text="",
+                    reasoning="完整工具续轮推理状态",
                     tool_calls=[ToolCall(id="c1", name="lookup", arguments={"value": "x"})],
                     finish_reason="tool_calls",
                     usage=Usage(
@@ -515,9 +524,26 @@ class RuntimeFeatureTests(unittest.TestCase):
             )
         self.assertEqual(
             [event.type for event in events],
-            ["tool_call_start", "usage", "tool_call_result", "text_delta", "usage", "done"],
+            [
+                "reasoning_delta",
+                "tool_call_start",
+                "usage",
+                "tool_call_result",
+                "text_delta",
+                "usage",
+                "done",
+            ],
         )
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
+        assistant_tool_message = next(
+            message
+            for message in provider.requests[1].messages
+            if message.get("tool_calls")
+        )
+        self.assertEqual(
+            assistant_tool_message["reasoning_content"],
+            "完整工具续轮推理状态",
+        )
         path = find_window(root, "alice", "cli", "tool")
         window = load_window(path)
         self.assertEqual(window["text"]["messages"][-1]["content"], "final")
@@ -543,6 +569,136 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(done.usage["provider_request_count"], 2)
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
+
+    def test_native_provider_state_is_preserved_across_tool_continuation(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+
+        class NativeStateProvider:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def create(self, request):
+                self.requests.append(request)
+                if len(self.requests) <= 2:
+                    index = len(self.requests)
+                    return KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.REQUIRES_ACTION,
+                        model=request.model,
+                        output=[
+                            ReasoningItem(
+                                # 故意模拟每次响应重复使用同一个 item id。
+                                id="reasoning-1",
+                                content=f"原生推理内容 {index}",
+                                provider_state=ProviderState(
+                                    kind="opaque",
+                                    data=f"opaque-state-{index}",
+                                    provider="stateful-provider",
+                                    model=request.model,
+                                ),
+                            ),
+                            ToolCallItem(
+                                id=f"tool-call-{index}",
+                                call_id=f"call-native-{index}",
+                                name="lookup",
+                                arguments={"value": str(index)},
+                            ),
+                        ],
+                    )
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[
+                        MessageItem.text(
+                            MessageRole.ASSISTANT,
+                            "native done",
+                        )
+                    ],
+                )
+
+        provider = NativeStateProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "native-provider-state",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "done")
+        second_reasoning = next(
+            item
+            for item in provider.requests[1].input
+            if isinstance(item, ReasoningItem)
+        )
+        self.assertEqual(second_reasoning.content, "原生推理内容 1")
+        self.assertIsNotNone(second_reasoning.provider_state)
+        self.assertEqual(second_reasoning.provider_state.data, "opaque-state-1")
+        third_reasoning = [
+            item
+            for item in provider.requests[2].input
+            if isinstance(item, ReasoningItem)
+        ]
+        self.assertEqual(
+            [item.provider_state.data for item in third_reasoning],
+            ["opaque-state-1", "opaque-state-2"],
+        )
+        self.assertEqual(len({item.id for item in third_reasoning}), 2)
+
+    def test_stream_tool_continuation_preserves_reasoning_content(self) -> None:
+        _, root = self.make_root(stream=True)
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(type="reasoning_delta", content="流式工具续轮状态"),
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="stream-call",
+                        tool_name="lookup",
+                        arguments={"value": "x"},
+                    ),
+                    RunEvent(type="usage", usage={}),
+                ],
+                [
+                    RunEvent(type="text_delta", content="stream done"),
+                    RunEvent(type="usage", usage={}),
+                ],
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "stream-tool-continuation",
+                        "prompt": "go",
+                        "stream": True,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "done")
+        assistant_tool_message = next(
+            message
+            for message in provider.requests[1].messages
+            if message.get("tool_calls")
+        )
+        self.assertEqual(
+            assistant_tool_message["reasoning_content"],
+            "流式工具续轮状态",
+        )
 
     def test_tool_loop_limit_commits_terminal_round_and_can_continue(self) -> None:
         _, root = self.make_root()

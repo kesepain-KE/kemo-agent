@@ -165,8 +165,14 @@ def _history_messages(window: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _assistant_tool_message(text: str, calls: list[ToolCall]) -> dict[str, Any]:
-    return {
+def _assistant_tool_message(
+    text: str,
+    calls: list[ToolCall],
+    *,
+    reasoning: str = "",
+    native_reasoning: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
         "role": "assistant",
         "content": text or None,
         "tool_calls": [
@@ -181,6 +187,37 @@ def _assistant_tool_message(text: str, calls: list[ToolCall]) -> dict[str, Any]:
             for call in calls
         ],
     }
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    if native_reasoning:
+        native_copy = copy.deepcopy(native_reasoning)
+        # Provider 的 response item id 只在原响应内唯一；多轮工具循环中
+        # 厂商可能重复使用 rs_1。进入新 KemoRequest 时换成本地唯一 id，
+        # provider_state 本体仍保持不变。
+        native_copy["id"] = f"rs_{uuid.uuid4().hex}"
+        message["_kemo_reasoning"] = native_copy
+    return message
+
+
+def _response_reasoning_item(
+    response: Any,
+    *,
+    streamed_content: str = "",
+) -> dict[str, Any] | None:
+    """取回本轮原生 reasoning item，供工具续轮完整回放。"""
+    if not isinstance(response, dict):
+        return None
+    output = response.get("output")
+    if not isinstance(output, list):
+        return None
+    for item in reversed(output):
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        reasoning = copy.deepcopy(item)
+        if streamed_content and not reasoning.get("content"):
+            reasoning["content"] = streamed_content
+        return reasoning
+    return None
 
 
 def _json_result(value: Any) -> str:
@@ -1352,7 +1389,18 @@ def _iter_request_events_impl(
                     return
 
                 assistant_text = "".join(iteration_text)
-                messages.append(_assistant_tool_message(assistant_text, calls))
+                iteration_reasoning_text = "".join(iteration_reasoning)
+                messages.append(
+                    _assistant_tool_message(
+                        assistant_text,
+                        calls,
+                        reasoning=iteration_reasoning_text,
+                        native_reasoning=_response_reasoning_item(
+                            provider_response,
+                            streamed_content=iteration_reasoning_text,
+                        ),
+                    )
+                )
                 for call in calls:
                     if cancel_event is not None and cancel_event.is_set():
                         yield commit_cancelled_round()
