@@ -921,6 +921,11 @@ def create_app(
     async def patch_user_config(user: str, body: dict[str, Any]) -> dict[str, Any]:
         return backend.patch_user_config(user, body.get("changes", body))
 
+    @app.get("/api/users/{user}/provider/models")
+    async def kemo_provider_models(user: str, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return await asyncio.to_thread(backend.kemo_provider_models, user)
+
     @app.get("/api/global-config")
     async def global_config() -> dict[str, Any]:
         return backend.global_config()

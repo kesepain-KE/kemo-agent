@@ -31,6 +31,7 @@ from cron.schedule import compute_next_run
 from events import RunEvent
 from message.identity import IdentityResolver
 from message.plugin import FileMessageTransport, MessagePluginConfig, MessagePluginError
+from provider.adapters.gateway import KemoGatewayAdapter
 from provider.protocol.models import (
     AudioContent,
     ContentBlock,
@@ -39,6 +40,7 @@ from provider.protocol.models import (
     VideoContent,
     normalize_reasoning_effort,
 )
+from provider.schema import ProviderError
 from run.agents import discover_agents
 from run.agent_runner import AgentRunner
 from run.attachments import AttachmentError, describe_uploaded_asset
@@ -46,6 +48,7 @@ from run.config import (
     ConfigError,
     USER_ONLY_SECTIONS,
     load_config,
+    provider_runtime_config,
     read_json_object,
 )
 from run.context import (
@@ -660,6 +663,11 @@ class InvalidRequestError(WebServiceError):
     status = 400
 
 
+class ProviderDiscoveryError(WebServiceError):
+    code = "provider_discovery_failed"
+    status = 502
+
+
 class NotFoundError(WebServiceError):
     code = "not_found"
     status = 404
@@ -1177,6 +1185,28 @@ class WebRunService:
     def patch_user_config(self, user: Any, changes: Any) -> dict[str, Any]:
         name = self.require_user(user)
         return self._patch_config_document(self._config_path(name), changes, user=name)
+
+    def kemo_provider_models(self, user: Any) -> dict[str, Any]:
+        """Discover LLMs through a persisted Kemo configuration without mutating it."""
+        name = self.require_user(user)
+        config = load_config(name, self.root)
+        configured_provider = config.get("provider") or {}
+        if str(configured_provider.get("type") or "").strip().lower() != "kemo":
+            raise InvalidRequestError("只有已保存的 Kemo 私有协议配置允许拉取模型")
+        try:
+            runtime_provider = provider_runtime_config(config)
+            catalog = KemoGatewayAdapter(runtime_provider).models(task="llm")
+        except (ConfigError, ProviderError, ValueError) as exc:
+            raise ProviderDiscoveryError(
+                "Kemo API 验证失败，未拉取模型"
+            ) from exc
+        return {
+            "user": name,
+            "protocol": "kemo",
+            "api_valid": True,
+            "count": catalog.count,
+            "data": [item.model_dump(mode="json") for item in catalog.data],
+        }
 
     def patch_global_config(self, changes: Any) -> dict[str, Any]:
         return self._patch_config_document(
