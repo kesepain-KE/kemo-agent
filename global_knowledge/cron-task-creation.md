@@ -72,6 +72,8 @@ Schema 拒绝未知或废弃字段。不要重新引入旧式嵌套 `schedule` �
 
 RuntimeHost 重启时会把被中断的 `running` 用户任务恢复为 `enabled` 并重新安排。`cron.enabled=false` 或 `runtime_host.enable_background_scheduler=false` 时不会后台执行。
 
+用户任务和系统任务的执行记录都写入结构化运行日志数据库 `runtime/logs.sqlite3`；每日系统任务 JSONL 文件仍保留作兼容审计。日志记录只保存受限结果摘要和错误信息，不保存完整提示词。
+
 ## 创建质量要求
 
 - `prompt` 必须包含目标、输入来源、输出去向和失败时行为。
@@ -83,4 +85,3 @@ RuntimeHost 重启时会把被中断的 `running` 用户任务恢复为 `enabled
 ## 系统任务边界
 
 `cron/task_cron_system/` 属于框架维护，允许可读的系统任务 ID、`exec_mode=system` 和 `action` 字段。感知刷新、全局拓展刷新、记忆巡检等由 RuntimeHost 对账创建。用户任务不得伪装成系统任务。
-

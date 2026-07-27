@@ -243,8 +243,10 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `rounds_after_compression` | int | `20` | 压缩后保留的轮数 |
 | `token_limit` | int | `1000000` | 上下文 Token 上限。预估总 token 超过此值时触发压缩 |
 | `token_compression_ratio` | float | `0.3` | 输入预算比例。`input_budget = token_limit × ratio`，超过此比例时触发压缩 |
-| `important_memory_review_hours` | int | `3` | 临时重要记忆定时巡检间隔（小时）。由 cron 模块的 recurring 任务执行 |
-| `daily_memory_review_time` | str | `"02:00"` | 每日记忆审阅执行时间（北京时间 HH:MM）。由 cron 模块的 daily 任务执行 |
+| `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
+| `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
+
+`context_manage` 的摘要输入会合并正文、reasoning/think 和工具结论；核心运行时为每次摘要请求提供最多 20000 tokens 的输出预算，并要求非空、完整的结构化 JSON。网页端手动压缩只有在摘要缓存、temp 工作区轮数、绝对轮次偏移和摘要覆盖范围重新读取校验通过后才报告成功；用户可见归档仍保留完整轮次。
 
 ---
 

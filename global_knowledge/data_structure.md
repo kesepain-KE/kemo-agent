@@ -24,6 +24,7 @@ kemo-agent/
 ├── update/                 # 分板块更新实现
 ├── tests/                  # 后端测试
 ├── config/                 # 全局配置与全局人格
+├── runtime/                # 结构化运行日志 SQLite（自动生成，不入 Git）
 ├── tmp/                    # 智能体中间文件，不作为用户交付目录
 ├── agents.md               # 智能体自身运行手册
 ├── .env / .env.example     # 本机环境变量与无密钥示例
@@ -76,6 +77,7 @@ kemo-agent/
 | `task-plan-creation.md` | 多步骤任务计划的创建与执行规则 |
 | `subagent-creation.md` | 内置/用户子智能体包与授权规则 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
+| `logging-storage.md` | Cron 与外部消息结构化日志、迁移和保留规则 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 
 ## 维护原则

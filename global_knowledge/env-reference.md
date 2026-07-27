@@ -57,6 +57,7 @@ Provider 和使用标准网络栈的模块可继承代理。TLS 证书验证使�
 | `WEB_AUTH_IP_WINDOW_SECONDS` | `600` | 失败次数统计窗口，单位秒，必须大于 `0` |
 | `WEB_AUTH_IP_LOCK_SECONDS` | `900` | 达到失败上限后的锁定时间，单位秒，必须大于 `0` |
 | `WEB_AUTH_TRUSTED_PROXIES` | 空 | 可信反向代理 IP/CIDR，逗号分隔；仅直连来源命中时才读取 `X-Forwarded-For` |
+| `KEMO_LOG_RETENTION_DAYS` | `90` | Cron 与外部消息 SQLite 结构化日志保留天数；`0` 表示不自动清理 |
 
 认证流程按配置确定：只配置 Token 时验证 Token 后进入；只配置用户名密码时登录后进入；两者同时配置时必须先验证 Token，再验证用户名和密码，不能任选其一。双重认证的 Token 中间状态有效 5 分钟，完整签名会话默认有效 2 小时。
 

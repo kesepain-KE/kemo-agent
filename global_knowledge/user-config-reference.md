@@ -292,7 +292,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 ## agents — 智能体上下文与压缩
 
-覆盖全局 `global_config.json → agents`。按对象深合并。
+覆盖全局 `global_config.json → agents`。按对象深合并，但系统 Cron 的两个宿主级调度字段除外。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
@@ -301,8 +301,11 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `rounds_after_compression` | int | 20 | 压缩后保留的轮数 |
 | `token_limit` | int | 1000000 | 上下文 Token 上限 |
 | `token_compression_ratio` | float | 0.3 | 输入预算比例 |
-| `important_memory_review_hours` | int | 3 | 临时重要记忆巡检间隔（小时） |
-| `daily_memory_review_time` | str | `"02:00"` | 每日记忆审阅时间（北京时间 HH:MM） |
+
+上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 temp 工作区和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
+
+`important_memory_review_hours` 与 `daily_memory_review_time` 只允许在
+`config/global_config.json → agents` 中配置。系统只创建一份全局时间表，任务到期后再按用户分别执行；在 `user_config.json` 中填写这两个字段不会创建用户专属调度，不应声明。
 
 ---
 
