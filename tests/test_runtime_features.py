@@ -653,6 +653,34 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertEqual(len({item.id for item in third_reasoning}), 2)
 
+        # 新一轮对话会从已提交历史中回放前一轮的两个 reasoning item。
+        # Provider 允许在不同响应中重复使用 item id，桥接层必须在构造
+        # 新 KemoRequest 时重新保证请求内唯一，而不是拒绝第二轮对话。
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            continued = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "native-provider-state",
+                        "prompt": "continue",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+        self.assertEqual(continued[-1].type, "done")
+        historical_reasoning = [
+            item
+            for item in provider.requests[3].input
+            if isinstance(item, ReasoningItem)
+        ]
+        self.assertEqual(
+            [item.provider_state.data for item in historical_reasoning],
+            ["opaque-state-1", "opaque-state-2"],
+        )
+        self.assertEqual(len({item.id for item in historical_reasoning}), 2)
+
     def test_stream_tool_continuation_preserves_reasoning_content(self) -> None:
         _, root = self.make_root(stream=True)
         self.write_tool(root / "plugins", "lookup", "plugin")

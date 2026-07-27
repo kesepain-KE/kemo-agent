@@ -461,6 +461,71 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual([item.id for item in reasoning], ["rs_valid"])
         self.assertEqual(reasoning[0].summary, "valid summary")
 
+    def test_chat_bridge_reassigns_duplicate_provider_item_and_call_ids(self) -> None:
+        def assistant(content: str, reasoning: str) -> dict[str, object]:
+            return {
+                "role": "assistant",
+                "content": content,
+                "_kemo_reasoning": {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": reasoning,
+                    "metadata": {},
+                },
+                "_kemo_message": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "text", "text": content}],
+                    "metadata": {},
+                    "extensions": {},
+                },
+            }
+
+        chat = ChatRequest(
+            model="test",
+            messages=[
+                assistant("first", "think first"),
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "one"},
+                assistant("second", "think second"),
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "two"},
+            ],
+        )
+
+        request = chat_request_to_kemo(chat)
+
+        self.assertEqual(len({item.id for item in request.input}), len(request.input))
+        reasoning = [item for item in request.input if isinstance(item, ReasoningItem)]
+        messages = [item for item in request.input if isinstance(item, MessageItem)]
+        calls = [item for item in request.input if isinstance(item, ToolCallItem)]
+        results = [item for item in request.input if isinstance(item, ToolResultItem)]
+        self.assertEqual([item.content for item in reasoning], ["think first", "think second"])
+        self.assertEqual(len({item.id for item in reasoning}), 2)
+        self.assertEqual(len({item.id for item in messages}), 2)
+        self.assertEqual(len({item.call_id for item in calls}), 2)
+        self.assertEqual([item.call_id for item in results], [item.call_id for item in calls])
+
     def test_chat_bridge_rebuilds_legacy_empty_native_message(self) -> None:
         chat = ChatRequest(
             model="test",
@@ -520,6 +585,37 @@ class UnifiedProtocolTests(unittest.TestCase):
             ).encode("utf-8")
         )
         self.assertEqual(adapter.capabilities(request.model).input_modalities, ["text", "image"])
+
+        seen_models = []
+        adapter._open = lambda model_request: (
+            seen_models.append(model_request)
+            or FakeHTTPResponse(
+                json.dumps(
+                    {
+                        "protocol_version": "1.0",
+                        "object": "kemo.model_list",
+                        "count": 1,
+                        "data": [
+                            {
+                                "id": request.model,
+                                "object": "kemo.model",
+                                "provider_id": "test",
+                                "provider_model": "model",
+                                "task": "llm",
+                                "capabilities_available": True,
+                                "capabilities_url": f"/model/models/{request.model}/capabilities",
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+            )
+        )
+        catalog = adapter.models(task="llm")
+        self.assertEqual([item.id for item in catalog.data], [request.model])
+        self.assertEqual(
+            seen_models[0].full_url,
+            "https://gateway.test/v1/model/models?task=llm",
+        )
 
         stream_events = [
             ProviderStreamEvent(

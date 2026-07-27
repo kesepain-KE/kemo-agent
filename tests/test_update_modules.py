@@ -131,6 +131,48 @@ class UpdateModuleTests(unittest.TestCase):
         self.assertTrue(expected.issubset(set(core_update.FILES)))
         self.assertNotIn("version.json", core_update.FILES)
 
+    def test_core_installs_gateway_status_expand_and_preserves_local_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.GATEWAY_STATUS_EXPAND)
+            for name in core_update.GATEWAY_STATUS_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {
+                "name": "Kemo 网关运行状态",
+                "open_input": False,
+                "input_health": "正常",
+            })
+            write(source / module / "input_data.md", "source inactive")
+            write_json(target / module / "gateway_config.json", {
+                "base_url": "http://127.0.0.1:7531",
+                "status_token": "local-secret",
+            })
+            write_json(target / module / "expand.json", {
+                "name": "old",
+                "open_input": True,
+                "input_health": "异常",
+                "recent_update": "2026-07-28 12:00:00",
+            })
+            write(target / module / "input_data.md", "local runtime status")
+            write(target / module / "data" / "gateway_status.json", "local snapshot")
+
+            result = core_update.update(source, target, assume_yes=True)
+
+            self.assertIn("更新内置拓展", "\n".join(result["details"]))
+            self.assertEqual((target / module / "gateway_status.py").read_text("utf-8"), "new gateway_status.py")
+            self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "local runtime status")
+            self.assertEqual((target / module / "data" / "gateway_status.json").read_text("utf-8"), "local snapshot")
+            self.assertEqual(
+                json.loads((target / module / "gateway_config.json").read_text("utf-8"))["status_token"],
+                "local-secret",
+            )
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertTrue(manifest["open_input"])
+            self.assertEqual(manifest["input_health"], "异常")
+            self.assertEqual(manifest["recent_update"], "2026-07-28 12:00:00")
+
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

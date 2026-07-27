@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
+from provider.protocol.models import ModelCatalogResponse
 from run.attachments import history_attachment_descriptors
 from run.cron_store import CronStore, normalize_task
 from run.history import (
@@ -138,6 +139,75 @@ class FakeService:
 
 
 class WebBackendTests(unittest.TestCase):
+    def test_kemo_model_discovery_uses_only_saved_private_protocol_config(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        config_path = root / "users" / "alice" / "user_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "chat",
+                        "base_url": "https://chat.test/v1",
+                        "model": "chat-model",
+                        "api_key": "chat-secret",
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        app = create_app(service=WebRunService(root))
+
+        with patch("web.service.KemoGatewayAdapter.models") as discover:
+            blocked = self.request(app, "GET", "/api/users/alice/provider/models")
+        self.assertEqual(blocked.status_code, 400)
+        discover.assert_not_called()
+
+        saved = {
+            "schema_version": 1,
+            "provider": {
+                "type": "kemo",
+                "base_url": "https://gateway.test",
+                "model": "deepseek-deepseek-v4-flash",
+                "api_key": "gateway-secret",
+            },
+        }
+        config_path.write_text(json.dumps(saved), "utf-8")
+        original = config_path.read_bytes()
+        catalog = ModelCatalogResponse.model_validate(
+            {
+                "protocol_version": "1.0",
+                "object": "kemo.model_list",
+                "count": 1,
+                "data": [
+                    {
+                        "id": "deepseek-deepseek-v4-flash",
+                        "object": "kemo.model",
+                        "provider_id": "deepseek",
+                        "provider_model": "deepseek-v4-flash",
+                        "task": "llm",
+                        "capabilities_available": True,
+                        "capabilities_url": "/model/models/deepseek-deepseek-v4-flash/capabilities",
+                    }
+                ],
+            }
+        )
+        with patch(
+            "web.service.KemoGatewayAdapter.models", return_value=catalog
+        ) as discover:
+            response = self.request(app, "GET", "/api/users/alice/provider/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertTrue(response.json()["api_valid"])
+        self.assertEqual(response.json()["data"][0]["id"], "deepseek-deepseek-v4-flash")
+        discover.assert_called_once_with(task="llm")
+        self.assertEqual(config_path.read_bytes(), original)
+
     def test_file_space_lists_six_items_per_page_for_all_areas(self) -> None:
         _, root = self.make_root()
         upload_root = root / "users" / "alice" / "file_upload"
