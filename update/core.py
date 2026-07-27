@@ -13,6 +13,7 @@ from ._utils import (
     read_json,
     sync_directory,
     sync_directory_except,
+    write_json_atomic,
     yellow,
 )
 
@@ -54,6 +55,17 @@ REGISTER_FILES = (
     "global_sense/register.py",
     "shared_expand/register.py",
     "shared_skills/register.py",
+)
+
+GATEWAY_STATUS_EXPAND = "global_expand/kemo_gateway_status"
+GATEWAY_STATUS_EXPAND_FILES = (
+    ".gitignore",
+    "README.md",
+    "gateway_config.example.json",
+    "gateway_status.py",
+    "data_update.py",
+    "start_expand.py",
+    "expand_control.md",
 )
 
 
@@ -161,6 +173,69 @@ def _sync_file_if_changed(
     return True
 
 
+def _update_gateway_status_expand(
+    source_root: Path,
+    target_root: Path,
+    *,
+    dry_run: bool,
+    details: list[str],
+    warnings: list[str],
+) -> bool:
+    """Install the built-in status Expand without overwriting local credentials or data."""
+
+    relative = GATEWAY_STATUS_EXPAND
+    source = source_root / relative
+    target = target_root / relative
+    if not source.is_dir():
+        warnings.append(f"源缺少目录: {relative}/")
+        return False
+
+    changed = False
+    for name in GATEWAY_STATUS_EXPAND_FILES:
+        if copy_file_safe(source / name, target / name, dry_run=dry_run):
+            changed = True
+
+    source_manifest = source / "expand.json"
+    target_manifest = target / "expand.json"
+    if not source_manifest.is_file():
+        warnings.append(f"源缺少文件: {relative}/expand.json")
+    else:
+        manifest = read_json(source_manifest)
+        manifest["open_input"] = (target / "gateway_config.json").is_file()
+        if target_manifest.is_file():
+            try:
+                current = read_json(target_manifest)
+            except Exception:
+                current = {}
+            if current.get("input_health") in {"正常", "异常"}:
+                manifest["input_health"] = current["input_health"]
+            recent_update = current.get("recent_update")
+            if isinstance(recent_update, str) and recent_update.strip():
+                manifest["recent_update"] = recent_update
+        try:
+            target_manifest_value = read_json(target_manifest) if target_manifest.is_file() else None
+        except Exception:
+            target_manifest_value = None
+        if target_manifest_value != manifest:
+            if dry_run:
+                print(f"[dry-run]  更新  {relative}/expand.json")
+            else:
+                write_json_atomic(target_manifest, manifest)
+            changed = True
+
+    source_input = source / "input_data.md"
+    target_input = target / "input_data.md"
+    if not source_input.is_file():
+        warnings.append(f"源缺少文件: {relative}/input_data.md")
+    elif not target_input.is_file():
+        if copy_file_safe(source_input, target_input, dry_run=dry_run):
+            changed = True
+
+    if changed:
+        details.append(f"更新内置拓展: {relative}/（保留本地凭据与采集数据）")
+    return changed
+
+
 def update(
     source_root: Path,
     target_root: Path,
@@ -232,6 +307,14 @@ def update(
             details=details,
             warnings=warnings,
         )
+
+    changed |= _update_gateway_status_expand(
+        source_root,
+        target_root,
+        dry_run=dry_run,
+        details=details,
+        warnings=warnings,
+    )
 
     config_changed, config_detail = _update_global_config(
         source_root,
