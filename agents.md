@@ -417,7 +417,8 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 压缩时把当前待发送轮次计入 `rounds_after_compression`：正常提交后，Provider 临时工作区总计保留最近 N 轮，而不是额外再保留当前轮次。
 - 所有摘要场景统一由 `context_manage` 处理；正常聊天的自动压缩不在请求主线程同步提取记忆，而是在完整提交后把摘要已覆盖轮次登记到持久化后台队列。手动压缩仍可显式选择同步或队列策略。
 - 摘要缓存在 `history/temp/<window>/context_summary.json` 中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。
-- `context_manage` 使用严格输出 Schema；摘要输入以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 8192 tokens。JSON 缺失、截断或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
+- `context_manage` 使用严格输出 Schema；摘要输入包含正文、reasoning/think 和工具结果，以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 20000 tokens，为模型推理和完整 JSON 正文共同预留空间。摘要只保留对后续仍有价值的精炼判断依据，不保留逐步内部推演或工具长输出。JSON 缺失、截断、空 narrative 或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
+- 手动压缩只有在摘要缓存、temp 工作区轮数、绝对轮次偏移和摘要覆盖范围全部落盘并重新读取校验通过后才返回成功；失败时回滚本次 temp 裁剪与摘要缓存，用户可继续使用原运行窗口重试。
 - `history/<window>/` 始终保留完整原始记录和累计轮数；`history/temp/<window>/` 才是受限并会裁剪的 Provider 工作区。`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
 
 ### 轮次结构
@@ -546,6 +547,8 @@ users/<user>/agents/<name>/
   自动管理 Cron 与上下文整理。
 - 普通任务通过主智能体执行；系统任务可通过 `subagent` 直调内部子代理，或通过白名单 `function` 模式执行内部函数。
 - 系统自动注册临时重要记忆巡检、每日整理、每 30 秒一次的 self_improve 到期晋升检查，以及感知/拓展数据刷新任务。
+- `agents.important_memory_review_hours` 和 `agents.daily_memory_review_time` 是宿主级全局调度参数，只从 `config/global_config.json` 创建统一系统任务；用户配置不得声明不同时间表。任务到期后仍按用户分别执行，用户之间的数据和写入锁彼此隔离。
+- 所有声明为 `background_serial` 的子代理在真实 executor 线程内按“项目根目录 + 用户”共享串行锁；网页同步调用、后台子代理队列、Maintenance 与 Cron 不得绕开该锁并发修改同一用户的派生数据。
 - 记忆类系统任务按用户分别执行；感知只以 `__system__` 身份刷新全局层。拓展任务先以 `__system__` 身份各刷新一次全局层和共享层，再按用户身份只刷新对应的 `users/<user>/expand/`，不得跨用户聚合执行。
 - 模块更新脚本在独立 Python 子进程中运行，优先调用 `update()`，兼容调用 `main()`；超时、非零退出码、`False`、`{ok: false}` 或失败状态均记为失败。
 - 拓展的 `input_data.md` 只承载长期采集摘要或资源索引；完整 JSON/CSV/HTML、图片、音视频和大型日志保存在模块内并按需读取，不能自动全部注入 Prompt。

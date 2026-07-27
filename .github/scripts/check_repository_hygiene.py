@@ -21,6 +21,7 @@ BLOCKED_PREFIXES = {
     ".pytest_cache/": "Python 测试缓存",
     ".ruff_cache/": "Python 检查缓存",
     "cron/task_cron_system/log/": "Cron 运行日志",
+    "runtime/": "结构化运行日志数据库",
     "开发临时目录/": "本地开发工作区",
 }
 
