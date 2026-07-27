@@ -28,6 +28,7 @@ from message.transport import (
     TransportPolicy,
 )
 from run.attachments import describe_message_asset
+from run.log_store import LogStore
 from run.users import user_dir
 
 if TYPE_CHECKING:
@@ -1069,6 +1070,20 @@ class FileMessageTransport:
             outbound = "重复消息已按幂等记录跳过。"
         else:
             outbound = f"处理失败：{(result.error or {}).get('message', '未知错误')}"
+        store = LogStore(self.config.root)
+        files_root = self.config.files_path.relative_to(self.config.root).as_posix()
+        try:
+            store.migrate_message_logs(
+                self.config.log_path,
+                machine_id=self.config.machine_id,
+                user=self.config.bound_user,
+                platform=self.config.platform,
+                files_root=files_root,
+            )
+        except Exception:
+            # Legacy Markdown remains the compatibility sink if SQLite is
+            # unavailable or an old log cannot be imported.
+            pass
         pieces: list[str] = []
         for message in messages:
             timestamp = datetime.fromisoformat(
@@ -1076,8 +1091,9 @@ class FileMessageTransport:
                 if message.timestamp.endswith("Z")
                 else message.timestamp
             )
+            display_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
             pieces.append(
-                f"## {timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"## {display_timestamp} | "
                 f"{message.chat_type} | {message.external_chat_id}\n\n"
                 f"**入站**：{message.text or '[仅附件]'}\n"
             )
@@ -1087,6 +1103,7 @@ class FileMessageTransport:
                     f"({attachment.mime}, {attachment.size} bytes)\n"
                 )
             pieces.append(f"\n**出站**：{outbound}\n")
+            outbound_file_display = ""
             if result.outbound is not None and result.outbound.file_path:
                 outbound_path = Path(result.outbound.file_path)
                 try:
@@ -1095,6 +1112,7 @@ class FileMessageTransport:
                     ).as_posix()
                 except (OSError, ValueError):
                     display_path = outbound_path.name
+                outbound_file_display = display_path
                 pieces.append(
                     f"  - 出站附件：{outbound_path.name} ({display_path})\n"
                 )
@@ -1103,6 +1121,67 @@ class FileMessageTransport:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write("".join(pieces))
+            source = log_file.relative_to(self.config.root).as_posix()
+            common = {
+                "occurred_at": display_timestamp,
+                "user": self.config.bound_user,
+                "machine_id": self.config.machine_id,
+                "platform": self.config.platform,
+                "chat_type": message.chat_type,
+                "chat_id": message.external_chat_id,
+                "source": source,
+            }
+            entries: list[dict[str, Any]] = []
+            if message.text:
+                entries.append(
+                    {
+                        **common,
+                        "direction": "receive",
+                        "kind": "text",
+                        "content": message.text,
+                        "success": True,
+                    }
+                )
+            for attachment in message.attachments:
+                entries.append(
+                    {
+                        **common,
+                        "direction": "receive",
+                        "kind": "file",
+                        "content": attachment.name,
+                        "file_path": f"{files_root}/{attachment.name}",
+                        "mime": attachment.mime,
+                        "size": attachment.size,
+                        "success": True,
+                    }
+                )
+            failed = outbound.startswith("处理失败：")
+            if outbound:
+                entries.append(
+                    {
+                        **common,
+                        "direction": "send",
+                        "kind": "system" if failed else "text",
+                        "content": outbound,
+                        "success": not failed,
+                    }
+                )
+            if result.outbound is not None and result.outbound.file_path:
+                entries.append(
+                    {
+                        **common,
+                        "direction": "send",
+                        "kind": "file",
+                        "content": Path(result.outbound.file_path).name,
+                        "file_path": outbound_file_display,
+                        "success": True,
+                    }
+                )
+            try:
+                store.append_message_entries(entries)
+                store.mark_legacy_source(log_file)
+            except Exception:
+                pass
             pieces.clear()
 
     def _report_error(self, exc: BaseException) -> None:
