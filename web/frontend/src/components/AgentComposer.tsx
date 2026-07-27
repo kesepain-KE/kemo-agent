@@ -56,8 +56,8 @@ export function AgentComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canSubmit = !disabled
-    && !stopping
     && !uploading
+    && (!stopping || running)
     && (value.trim().length > 0 || (!running && pendingFileCount > 0))
   const speech = useSpeechRecognition((text) => {
     const separator = value && !/\s$/.test(value) ? ' ' : ''
@@ -172,7 +172,7 @@ export function AgentComposer({
 
           <button type="button" className={`${styles.sendButton} ${running ? styles.guidance : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
             <Send aria-hidden="true" />
-            <span>{running ? '发送引导' : '发送'}</span>
+            <span>{stopping ? '发送下一轮' : running ? '发送引导' : '发送'}</span>
           </button>
           {running && onStop ? (
             <button type="button" className={styles.stopButton} onClick={onStop} aria-label="停止生成" disabled={stopping}>

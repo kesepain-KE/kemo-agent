@@ -50,6 +50,16 @@ describe('AgentComposer', () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
+  it('停止过渡期间把新文本作为下一轮提交，不会误投给旧运行', () => {
+    const onSubmit = vi.fn()
+    renderComposer({ value: '停止后继续处理', running: true, stopping: true, onSubmit, onStop: vi.fn() })
+    const submit = screen.getByRole('button', { name: '发送下一轮' })
+    expect(submit).toBeEnabled()
+    fireEvent.click(submit)
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeDisabled()
+  })
+
   it('通过隐藏文件选择器把用户选择的文件交给上传处理器', () => {
     const onUploadFiles = vi.fn()
     const { container } = renderComposer({ onUploadFiles })

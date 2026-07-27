@@ -1,8 +1,27 @@
-import { describe, expect, it } from 'vitest'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, selectDockedPlan } from './ChatPage'
+import { describe, expect, it, vi } from 'vitest'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('取消编辑后仍沿用撤销成功返回的历史轮次基线', () => {
+    const undone = { sessionId: 'session-1', remainingRounds: 4 }
+    expect(resolveHistoryUserMessages('session-1', 'session-1', 5, undefined, null, undone)).toBe(4)
+    expect(resolveHistoryUserMessages('session-1', 'session-1', 1, undefined, null, { sessionId: 'session-1', remainingRounds: 0 })).toBe(0)
+    expect(resolveHistoryUserMessages('session-1', 'session-1', 5, undefined, { sessionId: 'session-1', remainingRounds: 4 }, undone)).toBe(4)
+    expect(resolveHistoryUserMessages('session-2', 'session-1', 5, undefined, null, undone)).toBe(0)
+    expect(resolveHistoryUserMessages('session-1', 'session-1', 5, 3, null, undone)).toBe(3)
+  })
+
+  it('停止请求返回成功状态，并把失败交给统一处理器', async () => {
+    const onFailure = vi.fn()
+    await expect(executeStopRequest(() => Promise.resolve(), onFailure)).resolves.toBe(true)
+    expect(onFailure).not.toHaveBeenCalled()
+
+    const error = new Error('cancel failed')
+    await expect(executeStopRequest(() => Promise.reject(error), onFailure)).resolves.toBe(false)
+    expect(onFailure).toHaveBeenCalledWith(error)
+  })
+
   it('成功终态只清除本轮实际发送的附件，并保留运行期间新上传的文件', () => {
     const sent = { path: 'accounts.json', name: 'accounts.json', size: 12 }
     const uploadedDuringRun = { path: 'next.zip', name: 'next.zip', size: 24 }

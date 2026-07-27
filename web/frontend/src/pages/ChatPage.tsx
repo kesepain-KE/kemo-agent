@@ -553,6 +553,33 @@ export function dropLastLiveRound(items: ChatItem[]) {
   return items
 }
 
+export function resolveHistoryUserMessages(
+  activeSession: string,
+  currentSession: string,
+  persistedUserMessages: number,
+  explicitHistoryUserMessages?: number,
+  editingSource?: { sessionId: string; remainingRounds: number } | null,
+  undoneBaseline?: { sessionId: string; remainingRounds: number } | null,
+) {
+  if (explicitHistoryUserMessages !== undefined) return explicitHistoryUserMessages
+  if (editingSource?.sessionId === activeSession) return editingSource.remainingRounds
+  if (undoneBaseline?.sessionId === activeSession) return undoneBaseline.remainingRounds
+  return activeSession === currentSession ? persistedUserMessages : 0
+}
+
+export async function executeStopRequest(
+  request: () => Promise<unknown>,
+  onFailure: (error: unknown) => void,
+) {
+  try {
+    await request()
+    return true
+  } catch (error) {
+    onFailure(error)
+    return false
+  }
+}
+
 const terminalPlanStatuses = new Set(['completed', 'failed', 'rejected', 'cancelled'])
 
 export function selectDockedPlan(plans: PlanSummary[]) {
@@ -801,6 +828,10 @@ export function ChatPage() {
   const submittedUploadsRef = useRef(new Map<string, PendingUploadedFile[]>())
   const consumingNextTurnRef = useRef(false)
   const locallyCommittedSessionRef = useRef('')
+  const undoneRoundBaselineRef = useRef<{
+    sessionId: string
+    remainingRounds: number
+  } | null>(null)
   const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
   const liveSessionId = sessionId || lastAttemptSessionRef.current
@@ -879,6 +910,7 @@ export function ChatPage() {
     prependSnapshotRef.current = null
     setShowFollowOutput(false)
     setEditingSource(null)
+    undoneRoundBaselineRef.current = null
     setEditedSources(new Set())
     setCopiedItem('')
     if (!running) setActiveRunId('')
@@ -935,7 +967,7 @@ export function ChatPage() {
     const prompt = (promptOverride ?? draft).trim()
     const uploadedFiles = options.uploadedFiles ?? []
     const hasContent = Boolean(options.content?.length)
-    if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && running) || uploading) return false
+    if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && (running || stopping)) || uploading) return false
     const activeSession = options.sessionId || sessionId || createSessionId()
     const submissionDraftKey = draftKey
     let finalDraftKey = submissionDraftKey
@@ -944,12 +976,14 @@ export function ChatPage() {
     if (uploadedFiles.length) {
       submittedUploadsRef.current.set(runId, uploadedFiles.map((file) => ({ ...file })))
     }
-    const editingHistoryUserMessages = editingSource?.sessionId === activeSession
-      ? editingSource.remainingRounds
-      : undefined
-    const historyUserMessages = options.historyUserMessages
-      ?? editingHistoryUserMessages
-      ?? (activeSession === sessionId ? persistedUserMessages : 0)
+    const historyUserMessages = resolveHistoryUserMessages(
+      activeSession,
+      sessionId,
+      persistedUserMessages,
+      options.historyUserMessages,
+      editingSource,
+      undoneRoundBaselineRef.current,
+    )
     beginChatRun(user, activeSession, runId, historyUserMessages)
     setDraft('')
     setRunning(true)
@@ -1008,6 +1042,10 @@ export function ChatPage() {
         moveDraft(submissionDraftKey, finalDraftKey)
         setSessionId(activeSession)
       }
+      if (
+        committed
+        && undoneRoundBaselineRef.current?.sessionId === activeSession
+      ) undoneRoundBaselineRef.current = null
       if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
       refreshOverview()
@@ -1025,6 +1063,7 @@ export function ChatPage() {
       setChatAbortController(null)
       setActiveRunId('')
       setRunning(false)
+      setStopping(false)
     }
     return committed
   }
@@ -1224,9 +1263,13 @@ export function ChatPage() {
     setConversationFeedback(null)
     try {
       const undo = await undoLastRound(user, targetSession, expectedRound, content)
+      undoneRoundBaselineRef.current = {
+        sessionId: targetSession,
+        remainingRounds: Math.max(0, undo.remaining_rounds),
+      }
       setLiveItems((current) => dropLastLiveRound(current))
       if (sessionId) {
-        await queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+        void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] }).catch(() => undefined)
       }
       const editableContent = undo.prompt || content
       setDraft(editableContent)
@@ -1253,6 +1296,18 @@ export function ChatPage() {
     }
   }
 
+  const cancelEditAndResend = () => {
+    setEditingSource(null)
+    setDraft('')
+    setConversationFeedback({
+      tone: 'success',
+      text: '已取消编辑；被撤销的轮次不会恢复，下一条消息将直接作为新一轮发送。',
+    })
+    if (sessionId) {
+      void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] }).catch(() => undefined)
+    }
+  }
+
   const copyMessage = async (id: string, content: string) => {
     await copyText(content)
     setCopiedItem(id)
@@ -1261,12 +1316,10 @@ export function ChatPage() {
 
   const sendGuidance = async () => {
     const guidance = draft.trim()
-    if (!guidance || !user || !running || !effectiveRunId || stopping) return
-    setDraft('')
+    if (!guidance || !user || !running || !effectiveRunId) return
     const id = eventId('guidance')
-    setLiveItems((current) => [...current, { id, kind: 'guidance', content: guidance, status: 'queued' }])
     const queueForNextTurn = () => {
-      if (!liveSessionId) return
+      if (!liveSessionId) return false
       setLiveItems((current) => current.filter((item) => item.id !== id))
       const message: PendingNextTurnMessage = {
         id,
@@ -1278,14 +1331,20 @@ export function ChatPage() {
         status: 'queued',
       }
       queueNextTurnMessage(user, liveSessionId, message)
+      return true
     }
+    if (stopping) {
+      if (queueForNextTurn()) setDraft('')
+      return
+    }
+    setDraft('')
+    setLiveItems((current) => [...current, { id, kind: 'guidance', content: guidance, status: 'queued' }])
     try {
       const result = await submitGuidance(user, effectiveRunId, guidance)
       if (result.status === 'queued_next_turn') queueForNextTurn()
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
-        queueForNextTurn()
-        return
+        if (queueForNextTurn()) return
       }
       setLiveItems((current) => current.map((item) => item.kind === 'guidance' && item.id === id ? { ...item, status: 'error' } : item))
       setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '运行中引导提交失败' }])
@@ -1453,24 +1512,23 @@ export function ChatPage() {
   const dockedPlan = selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
   const stopCurrentRun = async () => {
     if (dockedPlan?.status === 'running') {
-      await commandPlanStatus(dockedPlan, 'pause')
-      return
+      void commandPlanStatus(dockedPlan, 'pause')
     }
     if (!user || !effectiveRunId || stopping) return
     setStopping(true)
-    try {
-      await cancelRun(user, effectiveRunId)
-    } catch (error) {
-      abortChatRun()
-      setStopping(false)
-      setLiveItems((current) => [...current, {
-        id: eventId('error'),
-        kind: 'error',
-        content: error instanceof Error
-          ? `紧急停止请求失败：${error.message}`
-          : '紧急停止请求失败，已断开当前响应',
-      }])
-    }
+    await executeStopRequest(
+      () => cancelRun(user, effectiveRunId),
+      (error) => {
+        abortChatRun()
+        setLiveItems((current) => [...current, {
+          id: eventId('error'),
+          kind: 'error',
+          content: error instanceof Error
+            ? `紧急停止请求失败：${error.message}`
+            : '紧急停止请求失败，已断开当前响应',
+        }])
+      },
+    )
   }
   const revealPlan = (plan: PlanSummary) => {
     if (plan.plan_id !== dockedPlan?.plan_id) {
@@ -1753,7 +1811,7 @@ export function ChatPage() {
         {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage item={guidancePreviewItem} placement="current" onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
         <AgentComposer
           value={draft}
-          placeholder={user ? running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+          placeholder={user ? stopping ? '输入下一轮消息；将在当前任务停止后自动发送…' : running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
           currentRound={currentRound}
           totalRounds={totalRounds}
           roundLimit={roundLimit}
@@ -1764,7 +1822,7 @@ export function ChatPage() {
           pendingFileCount={pendingUploads.length}
           uploading={uploading}
           uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status"><span>{uploadFeedback.text}</span><button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : pendingUploads.length ? <div className="upload-feedback success" role="status"><span>{pendingUploads.map((file) => `已上传 ${file.name} · ${formatBytes(file.size)}`).join('；')}</span><button type="button" onClick={() => setPendingUploads([])} aria-label="移除待发送文件">×</button></div> : null}
-          notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={() => { setEditingSource(null); setDraft('') }}>取消编辑</button></div> : null}
+          notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={cancelEditAndResend}>取消编辑</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">
               <div className="conversation-menu-head">对话操作</div>

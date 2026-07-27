@@ -1110,6 +1110,7 @@ export interface MessageTransportSummary {
   path: string
   files_path: string
   log_path: string
+  structured_log_path?: string
   message_buffer: string
   modules: Record<string, string>
   api_imported: boolean

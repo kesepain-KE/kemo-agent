@@ -87,6 +87,7 @@ from run.history_index import (
     new_conversation_id,
     reserve_session,
 )
+from run.log_store import LogStore
 from run.memory import (
     TIERS,
     MemoryError as RuntimeMemoryError,
@@ -1792,7 +1793,7 @@ class WebRunService:
     def _message_log_text(value: str) -> str:
         return " ".join(value.strip().split())
 
-    def _message_logs(
+    def _legacy_message_logs(
         self, config: MessagePluginConfig
     ) -> tuple[list[dict[str, Any]], bool, int]:
         entries: list[dict[str, Any]] = []
@@ -1879,6 +1880,38 @@ class WebRunService:
         )
         return entries[:_MESSAGE_LOG_LIMIT], truncated, today_count
 
+    def _message_logs(
+        self, config: MessagePluginConfig
+    ) -> tuple[list[dict[str, Any]], bool, int]:
+        """Read indexed message logs, retaining Markdown as a safe fallback."""
+
+        try:
+            store = LogStore(self.root)
+            files_root = config.files_path.relative_to(self.root).as_posix()
+            store.migrate_message_logs(
+                config.log_path,
+                machine_id=config.machine_id,
+                user=config.bound_user,
+                platform=config.platform,
+                files_root=files_root,
+            )
+            entries = store.list_messages(
+                config.machine_id,
+                limit=_MESSAGE_LOG_LIMIT + 1,
+            )
+            today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
+            today_count = store.count_messages(
+                config.machine_id,
+                date_prefix=today,
+            )
+            return (
+                entries[:_MESSAGE_LOG_LIMIT],
+                len(entries) > _MESSAGE_LOG_LIMIT,
+                today_count,
+            )
+        except Exception:
+            return self._legacy_message_logs(config)
+
     def _message_transport_item(
         self,
         config: MessagePluginConfig,
@@ -1934,6 +1967,7 @@ class WebRunService:
             "path": directory.relative_to(self.root).as_posix(),
             "files_path": config.files_path.relative_to(self.root).as_posix(),
             "log_path": config.log_path.relative_to(self.root).as_posix(),
+            "structured_log_path": "runtime/logs.sqlite3",
             "message_buffer": config.buffer_path.relative_to(self.root).as_posix(),
             "modules": dict(config.modules),
             "api_imported": True,
@@ -2057,6 +2091,13 @@ class WebRunService:
                 except OSError:
                     pass
             raise WebServiceError(f"消息模块删除失败：{logical_name}") from exc
+        try:
+            LogStore(self.root).delete_message_logs(
+                config.machine_id,
+                user=name,
+            )
+        except Exception:
+            pass
         return {
             "user": name,
             "module": logical_name,
@@ -2873,6 +2914,8 @@ class WebRunService:
         context = result.get("context") if isinstance(result.get("context"), dict) else {}
         rounds_removed = max(0, int(context.get("rounds_removed") or 0))
         summary_cache = str(result.get("summary_cache") or "")
+        compressed = result.get("compressed") is True
+        compression_verified = result.get("compression_verified") is True
         summary = context.get("summary")
         if isinstance(summary, dict) and summary.get("failed") is True:
             detail = str(summary.get("error") or "").strip()
@@ -2880,6 +2923,8 @@ class WebRunService:
             if detail:
                 message = f"{message}：{detail}"
             raise WebServiceError(message)
+        if rounds_removed and not (compressed and compression_verified):
+            raise WebServiceError("手动上下文压缩失败：运行窗口落盘校验未通过")
         raw_memory = result.get("memory")
         if isinstance(raw_memory, dict):
             memory = dict(raw_memory)
@@ -2915,7 +2960,8 @@ class WebRunService:
             "source": normalized_source,
             "session_id": normalized_session,
             "requested": True,
-            "compressed": bool(summary_cache or rounds_removed),
+            "compressed": compressed,
+            "compression_verified": compression_verified,
             "rounds_removed": rounds_removed,
             "summary_cache_exists": bool(summary_cache),
             "context": dict(context),
@@ -4995,7 +5041,23 @@ class WebRunService:
             / f"{now.astimezone(_BEIJING):%Y-%m-%d}.jsonl"
         )
         executions: list[dict[str, Any]] = []
-        if log_path.is_file() and not log_path.is_symlink():
+        structured: list[dict[str, Any]] = []
+        try:
+            store = LogStore(self.root)
+            store.migrate_cron_logs(log_path.parent)
+            structured = store.list_cron(user, limit=1000)
+        except Exception:
+            structured = []
+        if structured:
+            for item in structured:
+                task_id = str(item.get("task_id") or "")
+                executions.append(
+                    {
+                        **item,
+                        "title": task_titles.get(task_id, task_id),
+                    }
+                )
+        elif log_path.is_file() and not log_path.is_symlink():
             try:
                 lines = log_path.read_text("utf-8").splitlines()
             except (OSError, UnicodeError):
@@ -5043,7 +5105,7 @@ class WebRunService:
         return {
             "tasks": tasks,
             "executions": executions[:100],
-            "tracking": "execution_log" if log_path.is_file() else "task_state",
+            "tracking": "execution_log" if structured or log_path.is_file() else "task_state",
         }
 
     def runtime_status(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
