@@ -1,6 +1,6 @@
 {
   "name": "context_manage",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "按完整对话轮整理上下文并生成结构化历史摘要。",
   "trigger": "trigger.md"
 }

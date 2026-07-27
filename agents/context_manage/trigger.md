@@ -45,7 +45,7 @@
 
 逐轮检查，当某轮距离当前超过 `agents.conserved_rounds` 轮时：
 
-1. 压缩该轮的 think 和 tool_calls 为简短摘要
+1. 将该轮 think/reasoning 和 tool_calls 精炼为可独立理解的摘要，保留关键判断依据、工具名称、关键参数/结果、失败原因和最终结论
 2. 写入 temp 层该轮的 thinking 位置，工具日志标记为空
 3. 仅修改 temp 层，archive 不动
 
@@ -74,8 +74,10 @@
 
 ## 注意事项
 
-- 所有阈值从 `config/global_config.json → agents` 读取，不硬编码
+- 轮次和 token 触发阈值从 `config/global_config.json → agents` 读取；摘要最大输出预算由核心运行时统一设为 20000 tokens
 - 不直接修改 archive，所有压缩产物写入 temp
 - 正式引擎必须先持久化游标记忆提取结果，再让 executor 只生成摘要
 - 工具/思考压缩是逐轮进行的，不会批量压缩多轮
+- 摘要输入同时包含正文、reasoning/think 与工具结果；只保留对后续仍有用的精炼依据，不复述逐步内部推演或工具长输出
+- `tool_think_compress` 的 `narrative` 必须独立完整且非空，因为运行时会在成功摘要后删除该轮原始工具日志
 - 记忆游标逐轮同步推进；失败停在当前轮，后续由恢复机制重试
