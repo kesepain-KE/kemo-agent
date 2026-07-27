@@ -51,6 +51,62 @@ from run.tools import (
 
 _AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
 _STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
+_SERIAL_EXECUTION_LOCKS_GUARD = threading.RLock()
+_SERIAL_EXECUTION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_SERIAL_EXECUTION_LOCAL = threading.local()
+
+
+def _serial_execution_key(root: Path, user: str) -> tuple[str, str]:
+    return str(root.resolve()).casefold(), user
+
+
+def _serial_execution_lock(key: tuple[str, str]) -> threading.Lock:
+    """Return the process-local write lock shared by every runner for one user."""
+
+    with _SERIAL_EXECUTION_LOCKS_GUARD:
+        return _SERIAL_EXECUTION_LOCKS.setdefault(key, threading.Lock())
+
+
+def _owned_serial_execution_keys() -> set[tuple[str, str]]:
+    keys = getattr(_SERIAL_EXECUTION_LOCAL, "keys", None)
+    if keys is None:
+        keys = set()
+        _SERIAL_EXECUTION_LOCAL.keys = keys
+    return keys
+
+
+def _execute_agent(
+    function: Callable[[Any, dict[str, Any]], "AgentRunResult"],
+    context: Any,
+    input_data: dict[str, Any],
+    *,
+    serial_lock: threading.Lock | None,
+    serial_key: tuple[str, str] | None,
+) -> "AgentRunResult":
+    def execute() -> AgentRunResult:
+        owned = _owned_serial_execution_keys()
+        if serial_key is not None:
+            owned.add(serial_key)
+        try:
+            return function(context, input_data)
+        finally:
+            if serial_key is not None:
+                owned.discard(serial_key)
+
+    if serial_lock is not None:
+        with serial_lock:
+            if context.cancel_event.is_set():
+                raise AgentCancelledError(
+                    f"子代理 {context.definition.name} 在等待用户级串行执行时已取消"
+                )
+            return execute()
+    if serial_key is not None:
+        if context.cancel_event.is_set():
+            raise AgentCancelledError(
+                f"子代理 {context.definition.name} 在等待用户级串行执行时已取消"
+            )
+        return execute()
+    return function(context, input_data)
 
 
 class AgentRunError(RuntimeError):
@@ -710,7 +766,24 @@ class AgentRunner:
         function = _load_executor(definition)
         _event(event_callback, agent=name, status="started", task_id=task_id)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"agent-{name}")
-        future = executor.submit(function, context, input_data)
+        serial_key = (
+            _serial_execution_key(self.root, self.user)
+            if definition.execution == "background_serial"
+            else None
+        )
+        serial_lock = (
+            None
+            if serial_key is None or serial_key in _owned_serial_execution_keys()
+            else _serial_execution_lock(serial_key)
+        )
+        future = executor.submit(
+            _execute_agent,
+            function,
+            context,
+            input_data,
+            serial_lock=serial_lock,
+            serial_key=serial_key,
+        )
         deadline = time.monotonic() + effective_timeout
         try:
             while True:

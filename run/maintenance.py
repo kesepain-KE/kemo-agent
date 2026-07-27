@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,7 +34,6 @@ from run.history_index import (
     update_summary_checkpoint,
 )
 from run.memory import (
-    MemoryStore,
     contains_sensitive_credential,
     memory_extraction_batch_rounds,
     memory_extraction_mode,
@@ -49,7 +46,6 @@ from run.users import list_users
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
-IMPORTANT_MEMORY_INPUT_LIMIT = 200
 MEMORY_RECOVERY_ROUNDS_PER_SCAN = 10
 HISTORY_SUMMARY_CHUNK_TOKENS = 24_000
 HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 10_000
@@ -66,35 +62,6 @@ def _safe_agent_output_preview(error: BaseException) -> str:
     if contains_sensitive_credential(raw_text):
         return "[输出包含疑似敏感内容，已隐藏]"
     return " ".join(raw_text.split())[:1000]
-
-
-def _parse_daily_time(value: Any) -> tuple[int, int]:
-    text = str(value or "02:00").strip()
-    parts = text.split(":")
-    if len(parts) != 2:
-        raise MaintenanceError("agents.daily_memory_review_time 必须是 HH:MM")
-    try:
-        hour, minute = (int(part) for part in parts)
-    except ValueError as exc:
-        raise MaintenanceError("agents.daily_memory_review_time 必须是 HH:MM") from exc
-    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-        raise MaintenanceError("agents.daily_memory_review_time 必须是有效的北京时间")
-    return hour, minute
-
-
-def _atomic_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content.rstrip())
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 def _message_text(value: Any) -> str:
@@ -949,58 +916,6 @@ class MaintenanceScheduler:
             "batches": batches,
             "processed": processed,
             "failed": failed,
-        }
-
-    def _review_important_memory(
-        self,
-        user: str,
-        config: dict[str, Any],
-        store: MemoryStore,
-    ) -> dict[str, Any]:
-        """Deprecated compatibility helper; important memory now runs via cron."""
-        temporary = [
-            item
-            for tier in ("half_year", "one_month", "seven_days")
-            for item in store.load_tier(tier)
-        ]
-        temporary.sort(
-            key=lambda item: (-int(item.get("weight", 0)), str(item.get("filename", "")))
-        )
-        important_path = self.root / "users" / user / "memory_temporary_important.md"
-        try:
-            existing = important_path.read_text("utf-8").strip()
-        except FileNotFoundError:
-            existing = ""
-        permanent = store.load_tier("permanent")
-        if not temporary and not existing:
-            return {"status": "skipped", "reason": "no_temporary_memory"}
-        result = AgentRunner(
-            self.root,
-            user,
-            config=config,
-            provider_factory=self.provider_factory,
-        ).run(
-            "memory_temporary_important",
-            {
-                "temporary_memories": temporary[:IMPORTANT_MEMORY_INPUT_LIMIT],
-                "existing_important_memory": existing,
-                "permanent_memories": permanent,
-            },
-            cancel_event=self._stop_event,
-        )
-        content = result.data.get("content")
-        if not isinstance(content, str):
-            raise MaintenanceError("memory_temporary_important 输出缺少 content 字符串")
-        if contains_sensitive_credential(content):
-            raise MaintenanceError("重要记忆审阅结果包含疑似敏感凭据，已拒绝持久化")
-        if content.strip():
-            _atomic_text(important_path, content)
-        else:
-            important_path.unlink(missing_ok=True)
-        return {
-            "status": "completed",
-            "items_considered": min(len(temporary), IMPORTANT_MEMORY_INPUT_LIMIT),
-            "chars": len(content.strip()),
         }
 
     def _review_contexts(self, user: str) -> dict[str, Any]:

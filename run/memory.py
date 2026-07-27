@@ -339,7 +339,10 @@ class MemoryStore:
 
         The view index is derived cache metadata.  A missing or malformed file must
         never make the authoritative memory tiers unavailable, so prompt assembly
-        falls back to injecting all temporary fragments.
+        falls back to injecting all temporary fragments.  Source validation is
+        deliberately all-or-nothing: returning a valid subset while the hot view is
+        stale would exclude that subset from both the hot view and the regular
+        temporary-memory prompt.
         """
 
         path = self.important_view_path()
@@ -373,14 +376,20 @@ class MemoryStore:
                     expected_hash = ""
                 location = self.locate(filename)
                 if location is None or location.tier not in TEMPORARY_TIERS:
-                    continue
+                    LOGGER.warning("临时重要记忆来源已失效，回退全部临时记忆：%s", source)
+                    return frozenset()
                 if expected_hash:
                     actual_hash = hashlib.sha256(location.path.read_bytes()).hexdigest()
                     if actual_hash != expected_hash:
-                        continue
+                        LOGGER.warning("临时重要记忆来源内容已变化，回退全部临时记忆：%s", source)
+                        return frozenset()
+                if location.filename in normalized:
+                    LOGGER.warning("临时重要记忆来源重复，回退全部临时记忆：%s", source)
+                    return frozenset()
                 normalized.add(location.filename)
             except (MemoryError, OSError):
-                LOGGER.warning("跳过无效的临时重要记忆来源：%s", source)
+                LOGGER.warning("临时重要记忆来源无效，回退全部临时记忆：%s", source)
+                return frozenset()
         return frozenset(normalized)
 
     def important_view_is_current(self) -> bool:

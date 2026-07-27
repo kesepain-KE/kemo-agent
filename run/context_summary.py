@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -16,9 +17,9 @@ from run.agent_runner import AgentRunner
 from run.context import RoundGroup, estimate_text_tokens
 
 
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 3
 SUMMARY_CHUNK_TOKEN_BUDGET = 64_000
-SUMMARY_MAX_OUTPUT_TOKENS = 8_192
+SUMMARY_MAX_OUTPUT_TOKENS = 20_000
 SUMMARY_KEYS = (
     "facts",
     "requirements",
@@ -46,6 +47,11 @@ def _source_round(group: RoundGroup) -> dict[str, Any]:
     return {
         "round": group.number,
         "messages": group.raw_text_messages,
+        "reasoning": (
+            copy.deepcopy(group.think)
+            if isinstance(group.think, dict)
+            else None
+        ),
         "tools": (group.tool or {}).get("calls", []),
     }
 
@@ -82,6 +88,8 @@ def _normalise_summary(value: Any) -> dict[str, Any]:
             result[key] = [str(item)]
         else:
             result[key] = []
+    if not result["narrative"].strip():
+        raise SummaryError("摘要 narrative 不能为空")
     return result
 
 
@@ -106,6 +114,18 @@ def read_summary_cache(path: Path) -> dict[str, Any] | None:
 
     value = _read_cache(path)
     return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+
+
+def restore_summary_cache(path: Path, cache: dict[str, Any] | None) -> None:
+    """Restore the last validated cache after a runtime compaction rollback."""
+
+    if cache is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _atomic_write(path, cache)
 
 
 def _covered_through(cache: dict[str, Any] | None) -> int:
@@ -195,7 +215,7 @@ def get_or_create_summary(
     trigger: str,
     cancel_event: threading.Event | None = None,
     chunk_token_budget: int = SUMMARY_CHUNK_TOKEN_BUDGET,
-    max_tokens: int = 2048,
+    max_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
     response_hook: Callable[[dict[str, Any]], None] | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,
     skip_memory_extraction: bool = False,

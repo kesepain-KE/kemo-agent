@@ -48,6 +48,7 @@ from run.context_summary import (
     build_summary_message,
     get_or_create_summary,
     read_summary_cache,
+    restore_summary_cache,
 )
 from run.context_service import compress_per_round_tool_think as _compress_per_round_tool_think
 from run.errors import ContextLengthExceededError, EngineError
@@ -55,6 +56,7 @@ from run.history import (
     _trim_to_max_rounds,
     append_round_items,
     commit_window,
+    load_window,
     load_runtime_window,
     prepare_window,
     queue_memory_extraction,
@@ -257,6 +259,79 @@ def _ensure_fixed_content_fits(
         f"input_budget={selection.input_budget} tokens；"
         "请调小 memory.temporary_injection_limits 或 prompt.char_limits"
     )
+
+
+def _commit_verified_manual_compression(
+    *,
+    runtime_path: Path,
+    original_window: dict[str, Any],
+    compacted_window: dict[str, Any],
+    summary_path: Path,
+    summary_cache: dict[str, Any],
+    previous_summary_cache: dict[str, Any] | None,
+    removed_round_numbers: list[int],
+    previous_round_offset: int,
+    expected_rounds: int,
+    expected_round_offset: int,
+) -> None:
+    """Commit temp compaction and roll both artifacts back if verification fails."""
+
+    try:
+        commit_window(runtime_path, compacted_window)
+        stored = load_window(runtime_path)
+        stored_data = stored.get("data") or {}
+        stored_context = stored_data.get("context") or {}
+        actual_rounds = int(stored_data.get("rounds") or 0)
+        actual_workspace_rounds = int(
+            stored_context.get("workspace_rounds") or 0
+        )
+        actual_offset = int(stored_context.get("round_offset") or 0)
+        if (
+            actual_rounds != expected_rounds
+            or actual_workspace_rounds != expected_rounds
+            or actual_offset != expected_round_offset
+        ):
+            raise EngineError(
+                "上下文压缩落盘校验失败："
+                f"期望 workspace={expected_rounds}、offset={expected_round_offset}，"
+                f"实际 workspace={actual_rounds}/{actual_workspace_rounds}、"
+                f"offset={actual_offset}"
+            )
+        stored_cache = read_summary_cache(summary_path)
+        if stored_cache is None:
+            raise EngineError("上下文压缩落盘校验失败：摘要缓存不可读取")
+        if stored_cache.get("source_hash") != summary_cache.get("source_hash"):
+            raise EngineError("上下文压缩落盘校验失败：摘要缓存版本不一致")
+        covered = stored_cache.get("covered_rounds")
+        covered_rounds = {
+            int(number)
+            for number in covered
+            if isinstance(number, int) or str(number).isdigit()
+        } if isinstance(covered, list) else set()
+        expected_covered = {
+            max(0, previous_round_offset) + int(number)
+            for number in removed_round_numbers
+        }
+        if not expected_covered.issubset(covered_rounds):
+            raise EngineError("上下文压缩落盘校验失败：摘要未覆盖全部移除轮次")
+        if stored_context.get("summary_cache") != "context_summary.json":
+            raise EngineError("上下文压缩落盘校验失败：运行窗口未登记摘要缓存")
+        snapshot = stored_data.get("context_snapshot") or {}
+        if int(snapshot.get("workspace_rounds") or 0) != expected_rounds:
+            raise EngineError("上下文压缩落盘校验失败：上下文快照仍指向旧工作区")
+    except BaseException:
+        rollback_errors: list[str] = []
+        try:
+            commit_window(runtime_path, original_window)
+        except BaseException as exc:
+            rollback_errors.append(f"运行窗口回滚失败：{exc}")
+        try:
+            restore_summary_cache(summary_path, previous_summary_cache)
+        except BaseException as exc:
+            rollback_errors.append(f"摘要缓存回滚失败：{exc}")
+        if rollback_errors:
+            raise EngineError("；".join(rollback_errors))
+        raise
 
 
 def _memory_injected_chars(bundle: PromptBundle) -> int:
@@ -690,6 +765,13 @@ def _iter_request_events_impl(
                 if removed_after == removed_before:
                     break
 
+            # A later incremental pass can fail after an earlier pass wrote a
+            # newer cache. Never leave that partial cache paired with the old
+            # runtime workspace; the next request would otherwise read a
+            # summary for rounds that were never removed.
+            if bool(summary_diagnostics.get("failed")):
+                restore_summary_cache(summary_path, persisted_summary_cache)
+
             terminal_committer = TerminalRoundCommitter(
                 TerminalRoundContext(
                     identity=identity,
@@ -727,7 +809,24 @@ def _iter_request_events_impl(
             for subagent_event in subagent_events:
                 yield subagent_event
             if compress_only:
-                if summary_cache is not None and context_selection.removed_rounds:
+                compression_applied = False
+                summary_failed = bool(summary_diagnostics.get("failed"))
+                if summary_failed:
+                    restore_summary_cache(summary_path, persisted_summary_cache)
+                    summary_cache = persisted_summary_cache
+                if (
+                    not summary_failed
+                    and summary_cache is not None
+                    and context_selection.removed_rounds
+                ):
+                    previous_round_offset = max(
+                        0,
+                        int(
+                            (window.get("data", {}).get("context") or {}).get(
+                                "round_offset", 0
+                            )
+                        ),
+                    )
                     runtime_window = _trim_to_max_rounds(
                         window,
                         max(1, len(context_selection.kept_rounds)),
@@ -744,13 +843,43 @@ def _iter_request_events_impl(
                         ),
                         "summary_cache": "context_summary.json",
                     }
+                    runtime_selection = select_context(
+                        window=runtime_window,
+                        policy=context_policy,
+                        system_message=system_message,
+                        summary_message=build_summary_message(summary_cache),
+                        current_user_message=None,
+                        tools=tool_schemas,
+                    )
                     runtime_window["data"]["context_snapshot"] = build_context_snapshot(
-                        context_selection,
+                        runtime_selection,
                         system_prompt=prompt_bundle.text,
                         summary_message=build_summary_message(summary_cache),
                         capacity_tokens=context_policy.token_limit,
                     )
-                    commit_window(runtime_path, runtime_window)
+                    expected_rounds = int(
+                        runtime_window["data"].get("rounds") or 0
+                    )
+                    expected_round_offset = max(
+                        0,
+                        int(archive_window.get("data", {}).get("rounds") or 0)
+                        - expected_rounds,
+                    )
+                    _commit_verified_manual_compression(
+                        runtime_path=runtime_path,
+                        original_window=window,
+                        compacted_window=runtime_window,
+                        summary_path=summary_path,
+                        summary_cache=summary_cache,
+                        previous_summary_cache=persisted_summary_cache,
+                        removed_round_numbers=[
+                            item.number for item in context_selection.removed_rounds
+                        ],
+                        previous_round_offset=previous_round_offset,
+                        expected_rounds=expected_rounds,
+                        expected_round_offset=expected_round_offset,
+                    )
+                    compression_applied = True
                 if queue_compression_memory:
                     if bool(summary_diagnostics.get("failed")):
                         compression_memory = {
@@ -801,7 +930,8 @@ def _iter_request_events_impl(
                             if summary_cache is not None
                             else None
                         ),
-                        "compressed": True,
+                        "compressed": compression_applied,
+                        "compression_verified": compression_applied,
                         "committed": False,
                         "memory": compression_memory,
                     },

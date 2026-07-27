@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat as stat_module
 import threading
 import time
 import uuid
@@ -183,6 +184,10 @@ def empty_index() -> dict[str, Any]:
         "revision": 0,
         "sessions": {},
         "active": {},
+        # A lightweight fingerprint of archive metadata.  It lets readers
+        # avoid parsing every (potentially very large) archive data.json on
+        # every session-list request while still detecting external changes.
+        "archive_manifest": {},
         "updated_at": _now(),
     }
 
@@ -193,6 +198,42 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _archive_manifest(root: Path, user: str) -> dict[str, dict[str, int]]:
+    """Return stat-only fingerprints for complete archive candidates.
+
+    The manifest intentionally does not open archive files.  ``data.json``
+    can contain large round metrics, so listing sessions should only pay the
+    cost of a directory walk and a stat call per archive.  A changed mtime or
+    size causes the normal reconciliation path to re-read the archive.
+    """
+
+    directory = history_directory(root, user)
+    result: dict[str, dict[str, int]] = {}
+    if not directory.is_dir():
+        return result
+    try:
+        children = directory.iterdir()
+        for child in children:
+            if not child.is_dir() or child.name == "temp" or child.is_symlink():
+                continue
+            data_path = child / "data.json"
+            try:
+                file_stat = data_path.stat()
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(file_stat.st_mode):
+                continue
+            result[child.name] = {
+                "mtime_ns": int(file_stat.st_mtime_ns),
+                "size": int(file_stat.st_size),
+            }
+    except OSError:
+        # A disappearing history directory is equivalent to an empty one;
+        # reconciliation remains able to recover once it becomes available.
+        return {}
+    return result
 
 
 def _record_key(source: str, session_id: str) -> str:
@@ -369,6 +410,20 @@ def _normalize_index(value: dict[str, Any] | None) -> dict[str, Any]:
     active = value.get("active")
     if isinstance(active, dict):
         base["active"] = copy.deepcopy(active)
+    manifest = value.get("archive_manifest")
+    if isinstance(manifest, dict):
+        normalized_manifest: dict[str, dict[str, int]] = {}
+        for name, entry in manifest.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                normalized_manifest[str(name)] = {
+                    "mtime_ns": max(0, int(entry.get("mtime_ns") or 0)),
+                    "size": max(0, int(entry.get("size") or 0)),
+                }
+            except (TypeError, ValueError):
+                continue
+        base["archive_manifest"] = normalized_manifest
     try:
         base["revision"] = max(0, int(value.get("revision") or 0))
     except (TypeError, ValueError):
@@ -410,35 +465,11 @@ def _active_matches(value: Any, source: str, session_id: str) -> bool:
     return value == session_id
 
 
-def _reconcile_unlocked(root: Path, user: str, index: dict[str, Any]) -> bool:
+def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
+    """Repair registry-only state without opening archive data files."""
+
     changed = False
-    scanned = _scan_archive_windows(root, user)
     sessions = index.setdefault("sessions", {})
-    for key, record in scanned.items():
-        old = sessions.get(key)
-        if old != record:
-            # Preserve lifecycle, title, summary, bindings and cursors from an
-            # existing registry record while refreshing durable window counters.
-            sessions[key] = _record_from_data(
-                source=str(record.get("source") or ""),
-                session_id=str(record.get("session_id") or ""),
-                directory=history_directory(root, user) / str(record.get("archive_window") or ""),
-                data=record,
-                previous=old,
-            )
-            changed = True
-    existing_keys = set(sessions)
-    scanned_keys = set(scanned)
-    for key in existing_keys - scanned_keys:
-        record = sessions.get(key) or {}
-        if (
-            record.get("lifecycle") == "closed"
-            or record.get("run_state") == "running"
-            or not record.get("archive_window")
-        ):
-            continue
-        sessions.pop(key, None)
-        changed = True
     for record in sessions.values():
         if not isinstance(record, dict):
             continue
@@ -481,6 +512,48 @@ def _reconcile_unlocked(root: Path, user: str, index: dict[str, Any]) -> bool:
     return changed
 
 
+def _reconcile_unlocked(
+    root: Path,
+    user: str,
+    index: dict[str, Any],
+    *,
+    manifest: dict[str, dict[str, int]] | None = None,
+) -> bool:
+    changed = False
+    scanned = _scan_archive_windows(root, user)
+    sessions = index.setdefault("sessions", {})
+    for key, record in scanned.items():
+        old = sessions.get(key)
+        if old != record:
+            # Preserve lifecycle, title, summary, bindings and cursors from an
+            # existing registry record while refreshing durable window counters.
+            sessions[key] = _record_from_data(
+                source=str(record.get("source") or ""),
+                session_id=str(record.get("session_id") or ""),
+                directory=history_directory(root, user) / str(record.get("archive_window") or ""),
+                data=record,
+                previous=old,
+            )
+            changed = True
+    existing_keys = set(sessions)
+    scanned_keys = set(scanned)
+    for key in existing_keys - scanned_keys:
+        record = sessions.get(key) or {}
+        if (
+            record.get("run_state") == "running"
+            or not record.get("archive_window")
+        ):
+            continue
+        sessions.pop(key, None)
+        changed = True
+    changed = _reconcile_metadata_unlocked(index) or changed
+    current_manifest = manifest if manifest is not None else _archive_manifest(root, user)
+    if index.get("archive_manifest") != current_manifest:
+        index["archive_manifest"] = copy.deepcopy(current_manifest)
+        changed = True
+    return changed
+
+
 def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, Any]:
     """Load and, when needed, rebuild the per-user index atomically."""
 
@@ -490,7 +563,22 @@ def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, An
         index = _normalize_index(raw)
         changed = raw is None or raw.get("schema_version") != INDEX_SCHEMA_VERSION if isinstance(raw, dict) else True
         if reconcile:
-            changed = _reconcile_unlocked(root, user, index) or changed
+            manifest = _archive_manifest(root, user)
+            stored_manifest = index.get("archive_manifest")
+            needs_reconcile = (
+                changed
+                or not isinstance(stored_manifest, dict)
+                or stored_manifest != manifest
+            )
+            if needs_reconcile:
+                changed = _reconcile_unlocked(
+                    root,
+                    user,
+                    index,
+                    manifest=manifest,
+                ) or changed
+            else:
+                changed = _reconcile_metadata_unlocked(index) or changed
         if changed:
             index["schema_version"] = INDEX_SCHEMA_VERSION
             index["revision"] = max(0, int(index.get("revision") or 0)) + 1
@@ -500,6 +588,7 @@ def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, An
 
 
 def _write_index_unlocked(root: Path, user: str, index: dict[str, Any]) -> dict[str, Any]:
+    index["archive_manifest"] = _archive_manifest(root, user)
     index["schema_version"] = INDEX_SCHEMA_VERSION
     index["revision"] = max(0, int(index.get("revision") or 0)) + 1
     index["updated_at"] = _now()

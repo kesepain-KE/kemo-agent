@@ -869,6 +869,28 @@ def find_window(root: Path, user: str, source: str, session_id: str) -> Path | N
     history_dir = user_dir(user, root) / "history"
     if not history_dir.is_dir():
         return None
+
+    # The rebuildable registry normally knows the exact archive directory.
+    # Validate that hint against its data.json before returning it; stale or
+    # malformed index data falls back to the legacy full scan below.
+    indexed = find_index_record(root, user, source, session_id)
+    archive_window = str((indexed or {}).get("archive_window") or "")
+    if archive_window and Path(archive_window).name == archive_window:
+        indexed_directory = history_dir / archive_window
+        try:
+            indexed_data = _read_json(indexed_directory / "data.json")
+        except HistoryError:
+            indexed_data = None
+        if (
+            indexed_directory.is_dir()
+            and isinstance(indexed_data, dict)
+            and indexed_data.get("complete") is True
+            and indexed_data.get("source") == source
+            and indexed_data.get("session_id") == session_id
+            and str(indexed_data.get("user") or user) == user
+        ):
+            return indexed_directory
+
     candidates: list[tuple[str, Path]] = []
     for directory in history_dir.iterdir():
         if not directory.is_dir():

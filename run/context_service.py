@@ -11,7 +11,11 @@ from typing import Any, Callable
 from run.agent_runner import AgentRunner
 from run.config import load_config, project_root
 from run.context import ContextPolicy, select_context
-from run.context_summary import build_summary_message, read_summary_cache
+from run.context_summary import (
+    SUMMARY_MAX_OUTPUT_TOKENS,
+    build_summary_message,
+    read_summary_cache,
+)
 from run.history import load_runtime_window, prepare_window, runtime_window_path
 from run.memory import MemoryStore
 from run.prompt import build_prompt_bundle
@@ -31,6 +35,30 @@ def round_item_data(window: dict[str, Any], round_number: int) -> list[dict[str,
         and isinstance(item.get("metadata"), dict)
         and item["metadata"].get("round") == round_number
     ]
+
+
+def _tool_think_summary(data: dict[str, Any]) -> str:
+    """Keep the compact narrative plus any structured conclusions it omitted."""
+
+    narrative = str(data.get("narrative") or "").strip()
+    sections: list[str] = []
+    for key, label in (
+        ("facts", "事实"),
+        ("decisions", "决策"),
+        ("tool_results", "工具结论"),
+        ("unfinished", "未完成"),
+    ):
+        values = data.get(key)
+        if not isinstance(values, list):
+            continue
+        missing = [
+            str(value).strip()
+            for value in values
+            if str(value).strip() and str(value).strip() not in narrative
+        ]
+        if missing:
+            sections.append(f"{label}：" + "；".join(missing))
+    return "\n".join(part for part in (narrative, *sections) if part).strip()
 
 
 def compress_per_round_tool_think(
@@ -89,9 +117,11 @@ def compress_per_round_tool_think(
                 "trigger": "tool_think_compress",
             },
             cancel_event=cancel_event,
-            max_tokens=512,
+            max_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
         )
-        summary = str(result.data.get("narrative") or "").strip()
+        summary = _tool_think_summary(result.data)
+        if not summary:
+            raise RuntimeError("context_manage 工具/思考摘要为空，已保留原始数据")
         usage = dict(result.usage)
     if think_data is not None:
         think_data["content"] = summary
@@ -229,4 +259,3 @@ def context_status(
             "output_reserve": policy.output_reserve,
         },
     }
-
