@@ -25,6 +25,9 @@ class KemoGatewayProvider:
     def capabilities(self, model: str):
         return self._native.capabilities(model)
 
+    def models(self, *, task: str | None = None):
+        return self._native.models(task=task)
+
     def get_response(self, response_id: str):
         return self._native.get_response(response_id)
 

@@ -327,6 +327,23 @@ class ModelCapabilities(ExtensionModel):
     structured_output: bool = False
 
 
+class ModelCatalogItem(ProtocolModel):
+    id: str
+    object: Literal["kemo.model"] = "kemo.model"
+    provider_id: str
+    provider_model: str
+    task: Literal["llm", "embedding", "rerank", "unknown"]
+    capabilities_available: bool
+    capabilities_url: str
+
+
+class ModelCatalogResponse(ProtocolModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    object: Literal["kemo.model_list"] = "kemo.model_list"
+    count: int = Field(ge=0)
+    data: list[ModelCatalogItem]
+
+
 class Measurement(ProtocolModel):
     mode: MeasurementMode = MeasurementMode.UNKNOWN
     exact: bool = False

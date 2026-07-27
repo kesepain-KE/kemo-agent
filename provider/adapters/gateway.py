@@ -18,7 +18,12 @@ from typing import Any
 
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.assets import AssetDescriptor
-from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
+from provider.protocol.models import (
+    KemoRequest,
+    KemoResponse,
+    ModelCapabilities,
+    ModelCatalogResponse,
+)
 from provider.protocol.serialization import parse_response, to_json_bytes
 from provider.protocol.streaming import (
     ProviderStreamEvent,
@@ -73,6 +78,7 @@ class KemoGatewayAdapter:
         self.timeout = float(config.get("timeout", 120))
         self.responses_url = f"{self.base_url}/model/responses"
         self.capabilities_url = f"{self.base_url}/model/capabilities"
+        self.models_url = f"{self.base_url}/model/models"
         self.assets_url = f"{self.base_url}/assets"
 
     def _headers(
@@ -163,6 +169,25 @@ class KemoGatewayAdapter:
         except Exception as exc:
             raise ProviderError(
                 "Kemo gateway 返回了无效的模型能力声明",
+                category="gateway_protocol_error",
+                body=raw[:1000],
+            ) from exc
+
+    def models(self, *, task: str | None = None) -> ModelCatalogResponse:
+        query = urllib.parse.urlencode({"task": task}) if task else ""
+        url = self.models_url + (f"?{query}" if query else "")
+        request = urllib.request.Request(
+            url,
+            headers=self._headers(stream=False),
+            method="GET",
+        )
+        with self._open(request) as response:
+            raw = response.read()
+        try:
+            return ModelCatalogResponse.model_validate_json(raw)
+        except Exception as exc:
+            raise ProviderError(
+                "Kemo gateway 返回了无效的模型目录",
                 category="gateway_protocol_error",
                 body=raw[:1000],
             ) from exc

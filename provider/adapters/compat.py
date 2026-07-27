@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from collections.abc import Iterable, Iterator
@@ -49,6 +50,17 @@ from provider.schema import (
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _unique_id(value: Any, prefix: str, used: set[str]) -> str:
+    """Keep provider IDs when possible, but make a request-local ID unique."""
+    candidate = str(value or "")
+    if not candidate or candidate in used:
+        candidate = _id(prefix)
+        while candidate in used:
+            candidate = _id(prefix)
+    used.add(candidate)
+    return candidate
 
 
 def _protocol_usage_from_chat(value: ChatUsage) -> Usage:
@@ -336,6 +348,9 @@ def _content_blocks(value: Any) -> list[Any]:
 def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
     system_parts: list[str] = []
     items: list[Any] = []
+    item_ids: set[str] = set()
+    call_ids: set[str] = set()
+    pending_call_ids: dict[str, list[str]] = {}
     for raw in request.messages:
         role = str(raw.get("role") or "")
         if role in {"system", "developer"}:
@@ -345,13 +360,21 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
         native_message = raw.get("_kemo_message")
         reasoning = str(raw.get("reasoning_content") or "")
         if isinstance(native_reasoning, dict):
+            native_reasoning = copy.deepcopy(native_reasoning)
+            native_reasoning["id"] = _unique_id(
+                native_reasoning.get("id"), "rs", item_ids
+            )
             content = native_reasoning.get("content")
             summary = native_reasoning.get("summary")
             provider_state = native_reasoning.get("provider_state")
             if content or summary or provider_state:
                 items.append(ReasoningItem.model_validate(native_reasoning))
         elif reasoning:
-            items.append(ReasoningItem(id=_id("rs"), content=reasoning))
+            items.append(
+                ReasoningItem(
+                    id=_unique_id(None, "rs", item_ids), content=reasoning
+                )
+            )
         if role in {"user", "assistant"} and raw.get("content") not in (None, ""):
             native_content = (
                 native_message.get("content")
@@ -359,11 +382,15 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                 else None
             )
             if isinstance(native_content, list) and native_content:
-                items.append(MessageItem.model_validate(native_message))
+                native_message_copy = copy.deepcopy(native_message)
+                native_message_copy["id"] = _unique_id(
+                    native_message_copy.get("id"), "msg", item_ids
+                )
+                items.append(MessageItem.model_validate(native_message_copy))
             else:
                 items.append(
                     MessageItem(
-                        id=_id("msg"),
+                        id=_unique_id(None, "msg", item_ids),
                         role=role,
                         phase=(MessagePhase.COMMENTARY if role == "assistant" else None),
                         content=_content_blocks(raw.get("content")),
@@ -380,10 +407,14 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
             except json.JSONDecodeError as exc:
                 arguments = {}
                 parse_error = {"message": str(exc)}
+            original_call_id = str(raw_call.get("id") or "")
+            call_id = _unique_id(original_call_id, "callid", call_ids)
+            if original_call_id:
+                pending_call_ids.setdefault(original_call_id, []).append(call_id)
             items.append(
                 ToolCallItem(
-                    id=_id("call"),
-                    call_id=str(raw_call.get("id") or _id("callid")),
+                    id=_unique_id(None, "call", item_ids),
+                    call_id=call_id,
                     name=str(function.get("name") or ""),
                     arguments=arguments,
                     arguments_raw=arguments_raw,
@@ -397,10 +428,13 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                 blocks = [JsonContent(data=parsed)]
             except json.JSONDecodeError:
                 blocks = [TextContent(text=str(content or ""))]
+            original_call_id = str(raw.get("tool_call_id") or "")
+            call_queue = pending_call_ids.get(original_call_id) or []
+            call_id = call_queue.pop(0) if call_queue else original_call_id
             items.append(
                 ToolResultItem(
-                    id=_id("result"),
-                    call_id=str(raw.get("tool_call_id") or ""),
+                    id=_unique_id(None, "result", item_ids),
+                    call_id=call_id,
                     name=str(raw.get("name") or "unknown_tool"),
                     content=blocks,
                 )
