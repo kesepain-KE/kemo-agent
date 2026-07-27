@@ -141,7 +141,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             },
         )
         context_definition = registry.get("context_manage")
-        self.assertEqual(context_definition.version, "1.1.0")
+        self.assertEqual(context_definition.version, "1.2.0")
         self.assertEqual(context_definition.instruction_file, "AGENT.md")
         self.assertEqual(context_definition.trigger_file, "trigger.md")
         self.assertIn("按完整对话轮", context_definition.trigger_registration)
@@ -516,6 +516,109 @@ class SubAgentRuntimeTests(unittest.TestCase):
         )
         scheduler.wait(task, 1)
         self.assertEqual(order, [("start", 7), ("end", 7), ("persist", 7)])
+
+    def test_background_serial_is_shared_across_independent_runners(self) -> None:
+        first_started = threading.Event()
+        release_first = threading.Event()
+        order: list[tuple[str, int]] = []
+        errors: list[BaseException] = []
+
+        def executor(_context, input_data):
+            marker = int(input_data["target_round"])
+            order.append(("start", marker))
+            if marker == 1:
+                first_started.set()
+                release_first.wait(2)
+            order.append(("end", marker))
+            return AgentRunResult(
+                "history_summary",
+                {"title": f"title-{marker}", "summary": f"summary-{marker}"},
+                "{}",
+                {},
+                "mock",
+            )
+
+        def invoke(marker: int) -> None:
+            try:
+                self.runner(MockProvider()).run(
+                    "history_summary",
+                    {
+                        "trigger": "session_closed",
+                        "session_id": "conv_serial_test",
+                        "target_round": marker,
+                        "previous_summary": None,
+                        "rounds": [
+                            {"round": marker, "user": "u", "assistant": "a"}
+                        ],
+                    },
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch("run.agent_runner._load_executor", return_value=executor):
+            first = threading.Thread(target=invoke, args=(1,))
+            second = threading.Thread(target=invoke, args=(2,))
+            first.start()
+            self.assertTrue(first_started.wait(1))
+            second.start()
+            time.sleep(0.1)
+            self.assertEqual(order, [("start", 1)])
+            release_first.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            order,
+            [("start", 1), ("end", 1), ("start", 2), ("end", 2)],
+        )
+
+    def test_background_serial_allows_same_user_nested_runner_call(self) -> None:
+        order: list[tuple[str, int]] = []
+
+        def executor(context, input_data):
+            marker = int(input_data["target_round"])
+            order.append(("start", marker))
+            if marker == 1:
+                context.runner.run(
+                    "history_summary",
+                    {
+                        "trigger": "session_closed",
+                        "session_id": "conv_nested_serial_test",
+                        "target_round": 2,
+                        "previous_summary": None,
+                        "rounds": [{"round": 2, "user": "u", "assistant": "a"}],
+                    },
+                    timeout=2,
+                )
+            order.append(("end", marker))
+            return AgentRunResult(
+                "history_summary",
+                {"title": f"title-{marker}", "summary": f"summary-{marker}"},
+                "{}",
+                {},
+                "mock",
+            )
+
+        with patch("run.agent_runner._load_executor", return_value=executor):
+            self.runner(MockProvider()).run(
+                "history_summary",
+                {
+                    "trigger": "session_closed",
+                    "session_id": "conv_nested_serial_test",
+                    "target_round": 1,
+                    "previous_summary": None,
+                    "rounds": [{"round": 1, "user": "u", "assistant": "a"}],
+                },
+                timeout=2,
+            )
+
+        self.assertEqual(
+            order,
+            [("start", 1), ("start", 2), ("end", 2), ("end", 1)],
+        )
 
     def test_subagent_events_are_observable(self) -> None:
         events = []

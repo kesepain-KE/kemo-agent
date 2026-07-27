@@ -1653,6 +1653,110 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(window["data"]["memory_target_round"], 12)
         self.assertEqual(window["data"]["memory_processed_round"], 0)
 
+    def test_manual_compression_of_seventy_five_rounds_is_verified_and_next_round_runs(self) -> None:
+        _, root = self.make_root()
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config.update(
+            {
+                "agents": {
+                    "conserved_rounds": 3,
+                    "max_rounds": 80,
+                    "rounds_after_compression": 20,
+                    "token_limit": 120_000,
+                    "token_compression_ratio": 0.6,
+                },
+                "history": {"recent_full_rounds": 3},
+                "memory": {"extraction_mode": "compression_only"},
+            }
+        )
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        summary = {
+            "facts": ["前 55 轮已压缩"],
+            "requirements": [],
+            "decisions": [],
+            "unfinished": [],
+            "tool_results": [],
+            "entities": [],
+            "narrative": "已精炼前 55 轮正文、思考和工具结论",
+        }
+        seed_provider = ScriptedProvider(
+            responses=[
+                ChatResponse(text=f"assistant-{number}", usage=Usage())
+                for number in range(1, 76)
+            ]
+        )
+        summary_provider = ScriptedProvider(
+            responses=[ChatResponse(text=json.dumps(summary, ensure_ascii=False), usage=Usage())]
+        )
+        continuation_provider = ScriptedProvider(
+            responses=[ChatResponse(text="round-76-reply", usage=Usage())]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for number in range(1, 76):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "manual-75",
+                        "prompt": f"user-{number}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: seed_provider,
+                )
+            compressed = compress_context(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "manual-75",
+                    "memory_extraction_policy": "queue",
+                },
+                root=root,
+                provider_factory=lambda _: summary_provider,
+            )
+            archive_before = find_window(root, "alice", "web", "manual-75")
+            self.assertIsNotNone(archive_before)
+            _, runtime_before = load_runtime_window(
+                archive_before, load_window(archive_before)
+            )
+            self.assertEqual(runtime_before["data"]["rounds"], 20)
+            self.assertEqual(
+                runtime_before["data"]["context_snapshot"]["workspace_rounds"],
+                20,
+            )
+            continued = handle_request(
+                {
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "manual-75",
+                    "prompt": "继续处理",
+                },
+                root=root,
+                provider_factory=lambda _: continuation_provider,
+            )
+
+        self.assertTrue(compressed["compressed"])
+        self.assertTrue(compressed["compression_verified"])
+        self.assertEqual(compressed["context"]["rounds_removed"], 55)
+        self.assertEqual(summary_provider.requests[0].max_tokens, 20_000)
+        archive_path = find_window(root, "alice", "web", "manual-75")
+        self.assertIsNotNone(archive_path)
+        stored_archive = load_window(archive_path)
+        _, stored_runtime = load_runtime_window(archive_path, stored_archive)
+        self.assertEqual(stored_archive["data"]["rounds"], 76)
+        self.assertEqual(stored_runtime["data"]["rounds"], 21)
+        self.assertEqual(stored_runtime["data"]["context"]["round_offset"], 55)
+        self.assertEqual(stored_runtime["data"]["context_snapshot"]["workspace_rounds"], 21)
+        self.assertEqual(continued["text"], "round-76-reply")
+        self.assertTrue(
+            any(
+                message.get("role") == "system"
+                and "已精炼前 55 轮" in str(message.get("content") or "")
+                for message in continuation_provider.requests[0].messages
+            )
+        )
+
     def test_provider_context_length_error_compresses_and_retries(self) -> None:
         _, root = self.make_root()
         self.copy_self_improve_plugins(root)

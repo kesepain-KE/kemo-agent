@@ -1365,6 +1365,8 @@ class WebBackendTests(unittest.TestCase):
             return {
                 "context": {"rounds_removed": 3},
                 "summary_cache": "context_summary.json",
+                "compressed": True,
+                "compression_verified": True,
             }
 
         app = create_app(
@@ -1413,6 +1415,8 @@ class WebBackendTests(unittest.TestCase):
             return {
                 "context": {"rounds_removed": 1},
                 "summary_cache": "context_summary.json",
+                "compressed": True,
+                "compression_verified": True,
             }
 
         with (
@@ -1460,6 +1464,8 @@ class WebBackendTests(unittest.TestCase):
             return {
                 "context": {"rounds_removed": 2},
                 "summary_cache": "context_summary.json",
+                "compressed": True,
+                "compression_verified": True,
             }
 
         service = WebRunService(root, context_compressor=compressor)

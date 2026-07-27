@@ -3,12 +3,21 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from run.history import commit_window, empty_window, list_sessions, load_window
+import run.history as history_module
+import run.history_index as history_index_module
+from run.history import (
+    commit_window,
+    empty_window,
+    find_window,
+    list_sessions,
+    load_window,
+)
 from run.history_index import (
     _atomic_write,
     claim_pending_memory,
@@ -122,6 +131,131 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(record["archive_window"], "2026-07-21-12-30")
         self.assertEqual(record["memory_processed_round"], 1)
         self.assertEqual(record["memory_status"], "completed")
+
+    def test_unchanged_archive_manifest_skips_full_archive_scan(self) -> None:
+        _, root = self.make_root()
+        self.commit_archive(
+            root,
+            source="web",
+            session_id="fast-session",
+            directory_name="conv_fast",
+        )
+        initial = load_index(root, "alice")
+
+        self.assertIn("conv_fast", initial["archive_manifest"])
+        with patch(
+            "run.history_index._scan_archive_windows",
+            side_effect=AssertionError("unchanged archives must not be parsed"),
+        ):
+            sessions = list_sessions(root, "alice", "web")
+
+        self.assertEqual([item["session_id"] for item in sessions], ["fast-session"])
+
+    def test_changed_archive_manifest_triggers_reconciliation(self) -> None:
+        _, root = self.make_root()
+        archive = self.commit_archive(
+            root,
+            source="web",
+            session_id="changed-session",
+            directory_name="conv_changed",
+        )
+        load_index(root, "alice")
+        data_path = archive / "data.json"
+        data = json.loads(data_path.read_text("utf-8"))
+        data["title"] = "externally changed title with a different file size"
+        data_path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+        with patch(
+            "run.history_index._scan_archive_windows",
+            wraps=history_index_module._scan_archive_windows,
+        ) as scan:
+            refreshed = load_index(root, "alice")
+
+        scan.assert_called_once()
+        record = refreshed["sessions"][session_key("web", "changed-session")]
+        self.assertEqual(record["title"], data["title"])
+        self.assertEqual(
+            refreshed["archive_manifest"]["conv_changed"]["size"],
+            data_path.stat().st_size,
+        )
+
+    def test_added_archive_is_discovered_from_manifest_change(self) -> None:
+        _, root = self.make_root()
+        load_index(root, "alice")
+        archive = root / "users" / "alice" / "history" / "conv_external"
+        archive.mkdir()
+        data = empty_window("alice", "web", "external-session")["data"]
+        data["rounds"] = 2
+        data["complete"] = True
+        (archive / "data.json").write_text(
+            json.dumps(data, ensure_ascii=False),
+            "utf-8",
+        )
+
+        refreshed = load_index(root, "alice")
+
+        self.assertIn(session_key("web", "external-session"), refreshed["sessions"])
+        self.assertIn("conv_external", refreshed["archive_manifest"])
+
+    def test_deleted_open_archive_is_removed_after_manifest_change(self) -> None:
+        _, root = self.make_root()
+        archive = self.commit_archive(
+            root,
+            source="web",
+            session_id="removed-session",
+            directory_name="conv_removed",
+        )
+        load_index(root, "alice")
+        shutil.rmtree(archive)
+
+        refreshed = load_index(root, "alice")
+
+        self.assertNotIn(session_key("web", "removed-session"), refreshed["sessions"])
+        self.assertNotIn("conv_removed", refreshed["archive_manifest"])
+
+    def test_deleted_closed_archive_does_not_leave_a_ghost_session(self) -> None:
+        _, root = self.make_root()
+        archive = self.commit_archive(
+            root,
+            source="web",
+            session_id="closed-removed-session",
+            directory_name="conv_closed_removed",
+        )
+        close_session(root, "alice", "web", "closed-removed-session")
+        shutil.rmtree(archive)
+
+        refreshed = load_index(root, "alice")
+
+        self.assertNotIn(
+            session_key("web", "closed-removed-session"),
+            refreshed["sessions"],
+        )
+
+    def test_find_window_uses_valid_index_hint_without_scanning_other_archives(self) -> None:
+        _, root = self.make_root()
+        expected = self.commit_archive(
+            root,
+            source="web",
+            session_id="target-session",
+            directory_name="conv_target",
+        )
+        self.commit_archive(
+            root,
+            source="web",
+            session_id="other-session",
+            directory_name="conv_other",
+        )
+        load_index(root, "alice")
+
+        with patch(
+            "run.history._read_json",
+            wraps=history_module._read_json,
+        ) as read_json:
+            found = find_window(root, "alice", "web", "target-session")
+
+        self.assertEqual(found, expected)
+        self.assertEqual(read_json.call_count, 1)
+        self.assertEqual(read_json.call_args.args[0], expected / "data.json")
 
     def test_reserved_active_session_can_close_and_remove_without_archive(self) -> None:
         _, root = self.make_root()

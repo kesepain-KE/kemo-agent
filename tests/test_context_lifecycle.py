@@ -55,19 +55,28 @@ def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dic
 
 
 class SummaryRunner:
-    def __init__(self, *, fail: bool = False, narrative: str = "compressed") -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        narrative: str = "compressed",
+        include_fact: bool = True,
+    ) -> None:
         self.fail = fail
         self.narrative = narrative
+        self.include_fact = include_fact
         self.calls = 0
         self.inputs: list[dict] = []
+        self.kwargs: list[dict] = []
 
     def run(self, name, input_data, **kwargs):
         self.calls += 1
         self.inputs.append(json.loads(json.dumps(input_data, ensure_ascii=False)))
+        self.kwargs.append(dict(kwargs))
         if self.fail:
             raise RuntimeError("summary unavailable")
         payload = {
-            "facts": [f"chunk-{self.calls}"],
+            "facts": [f"chunk-{self.calls}"] if self.include_fact else [],
             "requirements": [],
             "decisions": [],
             "unfinished": [],
@@ -375,6 +384,56 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(second["source_hash"], first["source_hash"])
 
+    def test_summary_source_includes_reasoning_and_schema_upgrade_invalidates_cache(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        cache_path = Path(temporary.name) / "summary.json"
+        window = make_window(1)
+        window["think"]["rounds"][0]["content"] = "关键判断：使用已验证的路径"
+        groups = build_round_groups(window, ContextPolicy())
+        provider = SummaryRunner()
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "source_hash": "old",
+                    "summary": {"narrative": "旧缓存"},
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+
+        value, diagnostics = get_or_create_summary(
+            cache_path=cache_path,
+            groups=groups,
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="manual",
+        )
+
+        self.assertTrue(diagnostics["generated"])
+        self.assertIsNotNone(value)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(
+            provider.inputs[0]["rounds"][0]["reasoning"]["content"],
+            "关键判断：使用已验证的路径",
+        )
+
+    def test_context_summary_requests_twenty_thousand_output_tokens(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        provider = SummaryRunner()
+        groups = build_round_groups(make_window(1), ContextPolicy())
+        get_or_create_summary(
+            cache_path=Path(temporary.name) / "summary.json",
+            groups=groups,
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="manual",
+        )
+        self.assertEqual(provider.kwargs[0]["max_tokens"], 20_000)
+
     def test_summary_cache_rolls_forward_using_absolute_round_numbers(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -478,12 +537,13 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertTrue(diagnostics["compressed"])
         self.assertEqual(diagnostics["round"], 1)
         self.assertEqual(runner.calls, 1)
+        self.assertEqual(runner.kwargs[0]["max_tokens"], 20_000)
         self.assertTrue(window["think"]["rounds"][0]["compressed"])
-        self.assertEqual(window["think"]["rounds"][0]["content"], "compressed")
+        self.assertIn("compressed", window["think"]["rounds"][0]["content"])
         self.assertEqual(window["tool"]["rounds"][0]["calls"], [])
         self.assertFalse(window["think"]["rounds"][1].get("compressed", False))
 
-    def test_tool_think_compression_keeps_reasoning_when_summary_is_empty(self) -> None:
+    def test_tool_think_compression_rejects_empty_summary_without_mutating_data(self) -> None:
         window = make_window(5, with_tools=True)
         original_reasoning = {
             "id": "rs_original",
@@ -506,19 +566,17 @@ class ContextLifecycleTests(unittest.TestCase):
             ]
         }
 
-        diagnostics = compress_per_round_tool_think(
-            window=window,
-            conserved_rounds=2,
-            agent_runner=SummaryRunner(narrative=""),
-            cancel_event=None,
-        )
+        with self.assertRaisesRegex(RuntimeError, "摘要为空"):
+            compress_per_round_tool_think(
+                window=window,
+                conserved_rounds=2,
+                agent_runner=SummaryRunner(narrative="", include_fact=False),
+                cancel_event=None,
+            )
 
-        self.assertTrue(diagnostics["compressed"])
-        reasoning = next(
-            item for item in window["items"]["items"] if item.get("type") == "reasoning"
-        )
-        self.assertEqual(reasoning, original_reasoning)
-        self.assertNotEqual(reasoning.get("content"), "")
+        self.assertEqual(window["think"]["rounds"][0]["content"], "think-1")
+        self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["name"], "lookup")
+        self.assertEqual(window["items"]["items"][0], original_reasoning)
 
     def test_runtime_mirror_can_compress_without_mutating_archive(self) -> None:
         temporary = tempfile.TemporaryDirectory()

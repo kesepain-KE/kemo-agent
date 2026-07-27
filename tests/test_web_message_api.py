@@ -125,6 +125,7 @@ class WebMessageApiTests(unittest.TestCase):
         self.assertEqual(transport["path"], "message/out/alice_bridge")
         self.assertEqual(transport["files_path"], "message/out/alice_bridge/files")
         self.assertEqual(transport["log_path"], "message/out/alice_bridge/log")
+        self.assertEqual(transport["structured_log_path"], "runtime/logs.sqlite3")
         self.assertEqual(transport["temporary_file_count"], 1)
         self.assertEqual(len(transport["logs"]), 4)
         self.assertEqual(

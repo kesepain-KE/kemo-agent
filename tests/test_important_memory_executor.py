@@ -105,6 +105,37 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         refreshed = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(refreshed.selected_ids, (filename,))
 
+    def test_one_stale_source_restores_every_featured_fragment_to_regular_prompt(self) -> None:
+        store = self._store()
+        created = store.upsert_candidates(
+            [
+                {"filename": "沟通偏好", "content": "用户偏好简洁回复。"},
+                {"filename": "项目约束", "content": "项目必须兼容 Linux。"},
+            ],
+        )["created"]
+
+        execute(
+            _Context(
+                self.root,
+                "# 临时重要记忆\n\n- 简洁回复\n- 兼容 Linux",
+                featured=[
+                    {"tier": "seven_days", "filename": filename}
+                    for filename in created
+                ],
+            ),
+            {"trigger": "periodic_scan"},
+        )
+        self.assertEqual(store.load_important_view_sources(), set(created))
+
+        store.upsert_candidates(
+            [{"filename": created[1], "content": "项目必须兼容 Windows 和 Linux。"}],
+        )
+
+        self.assertFalse(store.important_view_is_current())
+        self.assertEqual(store.load_important_view_sources(), set())
+        refreshed = store.select_tier_for_prompt("seven_days", max_files=10)
+        self.assertEqual(set(refreshed.selected_ids), set(created))
+
     def test_periodic_can_drop_full_permanent_duplicate_atomically(self) -> None:
         store = self._store()
         permanent = store.upsert_candidates(

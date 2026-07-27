@@ -4,7 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,6 +14,8 @@ from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
 from cron.scheduler import (
     CronScheduler,
+    _append_system_execution,
+    _system_result_summary,
     cleanup_old_system_tasks,
     ensure_expand_task,
     ensure_memory_maintenance_tasks,
@@ -22,6 +24,7 @@ from cron.scheduler import (
 )
 from cron.service import generate_cron_task
 from run.cron_store import CronStore, CronValidationError, normalize_task
+from run.log_store import LogStore
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -311,6 +314,46 @@ class ExecutorTests(unittest.TestCase):
         )
         handled.assert_not_called()
         self.assertEqual(result["status"], "enabled")
+
+    def test_system_memory_review_exposes_persisted_update_metadata(self) -> None:
+        update = {
+            "featured": ["important.md"],
+            "reconciled": [
+                {
+                    "action": "drop_duplicate",
+                    "filename": "duplicate.md",
+                    "permanent_filename": "canonical.md",
+                }
+            ],
+        }
+        runner = SimpleNamespace(
+            run=MagicMock(
+                return_value=SimpleNamespace(
+                    data={"content": "private model output"},
+                    metadata={"important_memory_update": update},
+                )
+            )
+        )
+        with patch("cron.executor.AgentRunner", return_value=runner):
+            result = execute_cron_task(
+                root=self.root,
+                user="alice",
+                task_id="memory_periodic_scan",
+                config={},
+                system_task={
+                    "task_id": "memory_periodic_scan",
+                    "exec_mode": "system",
+                    "action": "periodic_scan",
+                },
+            )
+
+        self.assertEqual(result["memory_update"], update)
+        runner.run.assert_called_once_with(
+            "memory_temporary_important",
+            {"trigger": "periodic_scan"},
+            cancel_event=None,
+            task_id="memory_periodic_scan",
+        )
 
     def test_function_mode_uses_whitelisted_internal_function(self) -> None:
         task = self._create(
@@ -630,6 +673,61 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(
             all("system_key" not in task for task in [*first, promotion, perception, expand])
         )
+
+    def test_system_summary_keeps_bounded_important_memory_update_diagnostics(self) -> None:
+        summary = _system_result_summary(
+            {
+                "status": "completed",
+                "action": "periodic_scan",
+                "memory_update": {
+                    "featured": ["a.md", "b.md"],
+                    "reconciled": [
+                        {
+                            "action": "drop_duplicate",
+                            "filename": "duplicate.md",
+                            "permanent_filename": "canonical.md",
+                            "content": "must not enter logs",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(summary["memory_update"]["featured"], ["a.md", "b.md"])
+        self.assertEqual(
+            summary["memory_update"]["reconciled"],
+            [
+                {
+                    "action": "drop_duplicate",
+                    "filename": "duplicate.md",
+                    "permanent_filename": "canonical.md",
+                }
+            ],
+        )
+        self.assertNotIn("must not enter logs", json.dumps(summary))
+
+    def test_system_execution_marks_jsonl_as_already_migrated(self) -> None:
+        executed_at = datetime(2026, 7, 27, 20, 30, tzinfo=BEIJING)
+
+        _append_system_execution(
+            self.root,
+            user="alice",
+            task_id="memory_periodic_scan",
+            executed_at=executed_at,
+            duration_ms=18,
+            result={"status": "completed"},
+        )
+
+        log_path = (
+            self.root
+            / "cron"
+            / "task_cron_system"
+            / "log"
+            / "2026-07-27.jsonl"
+        )
+        store = LogStore(self.root)
+        self.assertFalse(store.legacy_source_changed(log_path))
+        self.assertEqual(len(store.list_cron("alice")), 1)
 
     def test_global_update_rates_default_fallback_and_recalibrate(self) -> None:
         perception = ensure_perception_task(self.root, {})
