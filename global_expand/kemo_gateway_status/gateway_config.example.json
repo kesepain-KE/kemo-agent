@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "base_url": "http://127.0.0.1:7531",
+  "status_token": "请填写网关独立的 STATUS_TOKEN",
+  "timeout_seconds": 15,
+  "ranking_limit": 20,
+  "log_limit": 20
+}
+
