@@ -521,6 +521,24 @@ export interface ProviderSummary {
   configured: boolean
 }
 
+export interface KemoModelCatalogItem {
+  id: string
+  object: 'kemo.model'
+  provider_id: string
+  provider_model: string
+  task: 'llm' | 'embedding' | 'rerank' | 'unknown'
+  capabilities_available: boolean
+  capabilities_url: string
+}
+
+export interface KemoProviderModelsResponse {
+  user: string
+  protocol: 'kemo'
+  api_valid: true
+  count: number
+  data: KemoModelCatalogItem[]
+}
+
 export interface SettingsResponse {
   user: string
   schema_version: number

@@ -297,10 +297,17 @@ describe('V16 module pages', () => {
 
   it('配置页提供七个纵向栏目、结构化字段编辑和只读版本查看', async () => {
     let savedChanges: Record<string, unknown> | undefined
+    let modelDiscoveryCalls = 0
     server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
       const body = await request.json() as { changes: Record<string, unknown> }
       savedChanges = body.changes
       return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: ['provider.api_key'], updated: true })
+    }), http.get('/api/users/kesepain/provider/models', () => {
+      modelDiscoveryCalls += 1
+      return HttpResponse.json({
+        user: 'kesepain', protocol: 'kemo', api_valid: true, count: 1,
+        data: [{ id: 'deepseek-deepseek-v4-flash', object: 'kemo.model', provider_id: 'deepseek', provider_model: 'deepseek-v4-flash', task: 'llm', capabilities_available: true, capabilities_url: '/model/models/deepseek-deepseek-v4-flash/capabilities' }],
+      })
     }))
     renderPage('settings')
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
@@ -313,6 +320,15 @@ describe('V16 module pages', () => {
     expect(screen.queryByText('配置文件 JSON')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '模型与 Provider ›' }))
+    expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
+    expect(modelDiscoveryCalls).toBe(1)
+    expect(screen.getByRole('button', { name: '主模型选择模型' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '外观与主题 ›' }))
+    expect(screen.queryByText('Kemo API 已验证，已获取 1 个可用模型')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider ›' }))
+    expect(screen.getByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '主模型选择模型' })).toBeInTheDocument()
+    expect(modelDiscoveryCalls).toBe(1)
     const providerSelect = await screen.findByRole('combobox', { name: 'Provider 类型' })
     expect(providerSelect).toHaveTextContent('kemo')
     expect(providerSelect).toHaveAttribute('aria-expanded', 'false')
@@ -349,6 +365,21 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
+    expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
+    expect(modelDiscoveryCalls).toBe(2)
+    expect(screen.getAllByText('可选择')).toHaveLength(12)
+    expect(screen.getByRole('button', { name: '主模型选择模型' })).toHaveTextContent('选择模型')
+    fireEvent.click(screen.getByRole('button', { name: '主模型选择模型' }))
+    expect(screen.getByRole('listbox', { name: '主模型选项' })).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '主模型筛选' }), { target: { value: 'deepseek-v4' } })
+    fireEvent.click(screen.getByRole('option', { name: /deepseek-deepseek-v4-flash/ }))
+    expect(screen.getByLabelText('模型')).toHaveValue('deepseek-deepseek-v4-flash')
+    fireEvent.click(screen.getByRole('button', { name: '默认子智能体模型选择模型' }))
+    fireEvent.click(screen.getByRole('option', { name: /deepseek-deepseek-v4-flash/ }))
+    expect(screen.getByLabelText('默认子智能体模型')).toHaveValue('deepseek-deepseek-v4-flash')
+    fireEvent.click(screen.getByRole('button', { name: '图片识别选择模型' }))
+    fireEvent.click(screen.getByRole('option', { name: /deepseek-deepseek-v4-flash/ }))
+    expect(screen.getByLabelText('图片识别')).toHaveValue('deepseek-deepseek-v4-flash')
     await waitFor(() => expect(savedChanges).toMatchObject({
       provider: { reasoning_effort: 'high', input_modalities: ['text', 'image'] },
       agent_models: { default: 'agent-default', cheap: 'summary-model-next', reasoning: 'agent-reasoning' },
@@ -392,6 +423,41 @@ describe('V16 module pages', () => {
     expect(screen.getByText(/智能体在执行任务时重启可能会出现故障/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '确认重启' }))
     expect(await screen.findByText(/重启请求已提交/)).toBeInTheDocument()
+  })
+
+  it('chat 协议保存后不请求 Kemo 模型目录', async () => {
+    let modelDiscoveryCalls = 0
+    server.use(http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
+      user: 'kesepain',
+      config: { provider: { type: 'chat', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false, reasoning_effort: 'medium' } },
+      redacted_paths: ['provider.api_key'],
+    })), http.get('/api/users/kesepain/provider/models', () => {
+      modelDiscoveryCalls += 1
+      return HttpResponse.json({ user: 'kesepain', protocol: 'kemo', api_valid: true, count: 0, data: [] })
+    }))
+    renderPage('settings')
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveTextContent('chat')
+    fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+    expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
+    expect(modelDiscoveryCalls).toBe(0)
+    expect(screen.queryByText(/Kemo API 已验证/)).not.toBeInTheDocument()
+    expect(screen.queryByText('可选择')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '主模型选择模型' })).not.toBeInTheDocument()
+  })
+
+  it('Kemo 模型目录为空时保留传统自由输入模式', async () => {
+    server.use(http.get('/api/users/kesepain/provider/models', () => HttpResponse.json({
+      user: 'kesepain', protocol: 'kemo', api_valid: true, count: 0, data: [],
+    })))
+    renderPage('settings')
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    expect(await screen.findByText('Kemo API 已验证，但当前密钥没有可用的 LLM 模型')).toBeInTheDocument()
+    expect(screen.getByLabelText('模型')).not.toHaveAttribute('list')
+    expect(screen.queryByText('可选择')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '主模型选择模型' })).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'manual-model' } })
+    expect(screen.getByLabelText('模型')).toHaveValue('manual-model')
   })
 
   it('文件空间支持逐层目录、分区搜索与严格的区域操作权限', async () => {

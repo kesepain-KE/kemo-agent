@@ -14,6 +14,7 @@ import type {
   ImportantMemoryResponse,
   KnowledgeDocumentResponse,
   KnowledgeResponse,
+  KemoProviderModelsResponse,
   MemoryItemResponse,
   MemorySummaryResponse,
   MessageCheckResponse,
@@ -472,6 +473,10 @@ export async function patchUserConfig(user: string, changes: Record<string, unkn
   return requestJson(`/api/users/${encodeURIComponent(user)}/config`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }),
   })
+}
+
+export async function getKemoProviderModels(user: string): Promise<KemoProviderModelsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/models`)
 }
 
 export async function getGlobalConfig(): Promise<{ scope: string; config: Record<string, unknown>; redacted_paths: string[] }> {

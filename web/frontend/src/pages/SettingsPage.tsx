@@ -6,6 +6,7 @@ import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   getGlobalConfig,
+  getKemoProviderModels,
   getSettings,
   getUserConfig,
   getVersion,
@@ -16,6 +17,7 @@ import {
   restartSystem,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import type { KemoModelCatalogItem } from '../types/api'
 import { ReasoningEffortSelect } from '../components/ReasoningEffortSelect'
 import { normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
 import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
@@ -68,6 +70,12 @@ interface SaveRequest {
   label: string
   userChanges?: Record<string, unknown>
   globalChanges?: Record<string, unknown>
+  providerDiscovery?: ProviderType
+}
+
+interface SaveResult {
+  providerModels?: KemoModelCatalogItem[]
+  providerDiscoveryError?: string
 }
 
 const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
@@ -395,6 +403,106 @@ function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingMode; on
   </div>
 }
 
+function ModelSelectField({
+  label,
+  value,
+  placeholder,
+  models,
+  enabled,
+  onChange,
+}: {
+  label: string
+  value: string
+  placeholder: string
+  models: KemoModelCatalogItem[]
+  enabled: boolean
+  onChange: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
+  const listboxId = useId()
+  const pickerLabel = label === '模型' ? '主模型' : label
+  const availableModels = models.filter((item) => item.task === 'llm' || item.task === 'unknown')
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredModels = availableModels.filter((item) => {
+    if (!normalizedQuery) return true
+    return `${item.id} ${item.provider_id} ${item.provider_model}`.toLowerCase().includes(normalizedQuery)
+  })
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnPointerDown)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!enabled) setOpen(false)
+  }, [enabled])
+
+  if (!enabled) {
+    return <input className="config-field" aria-label={label} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+  }
+
+  return <div className={`model-select-wrap ${open ? 'open' : ''}`} ref={rootRef}>
+    <div className="model-field-shell">
+      <input
+        className="config-field model-field-input"
+        aria-label={label}
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'Enter') {
+            event.preventDefault()
+            setOpen(true)
+          }
+          if (event.key === 'Escape') setOpen(false)
+        }}
+      />
+      <button
+        type="button"
+        className={`model-picker-trigger ${open ? 'open' : ''}`}
+        aria-label={`${pickerLabel}选择模型`}
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => { setQuery(''); setOpen((current) => !current) }}
+      >
+        <span>选择模型</span><em>可选择</em><ChevronDown size={14} aria-hidden="true" />
+      </button>
+    </div>
+    {open ? <div className="model-select-popover config-select-popover" id={listboxId} role="listbox" aria-label={`${pickerLabel}选项`}>
+      <div className="model-select-search">
+        <input aria-label={`${pickerLabel}筛选`} value={query} placeholder="筛选模型…" onChange={(event) => setQuery(event.target.value)} autoFocus />
+      </div>
+      <div className="model-select-options">
+        {filteredModels.length ? filteredModels.map((item) => <button
+          type="button"
+          role="option"
+          aria-selected={value === item.id}
+          className={value === item.id ? 'active' : ''}
+          key={`${item.provider_id}:${item.id}`}
+          onClick={() => { onChange(item.id); setOpen(false); setQuery('') }}
+        >
+          <span><strong>{item.id}</strong><small>{item.provider_id} · {item.provider_model}</small></span>
+          {value === item.id ? <Check size={15} /> : <i aria-hidden="true" />}
+        </button>) : <div className="model-select-empty">没有匹配的模型；仍可直接输入模型名。</div>}
+      </div>
+    </div> : null}
+  </div>
+}
+
 function NumberInput({ label, value, min = 0, max, step = 1, onChange }: { label: string; value: number; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
   return <input className="config-field config-number" type="number" aria-label={label} value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />
 }
@@ -440,6 +548,14 @@ export function SettingsPage() {
   const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
   const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
   const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: Boolean(user) })
+  const storedProviderType = record(userConfigQuery.data?.config.provider).type === 'kemo' ? 'kemo' : 'chat'
+  const providerModelsQuery = useQuery({
+    queryKey: ['provider-models', user],
+    queryFn: async () => (await getKemoProviderModels(user)).data,
+    enabled: Boolean(user) && tab === 'provider' && storedProviderType === 'kemo',
+    staleTime: 300_000,
+    retry: false,
+  })
   const versionQuery = useQuery({ queryKey: ['version'], queryFn: getVersion })
   const versionCheckQuery = useQuery({
     queryKey: ['version-check'],
@@ -450,6 +566,8 @@ export function SettingsPage() {
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
   const [initialApiKey, setInitialApiKey] = useState('')
+  const [providerModels, setProviderModels] = useState<KemoModelCatalogItem[]>([])
+  const [providerDiscovery, setProviderDiscovery] = useState<{ status: 'idle' | 'valid' | 'failed'; message: string }>({ status: 'idle', message: '' })
   const [formError, setFormError] = useState('')
   const [savedLabel, setSavedLabel] = useState('')
   const [restartState, setRestartState] = useState<RestartState>('idle')
@@ -475,6 +593,37 @@ export function SettingsPage() {
   }, [userConfigQuery.data])
 
   useEffect(() => {
+    setProviderModels([])
+    setProviderDiscovery({ status: 'idle', message: '' })
+  }, [user])
+
+  useEffect(() => {
+    if (storedProviderType !== 'kemo') {
+      setProviderModels([])
+      setProviderDiscovery({ status: 'idle', message: '' })
+      return
+    }
+    if (providerModelsQuery.isError) {
+      setProviderModels([])
+      setProviderDiscovery({
+        status: 'failed',
+        message: providerModelsQuery.error instanceof Error
+          ? providerModelsQuery.error.message
+          : 'Kemo API 验证失败，未拉取模型',
+      })
+      return
+    }
+    if (!providerModelsQuery.data) return
+    setProviderModels(providerModelsQuery.data)
+    setProviderDiscovery({
+      status: 'valid',
+      message: providerModelsQuery.data.length
+        ? `Kemo API 已验证，已获取 ${providerModelsQuery.data.length} 个可用模型`
+        : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
+    })
+  }, [providerModelsQuery.data, providerModelsQuery.error, providerModelsQuery.isError, storedProviderType])
+
+  useEffect(() => {
     if (globalConfigQuery.data) setGlobalDraft(buildGlobalDraft(globalConfigQuery.data.config))
   }, [globalConfigQuery.data])
 
@@ -483,15 +632,48 @@ export function SettingsPage() {
   }, [requestedTab])
 
   const saveMutation = useMutation({
-    mutationFn: async ({ userChanges, globalChanges }: SaveRequest) => {
+    mutationFn: async ({ userChanges, globalChanges, providerDiscovery }: SaveRequest): Promise<SaveResult> => {
       await Promise.all([
         userChanges ? patchUserConfig(user, userChanges) : Promise.resolve(),
         globalChanges ? patchGlobalConfig(globalChanges) : Promise.resolve(),
       ])
+      if (providerDiscovery !== 'kemo') return {}
+      try {
+        const catalog = await getKemoProviderModels(user)
+        return { providerModels: catalog.data }
+      } catch (error) {
+        return {
+          providerDiscoveryError: error instanceof Error
+            ? error.message
+            : 'Kemo API 验证失败，未拉取模型',
+        }
+      }
     },
-    onSuccess: async (_, request) => {
+    onSuccess: async (result, request) => {
       setFormError('')
       setSavedLabel(request.label)
+      if (request.providerDiscovery === 'chat') {
+        client.removeQueries({ queryKey: ['provider-models', user] })
+        setProviderModels([])
+        setProviderDiscovery({ status: 'idle', message: '' })
+      } else if (request.providerDiscovery === 'kemo') {
+        if (result.providerModels) {
+          client.setQueryData(['provider-models', user], result.providerModels)
+          setProviderModels(result.providerModels)
+          setProviderDiscovery({
+            status: 'valid',
+            message: result.providerModels.length
+              ? `Kemo API 已验证，已获取 ${result.providerModels.length} 个可用模型`
+              : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
+          })
+        } else {
+          setProviderModels([])
+          setProviderDiscovery({
+            status: 'failed',
+            message: result.providerDiscoveryError || 'Kemo API 验证失败，未拉取模型',
+          })
+        }
+      }
       await Promise.all([
         client.invalidateQueries({ queryKey: ['settings', user] }),
         client.invalidateQueries({ queryKey: ['user-config', user] }),
@@ -524,7 +706,13 @@ export function SettingsPage() {
   const refreshAll = () => {
     setSavedLabel('')
     setFormError('')
-    void Promise.all([settingsQuery.refetch(), userConfigQuery.refetch(), globalConfigQuery.refetch(), versionQuery.refetch()])
+    void Promise.all([
+      settingsQuery.refetch(),
+      userConfigQuery.refetch(),
+      globalConfigQuery.refetch(),
+      versionQuery.refetch(),
+      ...(storedProviderType === 'kemo' ? [providerModelsQuery.refetch()] : []),
+    ])
   }
   const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching || versionQuery.isFetching
 
@@ -567,6 +755,7 @@ export function SettingsPage() {
     if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
     submit({
       label: '保存模型与 Provider',
+      providerDiscovery: userDraft.provider.type,
       userChanges: {
         provider,
         agent_models: userDraft.agent_models,
@@ -675,6 +864,11 @@ export function SettingsPage() {
       setVersionCopyState('failed')
     }
   }
+  const modelPickerEnabled = Boolean(
+    userDraft?.provider.type === 'kemo'
+      && providerDiscovery.status === 'valid'
+      && providerModels.length > 0,
+  )
 
   return <ModuleFrame
     kicker="Configuration Overview"
@@ -712,8 +906,22 @@ export function SettingsPage() {
           <ConfigSaveBar label="保存模型与 Provider" description="保存后从下一次 Run 开始使用，不对运行中的请求热切换协议。" pending={saveMutation.isPending} saved={savedLabel === '保存模型与 Provider'} onSave={saveProvider} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>核心连接</strong><span>Provider 类型只允许 chat 或 kemo；运行中不会跨协议自动回退。</span></div>
-            <SettingRow title="Provider 类型" description={userDraft.provider.type === 'chat' ? '标准 /v1/chat/completions，保证文本、工具和图片输入基线' : '原生 Kemo Provider，支持网关声明的完整能力'} source="user" control={<ProviderSelect value={userDraft.provider.type} onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, type: value } })} />} />
-            <SettingRow title="模型" description="主对话模型标识，可自由填写或修改" source="user" control={<input className="config-field" aria-label="模型" value={userDraft.provider.model} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, model: event.target.value } })} />} />
+            <SettingRow title="Provider 类型" description={userDraft.provider.type === 'chat' ? '标准 /v1/chat/completions，保证文本、工具和图片输入基线' : '原生 Kemo Provider，支持网关声明的完整能力'} source="user" control={<ProviderSelect value={userDraft.provider.type} onChange={(value) => {
+              if (value !== 'kemo') {
+                setProviderModels([])
+                setProviderDiscovery({ status: 'idle', message: '' })
+              }
+              setUserDraft({ ...userDraft, provider: { ...userDraft.provider, type: value } })
+            }} />} />
+            <SettingRow title="模型" description={modelPickerEnabled ? '可直接输入模型名，或从已验证 Kemo 模型目录中选择' : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
+              label="模型"
+              value={userDraft.provider.model}
+              placeholder="输入模型名称"
+              models={providerModels}
+              enabled={modelPickerEnabled}
+              onChange={(model) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, model } })}
+            />} />
+            {userDraft.provider.type === 'kemo' && providerDiscovery.status !== 'idle' ? <SettingRow title="Kemo 模型目录" description={providerDiscovery.message} control={<StatusChip status={providerDiscovery.status === 'valid' ? 'configured' : 'error'}>{providerDiscovery.status === 'valid' ? 'API 有效' : '未拉取'}</StatusChip>} /> : null}
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
@@ -727,13 +935,27 @@ export function SettingsPage() {
           </article>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>子智能体模型</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
-            <div>{agentModelFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.agent_models[field.key]} placeholder="继承主对话模型" onChange={(event) => setUserDraft({ ...userDraft, agent_models: { ...userDraft.agent_models, [field.key]: event.target.value } })} />} />)}</div>
+            <div>{agentModelFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
+              label={field.label}
+              value={userDraft.agent_models[field.key]}
+              placeholder="继承主对话模型"
+              models={providerModels}
+              enabled={modelPickerEnabled}
+              onChange={(model) => setUserDraft({ ...userDraft, agent_models: { ...userDraft.agent_models, [field.key]: model } })}
+            />} />)}</div>
           </details>
           <details className="setting-section settings-disclosure" open>
             <summary><span><strong>多模态模型</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
             <div>
               <SettingRow title="图片路由" description="自动模式优先主模型，不支持图片时改用专用视觉模型" source="user" control={<VisionRoutingSelect value={userDraft.multimodal_routing.vision} onChange={(vision) => setUserDraft({ ...userDraft, multimodal_routing: { vision } })} />} />
-              {multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<input className="config-field" aria-label={field.label} value={userDraft.multimodal_models[field.key]} placeholder="未指定" onChange={(event) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: event.target.value } })} />} />)}
+              {multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
+                label={field.label}
+                value={userDraft.multimodal_models[field.key]}
+                placeholder="未指定"
+                models={providerModels}
+                enabled={modelPickerEnabled}
+                onChange={(model) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: model } })}
+              />} />)}
             </div>
           </details>
         </> : null}

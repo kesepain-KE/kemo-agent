@@ -278,6 +278,21 @@ export const handlers = [
     redacted_paths: ['provider.api_key'],
   })),
   http.patch('/api/users/:user/config', ({ params }) => HttpResponse.json({ user: params.user, config: {}, redacted_paths: ['provider.api_key'], updated: true })),
+  http.get('/api/users/:user/provider/models', ({ params }) => HttpResponse.json({
+    user: params.user,
+    protocol: 'kemo',
+    api_valid: true,
+    count: 1,
+    data: [{
+      id: 'deepseek-deepseek-v4-flash',
+      object: 'kemo.model',
+      provider_id: 'deepseek',
+      provider_model: 'deepseek-v4-flash',
+      task: 'llm',
+      capabilities_available: true,
+      capabilities_url: '/model/models/deepseek-deepseek-v4-flash/capabilities',
+    }],
+  })),
   http.get('/api/global-config', () => HttpResponse.json({
     scope: 'global',
     config: {
