@@ -7,13 +7,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.3.0",
+  "version": "0.6.0",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.3.0"},
-    "agents": {"version": "0.3.0"},
-    "plugins": {"version": "0.3.0"},
-    "web": {"version": "0.3.0"}
+    "core": {"version": "0.6.0"},
+    "agents": {"version": "0.6.0"},
+    "plugins": {"version": "0.6.0"},
+    "web": {"version": "0.6.0"}
   }
 }
 ```
@@ -89,7 +89,8 @@ python update.py --module all
 
 - `message/` 同步框架消息路由代码，但保留本地 `message/out/` 平台模块和运行数据。
 - `config/global_config.json` 内容不同时询问覆盖、保留或查看差异；schema 不同时额外显示顶层字段差异。
-- 只更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
+- 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
+- `global_expand/kemo_gateway_status/` 是内置例外：core 会同步其静态代码和说明，同时保留部署机的本地凭据、状态摘要、脱敏快照、图表和运行状态；存在本地配置时继续保持激活。
 - core 完成后尝试补齐现有用户骨架和迁移旧记忆，再执行 `pip install -r requirements.txt`（除非跳过）。
 
 ## agents — 内置子智能体
@@ -135,7 +136,7 @@ python update.py --module all
 - `shared_knowledge/`
 - 根目录 `.gitignore`
 - `config/` 中除 `global_soul.md` 和交互处理的 `global_config.json` 之外的文件
-- `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 之外的模块数据
+- `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 和内置 `global_expand/kemo_gateway_status/` 静态实现之外的模块数据
 - `users/`、`tmp/`、`message/out/` 等运行数据
 
 如这些框架路径发生版本变化，需要先扩展更新板块实现，或由维护者使用其他明确方式更新。不要假设 `--module all` 会覆盖未列出的路径。

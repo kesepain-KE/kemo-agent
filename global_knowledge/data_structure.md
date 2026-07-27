@@ -65,6 +65,7 @@ kemo-agent/
 | 文件 | 内容 |
 |------|------|
 | `expand-creation.md` | 拓展层级、清单、数据注入与操控入口 |
+| `kemo-gateway-status-expand.md` | 内置 Kemo 网关状态拓展的激活、权限、产物与更新边界 |
 | `sense-creation.md` | 全局感知模块的创建与刷新规则 |
 | `skill-creation.md` | 共享技能和用户技能的结构与作用域 |
 | `knowledge-creation.md` | 三层知识库及索引维护规则 |

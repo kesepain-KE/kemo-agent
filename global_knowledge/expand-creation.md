@@ -12,6 +12,8 @@
 
 `expand_creater` 不创建全局拓展。共享和全局拓展可被用户配置白名单过滤；当前用户拓展按用户目录实时发现。
 
+框架内置的 `global_expand/kemo_gateway_status/` 是默认未激活的只读网关状态拓展。它的激活方式、独立 `STATUS_TOKEN`、脱敏产物和更新保留规则见 `kemo-gateway-status-expand.md`。
+
 `expand_update` 到期后先以 `__system__` 身份刷新全局层和共享层，再为每个有效用户分别执行其私有目录。全局/共享模块不会因用户数量重复运行，用户模块也不会跨用户拼接结果。每个更新入口在独立 Python 子进程中执行，受 `task_cron_system.module_update_timeout` 限制；热插拔模块不会被导入 Web/Runtime 主进程。
 
 Windows 后台采集和框架发起的 `expand_call` 操作由框架隐藏终端，Linux 使用独立进程组。模块不需要自行设置 `CREATE_NO_WINDOW`、`CREATE_NEW_CONSOLE`、`pythonw` 或终端参数。用户手动运行 `data_update.py`、`start_expand.py` 属于前台调试，是否显示当前终端由用户的启动方式决定。
