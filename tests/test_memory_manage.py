@@ -492,9 +492,60 @@ class MemoryManageTests(unittest.TestCase):
             "permanent:设备信息.md",
         )
 
+    def test_single_search_actions_accept_all_memory_fragment_tiers(self) -> None:
+        for tier, title in (
+            ("seven_days", "STM32 临时记录"),
+            ("one_month", "STM32 月度记录"),
+            ("half_year", "STM32 半年记录"),
+            ("permanent", "STM32 永久记录"),
+        ):
+            add_fragment(
+                self.root,
+                "alice",
+                self.config,
+                tier,
+                title,
+                f"{title}：使用 STM32 控制器。",
+            )
+
+        content_result = run_memory_manage(
+            "search_by_content",
+            "all",
+            query="stm32",
+            limit=20,
+            context={"root": str(self.root), "user": "alice"},
+        )
+        self.assertEqual(content_result["tier"], "all")
+        self.assertEqual(content_result["total_matches"], 4)
+        self.assertFalse(content_result["truncated"])
+        self.assertEqual(
+            {match["tier"] for match in content_result["matches"]},
+            {"seven_days", "one_month", "half_year", "permanent"},
+        )
+        self.assertTrue(
+            all(
+                match["memory_ref"].startswith(f"{match['tier']}:")
+                for match in content_result["matches"]
+            )
+        )
+
+        title_result = search_by_title(
+            self.root,
+            "alice",
+            self.config,
+            "all",
+            "STM32",
+            limit=2,
+        )
+        self.assertEqual(title_result["total_matches"], 4)
+        self.assertEqual(len(title_result["matches"]), 2)
+        self.assertTrue(title_result["truncated"])
+        with self.assertRaisesRegex(ValueError, "不支持的记忆层级：all"):
+            list_entries(self.root, "alice", self.config, "all")
+
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.4.0")
+        self.assertEqual(tool.version, "1.5.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),

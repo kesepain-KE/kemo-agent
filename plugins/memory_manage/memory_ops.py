@@ -36,6 +36,12 @@ def _validate_tier(tier: str) -> str:
     return tier
 
 
+def _search_tiers(tier: str) -> tuple[str, ...]:
+    if tier == "all":
+        return SEARCH_ALL_TIERS
+    return (_validate_tier(tier),)
+
+
 def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -262,11 +268,15 @@ def search_by_title(
     needle = query.strip()
     comparison = needle if case_sensitive else needle.casefold()
     all_matches = []
-    for item in _tier_entries(root, user, config, tier):
-        stem = Path(str(item["filename"])).stem
-        haystack = stem if case_sensitive else stem.casefold()
-        if comparison in haystack:
-            all_matches.append(_summary(item, tier))
+    for current_tier in _search_tiers(tier):
+        for item in _tier_entries(root, user, config, current_tier):
+            stem = Path(str(item["filename"])).stem
+            haystack = stem if case_sensitive else stem.casefold()
+            if comparison in haystack:
+                match = _summary(item, current_tier)
+                if tier == "all":
+                    match["tier"] = current_tier
+                all_matches.append(match)
     return {
         "action": "search_by_title",
         "tier": tier,
@@ -300,26 +310,33 @@ def search_by_content(
     comparison = needle if case_sensitive else needle.casefold()
     matches: list[dict[str, Any]] = []
     total_matches = 0
-    for item in _tier_entries(root, user, config, tier):
-        content = str(item.get("content") or "")
-        haystack = content if case_sensitive else content.casefold()
-        index = haystack.find(comparison)
-        if index < 0:
-            continue
-        total_matches += 1
-        if len(matches) >= normalized_limit:
-            continue
-        match_end = index + len(needle)
-        body_budget = normalized_context
-        center = (index + match_end) // 2
-        start = max(0, min(len(content) - body_budget, center - body_budget // 2))
-        end = min(len(content), start + body_budget)
-        marker_chars = int(start > 0) + int(end < len(content))
-        body_budget = max(1, normalized_context - marker_chars)
-        start = max(0, min(len(content) - body_budget, center - body_budget // 2))
-        end = min(len(content), start + body_budget)
-        snippet = f"{'…' if start > 0 else ''}{content[start:end]}{'…' if end < len(content) else ''}"
-        matches.append({**_summary(item, tier), "snippet": snippet[:normalized_context]})
+    for current_tier in _search_tiers(tier):
+        for item in _tier_entries(root, user, config, current_tier):
+            content = str(item.get("content") or "")
+            haystack = content if case_sensitive else content.casefold()
+            index = haystack.find(comparison)
+            if index < 0:
+                continue
+            total_matches += 1
+            if len(matches) >= normalized_limit:
+                continue
+            match_end = index + len(needle)
+            body_budget = normalized_context
+            center = (index + match_end) // 2
+            start = max(0, min(len(content) - body_budget, center - body_budget // 2))
+            end = min(len(content), start + body_budget)
+            marker_chars = int(start > 0) + int(end < len(content))
+            body_budget = max(1, normalized_context - marker_chars)
+            start = max(0, min(len(content) - body_budget, center - body_budget // 2))
+            end = min(len(content), start + body_budget)
+            snippet = f"{'…' if start > 0 else ''}{content[start:end]}{'…' if end < len(content) else ''}"
+            match = {
+                **_summary(item, current_tier),
+                "snippet": snippet[:normalized_context],
+            }
+            if tier == "all":
+                match["tier"] = current_tier
+            matches.append(match)
     return {
         "action": "search_by_content",
         "tier": tier,
@@ -344,10 +361,7 @@ def search_many(
 ) -> dict[str, Any]:
     """Search title and content for several candidates in one tool call."""
 
-    if tier == "all":
-        tiers = SEARCH_ALL_TIERS
-    else:
-        tiers = (_validate_tier(tier),)
+    tiers = _search_tiers(tier)
     if not isinstance(queries, list) or not queries:
         raise ValueError("search_many 需要非空 queries 数组")
     if len(queries) > 20:

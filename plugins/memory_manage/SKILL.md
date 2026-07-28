@@ -11,7 +11,7 @@
    - `permanent`：永久记忆碎片，不会过期，权重为 null。
    - `important`：单文件临时重要记忆热画像，由 `memory_temporary_important` 子代理自动维护，权重和到期时间为 null。**此文件不可删除，不可写入空内容。** 主智能体只允许 `get` 和 `search_by_title`/`search_by_content` 读取此层级，不得使用 `add`、`edit` 或 `delete` 操作。
 2. **权限范围**：主智能体可以使用全部 action，但 `important` 层级只允许读取（`get`、`search_by_title`、`search_by_content`、`search_many`），禁止写入或删除；`self_improve` 子代理只能使用三个搜索 action；`memory_temporary_important` 只能使用 `list/get`。候选、热视图、遗忘、永久协调和晋升均由运行时原子持久化。
-3. **搜索、列出与获取**：列出整层摘要使用 `list`；按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；多个候选应优先使用一次 `search_many` 同时搜索标题和正文；获取单条完整正文使用 `get`。
+3. **搜索、列出与获取**：列出整层摘要使用 `list`；按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；三个搜索 action 均可传 `tier: "all"` 跨 `seven_days`、`one_month`、`half_year`、`permanent` 四个碎片层查询，结果中的 `tier` 与 `memory_ref` 用于精确定位；多个候选应优先使用一次 `search_many` 同时搜索标题和正文；获取单条完整正文使用 `get`。
 4. **禁止空搜索**：两个搜索 action 的 query 都必须是非空字符串。列出全部记忆不能再依赖空 query，应使用 `list`，需要正文时再逐条 `get`。
 5. **敏感凭据检测**：`add` 与 `edit` 会拒绝包含疑似密码、API Key、Token、Cookie 或私钥的内容。
 6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`truncated=true` 表示还有结果，可缩小层级或关键词后继续查询。
@@ -23,7 +23,7 @@
 | 参数 | 适用 action | 默认值 | 说明 |
 |------|-------------|--------|------|
 | `action` | 全部 | 必填 | `list` / `get` / `search_by_title` / `search_by_content` / `search_many` / `add` / `edit` / `delete` |
-| `tier` | 全部 | 必填 | 普通操作使用具体层级；`search_many` 可使用 `all` 一次搜索四个碎片层级 |
+| `tier` | 全部 | 必填 | 普通操作使用具体层级；三个搜索 action 可使用 `all` 一次搜索四个碎片层级；`all` 不适用于 list/get/增删改 |
 | `query` | search_* | 必填 | 非空搜索关键词；列出全部请使用 list |
 | `queries` | search_many | 必填 | 1–20 个 `{title, content}` 查询对象，每项至少提供一个非空字段 |
 | `filename` | get / add / edit / delete | — | 记忆文件名 |
@@ -44,7 +44,7 @@
 | `featured_sources` | get important | 当前有效热画像来源的 `{tier, filename}` 数组 |
 | `filename` | get / add / edit / delete | 记忆文件名 |
 | `snippet` | search_by_content | 首次命中位置附近的有界片段 |
-| `matches` | search_* | 匹配结果数组 |
+| `matches` | search_* | 匹配结果数组；跨层搜索时每项额外包含实际 `tier` |
 | `weight` | list / get / search_* | 临时层权重；permanent 与 important 为 null |
 | `expires_at` | list / get / search_* | 临时层到期时间；permanent 与 important 为 null |
 | `total_matches` | search_* | 实际命中总数，包含被 limit 截断的结果 |
@@ -55,7 +55,7 @@
 ```json
 {
   "name": "memory_manage",
-  "description": "按当前用户和记忆层级列出、获取、单项或批量搜索、增删改记忆。self_improve 应用 search_many 一次匹配整批候选，候选持久化仍由运行时处理。",
+  "description": "按当前用户和记忆层级列出、获取、单项或批量搜索、增删改记忆。三个搜索 action 支持 tier=all 跨全部碎片层查询；self_improve 应用 search_many 一次匹配整批候选，候选持久化仍由运行时处理。",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -123,7 +123,7 @@
     "required": ["action", "tier"],
     "additionalProperties": false
   },
-  "version": "1.4.0",
+  "version": "1.5.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }
