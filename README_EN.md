@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.7.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.8.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,7 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `0.7.1`
+Current version: `0.8.0`
 
 The core system now forms a complete working loop. Conversations, memory, subagent collaboration, task planning, scheduling, perception, extensions, the web interface, the CLI, and messaging-platform access are connected and can be used in everyday operation.
 
@@ -218,6 +218,8 @@ Available today:
 - one-time and recurring scheduled tasks that wake automatically at the agreed time;
 - subagent collaboration for memory organization, planning, summarization, and scheduling;
 - multiple built-in tools and skills with room for further extension;
+- dynamic reasoning-effort choices derived from gateway model capabilities when using the Kemo protocol, while other Provider protocols retain their existing configuration flow;
+- separate contract-test baselines for skills, extensions, perception modules, external message routes, subagents, and user templates, covering their basic framework inputs and outputs;
 - ZIP upload for user-created skills, with recursive `SKILL.md` discovery and transactional installation;
 - shared identity and memory across the web interface, CLI, and messaging platforms;
 - isolated workspaces and configuration for multiple users;
