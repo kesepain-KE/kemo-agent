@@ -9,17 +9,26 @@ import {
   ChevronRight,
   Clipboard,
   Download,
+  Eye,
   File,
+  FileAudio,
   FileImage,
   FileText,
+  FileVideo,
   Folder,
   FolderOpen,
   HardDrive,
+  Gauge,
   Info,
+  EllipsisVertical,
+  Pause,
   Pencil,
+  Play,
   Search,
   Trash2,
   UploadCloud,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react'
 import { useOutletContext } from 'react-router-dom'
@@ -29,7 +38,9 @@ import {
   deleteTmpFiles,
   deleteUserFiles,
   getTmpFiles,
+  getTmpFilePreviewUrl,
   getUserFileDownloadUrl,
+  getUserFilePreviewUrl,
   getUserFiles,
   moveUserFile,
   uploadUserFile,
@@ -85,10 +96,40 @@ const areaLabels: Record<FileArea, { label: string; detail: string; description:
 }
 
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'])
+const previewImageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico'])
+const audioExtensions = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.opus'])
+const videoExtensions = new Set(['.mp4', '.webm', '.ogv', '.mov', '.m4v'])
 const archiveExtensions = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz'])
 const codeExtensions = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.json', '.yaml', '.yml', '.css', '.scss', '.html', '.xml', '.sh', '.ps1'])
 const documentExtensions = new Set(['.md', '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.log'])
 const FILES_PER_PAGE = 6
+const MEDIA_PREVIEW_LIMITS = {
+  image: 10 * 1024 * 1024,
+  audio: 100 * 1024 * 1024,
+  video: 300 * 1024 * 1024,
+} as const
+
+interface MediaPreviewInfo {
+  kind: keyof typeof MEDIA_PREVIEW_LIMITS
+  limitLabel: string
+  available: boolean
+}
+
+function mediaPreviewInfo(entry: FileEntry): MediaPreviewInfo | null {
+  if (entry.type !== 'file') return null
+  const extension = entry.extension.toLowerCase()
+  const kind = previewImageExtensions.has(extension)
+    ? 'image'
+    : audioExtensions.has(extension)
+      ? 'audio'
+      : videoExtensions.has(extension)
+        ? 'video'
+        : null
+  if (!kind) return null
+  const maxBytes = MEDIA_PREVIEW_LIMITS[kind]
+  const labels = { image: '图片预览上限（10 MB）', audio: '音频预览上限（100 MB）', video: '视频预览上限（300 MB）' } as const
+  return { kind, limitLabel: labels[kind], available: entry.size <= maxBytes }
+}
 
 function toFileEntry(entry: FileListEntry): FileEntry {
   return {
@@ -107,6 +148,8 @@ function fileKind(entry: FileEntry): { label: string; className: string } {
   if (entry.type === 'directory') return { label: '文件夹', className: styles.kindFolder }
   const extension = entry.extension.toLowerCase()
   if (imageExtensions.has(extension)) return { label: '图片', className: styles.kindImage }
+  if (audioExtensions.has(extension)) return { label: '音频', className: styles.kindAudio }
+  if (videoExtensions.has(extension)) return { label: '视频', className: styles.kindVideo }
   if (archiveExtensions.has(extension)) return { label: '压缩包', className: styles.kindArchive }
   if (codeExtensions.has(extension)) return { label: '代码', className: styles.kindCode }
   if (documentExtensions.has(extension)) return { label: '文档', className: styles.kindDocument }
@@ -117,10 +160,235 @@ function EntryIcon({ entry, size = 18 }: { entry: FileEntry; size?: number }) {
   if (entry.type === 'directory') return <Folder size={size} />
   const extension = entry.extension.toLowerCase()
   if (imageExtensions.has(extension)) return <FileImage size={size} />
+  if (audioExtensions.has(extension)) return <FileAudio size={size} />
+  if (videoExtensions.has(extension)) return <FileVideo size={size} />
   if (archiveExtensions.has(extension)) return <Archive size={size} />
   if (codeExtensions.has(extension)) return <Braces size={size} />
   if (documentExtensions.has(extension)) return <FileText size={size} />
   return <File size={size} />
+}
+
+const AUDIO_PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
+
+function formatMediaTime(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '0:00'
+  const wholeSeconds = Math.floor(value)
+  const minutes = Math.floor(wholeSeconds / 60)
+  const seconds = wholeSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function ThemedAudioPlayer({ src, name, downloadUrl }: { src: string; name: string; downloadUrl: string }) {
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(1)
+  const [playbackRate, setPlaybackRate] = useState(1)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [speedOpen, setSpeedOpen] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setMenuOpen(false)
+        setSpeedOpen(false)
+      }
+    }
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      setSpeedOpen(false)
+    }
+    document.addEventListener('pointerdown', closeFromOutside)
+    document.addEventListener('keydown', closeFromKeyboard)
+    return () => {
+      document.removeEventListener('pointerdown', closeFromOutside)
+      document.removeEventListener('keydown', closeFromKeyboard)
+    }
+  }, [menuOpen])
+
+  const togglePlayback = async () => {
+    const audio = audioRef.current
+    if (!audio) return
+    setError('')
+    if (!audio.paused) {
+      audio.pause()
+      return
+    }
+    try {
+      await audio.play()
+    } catch {
+      setPlaying(false)
+      setError('浏览器未能开始播放，请稍后重试')
+    }
+  }
+
+  const seekTo = (value: number) => {
+    const audio = audioRef.current
+    if (!audio || !Number.isFinite(value)) return
+    audio.currentTime = value
+    setCurrentTime(value)
+  }
+
+  const toggleMute = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.muted = !audio.muted
+    setMuted(audio.muted)
+  }
+
+  const setAudioVolume = (value: number) => {
+    const audio = audioRef.current
+    if (!audio || !Number.isFinite(value)) return
+    const nextVolume = Math.min(1, Math.max(0, value))
+    audio.volume = nextVolume
+    audio.muted = nextVolume === 0
+    setVolume(nextVolume)
+    setMuted(audio.muted)
+  }
+
+  const selectPlaybackRate = (value: number) => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.playbackRate = value
+    setPlaybackRate(value)
+    setMenuOpen(false)
+    setSpeedOpen(false)
+  }
+
+  const safeDuration = Number.isFinite(duration) ? duration : 0
+  const progress = safeDuration > 0 ? Math.min(100, (currentTime / safeDuration) * 100) : 0
+  const volumeProgress = muted ? 0 : volume * 100
+
+  return (
+    <div className={styles.audioPlayer}>
+      <audio
+        ref={audioRef}
+        className={styles.audioElement}
+        src={src}
+        preload="metadata"
+        aria-label={`音频 ${name}`}
+        onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+        onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onVolumeChange={(event) => {
+          setVolume(event.currentTarget.volume)
+          setMuted(event.currentTarget.muted)
+        }}
+        onRateChange={(event) => setPlaybackRate(event.currentTarget.playbackRate)}
+        onError={() => { setPlaying(false); setError('无法读取此音频文件') }}
+      >
+        当前浏览器不支持音频播放。
+      </audio>
+
+      <div className={styles.audioControlRow}>
+        <button
+          type="button"
+          className={styles.audioPrimaryButton}
+          onClick={() => void togglePlayback()}
+          aria-label={playing ? `暂停 ${name}` : `播放 ${name}`}
+          title={playing ? '暂停' : '播放'}
+        >
+          {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
+        </button>
+        <span className={styles.audioTime} aria-label={`已播放 ${formatMediaTime(currentTime)}，总时长 ${formatMediaTime(safeDuration)}`}>
+          {formatMediaTime(currentTime)} <i>/</i> {formatMediaTime(safeDuration)}
+        </span>
+        <button
+          type="button"
+          className={styles.audioIconButton}
+          onClick={toggleMute}
+          aria-label={muted ? `取消静音 ${name}` : `静音 ${name}`}
+          title={muted ? '取消静音' : '静音'}
+        >
+          {muted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+        </button>
+        <div className={styles.audioMenuAnchor} ref={menuRef}>
+          <button
+            type="button"
+            className={`${styles.audioIconButton} ${menuOpen ? styles.audioIconButtonActive : ''}`}
+            onClick={() => {
+              setMenuOpen((current) => !current)
+              setSpeedOpen(false)
+            }}
+            aria-label={`打开音频菜单 ${name}`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="更多音频选项"
+          >
+            <EllipsisVertical size={17} />
+          </button>
+          {menuOpen && (
+            <div className={styles.audioMenu} role="menu" aria-label={`${name} 音频选项`}>
+              <div className={styles.audioVolumeRow}>
+                <Volume2 size={15} aria-hidden="true" />
+                <span>音量</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={muted ? 0 : volume}
+                  onChange={(event) => setAudioVolume(Number(event.currentTarget.value))}
+                  aria-label={`${name} 音量`}
+                  style={{ background: `linear-gradient(90deg, var(--brand) 0%, var(--brand) ${volumeProgress}%, var(--line-strong) ${volumeProgress}%, var(--line-strong) 100%)` }}
+                />
+                <strong>{Math.round(volumeProgress)}%</strong>
+              </div>
+              <a href={downloadUrl} download={name} role="menuitem" aria-label={`下载 ${name}`}>
+                <Download size={16} /><span>下载</span>
+              </a>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => setSpeedOpen((current) => !current)}
+                aria-expanded={speedOpen}
+              >
+                <Gauge size={16} /><span>播放速度</span><strong>{playbackRate}×</strong>
+              </button>
+              {speedOpen && (
+                <div className={styles.audioSpeedGrid} aria-label="选择播放速度">
+                  {AUDIO_PLAYBACK_RATES.map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={playbackRate === rate}
+                      onClick={() => selectPlaybackRate(rate)}
+                    >
+                      {rate}×
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <input
+        className={styles.audioTimeline}
+        type="range"
+        min="0"
+        max={safeDuration || 0}
+        step="0.1"
+        value={Math.min(currentTime, safeDuration || 0)}
+        onChange={(event) => seekTo(Number(event.currentTarget.value))}
+        aria-label={`${name} 播放进度`}
+        disabled={!safeDuration}
+        style={{ background: `linear-gradient(90deg, var(--brand) 0%, var(--brand) ${progress}%, var(--line-strong) ${progress}%, var(--line-strong) 100%)` }}
+      />
+      {error && <span className={styles.audioError} role="status">{error}</span>}
+    </div>
+  )
 }
 
 function joinPath(parent: string, name: string): string {
@@ -161,6 +429,11 @@ export function FilesPage() {
   const visibleFilePaths = visibleEntries.filter((entry) => entry.type === 'file').map((entry) => entry.relativePath)
   const allVisibleSelected = Boolean(visibleFilePaths.length) && visibleFilePaths.every((path) => selectedPaths.has(path))
   const areaRoot = data?.root || areaLabels[area].detail.replace('<user>', user || '—')
+  const selectedMedia = selectedEntry ? mediaPreviewInfo(selectedEntry) : null
+
+  const previewUrl = (entry: FileEntry): string => area === 'tmp'
+    ? getTmpFilePreviewUrl(entry.relativePath)
+    : getUserFilePreviewUrl(user, area, entry.relativePath)
 
   useEffect(() => {
     if (selectedPath && !selectedEntry) setSelectedPath('')
@@ -304,7 +577,7 @@ export function FilesPage() {
 
   const rootLabel = areaLabels[area].label
   const crumbs = currentPath ? currentPath.split('/') : []
-  const operationDescription = area === 'tmp' ? '复制路径、多选删除、全部删除' : '复制路径、重命名、下载、多选删除、全部删除'
+  const operationDescription = area === 'tmp' ? '复制路径、媒体预览、多选删除、全部删除' : '复制路径、重命名、媒体预览、下载、多选删除、全部删除'
 
   const renderEntryActions = (entry: FileEntry, compact = false) => (
     <>
@@ -315,6 +588,11 @@ export function FilesPage() {
         <button type="button" onClick={() => openRename(entry)} aria-label={`重命名 ${entry.name}`} title="重命名">
           <Pencil size={14} /><span>重命名</span>
         </button>
+      )}
+      {mediaPreviewInfo(entry)?.available && (
+        <a href={previewUrl(entry)} target="_blank" rel="noopener noreferrer" aria-label={`预览 ${entry.name}`} title="在新标签页预览">
+          <Eye size={14} /><span>预览</span>
+        </a>
       )}
       {area !== 'tmp' && entry.type === 'file' && (
         <a href={getUserFileDownloadUrl(user, area, entry.relativePath)} download={entry.name} aria-label={`下载 ${entry.name}`} title="下载文件">
@@ -522,6 +800,29 @@ export function FilesPage() {
               <div className={`${styles.detailIcon} ${fileKind(selectedEntry).className}`}><EntryIcon entry={selectedEntry} size={24} /></div>
               <h3>{selectedEntry.name}</h3>
               <span className={`${styles.kindBadge} ${fileKind(selectedEntry).className}`}>{fileKind(selectedEntry).label}</span>
+              {selectedMedia && (
+                selectedMedia.available ? (
+                  <div className={`${styles.mediaPreview} ${selectedMedia.kind === 'audio' ? styles.mediaAudio : ''}`}>
+                    {selectedMedia.kind === 'image' && <img src={previewUrl(selectedEntry)} alt={`预览 ${selectedEntry.name}`} loading="lazy" />}
+                    {selectedMedia.kind === 'audio' && (
+                      <ThemedAudioPlayer
+                        key={`${area}:${selectedEntry.relativePath}`}
+                        src={previewUrl(selectedEntry)}
+                        name={selectedEntry.name}
+                        downloadUrl={area === 'tmp'
+                          ? previewUrl(selectedEntry)
+                          : getUserFileDownloadUrl(user, area, selectedEntry.relativePath)}
+                      />
+                    )}
+                    {selectedMedia.kind === 'video' && <video src={previewUrl(selectedEntry)} controls preload="metadata" playsInline>当前浏览器不支持视频播放。</video>}
+                  </div>
+                ) : (
+                  <div className={styles.previewUnavailable} role="note">
+                    <Info size={15} />
+                    <span>文件超过{selectedMedia.limitLabel}，请下载后查看</span>
+                  </div>
+                )
+              )}
               <dl>
                 <div><dt>相对路径</dt><dd>{areaRoot}/{selectedEntry.relativePath}</dd></div>
                 <div><dt>所属区域</dt><dd>{rootLabel}</dd></div>

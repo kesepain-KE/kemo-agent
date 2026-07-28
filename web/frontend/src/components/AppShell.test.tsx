@@ -862,6 +862,52 @@ describe('AppShell navigation', () => {
     expect(screen.queryByText('已排队到下一轮')).not.toBeInTheDocument()
   })
 
+  it('下一轮自动发送失败后允许取消待重发消息', async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>
+    let chatRequestCount = 0
+    const encoder = new TextEncoder()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    server.use(
+      http.post('/api/runs/:runId/guidance', ({ params }) => HttpResponse.json({
+        run_id: params.runId,
+        status: 'queued_next_turn',
+        queued: 0,
+      })),
+    )
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequestCount += 1
+      if (chatRequestCount === 1) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { firstStreamController = controller },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return HttpResponse.json({ error: { message: '网关连接已断开' } }, { status: 502 })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '第一轮任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatRequestCount).toBe(1))
+
+    fireEvent.change(composer, { target: { value: '你给修一下网关' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    firstStreamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
+    firstStreamController.close()
+
+    expect(await screen.findByText('自动发送失败')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新发送' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+
+    await waitFor(() => expect(screen.queryByText('自动发送失败')).not.toBeInTheDocument())
+    expect(screen.getByText('你给修一下网关')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toBeEnabled()
+    expect(chatRequestCount).toBe(2)
+  })
+
   it('保存并创建新对话时不在前台同步等待记忆提取', async () => {
     let extractedSession = ''
     server.use(

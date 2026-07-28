@@ -12,9 +12,13 @@
 .titleRow h2 { margin: 0; color: var(--text); font-size: 1.55rem; line-height: 1.25; letter-spacing: -.02em; }
 .titleRow > span { min-height: 1.875rem; padding: 0 .8125rem; display: inline-flex; align-items: center; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .8125rem; font-weight: 650; }
 .header p { max-width: 52rem; margin: .6875rem 0 0; color: var(--muted); font-size: .8125rem; line-height: 1.65; }
-.refreshButton { min-height: 2.5rem; padding: 0 .875rem; display: inline-flex; align-items: center; gap: .5rem; border: 1px solid var(--line); border-radius: .75rem; color: var(--text-2); background: var(--surface-elevated); box-shadow: var(--shadow-soft); cursor: pointer; font-size: .75rem; font-weight: 650; white-space: nowrap; }
+.headerActions { display: flex; align-items: center; justify-content: flex-end; gap: .625rem; }
+.refreshButton, .uploadButton { min-height: 2.5rem; padding: 0 .875rem; display: inline-flex; align-items: center; justify-content: center; gap: .5rem; border: 1px solid var(--line); border-radius: .75rem; color: var(--text-2); background: var(--surface-elevated); box-shadow: var(--shadow-soft); cursor: pointer; font-size: .75rem; font-weight: 650; white-space: nowrap; }
 .refreshButton:hover { color: var(--skill-accent); border-color: color-mix(in srgb, var(--skill-accent) 35%, var(--line)); }
-.refreshButton:disabled { cursor: wait; opacity: .6; }
+.uploadButton { color: #fff; border-color: var(--skill-accent); background: var(--skill-accent); }
+.uploadButton:hover { border-color: color-mix(in srgb, var(--skill-accent) 80%, #000); background: color-mix(in srgb, var(--skill-accent) 90%, #000); }
+.refreshButton:disabled, .uploadButton:disabled { cursor: wait; opacity: .6; }
+.uploadInput { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .spinning { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -143,7 +147,7 @@
 
 @media (max-width: 600px) {
   .header { align-items: stretch; flex-direction: column; }
-  .refreshButton { align-self: flex-start; }
+  .headerActions { justify-content: flex-start; flex-wrap: wrap; }
   .summaryGrid { grid-template-columns: 1fr; }
   .detailHeader { flex-direction: column; }
   .detailActions { grid-template-columns: repeat(2, minmax(0, 1fr)); }

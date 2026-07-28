@@ -62,23 +62,32 @@ export function MetricCard({
   detail,
   symbol,
   tone,
+  active = false,
+  activeLabel,
+  onClick,
 }: {
   label: string
   value: ReactNode
   detail?: ReactNode
   symbol: ReactNode
   tone?: 'success' | 'warning' | 'muted'
+  active?: boolean
+  activeLabel?: string
+  onClick?: () => void
 }) {
-  return (
-    <article className="metric-card">
+  const content = <>
       <div className="metric-top">
         <span>{label}</span>
         <span className={`metric-symbol ${tone || ''}`}>{symbol}</span>
       </div>
+      {active && activeLabel && <span className="metric-card-active-badge">{activeLabel}</span>}
       <strong>{value}</strong>
       {detail && <small>{detail}</small>}
-    </article>
-  )
+    </>
+  if (onClick) {
+    return <button type="button" className={`metric-card metric-card-action ${active ? 'active' : ''}`} aria-pressed={active} onClick={onClick}>{content}</button>
+  }
+  return <article className="metric-card">{content}</article>
 }
 
 export function StatusChip({ status, children }: { status: string; children?: ReactNode }) {

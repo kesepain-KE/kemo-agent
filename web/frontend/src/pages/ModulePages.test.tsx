@@ -116,6 +116,17 @@ describe('V16 module pages', () => {
     expect(screen.queryByText(/当前显示\s+\d+\s*\/\s*\d+/)).not.toBeInTheDocument()
     expect(screen.queryByText('外接项目 · kemo-graph')).not.toBeInTheDocument()
     expect(screen.queryByText('知识集合')).not.toBeInTheDocument()
+
+    const userMetric = screen.getByRole('button', { name: /用户层.*users\/kesepain\/knowledge/ })
+    expect(userMetric).toHaveAttribute('aria-pressed', 'false')
+    expect(within(screen.getByRole('button', { name: /文件总数.*当前区域.*有效文档/ })).getByText('当前区域')).toBeInTheDocument()
+    fireEvent.click(userMetric)
+    expect(userMetric).toHaveAttribute('aria-pressed', 'true')
+    expect(within(userMetric).getByText('当前区域')).toBeInTheDocument()
+    expect(screen.getAllByText('当前区域')).toHaveLength(1)
+    expect(screen.getByPlaceholderText('用户层：搜索文件名或标题…')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /文件总数.*有效文档/ }))
+    expect(screen.getByPlaceholderText('全部层级：搜索文件名或标题…')).toBeInTheDocument()
   })
 
   it('知识页按层级搜索并在保存后提示刷新索引', async () => {
@@ -133,6 +144,35 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存编辑' }))
     expect(await screen.findByText('当前知识文件已更新，请提醒智能体刷新索引')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '我知道了，不用刷新' })).toBeInTheDocument()
+  })
+
+  it('知识文件固定每页十项且翻页只替换列表内容', async () => {
+    const documents = Array.from({ length: 11 }, (_, index) => ({
+      title: `知识文件 ${index + 1}`,
+      relative_path: `knowledge-page-${index + 1}.md`,
+      scope: 'global',
+      size: index + 1,
+      updated_at: '2026-07-28T08:00:00+08:00',
+      active_for_main_agent: true,
+    }))
+    server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({
+      user: 'kesepain',
+      summary: { documents: 11, user_documents: 0, shared_documents: 0, global_documents: 11 },
+      documents,
+    })))
+    renderPage('knowledge')
+
+    expect(await screen.findByText('知识文件 1')).toBeInTheDocument()
+    expect(screen.getByText('知识文件 10')).toBeInTheDocument()
+    expect(screen.queryByText('知识文件 11')).not.toBeInTheDocument()
+    expect(screen.getByText('1 / 2')).toBeInTheDocument()
+    expect(screen.getByText('每页 10 个 · 共 11 个')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '下一页知识文件' }))
+    expect(await screen.findByText('知识文件 11')).toBeInTheDocument()
+    expect(screen.queryByText('知识文件 1')).not.toBeInTheDocument()
+    expect(screen.getByText('2 / 2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下一页知识文件' })).toBeDisabled()
   })
 
   it('临时重要记忆直接展示单文件编辑器而不展示记忆列表', async () => {
@@ -153,6 +193,51 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('button', { name: /Markdown 预览/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /保存编辑/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /删除此记忆/ })).not.toBeInTheDocument()
+  })
+
+  it('记忆排序使用主题气泡并在不支持权重的层级自动回退', async () => {
+    server.use(http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({
+      user: 'kesepain',
+      summary: { total: 3, seven_days: 2, one_month: 0, half_year: 0, permanent: 1 },
+      items: [{
+        memory_ref: 'seven_days:newer.md', filename: 'newer.md', tier: 'seven_days',
+        preview: '# 较新低权重记忆', weight: 1,
+        created_at: '2026-07-22T16:00:00+08:00', content_updated_at: '2026-07-22T16:00:00+08:00',
+        updated_at: '2026-07-22T16:00:00+08:00', last_used_at: null, expires_at: null,
+      }, {
+        memory_ref: 'seven_days:older.md', filename: 'older.md', tier: 'seven_days',
+        preview: '# 较旧高权重记忆', weight: 9,
+        created_at: '2026-07-20T16:00:00+08:00', content_updated_at: '2026-07-20T16:00:00+08:00',
+        updated_at: '2026-07-20T16:00:00+08:00', last_used_at: null, expires_at: null,
+      }, {
+        memory_ref: 'permanent:stable.md', filename: 'stable.md', tier: 'permanent',
+        preview: '# 长期稳定记忆', weight: 0,
+        created_at: '2026-07-18T16:00:00+08:00', content_updated_at: '2026-07-18T16:00:00+08:00',
+        updated_at: '2026-07-18T16:00:00+08:00', last_used_at: null, expires_at: null,
+      }],
+    })))
+    renderPage('memory')
+    const trigger = await screen.findByRole('button', { name: '按更新时间' })
+
+    fireEvent.click(trigger)
+    expect(screen.getByRole('listbox', { name: '记忆排序选项' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '按权重排序' })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('listbox', { name: '记忆排序选项' })).not.toBeInTheDocument()
+
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('option', { name: '按权重排序' }))
+    expect(screen.getByRole('button', { name: '按权重排序' })).toHaveAttribute('aria-expanded', 'false')
+    const highWeight = screen.getByText('较旧高权重记忆').closest('article')!
+    const lowWeight = screen.getByText('较新低权重记忆').closest('article')!
+    expect(highWeight.compareDocumentPosition(lowWeight) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    fireEvent.click(screen.getAllByRole('button', { name: '长期记忆' })[0])
+    await waitFor(() => expect(screen.getByRole('button', { name: '按更新时间' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: '按更新时间' }))
+    expect(screen.queryByRole('option', { name: '按权重排序' })).not.toBeInTheDocument()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('listbox', { name: '记忆排序选项' })).not.toBeInTheDocument()
   })
 
   it('记忆删除确认框通过全局 Portal 覆盖应用外壳', async () => {
@@ -196,6 +281,32 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('textbox', { name: '技能 Markdown 编辑器' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
+  })
+
+  it('技能页只选择 ZIP 并在上传后切换到用户自建技能', async () => {
+    let uploadCalled = false
+    server.use(http.post('/api/users/kesepain/skills/user-created/upload', () => {
+      uploadCalled = true
+      return HttpResponse.json({
+        user: 'kesepain',
+        category: 'user_created',
+        installed: [{ name: 'user_create/uploaded', title: '上传技能', path: 'users/kesepain/user_skills/user_create/uploaded' }],
+        count: 1,
+      })
+    }))
+    renderPage('skills')
+    await screen.findByRole('heading', { name: '工具与技能' })
+
+    const input = screen.getByLabelText('选择用户技能 ZIP 压缩包')
+    expect(input).toHaveAttribute('accept', '.zip,application/zip,application/x-zip-compressed')
+    fireEvent.change(input, { target: { files: [new File(['bad'], 'skill.tar')] } })
+    expect(await screen.findByRole('alert')).toHaveTextContent('用户技能只支持 ZIP 压缩包')
+
+    fireEvent.click(screen.getByRole('button', { name: '上传用户技能' }))
+    fireEvent.change(input, { target: { files: [new File(['zip'], 'skills.zip', { type: 'application/zip' })] } })
+    expect(await screen.findByText('已安装 1 个用户技能：上传技能')).toBeInTheDocument()
+    expect(uploadCalled).toBe(true)
+    expect(screen.getByRole('tab', { name: '用户自建技能' })).toHaveAttribute('aria-selected', 'true')
   })
 
   it('感知页默认展示全局注入，选择模块后展示采集与注入详情', async () => {
@@ -553,6 +664,59 @@ describe('V16 module pages', () => {
     expect(screen.getByText('2 / 2')).toBeInTheDocument()
     expect(requestedPages).toContain(1)
     expect(requestedPages).toContain(2)
+  })
+
+  it('文件空间在详情中预览媒体并隐藏超限文件的预览入口', async () => {
+    const mediaEntries = [
+      { type: 'file' as const, name: 'small.png', relative_path: 'small.png', parent_path: '', size: 1024, updated_at: 1, extension: '.png', child_count: 0 },
+      { type: 'file' as const, name: 'track.mp3', relative_path: 'track.mp3', parent_path: '', size: 2048, updated_at: 1, extension: '.mp3', child_count: 0 },
+      { type: 'file' as const, name: 'clip.mp4', relative_path: 'clip.mp4', parent_path: '', size: 4096, updated_at: 1, extension: '.mp4', child_count: 0 },
+      { type: 'file' as const, name: 'large.png', relative_path: 'large.png', parent_path: '', size: 10 * 1024 * 1024 + 1, updated_at: 1, extension: '.png', child_count: 0 },
+    ]
+    server.use(http.get('/api/users/kesepain/files/file_upload', ({ request }) => HttpResponse.json({
+      user: 'kesepain',
+      scope: 'file_upload',
+      root: 'users/kesepain/file_upload',
+      summary: { total_files: mediaEntries.length, total_dirs: 0, total_size: mediaEntries.reduce((total, entry) => total + entry.size, 0) },
+      entries: mediaEntries,
+      path: '',
+      search: '',
+      pagination: { page: 1, page_size: 6, total_items: mediaEntries.length, total_pages: 1, has_previous: false, has_next: false },
+    })))
+
+    renderPage('files')
+    fireEvent.click(await screen.findByRole('button', { name: '查看文件信息 small.png' }))
+    const image = await screen.findByRole('img', { name: '预览 small.png' })
+    expect(image).toHaveAttribute('src', '/api/users/kesepain/files/file_upload/preview?path=small.png')
+    expect(screen.getAllByRole('link', { name: '预览 small.png' })[0]).toHaveAttribute('target', '_blank')
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文件信息 track.mp3' }))
+    const audio = screen.getByLabelText('音频 track.mp3') as HTMLAudioElement
+    expect(audio).not.toHaveAttribute('controls')
+    expect(audio).toHaveAttribute('preload', 'metadata')
+    expect(audio).toHaveAttribute('src', '/api/users/kesepain/files/file_upload/preview?path=track.mp3')
+    fireEvent.click(screen.getByRole('button', { name: '打开音频菜单 track.mp3' }))
+    const audioMenu = screen.getByRole('menu', { name: 'track.mp3 音频选项' })
+    expect(within(audioMenu).getByRole('menuitem', { name: '下载 track.mp3' })).toHaveAttribute(
+      'href',
+      '/api/users/kesepain/files/file_upload/download?path=track.mp3',
+    )
+    fireEvent.click(within(audioMenu).getByRole('menuitem', { name: /播放速度/ }))
+    fireEvent.click(within(audioMenu).getByRole('menuitemradio', { name: '1.5×' }))
+    expect(audio.playbackRate).toBe(1.5)
+    expect(screen.queryByRole('menu', { name: 'track.mp3 音频选项' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文件信息 clip.mp4' }))
+    const video = document.querySelector('video')
+    expect(video).toHaveAttribute('controls')
+    expect(video).toHaveAttribute('preload', 'metadata')
+    expect(video).toHaveAttribute('playsinline')
+    expect(video).toHaveAttribute('src', '/api/users/kesepain/files/file_upload/preview?path=clip.mp4')
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文件信息 large.png' }))
+    expect(await screen.findByText('文件超过图片预览上限（10 MB），请下载后查看')).toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: '预览 large.png' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '预览 large.png' })).not.toBeInTheDocument()
   })
 
   it('重启被运行态拦截后允许经二次确认强制重启', async () => {

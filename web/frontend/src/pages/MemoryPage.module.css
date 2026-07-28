@@ -39,7 +39,19 @@
 .search { min-width: 0; flex: 1; height: 36px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
 .search:focus-within { border-color: var(--brand); }
 .search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: .73rem; }
-.toolbar select, .pagination select { height: 36px; padding: 0 9px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--muted); font-size: .7rem; }
+.sortSelect { position: relative; flex: 0 0 auto; }
+.sortSelectOpen { z-index: 30; }
+.sortTrigger { min-width: 138px; height: 36px; padding: 0 10px 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 10px; outline: 0; background: var(--surface); color: var(--muted); font: 600 .7rem/1 inherit; cursor: pointer; transition: border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease; }
+.sortTrigger:hover { border-color: var(--line-strong); background: var(--surface-hover); color: var(--text-2); }
+.sortTrigger:focus-visible, .sortSelectOpen .sortTrigger { border-color: var(--memory-brand); color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--memory-brand) 16%, transparent); }
+.sortTrigger svg { flex: 0 0 auto; transition: transform .16s ease; }
+.sortSelectOpen .sortTrigger svg { transform: rotate(180deg); }
+.sortPopover { position: absolute; top: calc(100% + 7px); right: 0; min-width: 168px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface-elevated); box-shadow: var(--shadow-float); animation: sort-popover-in .14s ease-out; }
+.sortPopover button { width: 100%; min-height: 35px; padding: 0 9px 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: 600 .7rem/1.25 inherit; text-align: left; white-space: nowrap; cursor: pointer; }
+.sortPopover button:hover, .sortPopover button:focus-visible { outline: 0; background: var(--surface-hover); color: var(--text); }
+.sortPopover button.sortOptionActive { background: var(--memory-soft); color: var(--memory-brand); }
+.sortPopover svg { flex: 0 0 auto; }
+@keyframes sort-popover-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .rows { min-height: 300px; flex: 1; padding: 6px; display: flex; flex-direction: column; gap: 5px; }
 .row { min-width: 0; min-height: 70px; padding: 10px 12px; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); cursor: pointer; transition: background .14s ease, border-color .14s ease, box-shadow .14s ease; }
 .row:last-child { border: 1px solid var(--line); }

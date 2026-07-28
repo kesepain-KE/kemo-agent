@@ -1741,6 +1741,7 @@ button,select,.select-like,.role-chip,.state-pill,.status-chip,.policy-value{min
   border-radius:var(--radius-card);background:var(--surface-elevated);box-shadow:var(--shadow-float)
 }
 .config-select-popover>button{width:100%;min-height:52px;padding:7px 9px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--text-2);display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;gap:8px;text-align:right;cursor:pointer}
+.config-select-popover>button+button{margin-top:6px}
 .config-select-popover>button:hover{background:var(--surface-hover);color:var(--text)}
 .config-select-popover>button:focus-visible{outline:0;background:var(--surface-hover);color:var(--text)}
 .config-select-popover>button.active{background:var(--brand-soft);color:var(--brand)}

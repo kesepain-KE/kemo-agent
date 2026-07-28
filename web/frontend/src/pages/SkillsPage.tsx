@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Boxes,
@@ -12,6 +12,7 @@ import {
   Share2,
   Sparkles,
   Trash2,
+  Upload,
   UserRound,
   Wrench,
 } from 'lucide-react'
@@ -25,6 +26,7 @@ import {
   getSkills,
   putSkillDocument,
   setSkillEnabled,
+  uploadUserSkills,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { RefreshActionButton } from '../components/ModuleUi'
@@ -73,6 +75,8 @@ export function SkillsPage() {
   const [draft, setDraft] = useState('')
   const [deleteTarget, setDeleteTarget] = useState('')
   const [feedback, setFeedback] = useState('')
+  const [uploadValidationError, setUploadValidationError] = useState('')
+  const uploadInputRef = useRef<HTMLInputElement>(null)
 
   const skillsQuery = useQuery({
     queryKey: ['skills', user],
@@ -129,6 +133,38 @@ export function SkillsPage() {
       await queryClient.invalidateQueries({ queryKey: ['skills', user] })
     },
   })
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => uploadUserSkills(user, file),
+    onSuccess: async (result) => {
+      const names = result.installed.map((item) => item.title || item.name).join('、')
+      setActiveFilter('user_created')
+      setSearchText('')
+      setSelectedId(result.installed[0] ? `user_created:${result.installed[0].name}` : '')
+      setFeedback(`已安装 ${result.count} 个用户技能${names ? `：${names}` : ''}`)
+      await queryClient.invalidateQueries({ queryKey: ['skills', user] })
+    },
+    onSettled: () => {
+      if (uploadInputRef.current) uploadInputRef.current.value = ''
+    },
+  })
+
+  const chooseSkillArchive = () => {
+    setFeedback('')
+    setUploadValidationError('')
+    uploadMutation.reset()
+    if (uploadInputRef.current) uploadInputRef.current.value = ''
+    uploadInputRef.current?.click()
+  }
+  const uploadSkillArchive = (file: File | undefined) => {
+    if (!file) return
+    if (!file.name.toLocaleLowerCase().endsWith('.zip')) {
+      setUploadValidationError('用户技能只支持 ZIP 压缩包')
+      if (uploadInputRef.current) uploadInputRef.current.value = ''
+      return
+    }
+    setUploadValidationError('')
+    uploadMutation.mutate(file)
+  }
 
   const changeFilter = (filter: SkillFilter) => {
     setActiveFilter(filter)
@@ -151,7 +187,21 @@ export function SkillsPage() {
               <div className={styles.titleRow}><h2>工具与技能</h2><span>{user || '未选择用户'}</span></div>
               <p>统一查看基础插件、共享技能与两类用户技能；可用范围由当前用户的插件和共享技能白名单控制。</p>
             </div>
-            <RefreshActionButton pending={skillsQuery.isFetching} label="刷新技能库" pendingLabel="刷新中…" iconSize={16} className={styles.refreshButton} onClick={() => { void refresh() }} />
+            <div className={styles.headerActions}>
+              <RefreshActionButton pending={skillsQuery.isFetching} label="刷新技能库" pendingLabel="刷新中…" iconSize={16} className={styles.refreshButton} onClick={() => { void refresh() }} />
+              <input
+                ref={uploadInputRef}
+                className={styles.uploadInput}
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                aria-label="选择用户技能 ZIP 压缩包"
+                onChange={(event) => uploadSkillArchive(event.target.files?.[0])}
+              />
+              <button type="button" className={styles.uploadButton} disabled={uploadMutation.isPending || !user} onClick={chooseSkillArchive}>
+                {uploadMutation.isPending ? <LoaderCircle size={16} className={styles.spinning} /> : <Upload size={16} />}
+                {uploadMutation.isPending ? '正在上传…' : '上传用户技能'}
+              </button>
+            </div>
           </header>
 
           <section className={styles.summaryGrid} aria-label="技能统计">
@@ -170,6 +220,7 @@ export function SkillsPage() {
             </div>
 
             {skillsQuery.isError ? <div className={styles.errorBanner}>技能库读取失败，请检查配置文件或服务状态。</div> : null}
+            {uploadValidationError || uploadMutation.isError ? <div className={styles.errorBanner} role="alert">{uploadValidationError || (uploadMutation.error instanceof Error ? uploadMutation.error.message : '用户技能上传失败')}</div> : null}
             {feedback ? <div className={styles.feedback} role="status">{feedback}</div> : null}
             <div className={styles.workspace}>
               <section className={styles.listPanel} aria-label="技能列表">

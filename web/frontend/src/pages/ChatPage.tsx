@@ -722,7 +722,7 @@ type GuidanceDisplayItem = GuidanceItem | {
   status: 'next_turn' | 'next_turn_error'
 }
 
-function GuidanceMessage({ item, placement, onRetry }: { item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void }) {
+function GuidanceMessage({ item, placement, onRetry, onCancel }: { item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
   const title = item.status === 'queued'
     ? '正在引导'
     : item.status === 'next_turn'
@@ -751,7 +751,10 @@ function GuidanceMessage({ item, placement, onRetry }: { item: GuidanceDisplayIt
     <span className="guidance-title"><i aria-hidden="true" />{title}</span>
     <strong>{item.content}</strong>
     <small>{detail}</small>
-    {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>重新发送</button> : null}
+    {onRetry || onCancel ? <div className="guidance-actions">
+      {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>取消</button> : null}
+      {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>重新发送</button> : null}
+    </div> : null}
   </article>
 }
 
@@ -1808,7 +1811,7 @@ export function ChatPage() {
             />
           </div>
         ) : null}
-        {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage item={guidancePreviewItem} placement="current" onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
+        {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage item={guidancePreviewItem} placement="current" onCancel={pendingNextTurn?.status === 'error' && liveSessionId ? () => removeNextTurnMessage(user, liveSessionId, pendingNextTurn.id) : undefined} onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
         <AgentComposer
           value={draft}
           placeholder={user ? stopping ? '输入下一轮消息；将在当前任务停止后自动发送…' : running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}

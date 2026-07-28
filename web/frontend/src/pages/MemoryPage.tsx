@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Brain, CalendarDays, ChevronLeft, ChevronRight, Eye, FileText, LoaderCircle, Plus, RotateCcw, Save, Search, Trash2, X } from 'lucide-react'
+import { Brain, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Eye, FileText, LoaderCircle, Plus, RotateCcw, Save, Search, Trash2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useOutletContext } from 'react-router-dom'
@@ -12,6 +12,7 @@ import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton } from '../co
 import styles from './MemoryPage.module.css'
 
 type MemoryTier = 'seven_days' | 'one_month' | 'half_year' | 'important' | 'permanent'
+type MemorySort = 'newest' | 'oldest' | 'weight'
 
 const TABS: MemoryTier[] = ['seven_days', 'one_month', 'half_year', 'important', 'permanent']
 const TIER_LABELS: Record<MemoryTier, string> = {
@@ -23,6 +24,11 @@ const TIER_LABELS: Record<MemoryTier, string> = {
 }
 const WEIGHTED_TIERS = new Set<MemoryTier>(['seven_days', 'one_month', 'half_year'])
 const PAGE_SIZES = [6]
+const SORT_LABELS: Record<MemorySort, string> = {
+  newest: '按更新时间',
+  oldest: '按最早时间',
+  weight: '按权重排序',
+}
 
 interface MemoryRow {
   key: string
@@ -93,6 +99,57 @@ function StatCard({ tier, count, active, onClick }: { tier: MemoryTier; count: n
   </button>
 }
 
+function MemorySortSelect({ value, allowWeight, onChange }: { value: MemorySort; allowWeight: boolean; onChange: (value: MemorySort) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const options: MemorySort[] = allowWeight ? ['newest', 'oldest', 'weight'] : ['newest', 'oldest']
+
+  useEffect(() => {
+    if (!open) return
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeFromOutside)
+    document.addEventListener('keydown', closeFromKeyboard)
+    return () => {
+      document.removeEventListener('pointerdown', closeFromOutside)
+      document.removeEventListener('keydown', closeFromKeyboard)
+    }
+  }, [open])
+
+  return <div ref={rootRef} className={`${styles.sortSelect} ${open ? styles.sortSelectOpen : ''}`}>
+    <button
+      type="button"
+      className={styles.sortTrigger}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      onClick={() => setOpen((current) => !current)}
+    >
+      <span>{SORT_LABELS[value]}</span>
+      <ChevronDown size={15} aria-hidden="true" />
+    </button>
+    {open && <div className={styles.sortPopover} role="listbox" aria-label="记忆排序选项">
+      {options.map((option) => <button
+        type="button"
+        role="option"
+        aria-selected={option === value}
+        key={option}
+        className={option === value ? styles.sortOptionActive : ''}
+        onClick={() => {
+          onChange(option)
+          setOpen(false)
+        }}
+      >
+        <span>{SORT_LABELS[option]}</span>
+        {option === value && <Check size={14} aria-hidden="true" />}
+      </button>)}
+    </div>}
+  </div>
+}
+
 export function MemoryPage() {
   const { user } = useOutletContext<ShellOutletContext>()
   const client = useQueryClient()
@@ -102,7 +159,7 @@ export function MemoryPage() {
   const [original, setOriginal] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [queryText, setQueryText] = useState('')
-  const [sort, setSort] = useState<'newest' | 'oldest' | 'weight'>('newest')
+  const [sort, setSort] = useState<MemorySort>('newest')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(6)
   const [createOpen, setCreateOpen] = useState(false)
@@ -144,6 +201,9 @@ export function MemoryPage() {
   const pagedRows = visibleRows.slice((page - 1) * pageSize, page * pageSize)
   useEffect(() => setPage(1), [activeTier, queryText, pageSize])
   useEffect(() => { if (page > totalPages) setPage(totalPages) }, [page, totalPages])
+  useEffect(() => {
+    if (!WEIGHTED_TIERS.has(activeTier) && sort === 'weight') setSort('newest')
+  }, [activeTier, sort])
 
   const reload = () => { void summary.refetch(); void important.refetch(); if (selected) void item.refetch() }
   const invalidateMemory = async () => {
@@ -191,7 +251,7 @@ export function MemoryPage() {
     <div className={styles.statGrid}>{TABS.map((tier) => <StatCard key={tier} tier={tier} count={counts[tier]} active={activeTier === tier} onClick={() => setActiveTier(tier)} />)}</div>
     <div className={styles.tabsBar}>{TABS.map((tier) => <button type="button" key={tier} className={activeTier === tier ? styles.tabActive : ''} onClick={() => setActiveTier(tier)}>{TIER_LABELS[tier]}</button>)}</div>
     <div className={`${styles.workspace} ${activeTier === 'important' ? styles.workspaceSingle : ''}`}>
-      {activeTier !== 'important' && <section className={styles.listPanel}><div className={styles.panelHeading}><div><strong>{TIER_LABELS[activeTier]}</strong><span>{WEIGHTED_TIERS.has(activeTier) ? '编辑后权重 +1，每天最多增加一次。' : '手动创建并长期保存的稳定记忆。'}</span></div><span className={styles.panelCount}>{visibleRows.length}</span></div><div className={styles.toolbar}><label className={styles.search}><Search size={15} /><input value={queryText} placeholder="搜索当前记忆栏……" onChange={(event) => setQueryText(event.target.value)} /></label><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">按更新时间</option><option value="oldest">按最早时间</option>{WEIGHTED_TIERS.has(activeTier) && <option value="weight">按权重排序</option>}</select></div><div className={styles.rows}>{pagedRows.length ? pagedRows.map((row) => <article key={row.key} className={`${styles.row} ${selectedKey === row.key ? styles.rowSelected : ''}`} onClick={() => setSelectedKey(row.key)}><span className={styles.rowDot} /><div className={styles.rowCopy}><strong>{row.title}</strong><span>{row.preview || row.filename}</span></div><div className={styles.rowMeta}>{WEIGHTED_TIERS.has(row.tier) && <span className={styles.weight}>权重 {row.weight}</span>}<small>{formatUpdated(row.updatedAt)}</small><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedKey(row.key) }}>编辑</button><button type="button" onClick={(event) => { event.stopPropagation(); setPendingDelete(row) }}>删除</button></div></article>) : <EmptyPanel title="当前记忆栏暂无内容" description="可以切换其他记忆栏或重新读取数据。" icon={<Brain size={22} />} />}</div><div className={styles.pagination}><div><button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={14} /></button><b>{page} / {totalPages}</b><button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}><ChevronRight size={14} /></button></div></div></section>}
+      {activeTier !== 'important' && <section className={styles.listPanel}><div className={styles.panelHeading}><div><strong>{TIER_LABELS[activeTier]}</strong><span>{WEIGHTED_TIERS.has(activeTier) ? '编辑后权重 +1，每天最多增加一次。' : '手动创建并长期保存的稳定记忆。'}</span></div><span className={styles.panelCount}>{visibleRows.length}</span></div><div className={styles.toolbar}><label className={styles.search}><Search size={15} /><input value={queryText} placeholder="搜索当前记忆栏……" onChange={(event) => setQueryText(event.target.value)} /></label><MemorySortSelect value={sort} allowWeight={WEIGHTED_TIERS.has(activeTier)} onChange={setSort} /></div><div className={styles.rows}>{pagedRows.length ? pagedRows.map((row) => <article key={row.key} className={`${styles.row} ${selectedKey === row.key ? styles.rowSelected : ''}`} onClick={() => setSelectedKey(row.key)}><span className={styles.rowDot} /><div className={styles.rowCopy}><strong>{row.title}</strong><span>{row.preview || row.filename}</span></div><div className={styles.rowMeta}>{WEIGHTED_TIERS.has(row.tier) && <span className={styles.weight}>权重 {row.weight}</span>}<small>{formatUpdated(row.updatedAt)}</small><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedKey(row.key) }}>编辑</button><button type="button" onClick={(event) => { event.stopPropagation(); setPendingDelete(row) }}>删除</button></div></article>) : <EmptyPanel title="当前记忆栏暂无内容" description="可以切换其他记忆栏或重新读取数据。" icon={<Brain size={22} />} />}</div><div className={styles.pagination}><div><button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={14} /></button><b>{page} / {totalPages}</b><button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}><ChevronRight size={14} /></button></div></div></section>}
       <aside className={styles.editorPanel}><div className={styles.editorHeading}><div><strong>编辑查看</strong><span>{selected ? selected.title : activeTier === 'important' ? '临时重要记忆文件' : '选择一条记忆'}</span></div>{selected && activeTier !== 'important' && <button type="button" aria-label="关闭编辑查看" onClick={() => setSelectedKey('')}><X size={16} /></button>}</div>{!selected ? <div className={styles.editorEmpty}><Brain size={42} /><strong>{activeTier === 'important' ? '临时重要记忆文件不可用' : '选择一条记忆'}</strong><span>{activeTier === 'important' ? '请重新读取数据或检查记忆文件状态。' : '点击左侧记忆后在此处查看和编辑。'}</span></div> : <><div className={styles.metadata}><span>记忆类型：<b>{TIER_LABELS[selected.tier]}</b></span><span>创建时间：<b>{formatUpdated(selected.createdAt)}</b></span><span>内容更新：<b>{formatUpdated(selected.updatedAt)}</b></span>{selected.lastUsedAt && <span>最近使用：<b>{formatUpdated(selected.lastUsedAt)}</b></span>}{WEIGHTED_TIERS.has(selected.tier) && <span>当前权重：<b>{item.data?.weight ?? selected.weight}</b></span>}</div>{WEIGHTED_TIERS.has(selected.tier) && <div className={styles.weightNotice}><Brain size={14} />{weightToday ? '该记忆今天已经因编辑增加过权重，再次保存不会继续增加。' : '保存编辑后权重 +1，同一条记忆每天最多增加一次。'}</div>}<div className={styles.editorToolbar}><button type="button" className={previewing ? styles.previewActive : ''} onClick={() => setPreviewing((value) => !value)}>{previewing ? <><FileText size={14} />返回编辑</> : <><Eye size={14} />Markdown 预览</>}</button>{changed && <small>有未保存修改</small>}</div><div className={styles.editorBody}>{loadingDetail ? <div className={styles.editorLoading}>正在读取记忆内容…</div> : previewing ? <article className={styles.markdown}><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article> : <textarea value={draft} spellCheck={false} placeholder="输入记忆内容……" onChange={(event) => setDraft(event.target.value)} />}</div><div className={styles.editorActions}><button type="button" className="module-btn" disabled={!changed || save.isPending} onClick={() => setDraft(original)}><RotateCcw size={14} />恢复</button>{selected.tier !== 'important' && <button type="button" className="module-btn danger" disabled={save.isPending || remove.isPending} onClick={() => setPendingDelete(selected)}><Trash2 size={14} />删除此记忆</button>}<button type="button" className="module-btn primary" disabled={!changed || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}保存编辑</button></div>{save.isError && <ModuleError message={String(save.error)} />}</>}</aside>
     </div>
     <GlobalConfirmDialog

@@ -40,6 +40,7 @@ import type {
   SkillsResponse,
   SkillCategory,
   SkillDocumentResponse,
+  SkillUploadResponse,
   SoulResponse,
   TasksResponse,
   TmpFilesResponse,
@@ -405,6 +406,15 @@ export async function putSkillDocument(user: string, category: SkillCategory, na
   })
 }
 
+export async function uploadUserSkills(user: string, file: File): Promise<SkillUploadResponse> {
+  const formData = new FormData()
+  formData.append('file', file)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/user-created/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+}
+
 export async function deleteSkill(user: string, category: SkillCategory, name: string): Promise<{ user: string; category: SkillCategory; name: string; path: string; deleted: boolean }> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}?name=${encodeURIComponent(name)}`, { method: 'DELETE' })
 }
@@ -549,6 +559,18 @@ export function getUserFileDownloadUrl(
   path: string,
 ): string {
   return `${apiBase}/api/users/${encodeURIComponent(user)}/files/${scope}/download?path=${encodeURIComponent(path)}`
+}
+
+export function getUserFilePreviewUrl(
+  user: string,
+  scope: 'file_upload' | 'download',
+  path: string,
+): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/files/${scope}/preview?path=${encodeURIComponent(path)}`
+}
+
+export function getTmpFilePreviewUrl(path: string): string {
+  return `${apiBase}/api/tmp/preview?path=${encodeURIComponent(path)}`
 }
 
 export async function deleteUserFile(

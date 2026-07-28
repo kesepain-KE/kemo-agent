@@ -418,6 +418,17 @@ export interface SkillDocumentResponse {
   editable: boolean
 }
 
+export interface SkillUploadResponse {
+  user: string
+  category: 'user_created'
+  installed: Array<{
+    name: string
+    title: string
+    path: string
+  }>
+  count: number
+}
+
 export interface SkillsResponse {
   user: string
   summary: { registered: number; enabled: number; user: number; shared: number; core: number }

@@ -1,6 +1,6 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Database, Eye, FileText, Layers3, LoaderCircle, Pencil, RefreshCw, Save, Search, Share2, Trash2, Upload, UserRound, X } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight, Database, Eye, FileText, Layers3, LoaderCircle, Pencil, RefreshCw, Save, Search, Share2, Trash2, Upload, UserRound, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useNavigate, useOutletContext } from 'react-router-dom'
@@ -14,6 +14,7 @@ type EditableScope = 'user' | 'shared'
 type EditorMode = 'markdown' | 'preview'
 
 const scopeLabels: Record<Exclude<Scope, 'all'>, string> = { user: '用户层', shared: '共享层', global: '全局层' }
+const KNOWLEDGE_PAGE_SIZE = 10
 
 function basename(path: string) {
   return path.split('/').at(-1) || path
@@ -35,6 +36,7 @@ export function KnowledgePage() {
   const [hasIndexChanges, setHasIndexChanges] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importScope, setImportScope] = useState<EditableScope>('user')
+  const [page, setPage] = useState(1)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const query = useQuery({ queryKey: ['knowledge', user], queryFn: () => getKnowledge(user), enabled: Boolean(user) })
@@ -61,6 +63,16 @@ export function KnowledgePage() {
       && (!term || `${document.title} ${document.relative_path}`.toLocaleLowerCase().includes(term))
     ))
   }, [data?.documents, queryText, scope])
+  const totalPages = Math.max(1, Math.ceil(documents.length / KNOWLEDGE_PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const pagedDocuments = useMemo(() => {
+    const start = (currentPage - 1) * KNOWLEDGE_PAGE_SIZE
+    return documents.slice(start, start + KNOWLEDGE_PAGE_SIZE)
+  }, [currentPage, documents])
+  useEffect(() => setPage(1), [queryText, scope])
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages))
+  }, [totalPages])
   const selectedSummary = data?.documents.find((document) => document.scope === selected?.scope && document.relative_path === selected?.path)
   const readOnly = selected?.scope === 'global'
 
@@ -147,10 +159,10 @@ export function KnowledgePage() {
       </div>
 
       <section className="metric-strip knowledge-metrics">
-        <MetricCard label="文件总数" value={data?.summary.documents ?? '—'} detail="有效文档" symbol={<Database size={16} />} />
-        <MetricCard label="用户层" value={data?.summary.user_documents ?? '—'} detail={`users/${user}/knowledge`} symbol={<FileText size={16} />} />
-        <MetricCard label="共享层" value={data?.summary.shared_documents ?? '—'} detail="shared_knowledge" symbol={<Share2 size={16} />} />
-        <MetricCard label="全局层" value={data?.summary.global_documents ?? '—'} detail="global_knowledge" symbol={<Layers3 size={16} />} />
+        <MetricCard label="文件总数" value={data?.summary.documents ?? '—'} detail="有效文档" symbol={<Database size={16} />} active={scope === 'all'} activeLabel="当前区域" onClick={() => setScope('all')} />
+        <MetricCard label="用户层" value={data?.summary.user_documents ?? '—'} detail={`users/${user}/knowledge`} symbol={<FileText size={16} />} active={scope === 'user'} activeLabel="当前区域" onClick={() => setScope('user')} />
+        <MetricCard label="共享层" value={data?.summary.shared_documents ?? '—'} detail="shared_knowledge" symbol={<Share2 size={16} />} active={scope === 'shared'} activeLabel="当前区域" onClick={() => setScope('shared')} />
+        <MetricCard label="全局层" value={data?.summary.global_documents ?? '—'} detail="global_knowledge" symbol={<Layers3 size={16} />} active={scope === 'global'} activeLabel="当前区域" onClick={() => setScope('global')} />
       </section>
 
       <div className="module-toolbar knowledge-layer-toolbar">
@@ -160,7 +172,7 @@ export function KnowledgePage() {
       <div className="module-grid knowledge-grid knowledge-grid-editor">
         <article className="panel table-panel">
           <div className="panel-head"><div className="panel-title"><span className="panel-title-icon knowledge-collection-icon"><BookOpen size={17} /></span><span><strong>知识文件</strong><span>只展示元数据，点击文件进入编辑查看</span></span></div><span className="panel-count">{documents.length}</span></div>
-          {documents.length ? <div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>名称</th><th>层级</th><th>主智能体</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>{documents.map((document) => <tr key={documentKey(document)} className={selected && selected.scope === document.scope && selected.path === document.relative_path ? 'knowledge-row-selected' : ''} onClick={() => selectDocument(document)}><td><span className="table-main"><span className="table-icon knowledge-document-icon"><FileText size={16} /></span><span><strong>{document.title}</strong><span>{basename(document.relative_path)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope as Exclude<Scope, 'all'>] || document.scope}</span></td><td><StatusChip status={document.active_for_main_agent ? 'enabled' : 'paused'}>{document.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></td><td className="path-cell">{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}</tbody></table></div> : <EmptyPanel title="没有匹配的知识文件" description={queryText ? '调整搜索词或切换层级后重试。' : '当前知识目录中还没有可索引文件。'} icon={<BookOpen size={21} />} />}
+          {documents.length ? <div className="knowledge-list-body"><div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>名称</th><th>层级</th><th>主智能体</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>{pagedDocuments.map((document) => <tr key={documentKey(document)} className={selected && selected.scope === document.scope && selected.path === document.relative_path ? 'knowledge-row-selected' : ''} onClick={() => selectDocument(document)}><td><span className="table-main"><span className="table-icon knowledge-document-icon"><FileText size={16} /></span><span><strong>{document.title}</strong><span>{basename(document.relative_path)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope as Exclude<Scope, 'all'>] || document.scope}</span></td><td><StatusChip status={document.active_for_main_agent ? 'enabled' : 'paused'}>{document.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></td><td className="path-cell">{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}</tbody></table></div><footer className="knowledge-pagination"><span>每页 {KNOWLEDGE_PAGE_SIZE} 个 · 共 {documents.length} 个</span><nav aria-label="知识文件分页"><button type="button" aria-label="上一页知识文件" disabled={currentPage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} />上一页</button><strong>{currentPage} / {totalPages}</strong><button type="button" aria-label="下一页知识文件" disabled={currentPage >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>下一页<ChevronRight size={14} /></button></nav></footer></div> : <EmptyPanel title="没有匹配的知识文件" description={queryText ? '调整搜索词或切换层级后重试。' : '当前知识目录中还没有可索引文件。'} icon={<BookOpen size={21} />} />}
         </article>
 
         <aside className="knowledge-editor panel">
