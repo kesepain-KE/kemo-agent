@@ -293,6 +293,44 @@ export const handlers = [
       capabilities_url: '/model/models/deepseek-deepseek-v4-flash/capabilities',
     }],
   })),
+  http.get('/api/users/:user/provider/model-capabilities', ({ params, request }) => {
+    const model = new URL(request.url).searchParams.get('model') || 'test-model'
+    return HttpResponse.json({
+      user: params.user,
+      protocol: 'kemo',
+      api_valid: true,
+      model,
+      stale: false,
+      warning: '',
+      capabilities: {
+        model,
+        task: 'llm',
+        input_modalities: ['text'],
+        output_modalities: ['text'],
+        streaming: true,
+        reasoning: {
+          supported: true,
+          efforts: ['minimal', 'low', 'medium', 'high', 'max'],
+          summary: true,
+          persisted_state: false,
+        },
+        tools: {
+          function_calling: true,
+          parallel_calls: false,
+          multimodal_results: false,
+        },
+        structured_output: true,
+        metadata: {},
+        extensions: {
+          reasoning_policy: {
+            mode: 'native',
+            logical_efforts: ['minimal', 'low', 'medium', 'high', 'max'],
+            collapsed: false,
+          },
+        },
+      },
+    })
+  }),
   http.get('/api/global-config', () => HttpResponse.json({
     scope: 'global',
     config: {

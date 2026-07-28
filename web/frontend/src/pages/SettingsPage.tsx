@@ -6,6 +6,7 @@ import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   getGlobalConfig,
+  getKemoModelCapabilities,
   getKemoProviderModels,
   getSettings,
   getUserConfig,
@@ -17,9 +18,15 @@ import {
   restartSystem,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
-import type { KemoModelCatalogItem } from '../types/api'
+import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
 import { ReasoningEffortSelect } from '../components/ReasoningEffortSelect'
-import { normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
+import {
+  normalizeKemoReasoningEffort,
+  normalizeReasoningEffort,
+  reasoningEffortOptionsFor,
+  selectReasoningEffort,
+  type ReasoningEffort,
+} from '../reasoningEffort'
 import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 import { copyText } from '../utils/clipboard'
@@ -145,6 +152,22 @@ function versionCheckTime(value: string) {
   return parsed.toLocaleString('zh-CN', { hour12: false })
 }
 
+function reasoningPolicyDescription(response: KemoModelCapabilitiesResponse | undefined) {
+  if (!response) return ''
+  const policy = response.capabilities.extensions.reasoning_policy
+  const mode = policy?.mode
+  const details = mode === 'native'
+    ? '网关声明为厂商原生档位'
+    : mode === 'mapped'
+      ? 'Kemo 逻辑档位由网关映射到厂商档位'
+      : mode === 'provider_default'
+        ? '网关将使用厂商默认推理策略'
+        : '档位由 Kemo 网关能力声明提供'
+  return policy?.collapsed
+    ? `${details}；部分档位会映射到相同的上游强度`
+    : details
+}
+
 function stringList(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
@@ -161,6 +184,7 @@ function graphDraft(value: unknown): GraphDraft {
 
 function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
   const provider = record(config.provider)
+  const providerType: ProviderType = provider.type === 'kemo' ? 'kemo' : 'chat'
   const agentModels = record(config.agent_models)
   const multimodal = record(config.multimodal_models)
   const multimodalRouting = record(config.multimodal_routing)
@@ -172,12 +196,14 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
   const taskPlan = record(config.task_plan)
   return {
     provider: {
-      type: provider.type === 'kemo' ? 'kemo' : 'chat',
+      type: providerType,
       model: stringValue(provider.model),
       base_url: stringValue(provider.base_url),
       api_key: stringValue(provider.api_key),
       stream: booleanValue(provider.stream, true),
-      reasoning_effort: normalizeReasoningEffort(provider.reasoning_effort),
+      reasoning_effort: providerType === 'kemo'
+        ? normalizeKemoReasoningEffort(provider.reasoning_effort)
+        : normalizeReasoningEffort(provider.reasoning_effort),
       supports_image_input: stringList(provider.input_modalities).includes('image'),
       supports_audio_input: stringList(provider.input_modalities).includes('audio'),
       supports_video_input: stringList(provider.input_modalities).includes('video'),
@@ -575,6 +601,23 @@ export function SettingsPage() {
   const [restartCanForce, setRestartCanForce] = useState(false)
   const [versionCopyState, setVersionCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const restartTimerRef = useRef<number | null>(null)
+  const selectedProviderModel = userDraft?.provider.model.trim() || ''
+  const selectedCatalogModel = providerModels.find((item) => item.id === selectedProviderModel)
+  const providerCapabilitiesEnabled = Boolean(
+    user
+      && tab === 'provider'
+      && storedProviderType === 'kemo'
+      && userDraft?.provider.type === 'kemo'
+      && providerDiscovery.status === 'valid'
+      && selectedProviderModel,
+  )
+  const providerCapabilitiesQuery = useQuery({
+    queryKey: ['provider-model-capabilities', user, selectedProviderModel],
+    queryFn: () => getKemoModelCapabilities(user, selectedProviderModel),
+    enabled: providerCapabilitiesEnabled,
+    staleTime: 300_000,
+    retry: false,
+  })
 
   const versionCheckMutation = useMutation({
     mutationFn: () => getVersionCheck(true),
@@ -628,6 +671,27 @@ export function SettingsPage() {
   }, [globalConfigQuery.data])
 
   useEffect(() => {
+    const capabilities = providerCapabilitiesQuery.data?.capabilities
+    if (!capabilities?.reasoning.supported || !capabilities.reasoning.efforts.length) return
+    const fallback = selectReasoningEffort(
+      userDraft?.provider.reasoning_effort,
+      capabilities.reasoning.efforts,
+    )
+    if (!fallback || fallback === userDraft?.provider.reasoning_effort) return
+    setUserDraft((current) => {
+      if (
+        !current
+        || current.provider.type !== 'kemo'
+        || current.provider.model.trim() !== capabilities.model
+      ) return current
+      return {
+        ...current,
+        provider: { ...current.provider, reasoning_effort: fallback },
+      }
+    })
+  }, [providerCapabilitiesQuery.data, userDraft?.provider.reasoning_effort])
+
+  useEffect(() => {
     if (isSettingsTab(requestedTab)) setTab(requestedTab)
   }, [requestedTab])
 
@@ -639,7 +703,7 @@ export function SettingsPage() {
       ])
       if (providerDiscovery !== 'kemo') return {}
       try {
-        const catalog = await getKemoProviderModels(user)
+        const catalog = await getKemoProviderModels(user, true)
         return { providerModels: catalog.data }
       } catch (error) {
         return {
@@ -654,9 +718,11 @@ export function SettingsPage() {
       setSavedLabel(request.label)
       if (request.providerDiscovery === 'chat') {
         client.removeQueries({ queryKey: ['provider-models', user] })
+        client.removeQueries({ queryKey: ['provider-model-capabilities', user] })
         setProviderModels([])
         setProviderDiscovery({ status: 'idle', message: '' })
       } else if (request.providerDiscovery === 'kemo') {
+        client.removeQueries({ queryKey: ['provider-model-capabilities', user] })
         if (result.providerModels) {
           client.setQueryData(['provider-models', user], result.providerModels)
           setProviderModels(result.providerModels)
@@ -869,6 +935,24 @@ export function SettingsPage() {
       && providerDiscovery.status === 'valid'
       && providerModels.length > 0,
   )
+  const kemoReasoning = providerCapabilitiesQuery.data?.capabilities.reasoning
+  const kemoReasoningOptions = kemoReasoning?.supported
+    ? reasoningEffortOptionsFor(kemoReasoning.efforts)
+    : []
+  const kemoReasoningAvailable = kemoReasoningOptions.length > 0
+  const kemoReasoningDescription = providerCapabilitiesQuery.data
+    ? kemoReasoningAvailable
+      ? `${reasoningPolicyDescription(providerCapabilitiesQuery.data)}${providerCapabilitiesQuery.data.warning ? `；${providerCapabilitiesQuery.data.warning}` : ''}`
+      : '当前模型声明不支持推理；运行时不会向 Kemo 网关提交 reasoning 参数'
+    : providerCapabilitiesQuery.isPending && providerCapabilitiesEnabled
+      ? '正在读取当前模型的 Kemo 思考能力声明'
+      : providerCapabilitiesQuery.isError
+        ? '能力信息读取失败；为避免提交无效参数，运行时不会假定模型支持固定五档'
+        : userDraft?.provider.type === 'kemo'
+          ? selectedCatalogModel
+            ? '网关未为当前模型提供可用的思考能力声明'
+            : '请先选择当前密钥可用的 Kemo 模型；不会套用固定五档'
+          : '控制主对话和子智能体的推理深度；不可关闭，缺省使用中度'
 
   return <ModuleFrame
     kicker="Configuration Overview"
@@ -911,7 +995,16 @@ export function SettingsPage() {
                 setProviderModels([])
                 setProviderDiscovery({ status: 'idle', message: '' })
               }
-              setUserDraft({ ...userDraft, provider: { ...userDraft.provider, type: value } })
+              setUserDraft({
+                ...userDraft,
+                provider: {
+                  ...userDraft.provider,
+                  type: value,
+                  reasoning_effort: value === 'kemo'
+                    ? normalizeKemoReasoningEffort(userDraft.provider.reasoning_effort)
+                    : normalizeReasoningEffort(userDraft.provider.reasoning_effort),
+                },
+              })
             }} />} />
             <SettingRow title="模型" description={modelPickerEnabled ? '可直接输入模型名，或从已验证 Kemo 模型目录中选择' : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
               label="模型"
@@ -925,7 +1018,23 @@ export function SettingsPage() {
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
-            <SettingRow title="思考强度" description="控制主对话和子智能体的推理深度；不可关闭，缺省使用中度" source="user" control={<ReasoningEffortSelect ariaLabel="思考强度" value={userDraft.provider.reasoning_effort} onChange={(reasoningEffort) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, reasoning_effort: reasoningEffort } })} />} />
+            <SettingRow
+              title="思考强度"
+              description={kemoReasoningDescription}
+              source="user"
+              control={userDraft.provider.type === 'chat'
+                ? <ReasoningEffortSelect ariaLabel="思考强度" value={normalizeReasoningEffort(userDraft.provider.reasoning_effort)} onChange={(reasoningEffort) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, reasoning_effort: reasoningEffort } })} />
+                : kemoReasoningAvailable
+                  ? <ReasoningEffortSelect ariaLabel="思考强度" value={userDraft.provider.reasoning_effort} options={kemoReasoningOptions} onChange={(reasoningEffort) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, reasoning_effort: reasoningEffort } })} />
+                  : <ReasoningEffortSelect
+                    ariaLabel="思考强度"
+                    value={userDraft.provider.reasoning_effort}
+                    options={[]}
+                    emptyLabel={providerCapabilitiesQuery.isPending && providerCapabilitiesEnabled ? '读取能力中…' : '推理不可用'}
+                    disabled
+                    onChange={() => undefined}
+                  />}
+            />
             <SettingRow title="主模型支持图片输入" description="只在已确认当前主模型能够接收图片时开启；框架不会根据模型名称猜测" source="user" control={<Toggle checked={userDraft.provider.supports_image_input} label="主模型支持图片输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_image_input: value } })} />} />
             {userDraft.provider.type === 'kemo' ? <>
               <SettingRow title="主模型支持音频输入" description="仅 Kemo 模式；仍以网关能力声明为最终依据" source="user" control={<Toggle checked={userDraft.provider.supports_audio_input} label="主模型支持音频输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_audio_input: value } })} />} />

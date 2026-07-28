@@ -14,6 +14,7 @@ import type {
   ImportantMemoryResponse,
   KnowledgeDocumentResponse,
   KnowledgeResponse,
+  KemoModelCapabilitiesResponse,
   KemoProviderModelsResponse,
   MemoryItemResponse,
   MemorySummaryResponse,
@@ -485,8 +486,21 @@ export async function patchUserConfig(user: string, changes: Record<string, unkn
   })
 }
 
-export async function getKemoProviderModels(user: string): Promise<KemoProviderModelsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/models`)
+export async function getKemoProviderModels(user: string, refresh = false): Promise<KemoProviderModelsResponse> {
+  const query = refresh ? '?refresh=true' : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/models${query}`)
+}
+
+export async function getKemoModelCapabilities(
+  user: string,
+  model: string,
+  refresh = false,
+): Promise<KemoModelCapabilitiesResponse> {
+  const query = new URLSearchParams({ model })
+  if (refresh) query.set('refresh', 'true')
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/provider/model-capabilities?${query.toString()}`,
+  )
 }
 
 export async function getGlobalConfig(): Promise<{ scope: string; config: Record<string, unknown>; redacted_paths: string[] }> {

@@ -338,13 +338,110 @@ describe('AppShell navigation', () => {
       savedChanges = body.changes
       return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: [], updated: true })
     }))
-    renderApp('/chat')
+    renderApp('/chat?user=kesepain&session=s1')
     const providerButton = await screen.findByTitle('查看当前 Provider')
-    expect(providerButton).toHaveTextContent('中度')
+    await waitFor(() => expect(providerButton).toHaveTextContent('kemo · 中度'))
     fireEvent.click(providerButton)
     fireEvent.click(screen.getByRole('combobox', { name: '顶部模型思考强度' }))
     fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'high' } }))
+  })
+
+  it('Kemo 顶部模型气泡完全按能力声明展示档位并原样保存 max', async () => {
+    let savedChanges: Record<string, unknown> | undefined
+    server.use(
+      http.get('/api/users/kesepain/provider/model-capabilities', ({ request }) => {
+        const model = new URL(request.url).searchParams.get('model') || 'test-model'
+        return HttpResponse.json({
+          user: 'kesepain', protocol: 'kemo', api_valid: true, model, stale: false, warning: '',
+          capabilities: {
+            model, task: 'llm', input_modalities: ['text'], output_modalities: ['text'], streaming: true,
+            reasoning: { supported: true, efforts: ['low', 'max'], summary: true, persisted_state: false },
+            tools: { function_calling: true, parallel_calls: false, multimodal_results: false },
+            structured_output: true, metadata: {},
+            extensions: {
+              reasoning_effort_map: { low: 'low', max: 'high' },
+              reasoning_policy: { mode: 'mapped', logical_efforts: ['low', 'max'], collapsed: true },
+            },
+          },
+        })
+      }),
+      http.patch('/api/users/kesepain/config', async ({ request }) => {
+        const body = await request.json() as { changes: Record<string, unknown> }
+        savedChanges = body.changes
+        return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: [], updated: true })
+      }),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const providerButton = await screen.findByTitle('查看当前 Provider')
+    await waitFor(() => expect(providerButton).toHaveTextContent('轻度'))
+    fireEvent.click(providerButton)
+    expect(screen.getByText('此模型的部分思考档位会映射到相同的上游强度。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('combobox', { name: '顶部模型思考强度' }))
+    expect(screen.getByRole('option', { name: /低.*轻度推理/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /最大.*最强推理/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /中.*均衡/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: /最大.*最强推理/ }))
+    await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'max' } }))
+  })
+
+  it('Kemo 模型声明不支持推理时不展示固定五档', async () => {
+    server.use(http.get('/api/users/kesepain/provider/model-capabilities', ({ request }) => {
+      const model = new URL(request.url).searchParams.get('model') || 'test-model'
+      return HttpResponse.json({
+        user: 'kesepain', protocol: 'kemo', api_valid: true, model, stale: false, warning: '',
+        capabilities: {
+          model, task: 'llm', input_modalities: ['text'], output_modalities: ['text'], streaming: true,
+          reasoning: { supported: false, efforts: [], summary: false, persisted_state: false },
+          tools: { function_calling: true, parallel_calls: false, multimodal_results: false },
+          structured_output: false, metadata: {}, extensions: {},
+        },
+      })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const providerButton = await screen.findByTitle('查看当前 Provider')
+    await waitFor(() => expect(providerButton).toHaveTextContent('推理未启用'))
+    fireEvent.click(providerButton)
+    expect(screen.queryByRole('combobox', { name: '顶部模型思考强度' })).not.toBeInTheDocument()
+    expect(screen.getByText('不可用')).toBeInTheDocument()
+  })
+
+  it('Chat 协议保持固定五档且不请求 Kemo 能力接口', async () => {
+    let capabilityRequests = 0
+    server.use(
+      http.get('/api/users/kesepain/overview', () => HttpResponse.json({
+        user: 'kesepain', session_id: '',
+        context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false }, limit: 120000, percent: 0, rounds: 0, round_limit: 30 },
+        provider: { type: 'chat', base_url: 'https://chat.test/v1', model: 'chat-model', reasoning_effort: 'medium', timeout: 120, stream: true, credential_source: 'inline', configured: true },
+        counts: { sessions: 0, knowledge_documents: 0, enabled_tools: 0, enabled_agents: 0, active_tasks: 0 },
+        context_window: {
+          tokens: { total_tokens: 0, capacity_tokens: 120000, percent: 0, source: 'unavailable' },
+          conversation: { foreground_rounds: 0, archived_rounds: 0, session_total_rounds: 0, session_tool_calls: 0, total_tool_calls: 0 },
+          tasks: { active_plans: 0, waiting_crons: 0 },
+          capabilities: { tools_enabled: 0, tools_disabled: 0, agents_enabled: 0 },
+          knowledge: { enabled: 0, disabled: 0, graph_enabled: false },
+          messages: { connected: 0 },
+          integrations: { expands: 0, senses: 0 },
+        },
+        runtime_host: { state: 'unmanaged', components: {} }, activities: [], active_plan: null,
+      })),
+      http.get('/api/users/kesepain/provider/model-capabilities', () => {
+        capabilityRequests += 1
+        return HttpResponse.json({})
+      }),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const providerButton = await screen.findByTitle('查看当前 Provider')
+    await waitFor(() => expect(providerButton).toHaveTextContent('chat · 中度'))
+    expect(capabilityRequests).toBe(0)
+    fireEvent.click(providerButton)
+    fireEvent.click(screen.getByRole('combobox', { name: '顶部模型思考强度' }))
+    expect(screen.getAllByRole('option')).toHaveLength(5)
+    expect(screen.getByRole('option', { name: /最大.*最强推理/ })).toBeInTheDocument()
+    expect(capabilityRequests).toBe(0)
   })
 
   it('上传文件随下一条消息发送并在本轮完成后清除提示', async () => {

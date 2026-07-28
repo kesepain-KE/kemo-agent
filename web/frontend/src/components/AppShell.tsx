@@ -38,6 +38,7 @@ import {
   deleteSession,
   getActiveSession,
   getHealth,
+  getKemoModelCapabilities,
   getLogoUrl,
   getOverview,
   getPreferences,
@@ -58,7 +59,14 @@ import { UserProfileCard } from './UserProfileCard'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
-import { normalizeReasoningEffort, reasoningEffortLabel, type ReasoningEffort } from '../reasoningEffort'
+import {
+  normalizeKemoReasoningEffort,
+  normalizeReasoningEffort,
+  reasoningEffortLabel,
+  reasoningEffortOptionsFor,
+  selectReasoningEffort,
+  type ReasoningEffort,
+} from '../reasoningEffort'
 
 export interface ShellOutletContext {
   user: string
@@ -272,6 +280,19 @@ export function AppShell() {
     queryFn: () => getOverview(user, sessionId),
     enabled: Boolean(user),
     refetchInterval: 30_000,
+  })
+  const overviewProvider = overviewQuery.data?.provider
+  const providerCapabilitiesQuery = useQuery({
+    queryKey: ['provider-model-capabilities', user, overviewProvider?.model || ''],
+    queryFn: () => getKemoModelCapabilities(user, overviewProvider?.model || ''),
+    enabled: Boolean(
+      user
+        && overviewProvider?.type === 'kemo'
+        && overviewProvider.configured
+        && overviewProvider.model,
+    ),
+    staleTime: 300_000,
+    retry: false,
   })
   const preferencesQuery = useQuery({
     queryKey: ['preferences', user],
@@ -745,9 +766,29 @@ export function AppShell() {
   const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
   const contextPercent = Number(contextTokens?.percent ?? 0)
   const provider = overview?.provider
-  const displayedReasoningEffort = reasoningEffortMutation.isPending
-    ? normalizeReasoningEffort(reasoningEffortMutation.variables?.reasoningEffort)
-    : normalizeReasoningEffort(provider?.reasoning_effort)
+  const kemoReasoning = providerCapabilitiesQuery.data?.capabilities.reasoning
+  const kemoReasoningOptions = kemoReasoning?.supported
+    ? reasoningEffortOptionsFor(kemoReasoning.efforts)
+    : []
+  const kemoReasoningAvailable = kemoReasoningOptions.length > 0
+  const configuredReasoningEffort = reasoningEffortMutation.isPending
+    ? reasoningEffortMutation.variables?.reasoningEffort
+    : provider?.reasoning_effort
+  const displayedReasoningEffort = provider?.type === 'kemo' && kemoReasoningAvailable
+    ? selectReasoningEffort(configuredReasoningEffort, kemoReasoning!.efforts)!
+    : provider?.type === 'kemo'
+      ? normalizeKemoReasoningEffort(configuredReasoningEffort)
+      : normalizeReasoningEffort(configuredReasoningEffort)
+  const displayedReasoningLabel = provider?.type !== 'kemo'
+    ? reasoningEffortLabel(displayedReasoningEffort)
+    : kemoReasoningAvailable
+      ? reasoningEffortLabel(displayedReasoningEffort)
+      : providerCapabilitiesQuery.isPending
+        ? '读取能力中'
+        : '推理未启用'
+  const reasoningPolicy = providerCapabilitiesQuery.data?.capabilities.extensions.reasoning_policy
+  const reasoningCapabilityNotice = providerCapabilitiesQuery.data?.warning
+    || (reasoningPolicy?.collapsed ? '此模型的部分思考档位会映射到相同的上游强度。' : '')
 
   const settingsPath = (tab: 'users' | 'provider') => {
     const path = withContext('/settings')
@@ -806,9 +847,9 @@ export function AppShell() {
             </button>
             <div className="model-wrap" ref={modelMenuRef}>
               <button className="model-btn" onClick={() => setModelMenuOpen((value) => !value)} aria-expanded={modelMenuOpen} title="查看当前 Provider">
-                <span className="model-main"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {reasoningEffortLabel(displayedReasoningEffort)} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
+                <span className="model-main"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {displayedReasoningLabel} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
               </button>
-              {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像</span></div><div className="model-current"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><div className="model-effort-row"><span><strong>思考强度</strong><small>下一轮请求立即生效</small></span><ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /></div>{reasoningEffortMutation.isError ? <div className="model-effort-error" role="alert">思考强度保存失败，请重试。</div> : null}<button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置 <span>›</span></button></div>}
+              {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像</span></div><div className="model-current"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><div className="model-effort-row"><span><strong>思考强度</strong><small>{provider?.type === 'kemo' ? '选项来自 Kemo 模型能力声明' : '下一轮请求立即生效'}</small></span>{provider?.type === 'chat' ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /> : provider?.type === 'kemo' && kemoReasoningAvailable ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} options={kemoReasoningOptions} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /> : <span className="model-effort-state">{provider?.type === 'kemo' && providerCapabilitiesQuery.isPending ? '读取中…' : '不可用'}</span>}</div>{reasoningCapabilityNotice ? <div className="model-effort-notice" role="status">{reasoningCapabilityNotice}</div> : null}{provider?.type === 'kemo' && providerCapabilitiesQuery.isError ? <div className="model-effort-error" role="alert">模型能力读取失败，运行时不会提交未经声明的思考档位。</div> : null}{reasoningEffortMutation.isError ? <div className="model-effort-error" role="alert">思考强度保存失败，请重试。</div> : null}<button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置 <span>›</span></button></div>}
             </div>
             <div className="font-size-wrap" ref={fontSizeRef}>
               <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size="1.181rem" strokeWidth={2.2} /></button>

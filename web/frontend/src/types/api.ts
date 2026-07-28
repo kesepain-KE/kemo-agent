@@ -550,6 +550,52 @@ export interface KemoProviderModelsResponse {
   data: KemoModelCatalogItem[]
 }
 
+export interface KemoReasoningCapabilities {
+  supported: boolean
+  efforts: ReasoningEffort[]
+  summary: boolean
+  persisted_state: boolean
+}
+
+export interface KemoReasoningPolicy {
+  mode?: 'native' | 'mapped' | 'provider_default' | string
+  logical_efforts?: ReasoningEffort[]
+  upstream_parameter?: string
+  collapsed?: boolean
+  [key: string]: unknown
+}
+
+export interface KemoModelCapabilities {
+  model: string
+  task: 'llm' | 'embedding' | 'rerank'
+  input_modalities: string[]
+  output_modalities: string[]
+  streaming: boolean
+  reasoning: KemoReasoningCapabilities
+  tools: {
+    function_calling: boolean
+    parallel_calls: boolean
+    multimodal_results: boolean
+  }
+  structured_output: boolean
+  metadata: Record<string, unknown>
+  extensions: {
+    reasoning_effort_map?: Partial<Record<ReasoningEffort, string>>
+    reasoning_policy?: KemoReasoningPolicy
+    [key: string]: unknown
+  }
+}
+
+export interface KemoModelCapabilitiesResponse {
+  user: string
+  protocol: 'kemo'
+  api_valid: true
+  model: string
+  stale: boolean
+  warning: string
+  capabilities: KemoModelCapabilities
+}
+
 export interface SettingsResponse {
   user: string
   schema_version: number

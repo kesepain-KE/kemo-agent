@@ -19,6 +19,14 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: './src/test/setup.ts',
       css: true,
+      // GitHub hosted runners occasionally need more than Vitest's 5 second
+      // default for the larger integration-style page tests. Keep a finite
+      // ceiling while avoiding false failures caused by temporary CPU load.
+      testTimeout: 15_000,
+      hookTimeout: 10_000,
+      // Multiple jsdom workers are memory and CPU intensive. Two workers keep
+      // CI deterministic without serialising the complete frontend suite.
+      maxWorkers: process.env.CI ? 2 : undefined,
     },
   }
 })

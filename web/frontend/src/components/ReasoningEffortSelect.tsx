@@ -1,6 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
-import { reasoningEffortOptions, type ReasoningEffort } from '../reasoningEffort'
+import {
+  reasoningEffortOptions,
+  type ReasoningEffort,
+  type ReasoningEffortOption,
+} from '../reasoningEffort'
 
 interface ReasoningEffortSelectProps {
   value: ReasoningEffort
@@ -8,6 +12,8 @@ interface ReasoningEffortSelectProps {
   ariaLabel: string
   variant?: 'settings' | 'compact'
   disabled?: boolean
+  options?: readonly ReasoningEffortOption[]
+  emptyLabel?: string
 }
 
 export function ReasoningEffortSelect({
@@ -16,11 +22,16 @@ export function ReasoningEffortSelect({
   ariaLabel,
   variant = 'settings',
   disabled = false,
+  options = reasoningEffortOptions,
+  emptyLabel = '思考能力不可用',
 }: ReasoningEffortSelectProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const listboxId = useId()
-  const selected = reasoningEffortOptions.find((option) => option.value === value) ?? reasoningEffortOptions[2]
+  const selected = options.find((option) => option.value === value)
+    ?? options.find((option) => option.value === 'medium')
+    ?? options[0]
+  const unavailable = options.length === 0
 
   useEffect(() => {
     if (!open) return
@@ -39,8 +50,8 @@ export function ReasoningEffortSelect({
   }, [open])
 
   useEffect(() => {
-    if (disabled) setOpen(false)
-  }, [disabled])
+    if (disabled || unavailable) setOpen(false)
+  }, [disabled, unavailable])
 
   return <div className={`reasoning-effort-select ${variant} ${open ? 'open' : ''}`} ref={rootRef}>
     <button
@@ -51,7 +62,7 @@ export function ReasoningEffortSelect({
       aria-controls={listboxId}
       aria-expanded={open}
       aria-haspopup="listbox"
-      disabled={disabled}
+      disabled={disabled || unavailable}
       onClick={() => setOpen((current) => !current)}
       onKeyDown={(event) => {
         if (!open && event.key === 'ArrowDown') {
@@ -60,11 +71,11 @@ export function ReasoningEffortSelect({
         }
       }}
     >
-      <span>{variant === 'settings' ? selected.settingsLabel : selected.label}</span>
+      <span>{selected ? (variant === 'settings' ? selected.settingsLabel : selected.label) : emptyLabel}</span>
       <ChevronDown size={16} />
     </button>
     {open ? <div className="reasoning-effort-popover" id={listboxId} role="listbox" aria-label={`${ariaLabel}选项`}>
-      {reasoningEffortOptions.map((option) => <button
+      {options.map((option) => <button
         type="button"
         role="option"
         aria-selected={option.value === value}

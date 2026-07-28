@@ -466,14 +466,14 @@ describe('V16 module pages', () => {
     expect(screen.getByLabelText('轻量子智能体模型')).toHaveValue('summary-model')
     expect(screen.getByLabelText('推理子智能体模型')).toHaveValue('agent-reasoning')
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
+    fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
+    fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
     fireEvent.change(screen.getByLabelText('轻量子智能体模型'), { target: { value: 'summary-model-next' } })
     fireEvent.click(screen.getByRole('switch', { name: '主模型支持图片输入' }))
     fireEvent.keyDown(visionRoutingSelect, { key: 'ArrowDown' })
     fireEvent.click(screen.getByRole('option', { name: /仅专用视觉模型/ }))
     expect(visionRoutingSelect).toHaveTextContent('仅专用视觉模型')
-    fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
-    fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
@@ -549,7 +549,7 @@ describe('V16 module pages', () => {
     renderPage('settings')
     fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
     expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveTextContent('chat')
-    fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+    fireEvent.click(await screen.findByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     expect(modelDiscoveryCalls).toBe(0)
     expect(screen.queryByText(/Kemo API 已验证/)).not.toBeInTheDocument()
@@ -569,6 +569,55 @@ describe('V16 module pages', () => {
     expect(screen.queryByRole('button', { name: '主模型选择模型' })).not.toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'manual-model' } })
     expect(screen.getByLabelText('模型')).toHaveValue('manual-model')
+  })
+
+  it('Kemo 配置页随所选模型切换动态思考档位并禁用非推理模型', async () => {
+    server.use(
+      http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
+        user: 'kesepain',
+        config: {
+          provider: { type: 'kemo', model: 'dynamic-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: true, reasoning_effort: 'medium' },
+        },
+        redacted_paths: ['provider.api_key'],
+      })),
+      http.get('/api/users/kesepain/provider/models', () => HttpResponse.json({
+        user: 'kesepain', protocol: 'kemo', api_valid: true, count: 2,
+        data: [
+          { id: 'dynamic-model', object: 'kemo.model', provider_id: 'test', provider_model: 'dynamic', task: 'llm', capabilities_available: true, capabilities_url: '/model/models/dynamic-model/capabilities' },
+          { id: 'plain-model', object: 'kemo.model', provider_id: 'test', provider_model: 'plain', task: 'llm', capabilities_available: true, capabilities_url: '/model/models/plain-model/capabilities' },
+        ],
+      })),
+      http.get('/api/users/kesepain/provider/model-capabilities', ({ request }) => {
+        const model = new URL(request.url).searchParams.get('model') || ''
+        const supported = model !== 'plain-model'
+        return HttpResponse.json({
+          user: 'kesepain', protocol: 'kemo', api_valid: true, model, stale: false, warning: '',
+          capabilities: {
+            model, task: 'llm', input_modalities: ['text'], output_modalities: ['text'], streaming: true,
+            reasoning: { supported, efforts: supported ? ['minimal', 'xhigh'] : [], summary: supported, persisted_state: false },
+            tools: { function_calling: true, parallel_calls: false, multimodal_results: false },
+            structured_output: true, metadata: {},
+            extensions: supported ? { reasoning_policy: { mode: 'mapped', logical_efforts: ['minimal', 'xhigh'], collapsed: true } } : {},
+          },
+        })
+      }),
+    )
+
+    renderPage('settings')
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    const effortSelect = await screen.findByRole('combobox', { name: '思考强度' })
+    await waitFor(() => expect(effortSelect).toHaveTextContent('极少'))
+    expect(screen.getByText(/部分档位会映射到相同的上游强度/)).toBeInTheDocument()
+    fireEvent.click(effortSelect)
+    expect(screen.getByRole('option', { name: /极少.*几乎不思考/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /极高.*更强推理/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /中.*均衡/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: /极高.*更强推理/ }))
+
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'plain-model' } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '思考强度' })).toHaveTextContent('推理不可用'))
+    expect(screen.getByRole('combobox', { name: '思考强度' })).toBeDisabled()
+    expect(screen.getByText(/运行时不会向 Kemo 网关提交 reasoning 参数/)).toBeInTheDocument()
   })
 
   it('文件空间支持逐层目录、分区搜索与严格的区域操作权限', async () => {
