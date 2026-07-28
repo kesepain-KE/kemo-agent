@@ -19,6 +19,24 @@ class ProviderDiscoveryError(WebServiceError):
     status = 502
 
 
+class ProviderAccessError(WebServiceError):
+    code = "provider_access_denied"
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status if status in {401, 403} else 403
+
+
+class ProviderModelUnavailableError(WebServiceError):
+    code = "provider_model_unavailable"
+    status = 404
+
+
+class ProviderCapabilityError(WebServiceError):
+    code = "provider_capability_failed"
+    status = 502
+
+
 class NotFoundError(WebServiceError):
     code = "not_found"
     status = 404
@@ -36,4 +54,3 @@ class TooManyChatsError(WebServiceError):
     def __init__(self, message: str, *, retry_after: float) -> None:
         super().__init__(message)
         self.headers = {"Retry-After": str(max(1, int(retry_after)))}
-

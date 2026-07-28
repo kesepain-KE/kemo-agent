@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,24 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-from provider.protocol.models import normalize_reasoning_effort
-from run.config import USER_ONLY_SECTIONS, load_config, read_json_object
+from provider.adapters.gateway import KemoGatewayAdapter
+from provider.protocol.models import (
+    normalize_kemo_reasoning_effort,
+    normalize_reasoning_effort,
+)
+from provider.schema import ProviderError
+from run.config import (
+    ConfigError,
+    USER_ONLY_SECTIONS,
+    load_config,
+    provider_runtime_config,
+    read_json_object,
+)
+from run.model_capabilities import (
+    clear_model_capability_cache,
+    lookup_model_capabilities,
+    retain_model_capability_cache,
+)
 from run.prompt import PROMPT_SECTION_ORDER, build_prompt_bundle
 from run.source_policy import MainAgentSourcePolicy
 from update._utils import UpdateError, compare_versions, parse_version
@@ -26,7 +43,13 @@ from web.constants import (
     _SENSITIVE_CONFIG_KEYS,
     _VERSION_COMPONENT_IDS,
 )
-from web.errors import InvalidRequestError
+from web.errors import (
+    InvalidRequestError,
+    ProviderAccessError,
+    ProviderCapabilityError,
+    ProviderDiscoveryError,
+    ProviderModelUnavailableError,
+)
 from web.services._io import atomic_write as _atomic_write
 
 
@@ -271,7 +294,17 @@ class SettingsServiceMixin:
 
     def patch_user_config(self, user: Any, changes: Any) -> dict[str, Any]:
         name = self.require_user(user)
-        return self._patch_config_document(self._config_path(name), changes, user=name)
+        result = self._patch_config_document(self._config_path(name), changes, user=name)
+        provider_changes = changes.get("provider") if isinstance(changes, dict) else None
+        if isinstance(provider_changes, dict) and {
+            "type",
+            "base_url",
+            "api_key",
+            "api_key_env",
+        }.intersection(provider_changes):
+            self._clear_kemo_catalog_cache(name)
+            clear_model_capability_cache()
+        return result
 
     def patch_global_config(self, changes: Any) -> dict[str, Any]:
         return self._patch_config_document(
@@ -279,6 +312,163 @@ class SettingsServiceMixin:
             changes,
             user=None,
         )
+
+    @staticmethod
+    def _kemo_catalog_key(
+        user: str,
+        runtime_provider: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        secret_fingerprint = hashlib.sha256(
+            str(runtime_provider.get("api_key") or "").encode("utf-8")
+        ).hexdigest()
+        return (
+            user,
+            str(runtime_provider.get("base_url") or "").rstrip("/"),
+            secret_fingerprint,
+        )
+
+    def _clear_kemo_catalog_cache(self, user: str) -> None:
+        with self._kemo_catalog_lock:
+            for key in list(self._kemo_catalog_cache):
+                if key[0] == user:
+                    self._kemo_catalog_cache.pop(key, None)
+
+    def _kemo_catalog(
+        self,
+        user: str,
+        *,
+        refresh: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any], KemoGatewayAdapter, Any]:
+        config = load_config(user, self.root)
+        configured_provider = config.get("provider") or {}
+        if str(configured_provider.get("type") or "").strip().casefold() != "kemo":
+            raise InvalidRequestError("只有已保存的 Kemo 私有协议配置允许查询模型能力")
+        runtime_provider = provider_runtime_config(config)
+        adapter = KemoGatewayAdapter(runtime_provider)
+        cache_key = self._kemo_catalog_key(user, runtime_provider)
+        now = time.monotonic()
+        with self._kemo_catalog_lock:
+            for key in list(self._kemo_catalog_cache):
+                if key[0] == user and key != cache_key:
+                    self._kemo_catalog_cache.pop(key, None)
+            cached = self._kemo_catalog_cache.get(cache_key)
+            if not refresh and cached is not None and cached[0] > now:
+                return config, runtime_provider, adapter, cached[1]
+        catalog = adapter.models(task="llm")
+        with self._kemo_catalog_lock:
+            self._kemo_catalog_cache[cache_key] = (now + 300.0, catalog)
+        retain_model_capability_cache(
+            runtime_provider,
+            {item.id for item in catalog.data},
+        )
+        return config, runtime_provider, adapter, catalog
+
+    def kemo_provider_models(
+        self,
+        user: Any,
+        *,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Discover LLMs through persisted Kemo credentials without exposing them."""
+
+        name = self.require_user(user)
+        try:
+            _, _, _, catalog = self._kemo_catalog(name, refresh=bool(refresh))
+        except InvalidRequestError:
+            raise
+        except (ConfigError, ProviderError, ValueError) as exc:
+            raise ProviderDiscoveryError("Kemo API 验证失败，未拉取模型") from exc
+        return {
+            "user": name,
+            "protocol": "kemo",
+            "api_valid": True,
+            "count": catalog.count,
+            "data": [item.model_dump(mode="json") for item in catalog.data],
+        }
+
+    @staticmethod
+    def _raise_capability_lookup_error(error: BaseException | None) -> None:
+        if isinstance(error, ProviderError):
+            if error.status_code in {401, 403}:
+                raise ProviderAccessError(
+                    "Kemo API 密钥无效或没有读取该模型能力的权限",
+                    status=int(error.status_code),
+                ) from error
+            if error.status_code == 404:
+                raise ProviderModelUnavailableError(
+                    "模型不存在、已禁用，或不在当前密钥的白名单和任务权限内"
+                ) from error
+            if error.status_code == 502 or error.category == "gateway_protocol_error":
+                raise ProviderCapabilityError(
+                    "Kemo Provider 的模型能力声明无效"
+                ) from error
+        raise ProviderCapabilityError(
+            "Kemo 模型能力暂时无法读取，请检查网关连接后重试"
+        ) from error
+
+    def kemo_provider_model_capabilities(
+        self,
+        user: Any,
+        model: Any,
+        *,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        selected_model = str(model or "").strip()
+        if (
+            not selected_model
+            or len(selected_model) > 256
+            or any(ord(character) < 32 for character in selected_model)
+        ):
+            raise InvalidRequestError("model 必须是 1–256 字符的非空模型标识")
+        try:
+            config, runtime_provider, adapter, catalog = self._kemo_catalog(
+                name,
+                refresh=False,
+            )
+        except InvalidRequestError:
+            raise
+        except (ConfigError, ProviderError, ValueError) as exc:
+            self._raise_capability_lookup_error(exc)
+            raise AssertionError("unreachable")
+        entry = next(
+            (
+                item
+                for item in catalog.data
+                if item.id == selected_model and item.task == "llm"
+            ),
+            None,
+        )
+        if entry is None:
+            raise ProviderModelUnavailableError(
+                "模型不存在、已禁用，或不在当前密钥的 LLM 白名单内"
+            )
+        if not entry.capabilities_available:
+            raise ProviderModelUnavailableError("网关未为该模型提供能力声明")
+        lookup = lookup_model_capabilities(
+            config,
+            runtime_provider,
+            adapter,
+            model=selected_model,
+            capabilities_url=entry.capabilities_url,
+            force_refresh=bool(refresh),
+        )
+        if lookup.capabilities is None:
+            self._raise_capability_lookup_error(lookup.error)
+            raise AssertionError("unreachable")
+        return {
+            "user": name,
+            "protocol": "kemo",
+            "api_valid": True,
+            "model": selected_model,
+            "stale": lookup.stale,
+            "warning": (
+                "能力信息暂时无法刷新，当前显示上一次成功结果"
+                if lookup.stale
+                else ""
+            ),
+            "capabilities": lookup.capabilities.model_dump(mode="json"),
+        }
 
     def preferences(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -337,8 +527,10 @@ class SettingsServiceMixin:
                 "type": str(provider.get("type") or ""),
                 "base_url": str(provider.get("base_url") or ""),
                 "model": str(provider.get("model") or ""),
-                "reasoning_effort": normalize_reasoning_effort(
-                    provider.get("reasoning_effort")
+                "reasoning_effort": (
+                    normalize_kemo_reasoning_effort(provider.get("reasoning_effort"))
+                    if str(provider.get("type") or "").strip().casefold() == "kemo"
+                    else normalize_reasoning_effort(provider.get("reasoning_effort"))
                 ),
                 "timeout": 120.0,
                 "stream": bool(provider.get("stream", True)),
@@ -577,5 +769,4 @@ class SettingsServiceMixin:
             "source_selection": source_selection,
             "expand": source_selection.get("expand") or {},
         }
-
 

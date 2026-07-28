@@ -14,19 +14,16 @@ import uuid
 from pydantic import ValidationError
 
 from events import RunEvent
-from provider.adapters.gateway import KemoGatewayAdapter
 from provider.protocol.models import (
     AudioContent,
     FileContent,
     ImageContent,
     VideoContent,
 )
-from provider.schema import ProviderError
 from run.agent_runner import AgentRunner
 from run.config import (
     ConfigError,
     load_config,
-    provider_runtime_config,
 )
 from run.engine import compress_context, iter_request_events
 from run.history import (
@@ -241,6 +238,10 @@ class WebRunService(
         self._skill_upload_lock = threading.RLock()
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
+        self._kemo_catalog_lock = threading.RLock()
+        self._kemo_catalog_cache: dict[
+            tuple[str, str, str], tuple[float, Any]
+        ] = {}
 
     def _get_chat_gate(self, user: str) -> _UserChatGate:
         try:
@@ -500,28 +501,6 @@ class WebRunService(
             "user": name,
             "session_id": active.session_id,
             "status": "stopping",
-        }
-
-    def kemo_provider_models(self, user: Any) -> dict[str, Any]:
-        """Discover LLMs through a persisted Kemo configuration without mutating it."""
-        name = self.require_user(user)
-        config = load_config(name, self.root)
-        configured_provider = config.get("provider") or {}
-        if str(configured_provider.get("type") or "").strip().lower() != "kemo":
-            raise InvalidRequestError("只有已保存的 Kemo 私有协议配置允许拉取模型")
-        try:
-            runtime_provider = provider_runtime_config(config)
-            catalog = KemoGatewayAdapter(runtime_provider).models(task="llm")
-        except (ConfigError, ProviderError, ValueError) as exc:
-            raise ProviderDiscoveryError(
-                "Kemo API 验证失败，未拉取模型"
-            ) from exc
-        return {
-            "user": name,
-            "protocol": "kemo",
-            "api_valid": True,
-            "count": catalog.count,
-            "data": [item.model_dump(mode="json") for item in catalog.data],
         }
 
     def close_session(

@@ -80,9 +80,32 @@ def register_setting_routes(
         return backend.patch_user_config(user, body.get("changes", body))
 
     @app.get("/api/users/{user}/provider/models")
-    async def kemo_provider_models(user: str, response: Response) -> dict[str, Any]:
+    async def kemo_provider_models(
+        user: str,
+        response: Response,
+        refresh: bool = Query(False),
+    ) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
-        return await asyncio.to_thread(backend.kemo_provider_models, user)
+        return await asyncio.to_thread(
+            backend.kemo_provider_models,
+            user,
+            refresh=refresh,
+        )
+
+    @app.get("/api/users/{user}/provider/model-capabilities")
+    async def kemo_provider_model_capabilities(
+        user: str,
+        response: Response,
+        model: str = Query(...),
+        refresh: bool = Query(False),
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return await asyncio.to_thread(
+            backend.kemo_provider_model_capabilities,
+            user,
+            model,
+            refresh=refresh,
+        )
 
     @app.get("/api/global-config")
     async def global_config() -> dict[str, Any]:
