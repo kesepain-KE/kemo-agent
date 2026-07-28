@@ -7,13 +7,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.6.0"},
-    "agents": {"version": "0.6.0"},
-    "plugins": {"version": "0.6.0"},
-    "web": {"version": "0.6.0"}
+    "core": {"version": "0.7.0"},
+    "agents": {"version": "0.7.0"},
+    "plugins": {"version": "0.7.0"},
+    "web": {"version": "0.7.0"}
   }
 }
 ```
@@ -117,6 +117,8 @@ python update.py --module all
 - `web/dist/`
 - `web/frontend/node_modules/`
 - `web/frontend/dist/`
+
+同步范围包括 Web 应用装配、兼容服务门面、`web/routes/` 路由层、`web/services/` 领域服务层，以及 `web/schemas.py`、`web/errors.py`、`web/constants.py` 等公共契约文件。新增的分层目录会随 web 板块递归安装，不需要在部署机手动创建。
 
 同步完成后默认在 `web/frontend/` 执行 `npm install` 和 `npm run build`。由于 Git 仓库不跟踪 `dist/`，没有 npm 时不能把旧构建产物视为更新成功；更新器会保留旧版本号并提示安装 Node.js。
 
