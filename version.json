@@ -1,10 +1,10 @@
 {
   "name": "kemo-agent",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "schema_version": 1,
   "components": {
     "core": {
-      "version": "0.8.0",
+      "version": "0.8.1",
       "description": "核心引擎"
     },
     "agents": {
@@ -12,7 +12,7 @@
       "description": "子代理系统"
     },
     "plugins": {
-      "version": "0.8.0",
+      "version": "0.8.1",
       "description": "工具插件生态"
     },
     "web": {

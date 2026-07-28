@@ -7,12 +7,12 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.8.0"},
+    "core": {"version": "0.8.1"},
     "agents": {"version": "0.8.0"},
-    "plugins": {"version": "0.8.0"},
+    "plugins": {"version": "0.8.1"},
     "web": {"version": "0.8.0"}
   }
 }
@@ -20,7 +20,7 @@
 
 `version` 是全量发布版本；四个 `components.*.version` 用于单独判断板块更新。版本号使用点分数字并由更新器比较。
 
-组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本。本次 `0.8.0` 同时更新了 Provider 与运行时核心、子代理能力、多模态插件、Web 动态模型能力和模板合同测试，因此 core、agents、plugins、web 四个组件统一推进到 `0.8.0`。
+组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本。`0.8.1` 修复普通插件工具被误标为严格 Schema、导致 GPT 上游拒绝开放对象参数的问题，因此 core 与 plugins 推进到 `0.8.1`；本批没有修改子代理组件和 Web 实现，agents 与 web 保持 `0.8.0`。
 
 ## 命令
 
