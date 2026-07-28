@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import io
 import json
 import os
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -263,6 +265,98 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["pagination"]["page"], 2)
         self.assertEqual(len(response.json()["entries"]), 2)
 
+    def test_media_preview_is_inline_range_capable_and_enforces_limits(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        tmp_root = root / "tmp"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        (upload_root / "small.png").write_bytes(b"\x89PNG\r\n\x1a\npreview")
+        (upload_root / "track.mp3").write_bytes(b"0123456789")
+        (tmp_root / "clip.mp4").write_bytes(b"abcdefghij")
+        (upload_root / "notes.txt").write_text("not media", "utf-8")
+        oversized = {
+            "large.png": 10 * 1024 * 1024 + 1,
+            "large.mp3": 100 * 1024 * 1024 + 1,
+            "large.mp4": 300 * 1024 * 1024 + 1,
+        }
+        for filename, size in oversized.items():
+            with (upload_root / filename).open("wb") as handle:
+                handle.truncate(size)
+
+        app = create_app(service=WebRunService(root))
+        image = self.request(
+            app,
+            "GET",
+            "/api/users/alice/files/file_upload/preview?path=small.png",
+        )
+        self.assertEqual(image.status_code, 200, image.text)
+        self.assertEqual(image.headers["content-type"], "image/png")
+        self.assertIn("inline", image.headers["content-disposition"])
+        self.assertEqual(image.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(image.headers["cache-control"], "private, max-age=300")
+
+        audio_range = self.request(
+            app,
+            "GET",
+            "/api/users/alice/files/file_upload/preview?path=track.mp3",
+            headers={"Range": "bytes=2-5"},
+        )
+        self.assertEqual(audio_range.status_code, 206, audio_range.text)
+        self.assertEqual(audio_range.content, b"2345")
+        self.assertEqual(audio_range.headers["content-range"], "bytes 2-5/10")
+        self.assertEqual(audio_range.headers["accept-ranges"], "bytes")
+
+        video_range = self.request(
+            app,
+            "GET",
+            "/api/tmp/preview?path=clip.mp4",
+            headers={"Range": "bytes=4-7"},
+        )
+        self.assertEqual(video_range.status_code, 206, video_range.text)
+        self.assertEqual(video_range.content, b"efgh")
+        self.assertEqual(video_range.headers["content-type"], "video/mp4")
+
+        for filename in oversized:
+            rejected = self.request(
+                app,
+                "GET",
+                f"/api/users/alice/files/file_upload/preview?path={filename}",
+            )
+            self.assertEqual(rejected.status_code, 400, rejected.text)
+            self.assertIn("预览上限", rejected.json()["error"]["message"])
+
+        unsupported = self.request(
+            app,
+            "GET",
+            "/api/users/alice/files/file_upload/preview?path=notes.txt",
+        )
+        self.assertEqual(unsupported.status_code, 400, unsupported.text)
+        escaped = self.request(
+            app,
+            "GET",
+            "/api/users/alice/files/file_upload/preview?path=..%2Fsmall.png",
+        )
+        self.assertEqual(escaped.status_code, 400, escaped.text)
+
+    def test_media_preview_rejects_symbolic_links_when_supported(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        outside = root / "outside.png"
+        outside.write_bytes(b"outside")
+        link = upload_root / "linked.png"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            self.skipTest("当前系统不允许测试进程创建符号链接")
+        response = self.request(
+            create_app(service=WebRunService(root)),
+            "GET",
+            "/api/users/alice/files/file_upload/preview?path=linked.png",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
     def test_upload_avoids_overwrite_and_chat_validates_attached_file_paths(self) -> None:
         _, root = self.make_root()
         captured: list[dict[str, Any]] = []
@@ -341,6 +435,13 @@ class WebBackendTests(unittest.TestCase):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 return await client.request(method, url, **kwargs)
         return asyncio.run(invoke())
+
+    def skill_zip(self, files: dict[str, str | bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path, content in files.items():
+                archive.writestr(path, content)
+        return buffer.getvalue()
 
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
@@ -679,6 +780,142 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
         self.assertFalse(user_skill.exists())
+
+    def test_user_skill_zip_upload_installs_nested_packages_with_all_internal_files(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        app = create_app(service=WebRunService(root))
+        archive = self.skill_zip(
+            {
+                "outer/alpha/skill.md": "# Alpha skill\n\n第一个技能。\n",
+                "outer/alpha/tools/run.py": "print('alpha')\n",
+                "outer/alpha/assets/prompt.txt": "resource",
+                "another/beta/SKILL.md": "# Beta skill\n\n第二个技能。\n",
+                "another/beta/scripts/build.sh": "echo beta\n",
+            }
+        )
+
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/skills/user-created/upload",
+            files={"file": ("skills.zip", archive, "application/zip")},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["category"], "user_created")
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(
+            {item["name"] for item in payload["installed"]},
+            {"user_create/alpha", "user_create/beta"},
+        )
+        destination = root / "users" / "alice" / "user_skills" / "user_create"
+        self.assertTrue((destination / "alpha" / "SKILL.md").is_file())
+        self.assertIn("SKILL.md", {path.name for path in (destination / "alpha").iterdir()})
+        self.assertEqual(
+            (destination / "alpha" / "tools" / "run.py").read_text("utf-8"),
+            "print('alpha')\n",
+        )
+        self.assertEqual(
+            (destination / "alpha" / "assets" / "prompt.txt").read_text("utf-8"),
+            "resource",
+        )
+        listed = self.request(app, "GET", "/api/users/alice/skills").json()
+        user_names = {
+            item["name"]
+            for item in listed["items"]
+            if item["category"] == "user_created"
+        }
+        self.assertEqual(user_names, {"user_create/alpha", "user_create/beta"})
+
+    def test_user_skill_zip_upload_rejects_invalid_archives_without_partial_install(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        app = create_app(service=service)
+        endpoint = "/api/users/alice/skills/user-created/upload"
+
+        not_zip = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("skill.zip", b"not-a-zip", "application/zip")},
+        )
+        self.assertEqual(not_zip.status_code, 400, not_zip.text)
+        wrong_extension = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("skill.tar", self.skill_zip({"x/SKILL.md": "# X"}), "application/zip")},
+        )
+        self.assertEqual(wrong_extension.status_code, 400, wrong_extension.text)
+        missing_manifest = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("skill.zip", self.skill_zip({"x/readme.md": "# X"}), "application/zip")},
+        )
+        self.assertEqual(missing_manifest.status_code, 400, missing_manifest.text)
+        traversal = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("skill.zip", self.skill_zip({"../escape/SKILL.md": "# Escape"}), "application/zip")},
+        )
+        self.assertEqual(traversal.status_code, 400, traversal.text)
+        self.assertFalse((root / "escape").exists())
+
+        invalid_manifest = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={
+                "file": (
+                    "skill.zip",
+                    self.skill_zip(
+                        {
+                            "good/SKILL.md": "# Good\n",
+                            "bad/SKILL.md": "missing level-one title\n",
+                        }
+                    ),
+                    "application/zip",
+                )
+            },
+        )
+        self.assertEqual(invalid_manifest.status_code, 400, invalid_manifest.text)
+        destination = root / "users" / "alice" / "user_skills" / "user_create"
+        self.assertFalse((destination / "good").exists())
+        self.assertFalse((destination / "bad").exists())
+
+    def test_user_skill_zip_upload_conflict_does_not_overwrite_or_install_siblings(self) -> None:
+        _, root = self.make_root()
+        destination = root / "users" / "alice" / "user_skills" / "user_create"
+        existing = destination / "existing"
+        existing.mkdir(parents=True)
+        original = "# Existing\n\n原始内容。\n"
+        (existing / "SKILL.md").write_text(original, "utf-8")
+        app = create_app(service=WebRunService(root))
+        archive = self.skill_zip(
+            {
+                "upload/new-skill/SKILL.md": "# New skill\n",
+                "upload/existing/SKILL.md": "# Replacement\n",
+            }
+        )
+
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/skills/user-created/upload",
+            files={"file": ("skills.zip", archive, "application/zip")},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual((existing / "SKILL.md").read_text("utf-8"), original)
+        self.assertFalse((destination / "new-skill").exists())
 
     def test_auth_config_rejects_partial_password_and_generates_session_secret(self) -> None:
         with self.assertRaisesRegex(WebAuthConfigError, "必须同时配置"):
