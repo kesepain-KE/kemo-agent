@@ -51,6 +51,7 @@
   },
   "version": "1.0.0",
   "enabled": true,
+  "strict": false,
   "entrypoint": "tool.py:run"
 }
 ```

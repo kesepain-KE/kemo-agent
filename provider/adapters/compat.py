@@ -157,7 +157,11 @@ def _tool_definition(value: dict[str, Any]) -> ToolDefinition:
         name=str(function.get("name") or ""),
         description=str(function.get("description") or ""),
         parameters=dict(function.get("parameters") or function.get("input_schema") or {"type": "object"}),
-        strict=bool(function.get("strict", True)),
+        # OpenAI-compatible function tools are non-strict unless the caller
+        # explicitly opts into the Structured Outputs schema subset.  Treating
+        # an omitted flag as strict rejects ordinary open dictionaries such as
+        # expand_call.params before the model can start.
+        strict=bool(function.get("strict", False)),
         permission=(str(value.get("permission")) if value.get("permission") else None),
     )
 

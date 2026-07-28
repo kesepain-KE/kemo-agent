@@ -123,6 +123,7 @@ class ToolDefinition:
     entrypoint: str
     source: str
     directory: Path
+    strict: bool = False
     timeout_policy: str = "argument_or_default"
     overrides: list[str] = field(default_factory=list)
     _callable: Callable[..., Any] | None = field(default=None, repr=False)
@@ -134,6 +135,7 @@ class ToolDefinition:
                 "name": self.name,
                 "description": self.description,
                 "parameters": self.input_schema,
+                "strict": self.strict,
             },
         }
 
@@ -212,6 +214,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
         entrypoint=str(raw["entrypoint"]),
         source="plugins",
         directory=manifest.descriptor.path.parent,
+        strict=bool(raw.get("strict", False)),
         timeout_policy=str(raw.get("timeout_policy") or "argument_or_default"),
     )
 
