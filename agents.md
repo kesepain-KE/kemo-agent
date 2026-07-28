@@ -144,6 +144,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
 | 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
 | 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
+| 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
 | 外部消息状态 | `users/<name>/message_state/` | 外部消息处理状态（`processed.json`） |
 | Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
 | 记忆存储标记 | `users/<name>/improve/storage.json` | 记忆存储 schema 版本标记 |
@@ -163,6 +164,15 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - 框架只发现并处理明确约定的内容：感知/拓展读取清单声明项，消息路由加载 `message.json` 声明的适配入口，技能发现 `SKILL.md`，子代理发现包合同与可选执行器，插件发现 `SKILL.md` 中声明的工具。其余内部文件不会仅因存在而自动注册、注入 Prompt 或执行。
 - 创建器和模板只负责建立可发现的最小骨架。创建成功后，可继续使用正常文件、Shell 或代码工具在模块目录内完善实现、迁入已有项目；校验器不得以“模板未列出”为由拒绝、删除额外文件或要求合并目录。
 - “内部自由”不代表绕过合同和安全边界。清单字段、声明入口签名、Prompt 可见范围、调用权限、生命周期和返回协议仍需满足各模块规则；不得路径越界、借符号链接逃逸、硬编码凭据或加载不可信代码。不同模块仍按各自运行方式接受白名单、超时、取消、隔离或主进程信任边界约束。
+
+### 模块创建后的独立验收
+
+- 创建或实质修改子代理、拓展、外部消息路由、感知、技能或用户包后，必须读取并运行 `tests/template_tests/<kind>/` 中对应的 `STANDARD.md` 和独立 CLI；已知类型时不得用其他类型的标准代替。
+- 独立入口格式为 `python -m tests.template_tests.<kind> --target <path>`，其中 `<kind>` 取 `agent`、`expand`、`message`、`sense`、`skills` 或 `user`。只有候选类型未知或需要统一批处理时，才使用根级薄入口 `python -m tests.template_tests --kind auto --target <path>`。
+- 每类业务规则只属于本类目录。根级代码只能保存报告协议、临时沙箱、通用入口探测、类型识别和薄分发，不得累积跨类型分支形成测试“上帝模块”。新增类型时应建立新的独立验收包。
+- `FAIL` 必须修复后再交付；`WARN` 必须核对并说明；`SKIP` 表示外部凭据、网络、设备或可选 SDK 等条件尚未验证，不能表述为完整通过。通用验收不能替代模块自己的真实平台或设备集成测试。
+- `task_cron` 和 `task_plan` 不属于这组模块业务基准；用户包验收只确认它们的初始化目录存在。
+- 详细设计、命令选项和维护规则见 `global_knowledge/module-template-validation.md`。
 
 ### 外部消息插件发现规则
 
@@ -284,7 +294,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，chat 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
-| `reasoning_effort` | string | 思考强度：`minimal`、`low`、`medium`、`high`、`max`；缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
+| `reasoning_effort` | string | 保存的 Kemo 逻辑思考档位。`chat` 协议固定使用 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none`、`xhigh` 或非法值回退为 `medium`；`kemo` 协议由当前模型能力声明动态限定，可额外包含 `xhigh`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
 | `input_modalities` | string[] | 主模型已确认支持的输入模态；必须含 `text`。Chat 只可增加 `image`；Kemo 还可增加 `audio`、`video`、`file` |
 
 Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
@@ -623,6 +633,7 @@ system prompt 按以下固定顺序拼接：
   非法目录响应均不得产生可用模型列表。
 - 模型目录是短期界面数据，不新增 `user_config.json` 字段，不批量写入模型，也不覆盖当前
   `provider.model`。用户从目录选择模型后，仍通过原有 `provider.model` 字段显式保存。
+- Kemo 模型的思考档位从模型目录所声明的 `capabilities_url` 读取；Web 浏览器只提交模型名，网关密钥始终由后端读取。客户端原样提交能力声明中的 Kemo 逻辑档位，不执行 `reasoning_effort_map` 厂商映射；能力失败时可短期展示上一次成功缓存，但不得猜测固定五档。
 
 ### 密钥优先级
 

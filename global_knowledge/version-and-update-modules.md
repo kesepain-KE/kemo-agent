@@ -7,20 +7,20 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.7.1"},
-    "agents": {"version": "0.7.0"},
-    "plugins": {"version": "0.7.0"},
-    "web": {"version": "0.7.1"}
+    "core": {"version": "0.8.0"},
+    "agents": {"version": "0.8.0"},
+    "plugins": {"version": "0.8.0"},
+    "web": {"version": "0.8.0"}
   }
 }
 ```
 
 `version` 是全量发布版本；四个 `components.*.version` 用于单独判断板块更新。版本号使用点分数字并由更新器比较。
 
-组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本；例如 `0.7.1` 的对话导航修复更新了 core 中的版本声明与公共文档以及 web 实现，因此 core/web 为 `0.7.1`，未变化的 agents/plugins 继续保持 `0.7.0`。
+组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本。本次 `0.8.0` 同时更新了 Provider 与运行时核心、子代理能力、多模态插件、Web 动态模型能力和模板合同测试，因此 core、agents、plugins、web 四个组件统一推进到 `0.8.0`。
 
 ## 命令
 

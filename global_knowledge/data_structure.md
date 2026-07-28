@@ -78,6 +78,7 @@ kemo-agent/
 | `task-plan-creation.md` | 多步骤任务计划的创建与执行规则 |
 | `subagent-creation.md` | 内置/用户子智能体包与授权规则 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
+| `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
 | `logging-storage.md` | Cron 与外部消息结构化日志、迁移和保留规则 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 
@@ -92,3 +93,5 @@ kemo-agent/
 ## 模块目录的共同原则
 
 感知、拓展、外部消息、技能、子代理和工具插件的模板都只展示框架可发现的最小合同，不定义模块内部架构。模块目录可以是极小实现，也可以容纳任意层级文件或完整工程；框架只读取清单、主文档和已声明入口，其他内部内容不会自动注册、注入或执行。具体合同与安全边界以对应专题文档为准，不能因为模板没有列出某个内部文件就判定其非法。
+
+上述模块中的子代理、拓展、外部消息、感知、技能和用户包完成创建或实质修改后，应进入 `tests/template_tests/<kind>/` 运行对应的独立合同验收。具体映射、状态解释、沙箱边界和维护方法见 `module-template-validation.md`。

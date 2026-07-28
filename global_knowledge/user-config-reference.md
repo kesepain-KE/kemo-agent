@@ -35,7 +35,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
 | `timeout` | number | `120` | 普通 Provider 请求超时秒数。专用多模态调用未显式配置时会改用当前工具期限并预留 5 秒收尾；显式配置后仍受工具期限上限约束 |
-| `reasoning_effort` | string | `"medium"` | 思考强度：`minimal`、`low`、`medium`、`high`、`max`。缺失、`none` 或非法值统一回退为 `medium`，不可关闭推理 |
+| `reasoning_effort` | string | `"medium"` | 保存的 Kemo 逻辑思考档位。`chat` 固定支持 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none`、`xhigh` 或非法值回退为 `medium`；`kemo` 以当前模型的能力声明为准，可包含 `xhigh`。已保存档位失效时优先回退 `medium`，否则使用声明首项；不支持推理或能力不可用且无缓存时，请求不提交 `reasoning` |
 | `input_modalities` | string[] | `["text"]` | 主模型已确认支持的输入模态；必须包含 `text`。Chat 只允许增加 `image`；Kemo 还可声明 `audio`、`video`、`file`，并会与网关能力声明交叉验证 |
 
 ### 密钥优先级
@@ -49,6 +49,13 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 3. Provider 类型对应的内置默认地址（chat → OpenAI 默认，kemo → `http://127.0.0.1:8741`）
 
 最终地址统一去除尾部 `/`。只有 `chat` 模式自动补全 `/v1`。
+
+### Kemo 动态思考档位
+
+- 仅当已保存协议为 `kemo`、Base URL 与网关调用密钥有效且模型目录可读取时，Web 才从模型条目的 `capabilities_url` 获取当前模型档位；普通 `chat` 协议保持原固定五档链路。
+- 网关返回的 `reasoning.efforts` 是界面和运行时的唯一可选项。客户端保存并原样提交 Kemo 逻辑档位，不按模型名猜测，也不执行 `reasoning_effort_map` 到厂商档位的转换。
+- `reasoning.supported=false`、档位列表为空，或首次能力查询失败时，界面不显示固定五档，运行时省略 `reasoning`。刷新失败但存在短期成功缓存时可继续使用缓存，并明确标记为旧能力信息。
+- 模型、Base URL 或 API Key 改变后会按新的能力缓存身份重新读取；Web 能力接口只接收模型名，API Key 不会发送给浏览器或出现在响应中。
 
 ---
 
