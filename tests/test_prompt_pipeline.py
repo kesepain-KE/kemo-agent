@@ -1127,7 +1127,10 @@ class PromptPipelineTests(unittest.TestCase):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(provider.requests[0].messages[0]["role"], "system")
-        self.assertEqual(provider.requests[0].extra["reasoning_effort"], "medium")
+        # This fixture deliberately exposes no Kemo capability endpoint.  The
+        # runtime must not guess a fixed reasoning effort when the selected
+        # model has no verified declaration.
+        self.assertNotIn("reasoning_effort", provider.requests[0].extra)
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         weighted = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
         self.assertEqual(weighted[0]["weight"], 1)

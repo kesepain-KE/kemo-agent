@@ -502,6 +502,34 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", disabled.provider_options)
         self.assertNotIn("reasoning_enabled", disabled.provider_options)
 
+    def test_chat_tool_without_explicit_strict_defaults_to_non_strict(self) -> None:
+        request = chat_request_to_kemo(
+            ChatRequest(
+                model="test",
+                messages=[{"role": "user", "content": "call the expansion"}],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "expand_call",
+                            "description": "call an expansion",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"params": {"type": "object"}},
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+            )
+        )
+        self.assertEqual(len(request.tools), 1)
+        self.assertFalse(request.tools[0].strict)
+        self.assertNotIn(
+            "additionalProperties",
+            request.tools[0].parameters["properties"]["params"],
+        )
+
     def test_chat_bridge_reassigns_duplicate_provider_item_and_call_ids(self) -> None:
         def assistant(content: str, reasoning: str) -> dict[str, object]:
             return {

@@ -64,6 +64,9 @@ class PluginManifestTests(unittest.TestCase):
 
         registry = discover_tools(PROJECT_ROOT, "alice")
         self.assertEqual(len(registry.tools), 16)
+        expand_call = registry.get("expand_call")
+        self.assertFalse(expand_call.strict)
+        self.assertFalse(expand_call.openai_schema()["function"]["strict"])
         self.assertEqual(
             registry.get("subagent_dispatch").timeout_policy,
             "agent_runtime",
@@ -120,6 +123,23 @@ class PluginManifestTests(unittest.TestCase):
             )
             (plugin / "SKILL.md").write_text(f"# duplicate\ndescription\n\n{block}\n\n{block}\n", "utf-8")
             with self.assertRaisesRegex(PluginManifestError, "只能声明一个"):
+                discover_plugin_manifests(root)
+
+    def test_plugin_strict_flag_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root / "plugins" / "invalid_strict"
+            plugin.mkdir(parents=True)
+            (plugin / "tool.py").write_text("def run():\n    return {}\n", "utf-8")
+            (plugin / "SKILL.md").write_text(
+                "# invalid_strict\ndescription\n\n## Tool\n```json\n"
+                '{"name":"invalid_strict","description":"x",'
+                '"input_schema":{"type":"object"},"version":"1",'
+                '"enabled":true,"strict":"false","entrypoint":"tool.py:run"}'
+                "\n```\n",
+                "utf-8",
+            )
+            with self.assertRaisesRegex(PluginManifestError, "strict 必须是布尔值"):
                 discover_plugin_manifests(root)
 
 
