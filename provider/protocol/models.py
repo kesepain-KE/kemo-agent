@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,11 +23,10 @@ PROTOCOL_VERSION = "1.0"
 SUPPORTED_PROTOCOL_MAJOR = 1
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 USER_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "max"})
+KEMO_REASONING_EFFORTS = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh", "max"}
+)
 DEFAULT_REASONING_EFFORT = "medium"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _identifier(prefix: str) -> str:
@@ -38,6 +38,13 @@ def normalize_reasoning_effort(value: Any) -> str:
 
     effort = str(value or "").strip().lower()
     return effort if effort in USER_REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
+
+
+def normalize_kemo_reasoning_effort(value: Any) -> str:
+    """Normalize one Kemo logical effort without applying any vendor mapping."""
+
+    effort = str(value or "").strip().lower()
+    return effort if effort in KEMO_REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
 class ProtocolModel(BaseModel):
@@ -163,7 +170,7 @@ ContentBlock = Annotated[
 class ItemBase(ExtensionModel):
     id: str
     status: ItemStatus = ItemStatus.COMPLETED
-    created_at: datetime = Field(default_factory=_now)
+    created_at: datetime | None = None
 
     @field_validator("id")
     @classmethod
@@ -268,6 +275,7 @@ class GenerationConfig(ProtocolModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = None
     top_p: float | None = None
+    stop: str | list[str] | None = None
     parallel_tool_calls: bool = True
 
 
@@ -286,13 +294,32 @@ class VideoOutputConfig(ProtocolModel):
     duration_seconds: float | None = Field(default=None, gt=0)
 
 
+class FileOutputConfig(ProtocolModel):
+    filename: str | None = Field(default=None, max_length=255)
+    mime_type: str | None = Field(default=None, max_length=127)
+
+
 class OutputConfig(ProtocolModel):
-    modalities: list[Literal["text", "audio", "image", "video"]] = Field(
+    modalities: list[Literal["text", "audio", "image", "video", "file"]] = Field(
         default_factory=lambda: ["text"], min_length=1
     )
     audio: AudioOutputConfig | None = None
     image: ImageOutputConfig | None = None
     video: VideoOutputConfig | None = None
+    file: FileOutputConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_configs(self) -> "OutputConfig":
+        if len(self.modalities) != len(set(self.modalities)):
+            raise ValueError("output.modalities 不得重复")
+        for modality in ("audio", "image", "video", "file"):
+            config = getattr(self, modality)
+            requested = modality in self.modalities
+            if requested and config is None:
+                raise ValueError(f"请求 {modality} 输出时必须提供 output.{modality}")
+            if not requested and config is not None:
+                raise ValueError(f"output.{modality} 只能在 modalities 包含 {modality} 时提供")
+        return self
 
 
 class ToolDefinition(ExtensionModel):
@@ -310,21 +337,120 @@ class ReasoningCapabilities(ProtocolModel):
     summary: bool = False
     persisted_state: bool = False
 
+    @field_validator("efforts")
+    @classmethod
+    def validate_efforts(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw in values:
+            effort = str(raw or "").strip().casefold()
+            if effort not in KEMO_REASONING_EFFORTS:
+                raise ValueError(f"reasoning.efforts 包含未知逻辑档位：{raw!r}")
+            if effort in normalized:
+                raise ValueError(f"reasoning.efforts 不得重复：{effort}")
+            normalized.append(effort)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_supported_efforts(self) -> "ReasoningCapabilities":
+        if not self.supported and self.efforts:
+            raise ValueError("reasoning.supported=false 时 efforts 必须为空")
+        return self
+
 
 class ToolCapabilities(ProtocolModel):
-    function_calling: bool = True
+    function_calling: bool = False
     parallel_calls: bool = False
     multimodal_results: bool = False
 
 
+class EmbeddingCapabilities(ProtocolModel):
+    """Kemo 向量模型能力声明。"""
+
+    input_types: list[Literal["query", "document"]]
+    default_dimensions: int = Field(gt=0)
+    supported_dimensions: list[int] = Field(default_factory=list)
+    max_batch_size: int = Field(gt=0)
+    max_input_tokens_per_item: int | None = Field(default=None, gt=0)
+    normalization: Literal["always", "optional", "never", "unknown"] = "unknown"
+
+
+class RerankCapabilities(ProtocolModel):
+    """Kemo 重排序模型能力声明。"""
+
+    max_documents: int = Field(gt=0)
+    max_query_tokens: int | None = Field(default=None, gt=0)
+    max_document_tokens: int | None = Field(default=None, gt=0)
+    supports_return_documents: bool = True
+    score_semantics: Literal["higher_is_more_relevant"] = "higher_is_more_relevant"
+
+
 class ModelCapabilities(ExtensionModel):
     model: str
+    task: Literal["llm", "embedding", "rerank"] = "llm"
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     output_modalities: list[str] = Field(default_factory=lambda: ["text"])
     streaming: bool = True
     reasoning: ReasoningCapabilities = Field(default_factory=ReasoningCapabilities)
     tools: ToolCapabilities = Field(default_factory=ToolCapabilities)
     structured_output: bool = False
+    embedding: EmbeddingCapabilities | None = None
+    rerank: RerankCapabilities | None = None
+
+    @model_validator(mode="after")
+    def validate_task_capabilities(self) -> "ModelCapabilities":
+        if self.task == "embedding" and self.embedding is None:
+            raise ValueError("embedding 模型必须声明 embedding capabilities")
+        if self.task == "rerank" and self.rerank is None:
+            raise ValueError("rerank 模型必须声明 rerank capabilities")
+        if self.task != "embedding" and self.embedding is not None:
+            raise ValueError("非 embedding 模型不能声明 embedding capabilities")
+        if self.task != "rerank" and self.rerank is not None:
+            raise ValueError("非 rerank 模型不能声明 rerank capabilities")
+        if self.task == "llm":
+            self._validate_multimodal_operations()
+        return self
+
+    def _validate_multimodal_operations(self) -> None:
+        operations = self.extensions.get("operations")
+        if operations is None:
+            return
+        if not isinstance(operations, Mapping):
+            raise ValueError("extensions.operations 必须是对象")
+        requirements = {
+            "conversation": (set(), {"text"}),
+            "vision": ({"text", "image"}, {"text"}),
+            "image_generation": ({"text"}, {"image"}),
+            "image_edit": ({"text", "image"}, {"image"}),
+            "audio_transcription": ({"audio"}, {"text"}),
+            "speech_generation": ({"text"}, {"audio"}),
+            "speech_to_speech": ({"audio"}, {"audio"}),
+            "video_understanding": ({"video"}, {"text"}),
+            "video_generation": ({"text"}, {"video"}),
+        }
+        for name, declaration in operations.items():
+            if isinstance(declaration, bool):
+                supported = declaration
+            elif isinstance(declaration, Mapping):
+                supported = declaration.get("supported") is True
+                if "supported" not in declaration or not isinstance(
+                    declaration.get("supported"), bool
+                ):
+                    raise ValueError(
+                        f"extensions.operations.{name}.supported 必须是布尔值"
+                    )
+            else:
+                raise ValueError(
+                    f"extensions.operations.{name} 必须是布尔值或对象"
+                )
+            if not supported or name not in requirements:
+                continue
+            required_inputs, required_outputs = requirements[name]
+            missing_inputs = required_inputs - set(self.input_modalities)
+            missing_outputs = required_outputs - set(self.output_modalities)
+            if missing_inputs or missing_outputs:
+                raise ValueError(
+                    f"操作 {name} 与 input_modalities/output_modalities 声明不一致"
+                )
 
 
 class ModelCatalogItem(ProtocolModel):
@@ -386,6 +512,107 @@ class Usage(ProtocolModel):
     provider_raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class EmbeddingInput(ProtocolModel):
+    """One text item sent to the gateway embedding endpoint."""
+
+    id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=2_000_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EmbeddingRequest(ProtocolModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    request_id: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1)
+    input_type: Literal["query", "document"]
+    inputs: list[EmbeddingInput] = Field(min_length=1, max_length=2048)
+    dimensions: int | None = Field(default=None, gt=0)
+    normalize: bool | None = None
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> "EmbeddingRequest":
+        ids = [item.id for item in self.inputs]
+        if len(ids) != len(set(ids)):
+            raise ValueError("embedding input id 必须唯一")
+        return self
+
+
+class EmbeddingData(ProtocolModel):
+    id: str
+    index: int = Field(ge=0)
+    vector: list[float]
+
+
+class EmbeddingResponse(ProtocolModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    object: Literal["kemo.embedding_list"] = "kemo.embedding_list"
+    request_id: str
+    model: str
+    model_version: str | None = None
+    vector_space_id: str
+    dimensions: int = Field(gt=0)
+    data: list[EmbeddingData]
+    usage: Usage = Field(default_factory=Usage)
+    provider_response_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+
+class RerankDocument(ProtocolModel):
+    """A document supplied to the gateway rerank endpoint."""
+
+    id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=2_000_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RerankRequest(ProtocolModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    request_id: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=2_000_000)
+    documents: list[RerankDocument] = Field(min_length=1, max_length=4096)
+    top_n: int | None = Field(default=None, gt=0)
+    return_documents: bool = False
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_documents(self) -> "RerankRequest":
+        ids = [item.id for item in self.documents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("rerank document id 必须唯一")
+        if self.top_n is not None and self.top_n > len(self.documents):
+            raise ValueError("top_n 不能超过 documents 数量")
+        return self
+
+
+class RerankResultItem(ProtocolModel):
+    rank: int = Field(ge=1)
+    document_id: str
+    index: int = Field(ge=0)
+    relevance_score: float
+    document: RerankDocument | None = None
+
+
+class RerankResponse(ProtocolModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    object: Literal["kemo.rerank"] = "kemo.rerank"
+    request_id: str
+    model: str
+    model_version: str | None = None
+    score_semantics: Literal["higher_is_more_relevant"] = "higher_is_more_relevant"
+    results: list[RerankResultItem]
+    usage: Usage = Field(default_factory=Usage)
+    provider_response_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+
 class UnifiedError(ProtocolModel):
     type: str
     code: str
@@ -433,23 +660,57 @@ class KemoRequest(ExtensionModel):
     @model_validator(mode="after")
     def validate_items(self) -> "KemoRequest":
         item_ids: set[str] = set()
-        call_ids: set[str] = set()
+        calls: dict[str, str] = {}
+        completed_results: set[str] = set()
         for index, item in enumerate(self.input):
             if item.id in item_ids:
                 raise ValueError(f"input[{index}].id 重复：{item.id}")
             item_ids.add(item.id)
             if isinstance(item, ToolCallItem):
-                if item.call_id in call_ids:
+                if item.call_id in calls:
                     raise ValueError(f"tool_call.call_id 重复：{item.call_id}")
-                call_ids.add(item.call_id)
-            elif isinstance(item, ToolResultItem) and item.call_id not in call_ids:
-                raise ValueError(f"tool_result 无匹配 tool_call：{item.call_id}")
+                calls[item.call_id] = item.name
+            elif isinstance(item, ToolResultItem):
+                expected_name = calls.get(item.call_id)
+                if expected_name is None:
+                    raise ValueError(f"tool_result 无匹配 tool_call：{item.call_id}")
+                if expected_name != item.name:
+                    raise ValueError(f"tool_result.name 与 tool_call 不一致：{item.call_id}")
+                if item.call_id in completed_results:
+                    raise ValueError(f"tool_result.call_id 重复：{item.call_id}")
+                completed_results.add(item.call_id)
         return self
 
 
 class IncompleteDetails(ProtocolModel):
+    """Legacy typed view kept for callers that imported the old helper.
+
+    ``KemoResponse.incomplete_details`` intentionally uses a plain mapping so
+    gateway-specific fields are preserved; this class is not used for wire
+    validation anymore.
+    """
+
     reason: str
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+def _validate_output_media_item(
+    item: MessageItem, *, require_media: bool = False
+) -> None:
+    media_blocks = [
+        block
+        for block in item.content
+        if isinstance(block, (ImageContent, AudioContent, VideoContent, FileContent))
+    ]
+    if require_media and not media_blocks:
+        raise ValueError("媒体完成事件必须至少包含一个媒体 Content Block")
+    for block in media_blocks:
+        if not block.asset_id:
+            raise ValueError("响应媒体必须包含可下载的 asset_id")
+        if not block.mime_type:
+            raise ValueError("响应媒体必须包含真实 mime_type")
+        if not block.checksum_sha256:
+            raise ValueError("响应媒体必须包含 checksum_sha256")
 
 
 class KemoResponse(ExtensionModel):
@@ -462,7 +723,11 @@ class KemoResponse(ExtensionModel):
     output: list[Item] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     error: UnifiedError | None = None
-    incomplete_details: IncompleteDetails | None = None
+    # The gateway deliberately keeps this payload extensible.  Providers may
+    # attach reason-specific fields (for example ``retry_after_ms`` or a
+    # provider status) that are not part of the core response contract, so the
+    # consumer must not narrow it to the old ``IncompleteDetails`` shape.
+    incomplete_details: dict[str, Any] | None = None
     provider_response_id: str | None = None
 
     @model_validator(mode="after")
@@ -478,6 +743,13 @@ class KemoResponse(ExtensionModel):
         ids = [item.id for item in self.output]
         if len(ids) != len(set(ids)):
             raise ValueError("response.output item id 不得重复")
+        if self.status == ResponseStatus.COMPLETED and not self.output:
+            raise ValueError("completed response 必须包含完成结果")
+        for item in self.output:
+            if isinstance(item, MessageItem):
+                if item.role != MessageRole.ASSISTANT:
+                    raise ValueError("response.output message 必须使用 assistant role")
+                _validate_output_media_item(item)
         return self
 
 

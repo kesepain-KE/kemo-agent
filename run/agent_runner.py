@@ -41,6 +41,7 @@ from agents._runtime.resources import (
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
 from run.config import load_config, provider_runtime_config, resolve_agent_model
+from run.model_capabilities import resolve_reasoning_selection
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
@@ -402,6 +403,13 @@ class AgentRunner:
             model_override=context.model_override,
         )
         provider = self.provider_factory(runtime)
+        reasoning_selection = resolve_reasoning_selection(
+            self.config,
+            runtime,
+            provider,
+            model=runtime["model"],
+            cancel_event=context.cancel_event,
+        )
         system = (
             context.prompt_bundle.text
             + "\n\n[output_schema]\n"
@@ -503,15 +511,23 @@ class AgentRunner:
                             input=list(items),
                             tools=tool_definitions,
                             generation={"max_output_tokens": context.max_tokens},
-                            reasoning=ReasoningConfig(
-                                enabled=True,
-                                effort=runtime["reasoning_effort"],
-                                return_mode="content",
-                                context="auto",
+                            reasoning=(
+                                ReasoningConfig(
+                                    enabled=True,
+                                    effort=reasoning_selection.effort,
+                                    return_mode="content",
+                                    context="auto",
+                                )
+                                if reasoning_selection.enabled
+                                and reasoning_selection.effort
+                                else None
                             ),
-                            provider_options={
-                                "reasoning_effort": runtime["reasoning_effort"]
-                            },
+                            provider_options=(
+                                {"reasoning_effort": reasoning_selection.effort}
+                                if reasoning_selection.enabled
+                                and reasoning_selection.effort
+                                else {}
+                            ),
                             metadata={
                                 "capability": "conversation",
                                 "user": self.user,

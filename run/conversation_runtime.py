@@ -71,6 +71,7 @@ from run.memory_analysis import (
     extract_memory_backlog as _extract_memory_backlog,
     extract_round_memory as _extract_round_memory,
 )
+from run.model_capabilities import resolve_reasoning_selection
 from run.multimodal import main_model_supports_input, select_vision_route
 from run.prompt import PromptBundle, build_prompt_bundle
 from run.provider_events import (
@@ -975,6 +976,17 @@ def _iter_request_events_impl(
                 )
                 return
 
+            reasoning_selection = resolve_reasoning_selection(
+                config,
+                runtime_provider,
+                provider,
+                cancel_event=cancel_event,
+            )
+            reasoning_extra = (
+                {"reasoning_effort": reasoning_selection.effort}
+                if reasoning_selection.enabled and reasoning_selection.effort
+                else {"reasoning_enabled": False}
+            )
             stream = bool(request.get("stream", runtime_provider.get("stream", False)))
             guidance_channel = request.get("_guidance_queue")
             pending_guidance_ack: list[str] = []
@@ -1078,11 +1090,7 @@ def _iter_request_events_impl(
                         stream=stream,
                         tools=active_tool_schemas,
                         max_tokens=request_max_tokens,
-                        extra={
-                            "reasoning_effort": runtime_provider[
-                                "reasoning_effort"
-                            ]
-                        },
+                        extra=dict(reasoning_extra),
                     )
                     protocol_request = chat_request_to_kemo(chat_request).model_copy(
                         update={

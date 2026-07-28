@@ -37,6 +37,7 @@ from provider.protocol.models import (
     Usage,
     VideoContent,
     normalize_reasoning_effort,
+    normalize_kemo_reasoning_effort,
     text_from_content,
 )
 from provider.protocol.streaming import ProviderStreamEvent
@@ -439,7 +440,17 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                     content=blocks,
                 )
             )
-    effort = normalize_reasoning_effort(request.extra.get("reasoning_effort"))
+    reasoning_enabled = request.extra.get("reasoning_enabled") is not False
+    effort = normalize_kemo_reasoning_effort(request.extra.get("reasoning_effort"))
+    provider_options = {
+        key: value
+        for key, value in request.extra.items()
+        if key != "reasoning_enabled"
+    }
+    if reasoning_enabled:
+        provider_options["reasoning_effort"] = effort
+    else:
+        provider_options.pop("reasoning_effort", None)
     return KemoRequest(
         model=request.model,
         stream=request.stream,
@@ -450,13 +461,17 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
             "max_output_tokens": request.max_tokens,
             "temperature": request.temperature,
         },
-        reasoning=ReasoningConfig(
-            enabled=True,
-            effort=effort,
-            return_mode="content",
-            context="auto",
+        reasoning=(
+            ReasoningConfig(
+                enabled=True,
+                effort=effort,
+                return_mode="content",
+                context="auto",
+            )
+            if reasoning_enabled
+            else None
         ),
-        provider_options={**request.extra, "reasoning_effort": effort},
+        provider_options=provider_options,
     )
 
 
@@ -647,16 +662,27 @@ def chat_stream_to_protocol(
             )
         )
     output.extend(calls)
+    status = ResponseStatus.REQUIRES_ACTION if calls else (
+        ResponseStatus.COMPLETED if output else ResponseStatus.INCOMPLETE
+    )
     response = KemoResponse(
         id=response_id,
         request_id=request.request_id,
-        status=(ResponseStatus.REQUIRES_ACTION if calls else ResponseStatus.COMPLETED),
+        status=status,
         model=request.model,
         output=output,
         usage=usage,
+        incomplete_details=(
+            {"reason": "empty_output"} if status == ResponseStatus.INCOMPLETE else None
+        ),
+    )
+    terminal_type = (
+        StreamEventType.RESPONSE_INCOMPLETE
+        if status == ResponseStatus.INCOMPLETE
+        else StreamEventType.RESPONSE_COMPLETED
     )
     yield ProviderStreamEvent(
-        type=StreamEventType.RESPONSE_COMPLETED,
+        type=terminal_type,
         sequence=sequence,
         request_id=request.request_id,
         response_id=response_id,

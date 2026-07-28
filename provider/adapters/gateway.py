@@ -19,10 +19,14 @@ from typing import Any
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.assets import AssetDescriptor
 from provider.protocol.models import (
+    EmbeddingRequest,
+    EmbeddingResponse,
     KemoRequest,
     KemoResponse,
     ModelCapabilities,
     ModelCatalogResponse,
+    RerankRequest,
+    RerankResponse,
 )
 from provider.protocol.serialization import parse_response, to_json_bytes
 from provider.protocol.streaming import (
@@ -77,6 +81,8 @@ class KemoGatewayAdapter:
         self.model = str(config["model"])
         self.timeout = float(config.get("timeout", 120))
         self.responses_url = f"{self.base_url}/model/responses"
+        self.embeddings_url = f"{self.base_url}/model/embeddings"
+        self.rerank_url = f"{self.base_url}/model/rerank"
         self.capabilities_url = f"{self.base_url}/model/capabilities"
         self.models_url = f"{self.base_url}/model/models"
         self.assets_url = f"{self.base_url}/assets"
@@ -152,8 +158,48 @@ class KemoGatewayAdapter:
     def validate(self, request: KemoRequest) -> None:
         validate_request(request)
 
-    def capabilities(self, model: str) -> ModelCapabilities:
-        url = self.capabilities_url + "?" + urllib.parse.urlencode({"model": model})
+    def _model_capabilities_url(
+        self,
+        model: str,
+        capabilities_url: str | None,
+    ) -> str:
+        if not capabilities_url:
+            return self.capabilities_url + "?" + urllib.parse.urlencode(
+                {"model": model}
+            )
+        configured = urllib.parse.urlsplit(self.base_url)
+        resolved = urllib.parse.urljoin(f"{self.base_url}/", capabilities_url)
+        target = urllib.parse.urlsplit(resolved)
+        configured_origin = (
+            configured.scheme.casefold(),
+            (configured.hostname or "").casefold(),
+            configured.port,
+        )
+        target_origin = (
+            target.scheme.casefold(),
+            (target.hostname or "").casefold(),
+            target.port,
+        )
+        if (
+            target.scheme not in {"http", "https"}
+            or target.username is not None
+            or target.password is not None
+            or target_origin != configured_origin
+        ):
+            raise ProviderError(
+                "Kemo 模型目录返回了跨源 capabilities_url，已拒绝携带网关密钥访问",
+                category="gateway_protocol_error",
+                retryable=False,
+            )
+        return urllib.parse.urlunsplit(target._replace(fragment=""))
+
+    def capabilities(
+        self,
+        model: str,
+        *,
+        capabilities_url: str | None = None,
+    ) -> ModelCapabilities:
+        url = self._model_capabilities_url(model, capabilities_url)
         request = urllib.request.Request(
             url,
             headers=self._headers(stream=False),
@@ -165,7 +211,12 @@ class KemoGatewayAdapter:
             data = json.loads(raw.decode("utf-8"))
             if isinstance(data, dict) and isinstance(data.get("capabilities"), dict):
                 data = data["capabilities"]
-            return ModelCapabilities.model_validate(data)
+            capabilities = ModelCapabilities.model_validate(data)
+            if capabilities.model != model:
+                raise ValueError(
+                    f"能力声明模型不匹配：{capabilities.model!r} != {model!r}"
+                )
+            return capabilities
         except Exception as exc:
             raise ProviderError(
                 "Kemo gateway 返回了无效的模型能力声明",
@@ -203,6 +254,57 @@ class KemoGatewayAdapter:
         )
         with self._open(http_request) as response:
             return parse_response(response.read())
+
+    def embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        """Call the native Kemo vectorization endpoint without translation."""
+
+        http_request = urllib.request.Request(
+            self.embeddings_url,
+            data=to_json_bytes(request),
+            headers=self._headers(
+                stream=False,
+                idempotency_key=request.request_id,
+            ),
+            method="POST",
+        )
+        with self._open(http_request) as response:
+            raw = response.read()
+        try:
+            return EmbeddingResponse.model_validate_json(raw)
+        except Exception as exc:
+            raise ProviderError(
+                "Kemo gateway 返回了无效的 embedding 响应",
+                category="gateway_protocol_error",
+                body=raw[:1000],
+            ) from exc
+
+    # Provider packages use ``embed`` as the task-level method name.  Keep the
+    # endpoint-named alias as well so callers can use either vocabulary.
+    def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        return self.embeddings(request)
+
+    def rerank(self, request: RerankRequest) -> RerankResponse:
+        """Call the native Kemo reranking endpoint without translation."""
+
+        http_request = urllib.request.Request(
+            self.rerank_url,
+            data=to_json_bytes(request),
+            headers=self._headers(
+                stream=False,
+                idempotency_key=request.request_id,
+            ),
+            method="POST",
+        )
+        with self._open(http_request) as response:
+            raw = response.read()
+        try:
+            return RerankResponse.model_validate_json(raw)
+        except Exception as exc:
+            raise ProviderError(
+                "Kemo gateway 返回了无效的 rerank 响应",
+                category="gateway_protocol_error",
+                body=raw[:1000],
+            ) from exc
 
     def stream(
         self,

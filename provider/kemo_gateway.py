@@ -22,11 +22,20 @@ class KemoGatewayProvider:
     def validate(self, request):
         return self._native.validate(request)
 
-    def capabilities(self, model: str):
-        return self._native.capabilities(model)
+    def capabilities(self, model: str, *, capabilities_url: str | None = None):
+        return self._native.capabilities(model, capabilities_url=capabilities_url)
 
     def models(self, *, task: str | None = None):
         return self._native.models(task=task)
+
+    def embeddings(self, request):
+        return self._native.embeddings(request)
+
+    def embed(self, request):
+        return self._native.embed(request)
+
+    def rerank(self, request):
+        return self._native.rerank(request)
 
     def get_response(self, response_id: str):
         return self._native.get_response(response_id)

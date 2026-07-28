@@ -4,20 +4,30 @@ from __future__ import annotations
 
 import json
 import uuid
+import base64
+import binascii
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import Field, model_validator
 
-from provider.protocol.enums import StreamEventType, TERMINAL_STREAM_EVENTS
+from provider.protocol.enums import (
+    MessageRole,
+    ResponseStatus,
+    StreamEventType,
+    TERMINAL_STREAM_EVENTS,
+)
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.models import (
     Item,
     KemoResponse,
+    MessageItem,
     ProtocolModel,
+    ToolCallItem,
     UnifiedError,
     Usage,
+    _validate_output_media_item,
 )
 
 
@@ -44,12 +54,64 @@ class ProviderStreamEvent(ProtocolModel):
     @model_validator(mode="after")
     def validate_terminal(self) -> "ProviderStreamEvent":
         if self.type in {
+            StreamEventType.OUTPUT_TEXT_DELTA,
+            StreamEventType.OUTPUT_AUDIO_DELTA,
+            StreamEventType.REASONING_SUMMARY_DELTA,
+            StreamEventType.REASONING_CONTENT_DELTA,
+        } and (self.item_id is None or self.delta is None):
+            raise ValueError(f"{self.type} 必须包含 item_id 和 delta")
+        if self.type in {
+            StreamEventType.OUTPUT_TEXT_DELTA,
+            StreamEventType.OUTPUT_AUDIO_DELTA,
+        } and self.content_index is None:
+            raise ValueError(f"{self.type} 必须包含 content_index")
+        if self.type == StreamEventType.OUTPUT_AUDIO_DELTA and self.delta is not None:
+            try:
+                decoded = base64.b64decode(self.delta, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("output_audio.delta 必须是有效 Base64") from exc
+            if not decoded:
+                raise ValueError("output_audio.delta 不能是空音频片段")
+        if self.type == StreamEventType.TOOL_CALL_ARGUMENTS_DELTA and not all(
+            (self.item_id, self.call_id, self.name, self.delta is not None)
+        ):
+            raise ValueError(
+                "tool_call.arguments.delta 必须包含 item_id/call_id/name/delta"
+            )
+        if self.type == StreamEventType.TOOL_CALL_COMPLETED:
+            if not isinstance(self.item, ToolCallItem):
+                raise ValueError("tool_call.completed 必须包含完整 ToolCallItem")
+            if self.call_id is not None and self.item.call_id != self.call_id:
+                raise ValueError("tool_call.completed 的 call_id 与 item 不一致")
+        if self.type == StreamEventType.OUTPUT_MEDIA_COMPLETED:
+            if not isinstance(self.item, MessageItem) or self.item.role != MessageRole.ASSISTANT:
+                raise ValueError("output_media.completed 必须包含 assistant MessageItem")
+            if self.item_id != self.item.id:
+                raise ValueError("output_media.completed 的 item_id 与 item 不一致")
+            _validate_output_media_item(self.item, require_media=True)
+        if self.type == StreamEventType.USAGE_UPDATED and self.usage is None:
+            raise ValueError("usage.updated 必须包含 usage")
+        if self.type in {
             StreamEventType.RESPONSE_COMPLETED,
             StreamEventType.RESPONSE_INCOMPLETE,
             StreamEventType.RESPONSE_FAILED,
             StreamEventType.RESPONSE_CANCELLED,
         } and self.response is None:
             raise ValueError(f"{self.type} 必须包含完整 response")
+        expected_statuses = {
+            StreamEventType.RESPONSE_COMPLETED: {
+                ResponseStatus.COMPLETED,
+                ResponseStatus.REQUIRES_ACTION,
+            },
+            StreamEventType.RESPONSE_INCOMPLETE: {ResponseStatus.INCOMPLETE},
+            StreamEventType.RESPONSE_FAILED: {ResponseStatus.FAILED},
+            StreamEventType.RESPONSE_CANCELLED: {ResponseStatus.CANCELLED},
+        }
+        expected = expected_statuses.get(self.type)
+        if expected is not None and (
+            self.response is None or self.response.status not in expected
+        ):
+            raise ValueError(f"{self.type} 必须包含匹配状态的完整 KemoResponse")
         if self.type == StreamEventType.ERROR and self.error is None:
             raise ValueError("error 事件必须包含 error 对象")
         return self

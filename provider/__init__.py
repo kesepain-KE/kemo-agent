@@ -1,7 +1,15 @@
 """提供者包公共API。"""
 
 from provider.factory import create_provider
-from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
+from provider.protocol.models import (
+    EmbeddingRequest,
+    EmbeddingResponse,
+    KemoRequest,
+    KemoResponse,
+    ModelCapabilities,
+    RerankRequest,
+    RerankResponse,
+)
 from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import (
     ProviderAuthError,
@@ -10,6 +18,8 @@ from provider.schema import (
 )
 
 __all__ = [
+    "EmbeddingRequest",
+    "EmbeddingResponse",
     "KemoRequest",
     "KemoResponse",
     "ModelCapabilities",
@@ -17,5 +27,7 @@ __all__ = [
     "ProviderError",
     "ProviderStreamEvent",
     "ProviderTimeoutError",
+    "RerankRequest",
+    "RerankResponse",
     "create_provider",
 ]

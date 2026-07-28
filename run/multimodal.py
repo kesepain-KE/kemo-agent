@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import threading
-import time
 from typing import Any, Literal
 
 from run.config import ConfigError
-from provider.factory import provider_request_slot
+from run.model_capabilities import (
+    _capability_cache,
+    lookup_model_capabilities,
+)
 
 
 VisionRoute = Literal["main", "dedicated"]
 VISION_ROUTING_MODES = frozenset({"auto", "main", "dedicated"})
-_CAPABILITY_CACHE_TTL = 300.0
-_capability_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
-_capability_lock = threading.RLock()
 
 
 def configured_input_modalities(config: dict[str, Any]) -> tuple[str, ...]:
@@ -58,14 +57,6 @@ def validate_multimodal_config(config: dict[str, Any]) -> None:
     configured_vision_mode(config)
 
 
-def _kemo_capability_key(runtime_provider: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(runtime_provider.get("type") or ""),
-        str(runtime_provider.get("base_url") or ""),
-        str(runtime_provider.get("model") or ""),
-    )
-
-
 def _gateway_capabilities(
     config: dict[str, Any],
     runtime_provider: dict[str, Any],
@@ -73,26 +64,12 @@ def _gateway_capabilities(
     *,
     cancel_event: threading.Event | None = None,
 ) -> Any | None:
-    key = _kemo_capability_key(runtime_provider)
-    now = time.monotonic()
-    with _capability_lock:
-        cached = _capability_cache.get(key)
-        if cached is not None and cached[0] > now:
-            return cached[1]
-    declared = None
-    capabilities = getattr(provider, "capabilities", None)
-    if callable(capabilities):
-        try:
-            with provider_request_slot(config, cancel_event=cancel_event):
-                declared = capabilities(str(runtime_provider["model"]))
-        except Exception:
-            declared = None
-    with _capability_lock:
-        if declared is None:
-            _capability_cache.pop(key, None)
-        else:
-            _capability_cache[key] = (now + _CAPABILITY_CACHE_TTL, declared)
-    return declared
+    return lookup_model_capabilities(
+        config,
+        runtime_provider,
+        provider,
+        cancel_event=cancel_event,
+    ).capabilities
 
 
 def main_model_supports_input(
