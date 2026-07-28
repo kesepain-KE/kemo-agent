@@ -11,14 +11,19 @@ from provider.factory import create_provider, provider_request_slot
 from provider.protocol.enums import MessageRole, ResponseStatus
 from provider.protocol.models import (
     AudioOutputConfig,
+    AudioContent,
+    FileContent,
     GenerationConfig,
+    ImageContent,
     ImageOutputConfig,
     KemoRequest,
     MessageItem,
     OutputConfig,
     TextContent,
+    VideoContent,
     VideoOutputConfig,
 )
+from provider.protocol.assets import AssetDescriptor
 from provider.schema import ProviderError
 from run.attachments import RunAssetResolver, describe_local_asset
 from run.config import load_config, provider_runtime_config
@@ -215,6 +220,43 @@ def _output_config(
     return OutputConfig(modalities=["text"])
 
 
+def _asset_kind_from_mime(mime_type: str) -> str:
+    normalized = str(mime_type or "").casefold()
+    if normalized.startswith("image/"):
+        return "image"
+    if normalized.startswith("audio/"):
+        return "audio"
+    if normalized.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _remote_content(
+    descriptor: AssetDescriptor,
+    *,
+    expected_kind: str | None,
+) -> ImageContent | AudioContent | VideoContent | FileContent:
+    """Build a Kemo media block for an already-owned gateway Asset."""
+
+    kind = _asset_kind_from_mime(descriptor.mime_type)
+    if expected_kind is not None and kind != expected_kind:
+        raise ValueError(
+            f"附件类型不匹配：期望 {expected_kind}，实际为 {kind}"
+        )
+    common = {
+        "asset_id": descriptor.id,
+        "mime_type": descriptor.mime_type,
+        "checksum_sha256": descriptor.checksum_sha256,
+    }
+    if kind == "image":
+        return ImageContent(**common)
+    if kind == "audio":
+        return AudioContent(**common)
+    if kind == "video":
+        return VideoContent(**common)
+    return FileContent(filename=descriptor.filename, **common)
+
+
 def run(
     action: str,
     asset_ids: list[str] | None = None,
@@ -294,6 +336,11 @@ def run(
     ]
     descriptors = [*descriptors, *local_descriptors]
     ids.extend(str(item["asset_id"]) for item in local_descriptors)
+    local_asset_ids = {
+        str(item.get("asset_id") or "")
+        for item in descriptors
+        if isinstance(item, dict) and str(item.get("asset_id") or "")
+    }
     resolver = RunAssetResolver(root, user, descriptors)
     media = []
     multimodal_assets: list[dict[str, str]] = []
@@ -305,6 +352,49 @@ def run(
             ]
         else:
             for index, asset_id in enumerate(ids):
+                # A Kemo asset may have been created by the gateway (for example
+                # in an earlier run or by another client).  Such an id is not a
+                # local Run attachment and must be resolved through the gateway,
+                # rather than being forced through RunAssetResolver.
+                if asset_id not in local_asset_ids:
+                    get_asset = getattr(provider, "get_asset", None)
+                    wait_asset_ready = getattr(provider, "wait_asset_ready", None)
+                    if callable(get_asset) and callable(wait_asset_ready):
+                        try:
+                            with provider_request_slot(
+                                config, cancel_event=cancel_event
+                            ):
+                                remote = wait_asset_ready(
+                                    get_asset(asset_id),
+                                    cancel_event=cancel_event,
+                                )
+                        except ProviderError as exc:
+                            # A 404 means this is not a gateway asset; fall back
+                            # to the normal current-Run attachment validation.
+                            # Auth, expiry, network and other errors must surface.
+                            if exc.status_code != 404:
+                                raise
+                        else:
+                            media.append(
+                                _remote_content(
+                                    remote,
+                                    expected_kind=(
+                                        None
+                                        if action == "generate_video"
+                                        else expected_kind
+                                    ),
+                                )
+                            )
+                            role = (
+                                str(asset_roles[index])
+                                if asset_roles is not None
+                                else "source" if index == 0 else "reference"
+                            )
+                            multimodal_assets.append(
+                                {"asset_id": str(remote.id), "role": role}
+                            )
+                            ids[index] = str(remote.id)
+                            continue
                 path, verified = resolver.local_asset(
                     asset_id,
                     expected_kind=(
