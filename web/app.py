@@ -33,6 +33,7 @@ from web.service import (
     ConflictError,
     FILE_UPLOAD_MAX_BYTES,
     InvalidRequestError,
+    SKILL_ARCHIVE_MAX_BYTES,
     WebRunService,
     WebServiceError,
 )
@@ -405,6 +406,25 @@ def create_app(
         target = backend.file_download(user, scope, path)
         return FileResponse(target, filename=target.name)
 
+    @app.get("/api/users/{user}/files/{scope}/preview")
+    async def preview_file(
+        user: str,
+        scope: str,
+        path: str = Query(...),
+    ) -> FileResponse:
+        target, media_type, _ = backend.file_preview(user, scope, path)
+        return FileResponse(
+            target,
+            media_type=media_type,
+            filename=target.name,
+            content_disposition_type="inline",
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'",
+            },
+        )
+
     @app.delete("/api/users/{user}/files/{scope}")
     async def delete_file(
         user: str,
@@ -464,6 +484,21 @@ def create_app(
         finally:
             await file.close()
         return backend.save_tmp_file(path, data)
+
+    @app.get("/api/tmp/preview")
+    async def preview_tmp_file(path: str = Query(...)) -> FileResponse:
+        target, media_type, _ = backend.tmp_file_preview(path)
+        return FileResponse(
+            target,
+            media_type=media_type,
+            filename=target.name,
+            content_disposition_type="inline",
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'",
+            },
+        )
 
     @app.put("/api/tmp/text")
     async def write_tmp_text(path: str = Query(...), body: TextBody = ...) -> dict[str, Any]:
@@ -804,6 +839,23 @@ def create_app(
     @app.get("/api/users/{user}/skills")
     async def skills(user: str) -> dict[str, Any]:
         return backend.skills(user)
+
+    @app.post("/api/users/{user}/skills/user-created/upload")
+    async def upload_user_skills(
+        user: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        filename = file.filename or ""
+        try:
+            data = await file.read(SKILL_ARCHIVE_MAX_BYTES + 1)
+        finally:
+            await file.close()
+        return await asyncio.to_thread(
+            backend.upload_user_skills,
+            user,
+            filename,
+            data,
+        )
 
     @app.get("/api/users/{user}/skills/{category}/document")
     async def skill_document(user: str, category: str, name: str = Query(...)) -> dict[str, Any]:

@@ -14,6 +14,7 @@ import queue
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -104,7 +105,7 @@ from run.prompt import (
     build_prompt_bundle,
     parse_prompt_settings,
 )
-from run.prompt_sources import iter_files, load_prompt_source_registry
+from run.prompt_sources import iter_files, load_prompt_source_registry, parse_skill_descriptor
 from run.source_policy import MainAgentSourcePolicy
 from run.task_plan_store import (
     PlanConflictError,
@@ -138,6 +139,14 @@ _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
 FILE_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
+IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
+AUDIO_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
+VIDEO_PREVIEW_MAX_BYTES = 300 * 1024 * 1024
+SKILL_ARCHIVE_MAX_BYTES = 32 * 1024 * 1024
+SKILL_ARCHIVE_MAX_EXPANDED_BYTES = 128 * 1024 * 1024
+SKILL_ARCHIVE_MAX_FILES = 2000
+SKILL_ARCHIVE_MAX_SKILLS = 100
+SKILL_ARCHIVE_MAX_RATIO = 200
 TEXT_DOCUMENT_MAX_CHARS = 1_000_000
 IMPORTANT_MEMORY_MAX_HARD_CHARS = 65_536
 SESSION_LEASE_TTL_SECONDS = 45.0
@@ -153,6 +162,12 @@ _KNOWLEDGE_SCOPES = frozenset({"user", "shared", "global"})
 _KNOWLEDGE_SUFFIXES = frozenset({".md", ".txt", ".json"})
 _SKILL_CATEGORIES = frozenset({"builtin", "shared", "agent_generated", "user_created"})
 _EDITABLE_SKILL_CATEGORIES = frozenset({"agent_generated", "user_created"})
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+_WINDOWS_INVALID_PATH_CHARS = frozenset('<>:"|?*')
 _EXPAND_SCOPES = frozenset({"global", "shared", "user"})
 _EXPAND_INJECTION_HEADING = re.compile(r"^##\s+注入层\s*$", re.MULTILINE)
 _EXPAND_OPERATION_HEADING = re.compile(r"^##\s+操作层\s*$", re.MULTILINE)
@@ -178,6 +193,27 @@ _MESSAGE_LOG_LIMIT = 500
 _EDITABLE_TEXT_SUFFIXES = frozenset(
     {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".log", ".py", ".js", ".ts", ".tsx", ".css", ".html"}
 )
+_MEDIA_PREVIEW_TYPES: dict[str, tuple[str, str, int, str]] = {
+    ".png": ("image", "image/png", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".jpg": ("image", "image/jpeg", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".jpeg": ("image", "image/jpeg", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".gif": ("image", "image/gif", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".webp": ("image", "image/webp", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".bmp": ("image", "image/bmp", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".ico": ("image", "image/x-icon", IMAGE_PREVIEW_MAX_BYTES, "图片预览上限（10 MB）"),
+    ".mp3": ("audio", "audio/mpeg", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".wav": ("audio", "audio/wav", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".ogg": ("audio", "audio/ogg", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".m4a": ("audio", "audio/mp4", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".aac": ("audio", "audio/aac", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".flac": ("audio", "audio/flac", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".opus": ("audio", "audio/ogg", AUDIO_PREVIEW_MAX_BYTES, "音频预览上限（100 MB）"),
+    ".mp4": ("video", "video/mp4", VIDEO_PREVIEW_MAX_BYTES, "视频预览上限（300 MB）"),
+    ".webm": ("video", "video/webm", VIDEO_PREVIEW_MAX_BYTES, "视频预览上限（300 MB）"),
+    ".ogv": ("video", "video/ogg", VIDEO_PREVIEW_MAX_BYTES, "视频预览上限（300 MB）"),
+    ".mov": ("video", "video/quicktime", VIDEO_PREVIEW_MAX_BYTES, "视频预览上限（300 MB）"),
+    ".m4v": ("video", "video/x-m4v", VIDEO_PREVIEW_MAX_BYTES, "视频预览上限（300 MB）"),
+}
 _AVATAR_FORMATS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -600,6 +636,49 @@ def _reject_link_path(root: Path, target: Path) -> None:
             raise InvalidRequestError("Web 文件操作不允许符号链接或目录联接")
 
 
+def _validated_skill_archive_path(value: str) -> PurePosixPath:
+    """Normalize one ZIP member while keeping extraction portable and contained."""
+
+    normalized = str(value or "").replace("\\", "/")
+    if not normalized or "\x00" in normalized or normalized.startswith("/"):
+        raise InvalidRequestError("技能压缩包包含无效路径")
+    pure = PurePosixPath(normalized.rstrip("/"))
+    if not pure.parts or pure.is_absolute() or ".." in pure.parts:
+        raise InvalidRequestError("技能压缩包包含路径穿越或绝对路径")
+    for part in pure.parts:
+        if part in {"", ".", ".."}:
+            raise InvalidRequestError("技能压缩包包含无效路径片段")
+        if part.endswith((" ", ".")) or any(char in _WINDOWS_INVALID_PATH_CHARS for char in part):
+            raise InvalidRequestError(f"技能压缩包路径不兼容 Windows：{part}")
+        device_name = part.split(".", 1)[0].upper()
+        if device_name in _WINDOWS_RESERVED_NAMES:
+            raise InvalidRequestError(f"技能压缩包包含 Windows 保留名称：{part}")
+    return pure
+
+
+def _zip_member_kind(info: zipfile.ZipInfo) -> str:
+    """Return file/directory and reject links or other special archive entries."""
+
+    unix_mode = (info.external_attr >> 16) & 0xFFFF
+    file_type = stat.S_IFMT(unix_mode)
+    if file_type == stat.S_IFLNK or (info.external_attr & 0x400):
+        raise InvalidRequestError("技能压缩包不能包含符号链接、目录联接或重解析点")
+    is_directory = info.is_dir() or file_type == stat.S_IFDIR
+    if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+        raise InvalidRequestError("技能压缩包不能包含设备、套接字等特殊文件")
+    return "directory" if is_directory else "file"
+
+
+def _skill_package_name(value: str) -> str:
+    candidate = str(value or "").strip()
+    _validated_skill_archive_path(candidate)
+    if "/" in candidate or "\\" in candidate:
+        raise InvalidRequestError("技能目录名必须是单个文件夹名称")
+    if candidate.startswith("."):
+        raise InvalidRequestError("技能目录名不能以点开头")
+    return candidate
+
+
 def _validated_text(value: Any, *, field: str = "content", max_chars: int = TEXT_DOCUMENT_MAX_CHARS) -> str:
     if not isinstance(value, str):
         raise InvalidRequestError(f"{field} 必须是字符串")
@@ -827,6 +906,7 @@ class WebRunService:
         self._chat_gates: dict[str, _UserChatGate] = {}
         self._chat_gates_lock = threading.Lock()
         self._file_upload_lock = threading.RLock()
+        self._skill_upload_lock = threading.RLock()
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -1435,6 +1515,30 @@ class WebRunService:
         if target.is_symlink() or not target.is_file():
             raise NotFoundError(f"文件不存在：{path}")
         return target
+
+    def _media_preview(self, directory: Path, path: Any) -> tuple[Path, str, str]:
+        relative, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
+        if target.is_symlink() or not target.is_file():
+            raise NotFoundError(f"文件不存在：{relative}")
+        preview_type = _MEDIA_PREVIEW_TYPES.get(target.suffix.lower())
+        if preview_type is None:
+            raise InvalidRequestError("该文件类型不支持网页预览")
+        kind, media_type, max_bytes, limit_label = preview_type
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise WebServiceError(f"无法读取文件信息：{relative}") from exc
+        if size > max_bytes:
+            raise InvalidRequestError(f"文件超过{limit_label}，请下载后查看")
+        return target, media_type, kind
+
+    def file_preview(self, user: Any, scope: Any, path: Any) -> tuple[Path, str, str]:
+        _, _, directory = self._file_scope_root(user, scope)
+        return self._media_preview(directory, path)
+
+    def tmp_file_preview(self, path: Any) -> tuple[Path, str, str]:
+        return self._media_preview(self.root / "tmp", path)
 
     def delete_file(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
         name, normalized_scope, directory = self._file_scope_root(user, scope)
@@ -4041,6 +4145,224 @@ class WebRunService:
             _atomic_write(skill_file, previous)
             raise InvalidRequestError(f"技能文件校验失败：{exc}") from None
         return self.skill_document(name, normalized_category, logical_name)
+
+    def upload_user_skills(self, user: Any, filename: Any, data: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        archive_name = PurePosixPath(str(filename or "").strip().replace("\\", "/")).name
+        if not archive_name or Path(archive_name).suffix.casefold() != ".zip":
+            raise InvalidRequestError("用户技能只支持 ZIP 压缩包")
+        if not isinstance(data, bytes) or not data:
+            raise InvalidRequestError("技能压缩包不能为空")
+        if len(data) > SKILL_ARCHIVE_MAX_BYTES:
+            raise InvalidRequestError(
+                f"技能压缩包不能超过 {SKILL_ARCHIVE_MAX_BYTES // (1024 * 1024)} MB"
+            )
+        if not zipfile.is_zipfile(io.BytesIO(data)):
+            raise InvalidRequestError("上传内容不是有效的 ZIP 压缩包")
+
+        user_skills_root = self.root / "users" / name / "user_skills"
+        destination_root = user_skills_root / "user_create"
+        with self._skill_upload_lock:
+            user_skills_root.mkdir(parents=True, exist_ok=True)
+            _reject_link_path((self.root / "users" / name).resolve(), user_skills_root)
+            destination_root.mkdir(parents=True, exist_ok=True)
+            _reject_link_path(user_skills_root.resolve(), destination_root)
+            staging_root = destination_root / f".upload-{uuid.uuid4().hex}"
+            archive_root = staging_root / "archive"
+            packages_root = staging_root / "packages"
+            moved_targets: list[Path] = []
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+                    infos = archive.infolist()
+                    if not infos:
+                        raise InvalidRequestError("技能压缩包不能为空")
+
+                    members: list[tuple[zipfile.ZipInfo, PurePosixPath, str]] = []
+                    seen_paths: dict[str, tuple[PurePosixPath, str]] = {}
+                    expanded_bytes = 0
+                    file_count = 0
+                    for info in infos:
+                        if info.flag_bits & 0x1:
+                            raise InvalidRequestError("技能压缩包不能加密")
+                        pure = _validated_skill_archive_path(info.filename)
+                        kind = _zip_member_kind(info)
+                        key = pure.as_posix().casefold()
+                        if key in seen_paths:
+                            raise InvalidRequestError(
+                                f"技能压缩包存在重复或大小写冲突路径：{pure.as_posix()}"
+                            )
+                        seen_paths[key] = (pure, kind)
+                        if kind == "file":
+                            file_count += 1
+                            expanded_bytes += info.file_size
+                            if file_count > SKILL_ARCHIVE_MAX_FILES:
+                                raise InvalidRequestError(
+                                    f"技能压缩包文件数不能超过 {SKILL_ARCHIVE_MAX_FILES}"
+                                )
+                            if expanded_bytes > SKILL_ARCHIVE_MAX_EXPANDED_BYTES:
+                                raise InvalidRequestError(
+                                    "技能压缩包解压后内容超过安全上限"
+                                )
+                            ratio = info.file_size / max(1, info.compress_size)
+                            if info.file_size and ratio > SKILL_ARCHIVE_MAX_RATIO:
+                                raise InvalidRequestError("技能压缩包包含异常压缩比文件")
+                        members.append((info, pure, kind))
+
+                    file_keys = {
+                        pure.as_posix().casefold()
+                        for _, pure, kind in members
+                        if kind == "file"
+                    }
+                    for _, pure, _ in members:
+                        parent_parts = pure.parts[:-1]
+                        for index in range(1, len(parent_parts) + 1):
+                            parent_key = PurePosixPath(*parent_parts[:index]).as_posix().casefold()
+                            if parent_key in file_keys:
+                                raise InvalidRequestError(
+                                    "技能压缩包中同一路径不能同时作为文件和目录"
+                                )
+
+                    skill_files = [
+                        pure
+                        for _, pure, kind in members
+                        if kind == "file" and pure.name.casefold() == "skill.md"
+                    ]
+                    if not skill_files:
+                        raise InvalidRequestError("技能压缩包中没有找到 SKILL.md")
+                    if len(skill_files) > SKILL_ARCHIVE_MAX_SKILLS:
+                        raise InvalidRequestError(
+                            f"单个压缩包最多包含 {SKILL_ARCHIVE_MAX_SKILLS} 个技能"
+                        )
+                    if any(
+                        part.startswith(".")
+                        for skill_file in skill_files
+                        for part in skill_file.parent.parts
+                    ):
+                        raise InvalidRequestError("SKILL.md 不能位于隐藏目录中")
+
+                    candidate_roots = sorted(
+                        {skill_file.parent for skill_file in skill_files},
+                        key=lambda path: (len(path.parts), path.as_posix().casefold()),
+                    )
+                    skill_roots: list[PurePosixPath] = []
+                    for candidate in candidate_roots:
+                        if any(
+                            candidate == parent
+                            or candidate.is_relative_to(parent)
+                            for parent in skill_roots
+                        ):
+                            continue
+                        skill_roots.append(candidate)
+
+                    archive_stem = _skill_package_name(Path(archive_name).stem)
+                    packages: list[tuple[str, PurePosixPath]] = []
+                    package_names: set[str] = set()
+                    for skill_root in skill_roots:
+                        package_name = _skill_package_name(
+                            archive_stem if str(skill_root) == "." else skill_root.name
+                        )
+                        key = package_name.casefold()
+                        if key in package_names:
+                            raise InvalidRequestError(
+                                f"压缩包内多个技能会安装到同名目录：{package_name}"
+                            )
+                        package_names.add(key)
+                        packages.append((package_name, skill_root))
+
+                    existing_names = {
+                        path.name.casefold(): path.name
+                        for path in destination_root.iterdir()
+                        if not path.name.startswith(".upload-")
+                    }
+                    for package_name, _ in packages:
+                        existing = existing_names.get(package_name.casefold())
+                        if existing is not None:
+                            raise ConflictError(f"用户自建技能已存在：user_create/{existing}")
+
+                    archive_root.mkdir(parents=True)
+                    for info, pure, kind in members:
+                        target = archive_root.joinpath(*pure.parts)
+                        if kind == "directory":
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        written = 0
+                        with archive.open(info, "r") as source, target.open("wb") as output:
+                            while chunk := source.read(1024 * 1024):
+                                written += len(chunk)
+                                if written > info.file_size:
+                                    raise InvalidRequestError("技能压缩包文件大小声明无效")
+                                output.write(chunk)
+                        if written != info.file_size:
+                            raise InvalidRequestError("技能压缩包文件内容不完整")
+
+                    canonical_skill_files: list[Path] = []
+                    for skill_file in skill_files:
+                        extracted = archive_root.joinpath(*skill_file.parts)
+                        canonical = extracted.with_name("SKILL.md")
+                        if extracted.name != "SKILL.md":
+                            temporary_manifest = extracted.with_name(
+                                f".skill-{uuid.uuid4().hex}.tmp"
+                            )
+                            os.replace(extracted, temporary_manifest)
+                            os.replace(temporary_manifest, canonical)
+                        canonical_skill_files.append(canonical)
+                    try:
+                        for skill_file in canonical_skill_files:
+                            parse_skill_descriptor(skill_file, scope="user", root=self.root)
+                    except Exception as exc:
+                        raise InvalidRequestError(f"技能文件校验失败：{exc}") from None
+
+                    packages_root.mkdir()
+                    for package_name, skill_root in packages:
+                        source = (
+                            archive_root
+                            if str(skill_root) == "."
+                            else archive_root.joinpath(*skill_root.parts)
+                        )
+                        shutil.copytree(source, packages_root / package_name)
+
+                for package_name, _ in packages:
+                    target = destination_root / package_name
+                    if target.exists():
+                        raise ConflictError(f"用户自建技能已存在：user_create/{package_name}")
+                    os.replace(packages_root / package_name, target)
+                    moved_targets.append(target)
+                try:
+                    descriptors = load_prompt_source_registry(self.root, name).select_skills()
+                except Exception as exc:
+                    raise InvalidRequestError(f"技能注册校验失败：{exc}") from None
+
+                descriptor_by_path = {descriptor.path.parent.resolve(): descriptor for descriptor in descriptors}
+                installed = []
+                for target in moved_targets:
+                    descriptor = descriptor_by_path.get(target.resolve())
+                    if descriptor is None:
+                        raise InvalidRequestError(f"技能未被注册器发现：{target.name}")
+                    installed.append(
+                        {
+                            "name": f"user_create/{target.name}",
+                            "title": descriptor.title,
+                            "path": target.relative_to(self.root).as_posix(),
+                        }
+                    )
+                return {
+                    "user": name,
+                    "category": "user_created",
+                    "installed": installed,
+                    "count": len(installed),
+                }
+            except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+                if isinstance(exc, WebServiceError):
+                    raise
+                raise InvalidRequestError(f"技能压缩包处理失败：{exc}") from None
+            finally:
+                if sys.exc_info()[0] is not None:
+                    for target in reversed(moved_targets):
+                        if target.exists():
+                            shutil.rmtree(target)
+                if staging_root.exists():
+                    shutil.rmtree(staging_root)
 
     def delete_skill(self, user: Any, category: Any, skill_name: Any) -> dict[str, Any]:
         name, normalized_category, logical_name, target = self._skill_directory(user, category, skill_name)
