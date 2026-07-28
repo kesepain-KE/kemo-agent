@@ -14,6 +14,7 @@ from provider.protocol.models import (
     KemoResponse,
     Measurement,
     MessageItem,
+    ModelCapabilities,
     ToolCallItem,
     Usage,
     text_from_content,
@@ -27,6 +28,7 @@ from run.agent_runner import (
     AgentTimeoutError,
 )
 from run.agents import AgentDisabledError, AgentManifestError, discover_agents
+from run.model_capabilities import clear_model_capability_cache
 
 
 SUMMARY = {
@@ -48,12 +50,36 @@ class MockProvider:
         texts: list[str] | None = None,
         delay: float = 0.0,
         order=None,
+        reasoning_supported: bool = True,
+        reasoning_efforts: list[str] | None = None,
     ) -> None:
         self.text = text if text is not None else json.dumps(SUMMARY)
         self.texts = list(texts or [])
         self.delay = delay
         self.order = order
+        self.reasoning_supported = reasoning_supported
+        self.reasoning_efforts = list(
+            reasoning_efforts
+            if reasoning_efforts is not None
+            else ["minimal", "low", "medium", "high", "max"]
+        )
         self.requests = []
+        self.capability_calls: list[str] = []
+
+    def capabilities(self, model: str, *, capabilities_url: str | None = None):
+        del capabilities_url
+        self.capability_calls.append(model)
+        return ModelCapabilities.model_validate(
+            {
+                "model": model,
+                "task": "llm",
+                "reasoning": {
+                    "supported": self.reasoning_supported,
+                    "efforts": self.reasoning_efforts if self.reasoning_supported else [],
+                    "summary": self.reasoning_supported,
+                },
+            }
+        )
 
     def create(self, request):
         response_text = (
@@ -107,6 +133,7 @@ class StubRunner:
 
 class SubAgentRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
+        clear_model_capability_cache()
         self.root = Path(__file__).resolve().parents[1]
         self.config = {
             "provider": {
@@ -221,6 +248,65 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.requests[0].model, "summary-model")
+
+    def test_runner_omits_reasoning_when_kemo_model_declares_it_unsupported(self) -> None:
+        provider = MockProvider(reasoning_supported=False)
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        request = provider.requests[0]
+        self.assertIsNone(request.reasoning)
+        self.assertNotIn("reasoning_effort", request.provider_options)
+
+    def test_runner_preserves_declared_max_and_falls_back_to_first_available_effort(self) -> None:
+        for efforts, expected in ((["low", "max"], "max"), (["low", "high"], "low")):
+            with self.subTest(efforts=efforts):
+                clear_model_capability_cache()
+                provider = MockProvider(reasoning_efforts=efforts)
+                config = {
+                    **self.config,
+                    "provider": {**self.config["provider"], "reasoning_effort": "max"},
+                }
+                runner = AgentRunner(
+                    self.root,
+                    "kesepain",
+                    config=config,
+                    provider_factory=lambda _: provider,
+                )
+                with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+                    runner.run(
+                        "context_manage",
+                        {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                    )
+                request = provider.requests[0]
+                self.assertEqual(request.reasoning.effort, expected)
+                self.assertEqual(request.provider_options["reasoning_effort"], expected)
+
+    def test_runner_keeps_chat_reasoning_chain_without_capability_lookup(self) -> None:
+        provider = MockProvider()
+        config = {
+            **self.config,
+            "provider": {
+                **self.config["provider"],
+                "type": "chat",
+                "reasoning_effort": "high",
+            },
+        }
+        runner = AgentRunner(
+            self.root,
+            "kesepain",
+            config=config,
+            provider_factory=lambda _: provider,
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            runner.run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        self.assertEqual(provider.capability_calls, [])
+        self.assertEqual(provider.requests[0].reasoning.effort, "high")
 
     def test_history_summary_repairs_non_json_output_once(self) -> None:
         repaired = {

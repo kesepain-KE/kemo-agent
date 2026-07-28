@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
-from provider.protocol.models import ModelCatalogResponse
+from provider.protocol.models import ModelCapabilities, ModelCatalogResponse
+from provider.schema import ProviderError
 from run.attachments import history_attachment_descriptors
 from run.cron_store import CronStore, normalize_task
 from run.history import (
@@ -34,6 +35,7 @@ from run.history_index import (
     queue_summary,
 )
 from run.prompt import PROMPT_SECTION_ORDER
+from run.model_capabilities import clear_model_capability_cache
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError, resolve_client_ip
@@ -164,7 +166,7 @@ class WebBackendTests(unittest.TestCase):
         )
         app = create_app(service=WebRunService(root))
 
-        with patch("web.service.KemoGatewayAdapter.models") as discover:
+        with patch("web.services.settings.KemoGatewayAdapter.models") as discover:
             blocked = self.request(app, "GET", "/api/users/alice/provider/models")
         self.assertEqual(blocked.status_code, 400)
         discover.assert_not_called()
@@ -199,7 +201,7 @@ class WebBackendTests(unittest.TestCase):
             }
         )
         with patch(
-            "web.service.KemoGatewayAdapter.models", return_value=catalog
+            "web.services.settings.KemoGatewayAdapter.models", return_value=catalog
         ) as discover:
             response = self.request(app, "GET", "/api/users/alice/provider/models")
 
@@ -209,6 +211,107 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["data"][0]["id"], "deepseek-deepseek-v4-flash")
         discover.assert_called_once_with(task="llm")
         self.assertEqual(config_path.read_bytes(), original)
+
+    def test_kemo_model_capabilities_use_catalog_url_and_keep_credentials_server_side(self) -> None:
+        clear_model_capability_cache()
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "kemo",
+                        "base_url": "https://capabilities-gateway.test",
+                        "model": "mapped-model",
+                        "api_key": "gateway-secret-never-expose",
+                        "reasoning_effort": "max",
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        service = WebRunService(root)
+        app = create_app(service=service)
+        catalog = ModelCatalogResponse.model_validate(
+            {
+                "count": 1,
+                "data": [
+                    {
+                        "id": "mapped-model",
+                        "provider_id": "test",
+                        "provider_model": "mapped-upstream",
+                        "task": "llm",
+                        "capabilities_available": True,
+                        "capabilities_url": "/model/models/mapped-model/capabilities",
+                    }
+                ],
+            }
+        )
+        capabilities = ModelCapabilities.model_validate(
+            {
+                "model": "mapped-model",
+                "task": "llm",
+                "reasoning": {
+                    "supported": True,
+                    "efforts": ["minimal", "low", "medium", "high", "max"],
+                    "summary": True,
+                },
+                "extensions": {
+                    "reasoning_effort_map": {"max": "high"},
+                    "reasoning_policy": {"mode": "mapped", "collapsed": True},
+                },
+            }
+        )
+        with (
+            patch(
+                "web.services.settings.KemoGatewayAdapter.models",
+                return_value=catalog,
+            ) as discover,
+            patch(
+                "web.services.settings.KemoGatewayAdapter.capabilities",
+                return_value=capabilities,
+            ) as read_capabilities,
+        ):
+            response = self.request(
+                app,
+                "GET",
+                "/api/users/alice/provider/model-capabilities?model=mapped-model&refresh=true",
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        payload = response.json()
+        self.assertEqual(
+            payload["capabilities"]["reasoning"]["efforts"],
+            ["minimal", "low", "medium", "high", "max"],
+        )
+        self.assertTrue(
+            payload["capabilities"]["extensions"]["reasoning_policy"]["collapsed"]
+        )
+        self.assertNotIn("gateway-secret-never-expose", response.text)
+        discover.assert_called_once_with(task="llm")
+        read_capabilities.assert_called_once_with(
+            "mapped-model",
+            capabilities_url="/model/models/mapped-model/capabilities",
+        )
+
+        for status in (401, 403, 404, 502):
+            with self.subTest(status=status):
+                clear_model_capability_cache()
+                with patch(
+                    "web.services.settings.KemoGatewayAdapter.capabilities",
+                    side_effect=ProviderError("failed", status_code=status),
+                ):
+                    failed = self.request(
+                        app,
+                        "GET",
+                        "/api/users/alice/provider/model-capabilities?model=mapped-model&refresh=true",
+                    )
+                self.assertEqual(failed.status_code, status)
 
     def test_file_space_lists_six_items_per_page_for_all_areas(self) -> None:
         _, root = self.make_root()

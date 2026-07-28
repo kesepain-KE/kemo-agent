@@ -519,6 +519,89 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertEqual(result["attempts"], 2)
         self.assertEqual(result["analysis"], "第二次识别成功")
 
+    def test_kemo_dedicated_analysis_resolves_gateway_asset_outside_current_run(self) -> None:
+        root, _ = self.make_root(vision="vision-model")
+        config_path = root / "users" / "alice" / "user_config.json"
+        config = json.loads(config_path.read_text("utf-8"))
+        config["provider"]["type"] = "kemo"
+        config["provider"]["base_url"] = "http://gateway.test"
+        config_path.write_text(json.dumps(config), "utf-8")
+        from plugins.multimodal import tool
+
+        descriptor = AssetDescriptor(
+            id="asset_gateway_image",
+            status="ready",
+            purpose="input",
+            filename="remote.png",
+            mime_type="image/png",
+            size=len(_PNG),
+            checksum_sha256="a" * 64,
+        )
+
+        class GatewayProvider:
+            def __init__(self) -> None:
+                self.request = None
+                self.get_calls = []
+                self.upload_calls = 0
+
+            def capabilities(self, model: str) -> ModelCapabilities:
+                return ModelCapabilities(
+                    model=model,
+                    input_modalities=["text", "image"],
+                    output_modalities=["text"],
+                    extensions={"operations": {"vision": {"supported": True}}},
+                )
+
+            def get_asset(self, asset_id: str) -> AssetDescriptor:
+                self.get_calls.append(asset_id)
+                return descriptor
+
+            def wait_asset_ready(self, asset, *, cancel_event=None):
+                return asset
+
+            def upload_asset(self, *args, **kwargs):
+                self.upload_calls += 1
+                raise AssertionError("已有网关 Asset 不应再次上传")
+
+            def create(self, request):
+                self.request = request
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[
+                        MessageItem(
+                            id="msg_remote_visual_result",
+                            role=MessageRole.ASSISTANT,
+                            phase=MessagePhase.FINAL_ANSWER,
+                            content=[TextContent(text="远程 Asset 已识别")],
+                        )
+                    ],
+                )
+
+        fake = GatewayProvider()
+        with patch.object(tool, "create_provider", return_value=fake):
+            result = tool.run(
+                "analyze_image",
+                [descriptor.id],
+                "描述远程图片",
+                context={
+                    "root": str(root),
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "remote-asset",
+                    "uploaded_files": [],
+                },
+            )
+
+        self.assertEqual(fake.get_calls, [descriptor.id])
+        self.assertEqual(fake.upload_calls, 0)
+        media = fake.request.input[0].content[1]
+        self.assertIsInstance(media, ImageContent)
+        self.assertEqual(media.asset_id, descriptor.id)
+        self.assertEqual(media.checksum_sha256, descriptor.checksum_sha256)
+        self.assertEqual(result["analysis"], "远程 Asset 已识别")
+
     def test_dedicated_analysis_does_not_retry_non_transient_error(self) -> None:
         root, descriptor = self.make_root(vision="vision-model")
         from plugins.multimodal import tool

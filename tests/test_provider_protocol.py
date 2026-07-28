@@ -23,6 +23,8 @@ from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus, S
 from provider.protocol.errors import CapabilityError, ProtocolValidationError, StreamProtocolError
 from provider.protocol.models import (
     AudioContent,
+    EmbeddingInput,
+    EmbeddingRequest,
     ImageContent,
     JsonContent,
     KemoRequest,
@@ -31,6 +33,8 @@ from provider.protocol.models import (
     MessageItem,
     ModelCapabilities,
     ReasoningItem,
+    RerankDocument,
+    RerankRequest,
     TextContent,
     ToolCallItem,
     ToolResultItem,
@@ -45,7 +49,7 @@ from provider.protocol.streaming import (
     parse_sse_events,
 )
 from provider.protocol.validation import validate_request
-from provider.schema import ChatRequest, ChatResponse, Usage as ChatUsage
+from provider.schema import ChatRequest, ChatResponse, ProviderError, Usage as ChatUsage
 from run.engine import handle_request, iter_request_events
 from run.history import commit_window, empty_window, find_window, load_window
 
@@ -290,6 +294,21 @@ class UnifiedProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolValidationError):
             parse_request(invalid)
 
+    def test_gateway_nullable_created_at_and_extensible_incomplete_details_parse(self) -> None:
+        request = make_request(stream=False)
+        payload = make_response(request).model_dump(mode="json")
+        payload["output"][0]["created_at"] = None
+        payload["status"] = "incomplete"
+        payload["incomplete_details"] = {
+            "reason": "provider_timeout",
+            "retry_after_ms": 1200,
+            "provider_code": "UPSTREAM_BUSY",
+        }
+        parsed = parse_response(payload)
+        self.assertIsNone(parsed.output[0].created_at)
+        self.assertEqual(parsed.incomplete_details["retry_after_ms"], 1200)
+        self.assertEqual(parsed.incomplete_details["provider_code"], "UPSTREAM_BUSY")
+
     def test_ids_tool_linkage_and_asset_path_are_strict(self) -> None:
         with self.assertRaises(ValidationError):
             ImageContent(asset_id="C:\\secret\\image.png")
@@ -461,6 +480,28 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual([item.id for item in reasoning], ["rs_valid"])
         self.assertEqual(reasoning[0].summary, "valid summary")
 
+    def test_chat_bridge_preserves_kemo_max_and_can_omit_reasoning_entirely(self) -> None:
+        enabled = chat_request_to_kemo(
+            ChatRequest(
+                model="test",
+                messages=[{"role": "user", "content": "hello"}],
+                extra={"reasoning_effort": "max"},
+            )
+        )
+        self.assertEqual(enabled.reasoning.effort, "max")
+        self.assertEqual(enabled.provider_options["reasoning_effort"], "max")
+
+        disabled = chat_request_to_kemo(
+            ChatRequest(
+                model="test",
+                messages=[{"role": "user", "content": "hello"}],
+                extra={"reasoning_effort": "max", "reasoning_enabled": False},
+            )
+        )
+        self.assertIsNone(disabled.reasoning)
+        self.assertNotIn("reasoning_effort", disabled.provider_options)
+        self.assertNotIn("reasoning_enabled", disabled.provider_options)
+
     def test_chat_bridge_reassigns_duplicate_provider_item_and_call_ids(self) -> None:
         def assistant(content: str, reasoning: str) -> dict[str, object]:
             return {
@@ -579,12 +620,61 @@ class UnifiedProtocolTests(unittest.TestCase):
             json.dumps(
                 {
                     "model": request.model,
+                    "task": "llm",
                     "input_modalities": ["text", "image"],
                     "output_modalities": ["text"],
+                    "streaming": True,
+                    "reasoning": {"supported": False},
+                    "tools": {
+                        "function_calling": True,
+                        "parallel_calls": False,
+                        "multimodal_results": False,
+                    },
+                    "structured_output": False,
+                    "embedding": None,
+                    "rerank": None,
+                    "metadata": {"source": "provider_package"},
+                    "extensions": {
+                        "operations": {"vision": {"supported": True}}
+                    },
                 }
             ).encode("utf-8")
         )
-        self.assertEqual(adapter.capabilities(request.model).input_modalities, ["text", "image"])
+        capabilities = adapter.capabilities(request.model)
+        self.assertEqual(capabilities.task, "llm")
+        self.assertEqual(capabilities.input_modalities, ["text", "image"])
+        self.assertTrue(capabilities.extensions["operations"]["vision"]["supported"])
+
+        capability_requests = []
+        adapter._open = lambda capability_request: (
+            capability_requests.append(capability_request)
+            or FakeHTTPResponse(
+                json.dumps(
+                    {
+                        "model": request.model,
+                        "task": "llm",
+                        "reasoning": {
+                            "supported": True,
+                            "efforts": ["minimal", "low", "medium", "high", "max"],
+                        },
+                    }
+                ).encode("utf-8")
+            )
+        )
+        declared = adapter.capabilities(
+            request.model,
+            capabilities_url=f"/model/models/{request.model}/capabilities",
+        )
+        self.assertEqual(declared.reasoning.efforts[-1], "max")
+        self.assertEqual(
+            capability_requests[0].full_url,
+            f"https://gateway.test/model/models/{request.model}/capabilities",
+        )
+        with self.assertRaises(ProviderError):
+            adapter.capabilities(
+                request.model,
+                capabilities_url="https://attacker.test/model/capabilities",
+            )
 
         seen_models = []
         adapter._open = lambda model_request: (
@@ -691,6 +781,80 @@ class UnifiedProtocolTests(unittest.TestCase):
                 expected_sha256=checksum,
             )
             self.assertEqual(destination.read_bytes(), payload)
+
+    def test_gateway_retrieval_endpoints_round_trip_native_protocol(self) -> None:
+        adapter = KemoGatewayAdapter(
+            {"base_url": "https://gateway.test/v1", "api_key": "secret", "model": "m"}
+        )
+        embedding_request = EmbeddingRequest(
+            request_id="req_embed_1",
+            model="acme-embed-v1",
+            input_type="document",
+            inputs=[EmbeddingInput(id="doc_1", text="hello")],
+            dimensions=3,
+            normalize=True,
+        )
+        rerank_request = RerankRequest(
+            request_id="req_rerank_1",
+            model="acme-rerank-v1",
+            query="hello",
+            documents=[
+                RerankDocument(id="doc_1", text="hello world"),
+                RerankDocument(id="doc_2", text="unrelated"),
+            ],
+            top_n=1,
+            return_documents=True,
+        )
+        seen = []
+
+        def open_request(http_request):
+            seen.append(http_request)
+            if http_request.full_url.endswith("/embeddings"):
+                payload = {
+                    "protocol_version": "1.0",
+                    "object": "kemo.embedding_list",
+                    "request_id": "req_embed_1",
+                    "model": "acme-embed-v1",
+                    "vector_space_id": "space-v1",
+                    "dimensions": 3,
+                    "data": [{"id": "doc_1", "index": 0, "vector": [0.1, 0.2, 0.3]}],
+                }
+            else:
+                payload = {
+                    "protocol_version": "1.0",
+                    "object": "kemo.rerank",
+                    "request_id": "req_rerank_1",
+                    "model": "acme-rerank-v1",
+                    "results": [
+                        {
+                            "rank": 1,
+                            "document_id": "doc_1",
+                            "index": 0,
+                            "relevance_score": 0.99,
+                            "document": {"id": "doc_1", "text": "hello world"},
+                        }
+                    ],
+                }
+            return FakeHTTPResponse(json.dumps(payload).encode("utf-8"))
+
+        adapter._open = open_request
+        embedding = adapter.embeddings(embedding_request)
+        rerank = adapter.rerank(rerank_request)
+
+        self.assertEqual(embedding.vector_space_id, "space-v1")
+        self.assertEqual(embedding.data[0].vector, [0.1, 0.2, 0.3])
+        self.assertEqual(rerank.results[0].document_id, "doc_1")
+        self.assertEqual(
+            [request.full_url for request in seen],
+            [
+                "https://gateway.test/v1/model/embeddings",
+                "https://gateway.test/v1/model/rerank",
+            ],
+        )
+        self.assertEqual(seen[0].get_header("Idempotency-key"), "req_embed_1")
+        self.assertEqual(seen[1].get_header("X-kemo-protocol-version"), "1.0")
+        self.assertEqual(json.loads(seen[0].data)["input_type"], "document")
+        self.assertEqual(json.loads(seen[1].data)["top_n"], 1)
 
     def test_run_native_protocol_history_items_and_rejects_chat_only_provider(self) -> None:
         _, root = self.make_root(stream=False)
