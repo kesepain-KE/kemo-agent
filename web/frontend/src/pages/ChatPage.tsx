@@ -1797,7 +1797,7 @@ export function ChatPage() {
           scrollContainerRef={scrollRef}
           hasEarlierMessages={Boolean(historyQuery.hasNextPage)}
           loadingEarlierMessages={historyQuery.isFetchingNextPage}
-          onLoadEarlierMessages={() => { void loadEarlierHistory() }}
+          onLoadEarlierMessages={loadEarlierHistory}
           onNavigate={jumpToUserMessage}
         />
       </div>

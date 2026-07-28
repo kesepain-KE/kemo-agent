@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -21,7 +20,7 @@ interface UserMessageNavigatorProps {
   scrollContainerRef: RefObject<HTMLElement | null>
   hasEarlierMessages?: boolean
   loadingEarlierMessages?: boolean
-  onLoadEarlierMessages?: () => void
+  onLoadEarlierMessages?: () => void | Promise<void>
   onNavigate: (id: string) => void
 }
 
@@ -31,7 +30,7 @@ type WheelCardStyle = CSSProperties & {
   '--wheel-scale': number
 }
 
-const MAX_WHEEL_ITEMS = 20
+const MAX_WHEEL_ITEMS = 10
 const CLOSE_DELAY_MS = 180
 const WHEEL_THROTTLE_MS = 75
 
@@ -57,8 +56,16 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum)
 }
 
-function wheelPosition(index: number, count: number) {
-  const angle = count === 1 ? 180 : 90 + (index / Math.max(1, count - 1)) * 180
+function wheelAngle(index: number, count: number, activeIndex: number) {
+  if (count <= 1 || index === activeIndex) return 180
+  if (index < activeIndex) {
+    return 90 + (index / Math.max(1, activeIndex)) * 90
+  }
+  return 180 + ((index - activeIndex) / Math.max(1, count - activeIndex - 1)) * 90
+}
+
+function wheelPosition(index: number, count: number, activeIndex: number) {
+  const angle = wheelAngle(index, count, activeIndex)
   const radians = (angle * Math.PI) / 180
   return {
     angle,
@@ -68,10 +75,10 @@ function wheelPosition(index: number, count: number) {
 }
 
 function wheelCardStyle(index: number, count: number, activeIndex: number): WheelCardStyle {
-  const position = wheelPosition(index, count)
+  const position = wheelPosition(index, count, activeIndex)
   const distance = Math.abs(activeIndex - index)
   return {
-    '--wheel-x': `${index === activeIndex ? 70 : position.x + 7}%`,
+    '--wheel-x': `${position.x + 7}%`,
     '--wheel-y': `${position.y}%`,
     '--wheel-scale': index === activeIndex ? 1 : Math.max(.78, .94 - distance * .025),
     opacity: index === activeIndex ? 1 : Math.max(.2, .72 - distance * .07),
@@ -88,23 +95,33 @@ export function UserMessageNavigator({
   onNavigate,
 }: UserMessageNavigatorProps) {
   const markerIds = markers.map((marker) => marker.id).join('\u0001')
-  const visibleMarkers = useMemo(() => markers.slice(-MAX_WHEEL_ITEMS), [markerIds])
   const [viewportActiveId, setViewportActiveId] = useState(markers.at(-1)?.id ?? '')
   const [previewId, setPreviewId] = useState('')
   const [open, setOpen] = useState(false)
+  const [requestingEarlier, setRequestingEarlier] = useState(false)
   const navigatorRef = useRef<HTMLElement | null>(null)
   const frameRef = useRef<number | null>(null)
   const closeTimerRef = useRef<number | null>(null)
   const lastWheelTimeRef = useRef(0)
+  const loadAnchorIdRef = useRef('')
   const markersRef = useRef(markers)
   markersRef.current = markers
 
-  const activeId = visibleMarkers.some((marker) => marker.id === previewId)
+  const activeId = markers.some((marker) => marker.id === previewId)
     ? previewId
-    : visibleMarkers.some((marker) => marker.id === viewportActiveId)
+    : markers.some((marker) => marker.id === viewportActiveId)
       ? viewportActiveId
-      : visibleMarkers.at(-1)?.id ?? ''
+      : markers.at(-1)?.id ?? ''
+  const activeMarkerIndex = Math.max(0, markers.findIndex((marker) => marker.id === activeId))
+  const maxWindowStart = Math.max(0, markers.length - MAX_WHEEL_ITEMS)
+  const windowStart = clamp(
+    activeMarkerIndex - Math.floor(MAX_WHEEL_ITEMS / 2),
+    0,
+    maxWindowStart,
+  )
+  const visibleMarkers = markers.slice(windowStart, windowStart + MAX_WHEEL_ITEMS)
   const activeIndex = Math.max(0, visibleMarkers.findIndex((marker) => marker.id === activeId))
+  const isLoadingEarlier = loadingEarlierMessages || requestingEarlier
 
   const clearCloseTimer = useCallback(() => {
     if (closeTimerRef.current === null) return
@@ -133,9 +150,34 @@ export function UserMessageNavigator({
     setOpen(true)
   }, [clearCloseTimer, visibleMarkers])
 
+  const requestEarlierMessages = useCallback(async () => {
+    if (!hasEarlierMessages || !onLoadEarlierMessages || loadingEarlierMessages || requestingEarlier) return
+    loadAnchorIdRef.current = markersRef.current[0]?.id ?? ''
+    clearCloseTimer()
+    setOpen(true)
+    setRequestingEarlier(true)
+    try {
+      await onLoadEarlierMessages()
+    } catch {
+      loadAnchorIdRef.current = ''
+    } finally {
+      setRequestingEarlier(false)
+    }
+  }, [clearCloseTimer, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, requestingEarlier])
+
   const movePreview = useCallback((direction: -1 | 1) => {
-    previewAt(activeIndex + direction)
-  }, [activeIndex, previewAt])
+    const currentMarkers = markersRef.current
+    const currentIndex = currentMarkers.findIndex((marker) => marker.id === activeId)
+    if (direction < 0 && currentIndex <= 0 && hasEarlierMessages) {
+      void requestEarlierMessages()
+      return
+    }
+    const marker = currentMarkers[clamp(currentIndex + direction, 0, Math.max(0, currentMarkers.length - 1))]
+    if (!marker) return
+    clearCloseTimer()
+    setPreviewId(marker.id)
+    setOpen(true)
+  }, [activeId, clearCloseTimer, hasEarlierMessages, requestEarlierMessages])
 
   const activate = useCallback((marker: UserMessageMarker) => {
     setViewportActiveId(marker.id)
@@ -216,11 +258,31 @@ export function UserMessageNavigator({
   }, [markerIds, scrollContainerRef])
 
   useEffect(() => {
-    if (!markers.some((marker) => marker.id === viewportActiveId)) {
-      setViewportActiveId(markers.at(-1)?.id ?? '')
+    const currentMarkers = markersRef.current
+    if (!currentMarkers.some((marker) => marker.id === viewportActiveId)) {
+      setViewportActiveId(currentMarkers.at(-1)?.id ?? '')
     }
-    if (!visibleMarkers.some((marker) => marker.id === previewId)) setPreviewId('')
-  }, [markerIds, previewId, viewportActiveId, visibleMarkers])
+    if (!currentMarkers.some((marker) => marker.id === previewId)) setPreviewId('')
+  }, [markerIds, previewId, viewportActiveId])
+
+  useEffect(() => {
+    const anchorId = loadAnchorIdRef.current
+    if (!anchorId) return
+    const currentMarkers = markersRef.current
+    const anchorIndex = currentMarkers.findIndex((marker) => marker.id === anchorId)
+    if (anchorIndex > 0) {
+      const marker = currentMarkers[anchorIndex - 1]
+      loadAnchorIdRef.current = ''
+      setPreviewId(marker.id)
+      setOpen(true)
+      return
+    }
+    if (anchorIndex < 0 && !isLoadingEarlier) {
+      loadAnchorIdRef.current = ''
+      return
+    }
+    if (!isLoadingEarlier && !hasEarlierMessages) loadAnchorIdRef.current = ''
+  }, [hasEarlierMessages, isLoadingEarlier, markerIds])
 
   useEffect(() => () => clearCloseTimer(), [clearCloseTimer])
 
@@ -242,7 +304,7 @@ export function UserMessageNavigator({
             {visibleMarkers.map((marker, index) => {
               const preview = compactUserMessagePreview(marker.content)
               const active = index === activeIndex
-              const angle = wheelPosition(index, visibleMarkers.length).angle
+              const angle = wheelPosition(index, visibleMarkers.length, activeIndex).angle
               return (
                 <button
                   key={marker.id}
@@ -271,20 +333,20 @@ export function UserMessageNavigator({
         ) : null}
       </div>
 
-      <div className="user-message-rail" aria-label="最近 20 条用户消息刻度">
+      <div className="user-message-rail" aria-label="当前 10 条用户消息刻度">
         {hasEarlierMessages && onLoadEarlierMessages ? (
           <button
             className="user-message-navigator-more"
             type="button"
-            disabled={loadingEarlierMessages}
-            onClick={onLoadEarlierMessages}
-            aria-label={loadingEarlierMessages ? '正在加载更早消息' : '加载更早消息'}
-            title={loadingEarlierMessages ? '正在加载更早消息…' : '还有更早消息，点击加载'}
+            disabled={isLoadingEarlier}
+            onClick={() => { void requestEarlierMessages() }}
+            aria-label={isLoadingEarlier ? '正在加载更早消息' : '加载更早消息'}
+            title={isLoadingEarlier ? '正在加载更早消息…' : '还有更早消息，点击加载'}
           >
             <ChevronUp size={12} />
           </button>
         ) : null}
-        <div className="user-message-marker-layer" role="listbox" aria-label="已加载的用户消息，可通过滚轮切换">
+        <div className="user-message-marker-layer" role="listbox" aria-label="当前窗口的用户消息，可通过滚轮切换">
           {visibleMarkers.map((marker, index) => {
             const preview = compactUserMessagePreview(marker.content)
             const active = index === activeIndex
