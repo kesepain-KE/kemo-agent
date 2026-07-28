@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.6.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.7.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,7 +204,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`0.6.0`
+当前版本：`0.7.0`
 
 核心系统已经形成完整闭环。从对话、记忆、子代理协作，到任务计划、定时调度、感知与拓展，再到网页端、命令行和消息平台的多入口交互——这些部分已经连接在一起，可以在日常使用中实际运转。
 
@@ -218,9 +218,12 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - 一次性和周期性定时任务，在约定时间自动醒来完成；
 - 子代理协作：整理记忆、规划步骤、生成摘要、定时调度各有专人；
 - 多个内置工具与技能，可按需扩展；
+- 用户技能支持从 Web 上传 ZIP，递归发现 `SKILL.md` 并以事务方式安全安装；
 - 网页端、命令行、消息平台多入口，同一身份同一记忆；
 - 多用户独立工作空间，彼此隔离，各自配置；
-- 上传文件空间与智能体生成内容分开管理；
+- 上传文件空间与智能体生成内容分开管理，并支持受限的图片、音频和视频预览；
+- 记忆工具支持一次跨四个生命周期层级检索，知识库与长对话导航更适合持续使用；
+- Web 后端按路由、领域服务和公共契约分层，保留原有兼容入口；
 - 运行状态与日常维护入口，后台任务自动运转。
 
 仍在持续打磨的方向：
