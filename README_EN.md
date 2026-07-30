@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.8.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -82,7 +82,7 @@ The kemo-agent web interface is organized around real workflows rather than a si
 
 From one place, you can:
 
-- hold streaming conversations and add guidance while a run is in progress;
+- hold streaming conversations and add text, image, audio, video, or file guidance while a run is in progress;
 - search, switch, save, and manage conversation history;
 - inspect and edit memories to maintain long-term cognition;
 - manage personal, shared, and global knowledge;
@@ -204,13 +204,13 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `0.8.1`
+Current version: `0.9.0`
 
 The core system now forms a complete working loop. Conversations, memory, subagent collaboration, task planning, scheduling, perception, extensions, the web interface, the CLI, and messaging-platform access are connected and can be used in everyday operation.
 
 Available today:
 
-- a complete web conversation interface with streaming interaction and mid-run guidance;
+- a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
 - the Tidal Engram memory system, where memories naturally consolidate, gain weight, advance through tiers, or fade over time;
 - independently maintained temporary important memory, keeping recent concerns from sinking too deeply;
 - personal, shared, and global knowledge layers grounded in real source material;

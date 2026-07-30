@@ -27,6 +27,8 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 对话运行时 | `run/conversation_runtime.py` | 主循环编排：prompt → provider → 工具循环 → 终态提交 |
 | Provider 事件 | `run/provider_events.py` | Provider 协议响应、流事件、媒体产物到统一 RunEvent 的转换 |
 | 请求输入 | `run/request_input.py` | 请求字段、Content Block 与上传资产说明的验证和规范化 |
+| 运行中引导邮箱 | `run/guidance.py` | 接收文本或附件引导，并在当前 Run 与下一轮之间原子交接 |
+| 引导媒体准备 | `run/guidance_runtime.py` | 二次验证运行中附件，按模型能力路由图片、音频、视频和普通文件 |
 | Run 状态 | `run/run_state.py` | 显式承载单次运行的身份、依赖与可变轮次状态 |
 | 轮次终态 | `run/round_finalizer.py` | 取消、工具上限和上下文上限等受控停止轮次的持久化 |
 | 会话运行态 | `run/session_runtime.py` | 会话级锁与完整归档提交辅助 |
@@ -181,6 +183,13 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - `message.md` 是可恢复的文件队列。群聊中同一外部会话的累积消息合并为一次 Run；私聊逐条处理。
 - 附件必须使用非空的插件目录相对路径并位于该插件的 `files_dir` 内。文本文件正文直接并入请求；其他文件统一登记为带 `asset_id`、校验和、来源和媒体类型的当前 Run 资产，再由主模型能力路由或 `multimodal` 工具处理。平台模块不得自行决定是否把图片 Base64 直传主模型。
 - 每条终态结果写入 `log/YYYY-MM-DD.md`，随后删除本批次已处理附件；健康检测结果与收发计数写入 `state.json`。
+
+### 运行中多模态引导
+
+- Web 对话正在执行时，用户可以追加文本、图片、音频、视频、普通文件，或只发送附件；引导会在下一个 Provider/工具安全边界进入当前 Run。
+- 每个附件必须先登记为当前用户的上传资产，并在 API 边界与运行时分别校验归属、内容、类型、大小和校验和。不得把前端传入的路径、URL 或 Base64 直接交给 Provider。
+- Kemo 主模型声明对应输入模态时，通过 Asset API 直传；Chat 模式只按既有视觉能力直传图片。未被主模型直接接收的媒体仍保留在本轮资产白名单中，由 `multimodal` 或 `file` 工具按需处理，不能因不是图片而丢弃。
+- 当前 Run 已关闭引导入口时，文本和全部附件一起转入下一轮；提交失败时保留草稿与附件。历史指标用 `guidance_details` 保存结构化引导摘要，旧 `guidance: string[]` 继续兼容。
 
 ### 插件发现规则
 

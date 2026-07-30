@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.8.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -82,7 +82,7 @@ kemo-agent 的网页端围绕真实使用过程组织，而不是只提供一个
 
 你可以在其中：
 
-- 与智能体进行流式对话，并在运行过程中追加引导；
+- 与智能体进行流式对话，并在运行过程中追加文本、图片、音频、视频或文件引导；
 - 搜索、切换、保存和管理历史对话；
 - 查看与编辑记忆，维护长期认知；
 - 管理个人、共享与全局知识；
@@ -204,13 +204,13 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`0.8.1`
+当前版本：`0.9.0`
 
 核心系统已经形成完整闭环。从对话、记忆、子代理协作，到任务计划、定时调度、感知与拓展，再到网页端、命令行和消息平台的多入口交互——这些部分已经连接在一起，可以在日常使用中实际运转。
 
 目前可以体验的内容包括：
 
-- 完整的网页对话界面，支持流式交互与运行中追加引导；
+- 完整的网页对话界面，支持流式交互与运行中追加多模态引导；
 - 潮汐记忆系统，记忆随使用时间自然沉淀、加权、晋级或淡出；
 - 临时重要记忆独立维护，让近期关切不沉入深层；
 - 个人、共享与全局三层知识库，让回答贴近真实资料；
