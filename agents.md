@@ -61,6 +61,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | Web 领域服务 | `web/services/` | 文件、知识、技能、感知、拓展、消息、任务、记忆、设置和运行概览等高内聚实现 |
 | Web API 合同 | `web/schemas.py`、`web/errors.py`、`web/constants.py` | 请求模型、稳定业务异常和跨层常量的单一来源 |
 | Provider | `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
+| Provider 传输可靠性 | `provider/adapters/reliability.py` | Kemo 有界网络重试、Retry-After、取消观察与读取错误归一化 |
 | 事件系统 | `events.py` | 统一事件类型定义（`text_delta`、`reasoning_delta`、`tool_call_start`、`tool_call_result`、`usage`、`error`、`done`），供所有入口复用 |
 
 ---
@@ -636,8 +637,9 @@ system prompt 按以下固定顺序拼接：
 ### Provider 类型
 
 - `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。
-- `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。
+- `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。LLM、Embedding 和 Rerank 的瞬时建连/读取错误，以及统一终态前断流，最多进行 3 次网络尝试并始终复用同一正文与 `request_id`；SSE 在线路上只通过最后完整事件的 `Last-Event-ID` 续传，本地延续 `sequence` 校验并拒绝拼接不同 `response_id`。
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
+- Kemo 传输重试只处理网络层和可重试 HTTP 状态；网关显式返回的 `retryable=true/false` 优先于状态码默认值。它不重新执行鉴权/校验/幂等冲突、完整协议损坏或模型统一终态业务失败；同一 ID 的已持久化失败终态只会重放，重新执行必须由上层建立新的逻辑请求。上下文超限继续走独立压缩链路。退避等待与流式/非流式阻塞读取均可被 Run 取消，已知远端 `response_id` 时取消会尽力传给网关。
 - Web 保存 Provider 配置后，只有重新读取到已落盘的 `provider.type=kemo` 才允许通过
   `GET /model/models?task=llm` 拉取当前密钥可用模型；`chat`、未保存配置、缺少凭据、鉴权失败或
   非法目录响应均不得产生可用模型列表。
@@ -695,6 +697,7 @@ system prompt 按以下固定顺序拼接：
 
 - Provider 和基于标准库的 HTTP 请求自动遵循 `HTTP_PROXY` / `HTTPS_PROXY`；留空时直连。
 - TLS 证书校验始终使用系统默认安全策略，不再支持 `HTTP_VERIFY_SSL` 绕过。
+- Kemo 的 HTTP 模式只适用于同机或可信内网；跨主机、非可信局域网或公网必须使用 HTTPS 反向代理。完整的幂等、续传、取消和故障边界见 `global_knowledge/kemo-transport-reliability.md`。
 - `web_search` 始终参与正常的插件发现与白名单过滤；`TAVILY_API_KEY` 为空时，调用会返回配置引导且不会发起网络请求。配置密钥后需重启智能体使环境变量生效。
 
 ---
