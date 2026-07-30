@@ -28,8 +28,22 @@ describe('parseSseFrames', () => {
   })
 
   it('提交运行中引导到指定 run_id', async () => {
-    const result = await submitGuidance('kesepain', 'run_test_123', 'adjust')
+    let body: Record<string, unknown> = {}
+    server.use(http.post('/api/runs/:runId/guidance', async ({ params, request }) => {
+      body = await request.json() as Record<string, unknown>
+      return HttpResponse.json({ run_id: params.runId, status: 'accepted_current_run', queued: 1 })
+    }))
+    const result = await submitGuidance('kesepain', 'run_test_123', 'adjust', {
+      guidanceId: 'guidance_123',
+      uploadedFiles: ['clip.mp4', 'voice.mp3'],
+    })
     expect(result).toMatchObject({ run_id: 'run_test_123', status: 'accepted_current_run', queued: 1 })
+    expect(body).toEqual({
+      user: 'kesepain',
+      guidance: 'adjust',
+      guidance_id: 'guidance_123',
+      uploaded_files: ['clip.mp4', 'voice.mp3'],
+    })
   })
 
   it('计划执行请求携带 plan_id 且不需要伪造用户 prompt', async () => {

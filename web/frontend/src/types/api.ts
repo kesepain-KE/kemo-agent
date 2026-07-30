@@ -234,6 +234,12 @@ export interface HistoryResponse {
     elapsed_ms: number
     tool_calls: number
     guidance: string[]
+    guidance_details?: Array<{
+      id?: string
+      text?: string
+      display_text?: string
+      uploaded_files?: InputAttachment[]
+    }>
     status?: 'completed' | 'cancelled' | string
     cancelled?: boolean
     cancel_reason?: string
@@ -1362,5 +1368,5 @@ export type ChatItem =
     }
   | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary; presentation?: 'record' | 'reference' }
-  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; finalized?: boolean }
+  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; guidanceId?: string; attachments?: InputAttachment[]; finalized?: boolean }
   | { id: string; kind: 'error'; content: string }

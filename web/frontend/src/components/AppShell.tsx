@@ -58,6 +58,7 @@ import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
+import type { PendingUploadedFile } from '../store/chatDrafts'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
 import {
   normalizeKemoReasoningEffort,
@@ -103,6 +104,7 @@ export type ChatItemsUpdater = ChatItem[] | ((items: ChatItem[]) => ChatItem[])
 export interface PendingNextTurnMessage {
   id: string
   content: string
+  uploadedFiles?: PendingUploadedFile[]
   historyUserMessages: number
   status: 'queued' | 'sending' | 'error'
   error?: string

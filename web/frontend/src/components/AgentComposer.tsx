@@ -58,7 +58,7 @@ export function AgentComposer({
   const canSubmit = !disabled
     && !uploading
     && (!stopping || running)
-    && (value.trim().length > 0 || (!running && pendingFileCount > 0))
+    && (value.trim().length > 0 || pendingFileCount > 0)
   const speech = useSpeechRecognition((text) => {
     const separator = value && !/\s$/.test(value) ? ' ' : ''
     onChange(`${value}${separator}${text}`)

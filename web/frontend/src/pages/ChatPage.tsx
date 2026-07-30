@@ -334,8 +334,25 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     const pending = Array.isArray(event.metadata?.guidance)
       ? event.metadata.guidance.map((value) => String(value))
       : []
+    const details = Array.isArray(event.metadata?.guidance_details)
+      ? event.metadata.guidance_details
+        .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object')
+      : []
     return items.map((item) => {
       if (item.kind !== 'guidance' || item.status !== 'queued') return item
+      const detail = item.guidanceId
+        ? details.find((value) => String(value.id || '') === item.guidanceId)
+        : undefined
+      if (detail) {
+        return {
+          ...item,
+          status: 'accepted' as const,
+          attachments: Array.isArray(detail.uploaded_files)
+            ? detail.uploaded_files as InputAttachment[]
+            : item.attachments,
+        }
+      }
+      if (item.guidanceId && details.length) return item
       const matched = pending.indexOf(item.content)
       if (matched < 0) return item
       pending.splice(matched, 1)
@@ -485,7 +502,20 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
     const selected = metrics.get(round)
     if (selected) {
       appendArtifacts(selected.artifacts, `history_media_${round}`)
-      selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'completed', finalized: true }))
+      const guidanceDetails = selected.guidance_details ?? []
+      if (guidanceDetails.length) {
+        guidanceDetails.forEach((detail, guidanceIndex) => result.push({
+          id: `history_guidance_${round}_${guidanceIndex}`,
+          kind: 'guidance',
+          guidanceId: detail.id,
+          content: detail.display_text || detail.text || '附件引导',
+          attachments: detail.uploaded_files,
+          status: 'completed',
+          finalized: true,
+        }))
+      } else {
+        selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'completed', finalized: true }))
+      }
       result.push({
         id: `history_usage_${round}`, kind: 'usage', usage: selected.usage,
         elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
@@ -719,10 +749,12 @@ type GuidanceDisplayItem = GuidanceItem | {
   id: string
   kind: 'guidance'
   content: string
+  guidanceId?: string
+  attachments?: InputAttachment[]
   status: 'next_turn' | 'next_turn_error'
 }
 
-function GuidanceMessage({ item, placement, onRetry, onCancel }: { item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
+function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
   const title = item.status === 'queued'
     ? '正在引导'
     : item.status === 'next_turn'
@@ -749,7 +781,12 @@ function GuidanceMessage({ item, placement, onRetry, onCancel }: { item: Guidanc
           : '引导未能提交到当前运行'
   return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
     <span className="guidance-title"><i aria-hidden="true" />{title}</span>
-    <strong>{item.content}</strong>
+    {item.content ? <strong>{item.content}</strong> : null}
+    {item.attachments?.length ? <div className="user-attachment-list guidance-attachment-list">
+      {item.attachments.map((attachment, index) => (
+        <UserAttachmentCard key={attachment.asset_id || `${attachment.name}_${index}`} user={user} attachment={attachment} />
+      ))}
+    </div> : null}
     <small>{detail}</small>
     {onRetry || onCancel ? <div className="guidance-actions">
       {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>取消</button> : null}
@@ -1079,6 +1116,7 @@ export function ChatPage() {
     void send(pending.content, {
       sessionId: liveSessionId,
       historyUserMessages: pending.historyUserMessages,
+      uploadedFiles: pending.uploadedFiles,
       internalNextTurn: true,
       userMessageId: `next_turn_${pending.id}`,
     }).then((committed) => {
@@ -1319,14 +1357,24 @@ export function ChatPage() {
 
   const sendGuidance = async () => {
     const guidance = draft.trim()
-    if (!guidance || !user || !running || !effectiveRunId) return
+    const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
+    if ((!guidance && !uploadedFiles.length) || !user || !running || !effectiveRunId || uploading) return
     const id = eventId('guidance')
+    const attachments = uploadedFiles.map(pendingInputAttachment)
+    const displayText = guidance || `附件引导：${uploadedFiles.map((file) => file.name).join('、')}`
+    const clearSubmittedInput = () => {
+      setDraft('')
+      if (uploadedFiles.length) {
+        setDraftUploads(draftKey, (current) => removeSubmittedUploads(current, uploadedFiles))
+      }
+    }
     const queueForNextTurn = () => {
       if (!liveSessionId) return false
       setLiveItems((current) => current.filter((item) => item.id !== id))
       const message: PendingNextTurnMessage = {
         id,
         content: guidance,
+        uploadedFiles,
         historyUserMessages: Math.max(
           persistedUserMessages,
           (liveRun?.historyUserMessages ?? persistedUserMessages) + 1,
@@ -1334,17 +1382,31 @@ export function ChatPage() {
         status: 'queued',
       }
       queueNextTurnMessage(user, liveSessionId, message)
+      clearSubmittedInput()
       return true
     }
     if (stopping) {
-      if (queueForNextTurn()) setDraft('')
+      queueForNextTurn()
       return
     }
-    setDraft('')
-    setLiveItems((current) => [...current, { id, kind: 'guidance', content: guidance, status: 'queued' }])
+    setLiveItems((current) => [...current, {
+      id,
+      kind: 'guidance',
+      guidanceId: id,
+      content: displayText,
+      attachments,
+      status: 'queued',
+    }])
     try {
-      const result = await submitGuidance(user, effectiveRunId, guidance)
-      if (result.status === 'queued_next_turn') queueForNextTurn()
+      const result = await submitGuidance(user, effectiveRunId, guidance, {
+        guidanceId: id,
+        uploadedFiles: uploadedFiles.map((file) => file.path),
+      })
+      if (result.status === 'queued_next_turn') {
+        queueForNextTurn()
+      } else {
+        clearSubmittedInput()
+      }
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         if (queueForNextTurn()) return
@@ -1367,6 +1429,8 @@ export function ChatPage() {
       id: pendingNextTurn.id,
       kind: 'guidance',
       content: pendingNextTurn.content,
+      guidanceId: pendingNextTurn.id,
+      attachments: pendingNextTurn.uploadedFiles?.map(pendingInputAttachment),
       status: pendingNextTurn.status === 'error' ? 'next_turn_error' : 'next_turn',
     }
     : latestRunningGuidance
@@ -1784,7 +1848,7 @@ export function ChatPage() {
                     const plan = resolvePlan(item.plan)
                     return <TaskPlanRecord key={item.id} plan={plan} docked={plan.plan_id === dockedPlan?.plan_id} onOpen={() => revealPlan(plan)} />
                   })}
-                  {finalizedGuidance.length > 0 && <div className="assistant-guidance-list">{finalizedGuidance.map((item) => <GuidanceMessage key={item.id} item={item} placement="completed" />)}</div>}
+                  {finalizedGuidance.length > 0 && <div className="assistant-guidance-list">{finalizedGuidance.map((item) => <GuidanceMessage key={item.id} user={user} item={item} placement="completed" />)}</div>}
                 </div>
               </article>
             )
@@ -1811,7 +1875,7 @@ export function ChatPage() {
             />
           </div>
         ) : null}
-        {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage item={guidancePreviewItem} placement="current" onCancel={pendingNextTurn?.status === 'error' && liveSessionId ? () => removeNextTurnMessage(user, liveSessionId, pendingNextTurn.id) : undefined} onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
+        {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" onCancel={pendingNextTurn?.status === 'error' && liveSessionId ? () => removeNextTurnMessage(user, liveSessionId, pendingNextTurn.id) : undefined} onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
         <AgentComposer
           value={draft}
           placeholder={user ? stopping ? '输入下一轮消息；将在当前任务停止后自动发送…' : running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}

@@ -812,11 +812,22 @@ export async function submitGuidance(
   user: string,
   runId: string,
   guidance: string,
-): Promise<{ run_id: string; status: 'accepted_current_run' | 'queued_next_turn'; queued: number }> {
+  options: { guidanceId?: string; uploadedFiles?: string[] } = {},
+): Promise<{
+  run_id: string
+  status: 'accepted_current_run' | 'queued_next_turn'
+  queued: number
+  guidance_id?: string
+}> {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/guidance`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user, guidance }),
+    body: JSON.stringify({
+      user,
+      guidance,
+      guidance_id: options.guidanceId || '',
+      uploaded_files: options.uploadedFiles || [],
+    }),
   })
 }
 

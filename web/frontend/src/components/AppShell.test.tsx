@@ -856,6 +856,62 @@ describe('AppShell navigation', () => {
     expect(footer).toHaveClass('assistant-turn-footer')
   })
 
+  it('运行中支持只发送音频视频附件作为多模态引导', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    let guidanceBody: Record<string, unknown> | undefined
+    const encoder = new TextEncoder()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    server.use(http.post('/api/runs/:runId/guidance', async ({ params, request }) => {
+      guidanceBody = await request.json() as Record<string, unknown>
+      return HttpResponse.json({
+        run_id: params.runId,
+        status: 'accepted_current_run',
+        queued: 1,
+        guidance_id: guidanceBody.guidance_id,
+      })
+    }))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller },
+      }), { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '开始长任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await screen.findByRole('button', { name: '停止生成' })
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    fireEvent.change(fileInput!, { target: { files: [
+      new File(['audio'], 'voice.mp3', { type: 'audio/mpeg' }),
+      new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
+    ] } })
+    expect(await screen.findByText(/已上传 voice\.mp3/)).toBeInTheDocument()
+    const sendGuidance = screen.getByRole('button', { name: '发送引导' })
+    expect(sendGuidance).toBeEnabled()
+    fireEvent.click(sendGuidance)
+
+    await waitFor(() => expect(guidanceBody).toMatchObject({
+      guidance: '',
+      uploaded_files: ['voice.mp3', 'clip.mp4'],
+    }))
+    expect(await screen.findByText('voice.mp3')).toBeInTheDocument()
+    expect(screen.getByText('clip.mp4')).toBeInTheDocument()
+    const guidanceId = String(guidanceBody?.guidance_id || '')
+    streamController.enqueue(encoder.encode(`event: guidance_applied\ndata: ${JSON.stringify({
+      type: 'guidance_applied',
+      metadata: { guidance: ['附件引导：voice.mp3、clip.mp4'], guidance_details: [{ id: guidanceId }] },
+    })}\n\n`))
+    streamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true,"guidance_count":1}}\n\n'))
+    streamController.close()
+
+    expect(await screen.findByText('引导成功')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText(/已上传 voice\.mp3/)).not.toBeInTheDocument())
+  })
+
   it('任务计划终态卡片归档到执行轮次的 Token 统计与引导之间', async () => {
     const pendingPlan = {
       plan_id: 'plan_12345678', title: '终态归档验收', description: '验证计划卡片位置', status: 'pending', auto_accept: false,
@@ -917,6 +973,7 @@ describe('AppShell navigation', () => {
     let firstStreamController!: ReadableStreamDefaultController<Uint8Array>
     let chatRequestCount = 0
     let secondPrompt = ''
+    let secondUploadedFiles: string[] = []
     const encoder = new TextEncoder()
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     server.use(
@@ -935,7 +992,9 @@ describe('AppShell navigation', () => {
           start(controller) { firstStreamController = controller },
         }), { headers: { 'Content-Type': 'text/event-stream' } })
       }
-      secondPrompt = String(JSON.parse(String(init?.body || '{}')).prompt || '')
+      const body = JSON.parse(String(init?.body || '{}')) as { prompt?: string; uploaded_files?: string[] }
+      secondPrompt = String(body.prompt || '')
+      secondUploadedFiles = body.uploaded_files || []
       return new Response('event: text_delta\ndata: {"type":"text_delta","content":"第二轮已收到"}\n\nevent: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
     }))
 
@@ -945,6 +1004,9 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(chatRequestCount).toBe(1))
 
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    fireEvent.change(fileInput!, { target: { files: [new File(['audio'], 'queued.mp3', { type: 'audio/mpeg' })] } })
+    expect(await screen.findByText(/已上传 queued\.mp3/)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '作为第二轮继续处理' } })
     fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
     expect(await screen.findByText('已排队到下一轮')).toBeInTheDocument()
@@ -955,6 +1017,7 @@ describe('AppShell navigation', () => {
 
     await waitFor(() => expect(chatRequestCount).toBe(2))
     expect(secondPrompt).toBe('作为第二轮继续处理')
+    expect(secondUploadedFiles).toEqual(['queued.mp3'])
     expect(await screen.findByText('第二轮已收到')).toBeInTheDocument()
     expect(screen.queryByText('已排队到下一轮')).not.toBeInTheDocument()
   })

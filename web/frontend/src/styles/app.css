@@ -1242,6 +1242,8 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .guidance-message > span { color: var(--brand); font-size: .625rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
 .guidance-message > strong { color: var(--text); font-size: .8125rem; }
 .guidance-message > small { color: var(--muted); font-size: .625rem; }
+.guidance-attachment-list { width: 100%; justify-items: stretch; margin-top: 4px; }
+.guidance-attachment-list .user-attachment-card { max-width: none; }
 .guidance-message.error { border-color: color-mix(in srgb, var(--red) 35%, var(--line)); background: var(--red-soft); }
 .guidance-mode-label { color: var(--brand); font-weight: 800; }
 .send-btn.guidance { background: var(--brand-soft); color: var(--brand); border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--line)); }

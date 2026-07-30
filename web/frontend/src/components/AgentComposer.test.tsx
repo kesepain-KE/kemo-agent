@@ -114,6 +114,16 @@ describe('AgentComposer', () => {
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
   })
 
+  it('运行中只有待发送附件时也允许提交引导', () => {
+    const onSubmit = vi.fn()
+    renderComposer({ running: true, pendingFileCount: 1, onSubmit })
+
+    const button = screen.getByRole('button', { name: '发送引导' })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    expect(onSubmit).toHaveBeenCalledOnce()
+  })
+
   it('Boxes 按钮打开拓展面板', () => {
     const onOpenExpand = vi.fn()
     renderComposer({ onOpenExpand })

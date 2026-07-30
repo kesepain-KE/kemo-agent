@@ -265,6 +265,29 @@ describe('reduceRunEvent', () => {
     expect(items[2]).toMatchObject({ kind: 'guidance', status: 'not_applied', finalized: true })
   })
 
+  it('按 guidance id 确认重复文本的多媒体引导并保留附件', () => {
+    const attachment = {
+      asset_id: 'asset_video', name: 'clip.mp4', media_kind: 'video' as const,
+      mime_type: 'video/mp4', size: 12, checksum_sha256: '',
+      scope: 'file_upload' as const, relative_path: 'clip.mp4', available: true,
+    }
+    const items: ChatItem[] = [
+      { id: 'one', guidanceId: 'guidance_one', kind: 'guidance', content: '继续', status: 'queued' },
+      { id: 'two', guidanceId: 'guidance_two', kind: 'guidance', content: '继续', status: 'queued' },
+    ]
+
+    const reduced = reduceRunEvent(items, {
+      type: 'guidance_applied',
+      metadata: {
+        guidance: ['继续'],
+        guidance_details: [{ id: 'guidance_two', text: '继续', uploaded_files: [attachment] }],
+      },
+    })
+
+    expect(reduced[0]).toMatchObject({ status: 'queued' })
+    expect(reduced[1]).toMatchObject({ status: 'accepted', attachments: [attachment] })
+  })
+
   it('无论事件到达顺序如何都按思考、工具、正文排列一轮内容', () => {
     let items: ChatItem[] = [{ id: 'u1', kind: 'message', role: 'user', content: '请处理' }]
     items = reduceRunEvent(items, { type: 'text_delta', content: '最终正文' })
