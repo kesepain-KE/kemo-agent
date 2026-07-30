@@ -13,11 +13,23 @@ class KemoGatewayProvider:
     def __init__(self, config: dict[str, Any]) -> None:
         self._native = KemoGatewayAdapter(config)
 
-    def create(self, request):
-        return self._native.create(request)
+    def create(self, request, *, cancel_event=None):
+        return self._native.create(request, cancel_event=cancel_event)
 
-    def stream(self, request):
-        return self._native.stream(request)
+    def stream(
+        self,
+        request,
+        *,
+        last_event_id=None,
+        resume_from_sequence=None,
+        cancel_event=None,
+    ):
+        return self._native.stream(
+            request,
+            last_event_id=last_event_id,
+            resume_from_sequence=resume_from_sequence,
+            cancel_event=cancel_event,
+        )
 
     def validate(self, request):
         return self._native.validate(request)
@@ -28,14 +40,14 @@ class KemoGatewayProvider:
     def models(self, *, task: str | None = None):
         return self._native.models(task=task)
 
-    def embeddings(self, request):
-        return self._native.embeddings(request)
+    def embeddings(self, request, *, cancel_event=None):
+        return self._native.embeddings(request, cancel_event=cancel_event)
 
-    def embed(self, request):
-        return self._native.embed(request)
+    def embed(self, request, *, cancel_event=None):
+        return self._native.embed(request, cancel_event=cancel_event)
 
-    def rerank(self, request):
-        return self._native.rerank(request)
+    def rerank(self, request, *, cancel_event=None):
+        return self._native.rerank(request, cancel_event=cancel_event)
 
     def get_response(self, response_id: str):
         return self._native.get_response(response_id)

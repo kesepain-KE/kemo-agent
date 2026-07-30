@@ -16,6 +16,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from provider.adapters.reliability import (
+    CANCEL_REQUEST_TIMEOUT_SECONDS,
+    NETWORK_READ_ERRORS,
+    KemoNetworkRetryPolicy,
+    parse_retry_after_ms,
+    start_cancel_watcher,
+    transport_error,
+)
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.assets import AssetDescriptor
 from provider.protocol.models import (
@@ -42,7 +50,7 @@ from provider.schema import (
 )
 
 
-_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 class _MultipartUpload:
@@ -80,6 +88,7 @@ class KemoGatewayAdapter:
         self.api_key = str(config["api_key"])
         self.model = str(config["model"])
         self.timeout = float(config.get("timeout", 120))
+        self._retry_policy = KemoNetworkRetryPolicy()
         self.responses_url = f"{self.base_url}/model/responses"
         self.embeddings_url = f"{self.base_url}/model/embeddings"
         self.rerank_url = f"{self.base_url}/model/rerank"
@@ -132,17 +141,25 @@ class KemoGatewayAdapter:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 body = raw.decode("utf-8", errors="replace")[:1000]
             message = f"Kemo gateway HTTP {exc.code}"
+            declared_retryable: bool | None = None
             if isinstance(body, dict):
                 error = body.get("error")
                 if isinstance(error, dict):
                     message = str(error.get("message") or message)
+                    if isinstance(error.get("retryable"), bool):
+                        declared_retryable = bool(error["retryable"])
             if exc.code in {401, 403}:
                 raise ProviderAuthError(message, status_code=exc.code, body=body) from exc
             raise ProviderError(
                 message,
                 category="gateway_error",
                 status_code=exc.code,
-                retryable=exc.code in _RETRYABLE_STATUS,
+                retryable=(
+                    declared_retryable
+                    if declared_retryable is not None
+                    else exc.code in _RETRYABLE_STATUS
+                ),
+                retry_after_ms=parse_retry_after_ms(exc, body),
                 body=body,
             ) from exc
         except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
@@ -157,6 +174,30 @@ class KemoGatewayAdapter:
 
     def validate(self, request: KemoRequest) -> None:
         validate_request(request)
+
+    def _read_all(
+        self,
+        response: Any,
+        *,
+        action: str,
+        cancel_event: threading.Event | None,
+    ) -> bytes:
+        """Read one blocking Kemo response with cooperative cancellation."""
+
+        watcher = start_cancel_watcher(response, cancel_event)
+        try:
+            try:
+                raw = response.read()
+            except NETWORK_READ_ERRORS as exc:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise self._retry_policy.cancelled_error() from exc
+                raise transport_error(exc, action=action) from exc
+            if cancel_event is not None and cancel_event.is_set():
+                raise self._retry_policy.cancelled_error()
+            return raw
+        finally:
+            if watcher is not None:
+                watcher.close()
 
     def _model_capabilities_url(
         self,
@@ -243,68 +284,150 @@ class KemoGatewayAdapter:
                 body=raw[:1000],
             ) from exc
 
-    def create(self, request: KemoRequest) -> KemoResponse:
+    def create(
+        self,
+        request: KemoRequest,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> KemoResponse:
         self.validate(request)
         payload = request.model_copy(update={"stream": False})
-        http_request = urllib.request.Request(
-            self.responses_url,
-            data=to_json_bytes(payload),
-            headers=self._headers(stream=False, idempotency_key=request.request_id),
-            method="POST",
-        )
-        with self._open(http_request) as response:
-            return parse_response(response.read())
+        body = to_json_bytes(payload)
 
-    def embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        def send() -> KemoResponse:
+            http_request = urllib.request.Request(
+                self.responses_url,
+                data=body,
+                headers=self._headers(
+                    stream=False,
+                    idempotency_key=request.request_id,
+                ),
+                method="POST",
+            )
+            with self._open(http_request) as response:
+                raw = self._read_all(
+                    response,
+                    action="读取响应",
+                    cancel_event=cancel_event,
+                )
+            response = parse_response(raw)
+            if response.request_id != request.request_id:
+                raise ProviderError(
+                    "Kemo gateway 响应的 request_id 与请求不一致",
+                    category="gateway_protocol_error",
+                    retryable=False,
+                )
+            return response
+
+        return self._retry_policy.run(
+            send,
+            cancel_event=cancel_event,
+        )
+
+    def embeddings(
+        self,
+        request: EmbeddingRequest,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> EmbeddingResponse:
         """Call the native Kemo vectorization endpoint without translation."""
 
-        http_request = urllib.request.Request(
-            self.embeddings_url,
-            data=to_json_bytes(request),
-            headers=self._headers(
-                stream=False,
-                idempotency_key=request.request_id,
-            ),
-            method="POST",
-        )
-        with self._open(http_request) as response:
-            raw = response.read()
-        try:
-            return EmbeddingResponse.model_validate_json(raw)
-        except Exception as exc:
-            raise ProviderError(
-                "Kemo gateway 返回了无效的 embedding 响应",
-                category="gateway_protocol_error",
-                body=raw[:1000],
-            ) from exc
+        body = to_json_bytes(request)
+
+        def send() -> EmbeddingResponse:
+            http_request = urllib.request.Request(
+                self.embeddings_url,
+                data=body,
+                headers=self._headers(
+                    stream=False,
+                    idempotency_key=request.request_id,
+                ),
+                method="POST",
+            )
+            with self._open(http_request) as response:
+                raw = self._read_all(
+                    response,
+                    action="读取 embedding 响应",
+                    cancel_event=cancel_event,
+                )
+            try:
+                return EmbeddingResponse.model_validate_json(raw)
+            except Exception as exc:
+                raise ProviderError(
+                    "Kemo gateway 返回了无效的 embedding 响应",
+                    category="gateway_protocol_error",
+                    body=raw[:1000],
+                ) from exc
+
+        return self._retry_policy.run(send, cancel_event=cancel_event)
 
     # Provider packages use ``embed`` as the task-level method name.  Keep the
     # endpoint-named alias as well so callers can use either vocabulary.
-    def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        return self.embeddings(request)
+    def embed(
+        self,
+        request: EmbeddingRequest,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> EmbeddingResponse:
+        return self.embeddings(request, cancel_event=cancel_event)
 
-    def rerank(self, request: RerankRequest) -> RerankResponse:
+    def rerank(
+        self,
+        request: RerankRequest,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> RerankResponse:
         """Call the native Kemo reranking endpoint without translation."""
 
-        http_request = urllib.request.Request(
-            self.rerank_url,
-            data=to_json_bytes(request),
-            headers=self._headers(
-                stream=False,
-                idempotency_key=request.request_id,
-            ),
+        body = to_json_bytes(request)
+
+        def send() -> RerankResponse:
+            http_request = urllib.request.Request(
+                self.rerank_url,
+                data=body,
+                headers=self._headers(
+                    stream=False,
+                    idempotency_key=request.request_id,
+                ),
+                method="POST",
+            )
+            with self._open(http_request) as response:
+                raw = self._read_all(
+                    response,
+                    action="读取 rerank 响应",
+                    cancel_event=cancel_event,
+                )
+            try:
+                return RerankResponse.model_validate_json(raw)
+            except Exception as exc:
+                raise ProviderError(
+                    "Kemo gateway 返回了无效的 rerank 响应",
+                    category="gateway_protocol_error",
+                    body=raw[:1000],
+                ) from exc
+
+        return self._retry_policy.run(send, cancel_event=cancel_event)
+
+    def _cancel_response_best_effort(self, response_id: str) -> None:
+        url = (
+            f"{self.responses_url}/"
+            f"{urllib.parse.quote(response_id, safe='')}/cancel"
+        )
+        request = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers=self._headers(stream=False),
             method="POST",
         )
-        with self._open(http_request) as response:
-            raw = response.read()
         try:
-            return RerankResponse.model_validate_json(raw)
-        except Exception as exc:
-            raise ProviderError(
-                "Kemo gateway 返回了无效的 rerank 响应",
-                category="gateway_protocol_error",
-                body=raw[:1000],
-            ) from exc
+            with urllib.request.urlopen(
+                request,
+                timeout=min(self.timeout, CANCEL_REQUEST_TIMEOUT_SECONDS),
+            ) as response:
+                response.read()
+        except Exception:
+            # Local cancellation must not turn into a second Provider failure.
+            pass
 
     def stream(
         self,
@@ -312,37 +435,154 @@ class KemoGatewayAdapter:
         *,
         last_event_id: str | None = None,
         resume_from_sequence: int | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         self.validate(request)
         payload = request.model_copy(update={"stream": True})
-        query = ""
-        if resume_from_sequence is not None:
-            query = "?" + urllib.parse.urlencode(
-                {"resume_from_sequence": max(0, int(resume_from_sequence))}
+        body = to_json_bytes(payload)
+        current_last_event_id = str(last_event_id or "").strip() or None
+        if resume_from_sequence is not None and int(resume_from_sequence) < 0:
+            raise ValueError("resume_from_sequence 不能小于 0")
+        if resume_from_sequence is not None and current_last_event_id is None:
+            raise ValueError(
+                "Kemo 1.0 续传必须提供 Last-Event-ID；不能只使用 resume_from_sequence"
             )
-        http_request = urllib.request.Request(
-            self.responses_url + query,
-            data=to_json_bytes(payload),
-            headers=self._headers(
-                stream=True,
-                last_event_id=last_event_id,
-                idempotency_key=request.request_id,
-            ),
-            method="POST",
+        current_resume_sequence = (
+            int(resume_from_sequence) if resume_from_sequence is not None else None
         )
-        response = self._open(http_request)
-        guard = StreamSequenceGuard()
+        guard = StreamSequenceGuard(
+            start_after_sequence=current_resume_sequence,
+            allow_initial_offset=(
+                current_last_event_id is not None
+                and current_resume_sequence is None
+            ),
+        )
         terminal = False
+        expected_response_id: str | None = None
+        remote_cancel_id: str | None = None
+
         try:
-            lines = iter(response.readline, b"")
-            for event in parse_sse_events(lines):
-                if guard.accept(event):
-                    terminal = terminal or event.terminal
-                    yield event
-            if not terminal:
-                raise StreamProtocolError("Kemo gateway 流在统一终态事件前结束")
+            for attempt in range(1, self._retry_policy.max_attempts + 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise self._retry_policy.cancelled_error(
+                        attempt_count=attempt - 1
+                    )
+                http_request = urllib.request.Request(
+                    self.responses_url,
+                    data=body,
+                    headers=self._headers(
+                        stream=True,
+                        last_event_id=current_last_event_id,
+                        idempotency_key=request.request_id,
+                    ),
+                    method="POST",
+                )
+                response = None
+                watcher = None
+                failure: ProviderError | None = None
+                try:
+                    response = self._open(http_request)
+                    watcher = start_cancel_watcher(
+                        response,
+                        cancel_event,
+                    )
+                    saw_eof = False
+
+                    def lines():
+                        nonlocal saw_eof
+                        while True:
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise self._retry_policy.cancelled_error(
+                                    attempt_count=attempt
+                                )
+                            line = response.readline()
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise self._retry_policy.cancelled_error(
+                                    attempt_count=attempt
+                                )
+                            if not line:
+                                saw_eof = True
+                                return
+                            yield line
+
+                    event_iterator = parse_sse_events(lines())
+                    while True:
+                        try:
+                            event = next(event_iterator)
+                        except StopIteration:
+                            break
+                        except StreamProtocolError as exc:
+                            if not saw_eof:
+                                raise
+                            raise ProviderError(
+                                "Kemo gateway SSE 事件在传输中被截断",
+                                category="connection_error",
+                                retryable=True,
+                            ) from exc
+                        if event.request_id != request.request_id:
+                            raise StreamProtocolError(
+                                "Kemo gateway 流事件的 request_id 与请求不一致",
+                                details={
+                                    "expected": request.request_id,
+                                    "actual": event.request_id,
+                                },
+                            )
+                        if expected_response_id is None:
+                            expected_response_id = event.response_id
+                            remote_cancel_id = event.response_id
+                        elif event.response_id != expected_response_id:
+                            raise StreamProtocolError(
+                                "Kemo gateway 续传返回了不同的 response_id，已拒绝拼接",
+                                details={
+                                    "expected": expected_response_id,
+                                    "actual": event.response_id,
+                                },
+                            )
+                        if guard.accept(event):
+                            current_last_event_id = event.event_id
+                            current_resume_sequence = event.sequence
+                            terminal = terminal or event.terminal
+                            yield event
+                    if terminal:
+                        return
+                    failure = ProviderError(
+                        "Kemo gateway SSE 在统一终态事件前断开",
+                        category="connection_error",
+                        retryable=True,
+                    )
+                except ProviderError as exc:
+                    failure = exc
+                except NETWORK_READ_ERRORS as exc:
+                    failure = transport_error(exc, action="读取 SSE")
+                finally:
+                    if response is not None:
+                        try:
+                            response.close()
+                        except Exception:
+                            pass
+                    if watcher is not None:
+                        watcher.close()
+
+                if cancel_event is not None and cancel_event.is_set():
+                    raise self._retry_policy.cancelled_error(
+                        attempt_count=attempt
+                    )
+                if failure is None:
+                    raise StreamProtocolError("Kemo gateway SSE 未知状态")
+                self._retry_policy.retry_or_raise(
+                    failure,
+                    failed_attempt=attempt,
+                    cancel_event=cancel_event,
+                )
+            raise AssertionError("Kemo gateway SSE 重试循环异常退出")
         finally:
-            response.close()
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+                and not terminal
+                and remote_cancel_id
+            ):
+                self._cancel_response_best_effort(remote_cancel_id)
 
     def get_response(self, response_id: str) -> KemoResponse:
         url = f"{self.responses_url}/{urllib.parse.quote(response_id, safe='')}"

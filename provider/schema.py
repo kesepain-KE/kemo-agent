@@ -18,12 +18,16 @@ class ProviderError(RuntimeError):
         category: str = "provider_error",
         status_code: int | None = None,
         retryable: bool = False,
+        retry_after_ms: int | None = None,
+        attempt_count: int | None = None,
         body: Any = None,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.status_code = status_code
         self.retryable = retryable
+        self.retry_after_ms = retry_after_ms
+        self.attempt_count = attempt_count
         self.body = body
 
 

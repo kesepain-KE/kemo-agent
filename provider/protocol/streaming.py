@@ -186,10 +186,20 @@ def parse_sse_events(lines: Iterable[bytes | str]) -> Iterator[ProviderStreamEve
 class StreamSequenceGuard:
     """Validate per-response ordering and de-duplicate event IDs."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        start_after_sequence: int | None = None,
+        allow_initial_offset: bool = False,
+    ) -> None:
+        if start_after_sequence is not None and start_after_sequence < 0:
+            raise ValueError("start_after_sequence 不能小于 0")
         self._last_by_response: dict[str, int] = {}
         self._event_ids: set[str] = set()
         self._terminal: set[str] = set()
+        self._start_after_sequence = start_after_sequence
+        self._allow_initial_offset = allow_initial_offset
+        self._initial_offset_consumed = False
 
     def accept(self, event: ProviderStreamEvent) -> bool:
         if event.event_id in self._event_ids:
@@ -200,7 +210,16 @@ class StreamSequenceGuard:
                 details={"event_id": event.event_id},
             )
         previous = self._last_by_response.get(event.response_id)
-        expected = 0 if previous is None else previous + 1
+        if previous is not None:
+            expected = previous + 1
+        elif not self._initial_offset_consumed and self._start_after_sequence is not None:
+            expected = self._start_after_sequence + 1
+            self._initial_offset_consumed = True
+        elif not self._initial_offset_consumed and self._allow_initial_offset:
+            expected = event.sequence
+            self._initial_offset_consumed = True
+        else:
+            expected = 0
         if event.sequence != expected:
             raise StreamProtocolError(
                 f"sequence 不连续：期望 {expected}，收到 {event.sequence}",
