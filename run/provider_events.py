@@ -333,20 +333,35 @@ def provider_events(
     if protocol_request.stream:
         if not callable(stream):
             raise EngineError("Provider 必须实现 Kemo stream() 接口")
-        for protocol_event in stream(protocol_request):
-            if not isinstance(protocol_event, ProviderStreamEvent):
-                raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
-            yield from run_events_for_protocol_event(
-                protocol_event,
-                provider=provider,
-                root=root,
-                user=user,
-                cancel_event=cancel_event,
-            )
+        source = (
+            stream(protocol_request, cancel_event=cancel_event)
+            if getattr(provider, "mode", "") == "kemo"
+            else stream(protocol_request)
+        )
+        iterator = iter(source)
+        try:
+            for protocol_event in iterator:
+                if not isinstance(protocol_event, ProviderStreamEvent):
+                    raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
+                yield from run_events_for_protocol_event(
+                    protocol_event,
+                    provider=provider,
+                    root=root,
+                    user=user,
+                    cancel_event=cancel_event,
+                )
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
         return
     if not callable(create):
         raise EngineError("Provider 必须实现 Kemo create() 接口")
-    response = create(protocol_request)
+    response = (
+        create(protocol_request, cancel_event=cancel_event)
+        if getattr(provider, "mode", "") == "kemo"
+        else create(protocol_request)
+    )
     if not isinstance(response, KemoResponse):
         raise EngineError("Provider create() 必须返回 KemoResponse")
     yield from events_for_protocol_response(
@@ -356,4 +371,3 @@ def provider_events(
         user=user,
         cancel_event=cancel_event,
     )
-

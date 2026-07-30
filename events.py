@@ -113,11 +113,24 @@ class RunEvent:
 
 
 def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
+    detail: dict[str, Any] = {
+        "message": str(exc),
+        "exception_type": type(exc).__name__,
+        "phase": phase,
+    }
+    for field in (
+        "category",
+        "status_code",
+        "retryable",
+        "retry_after_ms",
+        "attempt_count",
+    ):
+        value = getattr(exc, field, None)
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            detail[field] = value
+        elif isinstance(value, str) and value.strip():
+            detail[field] = value.strip()[:160]
     return RunEvent(
         type="error",
-        error={
-            "message": str(exc),
-            "exception_type": type(exc).__name__,
-            "phase": phase,
-        },
+        error=detail,
     )

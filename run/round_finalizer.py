@@ -42,6 +42,7 @@ _FAILURE_DETAIL_FIELDS = (
     "status_code",
     "retryable",
     "retry_after_ms",
+    "attempt_count",
 )
 
 
@@ -54,6 +55,8 @@ def _safe_failure_detail(error: Any) -> dict[str, Any]:
             "category": getattr(error, "category", ""),
             "status_code": getattr(error, "status_code", None),
             "retryable": getattr(error, "retryable", None),
+            "retry_after_ms": getattr(error, "retry_after_ms", None),
+            "attempt_count": getattr(error, "attempt_count", None),
         }
     elif isinstance(error, dict):
         source = dict(error)

@@ -1232,6 +1232,9 @@ def _iter_request_events_impl(
                     except BaseException as exc:
                         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                             raise
+                        if cancel_event is not None and cancel_event.is_set():
+                            yield commit_cancelled_round()
+                            return
                         context_length_error = _is_context_length_exceeded(exc)
                         if (
                             not context_length_error
