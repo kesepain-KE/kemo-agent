@@ -292,7 +292,13 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/guidance")
     async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:
-        return backend.submit_guidance(body.user, run_id, body.guidance)
+        return backend.submit_guidance(
+            body.user,
+            run_id,
+            body.guidance,
+            guidance_id=body.guidance_id,
+            uploaded_files=body.uploaded_files,
+        )
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str, body: RunCancelBody) -> dict[str, Any]:

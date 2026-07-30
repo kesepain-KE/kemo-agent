@@ -44,7 +44,15 @@ class TokenLoginBody(BaseModel):
 
 class GuidanceBody(BaseModel):
     user: str
-    guidance: str
+    guidance_id: str = Field(default="", max_length=160)
+    guidance: str = Field(default="", max_length=1_000_000)
+    uploaded_files: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def require_input(self) -> "GuidanceBody":
+        if not self.guidance.strip() and not self.uploaded_files:
+            raise ValueError("guidance 和 uploaded_files 不能同时为空")
+        return self
 
 
 class RunCancelBody(BaseModel):

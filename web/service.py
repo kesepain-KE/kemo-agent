@@ -21,6 +21,7 @@ from provider.protocol.models import (
     VideoContent,
 )
 from run.agent_runner import AgentRunner
+from run.attachments import history_attachment_descriptors
 from run.config import (
     ConfigError,
     load_config,
@@ -43,7 +44,7 @@ from run.task_plan_store import (
 )
 from run.memory_analysis import extract_memory_backlog
 from run.session_runtime import session_lock
-from run.guidance import GuidanceMailbox
+from run.guidance import GuidanceInput, GuidanceMailbox
 from run.users import list_users
 from web.constants import (
     AUDIO_PREVIEW_MAX_BYTES,
@@ -459,10 +460,35 @@ class WebRunService(
         with self._active_runs_lock:
             return bool(self._active_runs)
 
-    def submit_guidance(self, user: Any, run_id: Any, guidance: Any) -> dict[str, Any]:
+    def submit_guidance(
+        self,
+        user: Any,
+        run_id: Any,
+        guidance: Any,
+        *,
+        guidance_id: Any = "",
+        uploaded_files: Any = None,
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_run_id = self.require_run_id(run_id)
-        text = self.require_prompt(guidance)
+        text = guidance.strip() if isinstance(guidance, str) else ""
+        normalized_id = str(guidance_id or "").strip()
+        normalized_files = self.require_uploaded_files(name, uploaded_files)
+        if not text and not normalized_files:
+            raise InvalidRequestError("guidance 和 uploaded_files 不能同时为空")
+        # A bare text call remains a string for compatibility with integrations
+        # that consume GuidanceMailbox directly.  New web calls use the
+        # structured envelope so attachment-only and duplicate-text guidance
+        # can be acknowledged by id.
+        value: str | GuidanceInput = (
+            text
+            if not normalized_files and not normalized_id
+            else GuidanceInput(
+                id=normalized_id,
+                text=text,
+                uploaded_files=normalized_files,
+            )
+        )
         with self._active_runs_lock:
             active = self._active_runs.get(normalized_run_id)
             if active is None:
@@ -470,7 +496,7 @@ class WebRunService(
             if active.user != name:
                 raise NotFoundError(f"运行不存在或已结束：{normalized_run_id}")
             try:
-                accepted_current_run, queued = active.guidance.offer(text)
+                accepted_current_run, queued = active.guidance.offer(value)
             except queue.Full as exc:
                 raise ConflictError("运行中引导队列已满，请等待当前引导被处理") from exc
         return {
@@ -483,6 +509,8 @@ class WebRunService(
                 else "queued_next_turn"
             ),
             "queued": queued,
+            "guidance_id": normalized_id,
+            "uploaded_files": history_attachment_descriptors(normalized_files),
         }
 
     def cancel_run(self, user: Any, run_id: Any) -> dict[str, Any]:

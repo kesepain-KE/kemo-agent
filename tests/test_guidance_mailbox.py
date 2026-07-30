@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from run.guidance import GuidanceMailbox
+from run.guidance import GuidanceInput, GuidanceMailbox
 
 
 class GuidanceMailboxTests(unittest.TestCase):
@@ -45,6 +45,17 @@ class GuidanceMailboxTests(unittest.TestCase):
         self.assertEqual(mailbox.drain_or_close(), [])
         self.assertEqual(mailbox.offer("next turn"), (False, 0))
         self.assertEqual(mailbox.qsize(), 0)
+
+    def test_structured_attachment_only_guidance_is_preserved(self) -> None:
+        mailbox = GuidanceMailbox()
+        guidance = GuidanceInput(
+            id="guidance_media",
+            uploaded_files=[{"asset_id": "asset_1", "name": "clip.mp4"}],
+        )
+
+        self.assertEqual(mailbox.offer(guidance), (True, 1))
+        self.assertEqual(mailbox.drain(), [guidance])
+        self.assertEqual(guidance.display_text, "附件引导：clip.mp4")
 
 
 if __name__ == "__main__":

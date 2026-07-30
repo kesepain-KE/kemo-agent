@@ -31,6 +31,8 @@ from provider.protocol.models import (
 )
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agent_runner import AgentRunResult
+from run.attachments import describe_uploaded_asset
+from run.guidance import GuidanceInput
 from run.engine import (
     compress_context,
     context_status,
@@ -1156,6 +1158,64 @@ class RuntimeFeatureTests(unittest.TestCase):
             window["data"]["round_metrics"][0]["guidance"],
             ["focus on the revised target"],
         )
+
+    def test_runtime_attachment_only_guidance_reaches_provider_and_history(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        upload = root / "users" / "alice" / "file_upload"
+        upload.mkdir(parents=True)
+        note = upload / "revised-target.md"
+        note.write_text("focus on the media-backed target", "utf-8")
+        descriptor = describe_uploaded_asset(
+            root,
+            "alice",
+            {"path": "users/alice/file_upload/revised-target.md"},
+        )
+        guidance: queue.Queue[GuidanceInput] = queue.Queue()
+        guidance.put(GuidanceInput(
+            id="guidance_attachment_only",
+            uploaded_files=[descriptor],
+        ))
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("g2", "lookup", {"value": "x"})],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="guided by attachment", usage=Usage()),
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(iter_request_events(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "guided-attachment",
+                    "prompt": "start",
+                    "run_id": "run_guided_attachment",
+                    "_guidance_queue": guidance,
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            ))
+
+        guidance_message = next(
+            item for item in provider.requests[1].messages
+            if item.get("role") == "user" and "运行中引导" in item.get("content", "")
+        )
+        self.assertIn("revised-target.md", guidance_message["content"])
+        self.assertIn("multimodal", guidance_message["content"])
+        applied = next(event for event in events if event.type == "guidance_applied")
+        self.assertEqual(
+            applied.metadata["guidance_details"][0]["id"],
+            "guidance_attachment_only",
+        )
+        window = load_window(find_window(root, "alice", "cli", "guided-attachment"))
+        detail = window["data"]["round_metrics"][0]["guidance_details"][0]
+        self.assertEqual(detail["uploaded_files"][0]["name"], "revised-target.md")
+        self.assertNotIn("path", detail["uploaded_files"][0])
 
     def test_stream_deltas_are_forwarded_before_provider_exhausts(self) -> None:
         _, root = self.make_root(stream=True)

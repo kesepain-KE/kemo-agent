@@ -590,6 +590,22 @@ class SessionServiceMixin:
                             for value in item.get("guidance", [])
                             if isinstance(value, str)
                         ] if isinstance(item.get("guidance"), list) else [],
+                        "guidance_details": [
+                            {
+                                "id": str(value.get("id") or ""),
+                                "text": str(value.get("text") or ""),
+                                "display_text": str(
+                                    value.get("display_text")
+                                    or value.get("text")
+                                    or "附件引导"
+                                ),
+                                "uploaded_files": input_attachments(
+                                    value.get("uploaded_files")
+                                ),
+                            }
+                            for value in item.get("guidance_details", [])
+                            if isinstance(value, dict)
+                        ] if isinstance(item.get("guidance_details"), list) else [],
                         "status": str(item.get("status") or "completed"),
                         "cancelled": bool(item.get("cancelled", False)),
                         "cancel_reason": str(item.get("cancel_reason") or ""),
@@ -682,4 +698,3 @@ class SessionServiceMixin:
                 "next_before": start_round if start_round > 1 else None,
             },
         }
-

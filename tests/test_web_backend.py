@@ -20,6 +20,7 @@ from agents._runtime.user_packages import create_user_agent_package
 from provider.protocol.models import ModelCapabilities, ModelCatalogResponse
 from provider.schema import ProviderError
 from run.attachments import history_attachment_descriptors
+from run.guidance import GuidanceInput
 from run.cron_store import CronStore, normalize_task
 from run.history import (
     commit_window,
@@ -2354,6 +2355,38 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response["status"], "queued_next_turn")
         self.assertEqual(response["queued"], 0)
         self.assertEqual(active.guidance.qsize(), 0)
+
+    def test_web_guidance_accepts_attachment_only_and_revalidates_user_scope(self) -> None:
+        _, root = self.make_root()
+        upload = root / "users" / "alice" / "file_upload"
+        upload.mkdir(parents=True)
+        (upload / "clip.txt").write_text("media sidecar", "utf-8")
+        service = WebRunService(root)
+        active = ActiveRun("run_guidance_media", "alice", "guided-session")
+        service._active_runs[active.run_id] = active
+
+        response = service.submit_guidance(
+            "alice",
+            active.run_id,
+            "",
+            guidance_id="guidance_media",
+            uploaded_files=["clip.txt"],
+        )
+
+        queued = active.guidance.get_nowait()
+        self.assertIsInstance(queued, GuidanceInput)
+        self.assertEqual(queued.id, "guidance_media")
+        self.assertEqual(queued.uploaded_files[0]["media_kind"], "file")
+        self.assertEqual(response["status"], "accepted_current_run")
+        self.assertEqual(response["uploaded_files"][0]["relative_path"], "clip.txt")
+        with self.assertRaisesRegex(Exception, "上传文件不存在"):
+            service.submit_guidance(
+                "alice",
+                active.run_id,
+                "",
+                guidance_id="missing_media",
+                uploaded_files=["missing.mp4"],
+            )
 
     def test_web_cancel_run_is_user_scoped_and_sets_active_event(self) -> None:
         _, root = self.make_root()

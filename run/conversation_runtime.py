@@ -63,6 +63,8 @@ from run.history import (
 )
 from run.history_index import set_active as set_active_history_session
 from run.history_index import update_memory_state, update_run_state
+from run.guidance import GuidanceInput, normalize_guidance
+from run.guidance_runtime import prepare_guidance
 from run.memory import (
     MemoryStore,
     memory_extraction_mode,
@@ -115,24 +117,24 @@ from run.usage import (
 )
 
 
-def _drain_guidance(channel: Any) -> list[str]:
+def _drain_guidance(channel: Any) -> list[Any]:
     drain = getattr(channel, "drain", None)
     if callable(drain):
         return list(drain())
     if channel is None or not callable(getattr(channel, "get_nowait", None)):
         return []
-    values: list[str] = []
+    values: list[Any] = []
     while True:
         try:
             value = channel.get_nowait()
         except queue.Empty:
             break
-        if isinstance(value, str) and value.strip():
-            values.append(value.strip())
+        if normalize_guidance(value) is not None:
+            values.append(value.strip() if isinstance(value, str) else value)
     return values
 
 
-def _drain_or_close_guidance(channel: Any) -> list[str]:
+def _drain_or_close_guidance(channel: Any) -> list[Any]:
     drain_or_close = getattr(channel, "drain_or_close", None)
     if callable(drain_or_close):
         return list(drain_or_close())
@@ -143,16 +145,6 @@ def _close_guidance(channel: Any) -> None:
     close = getattr(channel, "close", None)
     if callable(close):
         close()
-
-
-def _append_guidance(messages: list[dict[str, Any]], values: list[str]) -> None:
-    if values:
-        messages.append(
-            {
-                "role": "user",
-                "content": "[运行中引导]\n" + "\n".join(f"- {item}" for item in values),
-            }
-        )
 
 
 def _history_messages(window: dict[str, Any]) -> list[dict[str, Any]]:
@@ -708,6 +700,7 @@ def _iter_request_events_impl(
             tool_records = round_state.tool_records
             pending_tool_calls = round_state.pending_tool_calls
             consumed_guidance = round_state.consumed_guidance
+            consumed_guidance_details = round_state.consumed_guidance_details
             provider_responses = round_state.provider_responses
             usage_total = round_state.usage_total
             context_stats = context_selection.stats()
@@ -989,7 +982,8 @@ def _iter_request_events_impl(
             )
             stream = bool(request.get("stream", runtime_provider.get("stream", False)))
             guidance_channel = request.get("_guidance_queue")
-            pending_guidance_ack: list[str] = []
+            pending_guidance_ack: list[GuidanceInput] = []
+            remote_guidance_assets: dict[str, str] = {}
             protocol_parent_request_id: str | None = None
             usage_total.clear()
             usage_total.update(copy.deepcopy(summary_usage))
@@ -1010,6 +1004,34 @@ def _iter_request_events_impl(
             context_retry_count = 0
             last_provider_input_tokens: int | None = None
             last_sent_local_tokens: int | None = None
+
+            def prepare_pending_guidance(values: list[Any]) -> list[dict[str, Any]]:
+                """Prepare new text/media guidance and register its run assets."""
+
+                prepared = prepare_guidance(
+                    values,
+                    root=base,
+                    user=user,
+                    session_id=session_id,
+                    config=config,
+                    runtime_provider=runtime_provider,
+                    provider=provider,
+                    cancel_event=cancel_event,
+                    known_descriptors=uploaded_descriptors,
+                    remote_assets=remote_guidance_assets,
+                )
+                known_ids = {
+                    str(item.get("asset_id") or "")
+                    for item in uploaded_descriptors
+                    if isinstance(item, dict)
+                }
+                for descriptor in prepared.uploaded_descriptors:
+                    asset_id = str(descriptor.get("asset_id") or "")
+                    if asset_id and asset_id not in known_ids:
+                        uploaded_descriptors.append(descriptor)
+                        known_ids.add(asset_id)
+                pending_guidance_ack.extend(prepared.inputs)
+                return prepared.messages
 
             for iteration in range(1, max_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
@@ -1129,11 +1151,20 @@ def _iter_request_events_impl(
                                 if pending_guidance_ack:
                                     applied_guidance = list(pending_guidance_ack)
                                     pending_guidance_ack.clear()
-                                    consumed_guidance.extend(applied_guidance)
+                                    consumed_guidance.extend(
+                                        item.display_text for item in applied_guidance
+                                    )
+                                    applied_details = [
+                                        item.history_detail() for item in applied_guidance
+                                    ]
+                                    consumed_guidance_details.extend(applied_details)
                                     yield RunEvent(
                                         type="guidance_applied",
                                         metadata={
-                                            "guidance": applied_guidance,
+                                            "guidance": [
+                                                item.display_text for item in applied_guidance
+                                            ],
+                                            "guidance_details": applied_details,
                                             "guidance_count": len(applied_guidance),
                                             "iteration": iteration,
                                         },
@@ -1371,8 +1402,7 @@ def _iter_request_events_impl(
                         messages.append(
                             {"role": "assistant", "content": "".join(iteration_text)}
                         )
-                        _append_guidance(messages, pending_guidance)
-                        pending_guidance_ack.extend(pending_guidance)
+                        messages.extend(prepare_pending_guidance(pending_guidance))
                         all_text.append("\n\n")
                         observed_text.append("\n\n")
                         yield RunEvent(type="text_delta", content="\n\n")
@@ -1575,8 +1605,7 @@ def _iter_request_events_impl(
                         }
                     )
                 pending_guidance = _drain_guidance(guidance_channel)
-                _append_guidance(messages, pending_guidance)
-                pending_guidance_ack.extend(pending_guidance)
+                messages.extend(prepare_pending_guidance(pending_guidance))
 
             if not completed:
                 yield commit_terminal_round(
@@ -1641,6 +1670,7 @@ def _iter_request_events_impl(
                     "elapsed_ms": round_elapsed_ms,
                     "tool_calls": len(tool_records),
                     "guidance": list(consumed_guidance),
+                    "guidance_details": copy.deepcopy(consumed_guidance_details),
                     "provider_responses": copy.deepcopy(provider_responses),
                     **(
                         {"input_attachments": copy.deepcopy(history_attachments)}
@@ -1930,6 +1960,7 @@ def _iter_request_events_impl(
                     "elapsed_ms": round_elapsed_ms,
                     "run_id": run_id,
                     "guidance_count": len(consumed_guidance),
+                    "guidance_details": copy.deepcopy(consumed_guidance_details),
                     "context": context_stats,
                     "tool_think_compression": tool_think_compression,
                     "prompt": prompt_bundle.diagnostics,
