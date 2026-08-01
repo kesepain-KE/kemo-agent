@@ -27,6 +27,7 @@ from provider.protocol.models import (
     KemoRequest,
     KemoResponse,
     MessageItem,
+    ReasoningItem,
     ReasoningConfig,
     ToolCallItem,
     ToolDefinition,
@@ -55,6 +56,21 @@ _STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
 _SERIAL_EXECUTION_LOCKS_GUARD = threading.RLock()
 _SERIAL_EXECUTION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _SERIAL_EXECUTION_LOCAL = threading.local()
+
+
+def _response_items_for_next_request(output: list[Any]) -> list[Any]:
+    """Copy Provider output into local history with request-unique reasoning IDs."""
+
+    normalized: list[Any] = []
+    for item in output:
+        if isinstance(item, ReasoningItem):
+            # Provider response item IDs are only guaranteed to be unique inside
+            # one response. Some gateways reuse values such as ``rs_0`` across
+            # tool iterations, while the next KemoRequest requires global input
+            # uniqueness. Keep provider_state intact and only replace the local ID.
+            item = item.model_copy(update={"id": f"rs_{uuid.uuid4().hex}"})
+        normalized.append(item)
+    return normalized
 
 
 def _serial_execution_key(root: Path, user: str) -> tuple[str, str]:
@@ -553,7 +569,7 @@ class AgentRunner:
                 raise AgentRunError(f"子代理 Provider 响应失败：{message}")
             calls = [item for item in response.output if isinstance(item, ToolCallItem)]
             messages = [item for item in response.output if isinstance(item, MessageItem)]
-            items.extend(response.output)
+            items.extend(_response_items_for_next_request(response.output))
             structured_calls = [
                 call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
             ]

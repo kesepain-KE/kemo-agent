@@ -15,6 +15,7 @@ from provider.protocol.models import (
     Measurement,
     MessageItem,
     ModelCapabilities,
+    ReasoningItem,
     ToolCallItem,
     Usage,
     text_from_content,
@@ -307,6 +308,84 @@ class SubAgentRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(provider.capability_calls, [])
         self.assertEqual(provider.requests[0].reasoning.effort, "high")
+
+    def test_runner_rewrites_reused_reasoning_ids_across_tool_iterations(self) -> None:
+        class ReusedReasoningIdProvider(MockProvider):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.responses = []
+
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                iteration = len(inner_self.requests)
+                if iteration < 3:
+                    output = [
+                        ReasoningItem(id="rs_0", summary=f"reasoning {iteration}"),
+                        ToolCallItem(
+                            id=f"call_item_{iteration}",
+                            call_id=f"call_{iteration}",
+                            name="memory_manage",
+                            arguments={
+                                "action": "search_by_content",
+                                "tier": "seven_days",
+                                "query": f"candidate {iteration}",
+                            },
+                        ),
+                    ]
+                    status = ResponseStatus.REQUIRES_ACTION
+                else:
+                    output = [
+                        ReasoningItem(id="rs_0", summary="final reasoning"),
+                        MessageItem.text(
+                            MessageRole.ASSISTANT,
+                            json.dumps({"candidates": [], "promotions": []}),
+                            phase=MessagePhase.FINAL_ANSWER,
+                        ),
+                    ]
+                    status = ResponseStatus.COMPLETED
+                response = KemoResponse(
+                    request_id=request.request_id,
+                    status=status,
+                    model=request.model,
+                    output=output,
+                    usage=Usage(
+                        input_tokens=2,
+                        output_tokens=1,
+                        total_tokens=3,
+                        measurement=Measurement(mode="provider", exact=True),
+                    ),
+                )
+                inner_self.responses.append(response)
+                return response
+
+        provider = ReusedReasoningIdProvider()
+        with (
+            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch("run.agent_runner.execute_tool", return_value={"matches": []}),
+        ):
+            result = self.runner(provider).run(
+                "self_improve",
+                {"trigger": "context_compression", "rounds": []},
+            )
+
+        self.assertEqual(result.data["candidates"], [])
+        self.assertEqual(len(provider.requests), 3)
+        carried_reasoning = [
+            item
+            for item in provider.requests[2].input
+            if isinstance(item, ReasoningItem)
+        ]
+        self.assertEqual(len(carried_reasoning), 2)
+        self.assertEqual(len({item.id for item in carried_reasoning}), 2)
+        self.assertTrue(all(item.id != "rs_0" for item in carried_reasoning))
+        self.assertTrue(
+            all(
+                item.id == "rs_0"
+                for response in provider.responses
+                for item in response.output
+                if isinstance(item, ReasoningItem)
+            )
+        )
 
     def test_history_summary_repairs_non_json_output_once(self) -> None:
         repaired = {
