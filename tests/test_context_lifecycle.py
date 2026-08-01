@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from provider.schema import Usage
 from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
-from run.context_summary import build_summary_message, get_or_create_summary
+from run.context_summary import (
+    _atomic_write as write_summary_cache,
+    build_summary_message,
+    get_or_create_summary,
+)
 from run.context_service import compress_per_round_tool_think
 from run.session_runtime import copy_committed_round_to_archive
 from run.history import (
@@ -263,6 +270,30 @@ class ContextLifecycleTests(unittest.TestCase):
             ContextPolicy.from_config(
                 {"agents": {"max_rounds": 2, "rounds_after_compression": 3}}
             )
+
+    def test_context_summary_cache_retries_transient_replace_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "context_summary.json"
+            original_replace = os.replace
+            attempts = 0
+
+            def briefly_locked(source: Path, destination: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError(errno.EACCES, "temporarily locked")
+                original_replace(source, destination)
+
+            with (
+                patch("run.atomic_io.os.replace", side_effect=briefly_locked),
+                patch("run.atomic_io.time.sleep") as sleep,
+            ):
+                write_summary_cache(target, {"schema_version": 3, "summary": "ok"})
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(json.loads(target.read_text("utf-8"))["summary"], "ok")
+            self.assertEqual(list(target.parent.glob(".*.tmp")), [])
 
     def test_round_threshold_keeps_whole_latest_rounds_without_mutating_history(self) -> None:
         window = make_window(6)

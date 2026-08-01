@@ -13,6 +13,7 @@ data.json 最后以 complete=true 提交；读者不会把部分写入视为完�
 from __future__ import annotations
 
 import copy
+from contextlib import suppress
 import json
 import os
 import shutil
@@ -22,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run.atomic_io import replace_with_retry
 from run.history_index import (
     find_record as find_index_record,
     list_records as list_index_records,
@@ -94,10 +96,12 @@ def _atomic_write_json(path: Path, value: object) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            # Cleanup is secondary and must not hide the write/replace error.
+            with suppress(OSError):
+                temporary.unlink()
 
 
 def _read_json(path: Path) -> Any:

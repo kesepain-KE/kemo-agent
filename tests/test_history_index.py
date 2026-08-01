@@ -62,8 +62,8 @@ class HistoryIndexTests(unittest.TestCase):
             original_replace(source, destination)
 
         with (
-            patch("run.history_index.os.replace", side_effect=briefly_locked),
-            patch("run.history_index.time.sleep") as sleep,
+            patch("run.atomic_io.os.replace", side_effect=briefly_locked),
+            patch("run.atomic_io.time.sleep") as sleep,
         ):
             _atomic_write(target, {"schema_version": 2, "sessions": {}})
 
@@ -76,10 +76,10 @@ class HistoryIndexTests(unittest.TestCase):
         target = index_path(root, "alice")
         with (
             patch(
-                "run.history_index.os.replace",
+                "run.atomic_io.os.replace",
                 side_effect=OSError(errno.ENOSPC, "disk full"),
             ) as replace,
-            patch("run.history_index.time.sleep") as sleep,
+            patch("run.atomic_io.time.sleep") as sleep,
         ):
             with self.assertRaises(OSError) as raised:
                 _atomic_write(target, {"schema_version": 2})
@@ -87,6 +87,40 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(raised.exception.errno, errno.ENOSPC)
         replace.assert_called_once()
         sleep.assert_not_called()
+
+    def test_archive_commit_retries_transient_windows_style_file_lock(self) -> None:
+        _, root = self.make_root()
+        directory = root / "users" / "alice" / "history" / "conv_retry"
+        data_path = directory / "data.json"
+        window = empty_window("alice", "web", "conv_retry")
+        window["data"]["rounds"] = 1
+        window["text"]["messages"] = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+        original_replace = os.replace
+        denied_attempts = 0
+
+        def briefly_locked(source: Path, destination: Path) -> None:
+            nonlocal denied_attempts
+            if Path(destination) == data_path and denied_attempts < 2:
+                denied_attempts += 1
+                error = PermissionError(errno.EACCES, "temporarily locked")
+                error.winerror = 5
+                raise error
+            original_replace(source, destination)
+
+        with (
+            patch("run.atomic_io.os.replace", side_effect=briefly_locked),
+            patch("run.atomic_io.time.sleep") as sleep,
+        ):
+            commit_window(directory, window)
+
+        self.assertEqual(denied_attempts, 2)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(json.loads(data_path.read_text("utf-8"))["complete"])
+        self.assertEqual(load_window(directory)["data"]["rounds"], 1)
+        self.assertEqual(list(directory.glob(".*.tmp")), [])
 
     def commit_archive(
         self,

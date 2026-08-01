@@ -11,20 +11,19 @@ continues to be accepted during the migration period.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import copy
-import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat as stat_module
 import threading
-import time
 import uuid
 from typing import Any, Iterator
 
+from run.atomic_io import replace_with_retry
 from run.users import user_dir
 
 
@@ -39,11 +38,6 @@ SUMMARY_DEFAULT_RETRY_DELAYS = (30, 120, 600, 1800)
 _KEY_SEPARATOR = "\x1f"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
-_ATOMIC_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2)
-_TRANSIENT_REPLACE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
-_TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32, 33})
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -145,24 +139,6 @@ def index_lock(root: Path, user: str) -> Iterator[None]:
             yield
 
 
-def _replace_with_retry(source: Path, target: Path) -> None:
-    """Atomically replace a file, tolerating brief cross-platform file locks."""
-
-    for attempt in range(len(_ATOMIC_REPLACE_RETRY_DELAYS) + 1):
-        try:
-            os.replace(source, target)
-            return
-        except OSError as exc:
-            transient = (
-                exc.errno in _TRANSIENT_REPLACE_ERRNOS
-                or getattr(exc, "winerror", None)
-                in _TRANSIENT_WINDOWS_REPLACE_ERRORS
-            )
-            if not transient or attempt >= len(_ATOMIC_REPLACE_RETRY_DELAYS):
-                raise
-            time.sleep(_ATOMIC_REPLACE_RETRY_DELAYS[attempt])
-
-
 def _atomic_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -172,10 +148,12 @@ def _atomic_write(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        _replace_with_retry(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            # Cleanup is secondary and must not hide the write/replace error.
+            with suppress(OSError):
+                temporary.unlink()
 
 
 def empty_index() -> dict[str, Any]:

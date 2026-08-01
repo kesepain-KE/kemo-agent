@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import suppress
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from typing import Any, Callable
 
 from events import RunEvent
 from run.agent_runner import AgentRunner
+from run.atomic_io import replace_with_retry
 from run.context import RoundGroup, estimate_text_tokens
 
 
@@ -170,10 +172,12 @@ def _atomic_write(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            # Cleanup is secondary and must not hide the write/replace error.
+            with suppress(OSError):
+                temporary.unlink()
 
 
 def _chunks(groups: list[RoundGroup], token_budget: int) -> list[list[RoundGroup]]:
