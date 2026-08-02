@@ -1,35 +1,40 @@
-"""Durable logical conversation registry.
+"""Durable SQLite registry for logical conversations and background jobs.
 
-The history directory remains the source of truth for the complete transcript;
-this module stores the small, rebuildable registry that maps logical sessions
-to archive/runtime windows and to the active entry point of each chain.
-
-The registry deliberately accepts legacy timestamp-named windows.  New
-windows may use opaque ``conv_`` identifiers, while the public ``session_id``
-continues to be accepted during the migration period.
+The registry maps logical sessions to archive/runtime window rows, tracks
+active entry points, and coordinates memory and summary leases. Complete
+transcripts and this registry share the per-user history database.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import copy
 import hashlib
-import json
 import os
 from pathlib import Path
-import stat as stat_module
 import threading
 import uuid
 from typing import Any, Iterator
 
-from run.atomic_io import replace_with_retry
+from run.history_store import (
+    database_path as history_database_path,
+    list_windows as list_stored_windows,
+    query_session_records,
+    read_active_binding,
+    read_latest_registry_record,
+    read_registry,
+    read_registry_metadata,
+    read_registry_record,
+    upsert_registry_record,
+    write_registry,
+)
 from run.users import user_dir
 
 
-INDEX_SCHEMA_VERSION = 2
-INDEX_FILENAME = "data.json"
-INDEX_LOCK_FILENAME = ".data.index.lock"
+INDEX_SCHEMA_VERSION = 3
+INDEX_FILENAME = "history.sqlite3"
+INDEX_LOCK_FILENAME = ".history.index.lock"
 MEMORY_CLAIM_STALE_SECONDS = 15 * 60
 MEMORY_RETRY_DELAY_SECONDS = 30
 SUMMARY_CLAIM_STALE_SECONDS = 15 * 60
@@ -38,6 +43,8 @@ SUMMARY_DEFAULT_RETRY_DELAYS = (30, 120, 600, 1800)
 _KEY_SEPARATOR = "\x1f"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -78,7 +85,7 @@ def history_directory(root: Path, user: str) -> Path:
 
 
 def index_path(root: Path, user: str) -> Path:
-    return history_directory(root, user) / INDEX_FILENAME
+    return history_database_path(root, user)
 
 
 def _lock_path(root: Path, user: str) -> Path:
@@ -139,90 +146,25 @@ def index_lock(root: Path, user: str) -> Iterator[None]:
             yield
 
 
-def _atomic_write(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        replace_with_retry(temporary, path)
-    finally:
-        if temporary.exists():
-            # Cleanup is secondary and must not hide the write/replace error.
-            with suppress(OSError):
-                temporary.unlink()
-
-
 def empty_index() -> dict[str, Any]:
     return {
         "schema_version": INDEX_SCHEMA_VERSION,
         "revision": 0,
         "sessions": {},
         "active": {},
-        # A lightweight fingerprint of archive metadata.  It lets readers
-        # avoid parsing every (potentially very large) archive data.json on
-        # every session-list request while still detecting external changes.
-        "archive_manifest": {},
         "updated_at": _now(),
     }
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _archive_manifest(root: Path, user: str) -> dict[str, dict[str, int]]:
-    """Return stat-only fingerprints for complete archive candidates.
-
-    The manifest intentionally does not open archive files.  ``data.json``
-    can contain large round metrics, so listing sessions should only pay the
-    cost of a directory walk and a stat call per archive.  A changed mtime or
-    size causes the normal reconciliation path to re-read the archive.
-    """
-
-    directory = history_directory(root, user)
-    result: dict[str, dict[str, int]] = {}
-    if not directory.is_dir():
-        return result
-    try:
-        children = directory.iterdir()
-        for child in children:
-            if not child.is_dir() or child.name == "temp" or child.is_symlink():
-                continue
-            data_path = child / "data.json"
-            try:
-                file_stat = data_path.stat()
-            except OSError:
-                continue
-            if not stat_module.S_ISREG(file_stat.st_mode):
-                continue
-            result[child.name] = {
-                "mtime_ns": int(file_stat.st_mtime_ns),
-                "size": int(file_stat.st_size),
-            }
-    except OSError:
-        # A disappearing history directory is equivalent to an empty one;
-        # reconciliation remains able to recover once it becomes available.
-        return {}
-    return result
 
 
 def _record_key(source: str, session_id: str) -> str:
     return session_key(source, session_id)
 
 
-def _legacy_index_id(source: str, session_id: str, directory: Path) -> str:
+def _derived_conversation_id(source: str, session_id: str, directory: Path) -> str:
     digest = hashlib.sha256(
         f"{source}\0{session_id}\0{directory.name}".encode("utf-8")
     ).hexdigest()[:24]
-    return f"legacy_{digest}"
+    return f"conv_{digest}"
 
 
 def _platform_binding(source: str) -> str | None:
@@ -245,9 +187,7 @@ def _record_from_data(
     archive_memory_round: int | None = None
     if data.get("memory_processed_round") is not None:
         try:
-            archive_memory_round = max(
-                0, int(data.get("memory_processed_round") or 0)
-            )
+            archive_memory_round = max(0, int(data.get("memory_processed_round") or 0))
         except (TypeError, ValueError):
             archive_memory_round = 0
     try:
@@ -266,25 +206,25 @@ def _record_from_data(
         **old,
         "conversation_id": str(
             old.get("conversation_id")
-            or (session_id if session_id.startswith("conv_") else _legacy_index_id(source, session_id, directory))
+            or (
+                session_id
+                if session_id.startswith("conv_")
+                else _derived_conversation_id(source, session_id, directory)
+            )
         ),
         "session_id": session_id,
         "source": source,
         "chain": chain_for_source(source),
         "origins": sorted(
             {
-                *(
-                    item
-                    for item in old.get("origins", [])
-                    if isinstance(item, str)
-                ),
+                *(item for item in old.get("origins", []) if isinstance(item, str)),
                 source,
             }
         ),
         "title": str(data.get("title") or old.get("title") or ""),
         "summary": str(old.get("summary") or ""),
         "bound_platform": old.get("bound_platform") or _platform_binding(source),
-        "lifecycle": str(old.get("lifecycle") or old.get("state") or "open"),
+        "lifecycle": str(old.get("lifecycle") or "open"),
         "run_state": str(old.get("run_state") or "idle"),
         "archive_window": directory.name,
         "runtime_window": f"temp/{directory.name}",
@@ -335,16 +275,12 @@ def _record_from_data(
 
 
 def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
-    directory = history_directory(root, user)
     result: dict[str, dict[str, Any]] = {}
-    if not directory.is_dir():
-        return result
-    for child in directory.iterdir():
-        if not child.is_dir() or child.name == "temp" or child.is_symlink():
-            continue
-        data = _read_json(child / "data.json")
+    for stored in list_stored_windows(root, user):
+        data = stored.get("data")
         if not isinstance(data, dict) or data.get("complete") is not True:
             continue
+        child = history_directory(root, user) / str(stored.get("window_name") or "")
         source = str(data.get("source") or "")
         session_id = str(data.get("session_id") or "")
         user_value = str(data.get("user") or user)
@@ -365,82 +301,33 @@ def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
             previous=previous,
         )
         if previous is None and data.get("memory_processed_round") is None:
-            # Legacy archives predate durable extraction cursors.  Treat their
-            # existing rounds as migrated instead of unexpectedly replaying an
-            # unbounded number of historical LLM extraction jobs.
+            # A registry rebuilt from archive rows must not unexpectedly replay
+            # an unbounded number of historical LLM extraction jobs.
             record["memory_processed_round"] = record["rounds"]
             record["memory_status"] = "completed"
         result[key] = record
     return result
 
 
-def _normalize_index(value: dict[str, Any] | None) -> dict[str, Any]:
-    base = empty_index()
-    if not isinstance(value, dict):
-        return base
-    sessions = value.get("sessions")
-    if isinstance(sessions, dict):
-        base["sessions"] = {
-            str(key): copy.deepcopy(record)
-            for key, record in sessions.items()
-            if isinstance(record, dict)
-        }
-    active = value.get("active")
-    if isinstance(active, dict):
-        base["active"] = copy.deepcopy(active)
-    manifest = value.get("archive_manifest")
-    if isinstance(manifest, dict):
-        normalized_manifest: dict[str, dict[str, int]] = {}
-        for name, entry in manifest.items():
-            if not isinstance(entry, dict):
-                continue
-            try:
-                normalized_manifest[str(name)] = {
-                    "mtime_ns": max(0, int(entry.get("mtime_ns") or 0)),
-                    "size": max(0, int(entry.get("size") or 0)),
-                }
-            except (TypeError, ValueError):
-                continue
-        base["archive_manifest"] = normalized_manifest
-    try:
-        base["revision"] = max(0, int(value.get("revision") or 0))
-    except (TypeError, ValueError):
-        base["revision"] = 0
-    base["updated_at"] = str(value.get("updated_at") or _now())
-    return base
-
-
 def _active_reference(source: str, session_id: str) -> dict[str, str]:
     return {"source": source, "session_id": session_id}
 
 
-def _active_record(
-    sessions: dict[str, Any], value: Any
-) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        source = str(value.get("source") or "")
-        session_id = str(value.get("session_id") or "")
-        record = sessions.get(session_key(source, session_id))
-        return record if isinstance(record, dict) else None
-    if not isinstance(value, str):
+def _active_record(sessions: dict[str, Any], value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
         return None
-    matches = [
-        record
-        for record in sessions.values()
-        if isinstance(record, dict) and record.get("session_id") == value
-    ]
-    if not matches:
-        return None
-    matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-    return matches[0]
+    source = str(value.get("source") or "")
+    session_id = str(value.get("session_id") or "")
+    record = sessions.get(session_key(source, session_id))
+    return record if isinstance(record, dict) else None
 
 
 def _active_matches(value: Any, source: str, session_id: str) -> bool:
-    if isinstance(value, dict):
-        return (
-            value.get("source") == source and value.get("session_id") == session_id
-        )
-    return value == session_id
+    return bool(
+        isinstance(value, dict)
+        and value.get("source") == source
+        and value.get("session_id") == session_id
+    )
 
 
 def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
@@ -460,7 +347,9 @@ def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
             target_round = max(0, int(record.get("memory_target_round") or 0))
         except (TypeError, ValueError):
             target_round = 0
-        claim_limit = min(committed_round, target_round) if target_round else committed_round
+        claim_limit = (
+            min(committed_round, target_round) if target_round else committed_round
+        )
         if processed_round < claim_limit or not record.get("memory_claim_id"):
             continue
         for field in (
@@ -494,8 +383,6 @@ def _reconcile_unlocked(
     root: Path,
     user: str,
     index: dict[str, Any],
-    *,
-    manifest: dict[str, dict[str, int]] | None = None,
 ) -> bool:
     changed = False
     scanned = _scan_archive_windows(root, user)
@@ -508,7 +395,8 @@ def _reconcile_unlocked(
             sessions[key] = _record_from_data(
                 source=str(record.get("source") or ""),
                 session_id=str(record.get("session_id") or ""),
-                directory=history_directory(root, user) / str(record.get("archive_window") or ""),
+                directory=history_directory(root, user)
+                / str(record.get("archive_window") or ""),
                 data=record,
                 previous=old,
             )
@@ -517,60 +405,59 @@ def _reconcile_unlocked(
     scanned_keys = set(scanned)
     for key in existing_keys - scanned_keys:
         record = sessions.get(key) or {}
-        if (
-            record.get("run_state") == "running"
-            or not record.get("archive_window")
-        ):
+        if record.get("run_state") == "running" or not record.get("archive_window"):
             continue
         sessions.pop(key, None)
         changed = True
     changed = _reconcile_metadata_unlocked(index) or changed
-    current_manifest = manifest if manifest is not None else _archive_manifest(root, user)
-    if index.get("archive_manifest") != current_manifest:
-        index["archive_manifest"] = copy.deepcopy(current_manifest)
-        changed = True
     return changed
 
 
 def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, Any]:
-    """Load and, when needed, rebuild the per-user index atomically."""
+    """Load the per-user SQLite registry atomically."""
 
-    path = index_path(root, user)
     with index_lock(root, user):
-        raw = _read_json(path) if path.is_file() else None
-        index = _normalize_index(raw)
-        changed = raw is None or raw.get("schema_version") != INDEX_SCHEMA_VERSION if isinstance(raw, dict) else True
-        if reconcile:
-            manifest = _archive_manifest(root, user)
-            stored_manifest = index.get("archive_manifest")
-            needs_reconcile = (
-                changed
-                or not isinstance(stored_manifest, dict)
-                or stored_manifest != manifest
-            )
-            if needs_reconcile:
-                changed = _reconcile_unlocked(
-                    root,
-                    user,
-                    index,
-                    manifest=manifest,
-                ) or changed
-            else:
-                changed = _reconcile_metadata_unlocked(index) or changed
+        index = _load_index_unlocked(root, user)
+        changed = False
+        # A missing registry can be rebuilt from SQLite windows without any
+        # filesystem scan. Normal reads only repair registry-local metadata.
+        if reconcile and not index.get("sessions"):
+            changed = _reconcile_unlocked(root, user, index) or changed
+        elif reconcile:
+            changed = _reconcile_metadata_unlocked(index) or changed
         if changed:
-            index["schema_version"] = INDEX_SCHEMA_VERSION
-            index["revision"] = max(0, int(index.get("revision") or 0)) + 1
-            index["updated_at"] = _now()
-            _atomic_write(path, index)
+            _write_index_unlocked(root, user, index)
         return copy.deepcopy(index)
 
 
-def _write_index_unlocked(root: Path, user: str, index: dict[str, Any]) -> dict[str, Any]:
-    index["archive_manifest"] = _archive_manifest(root, user)
+def _load_index_unlocked(root: Path, user: str) -> dict[str, Any]:
+    sessions, active = read_registry(root, user)
+    metadata = read_registry_metadata(root, user)
+    index = empty_index()
+    index["sessions"] = sessions
+    index["active"] = active
+    try:
+        index["revision"] = max(0, int(metadata.get("registry_revision") or 0))
+    except (TypeError, ValueError):
+        index["revision"] = 0
+    index["updated_at"] = str(metadata.get("registry_updated_at") or _now())
+    return index
+
+
+def _write_index_unlocked(
+    root: Path, user: str, index: dict[str, Any]
+) -> dict[str, Any]:
     index["schema_version"] = INDEX_SCHEMA_VERSION
     index["revision"] = max(0, int(index.get("revision") or 0)) + 1
     index["updated_at"] = _now()
-    _atomic_write(index_path(root, user), index)
+    write_registry(
+        root,
+        user,
+        index.setdefault("sessions", {}),
+        index.setdefault("active", {}),
+        revision=int(index["revision"]),
+        updated_at=str(index["updated_at"]),
+    )
     return copy.deepcopy(index)
 
 
@@ -587,10 +474,7 @@ def upsert_window(
     """Insert/update one committed archive window in the registry."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
-        key = _record_key(source, session_id)
-        previous = index.setdefault("sessions", {}).get(key)
+        previous = read_registry_record(root, user, source, session_id)
         record = _record_from_data(
             source=source,
             session_id=session_id,
@@ -600,8 +484,7 @@ def upsert_window(
         )
         if run_state is not None:
             record["run_state"] = run_state
-        index["sessions"][key] = record
-        return _write_index_unlocked(root, user, index)["sessions"][key]
+        return upsert_registry_record(root, user, record, updated_at=_now())
 
 
 def _reserved_record(
@@ -636,12 +519,8 @@ def _reserved_record(
         "token_usage": copy.deepcopy(old.get("token_usage") or {}),
         "created_at": str(old.get("created_at") or now),
         "updated_at": now,
-        "last_committed_round": max(
-            0, int(old.get("last_committed_round") or 0)
-        ),
-        "memory_processed_round": max(
-            0, int(old.get("memory_processed_round") or 0)
-        ),
+        "last_committed_round": max(0, int(old.get("last_committed_round") or 0)),
+        "memory_processed_round": max(0, int(old.get("memory_processed_round") or 0)),
         "memory_status": str(old.get("memory_status") or "pending"),
     }
 
@@ -658,22 +537,23 @@ def reserve_session(
     """Reserve a logical session without creating an empty archive window."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
-        key = session_key(source, session_id)
-        previous = index.setdefault("sessions", {}).get(key)
+        previous = read_registry_record(root, user, source, session_id)
         record = _reserved_record(
             previous,
             source=source,
             session_id=session_id,
             title=title,
         )
-        index["sessions"][key] = record
-        if active_key:
-            index.setdefault("active", {})[active_key] = _active_reference(
-                source, session_id
-            )
-        return _write_index_unlocked(root, user, index)["sessions"][key]
+        active_updates = (
+            {active_key: _active_reference(source, session_id)} if active_key else None
+        )
+        return upsert_registry_record(
+            root,
+            user,
+            record,
+            active_updates=active_updates,
+            updated_at=_now(),
+        )
 
 
 def get_or_reserve_active(
@@ -689,59 +569,65 @@ def get_or_reserve_active(
     """Atomically resolve an active binding or reserve its next session."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
-        reconciled = _reconcile_unlocked(root, user, index)
-        sessions = index.setdefault("sessions", {})
-        record = _active_record(sessions, index.setdefault("active", {}).get(active_key))
+        binding = read_active_binding(root, user, active_key)
+        record = None
+        if isinstance(binding, dict):
+            record = read_registry_record(
+                root,
+                user,
+                str(binding.get("source") or ""),
+                str(binding.get("session_id") or ""),
+            )
         if (
             isinstance(record, dict)
             and record.get("source") == source
             and record.get("lifecycle") != "closed"
         ):
-            if reconciled:
-                _write_index_unlocked(root, user, index)
             return copy.deepcopy(record), False
 
         preferred = str(preferred_session_id or "").strip()
         if preferred:
-            candidate = sessions.get(session_key(source, preferred))
+            candidate = read_registry_record(root, user, source, preferred)
             if isinstance(candidate, dict) and candidate.get("lifecycle") != "closed":
-                index["active"][active_key] = _active_reference(source, preferred)
-                written = _write_index_unlocked(root, user, index)
-                return copy.deepcopy(written["sessions"][session_key(source, preferred)]), False
+                written = upsert_registry_record(
+                    root,
+                    user,
+                    candidate,
+                    active_updates={active_key: _active_reference(source, preferred)},
+                    updated_at=_now(),
+                )
+                return written, False
 
         if reuse_latest:
-            candidates = [
-                item
-                for item in sessions.values()
-                if isinstance(item, dict) and item.get("source") == source
-            ]
-            candidates.sort(
-                key=lambda item: str(item.get("updated_at") or ""), reverse=True
-            )
-            if candidates and candidates[0].get("lifecycle") != "closed":
-                latest = candidates[0]
+            latest = read_latest_registry_record(root, user, source)
+            if isinstance(latest, dict) and latest.get("lifecycle") != "closed":
                 latest_session = str(latest.get("session_id") or "")
-                index["active"][active_key] = _active_reference(
-                    source, latest_session
+                written = upsert_registry_record(
+                    root,
+                    user,
+                    latest,
+                    active_updates={
+                        active_key: _active_reference(source, latest_session)
+                    },
+                    updated_at=_now(),
                 )
-                written = _write_index_unlocked(root, user, index)
-                return copy.deepcopy(
-                    written["sessions"][session_key(source, latest_session)]
-                ), False
+                return written, False
 
         session_id = new_conversation_id()
-        key = session_key(source, session_id)
-        sessions[key] = _reserved_record(
+        record = _reserved_record(
             None,
             source=source,
             session_id=session_id,
             title=title,
         )
-        index["active"][active_key] = _active_reference(source, session_id)
-        written = _write_index_unlocked(root, user, index)
-        return copy.deepcopy(written["sessions"][key]), True
+        written = upsert_registry_record(
+            root,
+            user,
+            record,
+            active_updates={active_key: _active_reference(source, session_id)},
+            updated_at=_now(),
+        )
+        return written, True
 
 
 def find_record(
@@ -750,8 +636,7 @@ def find_record(
     source: str,
     session_id: str,
 ) -> dict[str, Any] | None:
-    index = load_index(root, user)
-    record = (index.get("sessions") or {}).get(session_key(source, session_id))
+    record = read_registry_record(root, user, source, session_id)
     return copy.deepcopy(record) if isinstance(record, dict) else None
 
 
@@ -766,10 +651,7 @@ def update_run_state(
     directory: Path | None = None,
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
-        key = _record_key(source, session_id)
-        record = index.setdefault("sessions", {}).get(key)
+        record = read_registry_record(root, user, source, session_id)
         if not isinstance(record, dict):
             if directory is None:
                 return None
@@ -783,8 +665,7 @@ def update_run_state(
         record["run_state_updated_at"] = _now()
         if run_id:
             record["last_run_id"] = run_id
-        index["sessions"][key] = record
-        return _write_index_unlocked(root, user, index)["sessions"][key]
+        return upsert_registry_record(root, user, record, updated_at=_now())
 
 
 def update_memory_state(
@@ -798,9 +679,7 @@ def update_memory_state(
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
-        record = index.setdefault("sessions", {}).get(_record_key(source, session_id))
+        record = read_registry_record(root, user, source, session_id)
         if not isinstance(record, dict):
             return None
         if processed_round is not None:
@@ -816,8 +695,7 @@ def update_memory_state(
             record["memory_error"] = copy.deepcopy(error)
         else:
             record.pop("memory_error", None)
-        index["sessions"][session_key(source, session_id)] = record
-        return _write_index_unlocked(root, user, index)["sessions"][session_key(source, session_id)]
+        return upsert_registry_record(root, user, record, updated_at=_now())
 
 
 def _claim_is_stale(
@@ -870,8 +748,7 @@ def claim_pending_memory(
     except (TypeError, ValueError) as exc:
         raise ValueError("max_rounds 必须是正整数") from exc
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         reconciled = _reconcile_unlocked(root, user, index)
         now = datetime.now(timezone.utc)
         candidates: list[tuple[str, str, dict[str, Any]]] = []
@@ -887,7 +764,9 @@ def claim_pending_memory(
                 target_round = max(0, int(record.get("memory_target_round") or 0))
             except (TypeError, ValueError):
                 target_round = 0
-            claim_limit = min(committed_round, target_round) if target_round else committed_round
+            claim_limit = (
+                min(committed_round, target_round) if target_round else committed_round
+            )
             if processed_round >= claim_limit or not record.get("archive_window"):
                 continue
             status = str(record.get("memory_status") or "pending")
@@ -925,7 +804,9 @@ def claim_pending_memory(
         next_round = max(0, int(record.get("memory_processed_round") or 0)) + 1
         committed_round = max(0, int(record.get("last_committed_round") or 0))
         target_round = max(0, int(record.get("memory_target_round") or 0))
-        claim_limit = min(committed_round, target_round) if target_round else committed_round
+        claim_limit = (
+            min(committed_round, target_round) if target_round else committed_round
+        )
         end_round = min(claim_limit, next_round + batch_size - 1)
         record["memory_status"] = "processing"
         record["memory_claim_id"] = claim_id
@@ -960,8 +841,7 @@ def finish_memory_claim(
     """Finish a memory lease; stale workers cannot overwrite a newer claim."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict) or record.get("memory_claim_id") != claim_id:
@@ -1041,8 +921,7 @@ def set_active(
     source: str | None = None,
 ) -> dict[str, Any]:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         normalized_source = str(source or "")
         if not normalized_source:
             matches = [
@@ -1075,8 +954,7 @@ def close_session(
     session_id: str,
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict):
@@ -1098,8 +976,7 @@ def update_title(
     title: str,
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict):
@@ -1119,24 +996,37 @@ def queue_summary(
     """Queue card metadata generation after a session is durably closed."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict):
             return {"status": "skipped", "reason": "session_not_found", "rounds": 0}
-        target_round = max(0, int(record.get("last_committed_round") or record.get("rounds") or 0))
+        target_round = max(
+            0, int(record.get("last_committed_round") or record.get("rounds") or 0)
+        )
         if record.get("lifecycle") != "closed":
-            return {"status": "skipped", "reason": "session_not_closed", "rounds": target_round}
+            return {
+                "status": "skipped",
+                "reason": "session_not_closed",
+                "rounds": target_round,
+            }
         if target_round < 1 or not record.get("archive_window"):
             record["summary_status"] = "none"
             record["summary_target_round"] = target_round
             index["sessions"][key] = record
             _write_index_unlocked(root, user, index)
-            return {"status": "skipped", "reason": "no_archive_rounds", "rounds": target_round}
+            return {
+                "status": "skipped",
+                "reason": "no_archive_rounds",
+                "rounds": target_round,
+            }
         completed_round = max(0, int(record.get("summary_completed_round") or 0))
         if completed_round >= target_round and str(record.get("summary") or "").strip():
-            return {"status": "completed", "reason": "already_current", "rounds": target_round}
+            return {
+                "status": "completed",
+                "reason": "already_current",
+                "rounds": target_round,
+            }
         record["summary_status"] = "queued"
         record["summary_target_round"] = target_round
         record["summary_state_updated_at"] = _now()
@@ -1167,8 +1057,7 @@ def claim_pending_summary(
     """Atomically lease one closed-session summary job."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         reconciled = _reconcile_unlocked(root, user, index)
         now = datetime.now(timezone.utc)
         candidates: list[tuple[str, str, dict[str, Any]]] = []
@@ -1177,12 +1066,18 @@ def claim_pending_summary(
                 continue
             target_round = max(0, int(record.get("summary_target_round") or 0))
             completed_round = max(0, int(record.get("summary_completed_round") or 0))
-            if target_round < 1 or completed_round >= target_round or not record.get("archive_window"):
+            if (
+                target_round < 1
+                or completed_round >= target_round
+                or not record.get("archive_window")
+            ):
                 continue
             status = str(record.get("summary_status") or "none")
             if status == "processing":
                 claimed_at = _timestamp(record.get("summary_claimed_at"))
-                if claimed_at is not None and (now - claimed_at).total_seconds() < max(1.0, stale_after_seconds):
+                if claimed_at is not None and (now - claimed_at).total_seconds() < max(
+                    1.0, stale_after_seconds
+                ):
                     continue
             elif status in {"failed", "retry_wait"}:
                 retry_at = _timestamp(record.get("summary_retry_at"))
@@ -1201,9 +1096,9 @@ def claim_pending_summary(
         record["summary_claim_id"] = claim_id
         record["summary_claimed_at"] = now.isoformat()
         record["summary_last_attempt_at"] = now.isoformat()
-        record["summary_attempt_count"] = max(
-            0, int(record.get("summary_attempt_count") or 0)
-        ) + 1
+        record["summary_attempt_count"] = (
+            max(0, int(record.get("summary_attempt_count") or 0)) + 1
+        )
         record["summary_state_updated_at"] = now.isoformat()
         index["sessions"][key] = record
         written = _write_index_unlocked(root, user, index)
@@ -1229,8 +1124,7 @@ def finish_summary_claim(
     """Finish a summary lease without allowing stale workers to overwrite data."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
@@ -1258,9 +1152,16 @@ def finish_summary_claim(
         else:
             normalized_title = str(title or "").strip()
             normalized_summary = str(summary or "").strip()
-            if not normalized_title or not normalized_summary or completed_round is None:
+            if (
+                not normalized_title
+                or not normalized_summary
+                or completed_round is None
+            ):
                 return None
-            if not str(record.get("title") or "").strip() or record.get("title_source") == "auto":
+            if (
+                not str(record.get("title") or "").strip()
+                or record.get("title_source") == "auto"
+            ):
                 record["title"] = normalized_title
                 record["title_source"] = "auto"
             record["summary"] = normalized_summary
@@ -1295,8 +1196,7 @@ def defer_summary_claim(
     """Release a lease without consuming an automatic retry attempt."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
@@ -1333,8 +1233,7 @@ def update_summary_checkpoint(
     """Persist rolling summary progress while the current lease is valid."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict) or record.get("summary_claim_id") != claim_id:
@@ -1360,8 +1259,7 @@ def retry_summary(
     """Immediately requeue one incomplete closed-session summary."""
 
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         key = session_key(source, session_id)
         record = index.setdefault("sessions", {}).get(key)
         if not isinstance(record, dict):
@@ -1394,8 +1292,7 @@ def retry_summary(
 
 def remove_session(root: Path, user: str, source: str, session_id: str) -> None:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         index.setdefault("sessions", {}).pop(session_key(source, session_id), None)
         for active_key, active_session in list(index.setdefault("active", {}).items()):
             if _active_matches(active_session, source, session_id):
@@ -1405,18 +1302,14 @@ def remove_session(root: Path, user: str, source: str, session_id: str) -> None:
 
 def remove_all_sessions(root: Path, user: str, source: str) -> int:
     with index_lock(root, user):
-        path = index_path(root, user)
-        index = _normalize_index(_read_json(path))
+        index = _load_index_unlocked(root, user)
         sessions = index.setdefault("sessions", {})
         targets = [
             (key, record)
             for key, record in sessions.items()
             if isinstance(record, dict) and record.get("source") == source
         ]
-        target_ids = {
-            str(record.get("session_id") or "")
-            for _, record in targets
-        }
+        target_ids = {str(record.get("session_id") or "") for _, record in targets}
         for key, _ in targets:
             sessions.pop(key, None)
         for active_key, active_session in list(index.setdefault("active", {}).items()):
@@ -1436,22 +1329,35 @@ def list_records(
     *,
     source: str | None = None,
     query: str = "",
+    limit: int | None = None,
+    before_updated_at: str = "",
 ) -> list[dict[str, Any]]:
-    index = load_index(root, user)
-    needle = query.strip().casefold()
-    records = []
-    for record in (index.get("sessions") or {}).values():
-        if not isinstance(record, dict) or record.get("lifecycle") == "deleted":
-            continue
-        if source is not None and record.get("source") != source:
-            continue
-        if needle:
-            searchable = " ".join(
-                str(record.get(key) or "")
-                for key in ("session_id", "conversation_id", "title", "summary", "archive_window")
-            ).casefold()
-            if needle not in searchable:
-                continue
-        records.append(copy.deepcopy(record))
-    records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-    return records
+    records, _ = query_session_records(
+        root,
+        user,
+        source=source,
+        query=query,
+        limit=limit,
+        before_updated_at=before_updated_at,
+    )
+    return [copy.deepcopy(record) for record in records]
+
+
+def list_records_page(
+    root: Path,
+    user: str,
+    *,
+    source: str | None = None,
+    query: str = "",
+    limit: int = 50,
+    before_updated_at: str = "",
+) -> tuple[list[dict[str, Any]], bool]:
+    records, has_more = query_session_records(
+        root,
+        user,
+        source=source,
+        query=query,
+        limit=max(1, min(100, int(limit))),
+        before_updated_at=before_updated_at,
+    )
+    return [copy.deepcopy(record) for record in records], has_more

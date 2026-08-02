@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import errno
 import json
-import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from provider.schema import Usage
 from run.agent_runner import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
 from run.context_summary import (
-    _atomic_write as write_summary_cache,
     build_summary_message,
     get_or_create_summary,
+    read_summary_cache,
 )
 from run.context_service import compress_per_round_tool_think
 from run.session_runtime import copy_committed_round_to_archive
@@ -61,6 +58,16 @@ def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dic
         "tool": {"rounds": tool_rounds},
         "data": {"rounds": rounds},
     }
+
+
+def make_summary_runtime(root: Path, *, name: str = "summary-window") -> Path:
+    archive_path = root / "users" / "alice" / "history" / name
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive = empty_window("alice", "web", name)
+    commit_window(archive_path, archive)
+    runtime_path = runtime_window_path(archive_path)
+    commit_window(runtime_path, archive)
+    return runtime_path
 
 
 class SummaryRunner:
@@ -163,7 +170,10 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_archive_data_is_clean_and_runtime_restore_is_bounded(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        archive_path = Path(temporary.name) / "history" / "archive-window"
+        archive_path = (
+            Path(temporary.name) / "users" / "alice" / "history" / "archive-window"
+        )
+        archive_path.parent.mkdir(parents=True)
         archive = empty_window("alice", "cli", "session")
         for number in range(1, 6):
             archive["text"]["messages"].extend(
@@ -185,7 +195,7 @@ class ContextLifecycleTests(unittest.TestCase):
         archive["data"]["summary_cache"] = "must-not-archive"
         commit_window(archive_path, archive)
 
-        raw_archive = json.loads((archive_path / "data.json").read_text("utf-8"))
+        raw_archive = load_window(archive_path)["data"]
         self.assertEqual(
             set(raw_archive),
             {
@@ -217,7 +227,7 @@ class ContextLifecycleTests(unittest.TestCase):
             ["u4", "a4", "u5", "a5"],
         )
         commit_window(runtime_path, runtime)
-        raw_runtime = json.loads((runtime_path / "data.json").read_text("utf-8"))
+        raw_runtime = load_window(runtime_path)["data"]
         self.assertIn("context", raw_runtime)
 
     def test_archive_append_maps_local_temp_round_to_absolute_round(self) -> None:
@@ -234,13 +244,9 @@ class ContextLifecycleTests(unittest.TestCase):
         ]
         runtime["think"]["rounds"] = [{"round": 3, "content": "reason"}]
         runtime["tool"]["rounds"] = [{"round": 3, "calls": []}]
-        runtime["items"]["items"] = [
-            {"id": "new-item", "metadata": {"round": 3}}
-        ]
+        runtime["items"]["items"] = [{"id": "new-item", "metadata": {"round": 3}}]
         runtime["data"]["rounds"] = 3
-        runtime["data"]["round_metrics"] = [
-            {"round": 3, "usage": {"total_tokens": 6}}
-        ]
+        runtime["data"]["round_metrics"] = [{"round": 3, "usage": {"total_tokens": 6}}]
         runtime["data"]["context"] = {"round_offset": 3}
 
         copy_committed_round_to_archive(archive, runtime, 3, 6)
@@ -273,34 +279,14 @@ class ContextLifecycleTests(unittest.TestCase):
                 {"agents": {"max_rounds": 2, "rounds_after_compression": 3}}
             )
 
-    def test_context_summary_cache_retries_transient_replace_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "context_summary.json"
-            original_replace = os.replace
-            attempts = 0
-
-            def briefly_locked(source: Path, destination: Path) -> None:
-                nonlocal attempts
-                attempts += 1
-                if attempts < 3:
-                    raise PermissionError(errno.EACCES, "temporarily locked")
-                original_replace(source, destination)
-
-            with (
-                patch("run.atomic_io.os.replace", side_effect=briefly_locked),
-                patch("run.atomic_io.time.sleep") as sleep,
-            ):
-                write_summary_cache(target, {"schema_version": 3, "summary": "ok"})
-
-            self.assertEqual(attempts, 3)
-            self.assertEqual(sleep.call_count, 2)
-            self.assertEqual(json.loads(target.read_text("utf-8"))["summary"], "ok")
-            self.assertEqual(list(target.parent.glob(".*.tmp")), [])
-
-    def test_round_threshold_keeps_whole_latest_rounds_without_mutating_history(self) -> None:
+    def test_round_threshold_keeps_whole_latest_rounds_without_mutating_history(
+        self,
+    ) -> None:
         window = make_window(6)
         snapshot = json.dumps(window, ensure_ascii=False, sort_keys=True)
-        policy = ContextPolicy(max_rounds=6, rounds_after_compression=2, token_limit=10000)
+        policy = ContextPolicy(
+            max_rounds=6, rounds_after_compression=2, token_limit=10000
+        )
         selected = select_context(
             window=window,
             policy=policy,
@@ -308,12 +294,18 @@ class ContextLifecycleTests(unittest.TestCase):
             current_user_message={"role": "user", "content": "current"},
         )
         self.assertEqual([item.number for item in selected.kept_rounds], [5, 6])
-        self.assertEqual([item.number for item in selected.removed_rounds], [1, 2, 3, 4])
+        self.assertEqual(
+            [item.number for item in selected.removed_rounds], [1, 2, 3, 4]
+        )
         self.assertEqual(selected.messages[1]["content"].split("-")[0], "u5")
         self.assertEqual(selected.messages[-1]["content"], "current")
-        self.assertEqual(json.dumps(window, ensure_ascii=False, sort_keys=True), snapshot)
+        self.assertEqual(
+            json.dumps(window, ensure_ascii=False, sort_keys=True), snapshot
+        )
 
-    def test_token_trim_never_splits_round_and_marks_oversized_fixed_content(self) -> None:
+    def test_token_trim_never_splits_round_and_marks_oversized_fixed_content(
+        self,
+    ) -> None:
         window = make_window(4, chars=120)
         policy = ContextPolicy(
             max_rounds=100,
@@ -334,7 +326,9 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertTrue(selected.recent_content_over_budget)
         self.assertEqual(selected.messages[-1]["content"], "当" * 600)
 
-    def test_tool_messages_stay_as_assistant_call_plus_result_and_old_results_compact(self) -> None:
+    def test_tool_messages_stay_as_assistant_call_plus_result_and_old_results_compact(
+        self,
+    ) -> None:
         window = make_window(4, with_tools=True)
         policy = ContextPolicy(
             recent_tool_rounds=1,
@@ -384,7 +378,9 @@ class ContextLifecycleTests(unittest.TestCase):
                 self.assertLess(len(content), 2_000)
                 self.assertNotIn("R" * 100, content)
 
-    def test_legacy_empty_message_keeps_round_boundary_without_invalid_native_item(self) -> None:
+    def test_legacy_empty_message_keeps_round_boundary_without_invalid_native_item(
+        self,
+    ) -> None:
         window = empty_window("alice", "web", "legacy-empty")
         window["data"]["rounds"] = 1
         window["items"]["items"] = [
@@ -412,7 +408,9 @@ class ContextLifecycleTests(unittest.TestCase):
         groups = build_round_groups(window, ContextPolicy())
 
         self.assertEqual(len(groups), 1)
-        self.assertEqual([item["role"] for item in groups[0].messages], ["user", "assistant"])
+        self.assertEqual(
+            [item["role"] for item in groups[0].messages], ["user", "assistant"]
+        )
         legacy_user = groups[0].messages[0]
         self.assertIn("历史兼容", legacy_user["content"])
         self.assertNotIn("_kemo_message", legacy_user)
@@ -420,12 +418,12 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_summary_cache_generation_and_exact_reuse(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        cache_path = Path(temporary.name) / "summary.json"
+        runtime_path = make_summary_runtime(Path(temporary.name))
         groups = build_round_groups(make_window(3), ContextPolicy())
         provider = SummaryRunner()
         usage = []
         first, diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -438,7 +436,7 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(build_summary_message(first))
 
         second, diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -448,28 +446,28 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(second["source_hash"], first["source_hash"])
 
-    def test_summary_source_includes_reasoning_and_schema_upgrade_invalidates_cache(self) -> None:
+    def test_summary_source_includes_reasoning_and_schema_upgrade_invalidates_cache(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        cache_path = Path(temporary.name) / "summary.json"
+        runtime_path = make_summary_runtime(Path(temporary.name))
         window = make_window(1)
         window["think"]["rounds"][0]["content"] = "关键判断：使用已验证的路径"
         groups = build_round_groups(window, ContextPolicy())
         provider = SummaryRunner()
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "source_hash": "old",
-                    "summary": {"narrative": "旧缓存"},
-                },
-                ensure_ascii=False,
-            ),
-            "utf-8",
+        commit_window(
+            runtime_path,
+            empty_window("alice", "web", "summary-window"),
+            summary_cache={
+                "schema_version": 2,
+                "source_hash": "old",
+                "summary": {"narrative": "旧缓存"},
+            },
         )
 
         value, diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -487,10 +485,11 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_context_summary_requests_twenty_thousand_output_tokens(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        runtime_path = make_summary_runtime(Path(temporary.name))
         provider = SummaryRunner()
         groups = build_round_groups(make_window(1), ContextPolicy())
         get_or_create_summary(
-            cache_path=Path(temporary.name) / "summary.json",
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -501,12 +500,12 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_summary_cache_rolls_forward_using_absolute_round_numbers(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        cache_path = Path(temporary.name) / "summary.json"
+        runtime_path = make_summary_runtime(Path(temporary.name))
         provider = SummaryRunner()
 
         first_groups = build_round_groups(make_window(2), ContextPolicy())
         first, first_diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=first_groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -517,7 +516,7 @@ class ContextLifecycleTests(unittest.TestCase):
 
         second_groups = build_round_groups(make_window(2), ContextPolicy())
         second, second_diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=second_groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -540,13 +539,26 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_summary_failure_and_cancel_leave_existing_cache_untouched(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        cache_path = Path(temporary.name) / "summary.json"
-        original = '{"schema_version":1,"source_hash":"old","summary":{"narrative":"old"}}'
-        cache_path.write_text(original, "utf-8")
+        runtime_path = make_summary_runtime(Path(temporary.name))
+        original = {
+            "schema_version": 3,
+            "source_hash": "old",
+            "previous_source_hash": None,
+            "covered_rounds": [1],
+            "covered_through_round": 1,
+            "created_at": "2026-08-02T00:00:00+00:00",
+            "summary": {"narrative": "old"},
+            "memory_extractions": [],
+        }
+        commit_window(
+            runtime_path,
+            empty_window("alice", "web", "summary-window"),
+            summary_cache=original,
+        )
         groups = build_round_groups(make_window(2), ContextPolicy())
 
         value, diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=SummaryRunner(fail=True),
             agent_name="context_manage",
@@ -554,12 +566,12 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         self.assertIsNone(value)
         self.assertTrue(diagnostics["failed"])
-        self.assertEqual(cache_path.read_text("utf-8"), original)
+        self.assertEqual(read_summary_cache(runtime_path)["source_hash"], "old")
 
         cancelled = threading.Event()
         cancelled.set()
         value, diagnostics = get_or_create_summary(
-            cache_path=cache_path,
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=SummaryRunner(),
             agent_name="context_manage",
@@ -568,15 +580,16 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         self.assertIsNone(value)
         self.assertEqual(diagnostics["error"], "cancelled")
-        self.assertEqual(cache_path.read_text("utf-8"), original)
+        self.assertEqual(read_summary_cache(runtime_path)["source_hash"], "old")
 
     def test_summary_chunking_keeps_rounds_indivisible(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        runtime_path = make_summary_runtime(Path(temporary.name))
         groups = build_round_groups(make_window(5, chars=300), ContextPolicy())
         provider = SummaryRunner()
         value, diagnostics = get_or_create_summary(
-            cache_path=Path(temporary.name) / "summary.json",
+            runtime_path=runtime_path,
             groups=groups,
             agent_runner=provider,
             agent_name="context_manage",
@@ -607,7 +620,9 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(window["tool"]["rounds"][0]["calls"], [])
         self.assertFalse(window["think"]["rounds"][1].get("compressed", False))
 
-    def test_tool_think_compression_rejects_empty_summary_without_mutating_data(self) -> None:
+    def test_tool_think_compression_rejects_empty_summary_without_mutating_data(
+        self,
+    ) -> None:
         window = make_window(5, with_tools=True)
         original_reasoning = {
             "id": "rs_original",
@@ -645,7 +660,10 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_runtime_mirror_can_compress_without_mutating_archive(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        archive_path = Path(temporary.name) / "history" / "archive-window"
+        archive_path = (
+            Path(temporary.name) / "users" / "alice" / "history" / "archive-window"
+        )
+        archive_path.parent.mkdir(parents=True)
         archive = empty_window("alice", "cli", "session")
         archive["think"]["rounds"].append({"round": 1, "content": "raw reasoning"})
         archive["tool"]["rounds"].append(
@@ -664,11 +682,42 @@ class ContextLifecycleTests(unittest.TestCase):
         runtime_path, reloaded_runtime = load_runtime_window(
             archive_path, reloaded_archive
         )
-        self.assertEqual(reloaded_archive["think"]["rounds"][0]["content"], "raw reasoning")
-        self.assertEqual(reloaded_archive["tool"]["rounds"][0]["calls"][0]["result"], "raw result")
+        self.assertEqual(
+            reloaded_archive["think"]["rounds"][0]["content"], "raw reasoning"
+        )
+        self.assertEqual(
+            reloaded_archive["tool"]["rounds"][0]["calls"][0]["result"], "raw result"
+        )
         self.assertEqual(runtime_path, runtime_window_path(archive_path))
-        self.assertEqual(reloaded_runtime["think"]["rounds"][0]["content"], "compressed")
+        self.assertEqual(
+            reloaded_runtime["think"]["rounds"][0]["content"], "compressed"
+        )
         self.assertEqual(reloaded_runtime["tool"]["rounds"][0]["calls"], [])
+
+    def test_runtime_window_and_summary_share_one_sqlite_commit(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        archive_path = (
+            Path(temporary.name) / "users" / "alice" / "history" / "archive-window"
+        )
+        archive_path.parent.mkdir(parents=True)
+        archive = empty_window("alice", "web", "session")
+        commit_window(archive_path, archive)
+        runtime_path = runtime_window_path(archive_path)
+        summary = {
+            "schema_version": 3,
+            "source_hash": "digest",
+            "previous_source_hash": None,
+            "covered_rounds": [1],
+            "covered_through_round": 1,
+            "created_at": "2026-08-02T00:00:00+00:00",
+            "summary": {"narrative": "compressed"},
+            "memory_extractions": [],
+        }
+
+        commit_window(runtime_path, archive, summary_cache=summary)
+
+        self.assertEqual(read_summary_cache(runtime_path)["source_hash"], "digest")
 
 
 if __name__ == "__main__":

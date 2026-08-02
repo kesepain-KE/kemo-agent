@@ -5,7 +5,7 @@
 ## 使用原则
 
 1. **与 memory 搜索的区别**：`history_search` 搜索原始对话文本，即用户和助手曾经说过什么；`memory_manage` 的 `search_by_title`、`search_by_content` 搜索提炼后的长期记忆、临时记忆与规则。想找“上次讨论树莓派时说了什么”使用 `history_search`，想找“树莓派的 IP 是多少”优先搜索记忆。
-2. **时间过滤优先**：用户提及“昨天”“上周”或具体日期时，应先换算为北京时间的 `YYYY-MM-DD`，再传入 `since`、`until`。工具使用归档 `data.json` 的 `created_at` 判断会话日期，并兼容旧式日期目录；被排除的窗口不会读取正文 JSON。
+2. **时间过滤优先**：用户提及“昨天”“上周”或具体日期时，应先换算为北京时间的 `YYYY-MM-DD`，再传入 `since`、`until`。工具使用 SQLite 归档元数据的 `created_at` 判断会话日期；正文来自结构化消息表，不扫描历史目录。
 3. **角色过滤**：用户问“我上次说过什么”时使用 `role=user`；问“你之前怎么回答的”时使用 `role=assistant`。
 4. **上下文按需获取**：需要还原对话脉络时传入 `context_messages`，一般取 2–3；只确认是否提到某个词时保持默认值 0。
 5. **搜索精度**：搜索 `AI` 等缩写且不希望命中 `main`、`email` 时，使用 `match_mode=word`。只有用户明确需要模式匹配时才启用 `regex=true`。
@@ -39,7 +39,7 @@
 | `session_id` | 会话 ID |
 | `role` | 匹配消息角色 |
 | `snippet` | 围绕首次命中位置生成的有界片段 |
-| `match_index` | 匹配消息在 `text.json.messages` 中的索引 |
+| `match_index` | 匹配消息在归档 text 逻辑分区中的索引 |
 | `context` | 上下文消息数组，仅在 `context_messages > 0` 时返回 |
 | `context_index` | 匹配消息在 context 数组中的位置，仅在 `context_messages > 0` 时返回 |
 

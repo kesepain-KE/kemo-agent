@@ -1,16 +1,8 @@
 from __future__ import annotations
 
-import errno
-import json
-import os
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
-import run.history as history_module
-import run.history_index as history_index_module
 from run.history import (
     commit_window,
     empty_window,
@@ -19,7 +11,6 @@ from run.history import (
     load_window,
 )
 from run.history_index import (
-    _atomic_write,
     claim_pending_memory,
     claim_pending_summary,
     close_session,
@@ -27,7 +18,6 @@ from run.history_index import (
     finish_memory_claim,
     finish_summary_claim,
     get_active,
-    index_path,
     load_index,
     new_conversation_id,
     remove_session,
@@ -38,6 +28,16 @@ from run.history_index import (
     update_run_state,
     update_title,
 )
+from run.history_store import (
+    connection,
+    database_path,
+    delete_window,
+    query_session_records,
+    read_registry,
+    session_page_cursor,
+    write_registry,
+    window_exists,
+)
 
 
 class HistoryIndexTests(unittest.TestCase):
@@ -47,80 +47,6 @@ class HistoryIndexTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "users" / "alice" / "history").mkdir(parents=True)
         return temporary, root
-
-    def test_atomic_index_write_retries_transient_replace_lock(self) -> None:
-        _, root = self.make_root()
-        target = index_path(root, "alice")
-        original_replace = os.replace
-        attempts = 0
-
-        def briefly_locked(source: Path, destination: Path) -> None:
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise PermissionError(errno.EACCES, "temporarily locked")
-            original_replace(source, destination)
-
-        with (
-            patch("run.atomic_io.os.replace", side_effect=briefly_locked),
-            patch("run.atomic_io.time.sleep") as sleep,
-        ):
-            _atomic_write(target, {"schema_version": 2, "sessions": {}})
-
-        self.assertEqual(attempts, 3)
-        self.assertEqual(sleep.call_count, 2)
-        self.assertEqual(json.loads(target.read_text("utf-8"))["schema_version"], 2)
-
-    def test_atomic_index_write_does_not_retry_non_transient_error(self) -> None:
-        _, root = self.make_root()
-        target = index_path(root, "alice")
-        with (
-            patch(
-                "run.atomic_io.os.replace",
-                side_effect=OSError(errno.ENOSPC, "disk full"),
-            ) as replace,
-            patch("run.atomic_io.time.sleep") as sleep,
-        ):
-            with self.assertRaises(OSError) as raised:
-                _atomic_write(target, {"schema_version": 2})
-
-        self.assertEqual(raised.exception.errno, errno.ENOSPC)
-        replace.assert_called_once()
-        sleep.assert_not_called()
-
-    def test_archive_commit_retries_transient_windows_style_file_lock(self) -> None:
-        _, root = self.make_root()
-        directory = root / "users" / "alice" / "history" / "conv_retry"
-        data_path = directory / "data.json"
-        window = empty_window("alice", "web", "conv_retry")
-        window["data"]["rounds"] = 1
-        window["text"]["messages"] = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
-        ]
-        original_replace = os.replace
-        denied_attempts = 0
-
-        def briefly_locked(source: Path, destination: Path) -> None:
-            nonlocal denied_attempts
-            if Path(destination) == data_path and denied_attempts < 2:
-                denied_attempts += 1
-                error = PermissionError(errno.EACCES, "temporarily locked")
-                error.winerror = 5
-                raise error
-            original_replace(source, destination)
-
-        with (
-            patch("run.atomic_io.os.replace", side_effect=briefly_locked),
-            patch("run.atomic_io.time.sleep") as sleep,
-        ):
-            commit_window(directory, window)
-
-        self.assertEqual(denied_attempts, 2)
-        self.assertEqual(sleep.call_count, 2)
-        self.assertTrue(json.loads(data_path.read_text("utf-8"))["complete"])
-        self.assertEqual(load_window(directory)["data"]["rounds"], 1)
-        self.assertEqual(list(directory.glob(".*.tmp")), [])
 
     def commit_archive(
         self,
@@ -146,126 +72,75 @@ class HistoryIndexTests(unittest.TestCase):
         commit_window(directory, window)
         return directory
 
-    def test_empty_or_corrupt_index_rebuilds_legacy_archive(self) -> None:
+    def test_history_is_stored_in_sqlite_without_archive_json_directories(self) -> None:
+        _, root = self.make_root()
+        directory = self.commit_archive(
+            root,
+            source="web",
+            session_id="sqlite-session",
+            directory_name="conv_sqlite",
+        )
+
+        self.assertTrue(database_path(root, "alice").is_file())
+        self.assertFalse(directory.exists())
+        self.assertTrue(window_exists(directory))
+        self.assertEqual(load_window(directory)["data"]["rounds"], 1)
+
+    def test_session_cursor_does_not_skip_equal_timestamps(self) -> None:
+        _, root = self.make_root()
+        timestamp = "2026-08-02T00:00:00+00:00"
+        sessions = {
+            session_key("web", f"same-{index}"): {
+                "conversation_id": f"same-{index}",
+                "session_id": f"same-{index}",
+                "source": "web",
+                "title": f"same {index}",
+                "lifecycle": "open",
+                "run_state": "idle",
+                "updated_at": timestamp,
+            }
+            for index in range(5)
+        }
+        write_registry(root, "alice", sessions, {})
+
+        collected: list[str] = []
+        cursor = ""
+        while True:
+            page, has_more = query_session_records(
+                root,
+                "alice",
+                source="web",
+                limit=2,
+                before_updated_at=cursor,
+            )
+            collected.extend(str(record["session_id"]) for record in page)
+            if not has_more:
+                break
+            cursor = session_page_cursor(page[-1])
+
+        self.assertEqual(
+            collected,
+            ["same-4", "same-3", "same-2", "same-1", "same-0"],
+        )
+
+    def test_missing_registry_rebuilds_from_sqlite_windows(self) -> None:
         _, root = self.make_root()
         self.commit_archive(
             root,
             source="web",
-            session_id="legacy-session",
-            directory_name="2026-07-21-12-30",
+            session_id="rebuild-session",
+            directory_name="conv_rebuild",
         )
-        index_path(root, "alice").write_text("{broken", "utf-8")
+        with connection(root, "alice", write=True) as database:
+            database.execute("DELETE FROM history_sessions")
 
         rebuilt = load_index(root, "alice")
 
-        record = find_record(root, "alice", "web", "legacy-session")
-        self.assertEqual(rebuilt["schema_version"], 2)
-        self.assertIsNotNone(record)
-        self.assertTrue(str(record["conversation_id"]).startswith("legacy_"))
-        self.assertEqual(record["archive_window"], "2026-07-21-12-30")
-        self.assertEqual(record["memory_processed_round"], 1)
-        self.assertEqual(record["memory_status"], "completed")
+        record = rebuilt["sessions"][session_key("web", "rebuild-session")]
+        self.assertEqual(rebuilt["schema_version"], 3)
+        self.assertEqual(record["archive_window"], "conv_rebuild")
 
-    def test_unchanged_archive_manifest_skips_full_archive_scan(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="fast-session",
-            directory_name="conv_fast",
-        )
-        initial = load_index(root, "alice")
-
-        self.assertIn("conv_fast", initial["archive_manifest"])
-        with patch(
-            "run.history_index._scan_archive_windows",
-            side_effect=AssertionError("unchanged archives must not be parsed"),
-        ):
-            sessions = list_sessions(root, "alice", "web")
-
-        self.assertEqual([item["session_id"] for item in sessions], ["fast-session"])
-
-    def test_changed_archive_manifest_triggers_reconciliation(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="changed-session",
-            directory_name="conv_changed",
-        )
-        load_index(root, "alice")
-        data_path = archive / "data.json"
-        data = json.loads(data_path.read_text("utf-8"))
-        data["title"] = "externally changed title with a different file size"
-        data_path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
-
-        with patch(
-            "run.history_index._scan_archive_windows",
-            wraps=history_index_module._scan_archive_windows,
-        ) as scan:
-            refreshed = load_index(root, "alice")
-
-        scan.assert_called_once()
-        record = refreshed["sessions"][session_key("web", "changed-session")]
-        self.assertEqual(record["title"], data["title"])
-        self.assertEqual(
-            refreshed["archive_manifest"]["conv_changed"]["size"],
-            data_path.stat().st_size,
-        )
-
-    def test_added_archive_is_discovered_from_manifest_change(self) -> None:
-        _, root = self.make_root()
-        load_index(root, "alice")
-        archive = root / "users" / "alice" / "history" / "conv_external"
-        archive.mkdir()
-        data = empty_window("alice", "web", "external-session")["data"]
-        data["rounds"] = 2
-        data["complete"] = True
-        (archive / "data.json").write_text(
-            json.dumps(data, ensure_ascii=False),
-            "utf-8",
-        )
-
-        refreshed = load_index(root, "alice")
-
-        self.assertIn(session_key("web", "external-session"), refreshed["sessions"])
-        self.assertIn("conv_external", refreshed["archive_manifest"])
-
-    def test_deleted_open_archive_is_removed_after_manifest_change(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="removed-session",
-            directory_name="conv_removed",
-        )
-        load_index(root, "alice")
-        shutil.rmtree(archive)
-
-        refreshed = load_index(root, "alice")
-
-        self.assertNotIn(session_key("web", "removed-session"), refreshed["sessions"])
-        self.assertNotIn("conv_removed", refreshed["archive_manifest"])
-
-    def test_deleted_closed_archive_does_not_leave_a_ghost_session(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="closed-removed-session",
-            directory_name="conv_closed_removed",
-        )
-        close_session(root, "alice", "web", "closed-removed-session")
-        shutil.rmtree(archive)
-
-        refreshed = load_index(root, "alice")
-
-        self.assertNotIn(
-            session_key("web", "closed-removed-session"),
-            refreshed["sessions"],
-        )
-
-    def test_find_window_uses_valid_index_hint_without_scanning_other_archives(self) -> None:
+    def test_find_window_uses_sqlite_registry_without_directory_scan(self) -> None:
         _, root = self.make_root()
         expected = self.commit_archive(
             root,
@@ -279,17 +154,19 @@ class HistoryIndexTests(unittest.TestCase):
             session_id="other-session",
             directory_name="conv_other",
         )
-        load_index(root, "alice")
 
-        with patch(
-            "run.history._read_json",
-            wraps=history_module._read_json,
-        ) as read_json:
-            found = find_window(root, "alice", "web", "target-session")
+        self.assertEqual(find_window(root, "alice", "web", "target-session"), expected)
 
-        self.assertEqual(found, expected)
-        self.assertEqual(read_json.call_count, 1)
-        self.assertEqual(read_json.call_args.args[0], expected / "data.json")
+    def test_deleting_a_window_is_a_database_operation(self) -> None:
+        _, root = self.make_root()
+        archive = self.commit_archive(
+            root,
+            source="web",
+            session_id="removed-session",
+            directory_name="conv_removed",
+        )
+        self.assertTrue(delete_window(archive))
+        self.assertFalse(window_exists(archive))
 
     def test_reserved_active_session_can_close_and_remove_without_archive(self) -> None:
         _, root = self.make_root()
@@ -556,10 +433,10 @@ class HistoryIndexTests(unittest.TestCase):
                 retry_delays=(1,),
             )
             if attempt < 3:
-                index = json.loads(index_path(root, "alice").read_text("utf-8"))
-                record = index["sessions"][session_key("web", "exhausted-summary")]
+                sessions, active = read_registry(root, "alice")
+                record = sessions[session_key("web", "exhausted-summary")]
                 record["summary_retry_at"] = "2000-01-01T00:00:00+00:00"
-                index_path(root, "alice").write_text(json.dumps(index), "utf-8")
+                write_registry(root, "alice", sessions, active)
 
         self.assertEqual(failed["summary_status"], "exhausted")
         self.assertNotIn("summary_retry_at", failed)

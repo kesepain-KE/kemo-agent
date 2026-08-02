@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from plugins.history_search.tool import run
 from plugins.manifest import discover_plugin_manifests
+from run.history_store import save_window
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +31,6 @@ class HistorySearchPluginTests(unittest.TestCase):
         updated_at: str = "",
     ) -> None:
         window = self.history / name
-        window.mkdir()
         data = {
             "complete": complete,
             "source": "web",
@@ -41,13 +40,17 @@ class HistorySearchPluginTests(unittest.TestCase):
             data["created_at"] = created_at
         if updated_at:
             data["updated_at"] = updated_at
-        (window / "data.json").write_text(
-            json.dumps(data),
-            "utf-8",
-        )
-        (window / "text.json").write_text(
-            json.dumps({"messages": messages}, ensure_ascii=False), "utf-8"
-        )
+        if complete:
+            save_window(
+                window,
+                {
+                    "data": data,
+                    "text": {"schema_version": 1, "messages": messages},
+                    "think": {"schema_version": 1, "rounds": []},
+                    "tool": {"schema_version": 1, "rounds": []},
+                    "items": {"schema_version": 2, "items": []},
+                },
+            )
 
     def test_time_and_role_filters_return_stable_metadata(self) -> None:
         self.write_window(
@@ -83,9 +86,7 @@ class HistorySearchPluginTests(unittest.TestCase):
         )
         self.assertEqual(result["matches"][0]["window"], "2026-07-20-15-30")
         self.assertEqual(result["matches"][0]["source"], "web")
-        self.assertEqual(
-            result["matches"][0]["session_id"], "session-2026-07-20-15-30"
-        )
+        self.assertEqual(result["matches"][0]["session_id"], "session-2026-07-20-15-30")
         self.assertEqual(result["matches"][0]["match_index"], 0)
         self.assertNotIn("context", result["matches"][0])
 
@@ -196,9 +197,7 @@ class HistorySearchPluginTests(unittest.TestCase):
     def test_validation_empty_result_and_manifest_contract(self) -> None:
         empty = run("  ", since="2026-07-20", context=self.context)
         self.assertEqual(empty["matches"], [])
-        self.assertEqual(
-            empty["time_range"], {"since": "2026-07-20", "until": None}
-        )
+        self.assertEqual(empty["time_range"], {"since": "2026-07-20", "until": None})
         with self.assertRaisesRegex(ValueError, "有效日期"):
             run("x", since="2026-02-30", context=self.context)
         with self.assertRaisesRegex(ValueError, "不能晚于"):

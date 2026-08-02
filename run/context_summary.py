@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import copy
-from contextlib import suppress
 import hashlib
 import json
-import os
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from events import RunEvent
 from run.agent_runner import AgentRunner
-from run.atomic_io import replace_with_retry
 from run.context import RoundGroup, estimate_text_tokens
+from run.history_store import (
+    read_context_summary,
+    write_context_summary,
+)
 
 
 SUMMARY_SCHEMA_VERSION = 3
+SUMMARY_STORE_REF = "history.sqlite3#history_context_summaries"
 SUMMARY_CHUNK_TOKEN_BUDGET = 64_000
 SUMMARY_MAX_OUTPUT_TOKENS = 20_000
 SUMMARY_KEYS = (
@@ -95,14 +96,9 @@ def _normalise_summary(value: Any) -> dict[str, Any]:
     return result
 
 
-def _read_cache(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text("utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, dict) or value.get("schema_version") != SUMMARY_SCHEMA_VERSION:
+def _read_cache(runtime_path: Path) -> dict[str, Any] | None:
+    value = read_context_summary(runtime_path)
+    if value is None or value.get("schema_version") != SUMMARY_SCHEMA_VERSION:
         return None
     try:
         value["summary"] = _normalise_summary(value.get("summary"))
@@ -111,23 +107,17 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
     return value
 
 
-def read_summary_cache(path: Path) -> dict[str, Any] | None:
+def read_summary_cache(runtime_path: Path) -> dict[str, Any] | None:
     """Read one validated summary cache without exposing mutable internals."""
 
-    value = _read_cache(path)
+    value = _read_cache(runtime_path)
     return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
 
 
-def restore_summary_cache(path: Path, cache: dict[str, Any] | None) -> None:
+def restore_summary_cache(runtime_path: Path, cache: dict[str, Any] | None) -> None:
     """Restore the last validated cache after a runtime compaction rollback."""
 
-    if cache is None:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        return
-    _atomic_write(path, cache)
+    write_context_summary(runtime_path, cache)
 
 
 def _covered_through(cache: dict[str, Any] | None) -> int:
@@ -163,23 +153,6 @@ def _incremental_hash(
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
-def _atomic_write(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        replace_with_retry(temporary, path)
-    finally:
-        if temporary.exists():
-            # Cleanup is secondary and must not hide the write/replace error.
-            with suppress(OSError):
-                temporary.unlink()
-
-
 def _chunks(groups: list[RoundGroup], token_budget: int) -> list[list[RoundGroup]]:
     chunks: list[list[RoundGroup]] = []
     current: list[RoundGroup] = []
@@ -212,7 +185,7 @@ def build_summary_message(cache: dict[str, Any] | None) -> dict[str, Any] | None
 
 def get_or_create_summary(
     *,
-    cache_path: Path,
+    runtime_path: Path,
     groups: list[RoundGroup],
     agent_runner: AgentRunner,
     agent_name: str,
@@ -225,6 +198,7 @@ def get_or_create_summary(
     skip_memory_extraction: bool = False,
     previous_cache: dict[str, Any] | None = None,
     round_offset: int = 0,
+    persist: bool = True,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return an exact cache hit or atomically generate a replacement.
 
@@ -262,7 +236,7 @@ def get_or_create_summary(
         if validated_previous is not None
         else source_hash(delta_groups, round_offset=offset)
     )
-    existing = _read_cache(cache_path)
+    existing = _read_cache(runtime_path)
     if existing and existing.get("source_hash") == digest:
         diagnostics["cache_hit"] = True
         return existing, diagnostics
@@ -337,7 +311,8 @@ def get_or_create_summary(
             "summary": rolling,
             "memory_extractions": memory_extractions,
         }
-        _atomic_write(cache_path, value)
+        if persist:
+            write_context_summary(runtime_path, value)
         diagnostics["generated"] = True
         diagnostics["memory_extractions"] = memory_extractions
         return value, diagnostics

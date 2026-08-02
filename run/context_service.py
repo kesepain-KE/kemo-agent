@@ -16,6 +16,7 @@ from run.context_summary import (
     build_summary_message,
     read_summary_cache,
 )
+from run.history_store import context_summary_exists
 from run.history import load_runtime_window, prepare_window, runtime_window_path
 from run.memory import MemoryStore
 from run.prompt import build_prompt_bundle
@@ -223,8 +224,7 @@ def context_status(
         plugin_manifests=registry.plugin_manifests,
         memory_store=memory_store,
     )
-    cache_path = runtime_path / "context_summary.json"
-    summary_cache = read_summary_cache(cache_path)
+    summary_cache = read_summary_cache(runtime_path)
     selection = select_context(
         window=window,
         policy=policy,
@@ -247,7 +247,7 @@ def context_status(
         "context": selection.stats(),
         "prompt": prompt_bundle.diagnostics,
         "last_committed_context": persisted if isinstance(persisted, dict) else None,
-        "summary_cache_exists": cache_path.is_file(),
+        "summary_cache_exists": context_summary_exists(runtime_path),
         "policy": {
             "recent_tool_rounds": policy.recent_tool_rounds,
             "recent_full_rounds": policy.recent_full_rounds,

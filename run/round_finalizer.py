@@ -17,7 +17,7 @@ from run.context import (
     build_context_snapshot,
     select_context,
 )
-from run.context_summary import build_summary_message
+from run.context_summary import SUMMARY_STORE_REF, build_summary_message
 from run.history import (
     _trim_to_max_rounds,
     append_round_items,
@@ -361,7 +361,7 @@ class TerminalRoundCommitter:
                     runtime_window["data"].get("rounds", 0)
                 ),
                 "summary_cache": (
-                    "context_summary.json" if summary_cache is not None else None
+                    SUMMARY_STORE_REF if summary_cache is not None else None
                 ),
             }
             runtime_window["data"]["context_snapshot"] = build_context_snapshot(
@@ -380,7 +380,11 @@ class TerminalRoundCommitter:
             }
     
         commit_window(window_path, cancelled_archive)
-        commit_window(runtime_path, runtime_window)
+        commit_window(
+            runtime_path,
+            runtime_window,
+            summary_cache=summary_cache,
+        )
         context.state.finalized = True
         if (
             queue_compression_memory

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Pattern
 from zoneinfo import ZoneInfo
+
+from run.history_store import message_windows
 
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -64,9 +65,11 @@ def _history_sort_time(dirname: str, data: dict[str, Any]) -> float:
             return parsed.timestamp()
     if _WINDOW_PATTERN.match(dirname):
         try:
-            return datetime.fromisoformat(dirname[:10]).replace(
-                tzinfo=_BEIJING
-            ).timestamp()
+            return (
+                datetime.fromisoformat(dirname[:10])
+                .replace(tzinfo=_BEIJING)
+                .timestamp()
+            )
         except ValueError:
             pass
     return float("-inf")
@@ -162,7 +165,10 @@ def _context_messages(
     eligible: list[tuple[int, dict[str, str]]] = []
     match_position = 0
     for index, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+        if not isinstance(message, dict) or message.get("role") not in {
+            "user",
+            "assistant",
+        }:
             continue
         content = message.get("content")
         if not isinstance(content, str):
@@ -209,9 +215,7 @@ def run(
     if normalized_role not in _ROLES:
         raise ValueError(f"role 必须是 any/user/assistant，而不是 {role}")
     if normalized_mode not in _MATCH_MODES:
-        raise ValueError(
-            f"match_mode 必须是 substring/word/exact，而不是 {match_mode}"
-        )
+        raise ValueError(f"match_mode 必须是 substring/word/exact，而不是 {match_mode}")
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=100)
     normalized_snippet = _bounded_integer(
         max_snippet, field="max_snippet", minimum=1, maximum=5000
@@ -236,44 +240,33 @@ def run(
 
     pattern = _compile_query(needle, normalized_mode, regex)
     try:
-        history_dir = (
-            Path(context["root"]) / "users" / str(context["user"]) / "history"
-        )
+        root = Path(context["root"])
+        user = str(context["user"])
     except (KeyError, TypeError):
         raise ValueError("context 必须包含 root 和 user") from None
-    if not history_dir.is_dir():
-        return result
-
-    candidates: list[tuple[float, str, Path, dict[str, Any]]] = []
-    for directory in history_dir.iterdir():
-        if (
-            not directory.is_dir()
-            or directory.name == "temp"
-            or directory.is_symlink()
-            or getattr(directory, "is_junction", lambda: False)()
-        ):
-            continue
-        try:
-            data = json.loads((directory / "data.json").read_text("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
+    candidates: list[tuple[float, str, dict[str, Any], dict[str, Any]]] = []
+    for stored in message_windows(root, user):
+        window_name = str(stored.get("window_name") or "")
+        data = stored.get("data")
         if not isinstance(data, dict) or data.get("complete") is not True:
             continue
-        window_date = _history_date(directory.name, data)
+        window_date = _history_date(window_name, data)
         if not _in_time_range(window_date, since_value, until_value):
             continue
         candidates.append(
-            (_history_sort_time(directory.name, data), directory.name, directory, data)
+            (
+                _history_sort_time(window_name, data),
+                window_name,
+                stored,
+                data,
+            )
         )
 
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     matches: list[dict[str, Any]] = []
     total_matches = 0
-    for _, _, directory, data in candidates:
-        try:
-            text = json.loads((directory / "text.json").read_text("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
+    for _, window_name, stored, data in candidates:
+        text = stored.get("text")
         if not isinstance(text, dict) or not isinstance(text.get("messages"), list):
             continue
 
@@ -296,7 +289,7 @@ def run(
             if len(matches) >= normalized_limit:
                 continue
             entry: dict[str, Any] = {
-                "window": directory.name,
+                "window": window_name,
                 "source": data.get("source"),
                 "session_id": data.get("session_id"),
                 "role": message_role,

@@ -10,17 +10,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from provider.factory import create_provider
-from provider.protocol.enums import MessageRole, StreamEventType
-from provider.protocol.models import KemoRequest, MessageItem, ToolCallItem, text_from_content
+from provider.protocol.enums import MessageRole, ResponseStatus, StreamEventType
+from provider.protocol.models import (
+    KemoRequest,
+    MessageItem,
+    ToolCallItem,
+    text_from_content,
+)
 from provider.schema import ProviderAuthError, ProviderError
 from run.config import (
     ConfigError,
-    deep_merge,
     load_config,
     provider_runtime_config,
     resolve_capability_model,
 )
-from run.history import HistoryError, commit_window, get_or_create_window, load_window
+from run.history import commit_window, get_or_create_window, load_window
 
 
 class MockChatHandler(BaseHTTPRequestHandler):
@@ -34,35 +38,142 @@ class MockChatHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length))
         type(self).requests.append(
-            {"path": self.path, "body": body, "authorization": self.headers.get("Authorization")}
+            {
+                "path": self.path,
+                "body": body,
+                "authorization": self.headers.get("Authorization"),
+            }
         )
         if self.headers.get("Authorization") == "Bearer bad-key":
             self._json(
                 401,
-                {"error": {"message": "invalid key", "type": "auth_error", "code": 401}},
+                {
+                    "error": {
+                        "message": "invalid key",
+                        "type": "auth_error",
+                        "code": 401,
+                    }
+                },
             )
             return
         if body.get("model") == "broken-model":
             self._json(
                 502,
-                {"detail": {"error": {"message": "upstream failed", "type": "provider_error"}}},
+                {
+                    "detail": {
+                        "error": {
+                            "message": "upstream failed",
+                            "type": "provider_error",
+                        }
+                    }
+                },
             )
             return
         if body.get("stream"):
             if body.get("model") == "tool-stream":
                 lines = [
-                    {"id": "stream-tool", "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "history_", "arguments": "{\"query\":\"hel"}}]}}]},
-                    {"id": "stream-tool", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "search", "arguments": "lo\",\"limit\":2}"}}]}, "finish_reason": "tool_calls"}]},
-                    {"id": "stream-tool", "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
+                    {
+                        "id": "stream-tool",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call-1",
+                                            "function": {
+                                                "name": "history_",
+                                                "arguments": '{"query":"hel',
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "id": "stream-tool",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {
+                                                "name": "search",
+                                                "arguments": 'lo","limit":2}',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "stream-tool",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 5,
+                            "completion_tokens": 3,
+                            "total_tokens": 8,
+                        },
+                    },
+                ]
+            elif body.get("model") == "truncated-tool-stream":
+                lines = [
+                    {
+                        "id": "stream-truncated-tool",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call-truncated",
+                                            "function": {
+                                                "name": "history_search",
+                                                "arguments": '{"query":"unfinished',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "length",
+                            }
+                        ],
+                    }
+                ]
+            elif body.get("model") == "eof-with-finish":
+                lines = [
+                    {
+                        "id": "stream-eof",
+                        "choices": [
+                            {
+                                "delta": {"content": "complete"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
                 ]
             else:
                 lines = [
                     {"id": "stream-1", "choices": [{"delta": {"content": "你"}}]},
                     {"id": "stream-1", "choices": [{"delta": {"content": "好"}}]},
-                    {"id": "stream-1", "choices": [], "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}},
+                    {
+                        "id": "stream-1",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 2,
+                            "total_tokens": 6,
+                        },
+                    },
                 ]
-            payload = "".join(f"data: {json.dumps(line, ensure_ascii=False)}\n\n" for line in lines)
-            payload += "data: [DONE]\n\n"
+            payload = "".join(
+                f"data: {json.dumps(line, ensure_ascii=False)}\n\n" for line in lines
+            )
+            if body.get("model") != "eof-with-finish":
+                payload += "data: [DONE]\n\n"
             raw = payload.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -70,13 +181,46 @@ class MockChatHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if body.get("model") == "truncated-tool":
+            self._json(
+                200,
+                {
+                    "id": "chat-truncated-tool",
+                    "model": body.get("model"),
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-truncated",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "history_search",
+                                            "arguments": '{"query":"unfinished',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "length",
+                        }
+                    ],
+                },
+            )
+            return
         response = {
             "id": "chat-1",
             "model": body.get("model"),
-            "choices": [{"message": {"content": "mock reply"}, "finish_reason": "stop"}],
+            "choices": [
+                {"message": {"content": "mock reply"}, "finish_reason": "stop"}
+            ],
         }
         if body.get("model") != "no-usage":
-            response["usage"] = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+            response["usage"] = {
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5,
+            }
         self._json(200, response)
 
     def _json(self, status: int, value: object) -> None:
@@ -165,7 +309,9 @@ class ConfigAndHistoryTests(unittest.TestCase):
         os.environ.pop("TEST_DOTENV_VALUE", None)
 
     def test_runtime_secret_from_environment(self) -> None:
-        config = {"provider": {"type": "chat", "model": "test", "api_key_env": "UNIT_KEY"}}
+        config = {
+            "provider": {"type": "chat", "model": "test", "api_key_env": "UNIT_KEY"}
+        }
         with patch.dict(os.environ, {"UNIT_KEY": "runtime-secret"}, clear=False):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "runtime-secret")
@@ -195,18 +341,33 @@ class ConfigAndHistoryTests(unittest.TestCase):
             )
             self.assertEqual(provider["reasoning_effort"], expected)
 
-    def test_kemo_runtime_preserves_xhigh_logical_effort(self) -> None:
+    def test_kemo_runtime_preserves_gateway_declared_logical_effort(self) -> None:
+        for effort in ("xhigh", "ultra"):
+            with self.subTest(effort=effort):
+                provider = provider_runtime_config(
+                    {
+                        "provider": {
+                            "type": "kemo",
+                            "model": "test",
+                            "api_key": "key",
+                            "reasoning_effort": effort,
+                        }
+                    }
+                )
+                self.assertEqual(provider["reasoning_effort"], effort)
+
+    def test_kemo_runtime_never_preserves_none_effort(self) -> None:
         provider = provider_runtime_config(
             {
                 "provider": {
                     "type": "kemo",
                     "model": "test",
                     "api_key": "key",
-                    "reasoning_effort": "xhigh",
+                    "reasoning_effort": "none",
                 }
             }
         )
-        self.assertEqual(provider["reasoning_effort"], "xhigh")
+        self.assertEqual(provider["reasoning_effort"], "medium")
 
     def test_only_chat_and_kemo_provider_types_are_accepted(self) -> None:
         with self.assertRaisesRegex(ConfigError, "chat.*kemo"):
@@ -236,7 +397,9 @@ class ConfigAndHistoryTests(unittest.TestCase):
             "chat-model",
         )
 
-    def test_provider_base_url_environment_fallback_and_explicit_precedence(self) -> None:
+    def test_provider_base_url_environment_fallback_and_explicit_precedence(
+        self,
+    ) -> None:
         env = {
             "KEMO_BASE_URL": "http://kemo-env.test/gateway/",
             "OPENAI_BASE_URL": "https://openai-env.test/v1/",
@@ -264,26 +427,33 @@ class ConfigAndHistoryTests(unittest.TestCase):
 
     def test_history_isolates_users_sources_and_sessions(self) -> None:
         _, root = self.make_root()
-        alice_cli_path, alice_cli = get_or_create_window(root, "alice", "cli", "default")
+        alice_cli_path, alice_cli = get_or_create_window(
+            root, "alice", "cli", "default"
+        )
         alice_qq_path, _ = get_or_create_window(root, "alice", "qq", "default")
         bob_cli_path, _ = get_or_create_window(root, "bob", "cli", "default")
         self.assertNotEqual(alice_cli_path, alice_qq_path)
         self.assertNotEqual(alice_cli_path, bob_cli_path)
         alice_cli["text"]["messages"].append({"role": "user", "content": "private"})
         commit_window(alice_cli_path, alice_cli)
-        self.assertEqual(load_window(alice_cli_path)["text"]["messages"][0]["content"], "private")
+        self.assertEqual(
+            load_window(alice_cli_path)["text"]["messages"][0]["content"], "private"
+        )
         self.assertEqual(load_window(alice_qq_path)["text"]["messages"], [])
 
-    def test_incomplete_window_is_rejected(self) -> None:
+    def test_sqlite_window_is_committed_as_one_complete_transaction(self) -> None:
         _, root = self.make_root()
-        path, _ = get_or_create_window(root, "alice", "cli", "broken")
-        (path / "tool.json").unlink()
-        with self.assertRaises(HistoryError):
-            load_window(path)
+        path, _ = get_or_create_window(root, "alice", "cli", "complete")
+        loaded = load_window(path)
+        self.assertTrue(loaded["data"]["complete"])
+        self.assertEqual(loaded["tool"]["rounds"], [])
+        self.assertFalse(path.exists())
 
 
 class ProviderTests(ServerMixin, unittest.TestCase):
-    def config(self, mode: str, model: str = "mock-model", key: str = "test-key") -> dict:
+    def config(
+        self, mode: str, model: str = "mock-model", key: str = "test-key"
+    ) -> dict:
         return {
             "type": mode,
             "base_url": self.base_url,
@@ -304,7 +474,9 @@ class ProviderTests(ServerMixin, unittest.TestCase):
     def test_chat_bridge_request_and_exact_usage(self) -> None:
         provider = create_provider(self.config("chat"))
         response = provider.create(self.request())
-        message = next(item for item in response.output if isinstance(item, MessageItem))
+        message = next(
+            item for item in response.output if isinstance(item, MessageItem)
+        )
         self.assertEqual(text_from_content(message.content), "mock reply")
         self.assertTrue(response.usage.measurement.exact)
         self.assertEqual(response.usage.total_tokens, 5)
@@ -329,7 +501,11 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             ),
             "你好",
         )
-        usage = [event.usage for event in events if event.type == StreamEventType.USAGE_UPDATED][-1]
+        usage = [
+            event.usage
+            for event in events
+            if event.type == StreamEventType.USAGE_UPDATED
+        ][-1]
         self.assertIsNotNone(usage)
         self.assertEqual(usage.total_tokens, 6)
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
@@ -337,13 +513,48 @@ class ProviderTests(ServerMixin, unittest.TestCase):
     def test_stream_tool_arguments_are_joined(self) -> None:
         provider = create_provider(self.config("chat", model="tool-stream"))
         events = list(provider.stream(self.request("tool-stream", stream=True)))
-        calls = [event.item for event in events if event.type == StreamEventType.TOOL_CALL_COMPLETED]
+        calls = [
+            event.item
+            for event in events
+            if event.type == StreamEventType.TOOL_CALL_COMPLETED
+        ]
         self.assertEqual(len(calls), 1)
         self.assertIsInstance(calls[0], ToolCallItem)
         self.assertEqual(calls[0].call_id, "call-1")
         self.assertEqual(calls[0].name, "history_search")
         self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
+
+    def test_truncated_chat_tool_arguments_are_never_published(self) -> None:
+        provider = create_provider(self.config("chat", model="truncated-tool"))
+        response = provider.create(self.request("truncated-tool"))
+        self.assertEqual(response.status, ResponseStatus.INCOMPLETE)
+        self.assertEqual(response.incomplete_details["reason"], "output_truncated")
+        self.assertFalse(
+            any(isinstance(item, ToolCallItem) for item in response.output)
+        )
+
+        stream_provider = create_provider(
+            self.config("chat", model="truncated-tool-stream")
+        )
+        events = list(
+            stream_provider.stream(
+                self.request("truncated-tool-stream", stream=True)
+            )
+        )
+        self.assertFalse(
+            any(
+                event.type == StreamEventType.TOOL_CALL_COMPLETED
+                for event in events
+            )
+        )
+        self.assertEqual(events[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
+
+    def test_clean_eof_after_finish_reason_is_accepted(self) -> None:
+        provider = create_provider(self.config("chat", model="eof-with-finish"))
+        events = list(provider.stream(self.request("eof-with-finish", stream=True)))
+        self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
+        self.assertEqual(events[-1].response.metadata["finish_reason"], "stop")
 
     def test_auth_error_mapping(self) -> None:
         provider = create_provider(self.config("chat", key="bad-key"))
