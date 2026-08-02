@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agents.self_improve.executor import execute as execute_self_improve
-from cron.executor import execute_cron_task
 from cron.review_due import scan_and_promote
 from cron.scheduler import (
     MEMORY_PROMOTION_SYSTEM_KEY,
@@ -17,7 +16,6 @@ from cron.scheduler import (
 )
 from plugins.skill_creater.tool import run as run_skill_creater
 from run.agent_runner import AgentOutputError, AgentRunResult
-from run.cron_store import CronStore, normalize_task
 from run.memory import MemoryStore, normalize_memory_filename
 from run.memory_pipeline import extract_compressed_round_memory
 
@@ -280,7 +278,24 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         result = execute_self_improve(
             Context(),
-            {"trigger": "context_compression", "rounds": [{"round": 1}]},
+            {
+                "trigger": "context_compression",
+                "rounds": [
+                    {
+                        "round": 1,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "请回答简洁一些，以后请使用中文。",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "我喜欢表格。",
+                            },
+                        ],
+                    }
+                ],
+            },
         )
 
         self.assertEqual(
@@ -289,6 +304,46 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result.metadata["candidate_filter"]["accepted"], 2)
         self.assertEqual(result.metadata["candidate_filter"]["rejected"], 4)
+
+    def test_context_extraction_model_receives_only_user_messages(self) -> None:
+        captured = {}
+
+        class Context:
+            @staticmethod
+            def run_model(input_data):
+                captured.update(input_data)
+                return _result(candidates=[])
+
+        execute_self_improve(
+            Context(),
+            {
+                "trigger": "context_compression",
+                "rounds": [
+                    {
+                        "round": 7,
+                        "messages": [
+                            {"role": "user", "content": "用户明确原话"},
+                            {"role": "assistant", "content": "来自临时重要记忆的复述"},
+                        ],
+                        "think": {"content": "不可信推理"},
+                        "tools": [{"result": "不可信工具结果"}],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(
+            captured["rounds"],
+            [
+                {
+                    "round": 7,
+                    "messages": [{"role": "user", "content": "用户明确原话"}],
+                }
+            ],
+        )
+        rendered = json.dumps(captured, ensure_ascii=False)
+        self.assertNotIn("临时重要记忆", rendered)
+        self.assertNotIn("不可信", rendered)
 
     def test_context_extraction_uses_configured_batch_candidate_cap(self) -> None:
         class Context:
@@ -315,7 +370,20 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             Context(),
             {
                 "trigger": "context_compression",
-                "rounds": [{"round": index} for index in range(1, 6)],
+                "rounds": [
+                    {
+                        "round": index,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": " ".join(
+                                    f"用户证据 {value}" for value in range(8)
+                                ),
+                            }
+                        ],
+                    }
+                    for index in range(1, 6)
+                ],
             },
         )
 

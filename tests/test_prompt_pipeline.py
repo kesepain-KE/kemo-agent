@@ -1116,7 +1116,7 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaises(PromptRegistrationError):
             load_prompt_source_registry(root, "alice")
 
-    def test_engine_uses_bundle_context_status_matches_and_memory_weights_after_commit(self) -> None:
+    def test_engine_uses_bundle_without_weighting_prompt_memory_after_commit(self) -> None:
         _, root, _ = self.make_root()
         self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
         provider = CaptureProvider()
@@ -1132,8 +1132,9 @@ class PromptPipelineTests(unittest.TestCase):
         # model has no verified declaration.
         self.assertNotIn("reasoning_effort", provider.requests[0].extra)
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
-        weighted = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
-        self.assertEqual(weighted[0]["weight"], 1)
+        self.assertEqual(result["memory"]["weighted_files"], [])
+        unchanged = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
+        self.assertEqual(unchanged[0]["weight"], 0)
         status = context_status(
             {"user": "alice", "source": "cli", "session_id": "ok"},
             root=root,

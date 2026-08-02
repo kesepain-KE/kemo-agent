@@ -33,7 +33,9 @@ def run(
 ) -> dict[str, Any]:
     root = Path(context["root"]).resolve()
     user = str(context["user"])
-    if context.get("agent") == "self_improve" and action not in {
+    agent = str(context.get("agent") or "")
+    agent_trigger = str(context.get("agent_trigger") or "")
+    if agent == "self_improve" and action not in {
         "search_by_title",
         "search_by_content",
         "search_many",
@@ -41,7 +43,15 @@ def run(
         raise PermissionError(
             "self_improve 只能用 memory_manage 搜索；候选和晋升由运行时原子持久化"
         )
-    if context.get("agent") == "memory_temporary_important" and action not in {
+    if (
+        agent == "self_improve"
+        and agent_trigger != "manual_review"
+        and tier == "important"
+    ):
+        raise PermissionError(
+            "后台临时记忆整理禁止读取 important；临时重要记忆只能由三层临时记忆单向提炼"
+        )
+    if agent == "memory_temporary_important" and action not in {
         "list",
         "get",
     }:

@@ -45,9 +45,11 @@
   5. 每个 upsert 必须携带 `durable=true` 与 `evidence`；单轮最多 2 条，批量最多 5 条
   6. 没有合格信息时返回空 candidates[]
 
-权重规则: 每天最多+1，通过 last_weight_date（日期字符串）比较
+权重规则: 仅本模式依据用户原文命中可加权，每天最多+1，通过 last_weight_date（日期字符串）比较。Prompt 注入、查看和检索不加权。
 永久记忆: 普通命中时不返回候选且运行时拒绝覆盖；只有用户本轮明确要求记住、`explicit=true` 时才允许更新
 ```
+
+运行时只会传入用户消息，不会传入助手回复、推理或工具结果。不得读取 `important` 层；每个候选的 `evidence` 必须是输入中可精确找到的用户原文。
 
 ### 模式二：记忆晋升（trigger = `"memory_promotion"`）
 
@@ -115,6 +117,7 @@
 - 候选统一由调用方写入 MemoryStore；权重通过 `last_weight_date` 日期比较，每天最多+1
 - 候选文件名基础名称最长 20 字符，并遵守全层级唯一命名规则
 - context_compression 模式下 memory_manage 只用于搜索，不直接增删改
+- context_compression / memory_promotion 模式下禁止搜索 `important`；用户主动 manual_review 可只读查看
 - memory_promotion 模式下 memory_manage 只用于读取和比对，不直接删除或移动；cron 根据 promotions 决策原子落盘
 - 永久记忆不自动修改（除非 explicit=true 或 180d 晋升）
 - skill_creater 只写 `agent_create` 目录，不写 `user_create`

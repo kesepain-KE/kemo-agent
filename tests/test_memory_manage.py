@@ -276,6 +276,72 @@ class MemoryManageTests(unittest.TestCase):
                 context=context,
             )
 
+    def test_background_memory_work_cannot_read_important_but_user_review_can(self) -> None:
+        important = self.root / "users" / "alice" / "memory_temporary_important.md"
+        important.write_text("# 临时重要记忆\n\n- 用户偏好简洁回复。", "utf-8")
+
+        for trigger in ("context_compression", "memory_promotion"):
+            with self.subTest(trigger=trigger):
+                with self.assertRaisesRegex(PermissionError, "禁止读取 important"):
+                    run_memory_manage(
+                        "search_by_content",
+                        "important",
+                        query="简洁",
+                        context={
+                            "root": str(self.root),
+                            "user": "alice",
+                            "agent": "self_improve",
+                            "agent_trigger": trigger,
+                        },
+                    )
+
+        manual = run_memory_manage(
+            "search_by_content",
+            "important",
+            query="简洁",
+            context={
+                "root": str(self.root),
+                "user": "alice",
+                "agent": "self_improve",
+                "agent_trigger": "manual_review",
+            },
+        )
+        self.assertEqual(manual["total_matches"], 1)
+
+        direct = run_memory_manage(
+            "get",
+            "important",
+            filename="memory_temporary_important.md",
+            context={"root": str(self.root), "user": "alice", "caller": "main_agent"},
+        )
+        self.assertIn("简洁回复", direct["content"])
+
+    def test_direct_memory_reads_do_not_change_temporary_weight(self) -> None:
+        added = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "只读记忆",
+            "用户明确偏好只读查看。",
+        )
+        filename = added["filename"]
+        context = {"root": str(self.root), "user": "alice", "caller": "main_agent"}
+
+        get_fragment(self.root, "alice", self.config, "seven_days", filename)
+        run_memory_manage(
+            "search_by_content",
+            "seven_days",
+            query="只读查看",
+            context=context,
+        )
+
+        metadata = MemoryStore(self.root, "alice", self.config).load_index("seven_days")[
+            filename
+        ]
+        self.assertEqual(metadata["weight"], 0)
+        self.assertIsNone(metadata["last_weight_date"])
+
     def test_important_memory_agent_can_read_but_cannot_mutate_directly(self) -> None:
         add_fragment(
             self.root,

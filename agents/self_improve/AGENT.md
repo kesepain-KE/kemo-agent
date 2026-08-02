@@ -52,7 +52,10 @@
 `memory.extraction_max_candidates_per_batch` 的总上限约束（默认 10 条）。没有符合条件的信息必须返回 `{"candidates": []}`。
 
 `context_compression` 的每个 upsert 候选必须包含 `"durable": true` 和简短
-`"evidence"`；执行器对缺失该标记的候选按不可信内容拒绝落盘。
+`"evidence"`；`evidence` 必须是本批用户消息中可精确找到的原文。执行器只向模型传递用户消息，并对缺失标记、引用助手回复或无法回溯用户原文的候选拒绝落盘。
+
+数据流严格单向：`用户对话原文 → 临时三层 → 临时重要热画像`。在
+`context_compression` 和 `memory_promotion` 模式下严禁读取 `important`；助手回复、推理和工具结果也不得作为临时三层的提取证据。用户主动的 `manual_review` 可以只读查看 `important`，但查看本身不加权。
 
 | 职责 | 说明 |
 |------|------|

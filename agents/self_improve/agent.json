@@ -1,6 +1,6 @@
 {
   "name": "self_improve",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "从显式传入的数据中提取、整理和升级记忆候选。",
   "trigger": "trigger.md"
 }

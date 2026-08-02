@@ -94,6 +94,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertIsNotNone(store.locate_in_tier("seven_days", filename))
         self.assertEqual(store.load_important_view_sources(), {filename})
         self.assertTrue(store.important_view_is_current())
+        self.assertEqual(store.load_index("seven_days")[filename]["weight"], 0)
         selection = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(selection.selected_ids, ())
 
