@@ -24,6 +24,7 @@ from run.task_plan_store import (
     PlanValidationError,
 )
 from run.tools import (
+    ToolResultTooLargeError,
     ToolRegistry,
     apply_runtime_tool_policy,
     discover_tools,
@@ -329,13 +330,18 @@ def execute_plan(
             except BaseException as exc:
                 if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                     raise
+                oversized_result = isinstance(exc, ToolResultTooLargeError)
                 status = "failed"
                 result_payload = {
                     "ok": False,
-                    "error": {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    },
+                    "error": (
+                        exc.error_payload()
+                        if oversized_result
+                        else {
+                            "message": str(exc),
+                            "exception_type": type(exc).__name__,
+                        }
+                    ),
                 }
                 error_payload = result_payload["error"]
 

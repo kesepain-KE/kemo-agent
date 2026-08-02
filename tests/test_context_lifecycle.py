@@ -19,6 +19,7 @@ from run.context_summary import (
 )
 from run.context_service import compress_per_round_tool_think
 from run.session_runtime import copy_committed_round_to_archive
+from run.tools import MAX_TOOL_RESULT_CHARS
 from run.history import (
     _trim_to_max_rounds,
     commit_window,
@@ -26,6 +27,7 @@ from run.history import (
     load_runtime_window,
     load_window,
     runtime_window_path,
+    synthesize_items,
 )
 
 
@@ -350,6 +352,37 @@ class ContextLifecycleTests(unittest.TestCase):
             )
         self.assertIn('"compressed": true', groups[0].messages[2]["content"])
         self.assertNotIn('"compressed": true', groups[-1].messages[2]["content"])
+
+    def test_recent_historical_tool_result_has_independent_hard_limit(self) -> None:
+        window = make_window(1, with_tools=True)
+        window["tool"]["rounds"][0]["calls"][0]["result"] = {
+            "ok": True,
+            "result": "R" * (MAX_TOOL_RESULT_CHARS + 5_000),
+        }
+
+        for native_items in (False, True):
+            with self.subTest(native_items=native_items):
+                candidate = json.loads(json.dumps(window, ensure_ascii=False))
+                if native_items:
+                    candidate["items"] = synthesize_items(candidate)
+                groups = build_round_groups(
+                    candidate,
+                    ContextPolicy(recent_tool_rounds=3, token_limit=1_000_000),
+                )
+
+                content = groups[0].messages[2]["content"]
+                payload = json.loads(content)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(
+                    payload["error"]["exception_type"],
+                    "ToolResultTooLargeError",
+                )
+                self.assertTrue(payload["error"]["content_omitted"])
+                self.assertGreater(
+                    payload["error"]["result_chars"], MAX_TOOL_RESULT_CHARS
+                )
+                self.assertLess(len(content), 2_000)
+                self.assertNotIn("R" * 100, content)
 
     def test_legacy_empty_message_keeps_round_boundary_without_invalid_native_item(self) -> None:
         window = empty_window("alice", "web", "legacy-empty")

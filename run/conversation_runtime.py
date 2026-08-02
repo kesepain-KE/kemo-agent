@@ -103,6 +103,7 @@ from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
     ToolCancelledError,
+    ToolResultTooLargeError,
     ToolRegistry,
     apply_runtime_tool_policy,
     discover_tools,
@@ -250,6 +251,8 @@ def _tool_context_diagnostics(
 def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
     """Preserve safe retry classification for the next model iteration."""
 
+    if isinstance(exc, ToolResultTooLargeError):
+        return exc.error_payload()
     detail: dict[str, Any] = {
         "message": str(exc),
         "exception_type": type(exc).__name__,
@@ -1526,6 +1529,9 @@ def _iter_request_events_impl(
                                 if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                                     raise
                                 cancelled_tool = isinstance(exc, ToolCancelledError)
+                                oversized_result = isinstance(
+                                    exc, ToolResultTooLargeError
+                                )
                                 result_payload = {
                                     "ok": False,
                                     "error": {
@@ -1533,14 +1539,25 @@ def _iter_request_events_impl(
                                         **({"cancelled": True} if cancelled_tool else {}),
                                     },
                                 }
-                                status = "cancelled" if cancelled_tool else "failed"
+                                status = (
+                                    "cancelled"
+                                    if cancelled_tool
+                                    else (
+                                        "result_too_large"
+                                        if oversized_result
+                                        else "failed"
+                                    )
+                                )
                             if result_payload.get("ok") is True:
                                 seen_calls[signature] = copy.deepcopy(result_payload)
                             else:
                                 seen_calls.pop(signature, None)
                         failure_count = failures.record(
                             call.name,
-                            succeeded=bool(result_payload.get("ok")),
+                            succeeded=(
+                                bool(result_payload.get("ok"))
+                                or status == "result_too_large"
+                            ),
                         )
                         if failure_count >= failure_limit:
                             result_payload["error"].update(
@@ -1938,17 +1955,10 @@ def _iter_request_events_impl(
                         "exception_type": type(exc).__name__,
                     }
 
-            # 仅对选择并实际发送到主模型的记忆进行加权。取消或失败的
-            # 回合不会走到这里，仅被检索但未注入的候选也不会加权。
+            # Prompt 注入和用户主动查看只是读操作，不得改变临时记忆权重。
+            # 权重只由保存/压缩等历史整理管线的用户原文命中更新。
             memory_weighted_files: list[str] = []
             memory_weight_error = None
-            try:
-                memory_weighted_files = memory_store.mark_used(list(prompt_bundle.memory_ids))
-            except Exception as exc:
-                memory_weight_error = {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
             final_metadata.update(
                 {
                     "text": text,

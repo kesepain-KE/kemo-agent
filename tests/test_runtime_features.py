@@ -44,8 +44,10 @@ from run.history_index import find_record as find_history_record
 from run.memory_analysis import extract_memory_backlog, extract_round_memory
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
+    MAX_TOOL_RESULT_CHARS,
     ToolCancelledError,
     ToolDefinition,
+    ToolResultTooLargeError,
     ToolTimeoutError,
     apply_runtime_tool_policy,
     discover_tools,
@@ -204,6 +206,44 @@ class RuntimeFeatureTests(unittest.TestCase):
         async_result = execute_tool(registry.get("async_tool"), {"value": "b"}, context=context, timeout=2)
         self.assertEqual(sync["source"], "sync")
         self.assertEqual(async_result["source"], "async")
+
+    def test_tool_execution_rejects_oversized_inline_result_with_range_hint(self) -> None:
+        tool = ToolDefinition(
+            name="file",
+            description="file",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["action", "path"],
+                "additionalProperties": False,
+            },
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=lambda action, path: {"content": "X" * MAX_TOOL_RESULT_CHARS},
+        )
+
+        with self.assertRaises(ToolResultTooLargeError) as raised:
+            execute_tool(
+                tool,
+                {"action": "read", "path": "large.log"},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=2,
+            )
+
+        error = raised.exception.error_payload()
+        self.assertEqual(error["category"], "result_too_large")
+        self.assertGreater(error["result_chars"], MAX_TOOL_RESULT_CHARS)
+        self.assertEqual(error["limit_chars"], MAX_TOOL_RESULT_CHARS)
+        self.assertTrue(error["content_omitted"])
+        self.assertFalse(error["retryable"])
+        self.assertIn("file.read_range", error["instruction"])
+        self.assertNotIn("X" * 100, json.dumps(error, ensure_ascii=False))
 
     def test_running_tool_observes_emergency_cancel_without_waiting_for_timeout(self) -> None:
         cancel = threading.Event()
@@ -571,6 +611,75 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(done.usage["provider_request_count"], 2)
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
+
+    def test_oversized_tool_result_is_omitted_before_provider_and_history(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "large_result", "large")
+        (root / "plugins" / "large_result" / "tool.py").write_text(
+            "def run(value, *, context):\n"
+            "    return {'content': 'X' * 25000, 'value': value}\n",
+            "utf-8",
+        )
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("large-1", "large_result", {"value": "x"})],
+                    finish_reason="tool_calls",
+                    usage=Usage(1_000, 10, 1_010, estimated=False),
+                ),
+                ChatResponse(
+                    text="已改用较小范围。",
+                    usage=Usage(2_000, 20, 2_020, estimated=False),
+                ),
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "oversized-tool-result",
+                        "prompt": "读取",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        result_event = next(
+            event for event in events if event.type == "tool_call_result"
+        )
+        self.assertEqual(result_event.metadata["status"], "result_too_large")
+        self.assertFalse(result_event.result["ok"])
+        error = result_event.result["error"]
+        self.assertEqual(error["exception_type"], "ToolResultTooLargeError")
+        self.assertTrue(error["content_omitted"])
+        self.assertGreater(error["result_chars"], MAX_TOOL_RESULT_CHARS)
+        self.assertNotIn("X" * 100, json.dumps(result_event.result, ensure_ascii=False))
+        self.assertEqual(len(provider.requests), 2)
+        continuation = provider.requests[1].messages[-1]
+        self.assertEqual(continuation["role"], "tool")
+        self.assertIn("ToolResultTooLargeError", continuation["content"])
+        self.assertLess(len(continuation["content"]), 2_000)
+        self.assertIsNotNone(provider.requests[1].tools)
+        self.assertEqual(events[-1].type, "done")
+
+        window_path = find_window(
+            root,
+            "alice",
+            "cli",
+            "oversized-tool-result",
+        )
+        window = load_window(window_path)
+        stored_call = window["tool"]["rounds"][0]["calls"][0]
+        self.assertEqual(stored_call["status"], "result_too_large")
+        self.assertTrue(stored_call["result"]["error"]["content_omitted"])
+        self.assertNotIn("X" * 100, json.dumps(window, ensure_ascii=False))
+        self.assertLess((window_path / "tool.json").stat().st_size, 10_000)
+        self.assertLess((window_path / "items.json").stat().st_size, 20_000)
 
     def test_native_provider_state_is_preserved_across_tool_continuation(self) -> None:
         _, root = self.make_root()

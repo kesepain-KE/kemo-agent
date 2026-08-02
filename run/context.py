@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from run.tools import MAX_TOOL_RESULT_CHARS, ToolResultTooLargeError
+
 
 DEFAULT_OLDER_TOOL_RESULT_CHARS = 200
 
@@ -352,14 +354,29 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
     return result or None
 
 
-def _compact_result(value: Any, limit: int) -> str:
-    rendered = _stable_json(value)
-    if len(rendered) <= limit:
+def _context_tool_result(
+    value: Any,
+    *,
+    tool_name: str,
+    compact_limit: int | None,
+) -> str:
+    """Bound every historical tool result, including protected recent rounds."""
+
+    rendered = value if isinstance(value, str) else _stable_json(value)
+    if len(rendered) > MAX_TOOL_RESULT_CHARS:
+        error = ToolResultTooLargeError(
+            tool_name,
+            {},
+            result_chars=len(rendered),
+            limit_chars=MAX_TOOL_RESULT_CHARS,
+        )
+        return _stable_json({"ok": False, "error": error.error_payload()})
+    if compact_limit is None or len(rendered) <= compact_limit:
         return rendered
     return _stable_json(
         {
             "compressed": True,
-            "preview": rendered[: max(1, limit - 40)],
+            "preview": rendered[: max(1, compact_limit - 40)],
             "original_chars": len(rendered),
         }
     )
@@ -397,10 +414,10 @@ def _tool_iteration_messages(
         messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
         for position, call in enumerate(calls):
             result = call.get("result")
-            content = (
-                _stable_json(result)
-                if compact_limit is None
-                else _compact_result(result, compact_limit)
+            content = _context_tool_result(
+                result,
+                tool_name=str(call.get("name") or "unknown_tool"),
+                compact_limit=compact_limit,
             )
             messages.append(
                 {
@@ -427,12 +444,15 @@ def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[Ro
         provider_messages: list[dict[str, Any]] = []
         if item_groups is not None:
             provider_messages = copy.deepcopy(raw_group)
-            if not is_recent:
-                for message in provider_messages:
-                    if message.get("role") == "tool":
-                        message["content"] = _compact_result(
-                            message.get("content"), policy.older_tool_result_chars
-                        )
+            for message in provider_messages:
+                if message.get("role") == "tool":
+                    message["content"] = _context_tool_result(
+                        message.get("content"),
+                        tool_name=str(message.get("name") or "unknown_tool"),
+                        compact_limit=(
+                            None if is_recent else policy.older_tool_result_chars
+                        ),
+                    )
             raw_text_messages = [
                 {key: copy.deepcopy(value) for key, value in message.items() if not key.startswith("_")}
                 for message in raw_group

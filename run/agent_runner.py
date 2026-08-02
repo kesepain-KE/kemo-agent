@@ -46,6 +46,7 @@ from run.model_capabilities import resolve_reasoning_selection
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
+    ToolResultTooLargeError,
     ToolRegistry,
     execute_tool,
 )
@@ -669,6 +670,9 @@ class AgentRunner:
                         )
                         payload = {"ok": True, "result": value}
                         status = "completed"
+                    except ToolResultTooLargeError as exc:
+                        payload = {"ok": False, "error": exc.error_payload()}
+                        status = "result_too_large"
                     except Exception as exc:
                         payload = {
                             "ok": False,
@@ -680,7 +684,10 @@ class AgentRunner:
                         status = "failed"
                     failure_count = failures.record(
                         call.name,
-                        succeeded=bool(payload.get("ok")),
+                        succeeded=(
+                            bool(payload.get("ok"))
+                            or status == "result_too_large"
+                        ),
                     )
                     if failure_count >= failure_limit:
                         payload["error"].update(

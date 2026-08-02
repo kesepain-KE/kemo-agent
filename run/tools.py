@@ -36,9 +36,96 @@ class ToolCancelledError(ToolError):
     """The user explicitly cancelled the run while a tool was executing."""
 
 
+class ToolResultTooLargeError(ToolError):
+    """A tool completed, but its inline result is unsafe to place in context."""
+
+    category = "result_too_large"
+    retryable = False
+    counts_as_failure = False
+
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        result_chars: int,
+        limit_chars: int,
+    ) -> None:
+        self.tool_name = str(tool_name or "unknown_tool")
+        self.result_chars = max(0, int(result_chars))
+        self.limit_chars = max(1, int(limit_chars))
+        self.action = str(arguments.get("action") or "").strip()
+        self.path = str(arguments.get("path") or "").strip()[:512]
+        self.instruction = _oversized_result_instruction(
+            self.tool_name,
+            self.action,
+        )
+        super().__init__(
+            f"工具 {self.tool_name} 返回约 {self.result_chars} 字符，"
+            f"超过 {self.limit_chars} 字符上限；正文未返回"
+        )
+
+    def error_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "message": str(self),
+            "exception_type": type(self).__name__,
+            "category": self.category,
+            "retryable": self.retryable,
+            "result_chars": self.result_chars,
+            "limit_chars": self.limit_chars,
+            "content_omitted": True,
+            "instruction": self.instruction,
+        }
+        if self.action:
+            payload["action"] = self.action
+        if self.path:
+            payload["path"] = self.path
+        return payload
+
+
 _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
+MAX_TOOL_RESULT_CHARS = 20_000
+
+
+def _oversized_result_instruction(tool_name: str, action: str) -> str:
+    if tool_name == "file" and action == "read":
+        return (
+            "请先使用 file.stat 查看文件大小，再使用 file.read_range，并通过 "
+            "start_line/end_line 或 tail 分段读取"
+        )
+    if tool_name == "file" and action == "read_range":
+        return (
+            "请缩小 file.read_range 的 start_line/end_line、max_lines 或 tail 范围后重试"
+        )
+    if tool_name == "file":
+        return (
+            "请先使用 file.stat 检查目标，再使用 file.read_range 并缩小 "
+            "start_line/end_line、max_lines 或 tail 范围"
+        )
+    if tool_name == "shell":
+        return "请缩小命令输出范围，或将完整输出写入文件后使用 file.read_range 分段读取"
+    return (
+        "请缩小查询或读取范围、降低 limit/max_results，"
+        "或将完整结果保存为文件后分段读取"
+    )
+
+
+def _enforce_tool_result_limit(
+    tool_name: str,
+    arguments: dict[str, Any],
+    value: Any,
+) -> Any:
+    rendered = json.dumps(value, ensure_ascii=False, default=str)
+    if len(rendered) > MAX_TOOL_RESULT_CHARS:
+        raise ToolResultTooLargeError(
+            tool_name,
+            arguments,
+            result_chars=len(rendered),
+            limit_chars=MAX_TOOL_RESULT_CHARS,
+        )
+    return value
 
 
 def tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
@@ -388,7 +475,8 @@ def execute_tool(
                     f"工具 {tool.name} 执行超时（{effective_timeout:g}s）"
                 )
             try:
-                return future.result(timeout=min(0.1, remaining))
+                value = future.result(timeout=min(0.1, remaining))
+                return _enforce_tool_result_limit(tool.name, arguments, value)
             except FutureTimeout:
                 continue
     finally:

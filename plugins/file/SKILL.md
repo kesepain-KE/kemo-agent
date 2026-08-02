@@ -5,7 +5,7 @@
 
 ## 使用原则
 
-1. **未知大文件先检查**：先用 `stat` 查看文件大小。`read` 和 `read_range` 默认最多读取 50 MB，超过限制会返回 `truncated=true`；读取日志尾部优先使用 `read_range` 的 `tail`，它不会全量加载文件。
+1. **未知大文件先检查**：先用 `stat` 查看文件大小。框架对单次工具内联结果执行 20,000 字符硬限制，超限正文会被完全省略并要求缩小范围；因此只有确认是小文件时才使用 `read`，其他情况使用 `read_range` 的 `start_line`/`end_line` 或 `tail` 分段读取。底层扫描默认最多 50 MB，超过限制还会返回 `truncated=true`。
 2. **编辑前后均要读取**：用 `edit` 前先读取并确认当前内容，优先使用 `read_range.lines` 中的显式行号；编辑后检查工具返回的 `preview`，必要时再次读取。`edit` 默认创建不覆盖的编号备份（`.bak`、`.bak.1`……），除非明确不需要，否则保持 `create_backup=true`。
 3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。`delete` 只删除文件，不删除目录。
 4. **搜索与浏览分工**：找文件或搜索代码使用 `search`；查看目录树使用 `tree_dir`；查看单层目录使用 `list_dir`。
@@ -32,7 +32,7 @@
 |--------|----------|
 | `exists` | 无 |
 | `stat` | 无 |
-| `read` | `max_bytes`：最大读取字节数，默认 50 MB、最高 512 MB |
+| `read` | `max_bytes`：最大底层读取字节数，默认 50 MB、最高 512 MB；返回正文仍受框架 20,000 字符硬限制 |
 | `read_range` | `start_line`/`end_line`：行范围；`tail`：尾部 N 行；`max_lines`：最大返回行数；`max_bytes`：最大扫描字节数 |
 | `write` | `content`：覆盖写入内容 |
 | `append` | `content`：追加内容 |
@@ -80,6 +80,8 @@
 | `entries` | list_dir/tree_dir | 目录条目数组或目录树条目数 |
 | `recursive` | copy | 是否递归复制 |
 | `deleted` | delete | 删除确认 |
+
+任何 action 的完整 JSON 结果超过 20,000 字符时，框架都不会截取一段正文冒充完整结果，而是返回 `ToolResultTooLargeError`，包含原始字符数、限制和缩小范围提示。该受控拒绝不会计入同名工具连续失败次数。
 
 ## Tool
 
