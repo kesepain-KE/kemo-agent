@@ -347,7 +347,7 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'high' } }))
   })
 
-  it('Kemo 顶部模型气泡完全按能力声明展示档位并原样保存 max', async () => {
+  it('Kemo 顶部模型气泡完全按能力声明展示新档位、排除 none 并原样保存', async () => {
     let savedChanges: Record<string, unknown> | undefined
     server.use(
       http.get('/api/users/kesepain/provider/model-capabilities', ({ request }) => {
@@ -356,12 +356,12 @@ describe('AppShell navigation', () => {
           user: 'kesepain', protocol: 'kemo', api_valid: true, model, stale: false, warning: '',
           capabilities: {
             model, task: 'llm', input_modalities: ['text'], output_modalities: ['text'], streaming: true,
-            reasoning: { supported: true, efforts: ['low', 'max'], summary: true, persisted_state: false },
+            reasoning: { supported: true, efforts: ['none', 'low', 'ultra'], summary: true, persisted_state: false },
             tools: { function_calling: true, parallel_calls: false, multimodal_results: false },
             structured_output: true, metadata: {},
             extensions: {
-              reasoning_effort_map: { low: 'low', max: 'high' },
-              reasoning_policy: { mode: 'mapped', logical_efforts: ['low', 'max'], collapsed: true },
+              reasoning_effort_map: { low: 'low', ultra: 'high' },
+              reasoning_policy: { mode: 'mapped', logical_efforts: ['low', 'ultra'], collapsed: true },
             },
           },
         })
@@ -380,10 +380,11 @@ describe('AppShell navigation', () => {
     expect(screen.getByText('此模型的部分思考档位会映射到相同的上游强度。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('combobox', { name: '顶部模型思考强度' }))
     expect(screen.getByRole('option', { name: /低.*轻度推理/ })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: /最大.*最强推理/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /ultra.*Kemo 网关声明档位/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /none/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /中.*均衡/ })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: /最大.*最强推理/ }))
-    await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'max' } }))
+    fireEvent.click(screen.getByRole('option', { name: /ultra.*Kemo 网关声明档位/ }))
+    await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'ultra' } }))
   })
 
   it('Kemo 模型声明不支持推理时不展示固定五档', async () => {
@@ -600,13 +601,21 @@ describe('AppShell navigation', () => {
 
     expect(await screen.findByText(/已上传 screenshot\.png/)).toBeInTheDocument()
     expect(screen.getByText(/已上传 bundle\.zip/)).toBeInTheDocument()
+    const imageCard = screen.getByLabelText('待发送附件：screenshot.png')
+    expect(within(imageCard).getByRole('img', { name: 'screenshot.png' })).toBeInTheDocument()
+    expect(within(imageCard).getByRole('link', { name: '预览图片 screenshot.png' })).toHaveAttribute('href', expect.stringContaining('/preview?path=screenshot.png'))
+    const fileCard = screen.getByLabelText('待发送附件：bundle.zip')
+    expect(within(fileCard).queryByRole('img')).not.toBeInTheDocument()
+    fireEvent.click(within(fileCard).getByRole('button', { name: '取消引用 bundle.zip' }))
+    expect(screen.queryByLabelText('待发送附件：bundle.zip')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('待发送附件：screenshot.png')).toBeInTheDocument()
     const sendButton = screen.getByRole('button', { name: '发送' })
     expect(sendButton).toBeEnabled()
     fireEvent.click(sendButton)
 
     await waitFor(() => expect(chatBody).toEqual(expect.objectContaining({
       prompt: '',
-      uploaded_files: ['screenshot.png', 'bundle.zip'],
+      uploaded_files: ['screenshot.png'],
     })))
   })
 

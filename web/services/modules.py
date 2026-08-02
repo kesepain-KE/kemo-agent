@@ -29,12 +29,7 @@ from web.constants import (
     _EXPAND_INJECTION_HEADING,
     _EXPAND_OPERATION_HEADING,
     _EXPAND_SCOPES,
-    _MESSAGE_LOG_ATTACHMENT,
-    _MESSAGE_LOG_HEADING,
-    _MESSAGE_LOG_INBOUND,
     _MESSAGE_LOG_LIMIT,
-    _MESSAGE_LOG_OUTBOUND,
-    _MESSAGE_LOG_OUTBOUND_ATTACHMENT,
 )
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _flat_files, _reject_tree_links, _visible_children
@@ -75,128 +70,26 @@ class MessageExpandServiceMixin:
             raise NotFoundError(f"当前用户未绑定消息模块：{logical_name}")
         return name, logical_name, target, config
 
-    @staticmethod
-    def _message_log_text(value: str) -> str:
-        return " ".join(value.strip().split())
-
-    def _legacy_message_logs(
-        self, config: MessagePluginConfig
-    ) -> tuple[list[dict[str, Any]], bool, int]:
-        entries: list[dict[str, Any]] = []
-        log_files = [
-            item
-            for item in _visible_children(config.log_path)
-            if item.is_file() and item.suffix.casefold() == ".md"
-        ]
-        log_files.sort(key=lambda item: (item.name.casefold(), item.name), reverse=True)
-        files_root = config.files_path.relative_to(self.root).as_posix()
-        for log_file in log_files:
-            try:
-                content = log_file.read_text("utf-8-sig")
-            except (OSError, UnicodeError):
-                continue
-            headings = list(_MESSAGE_LOG_HEADING.finditer(content))
-            for index, heading in enumerate(headings):
-                block_end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
-                block = content[heading.end():block_end]
-                timestamp = heading.group("timestamp").strip()
-                common = {
-                    "timestamp": timestamp,
-                    "chat_type": heading.group("chat_type").strip(),
-                    "chat_id": heading.group("chat_id").strip(),
-                    "source": log_file.relative_to(self.root).as_posix(),
-                }
-                inbound = _MESSAGE_LOG_INBOUND.search(block)
-                if inbound:
-                    inbound_text = self._message_log_text(inbound.group("content"))
-                    if inbound_text and inbound_text != "[仅附件]":
-                        entries.append({
-                            **common,
-                            "id": f"{config.directory.name}:{log_file.name}:{index}:receive",
-                            "direction": "receive",
-                            "kind": "text",
-                            "content": inbound_text,
-                            "file_path": None,
-                            "success": True,
-                        })
-                for attachment_index, attachment in enumerate(_MESSAGE_LOG_ATTACHMENT.finditer(block)):
-                    attachment_name = self._message_log_text(attachment.group("name"))
-                    entries.append({
-                        **common,
-                        "id": f"{config.directory.name}:{log_file.name}:{index}:file:{attachment_index}",
-                        "direction": "receive",
-                        "kind": "file",
-                        "content": attachment_name,
-                        "file_path": f"{files_root}/{attachment_name}",
-                        "mime": attachment.group("mime").strip(),
-                        "size": int(attachment.group("size")),
-                        "success": True,
-                    })
-                outbound = _MESSAGE_LOG_OUTBOUND.search(block)
-                if outbound:
-                    outbound_text = self._message_log_text(outbound.group("content"))
-                    if outbound_text:
-                        failed = outbound_text.startswith("处理失败：")
-                        entries.append({
-                            **common,
-                            "id": f"{config.directory.name}:{log_file.name}:{index}:send",
-                            "direction": "send",
-                            "kind": "system" if failed else "text",
-                            "content": outbound_text,
-                            "file_path": None,
-                            "success": not failed,
-                        })
-                for attachment_index, attachment in enumerate(
-                    _MESSAGE_LOG_OUTBOUND_ATTACHMENT.finditer(block)
-                ):
-                    entries.append({
-                        **common,
-                        "id": f"{config.directory.name}:{log_file.name}:{index}:send-file:{attachment_index}",
-                        "direction": "send",
-                        "kind": "file",
-                        "content": self._message_log_text(attachment.group("name")),
-                        "file_path": attachment.group("path").strip(),
-                        "success": True,
-                    })
-        entries.sort(key=lambda item: (str(item["timestamp"]), str(item["id"])), reverse=True)
-        truncated = len(entries) > _MESSAGE_LOG_LIMIT
-        today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
-        today_count = sum(
-            str(item.get("timestamp") or "").startswith(today) for item in entries
-        )
-        return entries[:_MESSAGE_LOG_LIMIT], truncated, today_count
-
     def _message_logs(
         self, config: MessagePluginConfig
     ) -> tuple[list[dict[str, Any]], bool, int]:
-        """Read indexed message logs, retaining Markdown as a safe fallback."""
+        """Read message-route logs from the authoritative SQLite store."""
 
-        try:
-            store = LogStore(self.root)
-            files_root = config.files_path.relative_to(self.root).as_posix()
-            store.migrate_message_logs(
-                config.log_path,
-                machine_id=config.machine_id,
-                user=config.bound_user,
-                platform=config.platform,
-                files_root=files_root,
-            )
-            entries = store.list_messages(
-                config.machine_id,
-                limit=_MESSAGE_LOG_LIMIT + 1,
-            )
-            today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
-            today_count = store.count_messages(
-                config.machine_id,
-                date_prefix=today,
-            )
-            return (
-                entries[:_MESSAGE_LOG_LIMIT],
-                len(entries) > _MESSAGE_LOG_LIMIT,
-                today_count,
-            )
-        except Exception:
-            return self._legacy_message_logs(config)
+        store = LogStore(self.root)
+        entries = store.list_messages(
+            config.machine_id,
+            limit=_MESSAGE_LOG_LIMIT + 1,
+        )
+        today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
+        today_count = store.count_messages(
+            config.machine_id,
+            date_prefix=today,
+        )
+        return (
+            entries[:_MESSAGE_LOG_LIMIT],
+            len(entries) > _MESSAGE_LOG_LIMIT,
+            today_count,
+        )
 
     def _message_transport_item(
         self,
@@ -206,7 +99,11 @@ class MessageExpandServiceMixin:
         issues: list[dict[str, str]],
     ) -> dict[str, Any]:
         try:
-            state = read_json_object(config.state_path, allow_empty=True)
+            state = LogStore(self.root).read_message_route_state(
+                config.machine_id
+            )
+            if state is None:
+                state = {}
         except Exception as exc:
             state = {}
             issues.append({"name": directory.name, "error": str(exc)})
@@ -228,7 +125,14 @@ class MessageExpandServiceMixin:
             if health in {"dead", "degraded"} or transport_state == "error"
             else "disconnected"
         )
-        logs, logs_truncated, today_logs = self._message_logs(config)
+        try:
+            logs, logs_truncated, today_logs = self._message_logs(config)
+        except Exception as exc:
+            logs, logs_truncated, today_logs = [], False, 0
+            issues.append({
+                "name": directory.name,
+                "error": f"消息日志数据库不可用：{exc}",
+            })
         temporary_files = _flat_files(config.files_path, relative_to=self.root)
         return {
             "id": directory.name,
@@ -252,8 +156,7 @@ class MessageExpandServiceMixin:
             "messages_sent_today": int(state.get("messages_sent_today") or 0),
             "path": directory.relative_to(self.root).as_posix(),
             "files_path": config.files_path.relative_to(self.root).as_posix(),
-            "log_path": config.log_path.relative_to(self.root).as_posix(),
-            "structured_log_path": "runtime/logs.sqlite3",
+            "log_path": "runtime/logs.sqlite3",
             "message_buffer": config.buffer_path.relative_to(self.root).as_posix(),
             "modules": dict(config.modules),
             "api_imported": True,
@@ -262,7 +165,7 @@ class MessageExpandServiceMixin:
             "file_relay_enabled": bool(
                 {"receive_file", "send_file"}.intersection(config.capabilities)
             ),
-            "log_rotation": "每日轮换",
+            "log_rotation": "按保留期清理",
             "temporary_file_count": len(temporary_files),
             "temporary_file_bytes": sum(int(item["size"]) for item in temporary_files),
             "today_log_count": today_logs,
@@ -378,10 +281,12 @@ class MessageExpandServiceMixin:
                     pass
             raise WebServiceError(f"消息模块删除失败：{logical_name}") from exc
         try:
-            LogStore(self.root).delete_message_logs(
+            store = LogStore(self.root)
+            store.delete_message_logs(
                 config.machine_id,
                 user=name,
             )
+            store.delete_message_route_state(config.machine_id, user=name)
         except Exception:
             pass
         return {
@@ -818,5 +723,3 @@ class MessageExpandServiceMixin:
             "path": relative_path,
             "deleted": True,
         }
-
-

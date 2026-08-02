@@ -8,6 +8,7 @@ from typing import Any
 
 from run.agents import discover_agents
 from run.config import load_config
+from run.context_summary import read_summary_cache
 from run.history import find_window, list_sessions, load_window, runtime_window_path
 from web.services.runtime_status import _nonnegative_int
 
@@ -25,13 +26,18 @@ class OverviewServiceMixin:
         directory = find_window(self.root, user, "web", session_id)
         if directory is None:
             return empty
-        path = runtime_window_path(directory) / "context_summary.json"
-        if not path.is_file():
-            return {**empty, "window": directory.name}
+        runtime_path = runtime_window_path(directory)
         try:
-            value = json.loads(path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {**empty, "exists": True, "window": directory.name, "invalid": True}
+            value = read_summary_cache(runtime_path)
+        except Exception:
+            return {
+                **empty,
+                "exists": False,
+                "window": directory.name,
+                "invalid": True,
+            }
+        if value is None:
+            return {**empty, "window": directory.name}
         return {
             "exists": True,
             "covered_rounds": [
@@ -343,6 +349,3 @@ class OverviewServiceMixin:
             "active_plan": active_plan,
             "activities": activities[:6],
         }
-
-
-

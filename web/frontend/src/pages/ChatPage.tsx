@@ -18,10 +18,11 @@ import {
   TimerReset,
   Trash2,
   UserRound,
+  X,
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserFileDownloadUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -162,6 +163,67 @@ function UserAttachmentCard({ user, attachment }: { user: string; attachment: In
       </span>
       {downloadable ? <button type="button" onClick={() => { void download() }} aria-label={`下载附件 ${attachment.name}`}><Download size={14} />下载</button> : null}
     </article>
+  )
+}
+
+function PendingAttachmentCard({
+  user,
+  file,
+  onRemove,
+}: {
+  user: string
+  file: PendingUploadedFile
+  onRemove: () => void
+}) {
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const image = file.mediaKind === 'image' || file.mimeType?.startsWith('image/')
+  const previewUrl = image ? getUserFilePreviewUrl(user, 'file_upload', file.path) : ''
+
+  useEffect(() => setPreviewFailed(false), [file.path])
+
+  return (
+    <article className={`pending-attachment-card${image ? ' image' : ' file'}`} role="listitem" aria-label={`待发送附件：${file.name}`}>
+      <span className="pending-attachment-status">已上传 {file.name}</span>
+      {image && !previewFailed ? (
+        <a className="pending-attachment-preview" href={previewUrl} target="_blank" rel="noreferrer" aria-label={`预览图片 ${file.name}`}>
+          <img src={previewUrl} alt={file.name} onError={() => setPreviewFailed(true)} />
+        </a>
+      ) : (
+        <span className="pending-attachment-file-icon" aria-hidden="true">
+          {image ? <ImageIcon size={22} /> : <FileIcon size={22} />}
+        </span>
+      )}
+      <span className="pending-attachment-copy">
+        <strong title={file.name}>{file.name}</strong>
+        <small>{file.mimeType || '文件'} · {formatBytes(file.size)}</small>
+      </span>
+      <button type="button" className="pending-attachment-remove" onClick={onRemove} aria-label={`取消引用 ${file.name}`} title="取消本次引用">
+        <X size={15} />
+      </button>
+    </article>
+  )
+}
+
+function PendingAttachmentTray({
+  user,
+  files,
+  onRemove,
+}: {
+  user: string
+  files: PendingUploadedFile[]
+  onRemove: (index: number) => void
+}) {
+  return (
+    <div className="pending-attachment-tray" role="list" aria-label="待发送附件">
+      {files.map((file, index) => (
+        <PendingAttachmentCard
+          key={`${file.path}:${index}`}
+          user={user}
+          file={file}
+          onRemove={() => onRemove(index)}
+        />
+      ))}
+    </div>
   )
 }
 
@@ -1859,6 +1921,7 @@ export function ChatPage() {
         <UserMessageNavigator
           markers={userMessageMarkers}
           scrollContainerRef={scrollRef}
+          totalRounds={Math.max(totalRounds, historyData?.pagination?.total_rounds ?? 0)}
           hasEarlierMessages={Boolean(historyQuery.hasNextPage)}
           loadingEarlierMessages={historyQuery.isFetchingNextPage}
           onLoadEarlierMessages={loadEarlierHistory}
@@ -1888,7 +1951,10 @@ export function ChatPage() {
           conversationMenuOpen={conversationMenuOpen}
           pendingFileCount={pendingUploads.length}
           uploading={uploading}
-          uploadFeedback={uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status"><span>{uploadFeedback.text}</span><button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : pendingUploads.length ? <div className="upload-feedback success" role="status"><span>{pendingUploads.map((file) => `已上传 ${file.name} · ${formatBytes(file.size)}`).join('；')}</span><button type="button" onClick={() => setPendingUploads([])} aria-label="移除待发送文件">×</button></div> : null}
+          uploadFeedback={<>
+            {uploadFeedback ? <div className={`upload-feedback ${uploadFeedback.tone}`} role="status"><span>{uploadFeedback.text}</span><button type="button" onClick={() => setUploadFeedback(null)} aria-label="关闭上传提示">×</button></div> : null}
+            {pendingUploads.length ? <PendingAttachmentTray user={user} files={pendingUploads} onRemove={(index) => setPendingUploads((current) => current.filter((_, currentIndex) => currentIndex !== index))} /> : null}
+          </>}
           notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={cancelEditAndResend}>取消编辑</button></div> : null}
           conversationMenu={conversationMenuOpen ? (
             <div className="conversation-menu show" role="menu">

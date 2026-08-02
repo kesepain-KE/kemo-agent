@@ -324,6 +324,7 @@ export function AppShell() {
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false)
   const [historySwitchingSessionId, setHistorySwitchingSessionId] = useState('')
   const [historySwitchError, setHistorySwitchError] = useState('')
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
   const [logoutPending, setLogoutPending] = useState(false)
   const [avatarRevision, setAvatarRevision] = useState(0)
   const [chatRunning, setChatRunning] = useState(false)
@@ -600,6 +601,28 @@ export function AppShell() {
   }, [clientId, navigate, queryClient])
 
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
+
+  const loadMoreHistorySessions = async () => {
+    const current = sessionsQuery.data
+    if (!user || !current?.has_more || !current.next_cursor || historyLoadingMore) return
+    setHistoryLoadingMore(true)
+    try {
+      const nextPage = await getSessions(user, '', 50, current.next_cursor)
+      queryClient.setQueryData<SessionsResponse>(['sessions', user], {
+        ...nextPage,
+        sessions: [
+          ...current.sessions,
+          ...nextPage.sessions.filter(
+            (candidate) => !current.sessions.some(
+              (existing) => existing.session_id === candidate.session_id,
+            ),
+          ),
+        ],
+      })
+    } finally {
+      setHistoryLoadingMore(false)
+    }
+  }
 
   const createNewSession = async () => {
     if (!user || chatRunning) return
@@ -937,6 +960,8 @@ export function AppShell() {
         sessions={sessionsQuery.data?.sessions ?? []}
         activeSessionId={sessionId}
         loading={sessionsQuery.isLoading || sessionsQuery.isFetching}
+        loadingMore={historyLoadingMore}
+        hasMore={Boolean(sessionsQuery.data?.has_more)}
         error={sessionsQuery.isError}
         chatRunning={chatRunning}
         switchingSessionId={historySwitchingSessionId}
@@ -946,6 +971,7 @@ export function AppShell() {
         onDeleteSession={deleteHistorySession}
         onDeleteAllSessions={deleteAllHistorySessions}
         onRetrySummary={retryHistorySummary}
+        onLoadMore={() => { void loadMoreHistorySessions() }}
       />
 
       {commandOpen && <div className="command-layer show" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false) }}>

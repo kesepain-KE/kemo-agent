@@ -12,6 +12,8 @@ export interface HistorySearchDrawerProps {
   sessions: SessionSummary[]
   activeSessionId: string
   loading?: boolean
+  loadingMore?: boolean
+  hasMore?: boolean
   error?: boolean
   chatRunning?: boolean
   switchingSessionId?: string
@@ -21,6 +23,7 @@ export interface HistorySearchDrawerProps {
   onDeleteSession: (sessionId: string) => Promise<void> | void
   onDeleteAllSessions: () => Promise<void> | void
   onRetrySummary: (sessionId: string) => Promise<void> | void
+  onLoadMore?: () => Promise<void> | void
 }
 
 interface SummaryPreview {
@@ -36,6 +39,8 @@ export function HistorySearchDrawer({
   sessions,
   activeSessionId,
   loading = false,
+  loadingMore = false,
+  hasMore = false,
   error = false,
   chatRunning = false,
   switchingSessionId = '',
@@ -45,6 +50,7 @@ export function HistorySearchDrawer({
   onDeleteSession,
   onDeleteAllSessions,
   onRetrySummary,
+  onLoadMore = () => undefined,
 }: HistorySearchDrawerProps) {
   const [query, setQuery] = useState('')
   const [pendingSessionId, setPendingSessionId] = useState('')
@@ -287,6 +293,15 @@ export function HistorySearchDrawer({
               </span>
             </article>
           })}
+          {!loading && !error && !normalizedQuery && hasMore && <button
+            type="button"
+            className={styles.loadMoreButton}
+            disabled={loadingMore}
+            onClick={() => { void onLoadMore() }}
+          >
+            {loadingMore && <LoaderCircle className={styles.spinning} size={15} />}
+            {loadingMore ? '正在加载更早对话…' : '加载更早对话'}
+          </button>}
           {!loading && !error && filteredSessions.length === 0 && <div className={styles.empty}>
             <Search size={22} />
             <strong>{sessions.length === 0 ? '暂无历史对话' : '没有匹配的对话'}</strong>

@@ -52,23 +52,6 @@ _WINDOWS_INVALID_PATH_CHARS = frozenset('<>:"|?*')
 _EXPAND_SCOPES = frozenset({"global", "shared", "user"})
 _EXPAND_INJECTION_HEADING = re.compile(r"^##\s+注入层\s*$", re.MULTILINE)
 _EXPAND_OPERATION_HEADING = re.compile(r"^##\s+操作层\s*$", re.MULTILINE)
-_MESSAGE_LOG_HEADING = re.compile(
-    r"(?m)^##\s+(?P<timestamp>[^|\r\n]+?)\s*\|\s*(?P<chat_type>[^|\r\n]+?)\s*\|\s*(?P<chat_id>[^\r\n]+?)\s*$"
-)
-_MESSAGE_LOG_INBOUND = re.compile(
-    r"\*\*入站\*\*：(?P<content>.*?)(?=\n\s*-\s*附件：|\n\*\*出站\*\*：|\n---|\Z)",
-    re.DOTALL,
-)
-_MESSAGE_LOG_OUTBOUND = re.compile(
-    r"\*\*出站\*\*：(?P<content>.*?)(?=\n\s*-\s*出站附件：|\n---|\Z)",
-    re.DOTALL,
-)
-_MESSAGE_LOG_ATTACHMENT = re.compile(
-    r"(?m)^\s*-\s*附件：(?P<name>.+?)\s+\((?P<mime>[^,]+),\s*(?P<size>\d+)\s+bytes\)\s*$"
-)
-_MESSAGE_LOG_OUTBOUND_ATTACHMENT = re.compile(
-    r"(?m)^\s*-\s*出站附件：(?P<name>.+?)\s+\((?P<path>[^\r\n]+)\)\s*$"
-)
 _BEIJING = ZoneInfo("Asia/Shanghai")
 _MESSAGE_LOG_LIMIT = 500
 _EDITABLE_TEXT_SUFFIXES = frozenset(
@@ -105,6 +88,5 @@ _AVATAR_SEARCH_ORDER = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {"api_key", "access_token", "password", "session_secret", "authorization"}
 )
-
 
 

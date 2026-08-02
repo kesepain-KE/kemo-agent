@@ -156,6 +156,9 @@ export interface SessionsResponse {
   user: string
   source: 'web'
   sessions: SessionSummary[]
+  query?: string
+  has_more?: boolean
+  next_cursor?: string
 }
 
 export interface SessionRenameResponse {
@@ -879,6 +882,7 @@ export type RuntimeHealth = 'healthy' | 'warning' | 'error' | 'offline'
 
 export interface RuntimeStatusResponse {
   schema_version: number
+  included_sections?: string[]
   generated_at: string
   user: string
   session_id: string
@@ -892,6 +896,7 @@ export interface RuntimeStatusResponse {
   }
   context: {
     selected: boolean
+    available?: boolean
     used_tokens: number
     max_tokens: number
     percent: number
@@ -1191,7 +1196,6 @@ export interface MessageTransportSummary {
   path: string
   files_path: string
   log_path: string
-  structured_log_path?: string
   message_buffer: string
   modules: Record<string, string>
   api_imported: boolean

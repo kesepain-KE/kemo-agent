@@ -664,6 +664,86 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .upload-feedback button { width: 24px; height: 24px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 7px; background: transparent; color: inherit; font-size: 1rem; line-height: 1; cursor: pointer; }
 .upload-feedback button:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 
+.pending-attachment-tray {
+  margin: 0 0 12px;
+  padding: 1px 1px 5px;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+.pending-attachment-card {
+  width: clamp(220px, 28vw, 292px);
+  min-width: 220px;
+  min-height: 70px;
+  padding: 9px 38px 9px 10px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-elevated) 91%, var(--surface-2));
+  box-shadow: 0 4px 12px rgba(31, 35, 48, .035);
+}
+.pending-attachment-preview,
+.pending-attachment-file-icon {
+  width: 54px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--brand);
+}
+.pending-attachment-preview img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.pending-attachment-preview:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 30%, transparent); outline-offset: 2px; }
+.pending-attachment-copy { min-width: 0; display: grid; gap: 5px; }
+.pending-attachment-copy strong,
+.pending-attachment-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-attachment-copy strong { color: var(--text); font-size: .78rem; font-weight: 760; }
+.pending-attachment-copy small { color: var(--muted); font-size: .66rem; }
+.pending-attachment-remove {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease;
+}
+.pending-attachment-remove:hover { color: var(--red); background: var(--red-soft); }
+.pending-attachment-remove:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 28%, transparent); outline-offset: 1px; }
+.pending-attachment-status {
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  position: absolute;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 620px) {
+  .pending-attachment-card { width: 210px; min-width: 210px; grid-template-columns: 46px minmax(0, 1fr); }
+  .pending-attachment-preview,
+  .pending-attachment-file-icon { width: 46px; height: 46px; }
+}
+
 @media (max-width: 780px) {
   .usage-card { width: calc(100% - 39px); margin-left: 39px; }
   .usage-card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1751,7 +1831,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   cursor: pointer;
 }
 
-/* A compact rail that expands into interactive 90°—270° conversation cards. */
+/* A global round-position indicator that expands into interactive 90°—270° conversation cards. */
 .user-message-navigator {
   --message-wheel-card: color-mix(in srgb, var(--surface-elevated) 96%, transparent);
   position: absolute;
@@ -1759,7 +1839,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   top: 50%;
   right: 5px;
   width: 540px;
-  height: min(560px, calc(100% - 24px));
+  height: min(440px, calc(100% - 24px));
   transform: translateY(-50%);
   pointer-events: none;
 }
@@ -1768,13 +1848,14 @@ label > input[type="search"]::-webkit-search-results-decoration {
   top: 50%;
   right: 28px;
   width: 480px;
-  height: min(520px, 100%);
+  height: 420px;
+  max-height: 100%;
   opacity: 0;
   visibility: hidden;
   transform: translateY(-50%) translateX(18px) scale(.985);
   transform-origin: right center;
   pointer-events: none;
-  transition: opacity .16s ease, transform .22s cubic-bezier(.22, 1, .36, 1), visibility .16s;
+  transition: opacity .2s ease, transform .3s cubic-bezier(.16, 1, .3, 1), visibility .2s;
 }
 .user-message-navigator[data-open="true"] .user-message-wheel {
   opacity: 1;
@@ -1786,12 +1867,12 @@ label > input[type="search"]::-webkit-search-results-decoration {
   position: absolute;
   top: 50%;
   right: 0;
-  width: 320px;
-  height: 84%;
-  border-radius: 50% 0 0 50%;
-  background: radial-gradient(circle at 100% 50%, color-mix(in srgb, var(--brand) 12%, transparent) 0%, color-mix(in srgb, var(--brand) 4%, transparent) 36%, transparent 72%);
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--brand) 11%, transparent) 0%, color-mix(in srgb, var(--brand) 4%, transparent) 42%, transparent 72%);
   filter: blur(9px);
-  transform: translateY(-50%);
+  transform: translate(45%, -50%);
   pointer-events: none;
 }
 .user-message-wheel-card {
@@ -1816,7 +1897,8 @@ label > input[type="search"]::-webkit-search-results-decoration {
   transform: translate(-50%, -50%) scale(var(--wheel-scale));
   transform-origin: center;
   backdrop-filter: blur(14px);
-  transition: width .18s cubic-bezier(.22, 1, .36, 1), min-height .18s cubic-bezier(.22, 1, .36, 1), padding .18s ease, opacity .15s ease, color .15s ease, border-color .15s ease, box-shadow .18s ease, transform .18s cubic-bezier(.22, 1, .36, 1);
+  will-change: left, top, transform, opacity;
+  transition: left .32s cubic-bezier(.16, 1, .3, 1), top .32s cubic-bezier(.16, 1, .3, 1), width .24s cubic-bezier(.16, 1, .3, 1), min-height .24s cubic-bezier(.16, 1, .3, 1), padding .2s ease, opacity .2s ease, color .18s ease, border-color .18s ease, box-shadow .24s ease, transform .32s cubic-bezier(.16, 1, .3, 1);
 }
 .user-message-wheel-card:hover {
   border-color: color-mix(in srgb, var(--brand) 22%, var(--line));
@@ -1866,92 +1948,62 @@ label > input[type="search"]::-webkit-search-results-decoration {
   position: absolute;
   top: 50%;
   right: 0;
-  width: 54px;
-  height: min(390px, calc(100% - 28px));
+  width: 28px;
+  height: 86px;
   display: flex;
   align-items: center;
   justify-content: center;
   transform: translateY(-50%);
   pointer-events: auto;
 }
-.user-message-marker-layer {
-  width: 38px;
-  max-height: 365px;
-  padding: 3px 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 2px;
-}
-.user-message-marker {
+.user-message-progress {
   position: relative;
-  width: 38px;
-  height: 15px;
-  flex: 0 0 15px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--muted-2);
-  cursor: pointer;
-}
-.user-message-marker-line {
-  width: 10px;
-  height: 2px;
-  margin-left: auto;
+  width: 4px;
+  height: 80px;
   display: block;
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--muted) 55%, transparent);
-  transition: width .14s ease, height .14s ease, background .14s ease;
+  background: color-mix(in srgb, var(--muted) 24%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 54%, transparent);
+  transition: background .2s ease, box-shadow .2s ease;
 }
-.user-message-marker:hover .user-message-marker-line,
-.user-message-marker:focus-visible .user-message-marker-line {
-  width: 21px;
-  height: 3px;
-  background: var(--text-2);
-}
-.user-message-marker.active .user-message-marker-line {
-  width: 30px;
+.user-message-progress-thumb {
+  position: absolute;
+  top: var(--round-progress);
+  left: 50%;
+  width: 16px;
   height: 4px;
+  display: block;
+  border-radius: var(--radius-full);
   background: var(--brand);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 8%, transparent), 0 0 18px color-mix(in srgb, var(--brand) 22%, transparent);
-  transform: translateX(-1px);
+  transform: translate(-50%, -50%);
+  transition: top .28s cubic-bezier(.16, 1, .3, 1), width .18s ease, box-shadow .18s ease;
 }
-.user-message-marker:focus-visible,
-.user-message-navigator-more:focus-visible {
+.user-message-navigator[data-open="true"] .user-message-progress {
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 18%, var(--line));
+}
+.user-message-navigator[data-open="true"] .user-message-progress-thumb { width: 20px; }
+.user-message-progress.loading .user-message-progress-thumb { animation: user-message-progress-pulse .9s ease-in-out infinite alternate; }
+.user-message-rail:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: 8px;
 }
-.user-message-navigator-more {
-  position: absolute;
-  top: -5px;
-  right: 9px;
-  width: 32px;
-  height: 20px;
+.user-message-progress-status {
+  width: 1px;
+  height: 1px;
   padding: 0;
+  position: absolute;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
   border: 0;
-  background: transparent;
-  display: grid;
-  place-items: center end;
-  color: var(--brand);
-  pointer-events: auto;
-  cursor: pointer;
 }
-.user-message-navigator-more svg {
-  padding: 2px;
-  box-sizing: content-box;
-  border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
-  border-radius: 50%;
-  background: var(--surface-elevated);
-  box-shadow: var(--shadow-soft);
+@keyframes user-message-progress-pulse {
+  from { opacity: .55; }
+  to { opacity: 1; }
 }
-.user-message-navigator-more:hover svg { background: var(--brand-soft); }
-.user-message-navigator-more:disabled { opacity: .5; cursor: wait; }
 
 @media (max-width: 780px) {
   .user-message-navigator { display: none; }
@@ -1966,7 +2018,8 @@ label > input[type="search"]::-webkit-search-results-decoration {
 @media (prefers-reduced-motion: reduce) {
   .user-message-wheel,
   .user-message-wheel-card,
-  .user-message-marker-line { transition: none; }
+  .user-message-progress,
+  .user-message-progress-thumb { transition: none; animation: none; }
 }
 
 

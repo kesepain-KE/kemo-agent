@@ -7,7 +7,6 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from 'react'
-import { ChevronUp } from 'lucide-react'
 
 export interface UserMessageMarker {
   id: string
@@ -18,6 +17,7 @@ export interface UserMessageMarker {
 interface UserMessageNavigatorProps {
   markers: UserMessageMarker[]
   scrollContainerRef: RefObject<HTMLElement | null>
+  totalRounds?: number
   hasEarlierMessages?: boolean
   loadingEarlierMessages?: boolean
   onLoadEarlierMessages?: () => void | Promise<void>
@@ -28,6 +28,10 @@ type WheelCardStyle = CSSProperties & {
   '--wheel-x': string
   '--wheel-y': string
   '--wheel-scale': number
+}
+
+type RoundProgressStyle = CSSProperties & {
+  '--round-progress': string
 }
 
 const MAX_WHEEL_ITEMS = 10
@@ -67,10 +71,11 @@ function wheelAngle(index: number, count: number, activeIndex: number) {
 function wheelPosition(index: number, count: number, activeIndex: number) {
   const angle = wheelAngle(index, count, activeIndex)
   const radians = (angle * Math.PI) / 180
+  const radius = 150
   return {
     angle,
-    x: 80 + 38 * Math.cos(radians),
-    y: 50 - 34 * Math.sin(radians),
+    x: 420 + radius * Math.cos(radians),
+    y: 210 - radius * Math.sin(radians),
   }
 }
 
@@ -78,8 +83,8 @@ function wheelCardStyle(index: number, count: number, activeIndex: number): Whee
   const position = wheelPosition(index, count, activeIndex)
   const distance = Math.abs(activeIndex - index)
   return {
-    '--wheel-x': `${position.x + 7}%`,
-    '--wheel-y': `${position.y}%`,
+    '--wheel-x': `${position.x}px`,
+    '--wheel-y': `${position.y}px`,
     '--wheel-scale': index === activeIndex ? 1 : Math.max(.78, .94 - distance * .025),
     opacity: index === activeIndex ? 1 : Math.max(.2, .72 - distance * .07),
     zIndex: index === activeIndex ? 100 : Math.max(1, 50 - distance),
@@ -89,6 +94,7 @@ function wheelCardStyle(index: number, count: number, activeIndex: number): Whee
 export function UserMessageNavigator({
   markers,
   scrollContainerRef,
+  totalRounds = 0,
   hasEarlierMessages = false,
   loadingEarlierMessages = false,
   onLoadEarlierMessages,
@@ -121,6 +127,14 @@ export function UserMessageNavigator({
   )
   const visibleMarkers = markers.slice(windowStart, windowStart + MAX_WHEEL_ITEMS)
   const activeIndex = Math.max(0, visibleMarkers.findIndex((marker) => marker.id === activeId))
+  const selectedRound = markers[activeMarkerIndex]?.round ?? markers.at(-1)?.round ?? 1
+  const globalRoundCount = Math.max(totalRounds, selectedRound, ...markers.map((marker) => marker.round))
+  const roundProgress = globalRoundCount <= 1
+    ? 1
+    : clamp((selectedRound - 1) / (globalRoundCount - 1), 0, 1)
+  const progressStyle: RoundProgressStyle = {
+    '--round-progress': `${roundProgress * 100}%`,
+  }
   const isLoadingEarlier = loadingEarlierMessages || requestingEarlier
 
   const clearCloseTimer = useCallback(() => {
@@ -296,6 +310,7 @@ export function UserMessageNavigator({
       data-open={open}
       onPointerEnter={openWheel}
       onPointerLeave={scheduleClose}
+      onFocus={openWheel}
     >
       <div className="user-message-wheel" aria-hidden={!open} aria-label="对话轮次卡片">
         <span className="user-message-wheel-glow" aria-hidden="true" />
@@ -333,43 +348,28 @@ export function UserMessageNavigator({
         ) : null}
       </div>
 
-      <div className="user-message-rail" aria-label="当前 10 条用户消息刻度">
-        {hasEarlierMessages && onLoadEarlierMessages ? (
-          <button
-            className="user-message-navigator-more"
-            type="button"
-            disabled={isLoadingEarlier}
-            onClick={() => { void requestEarlierMessages() }}
-            aria-label={isLoadingEarlier ? '正在加载更早消息' : '加载更早消息'}
-            title={isLoadingEarlier ? '正在加载更早消息…' : '还有更早消息，点击加载'}
-          >
-            <ChevronUp size={12} />
-          </button>
-        ) : null}
-        <div className="user-message-marker-layer" role="listbox" aria-label="当前窗口的用户消息，可通过滚轮切换">
-          {visibleMarkers.map((marker, index) => {
-            const preview = compactUserMessagePreview(marker.content)
-            const active = index === activeIndex
-            return (
-              <button
-                key={marker.id}
-                className={`user-message-marker${active ? ' active' : ''}`}
-                data-navigator-message-id={marker.id}
-                type="button"
-                role="option"
-                aria-selected={active}
-                aria-label={`跳转到第 ${marker.round} 轮：${preview}`}
-                onPointerEnter={() => previewAt(index)}
-                onFocus={() => previewAt(index)}
-                onClick={() => activate(marker)}
-                onKeyDown={handleKeyDown}
-              >
-                <span className="user-message-marker-line" aria-hidden="true" />
-              </button>
-            )
-          })}
-        </div>
+      <div
+        className="user-message-rail"
+        aria-label={`轮次位置：当前预选第 ${selectedRound} 轮，共 ${globalRoundCount} 轮`}
+        onFocus={openWheel}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+      >
+        <span
+          className={`user-message-progress${isLoadingEarlier ? ' loading' : ''}`}
+          role="progressbar"
+          aria-label="当前预选轮次"
+          aria-valuemin={1}
+          aria-valuemax={globalRoundCount}
+          aria-valuenow={selectedRound}
+          style={progressStyle}
+        >
+          <span className="user-message-progress-thumb" />
+        </span>
       </div>
+      <span className="user-message-progress-status" role="status" aria-live="polite">
+        当前预选第 {selectedRound} 轮，共 {globalRoundCount} 轮
+      </span>
     </nav>
   )
 }

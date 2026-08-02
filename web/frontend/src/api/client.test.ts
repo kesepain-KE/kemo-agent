@@ -5,6 +5,7 @@ import {
   AVATAR_UPDATED_EVENT,
   commandPlan,
   getLogoUrl,
+  getRuntimeStatus,
   getUserAvatarUrl,
   getUserFileDownloadUrl,
   parseSseFrames,
@@ -82,6 +83,20 @@ describe('parseSseFrames', () => {
   it('暂停计划使用无 revision 的状态指令接口', async () => {
     const result = await commandPlan('kesepain', 'plan_12345678', 'pause')
     expect(result).toMatchObject({ action: 'pause', updated: true, plan: { status: 'paused' } })
+  })
+
+  it('运行状态请求只携带当前栏目和摘要分区', async () => {
+    let requestUrl = ''
+    server.use(http.get('/api/users/kesepain/runtime/status', ({ request }) => {
+      requestUrl = request.url
+      return HttpResponse.json({ schema_version: 1 })
+    }))
+
+    await getRuntimeStatus('kesepain', 'session 1', ['summary', 'tokens'])
+
+    const query = new URL(requestUrl).searchParams
+    expect(query.get('session_id')).toBe('session 1')
+    expect(query.get('sections')).toBe('summary,tokens')
   })
 
   it('为头像、Logo 和文件下载生成安全 URL', () => {

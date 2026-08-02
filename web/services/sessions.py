@@ -12,9 +12,9 @@ from run.history import (
     delete_session as delete_history_session,
     find_window,
     list_sessions,
+    list_sessions_page,
     load_window,
     rename_session as rename_history_session,
-    session_messages,
     undo_last_round as undo_history_last_round,
 )
 from run.history_index import (
@@ -24,6 +24,7 @@ from run.history_index import (
     new_conversation_id,
     reserve_session,
 )
+from run.history_store import session_page_cursor
 from web.constants import _TOOL_TEXT_LIMIT
 from web.errors import (
     ConflictError,
@@ -53,46 +54,37 @@ class SessionServiceMixin:
         *,
         source: Any = "web",
         query: Any = "",
+        limit: Any = 50,
+        before: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         if not isinstance(query, str):
             raise InvalidRequestError("query 必须是字符串")
-        normalized_query = query.strip().casefold()
-        sessions = list_sessions(self.root, name, normalized_source)
-        if normalized_query:
-            matched = []
-            for item in sessions:
-                searchable = " ".join(
-                    str(item.get(key) or "") for key in ("session_id", "title", "window")
-                ).casefold()
-                if normalized_query in searchable:
-                    matched.append(item)
-                    continue
-                directory = find_window(
-                    self.root,
-                    name,
-                    normalized_source,
-                    str(item.get("session_id") or ""),
-                )
-                if directory is None:
-                    continue
-                try:
-                    messages = session_messages(load_window(directory))
-                except (OSError, ValueError, TypeError):
-                    continue
-                if any(
-                    normalized_query in str(message.get("content") or "").casefold()
-                    for message in messages
-                    if isinstance(message, dict)
-                ):
-                    matched.append(item)
-            sessions = matched
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise InvalidRequestError("limit 必须是 1 到 100 的整数")
+        if not isinstance(before, str):
+            raise InvalidRequestError("before 必须是字符串")
+        sessions, has_more = list_sessions_page(
+            self.root,
+            name,
+            normalized_source,
+            query=query.strip(),
+            limit=limit,
+            before_updated_at=before.strip(),
+        )
+        next_cursor = session_page_cursor(sessions[-1]) if has_more and sessions else ""
         return {
             "user": name,
             "source": normalized_source,
             "query": query.strip(),
             "sessions": sessions,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
         }
 
     @staticmethod
@@ -112,11 +104,15 @@ class SessionServiceMixin:
             "summary_completed_round": int(record.get("summary_completed_round") or 0),
             "summary_retry_at": str(record.get("summary_retry_at") or ""),
             "summary_retry_count": max(0, int(record.get("summary_retry_count") or 0)),
-            "summary_attempt_count": max(0, int(record.get("summary_attempt_count") or 0)),
+            "summary_attempt_count": max(
+                0, int(record.get("summary_attempt_count") or 0)
+            ),
             "summary_consecutive_failures": max(
                 0, int(record.get("summary_consecutive_failures") or 0)
             ),
-            "summary_max_attempts": max(1, int(record.get("summary_max_attempts") or 5)),
+            "summary_max_attempts": max(
+                1, int(record.get("summary_max_attempts") or 5)
+            ),
             "summary_last_attempt_at": str(record.get("summary_last_attempt_at") or ""),
             "summary_recovered_at": str(record.get("summary_recovered_at") or ""),
             "summary_last_error": (
@@ -488,7 +484,9 @@ class SessionServiceMixin:
                 if media_kind not in {"image", "audio", "video", "file"}:
                     media_kind = "file"
                 scope = str(item.get("scope") or "external")
-                relative_path = str(item.get("relative_path") or "").replace("\\", "/").strip("/")
+                relative_path = (
+                    str(item.get("relative_path") or "").replace("\\", "/").strip("/")
+                )
                 available = False
                 if scope == "file_upload" and relative_path:
                     try:
@@ -498,7 +496,10 @@ class SessionServiceMixin:
                         available = (
                             not target.is_symlink()
                             and target.is_file()
-                            and (not expected_size or target.stat().st_size == expected_size)
+                            and (
+                                not expected_size
+                                or target.stat().st_size == expected_size
+                            )
                         )
                     except (OSError, WebServiceError):
                         available = False
@@ -576,7 +577,11 @@ class SessionServiceMixin:
                 responses = item.get("provider_responses") or []
                 if isinstance(responses, list):
                     for response in responses:
-                        metadata = response.get("metadata") if isinstance(response, dict) else None
+                        metadata = (
+                            response.get("metadata")
+                            if isinstance(response, dict)
+                            else None
+                        )
                         if isinstance(metadata, dict):
                             artifacts.extend(media_artifacts(metadata.get("artifacts")))
                 round_metrics.append(
@@ -589,7 +594,9 @@ class SessionServiceMixin:
                             str(value)
                             for value in item.get("guidance", [])
                             if isinstance(value, str)
-                        ] if isinstance(item.get("guidance"), list) else [],
+                        ]
+                        if isinstance(item.get("guidance"), list)
+                        else [],
                         "guidance_details": [
                             {
                                 "id": str(value.get("id") or ""),
@@ -605,7 +612,9 @@ class SessionServiceMixin:
                             }
                             for value in item.get("guidance_details", [])
                             if isinstance(value, dict)
-                        ] if isinstance(item.get("guidance_details"), list) else [],
+                        ]
+                        if isinstance(item.get("guidance_details"), list)
+                        else [],
                         "status": str(item.get("status") or "completed"),
                         "cancelled": bool(item.get("cancelled", False)),
                         "cancel_reason": str(item.get("cancel_reason") or ""),
@@ -637,8 +646,12 @@ class SessionServiceMixin:
                 for call in item["calls"]:
                     if not isinstance(call, dict):
                         continue
-                    arguments_text, arguments_truncated = _tool_text_preview(call.get("arguments") or {})
-                    result_text, result_truncated = _tool_text_preview(call.get("result"))
+                    arguments_text, arguments_truncated = _tool_text_preview(
+                        call.get("arguments") or {}
+                    )
+                    result_text, result_truncated = _tool_text_preview(
+                        call.get("result")
+                    )
                     raw_result = call.get("result")
                     tool_value = (
                         raw_result.get("result")
@@ -680,7 +693,9 @@ class SessionServiceMixin:
                 "reasoning": reasoning_by_round.get(round_number, ""),
                 "tools": tools_by_round.get(round_number, []),
             }
-            for round_number in sorted(reasoning_by_round.keys() | tools_by_round.keys())
+            for round_number in sorted(
+                reasoning_by_round.keys() | tools_by_round.keys()
+            )
         ]
         return {
             "user": name,

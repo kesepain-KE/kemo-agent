@@ -21,8 +21,16 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         source: str = Query(default="web"),
         query: str = Query(default=""),
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.sessions(user, source=source, query=query)
+        return backend.sessions(
+            user,
+            source=source,
+            query=query,
+            limit=limit,
+            before=before,
+        )
 
     @app.delete("/api/users/{user}/sessions")
     async def delete_all_sessions(
@@ -191,6 +199,11 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     async def runtime_status(
         user: str,
         session_id: str = Query(default=""),
+        sections: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.runtime_status(user, session_id=session_id)
-
+        return await asyncio.to_thread(
+            backend.runtime_status,
+            user,
+            session_id=session_id,
+            sections=sections,
+        )

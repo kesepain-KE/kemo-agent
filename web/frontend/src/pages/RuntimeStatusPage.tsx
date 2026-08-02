@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -132,10 +132,13 @@ async function copyText(value: string) {
 
 export function RuntimeStatusPage() {
   const { user, sessionId } = useOutletContext<ShellOutletContext>()
+  const [activeTab, setActiveTab] = useState<RuntimeTab>('prompt')
   const query = useQuery({
-    queryKey: ['runtime-status', user, sessionId],
-    queryFn: () => getRuntimeStatus(user, sessionId),
+    queryKey: ['runtime-status', user, sessionId, activeTab],
+    queryFn: () => getRuntimeStatus(user, sessionId, ['summary', activeTab]),
     enabled: Boolean(user),
+    placeholderData: keepPreviousData,
+    staleTime: 10_000,
   })
 
   return (
@@ -152,7 +155,14 @@ export function RuntimeStatusPage() {
       )}
     >
       {query.isError ? <ModuleError message="运行状态读取失败，请检查用户配置或 RuntimeHost。" /> : null}
-      {query.data ? <RuntimeDashboard data={query.data} /> : !query.isError ? <LoadingState /> : null}
+      {query.data ? (
+        <RuntimeDashboard
+          data={query.data}
+          activeTab={activeTab}
+          onActiveTabChange={setActiveTab}
+          sectionPending={query.isPlaceholderData}
+        />
+      ) : !query.isError ? <LoadingState /> : null}
     </ModuleFrame>
   )
 }
@@ -164,8 +174,17 @@ function LoadingState() {
   </div>
 }
 
-function RuntimeDashboard({ data }: { data: RuntimeStatusResponse }) {
-  const [activeTab, setActiveTab] = useState<RuntimeTab>('prompt')
+function RuntimeDashboard({
+  data,
+  activeTab,
+  onActiveTabChange,
+  sectionPending,
+}: {
+  data: RuntimeStatusResponse
+  activeTab: RuntimeTab
+  onActiveTabChange: (tab: RuntimeTab) => void
+  sectionPending: boolean
+}) {
   const [activeSummary, setActiveSummary] = useState<SummaryKey | null>('context')
   const [promptView, setPromptView] = useState<'preview' | 'components'>('preview')
   const [copied, setCopied] = useState(false)
@@ -186,12 +205,12 @@ function RuntimeDashboard({ data }: { data: RuntimeStatusResponse }) {
 
   const openFromSummary = (summary: SummaryKey, tab: RuntimeTab) => {
     setActiveSummary(summary)
-    setActiveTab(tab)
+    onActiveTabChange(tab)
     revealTab(tab)
   }
 
   const openTab = (tab: RuntimeTab) => {
-    setActiveTab(tab)
+    onActiveTabChange(tab)
     setActiveSummary(tab === 'prompt' ? 'context' : tab === 'api' ? 'api' : tab === 'external' ? 'routes' : null)
     revealTab(tab)
   }
@@ -240,8 +259,10 @@ function RuntimeDashboard({ data }: { data: RuntimeStatusResponse }) {
       role="tabpanel"
       id={`runtime-panel-${activeTab}`}
       aria-labelledby={`runtime-tab-${activeTab}`}
+      aria-busy={sectionPending}
     >
-      {activeTab === 'prompt' ? <article className={`${styles.panel} ${styles.promptPanel}`}>
+      {sectionPending ? <SectionLoading /> : null}
+      {!sectionPending && activeTab === 'prompt' ? <article className={`${styles.panel} ${styles.promptPanel}`}>
           <PanelHeader icon={<Braces size={16} />} title="系统提示词上下文预览" detail={`${formatNumber(data.prompt.total_chars)} 字符 · 约 ${formatNumber(data.prompt.estimated_tokens)} Tokens`} />
           <div className={styles.promptTabs} role="tablist" aria-label="系统提示词查看方式">
             <button role="tab" aria-selected={promptView === 'preview'} className={promptView === 'preview' ? styles.activeTab : ''} onClick={() => setPromptView('preview')}>完整上下文预览</button>
@@ -255,18 +276,25 @@ function RuntimeDashboard({ data }: { data: RuntimeStatusResponse }) {
             <button onClick={() => void copyPrompt()}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? '已复制' : '复制上下文'}</button>
           </footer>
         </article> : null}
-      {activeTab === 'tokens' ? <TokenPanel data={data} /> : null}
-      {activeTab === 'api' ? <ApiPanel data={data} /> : null}
-      {activeTab === 'external' ? <div className={styles.externalGrid}>
+      {!sectionPending && activeTab === 'tokens' ? <TokenPanel data={data} /> : null}
+      {!sectionPending && activeTab === 'api' ? <ApiPanel data={data} /> : null}
+      {!sectionPending && activeTab === 'external' ? <div className={styles.externalGrid}>
         <HealthPanel data={data} />
         <MessageRoutePanel data={data} />
       </div> : null}
-      {activeTab === 'maintenance' ? <div className={styles.maintenanceGrid}>
+      {!sectionPending && activeTab === 'maintenance' ? <div className={styles.maintenanceGrid}>
         <MemoryPanel data={data} />
         <TaskPanel data={data} />
         <SystemCronPanel data={data} />
       </div> : null}
     </section>
+  </div>
+}
+
+function SectionLoading() {
+  return <div className={styles.loading} aria-label="正在读取当前栏目">
+    <Activity size={18} />
+    <span>正在读取当前栏目…</span>
   </div>
 }
 

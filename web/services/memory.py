@@ -22,6 +22,8 @@ from web.services._io import (
     atomic_write as _atomic_write,
     validated_text as _validated_text,
 )
+
+
 class MemoryServiceMixin:
     def memory_summary(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
@@ -54,7 +56,9 @@ class MemoryServiceMixin:
             "user": name,
             "summary": {
                 "total": len(result),
-                **{tier: sum(item["tier"] == tier for item in result) for tier in tiers},
+                **{
+                    tier: sum(item["tier"] == tier for item in result) for tier in tiers
+                },
             },
             "items": result,
         }
@@ -67,17 +71,7 @@ class MemoryServiceMixin:
             if target_tier not in TIERS:
                 raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
             store = MemoryStore(self.root, name, load_config(name, self.root))
-            location = store.locate_in_tier(target_tier, normalized)
-            item = (
-                store._entry(
-                    location,
-                    store.load_index(target_tier).get(location.filename)
-                    if target_tier != "permanent"
-                    else None,
-                )
-                if location is not None
-                else None
-            )
+            item = store.get_entry(target_tier, normalized)
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
         if item is None:
@@ -107,58 +101,31 @@ class MemoryServiceMixin:
             if target_tier is not None and target_tier not in TIERS:
                 raise InvalidRequestError(f"tier 只允许 {', '.join(TIERS)}")
             store = MemoryStore(self.root, name, load_config(name, self.root))
-            scoped_existing = (
-                store.locate_in_tier(target_tier, normalized)
-                if target_tier is not None
-                else None
-            )
-            if scoped_existing is not None:
-                if not scoped_existing.path.is_file():
-                    raise RuntimeMemoryError(
-                        f"记忆索引指向不存在的文件：{scoped_existing.path}"
-                    )
-                previous = scoped_existing.path.read_bytes()
-                _atomic_write(scoped_existing.path, text.encode("utf-8"))
-                try:
-                    if scoped_existing.indexed:
-                        store._touch_temporary(
-                            scoped_existing,
-                            utc_now(),
-                            content_changed=True,
-                        )
-                except Exception:
-                    _atomic_write(scoped_existing.path, previous)
-                    raise
-                existing = scoped_existing
+            existing = store.locate(normalized)
+            if existing is None:
+                store.create_fragment(target_tier or "seven_days", normalized, text)
+                existing = store.locate(normalized)
             else:
-                existing = store.locate(normalized)
-                if existing is not None and target_tier == "permanent":
-                    result = store.upsert_candidates(
-                        [{"filename": normalized, "content": text, "explicit": True}]
-                    )
-                else:
-                    result = store.upsert_candidates(
-                        [{"filename": normalized, "content": text}]
-                    )
-                if result.get("rejected"):
-                    raise RuntimeMemoryError("记忆内容未通过运行时校验")
-                existing = store.locate(normalized)
-                if existing is not None and target_tier and target_tier != existing.tier:
+                if target_tier and target_tier != existing.tier:
                     if existing.tier == "permanent":
                         raise RuntimeMemoryError("永久记忆不能降级到临时层")
                     rank = {tier_name: index for index, tier_name in enumerate(TIERS)}
                     if rank[target_tier] < rank[existing.tier]:
                         raise RuntimeMemoryError("临时记忆只能向更长期层级晋升")
+                store.edit_fragment(
+                    existing.tier, existing.filename, text, now=utc_now()
+                )
+                if target_tier and target_tier != existing.tier:
+                    existing = store.locate_in_tier(existing.tier, normalized)
+                    if existing is None:
+                        raise RuntimeMemoryError(f"记忆更新后无法定位：{normalized}")
                     store._promote_location(existing, target_tier, utc_now())
-                    existing = store.locate_in_tier(target_tier, normalized)
+                existing = store.locate(normalized)
             if existing is None:
                 raise RuntimeMemoryError(f"记忆写入后无法定位：{normalized}")
-            item = store._entry(
-                existing,
-                store.load_index(existing.tier).get(existing.filename)
-                if existing.indexed
-                else None,
-            )
+            item = store.get_entry(existing.tier, existing.filename)
+            if item is None:
+                raise RuntimeMemoryError(f"记忆写入后无法读取：{normalized}")
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
         return {
@@ -179,8 +146,7 @@ class MemoryServiceMixin:
             location = store.locate_in_tier(target_tier, normalized)
             if location is None:
                 raise NotFoundError(f"记忆不存在：{target_tier}/{normalized}")
-            file_existed = location.path.is_file()
-            store._delete_location(location)
+            deleted = store.delete_fragment(target_tier, location.filename)
         except RuntimeMemoryError as exc:
             raise InvalidRequestError(str(exc)) from None
         return {
@@ -188,10 +154,11 @@ class MemoryServiceMixin:
             "tier": target_tier,
             "memory_ref": f"{target_tier}:{location.filename}",
             "filename": location.filename,
-            "deleted": True,
-            "index_removed": location.indexed,
-            "file_removed": file_existed,
-            "repaired_orphan": location.indexed and not file_existed,
+            "deleted": deleted,
+            "row_removed": deleted,
+            "index_removed": False,
+            "file_removed": False,
+            "repaired_orphan": False,
         }
 
     def important_memory(self, user: Any) -> dict[str, Any]:
@@ -205,9 +172,9 @@ class MemoryServiceMixin:
             "path": f"users/{name}/memory_temporary_important.md",
             "content": content,
             "size": len(content.encode()),
-            "updated_at": datetime.fromtimestamp(
-                path.stat().st_mtime, timezone.utc
-            ).astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            .astimezone(ZoneInfo("Asia/Shanghai"))
+            .isoformat(),
         }
 
     def update_important_memory(self, user: Any, content: Any) -> dict[str, Any]:
@@ -233,9 +200,8 @@ class MemoryServiceMixin:
             "path": f"users/{name}/memory_temporary_important.md",
             "content": text,
             "size": len(text.encode()),
-            "updated_at": datetime.fromtimestamp(
-                path.stat().st_mtime, timezone.utc
-            ).astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            .astimezone(ZoneInfo("Asia/Shanghai"))
+            .isoformat(),
             "updated": True,
         }
-

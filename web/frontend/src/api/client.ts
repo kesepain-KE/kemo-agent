@@ -128,9 +128,16 @@ export async function getUsers(): Promise<UsersResponse> {
   return requestJson('/api/users')
 }
 
-export async function getSessions(user: string, query = ''): Promise<SessionsResponse> {
-  const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions${suffix}`)
+export async function getSessions(
+  user: string,
+  query = '',
+  limit = 50,
+  before = '',
+): Promise<SessionsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (query.trim()) params.set('query', query.trim())
+  if (before) params.set('before', before)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`)
 }
 
 export async function restartSystem(port: number, force = false): Promise<{ ok: boolean; port: number; helper_pid?: number; already_requested?: boolean }> {
@@ -320,9 +327,16 @@ export async function getOverview(user: string, sessionId = ''): Promise<Overvie
   return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`)
 }
 
-export async function getRuntimeStatus(user: string, sessionId = ''): Promise<RuntimeStatusResponse> {
-  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${query}`)
+export async function getRuntimeStatus(
+  user: string,
+  sessionId = '',
+  sections: string[] = [],
+): Promise<RuntimeStatusResponse> {
+  const query = new URLSearchParams()
+  if (sessionId) query.set('session_id', sessionId)
+  if (sections.length) query.set('sections', sections.join(','))
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${suffix}`)
 }
 
 export async function getTasks(user: string): Promise<TasksResponse> {

@@ -317,7 +317,7 @@ export function MessagesPage() {
                 <span><small>连接平台</small><strong>{selected.platform}</strong></span>
                 <span><small>临时文件目录</small><code>{selected.files_path}</code></span>
                 <span><small>支持能力</small><strong>{selected.capabilities.join(' / ')}</strong></span>
-                <span><small>日志目录</small><code>{selected.log_path}</code></span>
+                <span><small>日志数据库</small><code>{selected.log_path}</code></span>
                 <span><small>运行时状态</small><strong>{selected.state}</strong></span>
               </div>
             </div>
@@ -357,7 +357,7 @@ export function MessagesPage() {
             </div>)}
           </div> : <div className={styles.logEmpty}><FileText size={24} /><strong>没有符合筛选条件的日志</strong><p>模块处理消息后，记录会按时间显示在这里。</p></div>}
           <footer className={styles.logFooter}>
-            <span className={styles.logSource}><Activity size={13} /><span>结构化日志：{selected.structured_log_path || selected.log_path}{selected.logs_truncated ? ' · 仅展示最近 500 条' : ''}</span></span>
+            <span className={styles.logSource}><Activity size={13} /><span>日志数据库：{selected.log_path}{selected.logs_truncated ? ' · 仅展示最近 500 条' : ''}</span></span>
             {filteredLogs.length ? <nav className={styles.logPagination} aria-label="消息日志分页">
               <button type="button" aria-label="上一页日志" disabled={currentLogPage <= 1} onClick={() => setLogPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} /></button>
               <b>{currentLogPage} / {logPageCount}</b>

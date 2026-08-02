@@ -396,7 +396,7 @@ export const handlers = [
       id: 'onebot', name: 'onebot_ws_01', platform: 'onebot', display_name: 'OneBot 正向 WebSocket', description: 'OneBot 消息传输模块',
       capabilities: ['receive_text', 'send_text', 'receive_file'], state: 'running', connection_status: 'connected', bound_user: 'kesepain', allowed_tools: null,
       last_error: null, health: 'healthy', last_check: '2026-07-20T12:00:00Z', last_message_at: null, latency_ms: 12, messages_received_today: 2, messages_sent_today: 1,
-      path: 'message/out/onebot', files_path: 'message/out/onebot/files', log_path: 'message/out/onebot/log', message_buffer: 'message/out/onebot/message.md',
+      path: 'message/out/onebot', files_path: 'message/out/onebot/files', log_path: 'runtime/logs.sqlite3', message_buffer: 'message/out/onebot/message.md',
       modules: { input: 'input.py', output: 'output.py', detect: 'detect.py' }, api_imported: true, polling_interval: '1s', health_interval: '30s', file_relay_enabled: true,
       log_rotation: '每日轮换', temporary_file_count: 1, temporary_file_bytes: 128, today_log_count: 12, logs_truncated: false,
       logs: [

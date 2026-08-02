@@ -1,5 +1,4 @@
-export const kemoReasoningEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-export type ReasoningEffort = typeof kemoReasoningEfforts[number]
+export type ReasoningEffort = string
 
 export interface ReasoningEffortOption {
   value: ReasoningEffort
@@ -9,7 +8,7 @@ export interface ReasoningEffortOption {
   description: string
 }
 
-const optionByEffort: Record<ReasoningEffort, ReasoningEffortOption> = {
+const optionByEffort: Record<string, ReasoningEffortOption> = {
   minimal: { value: 'minimal', label: '极少思考', settingsLabel: '极少 — 最快，几乎不思考', title: '极少', description: '最快，几乎不思考' },
   low: { value: 'low', label: '轻度', settingsLabel: '低 — 快速，轻度推理', title: '低', description: '快速，轻度推理' },
   medium: { value: 'medium', label: '中度', settingsLabel: '中 — 均衡（推荐）', title: '中', description: '均衡（推荐）' },
@@ -21,14 +20,32 @@ const optionByEffort: Record<ReasoningEffort, ReasoningEffortOption> = {
 export const chatReasoningEfforts = ['minimal', 'low', 'medium', 'high', 'max'] as const satisfies readonly ReasoningEffort[]
 export const reasoningEffortOptions = reasoningEffortOptionsFor(chatReasoningEfforts)
 
-const reasoningEffortValues = new Set<string>(kemoReasoningEfforts)
-
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return typeof value === 'string' && reasoningEffortValues.has(value)
+  if (typeof value !== 'string') return false
+  const effort = value.trim()
+  return effort.length > 0
+    && effort.length <= 64
+    && effort.toLowerCase() !== 'none'
+    && !/[\u0000-\u001f]/.test(effort)
 }
 
 export function reasoningEffortOptionsFor(efforts: readonly ReasoningEffort[]): ReasoningEffortOption[] {
-  return efforts.map((effort) => optionByEffort[effort])
+  const seen = new Set<string>()
+  const options: ReasoningEffortOption[] = []
+  for (const rawEffort of efforts) {
+    if (!isReasoningEffort(rawEffort)) continue
+    const effort = rawEffort.trim().toLowerCase()
+    if (seen.has(effort)) continue
+    seen.add(effort)
+    options.push(optionByEffort[effort] ?? {
+      value: effort,
+      label: effort,
+      settingsLabel: effort,
+      title: effort,
+      description: 'Kemo 网关声明档位',
+    })
+  }
+  return options
 }
 
 export function normalizeReasoningEffort(value: unknown): ReasoningEffort {
@@ -38,18 +55,22 @@ export function normalizeReasoningEffort(value: unknown): ReasoningEffort {
 }
 
 export function normalizeKemoReasoningEffort(value: unknown): ReasoningEffort {
-  return isReasoningEffort(value) ? value : 'medium'
+  return isReasoningEffort(value) ? value.trim().toLowerCase() : 'medium'
 }
 
 export function selectReasoningEffort(
   value: unknown,
   efforts: readonly ReasoningEffort[],
 ): ReasoningEffort | undefined {
-  if (isReasoningEffort(value) && efforts.includes(value)) return value
-  if (efforts.includes('medium')) return 'medium'
-  return efforts[0]
+  const available = reasoningEffortOptionsFor(efforts).map((option) => option.value)
+  const selected = isReasoningEffort(value) ? value.trim().toLowerCase() : ''
+  if (selected && available.includes(selected)) return selected
+  if (available.includes('medium')) return 'medium'
+  return available[0]
 }
 
 export function reasoningEffortLabel(value: unknown) {
-  return isReasoningEffort(value) ? optionByEffort[value].label : optionByEffort.medium.label
+  if (!isReasoningEffort(value)) return optionByEffort.medium.label
+  const effort = value.trim().toLowerCase()
+  return optionByEffort[effort]?.label ?? effort
 }

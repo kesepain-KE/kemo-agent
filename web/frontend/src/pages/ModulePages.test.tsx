@@ -345,14 +345,14 @@ describe('V16 module pages', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'API 配置，打开用户 API 配置栏目' }))
     expect(sectionTabs.getByRole('tab', { name: '用户 API 配置' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('heading', { name: '用户 API 配置' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '用户 API 配置' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '外部消息路由，打开外部组件与消息路由栏目' }))
     expect(sectionTabs.getByRole('tab', { name: '外部组件与消息路由' })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByText('OneBot 正向 WebSocket')).toBeInTheDocument()
 
     fireEvent.click(sectionTabs.getByRole('tab', { name: '调度与维护' }))
-    expect(screen.getByText('今日记忆更新与升级')).toBeInTheDocument()
+    expect(await screen.findByText('今日记忆更新与升级')).toBeInTheDocument()
     expect(screen.getByText('系统及定时任务执行记录')).toBeInTheDocument()
     expect(screen.getByText('记忆碎片到期晋升检查')).toBeInTheDocument()
 
@@ -594,10 +594,10 @@ describe('V16 module pages', () => {
           user: 'kesepain', protocol: 'kemo', api_valid: true, model, stale: false, warning: '',
           capabilities: {
             model, task: 'llm', input_modalities: ['text'], output_modalities: ['text'], streaming: true,
-            reasoning: { supported, efforts: supported ? ['minimal', 'xhigh'] : [], summary: supported, persisted_state: false },
+            reasoning: { supported, efforts: supported ? ['none', 'minimal', 'ultra'] : [], summary: supported, persisted_state: false },
             tools: { function_calling: true, parallel_calls: false, multimodal_results: false },
             structured_output: true, metadata: {},
-            extensions: supported ? { reasoning_policy: { mode: 'mapped', logical_efforts: ['minimal', 'xhigh'], collapsed: true } } : {},
+            extensions: supported ? { reasoning_policy: { mode: 'mapped', logical_efforts: ['minimal', 'ultra'], collapsed: true } } : {},
           },
         })
       }),
@@ -610,9 +610,10 @@ describe('V16 module pages', () => {
     expect(screen.getByText(/部分档位会映射到相同的上游强度/)).toBeInTheDocument()
     fireEvent.click(effortSelect)
     expect(screen.getByRole('option', { name: /极少.*几乎不思考/ })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: /极高.*更强推理/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /ultra.*Kemo 网关声明档位/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /none/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /中.*均衡/ })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: /极高.*更强推理/ }))
+    fireEvent.click(screen.getByRole('option', { name: /ultra.*Kemo 网关声明档位/ }))
 
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'plain-model' } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: '思考强度' })).toHaveTextContent('推理不可用'))

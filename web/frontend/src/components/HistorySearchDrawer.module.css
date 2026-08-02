@@ -169,6 +169,23 @@
 .empty svg { color: var(--brand); }
 .empty strong { color: var(--text-2); font-size: .8125rem; }
 .empty span { max-width: 240px; font-size: .6875rem; line-height: 1.55; }
+.loadMoreButton {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control-lg);
+  color: var(--brand);
+  background: var(--surface-2);
+  font-size: .6875rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+.loadMoreButton:hover:not(:disabled) { border-color: var(--brand-line); background: var(--brand-soft); }
+.loadMoreButton:disabled { cursor: wait; opacity: .65; }
 .spinning { animation: spin .85s linear infinite; }
 
 .summaryTooltip {
