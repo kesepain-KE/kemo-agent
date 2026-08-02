@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.3-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,15 +204,15 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`0.9.2`
+当前版本：`0.9.3`
 
 核心系统已经形成完整闭环。从对话、记忆、子代理协作，到任务计划、定时调度、感知与拓展，再到网页端、命令行和消息平台的多入口交互——这些部分已经连接在一起，可以在日常使用中实际运转。
 
 目前可以体验的内容包括：
 
 - 完整的网页对话界面，支持流式交互与运行中追加多模态引导；
-- 潮汐记忆系统，记忆随使用时间自然沉淀、加权、晋级或淡出；
-- 临时重要记忆独立维护，让近期关切不沉入深层；
+- 潮汐记忆系统，只根据用户对话历史的可回溯原文命中加权，内容按周期晋级或淡出；
+- 临时重要记忆作为可重建热画像独立维护，只由临时三层单向提炼，不会反向加权源记忆；
 - 个人、共享与全局三层知识库，让回答贴近真实资料；
 - 任务计划从创建、审批到逐步执行，可暂停、可继续、可回溯；
 - 一次性和周期性定时任务，在约定时间自动醒来完成；

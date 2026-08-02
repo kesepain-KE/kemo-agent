@@ -133,6 +133,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
+单次工具内联 JSON 结果的 20,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。
+
 ---
 
 ## history — 对话历史

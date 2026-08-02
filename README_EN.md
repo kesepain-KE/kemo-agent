@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.3-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,15 +204,15 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `0.9.2`
+Current version: `0.9.3`
 
 The core system now forms a complete working loop. Conversations, memory, subagent collaboration, task planning, scheduling, perception, extensions, the web interface, the CLI, and messaging-platform access are connected and can be used in everyday operation.
 
 Available today:
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
-- the Tidal Engram memory system, where memories naturally consolidate, gain weight, advance through tiers, or fade over time;
-- independently maintained temporary important memory, keeping recent concerns from sinking too deeply;
+- the Tidal Engram memory system, where weight changes require traceable matches in the user's archived words before memories advance through tiers or fade over time;
+- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories;
 - personal, shared, and global knowledge layers grounded in real source material;
 - task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support;
 - one-time and recurring scheduled tasks that wake automatically at the agreed time;
