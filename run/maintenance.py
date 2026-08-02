@@ -33,6 +33,7 @@ from run.history_index import (
     history_directory,
     update_summary_checkpoint,
 )
+from run.history_store import list_windows as list_history_windows
 from run.memory import (
     contains_sensitive_credential,
     memory_extraction_batch_rounds,
@@ -106,7 +107,9 @@ def _summary_rounds(window: dict[str, Any], target_round: int) -> list[dict[str,
             if text
         )
         if user_text or assistant_text:
-            result.append({"round": number, "user": user_text, "assistant": assistant_text})
+            result.append(
+                {"round": number, "user": user_text, "assistant": assistant_text}
+            )
     return result
 
 
@@ -148,7 +151,10 @@ def _summary_round_parts(
     item: dict[str, Any],
     token_budget: int,
 ) -> list[dict[str, Any]]:
-    if estimate_text_tokens(json.dumps(item, ensure_ascii=False, default=str)) <= token_budget:
+    if (
+        estimate_text_tokens(json.dumps(item, ensure_ascii=False, default=str))
+        <= token_budget
+    ):
         return [item]
     round_number = max(0, int(item.get("round") or 0))
     empty_tokens = estimate_text_tokens(
@@ -192,17 +198,9 @@ def _summary_chunks(rounds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 
 def _history_sessions(root: Path, user: str) -> list[dict[str, str]]:
-    history = root / "users" / user / "history"
-    if not history.is_dir():
-        return []
     latest: dict[tuple[str, str], tuple[str, dict[str, str]]] = {}
-    for directory in history.iterdir():
-        if not directory.is_dir() or directory.is_symlink():
-            continue
-        try:
-            data = load_window(directory).get("data") or {}
-        except Exception:
-            continue
+    for stored in list_history_windows(root, user):
+        data = stored.get("data") or {}
         source = str(data.get("source") or "")
         session_id = str(data.get("session_id") or "")
         if not source or not session_id:
@@ -210,7 +208,7 @@ def _history_sessions(root: Path, user: str) -> list[dict[str, str]]:
         value = {
             "source": source,
             "session_id": session_id,
-            "window": directory.name,
+            "window": str(stored.get("window_name") or ""),
         }
         updated = str(data.get("updated_at") or "")
         key = (source, session_id)
@@ -475,14 +473,16 @@ class MaintenanceScheduler:
                 raise MaintenanceError("历史摘要领取已失效")
             return {
                 "claimed": 1,
-                "processed": [{
-                    **identity,
-                    "status": "completed",
-                    "chunks": len(chunks),
-                    "resumed_from_chunk": start_chunk,
-                    "recovery_modes": recovery_modes,
-                    "output_transports": output_transports,
-                }],
+                "processed": [
+                    {
+                        **identity,
+                        "status": "completed",
+                        "chunks": len(chunks),
+                        "resumed_from_chunk": start_chunk,
+                        "recovery_modes": recovery_modes,
+                        "output_transports": output_transports,
+                    }
+                ],
                 "failed": [],
             }
         except ProviderCongestionError as exc:
@@ -551,7 +551,11 @@ class MaintenanceScheduler:
                     "exception_type": type(index_exc).__name__,
                 }
             self._report_error(f"maintenance:{user}:history_summary", exc)
-            return {"claimed": 1, "processed": [], "failed": [{**identity, "error": error}]}
+            return {
+                "claimed": 1,
+                "processed": [],
+                "failed": [{**identity, "error": error}],
+            }
 
     def _recover_pending_summary(self, user: str) -> dict[str, Any]:
         """Compatibility alias for callers predating the dedicated scheduler."""
@@ -654,10 +658,15 @@ class MaintenanceScheduler:
                 with session_lock(self.root, user, source, session_id):
                     window = load_window(archive_path)
                     data = window.get("data") or {}
-                    if data.get("source") != source or data.get("session_id") != session_id:
+                    if (
+                        data.get("source") != source
+                        or data.get("session_id") != session_id
+                    ):
                         raise MaintenanceError("记忆恢复领取记录与归档身份不一致")
                     archive_rounds = max(0, int(data.get("rounds") or 0))
-                    archive_cursor = max(0, int(data.get("memory_processed_round") or 0))
+                    archive_cursor = max(
+                        0, int(data.get("memory_processed_round") or 0)
+                    )
                     if round_end > archive_rounds:
                         raise MaintenanceError(
                             f"待提取轮次 {round_start}-{round_end} 超过归档轮数 {archive_rounds}"
@@ -817,10 +826,7 @@ class MaintenanceScheduler:
                                 }
                             )
                             raise MaintenanceError(
-                                str(
-                                    extraction_error.get("message")
-                                    or "记忆持久化失败"
-                                )
+                                str(extraction_error.get("message") or "记忆持久化失败")
                             )
                     finished = finish_memory_claim(
                         self.root,
@@ -841,9 +847,7 @@ class MaintenanceScheduler:
                     )
                     data.pop("memory_error", None)
                     if isinstance(finished.get("memory_last_error"), dict):
-                        data["memory_last_error"] = dict(
-                            finished["memory_last_error"]
-                        )
+                        data["memory_last_error"] = dict(finished["memory_last_error"])
                     for field in (
                         "memory_queue_reason",
                         "memory_target_round",
