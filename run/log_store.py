@@ -1,9 +1,4 @@
-"""SQLite-backed structured runtime logs.
-
-The human-readable JSONL/Markdown files remain a compatibility and export
-format.  New records are written to this store as well, while the web layer
-can import legacy files once (or when their file fingerprint changes).
-"""
+"""SQLite-backed structured runtime logs."""
 
 from __future__ import annotations
 
@@ -13,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sqlite3
 import threading
 from typing import Any, Iterator
@@ -26,23 +20,6 @@ DEFAULT_RETENTION_DAYS = 90
 _STORE_LOCKS: dict[str, threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
 _READY_PATHS: set[str] = set()
-
-_MESSAGE_HEADING = re.compile(
-    r"(?m)^##\s+(?P<timestamp>[^|\r\n]+)\s*\|\s*"
-    r"(?P<chat_type>[^|\r\n]+)\s*\|\s*(?P<chat_id>[^\r\n]+)\s*$"
-)
-_MESSAGE_INBOUND = re.compile(
-    r"\*\*入站\*\*：(?P<content>.*?)(?=\n\s*-\s*附件：|\n\*\*出站\*\*：|\n---|\Z)",
-    re.DOTALL,
-)
-_MESSAGE_OUTBOUND = re.compile(r"\*\*出站\*\*：(?P<content>.*?)(?=\n\s*-\s*出站附件：|\n---|\Z)", re.DOTALL)
-_MESSAGE_ATTACHMENT = re.compile(
-    r"(?m)^\s*-\s*附件：(?P<name>.+?)\s+\((?P<mime>[^,]+),\s*(?P<size>\d+)\s+bytes\)\s*$"
-)
-_MESSAGE_OUTBOUND_ATTACHMENT = re.compile(
-    r"(?m)^\s*-\s*出站附件：(?P<name>.+?)\s+\((?P<path>[^\r\n]+)\)\s*$"
-)
-
 
 class LogStoreError(RuntimeError):
     """Structured log persistence failed."""
@@ -164,9 +141,30 @@ class LogStore:
                             ON message_route_logs(machine_id, occurred_at_ms DESC, id DESC);
                         CREATE INDEX IF NOT EXISTS idx_message_user_time
                             ON message_route_logs(user, occurred_at_ms DESC, id DESC);
+                        CREATE TABLE IF NOT EXISTS message_route_state (
+                            machine_id TEXT PRIMARY KEY,
+                            user TEXT NOT NULL,
+                            platform TEXT NOT NULL,
+                            schema_version INTEGER NOT NULL,
+                            health TEXT NOT NULL,
+                            last_check TEXT,
+                            last_message_at TEXT,
+                            error TEXT,
+                            latency_ms INTEGER,
+                            messages_received_today INTEGER NOT NULL DEFAULT 0,
+                            messages_sent_today INTEGER NOT NULL DEFAULT 0,
+                            input_status TEXT NOT NULL,
+                            input_restart_count INTEGER NOT NULL DEFAULT 0,
+                            input_last_restart_at TEXT,
+                            input_error TEXT,
+                            extra_json TEXT NOT NULL DEFAULT '{}',
+                            updated_at TEXT NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_message_route_state_user
+                            ON message_route_state(user, platform);
                         """
                     )
-                    connection.execute("PRAGMA user_version = 1")
+                    connection.execute("PRAGMA user_version = 2")
                     try:
                         self.path.parent.chmod(0o700)
                         self.path.chmod(0o600)
@@ -247,7 +245,8 @@ class LogStore:
         for row in rows:
             result.append({
                 "id": f"{row['task_id']}:{row['event_key']}",
-                "task_id": row["task_id"], "executed_at": row["occurred_at"],
+                "user": row["user"], "task_id": row["task_id"],
+                "executed_at": row["occurred_at"],
                 "status": row["status"], "duration_ms": int(row["duration_ms"] or 0),
                 "result": _json_object(json.loads(row["result_json"] or "{}")),
                 "error": json.loads(row["error_json"]) if row["error_json"] else None,
@@ -329,89 +328,95 @@ class LogStore:
             )
         return max(0, int(cursor.rowcount or 0))
 
-    def mark_legacy_source(self, source: Path) -> None:
-        stat = source.stat()
-        key = f"legacy:{source.resolve()}"
+    def delete_message_route_state(self, machine_id: str, *, user: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM message_route_state WHERE machine_id=? AND user=?",
+                (machine_id, user),
+            )
+        return cursor.rowcount > 0
+
+    def read_message_route_state(self, machine_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM message_route_state WHERE machine_id=?",
+                (machine_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        extra = _json_object(json.loads(row["extra_json"] or "{}"))
+        return {
+            **extra,
+            "schema_version": int(row["schema_version"]),
+            "health": str(row["health"]),
+            "last_check": row["last_check"],
+            "last_message_at": row["last_message_at"],
+            "error": row["error"],
+            "latency_ms": int(row["latency_ms"]) if row["latency_ms"] is not None else None,
+            "messages_received_today": int(row["messages_received_today"] or 0),
+            "messages_sent_today": int(row["messages_sent_today"] or 0),
+            "input_status": str(row["input_status"]),
+            "input_restart_count": int(row["input_restart_count"] or 0),
+            "input_last_restart_at": row["input_last_restart_at"],
+            "input_error": row["input_error"],
+        }
+
+    def write_message_route_state(
+        self,
+        machine_id: str,
+        *,
+        user: str,
+        platform: str,
+        state: dict[str, Any],
+    ) -> None:
+        standard = {
+            "schema_version", "health", "last_check", "last_message_at",
+            "error", "latency_ms", "messages_received_today",
+            "messages_sent_today", "input_status", "input_restart_count",
+            "input_last_restart_at", "input_error",
+        }
+        extra = {key: value for key, value in state.items() if key not in standard}
         with self._connection() as connection:
             connection.execute(
-                """INSERT INTO log_meta(key, value) VALUES(?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-                (key, f"{stat.st_mtime_ns}:{stat.st_size}"),
+                """
+                INSERT INTO message_route_state(
+                    machine_id, user, platform, schema_version, health,
+                    last_check, last_message_at, error, latency_ms,
+                    messages_received_today, messages_sent_today, input_status,
+                    input_restart_count, input_last_restart_at, input_error,
+                    extra_json, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(machine_id) DO UPDATE SET
+                    user=excluded.user,
+                    platform=excluded.platform,
+                    schema_version=excluded.schema_version,
+                    health=excluded.health,
+                    last_check=excluded.last_check,
+                    last_message_at=excluded.last_message_at,
+                    error=excluded.error,
+                    latency_ms=excluded.latency_ms,
+                    messages_received_today=excluded.messages_received_today,
+                    messages_sent_today=excluded.messages_sent_today,
+                    input_status=excluded.input_status,
+                    input_restart_count=excluded.input_restart_count,
+                    input_last_restart_at=excluded.input_last_restart_at,
+                    input_error=excluded.input_error,
+                    extra_json=excluded.extra_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    machine_id, user, platform,
+                    max(1, int(state.get("schema_version") or 1)),
+                    str(state.get("health") or "unknown"), state.get("last_check"),
+                    state.get("last_message_at"),
+                    None if state.get("error") is None else str(state.get("error")),
+                    state.get("latency_ms"),
+                    max(0, int(state.get("messages_received_today") or 0)),
+                    max(0, int(state.get("messages_sent_today") or 0)),
+                    str(state.get("input_status") or "unknown"),
+                    max(0, int(state.get("input_restart_count") or 0)),
+                    state.get("input_last_restart_at"),
+                    None if state.get("input_error") is None else str(state.get("input_error")),
+                    _json_text(extra), datetime.now(timezone.utc).isoformat(),
+                ),
             )
-
-    def legacy_source_changed(self, source: Path) -> bool:
-        try:
-            stat = source.stat()
-        except OSError:
-            return False
-        key = f"legacy:{source.resolve()}"
-        with self._connection() as connection:
-            row = connection.execute("SELECT value FROM log_meta WHERE key = ?", (key,)).fetchone()
-        return row is None or row[0] != f"{stat.st_mtime_ns}:{stat.st_size}"
-
-    def migrate_cron_logs(self, directory: Path) -> None:
-        for path in sorted(directory.glob("*.jsonl")) if directory.is_dir() else ():
-            if not self.legacy_source_changed(path):
-                continue
-            records: list[dict[str, Any]] = []
-            try:
-                for line in path.read_text("utf-8").splitlines():
-                    try:
-                        item = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(item, dict):
-                        records.append(item)
-            except (OSError, UnicodeError):
-                continue
-            self.append_cron_records(records)
-            try:
-                self.mark_legacy_source(path)
-            except OSError:
-                pass
-
-    def migrate_message_logs(
-        self, directory: Path, *, machine_id: str, user: str, platform: str, files_root: str
-    ) -> None:
-        if not directory.is_dir():
-            return
-        for path in sorted(directory.glob("*.md")):
-            if not self.legacy_source_changed(path):
-                continue
-            try:
-                content = path.read_text("utf-8-sig")
-            except (OSError, UnicodeError):
-                continue
-            entries: list[dict[str, Any]] = []
-            headings = list(_MESSAGE_HEADING.finditer(content))
-            source = path.as_posix()
-            try:
-                source = path.relative_to(self.root).as_posix()
-            except ValueError:
-                pass
-            for index, heading in enumerate(headings):
-                end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
-                block = content[heading.end():end]
-                common = {
-                    "occurred_at": heading.group("timestamp").strip(),
-                    "user": user, "machine_id": machine_id, "platform": platform,
-                    "chat_type": heading.group("chat_type").strip(),
-                    "chat_id": heading.group("chat_id").strip(), "source": source,
-                }
-                inbound = _MESSAGE_INBOUND.search(block)
-                if inbound and _compact_text(inbound.group("content")) not in {"", "[仅附件]"}:
-                    entries.append({**common, "direction": "receive", "kind": "text", "content": inbound.group("content"), "success": True})
-                for attachment in _MESSAGE_ATTACHMENT.finditer(block):
-                    name = _compact_text(attachment.group("name"))
-                    entries.append({**common, "direction": "receive", "kind": "file", "content": name, "file_path": f"{files_root}/{name}", "mime": attachment.group("mime").strip(), "size": int(attachment.group("size")), "success": True})
-                outbound = _MESSAGE_OUTBOUND.search(block)
-                if outbound and _compact_text(outbound.group("content")):
-                    text = outbound.group("content")
-                    entries.append({**common, "direction": "send", "kind": "system" if _compact_text(text).startswith("处理失败：") else "text", "content": text, "success": not _compact_text(text).startswith("处理失败：")})
-                for attachment in _MESSAGE_OUTBOUND_ATTACHMENT.finditer(block):
-                    entries.append({**common, "direction": "send", "kind": "file", "content": _compact_text(attachment.group("name")), "file_path": attachment.group("path").strip(), "success": True})
-            self.append_message_entries(entries)
-            try:
-                self.mark_legacy_source(path)
-            except OSError:
-                pass

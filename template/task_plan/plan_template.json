@@ -1,22 +1,46 @@
 {
-  "plan_id": "plan_xxxxxxxx",
+  "schema_version": 1,
+  "plan_id": "plan_a1b2c3d4",
   "title": "计划任务名称",
   "description": "计划任务描述",
   "user": "用户名",
+  "source": "web",
+  "session_id": "conv_example",
   "status": "pending",
-  "created_at": "2026-01-01T00:00:00+08:00",
+  "auto_accept": false,
+  "reminder": "",
+  "revision": 1,
+  "created_at": "2026-08-02T00:00:00+00:00",
+  "updated_at": "2026-08-02T00:00:00+00:00",
+  "current_step": "step_1",
   "steps": [
     {
       "step_id": "step_1",
+      "title": "步骤一",
       "description": "步骤一描述",
       "status": "pending",
-      "result": ""
+      "depends_on": [],
+      "tool_name": null,
+      "tool_arguments": {},
+      "critical": true,
+      "result": null,
+      "error": null,
+      "started_at": "",
+      "finished_at": ""
     },
     {
       "step_id": "step_2",
+      "title": "步骤二",
       "description": "步骤二描述",
       "status": "pending",
-      "result": ""
+      "depends_on": ["step_1"],
+      "tool_name": null,
+      "tool_arguments": {},
+      "critical": true,
+      "result": null,
+      "error": null,
+      "started_at": "",
+      "finished_at": ""
     }
   ]
 }

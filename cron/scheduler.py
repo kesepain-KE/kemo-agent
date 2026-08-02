@@ -139,29 +139,9 @@ def _append_system_execution(
             else None
         ),
     }
-    structured_store: LogStore | None = None
     try:
-        structured_store = LogStore(root)
-        structured_store.append_cron(record)
+        LogStore(root).append_cron(record)
     except Exception:
-        # The structured store is an observability sink; it must never stop
-        # the scheduler or prevent the legacy audit file from being written.
-        structured_store = None
-    directory = root / "cron" / "task_cron_system" / "log"
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{executed_at.astimezone(BEIJING):%Y-%m-%d}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-        if structured_store is not None:
-            try:
-                structured_store.mark_legacy_source(path)
-            except Exception:
-                # A stale migration fingerprint only costs a later idempotent
-                # import; it must not turn successful log persistence into a
-                # scheduler failure.
-                pass
-    except OSError:
         # Diagnostics persistence must never stop the scheduler itself.
         return
 

@@ -47,7 +47,6 @@ _CONFIG_FIELDS = frozenset(
         "allowed_tools",
         "message_buffer",
         "files_dir",
-        "log_dir",
     }
 )
 _MODULE_FIELDS = frozenset({"input", "output", "detect"})
@@ -93,7 +92,6 @@ class MessagePluginConfig:
     allowed_tools: frozenset[str] | None
     message_buffer: str
     files_dir: str
-    log_dir: str
     raw: dict[str, Any]
 
     @classmethod
@@ -160,9 +158,8 @@ class MessagePluginConfig:
             value.get("message_buffer"), "message_buffer"
         )
         files_dir = _relative_path(value.get("files_dir"), "files_dir")
-        log_dir = _relative_path(value.get("log_dir"), "log_dir")
         resolved_directory = directory.resolve()
-        for relative in (*normalized_modules.values(), message_buffer, files_dir, log_dir):
+        for relative in (*normalized_modules.values(), message_buffer, files_dir):
             _resolve_within(resolved_directory, relative)
         for name, relative in normalized_modules.items():
             module_path = _resolve_within(resolved_directory, relative)
@@ -181,7 +178,6 @@ class MessagePluginConfig:
             allowed_tools=allowed_tools,
             message_buffer=message_buffer,
             files_dir=files_dir,
-            log_dir=log_dir,
             raw=dict(value),
         )
 
@@ -192,14 +188,6 @@ class MessagePluginConfig:
     @property
     def files_path(self) -> Path:
         return _resolve_within(self.directory, self.files_dir)
-
-    @property
-    def log_path(self) -> Path:
-        return _resolve_within(self.directory, self.log_dir)
-
-    @property
-    def state_path(self) -> Path:
-        return self.directory / "state.json"
 
     def module_path(self, name: str) -> Path:
         return _resolve_within(self.directory, self.modules[name])
@@ -394,13 +382,6 @@ def _load_module(path: Path, machine_id: str, role: str) -> ModuleType:
     return module
 
 
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", "utf-8")
-    os.replace(temporary, path)
-
-
 def _initial_state() -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -420,10 +401,10 @@ def _initial_state() -> dict[str, Any]:
 
 def _normalize_state(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise MessagePluginError("state.json 必须是对象")
+        raise MessagePluginError("消息路由状态必须是对象")
     state = {**_initial_state(), **value}
     if state.get("schema_version") != 1:
-        raise MessagePluginError("state.json schema_version 必须为 1")
+        raise MessagePluginError("消息路由状态 schema_version 必须为 1")
     if state.get("health") not in _HEALTH_VALUES:
         raise MessagePluginError("state.health 必须是 unknown/healthy/degraded/dead")
     for field in ("messages_received_today", "messages_sent_today"):
@@ -542,7 +523,6 @@ class FileMessageTransport:
             self._on_error = on_error
             self._stop_event.clear()
             self.config.files_path.mkdir(parents=True, exist_ok=True)
-            self.config.log_path.mkdir(parents=True, exist_ok=True)
             self.config.buffer_path.parent.mkdir(parents=True, exist_ok=True)
             self.config.buffer_path.touch(exist_ok=True)
             self._ensure_state()
@@ -750,7 +730,7 @@ class FileMessageTransport:
                 state["last_check"] = datetime.now().astimezone().isoformat()
                 if state.get("latency_ms") is None:
                     state["latency_ms"] = int((time.monotonic() - started) * 1000)
-                _atomic_json(self.config.state_path, state)
+                self._write_state(state)
                 return state
             except BaseException as exc:
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -759,7 +739,7 @@ class FileMessageTransport:
                 current["last_check"] = datetime.now().astimezone().isoformat()
                 current["error"] = str(exc)
                 current["latency_ms"] = int((time.monotonic() - started) * 1000)
-                _atomic_json(self.config.state_path, current)
+                self._write_state(current)
                 self._report_error(exc)
                 return current
 
@@ -776,7 +756,6 @@ class FileMessageTransport:
                 dict(self.config.raw),
                 str(self.config.buffer_path),
                 str(self.config.files_path),
-                str(self.config.state_path),
             )
         except BaseException as exc:
             if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -868,10 +847,10 @@ class FileMessageTransport:
                     self._set_input_state("restarting", error=reason)
                     restart_attempts += 1
                     try:
+                        self._set_input_state("starting", restarted=True)
                         restarted = self._restart_input()
                         if not restarted:
                             return
-                        self._set_input_state("starting", restarted=True)
                     except BaseException as exc:
                         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                             return
@@ -1019,25 +998,34 @@ class FileMessageTransport:
 
     def _ensure_state(self) -> None:
         with self._state_lock:
-            if not self.config.state_path.is_file():
-                _atomic_json(self.config.state_path, _initial_state())
-            else:
-                _atomic_json(self.config.state_path, self._read_state())
+            store = LogStore(self.config.root)
+            state = store.read_message_route_state(self.config.machine_id)
+            if state is None:
+                state = _initial_state()
+            self._write_state(state)
 
     def _read_state(self) -> dict[str, Any]:
-        try:
-            value = json.loads(self.config.state_path.read_text("utf-8"))
-        except FileNotFoundError:
-            value = _initial_state()
-        except (OSError, json.JSONDecodeError) as exc:
-            raise MessagePluginError(f"state.json 不可读：{exc}") from exc
-        return _normalize_state(value)
+        stored = LogStore(self.config.root).read_message_route_state(
+            self.config.machine_id
+        )
+        if stored is not None:
+            return _normalize_state(stored)
+        return _initial_state()
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        normalized = _normalize_state(state)
+        LogStore(self.config.root).write_message_route_state(
+            self.config.machine_id,
+            user=self.config.bound_user,
+            platform=self.config.platform,
+            state=normalized,
+        )
 
     def _update_state(self, update: Callable[[dict[str, Any]], Any]) -> None:
         with self._state_lock:
             state = self._read_state()
             update(state)
-            _atomic_json(self.config.state_path, _normalize_state(state))
+            self._write_state(state)
 
     def _set_input_state(
         self,
@@ -1072,19 +1060,7 @@ class FileMessageTransport:
             outbound = f"处理失败：{(result.error or {}).get('message', '未知错误')}"
         store = LogStore(self.config.root)
         files_root = self.config.files_path.relative_to(self.config.root).as_posix()
-        try:
-            store.migrate_message_logs(
-                self.config.log_path,
-                machine_id=self.config.machine_id,
-                user=self.config.bound_user,
-                platform=self.config.platform,
-                files_root=files_root,
-            )
-        except Exception:
-            # Legacy Markdown remains the compatibility sink if SQLite is
-            # unavailable or an old log cannot be imported.
-            pass
-        pieces: list[str] = []
+        entries: list[dict[str, Any]] = []
         for message in messages:
             timestamp = datetime.fromisoformat(
                 message.timestamp[:-1] + "+00:00"
@@ -1092,17 +1068,6 @@ class FileMessageTransport:
                 else message.timestamp
             )
             display_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            pieces.append(
-                f"## {display_timestamp} | "
-                f"{message.chat_type} | {message.external_chat_id}\n\n"
-                f"**入站**：{message.text or '[仅附件]'}\n"
-            )
-            for attachment in message.attachments:
-                pieces.append(
-                    f"  - 附件：{attachment.name} "
-                    f"({attachment.mime}, {attachment.size} bytes)\n"
-                )
-            pieces.append(f"\n**出站**：{outbound}\n")
             outbound_file_display = ""
             if result.outbound is not None and result.outbound.file_path:
                 outbound_path = Path(result.outbound.file_path)
@@ -1113,15 +1078,6 @@ class FileMessageTransport:
                 except (OSError, ValueError):
                     display_path = outbound_path.name
                 outbound_file_display = display_path
-                pieces.append(
-                    f"  - 出站附件：{outbound_path.name} ({display_path})\n"
-                )
-            pieces.append("\n---\n\n")
-            log_file = self.config.log_path / f"{timestamp.date().isoformat()}.md"
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            with log_file.open("a", encoding="utf-8") as handle:
-                handle.write("".join(pieces))
-            source = log_file.relative_to(self.config.root).as_posix()
             common = {
                 "occurred_at": display_timestamp,
                 "user": self.config.bound_user,
@@ -1129,9 +1085,8 @@ class FileMessageTransport:
                 "platform": self.config.platform,
                 "chat_type": message.chat_type,
                 "chat_id": message.external_chat_id,
-                "source": source,
+                "source": "runtime/logs.sqlite3",
             }
-            entries: list[dict[str, Any]] = []
             if message.text:
                 entries.append(
                     {
@@ -1177,12 +1132,11 @@ class FileMessageTransport:
                         "success": True,
                     }
                 )
-            try:
-                store.append_message_entries(entries)
-                store.mark_legacy_source(log_file)
-            except Exception:
-                pass
-            pieces.clear()
+        try:
+            store.append_message_entries(entries)
+        except Exception:
+            # Observability persistence must not replay an already-routed message.
+            pass
 
     def _report_error(self, exc: BaseException) -> None:
         try:
@@ -1191,7 +1145,7 @@ class FileMessageTransport:
                 if state.get("health") != "dead":
                     state["health"] = "degraded"
                 state["error"] = str(exc)
-                _atomic_json(self.config.state_path, state)
+                self._write_state(state)
         except Exception:
             pass
         callback = self._on_error

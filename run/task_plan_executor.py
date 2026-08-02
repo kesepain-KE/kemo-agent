@@ -250,6 +250,7 @@ def execute_plan(
             agent_tools: list[dict[str, Any]] = []
             agent_error: dict[str, Any] | None = None
             terminal_done = False
+            terminal_metadata: dict[str, Any] = {}
             for agent_event in agent_event_source(agent_request):
                 agent_event.metadata.setdefault("plan_id", plan_id)
                 agent_event.metadata.setdefault("step_id", step_id)
@@ -271,6 +272,7 @@ def execute_plan(
                     agent_error = dict(agent_event.error or {})
                 elif agent_event.type == "done":
                     terminal_done = True
+                    terminal_metadata = dict(agent_event.metadata)
                 if agent_event.type not in {"done", "error"}:
                     yield agent_event
             if agent_error is not None:
@@ -283,6 +285,36 @@ def execute_plan(
                     "message": "主智能体执行未产生完成事件",
                     "exception_type": "PlanAgentRunIncomplete",
                 }
+                result_payload = {"ok": False, "error": error_payload}
+            elif str(terminal_metadata.get("status") or "").casefold() not in {
+                "",
+                "completed",
+                "success",
+            }:
+                terminal_status = str(terminal_metadata.get("status") or "failed").casefold()
+                stop_reason = str(
+                    terminal_metadata.get("stop_reason")
+                    or terminal_metadata.get("reason")
+                    or terminal_status
+                )
+                exception_type = {
+                    "limited": "PlanAgentRunLimited",
+                    "cancelled": "PlanAgentRunCancelled",
+                    "failed": "PlanAgentRunFailed",
+                }.get(terminal_status, "PlanAgentRunIncomplete")
+                status = "failed"
+                error_payload = {
+                    "message": (
+                        f"主智能体以非成功状态结束：{terminal_status}"
+                        f"（{stop_reason}）"
+                    ),
+                    "exception_type": exception_type,
+                    "agent_status": terminal_status,
+                    "stop_reason": stop_reason,
+                }
+                failure = terminal_metadata.get("failure")
+                if isinstance(failure, dict) and failure:
+                    error_payload["failure"] = dict(failure)
                 result_payload = {"ok": False, "error": error_payload}
             elif tool_name is not None and not any(
                 item["status"] == "completed" for item in agent_tools
@@ -391,6 +423,15 @@ def execute_plan(
                         "status": "paused",
                         "reason": "critical_step_failed",
                         "step_id": step_id,
+                        **(
+                            {
+                                "stop_reason": error_payload.get("stop_reason"),
+                                "failure": dict(error_payload),
+                            }
+                            if isinstance(error_payload, dict)
+                            and error_payload.get("stop_reason")
+                            else {}
+                        ),
                     },
                 )
                 return

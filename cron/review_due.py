@@ -11,7 +11,6 @@ from provider.factory import create_provider
 from run.agent_runner import AgentRunner
 from run.memory import (
     TEMPORARY_TIERS,
-    MemoryLocation,
     MemoryStore,
     normalize_memory_filename,
     parse_time,
@@ -57,20 +56,16 @@ def scan_and_promote(
     with store._lock:
         for tier in TEMPORARY_TIERS:
             rule = store.rules[tier]
-            for filename, meta in list(store.load_index(tier).items()):
+            for item in store.load_tier(tier):
+                filename = str(item["filename"])
+                meta = item
                 expires_at = parse_time(meta.get("expires_at"))
                 if expires_at is None or expires_at > current:
                     continue
-                location = MemoryLocation(
-                    tier,
-                    filename,
-                    store.fragment_path(tier, filename),
-                    True,
-                )
                 weight = int(meta.get("weight", 0))
                 threshold = int(rule.upgrade_threshold or 0)
-                if not location.path.is_file() or weight < threshold:
-                    store._delete_location(location)
+                if weight < threshold:
+                    store.delete_fragment(tier, filename)
                     deleted.append(filename)
                     continue
                 if rule.next is None:
@@ -80,7 +75,7 @@ def scan_and_promote(
                         "from_tier": tier,
                         "to_tier": rule.next,
                         "filename": filename,
-                        "content": location.path.read_text("utf-8").strip(),
+                        "content": str(item.get("content") or "").strip(),
                         "weight": weight,
                         "expires_at": meta.get("expires_at"),
                     }
@@ -134,13 +129,8 @@ def scan_and_promote(
                 continue
             if decision.get("to_tier") != requested["to_tier"]:
                 continue
-            location = next(
-                (
-                    item
-                    for item in store._locations(requested["filename"])
-                    if item.tier == requested["from_tier"]
-                ),
-                None,
+            location = store.locate_in_tier(
+                requested["from_tier"], requested["filename"]
             )
             if location is None:
                 applied.append(requested["filename"])

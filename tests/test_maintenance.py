@@ -10,14 +10,19 @@ from types import SimpleNamespace
 
 from run.agent_runner import AgentOutputError
 from provider.factory import ProviderCongestionError
-from run.history import commit_window, empty_window, load_window, queue_memory_extraction
+from run.history import (
+    commit_window,
+    empty_window,
+    load_window,
+    queue_memory_extraction,
+)
 from run.history_index import (
     close_session,
     find_record,
-    index_path,
     queue_summary,
     session_key,
 )
+from run.history_store import read_registry, write_registry
 from run.context import estimate_text_tokens
 from run.maintenance import (
     HISTORY_SUMMARY_CHUNK_TOKENS,
@@ -25,10 +30,13 @@ from run.maintenance import (
     _summary_chunks,
 )
 from run.memory import MemoryStore, normalize_memory_filename
+from tests.memory_db import update_fragment_metadata
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):
-    def test_summary_chunks_hard_split_one_oversized_round_without_data_loss(self) -> None:
+    def test_summary_chunks_hard_split_one_oversized_round_without_data_loss(
+        self,
+    ) -> None:
         user_text = "用户内容。" * 15_000
         assistant_text = "助手结果。" * 15_000
         chunks = _summary_chunks(
@@ -128,7 +136,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             result = MaintenanceScheduler(root).scan_once()
 
         self.assertEqual(
-            result["alice"]["history_summary"]["failed"][0]["error"]["raw_output_preview"],
+            result["alice"]["history_summary"]["failed"][0]["error"][
+                "raw_output_preview"
+            ],
             "第一行普通文本 第二行仍不是 JSON",
         )
         record = find_record(root, "alice", "web", "conv_failed")
@@ -203,7 +213,12 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         with patch("run.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.side_effect = [
-                SimpleNamespace(data={"title": "分块摘要第一阶段结果", "summary": "第一块历史内容已经完成摘要并写入持久断点，后续失败时无需重新处理。"}),
+                SimpleNamespace(
+                    data={
+                        "title": "分块摘要第一阶段结果",
+                        "summary": "第一块历史内容已经完成摘要并写入持久断点，后续失败时无需重新处理。",
+                    }
+                ),
                 AgentOutputError("第二块暂时失败"),
             ]
             first = scheduler.process_next_summary("alice")
@@ -212,12 +227,17 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(checkpointed["summary_checkpoint_next_chunk"], 1)
         self.assertEqual(checkpointed["summary_checkpoint_total_chunks"], 2)
 
-        index = json.loads(index_path(root, "alice").read_text("utf-8"))
-        index["sessions"][session_key("web", "conv_chunked")]["summary_retry_at"] = "2000-01-01T00:00:00+00:00"
-        index_path(root, "alice").write_text(json.dumps(index), "utf-8")
+        sessions, active = read_registry(root, "alice")
+        sessions[session_key("web", "conv_chunked")]["summary_retry_at"] = (
+            "2000-01-01T00:00:00+00:00"
+        )
+        write_registry(root, "alice", sessions, active)
         with patch("run.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.return_value = SimpleNamespace(
-                data={"title": "分块摘要断点恢复完成", "summary": "第二块从持久断点继续处理，最终摘要成功写回且没有重复调用第一块内容。"}
+                data={
+                    "title": "分块摘要断点恢复完成",
+                    "summary": "第二块从持久断点继续处理，最终摘要成功写回且没有重复调用第一块内容。",
+                }
             )
             second = scheduler.process_next_summary("alice")
 
@@ -249,7 +269,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         queue_summary(root, "alice", "web", "conv_congested")
 
         with patch("run.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.side_effect = ProviderCongestionError("Provider 繁忙")
+            runner_type.return_value.run.side_effect = ProviderCongestionError(
+                "Provider 繁忙"
+            )
             result = MaintenanceScheduler(root).process_next_summary("alice")
 
         self.assertTrue(result["failed"][0]["deferred"])
@@ -371,7 +393,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "pending",
         )
 
-    def test_compression_only_claims_closed_session_explicitly_queued_for_save(self) -> None:
+    def test_compression_only_claims_closed_session_explicitly_queued_for_save(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -440,7 +464,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "completed",
         )
 
-    def test_manual_compression_queue_drains_open_session_to_bounded_target(self) -> None:
+    def test_manual_compression_queue_drains_open_session_to_bounded_target(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -526,7 +552,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(completed["memory_status"], "completed")
         self.assertNotIn("memory_target_round", completed)
 
-    def test_manual_compression_queue_stops_at_target_when_new_round_arrives(self) -> None:
+    def test_manual_compression_queue_stops_at_target_when_new_round_arrives(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -670,16 +698,18 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             self.assertEqual(state["memory_processed_round"], 0)
             self.assertEqual(state["memory_status"], "failed")
             self.assertEqual(state["memory_error"]["round"], 1)
-            self.assertEqual(state["memory_last_error"]["exception_type"], "AgentOutputError")
+            self.assertEqual(
+                state["memory_last_error"]["exception_type"], "AgentOutputError"
+            )
             self.assertEqual(state["memory_last_error"]["retry_count"], 1)
             self.assertTrue(state["memory_last_error"]["occurred_at"])
 
-        raw_index = json.loads(index_path(root, "alice").read_text("utf-8"))
+        sessions, active = read_registry(root, "alice")
         record_key = session_key("web", "conv_retry")
-        raw_index["sessions"][record_key]["memory_state_updated_at"] = (
+        sessions[record_key]["memory_state_updated_at"] = (
             datetime.now(timezone.utc) - timedelta(minutes=2)
         ).isoformat()
-        index_path(root, "alice").write_text(json.dumps(raw_index), "utf-8")
+        write_registry(root, "alice", sessions, active)
         success_analysis = {
             "status": "completed",
             "candidate_count": 0,
@@ -714,7 +744,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             self.assertEqual(state["memory_last_error"]["round"], 1)
             self.assertEqual(state["memory_last_error"]["retry_count"], 1)
 
-    def test_stale_memory_analysis_is_discarded_without_persisting_or_marking_failed(self) -> None:
+    def test_stale_memory_analysis_is_discarded_without_persisting_or_marking_failed(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -757,7 +789,10 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             patch("run.maintenance.analyze_round_memory", return_value=analysis),
             patch(
                 "run.maintenance.find_record",
-                return_value={"memory_claim_id": "newer-worker", "memory_claim_round": 1},
+                return_value={
+                    "memory_claim_id": "newer-worker",
+                    "memory_claim_round": 1,
+                },
             ),
             patch("run.maintenance.persist_round_memory_analysis") as persist,
         ):
@@ -813,28 +848,24 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         )
         store = MemoryStore(root, "alice", config)
         filename = normalize_memory_filename("durable preference")
-        path = store.fragment_path("half_year", filename)
-        path.parent.mkdir(parents=True)
-        path.write_text("durable preference", "utf-8")
         now = datetime(2026, 7, 19, 3, tzinfo=timezone.utc)
-        store.write_index(
+        store.create_fragment(
+            "half_year", filename, "durable preference", now=now - timedelta(days=181)
+        )
+        update_fragment_metadata(
+            store,
             "half_year",
-            {
-                filename: {
-                    "weight": 60,
-                    "updated_at": (now - timedelta(days=181)).isoformat(),
-                    "last_weight_date": None,
-                    "expires_at": (now - timedelta(seconds=1)).isoformat(),
-                }
-            },
+            filename,
+            weight=60,
+            expires_at=now - timedelta(seconds=1),
         )
 
         result = MaintenanceScheduler(root).scan_once(now=now, force=True)
 
         self.assertNotIn("_perception", result)
         self.assertNotIn("memory_lifecycle", result["alice"])
-        self.assertFalse(store.fragment_path("permanent", filename).is_file())
-        self.assertIn(filename, store.load_index("half_year"))
+        self.assertIsNone(store.get_entry("permanent", filename))
+        self.assertIsNotNone(store.get_entry("half_year", filename))
         self.assertNotIn("important_memory", result["alice"])
         self.assertNotIn("daily_memory_review", result["alice"])
 

@@ -12,12 +12,13 @@ import httpx
 
 from web.app import create_app
 from web.service import WebRunService
+from run.log_store import LogStore
 
 
 INPUT_SOURCE = '''import threading
 _stop = threading.Event()
-def start(config, message_buffer, files_dir, state_path):
-    del config, message_buffer, files_dir, state_path
+def start(config, message_buffer, files_dir):
+    del config, message_buffer, files_dir
     _stop.wait()
 def stop():
     _stop.set()
@@ -56,7 +57,6 @@ class WebMessageApiTests(unittest.TestCase):
     def create_module(self, directory_name: str, user: str, *, healthy: bool = True) -> Path:
         module = self.root / "message" / "out" / directory_name
         (module / "files").mkdir(parents=True)
-        (module / "log").mkdir()
         (module / "input.py").write_text(INPUT_SOURCE, "utf-8")
         (module / "output.py").write_text(OUTPUT_SOURCE, "utf-8")
         (module / "detect.py").write_text(DETECT_SOURCE, "utf-8")
@@ -74,27 +74,27 @@ class WebMessageApiTests(unittest.TestCase):
                     "allowed_tools": None,
                     "message_buffer": "message.md",
                     "files_dir": "files/",
-                    "log_dir": "log/",
                 },
                 ensure_ascii=False,
             ),
             "utf-8",
         )
-        (module / "state.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "health": "healthy" if healthy else "dead",
-                    "last_check": "2026-07-21T12:49:08+08:00",
-                    "last_message_at": "2026-07-21T12:49:08+08:00",
-                    "error": None if healthy else "connection failed",
-                    "latency_ms": 8,
-                    "messages_received_today": 2,
-                    "messages_sent_today": 1,
-                },
-                ensure_ascii=False,
-            ),
-            "utf-8",
+        LogStore(self.root).write_message_route_state(
+            f"machine_{directory_name}",
+            user=user,
+            platform=directory_name,
+            state={
+                "schema_version": 1,
+                "health": "healthy" if healthy else "dead",
+                "last_check": "2026-07-21T12:49:08+08:00",
+                "last_message_at": "2026-07-21T12:49:08+08:00",
+                "error": None if healthy else "connection failed",
+                "latency_ms": 8,
+                "messages_received_today": 2,
+                "messages_sent_today": 1,
+                "input_status": "running",
+                "input_restart_count": 0,
+            },
         )
         return module
 
@@ -103,14 +103,22 @@ class WebMessageApiTests(unittest.TestCase):
         self.create_module("bob_bridge", "bob")
         (alice / "files" / "meeting_notes.docx").write_bytes(b"document")
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-        (alice / "log" / f"{today}.md").write_text(
-            f"## {today} 12:49:08 | private | chat-1\n\n"
-            "**入站**：请查看会议纪要\n"
-            "  - 附件：meeting_notes.docx (application/vnd.openxmlformats-officedocument.wordprocessingml.document, 8 bytes)\n\n"
-            "**出站**：会议纪要已收到。\n"
-            "  - 出站附件：summary.pdf (users/alice/download/summary.pdf)\n\n---\n",
-            "utf-8",
-        )
+        common = {
+            "occurred_at": f"{today} 12:49:08",
+            "user": "alice",
+            "machine_id": "machine_alice_bridge",
+            "platform": "alice_bridge",
+            "chat_type": "private",
+            "chat_id": "chat-1",
+            "source": "runtime/logs.sqlite3",
+            "success": True,
+        }
+        LogStore(self.root).append_message_entries([
+            {**common, "direction": "receive", "kind": "text", "content": "请查看会议纪要"},
+            {**common, "direction": "receive", "kind": "file", "content": "meeting_notes.docx", "file_path": "message/out/alice_bridge/files/meeting_notes.docx", "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "size": 8},
+            {**common, "direction": "send", "kind": "text", "content": "会议纪要已收到。"},
+            {**common, "direction": "send", "kind": "file", "content": "summary.pdf", "file_path": "users/alice/download/summary.pdf"},
+        ])
 
         response = self.request("GET", "/api/users/alice/message/status")
         self.assertEqual(response.status_code, 200, response.text)
@@ -124,8 +132,7 @@ class WebMessageApiTests(unittest.TestCase):
         self.assertEqual(transport["bound_user"], "alice")
         self.assertEqual(transport["path"], "message/out/alice_bridge")
         self.assertEqual(transport["files_path"], "message/out/alice_bridge/files")
-        self.assertEqual(transport["log_path"], "message/out/alice_bridge/log")
-        self.assertEqual(transport["structured_log_path"], "runtime/logs.sqlite3")
+        self.assertEqual(transport["log_path"], "runtime/logs.sqlite3")
         self.assertEqual(transport["temporary_file_count"], 1)
         self.assertEqual(len(transport["logs"]), 4)
         self.assertEqual(
@@ -135,7 +142,7 @@ class WebMessageApiTests(unittest.TestCase):
         self.assertNotIn("bob_bridge", response.text)
 
     def test_check_connection_updates_state_and_returns_refreshed_transport(self) -> None:
-        module = self.create_module("check_bridge", "alice", healthy=False)
+        self.create_module("check_bridge", "alice", healthy=False)
         response = self.request(
             "POST",
             "/api/users/alice/message/modules/check_bridge/check",
@@ -144,7 +151,9 @@ class WebMessageApiTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["checked"])
         self.assertEqual(payload["transport"]["connection_status"], "connected")
-        state = json.loads((module / "state.json").read_text("utf-8"))
+        state = LogStore(self.root).read_message_route_state("machine_check_bridge")
+        self.assertIsNotNone(state)
+        assert state is not None
         self.assertEqual(state["health"], "healthy")
         self.assertIsNone(state["error"])
 

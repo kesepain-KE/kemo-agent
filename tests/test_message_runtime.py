@@ -33,7 +33,9 @@ from message.transport import (
 )
 from run.history import commit_window, empty_window, session_messages
 from run.history_index import find_record, get_active, get_or_reserve_active
+from run.history_store import connection as history_connection
 from run.attachments import RunAssetResolver
+from run.log_store import LogStore
 from run.runtime_host import RuntimeHost
 from run.cron_store import CronStore
 from run.tools import ToolDefinition, ToolRegistry
@@ -97,7 +99,6 @@ def _write_file_plugin(
 ) -> Path:
     directory = root / "message" / "out" / name
     (directory / "files").mkdir(parents=True)
-    (directory / "log").mkdir()
     (directory / "message.json").write_text(
         json.dumps(
             {
@@ -120,22 +121,6 @@ def _write_file_plugin(
                 "allowed_tools": [],
                 "message_buffer": "message.md",
                 "files_dir": "files/",
-                "log_dir": "log/",
-            }
-        ),
-        "utf-8",
-    )
-    (directory / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "health": "unknown",
-                "last_check": None,
-                "last_message_at": None,
-                "error": None,
-                "latency_ms": None,
-                "messages_received_today": 0,
-                "messages_sent_today": 0,
             }
         ),
         "utf-8",
@@ -144,7 +129,7 @@ def _write_file_plugin(
     (directory / "input.py").write_text(
         "import threading\n"
         "STOP = threading.Event()\n"
-        "def start(config, message_buffer, files_dir, state_path):\n"
+        "def start(config, message_buffer, files_dir):\n"
         "    STOP.clear()\n"
         "    STOP.wait()\n"
         "def stop():\n"
@@ -409,10 +394,12 @@ timestamp: 2026-07-18T14:32:25+08:00
         self.assertFalse(image.exists())
         self.assertFalse(text_file.exists())
         self.assertFalse(list(self.directory.glob("*.processing.md")))
-        log = (self.directory / "log" / "2026-07-18.md").read_text("utf-8")
-        self.assertIn("请分析附件", log)
-        self.assertIn("screenshot.png", log)
-        state = json.loads((self.directory / "state.json").read_text("utf-8"))
+        logs = LogStore(self.root).list_messages("msg_filedemo")
+        self.assertIn("请分析附件", {item["content"] for item in logs})
+        self.assertIn("screenshot.png", {item["content"] for item in logs})
+        state = LogStore(self.root).read_message_route_state("msg_filedemo")
+        self.assertIsNotNone(state)
+        assert state is not None
         self.assertEqual(state["messages_received_today"], 3)
         self.assertEqual(state["messages_sent_today"], 2)
         self.assertFalse(errors)
@@ -425,7 +412,7 @@ timestamp: 2026-07-18T14:32:25+08:00
             "STARTS = 0\n"
             "RUNNING = False\n"
             "LAST_ERROR = None\n"
-            "def start(config, message_buffer, files_dir, state_path):\n"
+            "def start(config, message_buffer, files_dir):\n"
             "    global STARTS, RUNNING, LAST_ERROR\n"
             "    STARTS += 1\n"
             "    RUNNING = True\n"
@@ -467,7 +454,9 @@ timestamp: 2026-07-18T14:32:25+08:00
 
         self.assertGreaterEqual(transport._input.STARTS, 2)
         self.assertTrue(transport._input.is_alive())
-        state = json.loads((self.directory / "state.json").read_text("utf-8"))
+        state = LogStore(self.root).read_message_route_state("msg_filedemo")
+        self.assertIsNotNone(state)
+        assert state is not None
         self.assertGreaterEqual(state["input_restart_count"], 1)
         self.assertIn(state["input_status"], {"starting", "running"})
 
@@ -564,8 +553,11 @@ class StateTests(unittest.TestCase):
             key = f"mock:m{index}"
             store.claim(key)
             store.complete(key, status="completed")
-        data = json.loads(store.path.read_text("utf-8"))
-        self.assertEqual(len(data["messages"]), 2)
+        with history_connection(self.root, "alice") as database:
+            count = int(database.execute(
+                "SELECT COUNT(*) FROM message_processed_messages"
+            ).fetchone()[0])
+        self.assertEqual(count, 2)
 
 
 class RouterTests(unittest.TestCase):
@@ -1075,11 +1067,12 @@ hello plugin
             while not transport._output.SENT and time.time() < deadline:
                 time.sleep(0.05)
             self.assertEqual(transport._output.SENT[0]["text"], "reply:hello plugin")
-            log = self.root / "message" / "out" / "filedemo" / "log" / "2026-07-18.md"
             deadline = time.time() + 2
-            while not log.is_file() and time.time() < deadline:
+            logs = LogStore(self.root).list_messages("msg_filedemo")
+            while not logs and time.time() < deadline:
                 time.sleep(0.05)
-            self.assertIn("hello plugin", log.read_text("utf-8"))
+                logs = LogStore(self.root).list_messages("msg_filedemo")
+            self.assertIn("hello plugin", {item["content"] for item in logs})
             (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
                 """---
 machine_id: msg_filedemo

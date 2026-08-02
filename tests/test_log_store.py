@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +8,32 @@ from run.log_store import LogStore
 
 
 class LogStoreTests(unittest.TestCase):
+    def test_message_route_state_round_trip_preserves_extension_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LogStore(Path(directory))
+            state = {
+                "schema_version": 1,
+                "health": "healthy",
+                "last_check": "2026-08-02T12:00:00+08:00",
+                "last_message_at": None,
+                "error": None,
+                "latency_ms": 18,
+                "messages_received_today": 4,
+                "messages_sent_today": 3,
+                "input_status": "running",
+                "input_restart_count": 1,
+                "input_last_restart_at": None,
+                "input_error": None,
+                "_bot_info": {"username": "demo"},
+            }
+            store.write_message_route_state(
+                "telegram-demo", user="alice", platform="telegram", state=state
+            )
+
+            self.assertEqual(
+                store.read_message_route_state("telegram-demo"), state
+            )
+
     def test_cron_records_are_idempotent_and_queryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = LogStore(Path(directory))
@@ -29,62 +54,27 @@ class LogStoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["task_id"], "memory_promotion")
             self.assertEqual(rows[0]["result"], {"status": "completed"})
 
-    def test_cron_legacy_jsonl_migration_is_idempotent(self) -> None:
+    def test_message_records_are_idempotent_and_queryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            log_dir = root / "cron" / "task_cron_system" / "log"
-            log_dir.mkdir(parents=True)
-            path = log_dir / "2026-07-27.jsonl"
-            path.write_text(
-                json.dumps(
-                    {
-                        "executed_at": "2026-07-27T12:00:00+08:00",
-                        "user": "alice",
-                        "task_id": "expand_update",
-                        "status": "success",
-                        "duration_ms": 4,
-                        "result": {},
-                    }
-                )
-                + "\n",
-                "utf-8",
-            )
-            store = LogStore(root)
-
-            store.migrate_cron_logs(log_dir)
-            store.migrate_cron_logs(log_dir)
-
-            self.assertEqual(len(store.list_cron("alice")), 1)
-
-    def test_message_legacy_markdown_migration_preserves_four_log_items(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            log_dir = root / "message" / "out" / "bridge" / "log"
-            log_dir.mkdir(parents=True)
-            (log_dir / "2026-07-27.md").write_text(
-                "## 2026-07-27 12:49:08 | private | chat-1\n\n"
-                "**入站**：请查看会议纪要\n"
-                "  - 附件：meeting_notes.docx (application/docx, 8 bytes)\n\n"
-                "**出站**：会议纪要已收到。\n"
-                "  - 出站附件：summary.pdf (users/alice/download/summary.pdf)\n\n---\n",
-                "utf-8",
-            )
-            store = LogStore(root)
-
-            store.migrate_message_logs(
-                log_dir,
-                machine_id="bridge",
-                user="alice",
-                platform="telegram",
-                files_root="message/out/bridge/files",
-            )
-            store.migrate_message_logs(
-                log_dir,
-                machine_id="bridge",
-                user="alice",
-                platform="telegram",
-                files_root="message/out/bridge/files",
-            )
+            store = LogStore(Path(directory))
+            common = {
+                "occurred_at": "2026-07-27 12:49:08",
+                "user": "alice",
+                "machine_id": "bridge",
+                "platform": "telegram",
+                "chat_type": "private",
+                "chat_id": "chat-1",
+                "source": "runtime/logs.sqlite3",
+                "success": True,
+            }
+            entries = [
+                {**common, "direction": "receive", "kind": "text", "content": "请查看会议纪要"},
+                {**common, "direction": "receive", "kind": "file", "content": "meeting_notes.docx", "file_path": "message/out/bridge/files/meeting_notes.docx", "mime": "application/docx", "size": 8},
+                {**common, "direction": "send", "kind": "text", "content": "会议纪要已收到。"},
+                {**common, "direction": "send", "kind": "file", "content": "summary.pdf", "file_path": "users/alice/download/summary.pdf"},
+            ]
+            store.append_message_entries(entries)
+            store.append_message_entries(entries)
 
             rows = store.list_messages("bridge")
             self.assertEqual(len(rows), 4)
@@ -93,4 +83,3 @@ class LogStoreTests(unittest.TestCase):
                 {(row["direction"], row["kind"]) for row in rows},
                 {("receive", "text"), ("receive", "file"), ("send", "text"), ("send", "file")},
             )
-

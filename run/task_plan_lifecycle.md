@@ -3,8 +3,10 @@
 ## 存储路径
 
 ```
-users/<user>/task_plan/<plan_id>.json
+users/<user>/task_plan/task_plans.sqlite3
 ```
+
+`task_plans` 保存计划元数据，`task_plan_steps` 保存有序步骤，`task_plan_dependencies` 保存依赖边。下方 JSON 只是 API/子代理数据契约，不是磁盘文件。
 
 ## 计划数据契约
 
@@ -137,16 +139,7 @@ pending → approved → running → completed
 
 - TaskPlanScheduler 按依赖逐步触发主智能体 Run；活跃计划由系统提示词自动注入。
 - 每次 Run 只执行当前可运行步骤，步骤与计划状态由框架持久化，不能交给模型自行修改。
-- 启动时扫描所有用户计划文件
+- 启动时按索引查询所有用户数据库中的运行步骤
 - 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态恢复为 `pending`
 - 不自动重放有副作用的步骤
 - 等待用户决定恢复或取消
-
-## 旧数据兼容
-
-- `schema_version` 不匹配时拒绝加载并报错
-- 无旧文件需要迁移（目录当前为空）
-
-## Web 暂不接入
-
-本阶段不修改 `web/`，为后续用户提供 Web 模板保留稳定服务接口。

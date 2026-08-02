@@ -3,12 +3,11 @@
 这是可完全替换的协议样例，不规定消息模块的内部结构。复杂实现可以保留在
 当前模块目录的任意包或完整工程中，由本入口转交；框架只调用下列生命周期合同。
 
-Protocol: start(config, buffer_path, files_path, state_path) / stop()
+Protocol: start(config, buffer_path, files_path) / stop()
 Optional lifecycle: is_alive() / restart() / last_error()
   - config: dict from message.json (raw)
   - buffer_path: path to message.md queue file
   - files_path: path to files/ directory
-  - state_path: path to state.json
 
 This example:
   start() launches an asyncio event loop in a daemon thread.
@@ -233,7 +232,7 @@ async def _run_bot(token: str) -> None:
             await app.shutdown()
 
 
-def start(config: dict, buffer_path: str, files_path: str, state_path: str) -> None:
+def start(config: dict, buffer_path: str, files_path: str) -> None:
     """在后台线程中启动 Telegram Bot 长轮询。"""
     global _THREAD, _BUFFER_PATH, _FILES_PATH, _MACHINE_ID
     global _LAST_ERROR, _START_ARGS
@@ -244,7 +243,7 @@ def start(config: dict, buffer_path: str, files_path: str, state_path: str) -> N
         _BUFFER_PATH = Path(buffer_path)
         _FILES_PATH = Path(files_path)
         _MACHINE_ID = config.get("machine_id", "tg-mybot-001")
-        _START_ARGS = (dict(config), buffer_path, files_path, state_path)
+        _START_ARGS = (dict(config), buffer_path, files_path)
         _LAST_ERROR = None
         _STOP_EVENT.clear()
         token = load_token()

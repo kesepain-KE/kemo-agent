@@ -706,7 +706,7 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertNotIn("must not enter logs", json.dumps(summary))
 
-    def test_system_execution_marks_jsonl_as_already_migrated(self) -> None:
+    def test_system_execution_is_written_to_sqlite(self) -> None:
         executed_at = datetime(2026, 7, 27, 20, 30, tzinfo=BEIJING)
 
         _append_system_execution(
@@ -718,15 +718,7 @@ class SchedulerTests(unittest.TestCase):
             result={"status": "completed"},
         )
 
-        log_path = (
-            self.root
-            / "cron"
-            / "task_cron_system"
-            / "log"
-            / "2026-07-27.jsonl"
-        )
         store = LogStore(self.root)
-        self.assertFalse(store.legacy_source_changed(log_path))
         self.assertEqual(len(store.list_cron("alice")), 1)
 
     def test_global_update_rates_default_fallback_and_recalibrate(self) -> None:
@@ -817,14 +809,7 @@ class SchedulerTests(unittest.TestCase):
         advanced = store.read("memory_promotion")
         self.assertTrue(advanced["latest_run_at"])
         self.assertGreater(datetime.fromisoformat(advanced["next_run_at"]), datetime.now(BEIJING))
-        log_path = (
-            self.root
-            / "cron"
-            / "task_cron_system"
-            / "log"
-            / f"{datetime.now(BEIJING):%Y-%m-%d}.jsonl"
-        )
-        records = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
+        records = LogStore(self.root).list_cron("alice") + LogStore(self.root).list_cron("bob")
         self.assertEqual({record["user"] for record in records}, {"alice", "bob"})
         self.assertTrue(all(record["task_id"] == "memory_promotion" for record in records))
         self.assertTrue(all(record["status"] == "success" for record in records))
@@ -858,14 +843,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs["user"], "__system__")
         self.assertEqual(execute.call_args.kwargs["config"], {})
         self.assertEqual(execute.call_args.kwargs["system_task"]["task_id"], task["task_id"])
-        log_path = (
-            self.root
-            / "cron"
-            / "task_cron_system"
-            / "log"
-            / f"{datetime.now(BEIJING):%Y-%m-%d}.jsonl"
-        )
-        record = json.loads(log_path.read_text("utf-8").splitlines()[-1])
+        record = LogStore(self.root).list_cron("__system__")[0]
         self.assertEqual(record["user"], "__system__")
         self.assertEqual(record["status"], "partial")
         self.assertEqual(record["result"]["category"], "sense")

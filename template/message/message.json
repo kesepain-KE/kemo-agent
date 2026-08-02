@@ -17,6 +17,5 @@
   ],
   "allowed_tools": null,
   "message_buffer": "message.md",
-  "files_dir": "files",
-  "log_dir": "log"
+  "files_dir": "files"
 }

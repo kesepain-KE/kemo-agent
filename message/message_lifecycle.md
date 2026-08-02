@@ -96,13 +96,14 @@ session_id= <chat_type>:<external_chat_id>
 
 ## 幂等去重
 
-处理记录保存于：
+处理记录保存于每用户历史库：
 
 ```text
-users/<user>/message_state/processed.json
+users/<user>/history/history.sqlite3
+└── message_processed_messages
 ```
 
-键为 `<platform>:<message_id>`。消息在进入 Run 前原子 claim，完成后写 `completed` 或 `failed`。群聊即使合批，也会原子领取批次内每个原始消息 ID；已存在的单条消息不会随新消息再次进入推理。记录按配置上限保留最近 N 条。
+键为 `<platform>:<message_id>`。消息在进入 Run 前以 `BEGIN IMMEDIATE` 原子 claim，完成后写 `completed` 或 `failed`。群聊即使合批，也会原子领取批次内每个原始消息 ID；已存在的单条消息不会随新消息再次进入推理。记录按配置上限只淘汰最旧终态，绝不删除 `processing`。
 
 ## 工具权限交集
 
@@ -123,12 +124,11 @@ users/<user>/message_state/processed.json
 RuntimeHost 启动时扫描 `message/out/` 的直接子目录。每个有效插件必须包含：
 
 - `message.json`：平台、机器 ID、绑定用户、能力、工具权限和模块路径；
-- `state.json`：健康状态、最近消息和当日收发计数；
 - `message.md`：YAML front matter + Markdown 正文文件队列；
 - `input.py`：阻塞式 `start()` 与幂等 `stop()`；
 - `output.py`：返回 bool 的 `send(message)`；
 - `detect.py`：返回完整状态对象的 `check(config, state)`；
-- `files/` 与 `log/`：附件落地和按日回溯日志。
+- `files/`：附件落地目录。运行状态与收发日志统一位于 `runtime/logs.sqlite3`。
 
 同一群聊在一次队列领取中的多条消息合并为一个 MessageEnvelope，私聊逐条提交。领取文件保留到全部 RouteResult 进入终态，宿主重启后仍可重新发现；用户级幂等状态避免重复副作用。
 

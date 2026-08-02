@@ -126,6 +126,7 @@ class PlanStoreTests(unittest.TestCase):
         created = store.create(plan)
         self.assertEqual(created["status"], "pending")
         self.assertEqual(created["revision"], 1)
+        self.assertTrue(store.path.is_file())
 
         read = store.read(created["plan_id"])
         self.assertEqual(read["plan_id"], created["plan_id"])
@@ -218,20 +219,7 @@ class PlanStoreTests(unittest.TestCase):
         self.assertEqual(plan["status"], "paused")
         self.assertEqual(plan["steps"][0]["status"], "pending")
 
-    def test_corrupt_file_skipped_in_list(self) -> None:
-        _, root = _make_root(["alice"])
-        store = PlanStore(root, "alice")
-        plan = store.create(_make_plan([
-            {"step_id": "step_1", "title": "A", "description": "A",
-             "tool_name": None, "tool_arguments": {}, "critical": True},
-        ]))
-        # Corrupt the file
-        (store._dir / f"{plan['plan_id']}.json").write_text("not json", "utf-8")
-        self.assertEqual(len(store.list_plans()), 0)
-        with self.assertRaises(PlanError):
-            store.read(plan["plan_id"])
-
-    def test_reminder_is_persisted_and_legacy_plan_defaults_to_empty(self) -> None:
+    def test_reminder_is_persisted(self) -> None:
         _, root = _make_root(["alice"])
         store = PlanStore(root, "alice")
         plan = normalize_plan(
@@ -249,15 +237,15 @@ class PlanStoreTests(unittest.TestCase):
             }],
         )
         store.create(plan)
-        self.assertEqual(store.read(plan["plan_id"])["reminder"], plan["reminder"])
-
-        path = store._path(plan["plan_id"])
-        raw = json.loads(path.read_text("utf-8"))
-        raw.pop("reminder")
-        path.write_text(json.dumps(raw), "utf-8")
-        self.assertEqual(store.read(plan["plan_id"])["reminder"], "")
+        self.assertEqual(
+            store.read(plan["plan_id"])["reminder"],
+            "当前任务计划已创建，请让用户点击批准后执行",
+        )
         updated = store.update(plan["plan_id"], lambda item: item)
-        self.assertEqual(updated["reminder"], "")
+        self.assertEqual(
+            updated["reminder"],
+            "当前任务计划已创建，请让用户点击批准后执行",
+        )
 
 
 class PlanExecutionTests(unittest.TestCase):
@@ -370,6 +358,53 @@ class PlanExecutionTests(unittest.TestCase):
         self.assertEqual(
             [step["status"] for step in stored["steps"]],
             ["completed", "completed"],
+        )
+
+    def test_agent_limited_terminal_preserves_reason_when_plan_pauses(self) -> None:
+        plan = self._plan_with_steps([
+            {
+                "step_id": "step_1",
+                "title": "Collect",
+                "description": "Collect data",
+                "tool_name": "shell",
+                "tool_arguments": {"command": "first"},
+                "critical": True,
+            },
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+
+        def event_source(request):
+            del request
+            yield RunEvent(
+                type="done",
+                metadata={
+                    "committed": True,
+                    "status": "limited",
+                    "stop_reason": "max_tool_iterations",
+                },
+            )
+
+        events = list(
+            execute_plan(
+                root=self.root,
+                user="alice",
+                plan_id=plan["plan_id"],
+                config=CONFIG,
+                agent_event_source=event_source,
+            )
+        )
+
+        done = next(event for event in events if event.type == "done")
+        self.assertEqual(done.metadata["status"], "paused")
+        self.assertEqual(done.metadata["stop_reason"], "max_tool_iterations")
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(
+            stored["steps"][0]["error"]["exception_type"],
+            "PlanAgentRunLimited",
+        )
+        self.assertEqual(
+            stored["steps"][0]["error"]["stop_reason"],
+            "max_tool_iterations",
         )
 
     def test_critical_failure_pauses_plan(self) -> None:

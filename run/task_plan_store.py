@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
-import os
 import re
+import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from run.prompt_sources import natural_path_key, relative_path, truncate_chars
+from run.prompt_sources import truncate_chars
 
 SCHEMA_VERSION = 1
+TASK_PLAN_DB_FILENAME = "task_plans.sqlite3"
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{8}$")
 STEP_ID_RE = re.compile(r"^step_\d+$")
 PLAN_STATUSes = frozenset({
@@ -76,18 +78,17 @@ def _plan_dir(root: Path, user: str) -> Path:
     return root / "users" / user / "task_plan"
 
 
-def _atomic_write(path: Path, data: dict[str, Any]) -> None:
-    tmp = path.with_suffix(".tmp")
+def _json_text(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_value(value: Any, default: Any) -> Any:
+    if not isinstance(value, str):
+        return default
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        raise
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
 
 
 def _validate_step(step: dict[str, Any], index: int, tool_names: set[str] | None) -> None:
@@ -256,110 +257,328 @@ def normalize_plan(
 
 
 class PlanStore:
-    """Disk-authoritative plan storage with per-user locking."""
+    """SQLite-authoritative plan storage with one-time JSON migration."""
 
     def __init__(self, root: Path, user: str) -> None:
         self.root = root.resolve()
         self.user = user
         self._dir = _plan_dir(self.root, self.user)
+        self.path = self._dir / TASK_PLAN_DB_FILENAME
         self._lock = _store_lock(self.root, self.user)
 
-    def _path(self, plan_id: str) -> Path:
-        return self._dir / f"{plan_id}.json"
+    @contextmanager
+    def _connection(self, *, write: bool = False):
+        self._dir.mkdir(parents=True, exist_ok=True)
+        database = sqlite3.connect(self.path, timeout=5.0)
+        database.row_factory = sqlite3.Row
+        try:
+            database.execute("PRAGMA journal_mode=WAL")
+            database.execute("PRAGMA synchronous=NORMAL")
+            database.execute("PRAGMA foreign_keys=ON")
+            database.execute("PRAGMA busy_timeout=5000")
+            database.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS task_plan_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_plans (
+                    plan_id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    user TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    auto_accept INTEGER NOT NULL,
+                    reminder TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    current_step TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_plans_status_time
+                    ON task_plans(status, updated_at DESC, plan_id);
+                CREATE TABLE IF NOT EXISTS task_plan_steps (
+                    plan_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    step_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tool_name TEXT,
+                    tool_arguments_json TEXT NOT NULL DEFAULT '{}',
+                    critical INTEGER NOT NULL,
+                    result_json TEXT,
+                    error_json TEXT,
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(plan_id, step_id),
+                    UNIQUE(plan_id, position),
+                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS task_plan_dependencies (
+                    plan_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    depends_on_step_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    PRIMARY KEY(plan_id, step_id, depends_on_step_id),
+                    FOREIGN KEY(plan_id, step_id)
+                        REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE,
+                    FOREIGN KEY(plan_id, depends_on_step_id)
+                        REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE
+                );
+                """
+            )
+            database.execute(
+                "INSERT INTO task_plan_meta(key, value) VALUES('schema_version', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
+            database.commit()
+            if write:
+                database.execute("BEGIN IMMEDIATE")
+            yield database
+            if write:
+                database.commit()
+        except BaseException:
+            if write:
+                database.rollback()
+            raise
+        finally:
+            database.close()
+
+    @staticmethod
+    def _save(database: sqlite3.Connection, plan: dict[str, Any]) -> None:
+        database.execute(
+            """
+            INSERT INTO task_plans(
+                plan_id, schema_version, title, description, user, source,
+                session_id, status, auto_accept, reminder, revision,
+                created_at, updated_at, current_step
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(plan_id) DO UPDATE SET
+                schema_version=excluded.schema_version,
+                title=excluded.title,
+                description=excluded.description,
+                user=excluded.user,
+                source=excluded.source,
+                session_id=excluded.session_id,
+                status=excluded.status,
+                auto_accept=excluded.auto_accept,
+                reminder=excluded.reminder,
+                revision=excluded.revision,
+                created_at=excluded.created_at,
+                updated_at=excluded.updated_at,
+                current_step=excluded.current_step
+            """,
+            (
+                plan["plan_id"], int(plan["schema_version"]), plan["title"],
+                plan["description"], plan["user"], str(plan.get("source") or "cli"),
+                str(plan.get("session_id") or "default"), plan["status"],
+                1 if plan["auto_accept"] else 0, str(plan.get("reminder") or ""),
+                int(plan["revision"]), str(plan.get("created_at") or ""),
+                str(plan.get("updated_at") or ""), str(plan.get("current_step") or ""),
+            ),
+        )
+        database.execute(
+            "DELETE FROM task_plan_dependencies WHERE plan_id=?", (plan["plan_id"],)
+        )
+        database.execute(
+            "DELETE FROM task_plan_steps WHERE plan_id=?", (plan["plan_id"],)
+        )
+        for position, step in enumerate(plan["steps"]):
+            database.execute(
+                """
+                INSERT INTO task_plan_steps(
+                    plan_id, position, step_id, title, description, status,
+                    tool_name, tool_arguments_json, critical, result_json,
+                    error_json, started_at, finished_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan["plan_id"], position, step["step_id"], step["title"],
+                    step["description"], step.get("status", "pending"),
+                    step.get("tool_name"), _json_text(step.get("tool_arguments") or {}),
+                    1 if step.get("critical", True) else 0,
+                    _json_text(step.get("result")) if step.get("result") is not None else None,
+                    _json_text(step.get("error")) if step.get("error") is not None else None,
+                    str(step.get("started_at") or ""), str(step.get("finished_at") or ""),
+                ),
+            )
+        for step in plan["steps"]:
+            for position, dependency in enumerate(step.get("depends_on") or []):
+                database.execute(
+                    """
+                    INSERT INTO task_plan_dependencies(
+                        plan_id, step_id, depends_on_step_id, position
+                    ) VALUES(?, ?, ?, ?)
+                    """,
+                    (plan["plan_id"], step["step_id"], dependency, position),
+                )
+
+    @staticmethod
+    def _load(database: sqlite3.Connection, plan_id: str) -> dict[str, Any] | None:
+        row = database.execute(
+            "SELECT * FROM task_plans WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        dependency_rows = database.execute(
+            """
+            SELECT step_id, depends_on_step_id FROM task_plan_dependencies
+            WHERE plan_id=? ORDER BY step_id, position
+            """,
+            (plan_id,),
+        ).fetchall()
+        dependencies: dict[str, list[str]] = {}
+        for dependency in dependency_rows:
+            dependencies.setdefault(str(dependency["step_id"]), []).append(
+                str(dependency["depends_on_step_id"])
+            )
+        steps = []
+        for step in database.execute(
+            "SELECT * FROM task_plan_steps WHERE plan_id=? ORDER BY position",
+            (plan_id,),
+        ).fetchall():
+            steps.append({
+                "step_id": str(step["step_id"]),
+                "title": str(step["title"]),
+                "description": str(step["description"]),
+                "status": str(step["status"]),
+                "depends_on": dependencies.get(str(step["step_id"]), []),
+                "tool_name": step["tool_name"],
+                "tool_arguments": _json_value(step["tool_arguments_json"], {}),
+                "critical": bool(step["critical"]),
+                "result": _json_value(step["result_json"], None),
+                "error": _json_value(step["error_json"], None),
+                "started_at": str(step["started_at"] or ""),
+                "finished_at": str(step["finished_at"] or ""),
+            })
+        return {
+            "schema_version": int(row["schema_version"]),
+            "plan_id": str(row["plan_id"]),
+            "title": str(row["title"]),
+            "description": str(row["description"]),
+            "user": str(row["user"]),
+            "source": str(row["source"]),
+            "session_id": str(row["session_id"]),
+            "status": str(row["status"]),
+            "auto_accept": bool(row["auto_accept"]),
+            "reminder": str(row["reminder"] or ""),
+            "revision": int(row["revision"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "current_step": str(row["current_step"] or ""),
+            "steps": steps,
+        }
 
     def create(self, plan: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             _validate_plan(plan)
-            self._dir.mkdir(parents=True, exist_ok=True)
-            plan_id = plan["plan_id"]
-            path = self._path(plan_id)
-            if path.exists():
-                raise PlanConflictError(f"计划已存在：{plan_id}")
-            _atomic_write(path, plan)
-            return plan
+            if plan.get("user") != self.user:
+                raise PlanValidationError(
+                    f"计划用户与存储用户不一致：{plan.get('user')!r} != {self.user!r}"
+                )
+            try:
+                with self._connection(write=True) as database:
+                    if self._load(database, plan["plan_id"]) is not None:
+                        raise PlanConflictError(f"计划已存在：{plan['plan_id']}")
+                    self._save(database, plan)
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+            return dict(plan)
 
     def read(self, plan_id: str) -> dict[str, Any]:
         with self._lock:
-            path = self._path(plan_id)
-            if not path.exists():
-                raise PlanNotFoundError(f"计划不存在：{plan_id}")
             try:
-                data = json.loads(path.read_text("utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise PlanError(f"计划文件损坏：{plan_id}（{exc}）") from exc
-            if isinstance(data, dict):
-                data.setdefault("reminder", "")
+                with self._connection() as database:
+                    data = self._load(database, plan_id)
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+            if data is None:
+                raise PlanNotFoundError(f"计划不存在：{plan_id}")
             return data
 
     def list_plans(self) -> list[dict[str, Any]]:
         with self._lock:
-            if not self._dir.is_dir():
-                return []
-            plans: list[dict[str, Any]] = []
-            for path in sorted(self._dir.glob("plan_*.json"), key=lambda p: p.name):
-                try:
-                    data = json.loads(path.read_text("utf-8"))
-                    if isinstance(data, dict) and "plan_id" in data:
-                        data.setdefault("reminder", "")
-                        plans.append(data)
-                except (OSError, json.JSONDecodeError):
-                    continue
-            return plans
+            try:
+                with self._connection() as database:
+                    ids = [str(row["plan_id"]) for row in database.execute(
+                        "SELECT plan_id FROM task_plans ORDER BY plan_id"
+                    ).fetchall()]
+                    return [plan for plan_id in ids if (plan := self._load(database, plan_id)) is not None]
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
     def update(self, plan_id: str, mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
         """Atomically read, mutate, validate and persist a plan."""
         with self._lock:
-            path = self._path(plan_id)
-            if not path.exists():
-                raise PlanNotFoundError(f"计划不存在：{plan_id}")
             try:
-                current = json.loads(path.read_text("utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise PlanError(f"计划文件损坏：{plan_id}（{exc}）") from exc
-            current.setdefault("reminder", "")
-            updated = mutator(current)
-            if not isinstance(updated, dict):
-                raise PlanError("mutator 必须返回 dict")
-            updated["revision"] = int(current.get("revision", 1)) + 1
-            updated["updated_at"] = _now()
-            _validate_plan(updated)
-            _atomic_write(path, updated)
-            return updated
+                with self._connection(write=True) as database:
+                    current = self._load(database, plan_id)
+                    if current is None:
+                        raise PlanNotFoundError(f"计划不存在：{plan_id}")
+                    expected_revision = int(current.get("revision", 1))
+                    updated = mutator(current)
+                    if not isinstance(updated, dict):
+                        raise PlanError("mutator 必须返回 dict")
+                    if updated.get("plan_id") != plan_id:
+                        raise PlanValidationError("更新不能修改 plan_id")
+                    if updated.get("user") != self.user:
+                        raise PlanValidationError("更新不能修改计划所属用户")
+                    updated["revision"] = expected_revision + 1
+                    updated["updated_at"] = _now()
+                    _validate_plan(updated)
+                    actual = database.execute(
+                        "SELECT revision FROM task_plans WHERE plan_id=?", (plan_id,)
+                    ).fetchone()
+                    if actual is None or int(actual["revision"]) != expected_revision:
+                        raise PlanConflictError(f"计划版本冲突：{plan_id}")
+                    self._save(database, updated)
+                    return updated
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
     def delete(self, plan_id: str) -> bool:
         with self._lock:
-            path = self._path(plan_id)
-            if not path.exists():
-                return False
-            path.unlink()
-            return True
+            try:
+                with self._connection(write=True) as database:
+                    result = database.execute(
+                        "DELETE FROM task_plans WHERE plan_id=?", (plan_id,)
+                    )
+                    return result.rowcount > 0
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
     def recover_interrupted(self) -> list[str]:
         """On startup, find plans with running steps and pause them."""
-        recovered: list[str] = []
         with self._lock:
-            if not self._dir.is_dir():
+            recovered: list[str] = []
+            try:
+                with self._connection(write=True) as database:
+                    ids = [str(row["plan_id"]) for row in database.execute(
+                        "SELECT DISTINCT plan_id FROM task_plan_steps WHERE status='running' ORDER BY plan_id"
+                    ).fetchall()]
+                    for plan_id in ids:
+                        data = self._load(database, plan_id)
+                        if data is None:
+                            continue
+                        changed = False
+                        for step in data["steps"]:
+                            if step.get("status") == "running":
+                                step["status"] = "pending"
+                                changed = True
+                        if changed and data.get("status") in {"running", "approved"}:
+                            data["status"] = "paused"
+                            data["revision"] = int(data.get("revision", 1)) + 1
+                            data["updated_at"] = _now()
+                            _validate_plan(data)
+                            self._save(database, data)
+                            recovered.append(plan_id)
                 return recovered
-            for path in sorted(self._dir.glob("plan_*.json"), key=lambda p: p.name):
-                try:
-                    data = json.loads(path.read_text("utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(data, dict):
-                    continue
-                data.setdefault("reminder", "")
-                changed = False
-                for step in data.get("steps", []):
-                    if step.get("status") == "running":
-                        step["status"] = "pending"
-                        changed = True
-                if changed and data.get("status") in ("running", "approved"):
-                    data["status"] = "paused"
-                    data["revision"] = int(data.get("revision", 1)) + 1
-                    data["updated_at"] = _now()
-                    _atomic_write(path, data)
-                    recovered.append(data.get("plan_id", path.stem))
-        return recovered
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
 
 def _prompt_step(step: dict[str, Any]) -> str:
@@ -378,8 +597,7 @@ def select_prompt_plans(root: Path, user: str, *, max_chars: int) -> TaskPlanSel
     directory = _plan_dir(root, user)
     if not directory.is_dir():
         return TaskPlanSelection("", (), 0, 0, 0, 0, False)
-    paths = list(directory.glob("plan_*.json"))
-    paths.sort(key=lambda path: natural_path_key(path.name))
+    plans = PlanStore(root, user).list_plans()
     status_map = {
         "pending": "pending",
         "approved": "active",
@@ -393,31 +611,28 @@ def select_prompt_plans(root: Path, user: str, *, max_chars: int) -> TaskPlanSel
     selected_paths: list[str] = []
     offsets: list[int] = []
     used = 0
-    for path in paths:
-        try:
-            data = json.loads(path.read_text("utf-8-sig"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise PlanError(f"计划文件损坏：{path}（{exc}）") from exc
-        if not isinstance(data, dict):
-            raise PlanError(f"计划文件根节点必须是对象：{path}")
+    for data in plans:
+        plan_id = str(data.get("plan_id") or "")
         mapped = status_map.get(str(data.get("status") or ""))
         if mapped is None:
-            raise PlanError(f"计划状态无效：{path}")
+            raise PlanError(f"计划状态无效：{plan_id}")
         if mapped in {"completed", "aborted"}:
             continue
-        title = str(data.get("title") or data.get("plan_id") or path.stem)
+        title = str(data.get("title") or plan_id)
         description = str(data.get("description") or "").strip()
-        lines = [f"[plan:{data.get('plan_id') or path.stem}]", f"title: {title}", f"status: {mapped}"]
+        lines = [f"[plan:{plan_id}]", f"title: {title}", f"status: {mapped}"]
         if description:
             lines.append(f"description: {description}")
         steps = data.get("steps") or []
         if not isinstance(steps, list):
-            raise PlanError(f"计划 steps 必须是数组：{path}")
+            raise PlanError(f"计划 steps 必须是数组：{plan_id}")
         lines.extend(_prompt_step(step) for step in steps if isinstance(step, dict))
         piece = "\n".join(lines)
         offsets.append(used + (2 if pieces else 0))
         pieces.append(piece)
-        selected_paths.append(relative_path(path, root))
+        selected_paths.append(
+            f"users/{user}/task_plan/{TASK_PLAN_DB_FILENAME}#{plan_id}"
+        )
         used += len(piece) + (2 if len(pieces) > 1 else 0)
     full_text = "\n\n".join(pieces)
     text, truncated = truncate_chars(full_text, max_chars)
