@@ -4,7 +4,7 @@
 
 ## 最小框架合同与自由实现
 
-`message/out/<module>/` 是一个完整的平台模块工作区，不是固定文件模板。框架只要求存在 `message.json`，并按清单加载 input、output、detect 三个适配入口，使用清单声明的消息缓冲、附件目录和日志目录；`state.json` 是核心约定的运行状态文件。
+`message/out/<module>/` 是一个完整的平台模块工作区，不是固定文件模板。框架只要求存在 `message.json`，并按清单加载 input、output、detect 三个适配入口，使用清单声明的消息缓冲与附件目录；日志和运行状态统一存入 `runtime/logs.sqlite3`。
 
 这些入口和路径可以使用清单允许的模块内相对路径，不要求平铺在根目录。模块内部可以自由包含平台 SDK 封装、协议实现、数据库、资源、测试、构建文件、任意层级包或完整开源项目。入口可以直接实现极小平台，也可以只作为内部工程的薄适配器。框架不会扫描或自动执行未声明的内部 Python 文件，也不会因模板未列出额外文件而拒绝模块。
 
@@ -34,8 +34,7 @@
   ],
   "allowed_tools": null,
   "message_buffer": "message.md",
-  "files_dir": "files",
-  "log_dir": "log"
+  "files_dir": "files"
 }
 ```
 
@@ -48,7 +47,7 @@
 ### input.py
 
 ```python
-def start(config: dict, buffer_path: str, files_path: str, state_path: str) -> None:
+def start(config: dict, buffer_path: str, files_path: str) -> None:
     """启动轮询/Webhook，并把消息追加到 buffer_path。"""
 
 def stop() -> None:
@@ -67,7 +66,7 @@ def last_error() -> str | None:
 
 `start()` 由框架线程调用。平台模块不能自行执行主智能体，也不能在这里实现 `/new`、`/clear`、`/compress` 等核心指令；斜杠消息应原样进入平台中立路由。
 
-核心兼容只实现 `start()/stop()` 的旧模块：此时通过调用 `start()` 的框架线程判断存活。自行创建后台线程或事件循环的模块必须实现 `is_alive()`，否则 `start()` 返回后核心无法区分“模块在后台正常工作”和“接收循环已经退出”。
+仅实现 `start()/stop()` 时，核心通过调用 `start()` 的框架线程判断存活。自行创建后台线程或事件循环的模块必须实现 `is_alive()`，否则 `start()` 返回后核心无法区分“模块在后台正常工作”和“接收循环已经退出”。
 
 核心使用独立监督线程检查输入生命周期，监督不会阻塞 `message.md` 文件队列轮询。输入死亡后按指数退避自动重启；RuntimeHost 停止期间禁止拉起。实现 `restart()` 时，模块必须保证旧长轮询、Webhook、线程和事件循环已经退出，不能产生两个并行消费者。没有 `restart()` 时，核心退回到 `stop()` 后重新调用 `start()`。
 
@@ -118,7 +117,7 @@ attachments:
 
 平台输入必须从原始附件对象保留准确 MIME 和安全文件名，不能把所有文件降级为 `application/octet-stream`。输入模块只负责下载、原子保存到 `files_dir` 并写入非空相对路径；不能根据主模型名称猜测视觉能力，也不能把路径改写成 Markdown 图片来代替资产登记。
 
-## state.json
+## 运行状态
 
 ```json
 {
@@ -137,11 +136,13 @@ attachments:
 }
 ```
 
-计数必须是非负整数。框架会维护每日计数、检测时间、错误、延迟和输入监督状态；模块可增加私有字段，但不能破坏标准字段类型。`input_status` 取值为 `unknown`、`starting`、`running`、`restarting`、`stopped`。
+计数必须是非负整数。框架把每日计数、检测时间、错误、延迟和输入监督状态写入 `runtime/logs.sqlite3` 的 `message_route_state`；模块私有检测字段进入 `extra_json`。`input_status` 取值为 `unknown`、`starting`、`running`、`restarting`、`stopped`。
+
+状态对象由核心传给 `detect.check()`，检测返回的新字段随标准字段一起事务写入 `message_route_state`。输入模块不接收状态路径，也不得自行维护核心计数。
 
 ## 长存活与历史会话
 
-外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，写入 `users/<user>/history/data.json`；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。
+外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，事务写入 `users/<user>/history/history.sqlite3` 的活跃会话表；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。
 
 - 私聊按外部聊天 ID 隔离。
 - 群聊默认以整个群的聊天 ID 共享一个会话。
@@ -149,9 +150,11 @@ attachments:
 - `/clear` 只清空当前外部聊天绑定的会话。
 - 平台模块不得自行生成或缓存内部 `session_id`，也不得把输入线程重启解释为新对话。
 
-`message.md` 是接收与核心路由之间的持久缓冲。平台收到消息后必须先完整追加队列，再确认本地处理成功；文件写入应加锁并保证单条 YAML 块不会被并发写坏。平台输入模块不要直接改写 `state.json` 的标准字段，消息计数和 `last_message_at` 由核心领取队列后统一维护，避免与健康检测发生覆盖竞争。
+入站幂等键 `<platform>:<message_id>` 也存入同一历史库的 `message_processed_messages`。群聊合批使用单事务领取；任一键已存在时整批拒绝。启动时遗留的 `processing` 只改为 `failed`，不会自动重放可能已经发生的副作用。
 
-消息入站、出站、附件和失败状态会双写到 `runtime/logs.sqlite3` 的 `message_route_logs` 表；模块 `log_dir` 下的每日 Markdown 仍保留为兼容审计和人工导出格式。网页优先查询 SQLite，数据库不可用时回退解析 Markdown。日志数据库只保存附件路径和元数据，不保存附件二进制；平台密钥不得写入正文日志。
+`message.md` 是接收与核心路由之间的持久缓冲。平台收到消息后必须先完整追加队列，再确认本地处理成功；文件写入应加锁并保证单条 YAML 块不会被并发写坏。消息计数和 `last_message_at` 由核心领取队列后统一维护，避免与健康检测发生覆盖竞争。
+
+消息入站、出站、附件和失败状态只写入 `runtime/logs.sqlite3` 的 `message_route_logs` 表，网页也只查询该表。日志数据库只保存附件路径和元数据，不保存附件二进制；平台密钥不得写入正文日志。
 
 ## 创建流程
 

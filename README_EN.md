@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.3-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.10.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,14 +204,15 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `0.9.3`
+Current version: `0.10.0`
 
 The core system now forms a complete working loop. Conversations, memory, subagent collaboration, task planning, scheduling, perception, extensions, the web interface, the CLI, and messaging-platform access are connected and can be used in everyday operation.
 
 Available today:
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
-- the Tidal Engram memory system, where weight changes require traceable matches in the user's archived words before memories advance through tiers or fade over time;
+- a per-user SQLite history store with transactional commits, table-backed content search, and cursor pagination;
+- a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; weight changes still require traceable matches in the user's archived words before memories advance through tiers or fade over time;
 - temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories;
 - personal, shared, and global knowledge layers grounded in real source material;
 - task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support;
@@ -220,6 +221,7 @@ Available today:
 - multiple built-in tools and skills with room for further extension;
 - dynamic reasoning-effort choices derived from gateway model capabilities when using the Kemo protocol, while other Provider protocols retain their existing configuration flow;
 - non-strict parameter mode for ordinary plugin tools with open objects or optional fields, while structured-output tools retain strict validation;
+- pre-execution tool-argument integrity checks for both Kemo and Chat providers; truncated, content-filtered, or malformed Chat tool calls terminate explicitly as incomplete instead of executing partial arguments;
 - separate contract-test baselines for skills, extensions, perception modules, external message routes, subagents, and user templates, covering their basic framework inputs and outputs;
 - ZIP upload for user-created skills, with recursive `SKILL.md` discovery and transactional installation;
 - shared identity and memory across the web interface, CLI, and messaging platforms;

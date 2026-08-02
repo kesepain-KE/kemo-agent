@@ -7,20 +7,20 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "schema_version": 1,
   "components": {
-    "core": {"version": "0.9.3"},
+    "core": {"version": "0.10.0"},
     "agents": {"version": "0.8.1"},
-    "plugins": {"version": "0.8.2"},
-    "web": {"version": "0.9.0"}
+    "plugins": {"version": "0.8.3"},
+    "web": {"version": "0.10.0"}
   }
 }
 ```
 
 `version` 是全量发布版本；四个 `components.*.version` 用于单独判断板块更新。版本号使用点分数字并由更新器比较。
 
-组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本。`0.9.3` 包含两组运行时安全边界：主对话、子代理和任务计划统一增加 20,000 字符工具内联结果硬限制，超限正文不进入 Provider、事件或历史；临时记忆改为“用户对话原文 → 临时三层 → 临时重要热画像”的单向数据流，后台整理不得读取 `important`，助手回复、推理与工具结果不得作为提取证据，Prompt 注入、用户查看和工具检索均不加权。因此 core 推进到 `0.9.3`、agents 推进到 `0.8.1`、plugins 推进到 `0.8.2`；web 保持 `0.9.0`。前端包元数据仅与根发布版本同步为 `0.9.3`，不代表 Web 组件功能升版。
+组件版本不要求始终与根版本相同。仅有部分板块发生变化时，只推进对应组件版本。`0.10.0` 将历史会话、活跃绑定、archive/runtime 窗口、正文检索和后台任务状态统一迁入每用户独立的 SQLite WAL 数据库；Web 会话列表改为最多 100 条的游标分页，历史正文搜索不再扫描归档目录。旧式历史 JSON 不自动导入，因此这是一次明确的存储边界升级。本版本同时补齐 Chat/Kemo 工具调用终态防护：截断、内容过滤或参数解析失败的调用不会执行，任务计划会保留主运行的 `limited/cancelled/failed` 与 `stop_reason`。这些改动属于 core 内部适配与运行时防御，不改变 Kemo 网关线路协议。core 与 web 推进到 `0.10.0`，history_search 所属 plugins 推进到 `0.8.3`，agents 保持 `0.8.1`。前端包元数据同步为 `0.10.0`。
 
 ## 命令
 
@@ -55,7 +55,7 @@ python update.py --module all
   → 创建本地备份
   → 从克隆源码加载最新 update/ 板块实现
   → 按 core → agents → plugins → web 执行选中板块
-  → core：尝试用户骨架与旧记忆迁移、刷新 pip 依赖
+  → core：补齐用户骨架，初始化记忆库，并事务迁移任务计划、消息幂等、上下文摘要和路由状态，再刷新 pip 依赖
   → web：npm install + npm run build
   → 全部成功后原子提交 version.json
   → 输出逐板块汇总
@@ -93,7 +93,7 @@ python update.py --module all
 - `config/global_config.json` 内容不同时询问覆盖、保留或查看差异；schema 不同时额外显示顶层字段差异。
 - 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
 - `global_expand/kemo_gateway_status/` 是内置例外：core 会同步其静态代码和说明，同时保留部署机的本地凭据、状态摘要、脱敏快照、图表和运行状态；存在本地配置时继续保持激活。
-- core 完成后尝试补齐现有用户骨架和迁移旧记忆，再执行 `pip install -r requirements.txt`（除非跳过）。
+- core 完成后补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。初始化失败时版本号不提交；更新器不扫描或导入其他存储格式。全部完成后才执行 `pip install -r requirements.txt`（除非跳过）。
 
 ## agents — 内置子智能体
 

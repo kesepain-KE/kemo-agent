@@ -1,7 +1,7 @@
 # user_config.json 配置项手册
 
-> 文档版本：v2.1
-> 最后核对：2026-07-23
+> 文档版本：v2.2
+> 最后核对：2026-08-02
 > 事实来源：`template/user/user_config.json`、`run/config.py`、`provider/protocol/models.py`
 
 kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
@@ -35,7 +35,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
 | `timeout` | number | `120` | 普通 Provider 请求超时秒数。专用多模态调用未显式配置时会改用当前工具期限并预留 5 秒收尾；显式配置后仍受工具期限上限约束 |
-| `reasoning_effort` | string | `"medium"` | 保存的 Kemo 逻辑思考档位。`chat` 固定支持 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none`、`xhigh` 或非法值回退为 `medium`；`kemo` 以当前模型的能力声明为准，可包含 `xhigh`。已保存档位失效时优先回退 `medium`，否则使用声明首项；不支持推理或能力不可用且无缓存时，请求不提交 `reasoning` |
+| `reasoning_effort` | string | `"medium"` | 保存的逻辑思考档位。`chat` 固定支持 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none` 或非法值回退为 `medium`；`kemo` 完全以当前模型能力声明的有序档位为准，不限定名称或数量，并过滤 `none`。已保存档位失效时优先回退 `medium`，否则使用声明首项；不支持推理或能力不可用且无缓存时，请求不提交 `reasoning` |
 | `input_modalities` | string[] | `["text"]` | 主模型已确认支持的输入模态；必须包含 `text`。Chat 只允许增加 `image`；Kemo 还可声明 `audio`、`video`、`file`，并会与网关能力声明交叉验证 |
 
 ### 密钥优先级
@@ -53,9 +53,16 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 ### Kemo 动态思考档位
 
 - 仅当已保存协议为 `kemo`、Base URL 与网关调用密钥有效且模型目录可读取时，Web 才从模型条目的 `capabilities_url` 获取当前模型档位；普通 `chat` 协议保持原固定五档链路。
-- 网关返回的 `reasoning.efforts` 是界面和运行时的唯一可选项。客户端保存并原样提交 Kemo 逻辑档位，不按模型名猜测，也不执行 `reasoning_effort_map` 到厂商档位的转换。
+- 网关返回的有序 `reasoning.efforts` 是界面和运行时的唯一可选项。顶部模型弹层与 Provider 配置页按返回顺序动态生成同一组卡片；返回三档就展示三档，返回七档就展示七档。框架不维护 Kemo 档位白名单，表示关闭思考的 `none` 即使被返回也必须过滤。客户端保存并原样提交其余 Kemo 逻辑档位，不按模型名猜测，也不执行 `reasoning_effort_map` 到厂商档位的转换。
 - `reasoning.supported=false`、档位列表为空，或首次能力查询失败时，界面不显示固定五档，运行时省略 `reasoning`。刷新失败但存在短期成功缓存时可继续使用缓存，并明确标记为旧能力信息。
 - 模型、Base URL 或 API Key 改变后会按新的能力缓存身份重新读取；Web 能力接口只接收模型名，API Key 不会发送给浏览器或出现在响应中。
+
+### Provider 工具调用终态
+
+- `chat` 模式同时兼容现代 `tool_calls` 与旧式单个 `function_call`。工具参数必须是完整 JSON 对象；空参数可规范化为空对象，但无效 JSON 或数组、字符串等非对象根节点不会进入工具执行。
+- `finish_reason=length`、`max_tokens`、`max_output_tokens` 或 `content_filter` 会映射为统一 `incomplete`。即使响应中已经出现工具名称或部分参数，也只保留诊断信息，不执行该批工具。
+- `kemo` 模式以网关统一终态为准；若 `ToolCallItem.parse_error` 非空，框架在统一运行事件层拒绝执行。该保护不改变 Kemo 协议字段，也不触发跨协议回退。
+- Chat 流优先使用标准 `[DONE]`。部分兼容服务在已经提供明确 `finish_reason` 后以正常 EOF 关闭时可以收束；没有 `[DONE]`、没有 `finish_reason` 或在 JSON 帧中途断开仍视为传输失败。
 
 ---
 
@@ -311,7 +318,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `token_limit` | int | 1000000 | 上下文 Token 上限 |
 | `token_compression_ratio` | float | 0.3 | 输入预算比例 |
 
-上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 temp 工作区和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
+上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 SQLite runtime 窗口和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
 
 `important_memory_review_hours` 与 `daily_memory_review_time` 只允许在
 `config/global_config.json → agents` 中配置。系统只创建一份全局时间表，任务到期后再按用户分别执行；在 `user_config.json` 中填写这两个字段不会创建用户专属调度，不应声明。

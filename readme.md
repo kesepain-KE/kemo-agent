@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.9.3-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-0.10.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,14 +204,15 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`0.9.3`
+当前版本：`0.10.0`
 
 核心系统已经形成完整闭环。从对话、记忆、子代理协作，到任务计划、定时调度、感知与拓展，再到网页端、命令行和消息平台的多入口交互——这些部分已经连接在一起，可以在日常使用中实际运转。
 
 目前可以体验的内容包括：
 
 - 完整的网页对话界面，支持流式交互与运行中追加多模态引导；
-- 潮汐记忆系统，只根据用户对话历史的可回溯原文命中加权，内容按周期晋级或淡出；
+- 每用户独立的 SQLite 历史库，支持事务提交、正文表检索和游标分页；
+- 每用户独立的 SQLite 潮汐记忆库，正文、生命周期、每日加权证据和热画像来源统一事务化；只根据用户对话历史的可回溯原文命中加权，内容按周期晋级或淡出；
 - 临时重要记忆作为可重建热画像独立维护，只由临时三层单向提炼，不会反向加权源记忆；
 - 个人、共享与全局三层知识库，让回答贴近真实资料；
 - 任务计划从创建、审批到逐步执行，可暂停、可继续、可回溯；
@@ -220,6 +221,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - 多个内置工具与技能，可按需扩展；
 - Kemo 协议下根据网关模型能力动态展示思考档位，其他 Provider 协议继续使用原有配置方式；
 - 普通插件工具使用非严格参数模式，兼容开放对象与可选字段，同时保留结构化输出工具的严格校验；
+- Kemo 与 Chat 两条 Provider 链路都会在执行前校验工具参数完整性；Chat 输出截断、内容过滤或残缺 JSON 会明确结束为不完整响应，不会误执行半个工具调用；
 - 技能、拓展、感知、外部消息路由、子代理和用户模板配有独立合同测试基准，便于验证创建结果的基础入口与出口协议；
 - 用户技能支持从 Web 上传 ZIP，递归发现 `SKILL.md` 并以事务方式安全安装；
 - 网页端、命令行、消息平台多入口，同一身份同一记忆；

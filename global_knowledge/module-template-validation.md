@@ -55,7 +55,7 @@ python -m tests.template_tests --kind auto --target <path>
 
 ### 外部消息路由
 
-- 检查 `message.json`、`state.json`、平台能力、绑定用户及输入、输出、检测三个入口的签名。
+- 检查 `message.json`、平台能力、绑定用户及输入、输出、检测三个入口的签名。
 - 检查 `message.md` 为空或包含完整可消费的 YAML front matter 消息。
 - 使用合成消息验证统一消息转换与 Transport 发现。
 - 通用验收不会启动真实平台、消费积压消息、发送消息、调用在线健康检测或要求真实 Token。

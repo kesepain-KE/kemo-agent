@@ -46,7 +46,7 @@ kemo-agent/
   → 人格、子代理、插件、技能、知识索引、记忆、计划、拓展、感知拼接
   → Provider 与工具循环
   → 运行中引导在安全边界追加文本或多模态资产
-  → 完整历史归档 + 当前上下文工作区
+  → 用户级 SQLite archive 完整归档 + runtime 可裁剪上下文窗口
   → 记忆、计划和后台维护管线
 ```
 
@@ -77,6 +77,9 @@ kemo-agent/
 | `sense-creation.md` | 全局感知模块的创建与刷新规则 |
 | `skill-creation.md` | 共享技能和用户技能的结构与作用域 |
 | `knowledge-creation.md` | 三层知识库及索引维护规则 |
+| `history-storage.md` | 用户级 SQLite 历史表、分页、搜索、备份与旧格式边界 |
+| `memory-storage.md` | 用户级 SQLite 记忆表、生命周期事务、每日加权约束、热视图与旧格式边界 |
+| `runtime-state-storage.md` | 任务计划、上下文摘要、消息幂等和外部路由状态的数据库分工与迁移 |
 | `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
 | `env-reference.md` | `.env` 参数、优先级与安全要求 |

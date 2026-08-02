@@ -126,7 +126,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `storage_schema_version` | int | `3` | 记忆存储格式版本号 |
+| `storage_schema_version` | int | `1` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许 Maintenance 每轮后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
@@ -138,7 +138,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 按**文件数量**截断，优先保留高权重层级。仅限制单次 Prompt 注入，不限制磁盘存储数量。
 
-已被 `improve/important_view.json` 有效引用的临时碎片由热画像段承载，普通临时记忆段会跳过这些来源，避免同一事实重复注入。源文件仍保留，但只能在保存/压缩的用户对话历史整理中加权，并正常到期和晋升；任一来源发生变化时旧热画像暂停注入，直到下次巡检重建。
+已被 `memory_important_sources` 表有效引用的临时碎片由热画像段承载，普通临时记忆段会跳过这些来源，避免同一事实重复注入。权威表行仍保留，但只能在保存/压缩的用户对话历史整理中加权，并正常到期和晋升；任一来源正文摘要或层级变化时旧热画像暂停注入，直到下次巡检重建。
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
@@ -242,14 +242,14 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `conserved_rounds` | int | `3` | 保留完整工具日志和思考过程的最近轮数。超出此数的旧轮次由 `context_manage` 逐轮压缩 |
-| `max_rounds` | int | `80` | 上下文最大对话轮数。达到后触发压缩。此值限制 temp 工作区及 Provider 上下文的轮次上限，不限制用户可见归档 |
+| `max_rounds` | int | `80` | 上下文最大对话轮数。达到后触发压缩。此值限制 SQLite runtime 窗口及 Provider 上下文的轮次上限，不限制用户可见 archive 归档 |
 | `rounds_after_compression` | int | `20` | 压缩后保留的轮数 |
 | `token_limit` | int | `1000000` | 上下文 Token 上限。预估总 token 超过此值时触发压缩 |
 | `token_compression_ratio` | float | `0.3` | 输入预算比例。`input_budget = token_limit × ratio`，超过此比例时触发压缩 |
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
 
-`context_manage` 的摘要输入会合并正文、reasoning/think 和工具结论；核心运行时为每次摘要请求提供最多 20000 tokens 的输出预算，并要求非空、完整的结构化 JSON。网页端手动压缩只有在摘要缓存、temp 工作区轮数、绝对轮次偏移和摘要覆盖范围重新读取校验通过后才报告成功；用户可见归档仍保留完整轮次。
+`context_manage` 的摘要输入会合并正文、reasoning/think 和工具结论；核心运行时为每次摘要请求提供最多 20000 tokens 的输出预算，并要求非空、完整的结构化 JSON。网页端手动压缩只有在摘要缓存、SQLite runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围重新读取校验通过后才报告成功；用户可见 archive 归档仍保留完整轮次。
 
 ---
 

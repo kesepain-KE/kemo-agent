@@ -19,35 +19,29 @@ users/<name>/
 ├── user_skills/
 │   ├── agent_create/                   # 智能体创建的用户技能
 │   └── user_create/                    # 用户创建的技能
-├── task_plan/                          # plan_<8hex>.json
+├── task_plan/                          # 任务计划 SQLite 目录
 ├── task_cron/                          # cron_<8hex>.json
-├── history/                            # 完整历史与当前 Provider 工作区
-└── improve/
-    ├── storage.json                    # 记忆存储 schema 标记
-    ├── permanent/                      # 永久记忆
-    ├── half_year/
-    │   └── data.json
-    ├── one_month/
-    │   └── data.json
-    └── seven_days/
-        └── data.json
+├── history/                            # 首次会话时生成用户级 SQLite 历史库
+└── improve/                            # 模板中只保留 .gitkeep
 ```
 
 运行中还可能生成：
 
 ```text
 users/<name>/
-├── message_state/processed.json        # 外部消息幂等状态
 ├── web_preferences.json                # Web 主题、字号等外观偏好
+├── task_plan/
+│   ├── task_plans.sqlite3              # 计划、步骤、依赖的唯一权威数据库
+│   ├── task_plans.sqlite3-wal          # 运行时 WAL
+│   └── task_plans.sqlite3-shm          # 运行时共享内存索引
+├── improve/
+│   ├── memory.sqlite3                  # 四档记忆及生命周期的唯一权威数据库
+│   ├── memory.sqlite3-wal              # 运行时 WAL，正常关闭后自动合并
+│   └── memory.sqlite3-shm              # SQLite 共享内存索引，运行时自动生成
 └── history/
-    ├── data.json                        # 会话索引
-    ├── conv_<uuid>/                     # 完整、不可裁剪的归档会话
-    │   ├── data.json
-    │   ├── text.json
-    │   ├── think.json
-    │   ├── tool.json
-    │   └── items.json
-    └── temp/<conversation-id>/          # 可压缩的 Provider 工作区，同样为五文件
+    ├── history.sqlite3                  # 会话、正文、状态和检索的权威数据库
+    ├── history.sqlite3-wal              # 运行时 WAL，正常关闭后自动合并
+    └── history.sqlite3-shm              # SQLite 共享内存索引，运行时自动生成
 ```
 
 ## 目录所有权
@@ -60,9 +54,9 @@ users/<name>/
 | `knowledge/` | 用户或明确授权的智能体 | 私有知识默认写这里，并同步索引 |
 | `file_upload/` | Web/外部入口 | 同名上传自动防覆盖；不能当临时目录 |
 | `download/` | 智能体工具 | 只放需要交给用户的最终产物 |
-| `history/` | 历史引擎 | 不手工改五文件或会话索引 |
-| `improve/` | 记忆引擎与记忆子智能体 | 不手工改权重、游标和 schema 文件 |
-| `task_plan/` | `PlanStore`、任务计划工具 | 使用状态机，不直接覆盖 JSON |
+| `history/history.sqlite3` | 历史引擎 | 不手工修改表；备份运行中数据库时使用 SQLite backup，而不是只复制主文件 |
+| `improve/memory.sqlite3` | 记忆引擎与记忆子智能体 | 不手工改表；备份运行中数据库应使用 SQLite backup，而不是只复制主文件 |
+| `task_plan/task_plans.sqlite3` | `PlanStore`、任务计划工具 | 使用状态机和 revision 事务，不直接编辑表或放置 JSON |
 | `task_cron/` | `CronStore`、`task_time` | 时间统一保存为北京时间 ISO 8601 |
 | `agents/` | 子智能体创建器或可信管理员 | 自定义 `executor.py` 会在主进程执行，只安装可信代码 |
 
@@ -79,9 +73,8 @@ users/<name>/
 python user_create.py
 ```
 
-创建流程会复制 `template/user/`，初始化知识索引、记忆存储标记并补齐所有空目录。更新器会尝试为现有用户补齐新骨架，但用户历史、记忆、上传、下载和私有资源属于运行数据，不应被框架更新覆盖。
+创建流程会复制 `template/user/`，初始化知识索引、记忆库、历史库和任务计划库，并补齐其他空目录。更新器只初始化当前数据库 Schema，不扫描其他状态格式。
 
 ## 备份建议
 
 备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/` 和 `expand/`。
-

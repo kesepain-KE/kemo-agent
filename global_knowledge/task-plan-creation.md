@@ -1,6 +1,6 @@
 # 任务计划创建规则
 
-任务计划用于需要多个可验证步骤、依赖关系和中途控制的复杂任务。文件位于 `users/<user>/task_plan/plan_<8hex>.json`，由 `PlanStore` 管理。
+任务计划用于需要多个可验证步骤、依赖关系和中途控制的复杂任务。权威数据位于 `users/<user>/task_plan/task_plans.sqlite3`，由 `PlanStore` 管理；模板 JSON 只用于说明输入结构。
 
 简单的一次性操作不应创建计划。计划创建和编辑必须走 `task_plan` 子智能体；`task_plan` 工具只管理查看、批准、步骤结果、暂停、恢复和取消。
 
@@ -106,3 +106,4 @@
 
 只允许编辑 `pending`、`approved` 或 `paused` 计划。每次更新都会增加 `revision`；界面保存前必须基于最新版本，收到“计划版本已变化”时重新读取并合并，而不是强制覆盖。运行结束或启动恢复时，未完成的运行步骤会回收到安全状态。
 
+数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`。创建、修改、步骤结果和启动恢复均为事务；启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。

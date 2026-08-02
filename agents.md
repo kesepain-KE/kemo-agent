@@ -15,7 +15,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → 上下文选择（轮次预算 + token 预算 + 压缩）
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
-  → 提交五文件历史（text + think + tool + items + data）
+  → 事务提交 SQLite 历史窗口（text + think + tool + items + data 五个逻辑分区）
   → 记忆引用加权；按 extraction_mode 提交、延期或游标提取
 ```
 
@@ -34,8 +34,8 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 会话运行态 | `run/session_runtime.py` | 会话级锁与完整归档提交辅助 |
 | 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
 | 上下文服务 | `run/context_service.py` | 上下文状态查询和临时工作区工具/思考压缩 |
-| 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与缓存 |
-| 历史管理 | `run/history.py` | 用户可见完整归档与 `history/temp/<window>/` Provider 临时工作区的创建、裁剪、恢复和提交 |
+| 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与 SQLite 缓存 |
+| 历史管理 | `run/history.py`、`run/history_store.py` | SQLite archive/runtime 窗口的创建、裁剪、恢复、事务提交和正文索引 |
 | 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
 | 记忆分析 | `run/memory_analysis.py` | 批量分析、韧性重试、持久化与 `memory_processed_round` 游标推进 |
 | 记忆管道 | `run/conversation_runtime.py`、`run/memory_pipeline.py` | 按模式登记状态，并在提交、保存或压缩边界顺序提取 |
@@ -52,7 +52,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 子代理授权 | `agents/_runtime/resources.py` | 按 `agent-config.json` 构建独立 Prompt 和工具白名单 |
 | 用户代理创建 | `agents/_runtime/user_packages.py` | 原子创建数据型用户代理包并立即校验 |
 | 兼容入口 | `run/agents.py` | 转发子代理 schema 公共 API |
-| 任务计划 | `run/task_plan_store.py` | 计划创建、状态机、磁盘持久化 |
+| 任务计划 | `run/task_plan_store.py` | 计划创建、状态机、SQLite 事务持久化 |
 | 定时任务 | `run/cron_store.py` | cron 任务 CRUD、校验 |
 | 运行时宿主 | `run/runtime_host.py` | Web、cron、消息路由与任务计划调度的统一宿主 |
 | Web 应用装配 | `web/app.py` | 创建 FastAPI、安装认证与异常处理、组合领域路由，并保留聊天流和前端托管边界 |
@@ -139,18 +139,18 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、`executor.py`、可选 `schema.json` |
 | 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、可选 `executor.py`、可选 `schema.json` |
-| 用户历史 | `users/<name>/history/` | `data.json` 保存可重建会话索引；`conv_<uuid>/`（兼容旧时间戳目录）保存无上限完整归档，`temp/<window>/` 保存受 `agents.max_rounds` 限制的 Provider 工作区 |
-| 记忆存储 | `users/<name>/improve/` | 4 挡位记忆数据 |
-| 任务计划 | `users/<name>/task_plan/` | 计划文件 |
+| 用户历史 | `users/<name>/history/history.sqlite3` | 每用户独立 SQLite WAL；会话、活跃绑定、归档/运行时窗口、消息检索和后台任务状态统一事务化存储 |
+| 用户记忆 | `users/<name>/improve/memory.sqlite3` | 每用户独立 SQLite WAL；四档正文、生命周期、每日加权证据、幂等操作和热画像来源统一事务化存储 |
+| 任务计划 | `users/<name>/task_plan/task_plans.sqlite3` | 计划、步骤与依赖的用户级 SQLite WAL |
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
 | 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
 | 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
 | 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
-| 外部消息状态 | `users/<name>/message_state/` | 外部消息处理状态（`processed.json`） |
+| 外部消息幂等 | `users/<name>/history/history.sqlite3` | `message_processed_messages` 表；领取、终态与启动恢复 |
+| 外部路由状态 | `runtime/logs.sqlite3` | `message_route_state` 表；模块健康、计数与输入线程状态 |
 | Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
-| 记忆存储标记 | `users/<name>/improve/storage.json` | 记忆存储 schema 版本标记 |
 | Web 服务 | `web/` | 前端（React + Vite）+ 后端（FastAPI），开发服务器默认 `:5173` |
 | 全局版本 | `version.json` | 5 组版本号（core/agents/plugins/web/all），启动时展示 |
 | 更新系统 | `update.py` + `update/` | 8 板块覆盖策略，版本对比，远程拉取 |
@@ -183,7 +183,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 - `message.json.bound_user` 将整个平台插件绑定到一个现有内部用户；传统 Transport 仍使用 `config/message_config.json` 的外部身份映射。
 - `message.md` 是可恢复的文件队列。群聊中同一外部会话的累积消息合并为一次 Run；私聊逐条处理。
 - 附件必须使用非空的插件目录相对路径并位于该插件的 `files_dir` 内。文本文件正文直接并入请求；其他文件统一登记为带 `asset_id`、校验和、来源和媒体类型的当前 Run 资产，再由主模型能力路由或 `multimodal` 工具处理。平台模块不得自行决定是否把图片 Base64 直传主模型。
-- 每条终态结果写入 `log/YYYY-MM-DD.md`，随后删除本批次已处理附件；健康检测结果与收发计数写入 `state.json`。
+- 每条终态结果只写入 `runtime/logs.sqlite3` 的 `message_route_logs`；健康检测结果与收发计数只写入 `message_route_state`。模块目录不保存日志或运行状态副本。
 
 ### 运行中多模态引导
 
@@ -304,7 +304,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，chat 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
-| `reasoning_effort` | string | 保存的 Kemo 逻辑思考档位。`chat` 协议固定使用 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none`、`xhigh` 或非法值回退为 `medium`；`kemo` 协议由当前模型能力声明动态限定，可额外包含 `xhigh`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
+| `reasoning_effort` | string | 保存的逻辑思考档位。`chat` 协议固定使用 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none` 或非法值回退为 `medium`；`kemo` 协议完全采用当前模型能力声明中有序的 `reasoning.efforts`，不限制档位名称或数量，并永久过滤表示关闭思考的 `none`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
 | `input_modalities` | string[] | 主模型已确认支持的输入模态；必须含 `text`。Chat 只可增加 `image`；Kemo 还可增加 `audio`、`video`、`file` |
 
 Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
@@ -360,6 +360,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
 - 插件工具清单的可选 `strict` 默认为 `false`。只有整个参数 Schema（包括所有嵌套 object）满足目标 Provider 的严格结构化输出子集时才能设为 `true`；包含开放参数对象或可选字段的普通工具必须保持非严格，不能由网关静默改写。
 - 插件工具清单的可选 `timeout_policy` 默认为 `argument_or_default`；只有自身管理子智能体整体期限的调度工具使用 `agent_runtime`，普通插件不得借此绕过工具超时边界。
+- Provider 工具调用只有在参数已解析为完整 JSON 对象且响应处于可执行终态时才能进入执行循环。Chat 的 `finish_reason=length/max_tokens/max_output_tokens/content_filter`、无效参数 JSON，以及 Kemo `ToolCallItem.parse_error` 都必须在执行前拒绝；禁止把残缺原文包装成 `_raw` 参数后尝试调用工具。
 
 ---
 
@@ -382,25 +383,26 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 到期未达晋升阈值直接删除，不降级保留。
 - 晋升后新挡位权重从 0 重新累计。
 - Prompt 注入、记忆工具查看和用户主动检索都是只读行为，绝不加权。
-- 永久记忆没有索引、权重或到期时间。
+- 永久记忆在表中不参与权重累计，也没有到期时间。
 
-### 文件存储
+### SQLite 存储
 
-- 文件名是全部记忆层级中的全局唯一身份，建议使用标题 slug 格式（如 `用户偏好-xxx.md`），人可读且便于后期维护。
-- 一个 Markdown 只保存一个微量化事实、偏好、关系或项目状态；同名写入更新原文件。
-- 临时三层正文存为 Markdown，同目录 `data.json` 保存 weight、created_at、content_updated_at、last_used_at、last_weight_date、tier_entered_at 和 expires_at。绝对时间统一存 UTC，展示层转换到本地时区。
+- `users/<name>/improve/memory.sqlite3` 是四档记忆的唯一权威源，使用 WAL、外键、事务和 busy timeout；不得长期双写 Markdown 或 `data.json`。
+- 逻辑文件名仍是全部记忆层级中的全局唯一身份，建议使用人可读标题（如 `用户偏好-xxx.md`）；`memory_fragments.filename_key` 的唯一约束阻止跨层同名。
+- 每行保存一个微量化事实、偏好、关系或项目状态，以及 tier、weight、created_at、content_updated_at、last_used_at、last_weight_date、tier_entered_at、expires_at 和正文摘要。绝对时间统一存 UTC，展示层转换到本地时区。
+- `memory_weight_events(fragment_id, evidence_date)` 由数据库唯一约束同一碎片同一天最多加权一次；晋升、融合、删除、幂等批次结果和热画像来源变更必须在事务内完成。
 - `updated_at` 仅作为 `content_updated_at` 的兼容别名；记忆被注入使用时不得覆盖内容更新时间。
-- 永久层只保存 Markdown，不存在 `data.json`。
-- 当前文件检索只使用文件名，不接入关键词、实体、向量或 `kemo-graph`。
+- 旧 Markdown、`storage.json`、三层 `data.json`、`.memory_operations.json` 和 `important_view.json` 不参与读取，也不会自动导入。
+- 当前生命周期搜索按逻辑文件名与正文执行普通表查询；外部 `kemo-graph` 是否接管临时记忆 Prompt 由独立开关决定。
 
 ### 临时重要热画像
 
 - `memory_temporary_important.md` 是从临时微记忆派生的可重建热视图，不是第五个生命周期挡位，也不是永久记忆的前置层。
-- `improve/important_view.json` 保存热画像当前引用的临时源文件名及内容摘要。临时源仍是权威数据，只能由用户对话历史整理继续加权，并正常到期和晋升。
+- `memory_important_sources` 表保存热画像当前引用的临时源行及内容摘要。临时源仍是权威数据，只能由用户对话历史整理继续加权，并正常到期和晋升。
 - 数据流必须保持单向：`用户对话原文 → 临时三层 → 临时重要热画像`。后台提取、整理和晋升临时三层时，禁止读取 `important`，也禁止把助手回复、推理或工具结果当作用户证据。
 - 用户或主智能体主动查看记忆属于白名单只读场景，可读取 `important`，但查看本身不得改变任何临时记忆权重。
 - 已进入热画像且内容摘要仍匹配的源碎片不再重复注入普通临时记忆段；任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容恢复正常注入，等待下次巡检重建。
-- 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像、来源索引、永久融合和临时副本清理由运行时统一原子持久化，子代理不得直接增删改记忆文件。
+- 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像来源、永久融合和临时副本清理由运行时统一事务化，子代理不得直接修改数据库。
 - 普通记忆提取不得覆盖已有永久正文；只有用户本轮明确要求记住的 `explicit=true` 候选才允许更新永久记忆。
 
 ### 注入
@@ -430,7 +432,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 |------|--------|------|
 | `agents.conserved_rounds` | 3 | 最近 N 轮保留完整工具日志 |
 | `history.recent_full_rounds` | 3 | 最近 N 轮完整历史不被摘要或移除 |
-| `agents.max_rounds` | 80 | temp 工作区及 Provider 上下文的轮次上限；不限制用户可见归档 |
+| `agents.max_rounds` | 80 | runtime 窗口及 Provider 上下文的轮次上限；不限制用户可见 archive 归档 |
 | `agents.rounds_after_compression` | 20 | 压缩后保留的轮次数 |
 | `agents.token_limit` | 1000000 | token 上限 |
 | `agents.token_compression_ratio` | 0.3 | 输入预算 = token_limit × ratio |
@@ -446,19 +448,21 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - **手动触发**：请求带 `compress=true` 时强制压缩。
 - 压缩时把当前待发送轮次计入 `rounds_after_compression`：正常提交后，Provider 临时工作区总计保留最近 N 轮，而不是额外再保留当前轮次。
 - 所有摘要场景统一由 `context_manage` 处理；正常聊天的自动压缩不在请求主线程同步提取记忆，而是在完整提交后把摘要已覆盖轮次登记到持久化后台队列。手动压缩仍可显式选择同步或队列策略。
-- 摘要缓存在 `history/temp/<window>/context_summary.json` 中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。
+- 摘要缓存在 `history/history.sqlite3` 的 `history_context_summaries` 表中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。runtime 窗口裁剪与摘要版本在同一个 SQLite 事务提交。
 - `context_manage` 使用严格输出 Schema；摘要输入包含正文、reasoning/think 和工具结果，以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 20000 tokens，为模型推理和完整 JSON 正文共同预留空间。摘要只保留对后续仍有价值的精炼判断依据，不保留逐步内部推演或工具长输出。JSON 缺失、截断、空 narrative 或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
-- 手动压缩只有在摘要缓存、temp 工作区轮数、绝对轮次偏移和摘要覆盖范围全部落盘并重新读取校验通过后才返回成功；失败时回滚本次 temp 裁剪与摘要缓存，用户可继续使用原运行窗口重试。
-- `history/<window>/` 始终保留完整原始记录和累计轮数；`history/temp/<window>/` 才是受限并会裁剪的 Provider 工作区。`data.json` 不保存 context/summary 诊断；temp 丢失时仅从归档恢复最近 `max_rounds` 轮。
+- 手动压缩只有在摘要缓存、runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围全部落盘并重新读取校验通过后才返回成功；失败时回滚本次 runtime 裁剪与摘要缓存，用户可继续使用原运行窗口重试。
+- `history.sqlite3` 的 archive 窗口始终保留完整原始记录和累计轮数；runtime 窗口才受限并会裁剪。归档元数据不保存 context/summary 诊断；runtime 行丢失时仅从 archive 恢复最近 `max_rounds` 轮。
 
 ### 轮次结构
 
-每个对话轮次包含：
-- `text.json` 中的 user + assistant 消息
-- `think.json` 中的思考记录
-- `tool.json` 中的工具调用记录
+每个对话轮次在 SQLite 窗口行中保留五个逻辑分区：
+- `text_json`：user + assistant 消息
+- `think_json`：思考记录
+- `tool_json`：工具调用记录
+- `items_json`：统一协议 Item
+- `data_json`：轮次、用量与持久状态元数据
 
-每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 temp 工作区，归档中的原始 `think.json`、`tool.json` 和 `items.json` 保持不变。旧数据迁移期间仍保留代码内建的工具结果字符上限作为降级保护。
+每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 runtime 窗口，archive 窗口中的原始逻辑分区保持不变。工具结果字符上限仍作为上下文保护。
 
 ---
 
@@ -535,11 +539,12 @@ users/<user>/agents/<name>/
 ### 任务计划
 
 - `task_plan.auto_accept` 控制是否自动执行（默认 false，需手动批准）。
-- 计划文件存储在 `users/<name>/task_plan/`。
+- 计划存储在 `users/<name>/task_plan/task_plans.sqlite3`；`task_plans`、`task_plan_steps` 和 `task_plan_dependencies` 分表维护，运行时没有文件式计划旁路。
 - 计划状态机：pending → approved → running → completed/failed/paused/cancelled。
 - 主智能体手动执行计划步骤后，必须立即调用 `task_plan step_done` 或 `task_plan step_fail` 写回结果；创建和编辑仍走 `task_plan` 子代理。
 - `task_plan` 是运行态管理工具，不能作为计划中的执行步骤。
 - 计划暂停后等待用户继续，不自动恢复。
+- 计划调度器必须检查主智能体 `done.metadata.status`：只有缺省的旧式成功终态、`completed` 或 `success` 可作为成功；`limited`、`cancelled`、`failed` 等显式非成功终态必须记入步骤错误并暂停关键步骤，同时保留 `stop_reason`，不得退化成“未调用工具”的模糊原因。
 - `task_plan.max_steps` 限制最大步骤数（默认 20）。
 - 计划生成输入按“可用工具 → 插件技能全文 → 共享技能全文 → 用户技能全文 → 全局/共享/用户知识索引”顺序组装，且这些专项输入不截断。
 - 仅 `pending`、`approved`、`paused` 计划允许编辑；已完成步骤由运行时强制保护。
@@ -600,11 +605,11 @@ system prompt 按以下固定顺序拼接：
 7. **技能提示词** — 注册全部共享/用户技能后，按主智能体白名单选择描述部分
 8. **知识库索引** — 按 `knowledge.use_shared/use_global` 选择用户 + 共享 + 全局索引
 9. **kemo-graph** — 六个独立图谱子层的检索结果或未连接状态
-10. **永久记忆** — `improve/permanent/`
+10. **永久记忆** — `improve/memory.sqlite3` 的 `permanent` 行
 11. **临时重要记忆** — `memory_temporary_important.md`
-12. **临时记忆 half_year** — `improve/half_year/`
-13. **临时记忆 one_month** — `improve/one_month/`
-14. **临时记忆 seven_days** — `improve/seven_days/`
+12. **临时记忆 half_year** — `improve/memory.sqlite3` 的 `half_year` 行
+13. **临时记忆 one_month** — `improve/memory.sqlite3` 的 `one_month` 行
+14. **临时记忆 seven_days** — `improve/memory.sqlite3` 的 `seven_days` 行
 15. **任务计划** — 当前活跃计划的描述
 16. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行
 17. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
@@ -641,13 +646,15 @@ system prompt 按以下固定顺序拼接：
 - `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。
 - `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。LLM、Embedding 和 Rerank 的瞬时建连/读取错误，以及统一终态前断流，最多进行 3 次网络尝试并始终复用同一正文与 `request_id`；SSE 在线路上只通过最后完整事件的 `Last-Event-ID` 续传，本地延续 `sequence` 校验并拒绝拼接不同 `response_id`。
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
+- Chat Bridge 同时解析现代 `tool_calls` 和旧式单个 `function_call`。标准 `[DONE]` 仍受支持；兼容服务在已经给出明确 `finish_reason` 后干净关闭 HTTP 流也视为正常结束，但无终态标记的 EOF 仍是传输中断。
+- Chat 的输出截断或工具参数解析失败映射为统一 `incomplete`，保留最多 500 字符原始参数用于诊断而不发布可执行调用。Kemo 原生响应若携带 `ToolCallItem.parse_error`，统一运行事件层同样在工具执行前转为明确错误；这是运行时防御，不改变 Kemo 线路 Schema。
 - Kemo 传输重试只处理网络层和可重试 HTTP 状态；网关显式返回的 `retryable=true/false` 优先于状态码默认值。它不重新执行鉴权/校验/幂等冲突、完整协议损坏或模型统一终态业务失败；同一 ID 的已持久化失败终态只会重放，重新执行必须由上层建立新的逻辑请求。上下文超限继续走独立压缩链路。退避等待与流式/非流式阻塞读取均可被 Run 取消，已知远端 `response_id` 时取消会尽力传给网关。
 - Web 保存 Provider 配置后，只有重新读取到已落盘的 `provider.type=kemo` 才允许通过
   `GET /model/models?task=llm` 拉取当前密钥可用模型；`chat`、未保存配置、缺少凭据、鉴权失败或
   非法目录响应均不得产生可用模型列表。
 - 模型目录是短期界面数据，不新增 `user_config.json` 字段，不批量写入模型，也不覆盖当前
   `provider.model`。用户从目录选择模型后，仍通过原有 `provider.model` 字段显式保存。
-- Kemo 模型的思考档位从模型目录所声明的 `capabilities_url` 读取；Web 浏览器只提交模型名，网关密钥始终由后端读取。客户端原样提交能力声明中的 Kemo 逻辑档位，不执行 `reasoning_effort_map` 厂商映射；能力失败时可短期展示上一次成功缓存，但不得猜测固定五档。
+- Kemo 模型的思考档位从模型目录所声明的 `capabilities_url` 读取；Web 浏览器只提交模型名，网关密钥始终由后端读取。能力声明中有几个有效档位，顶部模型弹层和 Provider 配置页就按原顺序展示几个；框架不维护 Kemo 档位白名单，并永久过滤 `none`。客户端原样提交能力声明中的 Kemo 逻辑档位，不执行 `reasoning_effort_map` 厂商映射；能力失败时可短期展示上一次成功缓存，但不得猜测固定五档。
 
 ### 密钥优先级
 
@@ -682,7 +689,7 @@ system prompt 按以下固定顺序拼接：
 - Web 前端的 `/files` 页面落地用户文件与 `tmp` 浏览、下载和二次确认删除；`/runtime` 页面落地子代理、外部消息状态与三层 Expand 库存；`/profile` 页面落地头像上传和用户/全局人格编辑。
 - 侧边栏品牌图使用公开 `/api/logo`，用户卡片头像使用受保护 `/api/users/{user}/avatar`；头像不存在或加载失败时回退首字母占位，不阻塞页面使用。
 - 聊天请求使用高熵 `run_id`。运行中引导通过独立 guidance 队列提交，只在 Provider 完成或工具调用结束后的安全边界注入，不会中断正在阻塞的 Provider/工具函数。
-- 每轮历史在 `data.json.round_metrics` 保存 usage、缓存 Token、耗时、工具调用数和已消费 guidance；`tool.json` 的每次调用保存 `elapsed_ms`。
+- 每轮历史在 archive 窗口的 `data_json.round_metrics` 保存 usage、缓存 Token、耗时、工具调用数和已消费 guidance；`tool_json` 的每次调用保存 `elapsed_ms`。
 
 ### 多模态
 

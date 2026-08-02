@@ -72,7 +72,7 @@ Schema 拒绝未知或废弃字段。不要重新引入旧式嵌套 `schedule` �
 
 RuntimeHost 重启时会把被中断的 `running` 用户任务恢复为 `enabled` 并重新安排。`cron.enabled=false` 或 `runtime_host.enable_background_scheduler=false` 时不会后台执行。
 
-用户任务和系统任务的执行记录都写入结构化运行日志数据库 `runtime/logs.sqlite3`；每日系统任务 JSONL 文件仍保留作兼容审计。日志记录只保存受限结果摘要和错误信息，不保存完整提示词。
+用户任务和系统任务的执行记录都只写入结构化运行日志数据库 `runtime/logs.sqlite3`。日志记录只保存受限结果摘要和错误信息，不保存完整提示词。
 
 ## 创建质量要求
 
