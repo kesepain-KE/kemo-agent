@@ -164,7 +164,12 @@ def select_declared_reasoning_effort(
     configured: Any,
     efforts: list[str] | tuple[str, ...],
 ) -> str | None:
-    available = [str(item).strip().casefold() for item in efforts if str(item).strip()]
+    available: list[str] = []
+    for item in efforts:
+        effort = str(item or "").strip().casefold()
+        if not effort or effort == "none" or effort in available:
+            continue
+        available.append(effort)
     selected = str(configured or "").strip().casefold()
     if selected in available:
         return selected
