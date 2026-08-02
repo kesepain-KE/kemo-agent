@@ -60,8 +60,7 @@
   7d→30d / 30d→180d:
     1. 查下一层全部碎片
     2. 相似 → 返回 merged_with + 完整融合 content；无相似 → merged_with=null
-    3. cron 根据决策原子移动，旧层删除，新层 weight=0，重设 expires_at
-    4. cron 更新两层 data.json
+    3. cron 根据决策在 SQLite 事务内更新或融合表行，来源删除，目标 weight=0，重设 expires_at
 
   180d→permanent:
     1. 判断是否为工作记忆

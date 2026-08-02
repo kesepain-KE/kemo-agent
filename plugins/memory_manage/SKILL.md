@@ -15,7 +15,7 @@
 4. **禁止空搜索**：两个搜索 action 的 query 都必须是非空字符串。列出全部记忆不能再依赖空 query，应使用 `list`，需要正文时再逐条 `get`。
 5. **敏感凭据检测**：`add` 与 `edit` 会拒绝包含疑似密码、API Key、Token、Cookie 或私钥的内容。
 6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`truncated=true` 表示还有结果，可缩小层级或关键词后继续查询。
-7. **精确寻址**：`get`、`edit`、`delete` 使用 `tier + filename` 作为组合身份。即使异常数据中多个层级存在同名文件，也只操作指定层级；删除缺失正文的临时层孤儿索引会返回 `repaired_orphan=true`。
+7. **精确寻址**：`get`、`edit`、`delete` 使用 `tier + filename` 寻址 SQLite 表行；逻辑文件名在全部层级全局唯一，跨层同名会由数据库拒绝。删除成功返回 `row_removed=true`，不再存在文件孤儿修复语义。
 8. **稳定引用**：`list`、搜索及所有单条 CRUD 结果均返回 `memory_ref`，格式为 `tier:filename`；展示标题仍使用 `filename`，程序传递目标时优先保留 `memory_ref`。
 
 ## 参数说明

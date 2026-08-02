@@ -17,6 +17,7 @@ from cron.scheduler import (
 from plugins.skill_creater.tool import run as run_skill_creater
 from run.agent_runner import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore, normalize_memory_filename
+from tests.memory_db import update_fragment_metadata
 from run.memory_pipeline import extract_compressed_round_memory
 
 
@@ -61,20 +62,19 @@ class SelfImproveRuntimeTests(unittest.TestCase):
     ) -> str:
         store = MemoryStore(self.root, "alice", CONFIG)
         filename = normalize_memory_filename(name)
-        path = store.fragment_path(tier, filename)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, "utf-8")
-        index = store.load_index(tier)
-        index[filename] = {
-            "weight": weight,
-            "updated_at": expires_at.isoformat(),
-            "last_weight_date": None,
-            "expires_at": expires_at.isoformat(),
-        }
-        store.write_index(tier, index)
+        store.create_fragment(tier, filename, content, now=expires_at)
+        update_fragment_metadata(
+            store,
+            tier,
+            filename,
+            weight=weight,
+            expires_at=expires_at,
+        )
         return filename
 
-    def test_context_compression_passes_complete_rounds_and_persists_candidates(self) -> None:
+    def test_context_compression_passes_complete_rounds_and_persists_candidates(
+        self,
+    ) -> None:
         rounds = [
             {
                 "round": 4,
@@ -92,12 +92,16 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
             def run(self, name, input_data, **kwargs):
                 self.input_data = input_data
-                return _result(candidates=[{
-                    "action": "upsert",
-                    "filename": "batch fact",
-                    "content": "A fact from complete rounds.",
-                    "explicit": False,
-                }])
+                return _result(
+                    candidates=[
+                        {
+                            "action": "upsert",
+                            "filename": "batch fact",
+                            "content": "A fact from complete rounds.",
+                            "explicit": False,
+                        }
+                    ]
+                )
 
         runner = Runner()
         extract_compressed_round_memory(
@@ -113,7 +117,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(runner.input_data["rounds"], rounds)
         self.assertEqual(runner.input_data["source"]["trigger"], "token_limit")
         self.assertEqual(
-            MemoryStore(self.root, "alice", CONFIG).load_tier("seven_days")[0]["content"],
+            MemoryStore(self.root, "alice", CONFIG).load_tier("seven_days")[0][
+                "content"
+            ],
             "A fact from complete rounds.",
         )
 
@@ -133,13 +139,17 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
             def run(self, name, input_data, **kwargs):
                 calls.append((name, input_data))
-                return _result(promotions=[{
-                    "from_tier": "seven_days",
-                    "to_tier": "one_month",
-                    "filename": high,
-                    "merged_with": None,
-                    "skill_created": False,
-                }])
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": "seven_days",
+                            "to_tier": "one_month",
+                            "filename": high,
+                            "merged_with": None,
+                            "skill_created": False,
+                        }
+                    ]
+                )
 
         with patch("cron.review_due.AgentRunner", Runner):
             result = scan_and_promote(
@@ -155,9 +165,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["trigger"], "memory_promotion")
         self.assertEqual(calls[0][1]["promotions"][0]["content"], "high content")
         store = MemoryStore(self.root, "alice", CONFIG)
-        self.assertNotIn(high, store.load_index("seven_days"))
-        self.assertNotIn(low, store.load_index("seven_days"))
-        self.assertIn(high, store.load_index("one_month"))
+        self.assertIsNone(store.get_entry("seven_days", high))
+        self.assertIsNone(store.get_entry("seven_days", low))
+        self.assertIsNotNone(store.get_entry("one_month", high))
 
     def test_merged_promotion_overwrites_target_and_resets_lifecycle(self) -> None:
         now = datetime(2026, 7, 19, tzinfo=timezone.utc)
@@ -165,11 +175,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             "seven_days", "same", content="source", weight=3, expires_at=now
         )
         store = MemoryStore(self.root, "alice", CONFIG)
-        location = next(
-            item
-            for item in store._locations(filename)
-            if item.tier == "seven_days"
-        )
+        location = store.locate_in_tier("seven_days", filename)
+        self.assertIsNotNone(location)
         store._promote_location(
             location,
             "one_month",
@@ -177,15 +184,15 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             merged_content="merged content",
         )
 
-        self.assertNotIn(filename, store.load_index("seven_days"))
-        target = store.load_index("one_month")[filename]
+        self.assertIsNone(store.get_entry("seven_days", filename))
+        target = store.get_entry("one_month", filename)
         self.assertEqual(target["weight"], 0)
         self.assertEqual(
             target["expires_at"],
             (now + timedelta(days=30)).isoformat(),
         )
         self.assertEqual(
-            store.fragment_path("one_month", filename).read_text("utf-8").strip(),
+            store.get_entry("one_month", filename)["content"],
             "merged content",
         )
 
@@ -207,14 +214,18 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 pass
 
             def run(self, name, input_data, **kwargs):
-                return _result(promotions=[{
-                    "from_tier": "seven_days",
-                    "to_tier": "one_month",
-                    "filename": source,
-                    "merged_with": target,
-                    "content": "merged semantic fact",
-                    "skill_created": False,
-                }])
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": "seven_days",
+                            "to_tier": "one_month",
+                            "filename": source,
+                            "merged_with": target,
+                            "content": "merged semantic fact",
+                            "skill_created": False,
+                        }
+                    ]
+                )
 
         with patch("cron.review_due.AgentRunner", Runner):
             result = scan_and_promote(
@@ -226,10 +237,10 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         store = MemoryStore(self.root, "alice", CONFIG)
         self.assertEqual(result["applied"], [source])
-        self.assertNotIn(source, store.load_index("seven_days"))
-        self.assertEqual(store.load_index("one_month")[target]["weight"], 0)
+        self.assertIsNone(store.get_entry("seven_days", source))
+        self.assertEqual(store.get_entry("one_month", target)["weight"], 0)
         self.assertEqual(
-            store.fragment_path("one_month", target).read_text("utf-8").strip(),
+            store.get_entry("one_month", target)["content"],
             "merged semantic fact",
         )
 
@@ -267,14 +278,43 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         class Context:
             @staticmethod
             def run_model(input_data):
-                return _result(candidates=[
-                    {"action": "upsert", "filename": "系统配置", "content": "当前模型配置"},
-                    {"action": "upsert", "filename": "缺少证据", "content": "用户长期偏好", "durable": True},
-                    {"action": "upsert", "filename": "偏好一", "content": "用户偏好简洁回答", "durable": True, "evidence": "请回答简洁一些"},
-                    {"action": "upsert", "filename": "偏好二", "content": "用户偏好中文", "durable": True, "evidence": "以后请使用中文"},
-                    {"action": "upsert", "filename": "偏好三", "content": "用户偏好表格", "durable": True, "evidence": "我喜欢表格"},
-                    {"action": "forget", "filename": "旧偏好"},
-                ])
+                return _result(
+                    candidates=[
+                        {
+                            "action": "upsert",
+                            "filename": "系统配置",
+                            "content": "当前模型配置",
+                        },
+                        {
+                            "action": "upsert",
+                            "filename": "缺少证据",
+                            "content": "用户长期偏好",
+                            "durable": True,
+                        },
+                        {
+                            "action": "upsert",
+                            "filename": "偏好一",
+                            "content": "用户偏好简洁回答",
+                            "durable": True,
+                            "evidence": "请回答简洁一些",
+                        },
+                        {
+                            "action": "upsert",
+                            "filename": "偏好二",
+                            "content": "用户偏好中文",
+                            "durable": True,
+                            "evidence": "以后请使用中文",
+                        },
+                        {
+                            "action": "upsert",
+                            "filename": "偏好三",
+                            "content": "用户偏好表格",
+                            "durable": True,
+                            "evidence": "我喜欢表格",
+                        },
+                        {"action": "forget", "filename": "旧偏好"},
+                    ]
+                )
 
         result = execute_self_improve(
             Context(),
@@ -396,12 +436,16 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
             @staticmethod
             def run_model(input_data):
-                return _result(candidates=[{
-                    "action": "upsert",
-                    "filename": "manual-review",
-                    "content": "用户偏好简洁的技术说明。",
-                    "explicit": False,
-                }])
+                return _result(
+                    candidates=[
+                        {
+                            "action": "upsert",
+                            "filename": "manual-review",
+                            "content": "用户偏好简洁的技术说明。",
+                            "explicit": False,
+                        }
+                    ]
+                )
 
         result = execute_self_improve(
             Context(),
@@ -410,7 +454,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         location = MemoryStore(self.root, "alice", CONFIG).locate("manual-review")
         self.assertIsNotNone(location)
         self.assertEqual(location.tier, "seven_days")
-        self.assertEqual(result.metadata["memory_update"]["created"], ["manual-review.md"])
+        self.assertEqual(
+            result.metadata["memory_update"]["created"], ["manual-review.md"]
+        )
 
         with self.assertRaisesRegex(AgentOutputError, "request"):
             execute_self_improve(Context(), {"trigger": "manual_review"})

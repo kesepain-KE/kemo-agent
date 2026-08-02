@@ -58,8 +58,12 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
             {"memory": {"important_memory_max_chars": 2000}},
         )
 
-    def test_nonempty_output_is_written_and_empty_output_restores_placeholder(self) -> None:
-        execute(_Context(self.root, "# Profile\n\n- concise"), {"trigger": "periodic_scan"})
+    def test_nonempty_output_is_written_and_empty_output_restores_placeholder(
+        self,
+    ) -> None:
+        execute(
+            _Context(self.root, "# Profile\n\n- concise"), {"trigger": "periodic_scan"}
+        )
         self.assertEqual(self.path.read_text("utf-8").strip(), "# Profile\n\n- concise")
 
         execute(_Context(self.root, ""), {"trigger": "daily_consolidate"})
@@ -75,7 +79,9 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
             )
         self.assertEqual(self.path.read_text("utf-8"), "original")
 
-    def test_periodic_view_keeps_source_and_excludes_it_from_regular_prompt(self) -> None:
+    def test_periodic_view_keeps_source_and_excludes_it_from_regular_prompt(
+        self,
+    ) -> None:
         store = self._store()
         result = store.upsert_candidates(
             [{"filename": "沟通偏好", "content": "用户偏好简洁回复。"}],
@@ -94,7 +100,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertIsNotNone(store.locate_in_tier("seven_days", filename))
         self.assertEqual(store.load_important_view_sources(), {filename})
         self.assertTrue(store.important_view_is_current())
-        self.assertEqual(store.load_index("seven_days")[filename]["weight"], 0)
+        self.assertEqual(store.get_entry("seven_days", filename)["weight"], 0)
         selection = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(selection.selected_ids, ())
 
@@ -106,7 +112,9 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         refreshed = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(refreshed.selected_ids, (filename,))
 
-    def test_one_stale_source_restores_every_featured_fragment_to_regular_prompt(self) -> None:
+    def test_one_stale_source_restores_every_featured_fragment_to_regular_prompt(
+        self,
+    ) -> None:
         store = self._store()
         created = store.upsert_candidates(
             [
@@ -120,8 +128,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
                 self.root,
                 "# 临时重要记忆\n\n- 简洁回复\n- 兼容 Linux",
                 featured=[
-                    {"tier": "seven_days", "filename": filename}
-                    for filename in created
+                    {"tier": "seven_days", "filename": filename} for filename in created
                 ],
             ),
             {"trigger": "periodic_scan"},
@@ -140,7 +147,13 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
     def test_periodic_can_drop_full_permanent_duplicate_atomically(self) -> None:
         store = self._store()
         permanent = store.upsert_candidates(
-            [{"filename": "用户偏好", "content": "用户偏好简洁回复。", "explicit": True}],
+            [
+                {
+                    "filename": "用户偏好",
+                    "content": "用户偏好简洁回复。",
+                    "explicit": True,
+                }
+            ],
         )["created"][0]
         temporary = store.upsert_candidates(
             [{"filename": "重复偏好", "content": "用户偏好简洁回复。"}],
@@ -164,14 +177,20 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
 
         self.assertIsNone(store.locate_in_tier("seven_days", temporary))
         self.assertEqual(
-            store.locate_in_tier("permanent", permanent).path.read_text("utf-8").strip(),
+            store.get_entry("permanent", permanent)["content"],
             "用户偏好简洁回复。",
         )
 
     def test_periodic_can_merge_partial_permanent_coverage(self) -> None:
         store = self._store()
         permanent = store.upsert_candidates(
-            [{"filename": "用户偏好", "content": "用户偏好简洁回复。", "explicit": True}],
+            [
+                {
+                    "filename": "用户偏好",
+                    "content": "用户偏好简洁回复。",
+                    "explicit": True,
+                }
+            ],
         )["created"][0]
         temporary = store.upsert_candidates(
             [{"filename": "偏好新增", "content": "代码修改后需要运行测试。"}],
@@ -197,7 +216,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
 
         self.assertIsNone(store.locate_in_tier("seven_days", temporary))
         self.assertEqual(
-            store.locate_in_tier("permanent", permanent).path.read_text("utf-8").strip(),
+            store.get_entry("permanent", permanent)["content"],
             merged,
         )
 

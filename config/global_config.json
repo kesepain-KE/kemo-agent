@@ -42,7 +42,7 @@
     "kemo_graph_temporary_memory": false
   },
   "memory": {
-    "storage_schema_version": 3,
+    "storage_schema_version": 1,
     "extraction_mode": "compression_only",
     "recovery_max_rounds_per_scan": 10,
     "extraction_batch_rounds": 5,

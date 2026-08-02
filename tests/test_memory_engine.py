@@ -17,6 +17,7 @@ from run.memory_analysis import (
     memory_batch_operation_id,
 )
 from run.history_index import find_record as find_history_record
+from run.history_store import list_windows, window_exists, window_path
 from run.memory import MemoryStore
 
 
@@ -34,7 +35,9 @@ class Provider:
     def chat(self, request):
         if self.fail:
             raise RuntimeError("provider failed")
-        return ChatResponse(text="完成", usage=Usage(1, 1, 2, source="mock"), model=request.model)
+        return ChatResponse(
+            text="完成", usage=Usage(1, 1, 2, source="mock"), model=request.model
+        )
 
     def create(self, request):
         return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
@@ -71,10 +74,7 @@ class MemoryEngineTests(unittest.TestCase):
         self.assertNotEqual(first, rewritten)
 
     def test_batch_analysis_retries_then_splits_malformed_output(self) -> None:
-        rounds = [
-            {"round": number, "messages": []}
-            for number in range(1, 5)
-        ]
+        rounds = [{"round": number, "messages": []} for number in range(1, 5)]
         failed = {
             "status": "failed",
             "candidate_count": 0,
@@ -110,7 +110,9 @@ class MemoryEngineTests(unittest.TestCase):
             }
 
         analyze.calls = 0
-        with patch("run.memory_analysis.analyze_memory_batch", side_effect=analyze) as mocked:
+        with patch(
+            "run.memory_analysis.analyze_memory_batch", side_effect=analyze
+        ) as mocked:
             result = analyze_memory_batch_resilient(
                 rounds=rounds,
                 agent_runner=object(),
@@ -154,9 +156,14 @@ class MemoryEngineTests(unittest.TestCase):
         return root
 
     def request(self):
-        return {"user": "alice", "source": "cli", "session_id": "s", "prompt": "记住我喜欢川菜"}
+        return {
+            "user": "alice",
+            "source": "cli",
+            "session_id": "s",
+            "prompt": "记住我喜欢川菜",
+        }
 
-    def test_empty_tier_file_is_treated_as_empty_memory(self) -> None:
+    def test_empty_database_tier_is_treated_as_empty_memory(self) -> None:
         root = self.root()
         config = {
             "memory": {
@@ -164,13 +171,14 @@ class MemoryEngineTests(unittest.TestCase):
             }
         }
         store = MemoryStore(root, "alice", config)
-        store.tier_dir("permanent").mkdir(parents=True, exist_ok=True)
         self.assertEqual(store.load_tier("permanent"), [])
 
     def test_committed_round_defers_compression_only_extraction(self) -> None:
         root = self.root()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
-            result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
+            result = handle_request(
+                self.request(), root=root, provider_factory=lambda _: Provider()
+            )
         self.assertTrue(result["committed"])
         self.assertIsNone(result["memory"]["extraction_task_id"])
         self.assertIsNone(result["memory"]["extraction_error"])
@@ -192,7 +200,11 @@ class MemoryEngineTests(unittest.TestCase):
         root = self.root()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
             with self.assertRaises(RuntimeError):
-                handle_request(self.request(), root=root, provider_factory=lambda _: Provider(fail=True))
+                handle_request(
+                    self.request(),
+                    root=root,
+                    provider_factory=lambda _: Provider(fail=True),
+                )
         archive = load_window(find_window(root, "alice", "cli", "s"))
         self.assertEqual(archive["data"]["rounds"], 1)
         self.assertEqual(archive["data"]["round_metrics"][0]["status"], "failed")
@@ -203,7 +215,10 @@ class MemoryEngineTests(unittest.TestCase):
 
         stopped = threading.Event()
         iterator = iter_request_events(
-            self.request(), root=root, provider_factory=lambda _: Provider(), cancel_event=stopped
+            self.request(),
+            root=root,
+            provider_factory=lambda _: Provider(),
+            cancel_event=stopped,
         )
         stopped.set()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
@@ -220,14 +235,19 @@ class MemoryEngineTests(unittest.TestCase):
     def test_committed_round_persists_history_without_extraction_queue(self) -> None:
         root = self.root()
         with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
-            result = handle_request(self.request(), root=root, provider_factory=lambda _: Provider())
+            result = handle_request(
+                self.request(), root=root, provider_factory=lambda _: Provider()
+            )
         self.assertTrue(result["committed"])
-        history = root / "users" / "alice" / "history"
-        windows = [
-            item for item in history.iterdir() if item.is_dir() and item.name != "temp"
-        ]
+        windows = list_windows(root, "alice", source="cli")
         self.assertEqual(len(windows), 1)
-        self.assertTrue((history / "temp" / windows[0].name / "data.json").is_file())
+        runtime = window_path(
+            root,
+            "alice",
+            str(windows[0]["window_name"]),
+            kind="runtime",
+        )
+        self.assertTrue(window_exists(runtime))
 
     def test_index_memory_error_does_not_fail_commit_or_leave_run_running(self) -> None:
         root = self.root()
@@ -240,7 +260,9 @@ class MemoryEngineTests(unittest.TestCase):
                 side_effect=RuntimeError("index failed"),
             ),
         ):
-            result = handle_request(request, root=root, provider_factory=lambda _: Provider())
+            result = handle_request(
+                request, root=root, provider_factory=lambda _: Provider()
+            )
 
         self.assertTrue(result["committed"])
         self.assertEqual(result["history_index_error"]["message"], "index failed")

@@ -1,20 +1,20 @@
 # 记忆生命周期
 
-`users/<user>/improve/` 使用文件型 schema v3 保存微量记忆：
+`users/<user>/improve/memory.sqlite3` 使用每用户独立 SQLite schema v1 保存微量记忆：
 
 ```text
 seven_days → one_month → half_year → permanent
 ```
 
-临时三层的正文是独立 Markdown；同目录 `data.json` 分别记录创建、内容更新、最近使用、层级进入、当日加权锁和固定到期时间。永久层只有 Markdown，不存在索引。
+四档正文和生命周期统一存入 `memory_fragments`；`memory_weight_events` 以 `(fragment_id, evidence_date)` 唯一约束当日加权，永久层行没有到期时间。
 
-## 文件身份
+## 逻辑身份
 
 - 文件名是全部层级中的全局唯一身份，基础名称最长 50 个字符。
-- 同名 upsert 更新原文件，不创建重复文件。
-- 创建前扫描全部层级；检测到跨层同名属于存储损坏并停止覆盖。
-- 当前文件检索只使用文件名，不依赖关键词、实体、向量或知识图谱。
-- 每个文件只保存一个足够微量化的事实、偏好、关系或项目状态。
+- 同名 upsert 更新原表行，不创建重复行。
+- `filename_key` 在全部层级全局唯一，数据库直接拒绝跨层同名。
+- 普通搜索可查询逻辑文件名或正文，不依赖向量或知识图谱。
+- 每行只保存一个足够微量化的事实、偏好、关系或项目状态。
 
 ## 权重规则
 
@@ -38,13 +38,13 @@ seven_days → one_month → half_year → permanent
 
 到达 `expires_at` 后：
 
-- 权重达到阈值：移动同名 Markdown 到下一层，权重清零并设置新层固定到期时间。
-- 权重未达到阈值：直接删除正文和索引项。
+- 权重达到阈值：事务内更新同一行到下一层，权重清零并设置新层固定到期时间。
+- 权重未达到阈值：事务内直接删除正文行和关联事件。
 - 主动遗忘同样直接删除，不保留 tombstone 或删除历史。
 
 ## Prompt 注入
 
-- 永久层全部注入，按自然文件名稳定排序。
+- 永久层全部注入，按逻辑文件名稳定排序。
 - `memory_temporary_important.md` 是独立单文件，受字符上限控制，不参与普通权重。
 - 临时三层按 `half_year → one_month → seven_days` 注入。
 - 层内按 weight 降序、文件名自然排序；使用时间或文件系统修改时间不得打乱同权重稳定顺序。
@@ -59,5 +59,5 @@ seven_days → one_month → half_year → permanent
 - 成功提交的对话才能产生记忆候选；失败、取消或未提交轮次不得写入。
 - 用户明确要求长期记住的有效内容直接进入永久层。
 - 密码、API Key、Token、Cookie、私钥、验证码等敏感凭据禁止入库。
-- Markdown 和索引均使用临时文件加 `os.replace()` 原子提交。
+- 加权、晋升、融合、删除、幂等结果和热画像来源使用 SQLite 事务原子提交。
 - 当前阶段不调用或修改 `E:\code\kemo-graph`。

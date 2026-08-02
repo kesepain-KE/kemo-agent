@@ -133,7 +133,8 @@
 
 ```python
 for tier in TEMPORARY_TIERS:
-    for filename, meta in load_index(tier):
+    for fragment in store.load_tier(tier):
+        meta = fragment
         if 到期 AND weight >= upgrade_threshold:
             → 调用 self_improve(trigger="memory_promotion", ...)
 ```
@@ -147,7 +148,7 @@ for tier in TEMPORARY_TIERS:
 3. 检查是否有相似/重复的碎片：
    - **有相似** → 返回目标文件名与完整融合正文
    - **无相似** → 返回直接晋升决策
-4. cron 根据决策原子更新正文和两层索引，目标层 weight 归零并重设 `expires_at`
+4. cron 根据决策在 SQLite 事务内更新正文和 tier，目标行 weight 归零并重设 `expires_at`
 
 晋升模式下不得通过 `memory_manage` 直接删除、移动或覆盖源碎片；只读取记忆并返回决策，最终记忆落盘由 cron 完成。
 

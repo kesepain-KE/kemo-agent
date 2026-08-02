@@ -109,7 +109,9 @@ def _important_entry(
     ]
 
 
-def _tier_entries(root: Path, user: str, config: dict[str, Any], tier: str) -> list[dict[str, Any]]:
+def _tier_entries(
+    root: Path, user: str, config: dict[str, Any], tier: str
+) -> list[dict[str, Any]]:
     _validate_tier(tier)
     if tier == "important":
         return _important_entry(root, user, config)
@@ -157,15 +159,10 @@ def list_entries(
             for filename in names[:normalized_limit]
         ]
     elif tier == "permanent":
-        directory = MemoryStore(root, user, config).tier_dir("permanent")
-        names = sorted(
-            (
-                path.name
-                for path in directory.glob("*.md")
-                if path.is_file() and not path.is_symlink()
-            ),
-            key=str.casefold,
-        ) if directory.is_dir() else []
+        names = [
+            str(item["filename"])
+            for item in MemoryStore(root, user, config).load_tier("permanent")
+        ]
         entries = [
             {
                 "memory_ref": _memory_ref(tier, filename),
@@ -176,17 +173,18 @@ def list_entries(
             for filename in names[:normalized_limit]
         ]
     else:
-        index = MemoryStore(root, user, config).load_index(tier)
-        names = sorted(index, key=str.casefold)
+        items = MemoryStore(root, user, config).load_tier(tier)
+        names = [str(item["filename"]) for item in items]
+        by_name = {str(item["filename"]): item for item in items}
         entries = [
             {
                 "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
-                "weight": int(index[filename].get("weight", 0)),
-                "created_at": index[filename].get("created_at"),
-                "content_updated_at": index[filename].get("content_updated_at"),
-                "last_used_at": index[filename].get("last_used_at"),
-                "expires_at": index[filename].get("expires_at"),
+                "weight": int(by_name[filename].get("weight", 0)),
+                "created_at": by_name[filename].get("created_at"),
+                "content_updated_at": by_name[filename].get("content_updated_at"),
+                "last_used_at": by_name[filename].get("last_used_at"),
+                "expires_at": by_name[filename].get("expires_at"),
             }
             for filename in names[:normalized_limit]
         ]
@@ -209,7 +207,10 @@ def get_fragment(
 ) -> dict[str, Any]:
     _validate_tier(tier)
     if tier == "important":
-        if not isinstance(filename, str) or filename.strip().casefold() != IMPORTANT_FILENAME.casefold():
+        if (
+            not isinstance(filename, str)
+            or filename.strip().casefold() != IMPORTANT_FILENAME.casefold()
+        ):
             raise FileNotFoundError(f"记忆不存在：{tier}/{filename}")
         normalized = IMPORTANT_FILENAME
         entries = _important_entry(root, user, config)
@@ -219,18 +220,10 @@ def get_fragment(
     else:
         store = MemoryStore(root, user, config)
         normalized = normalize_memory_filename(filename)
-        location = store.locate_in_tier(tier, normalized)
-        if location is None or location.tier != tier:
+        item = store.get_entry(tier, normalized)
+        if item is None:
             raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
-        if location.path.is_symlink():
-            raise MemoryError("记忆文件不能是符号链接")
-        item = store._entry(
-            location,
-            store.load_index(tier).get(location.filename)
-            if tier in TEMPORARY_TIERS
-            else None,
-        )
-        normalized = location.filename
+        normalized = str(item["filename"])
     return {
         "action": "get",
         "tier": tier,
@@ -460,21 +453,25 @@ def delete_fragment(
         raise MemoryError("临时重要记忆文件不可删除")
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
-    with store._lock:
-        location = store.locate_in_tier(tier, normalized)
-        if location is None or location.tier != tier:
-            return {"action": "delete", "tier": tier, "filename": normalized, "deleted": False}
-        file_existed = location.path.is_file()
-        store._delete_location(location)
+    location = store.locate_in_tier(tier, normalized)
+    if location is None:
+        return {
+            "action": "delete",
+            "tier": tier,
+            "filename": normalized,
+            "deleted": False,
+        }
+    deleted = store.delete_fragment(tier, location.filename)
     return {
         "action": "delete",
         "tier": tier,
         "memory_ref": _memory_ref(tier, location.filename),
         "filename": location.filename,
-        "deleted": True,
-        "index_removed": location.indexed,
-        "file_removed": file_existed,
-        "repaired_orphan": location.indexed and not file_existed,
+        "deleted": deleted,
+        "row_removed": deleted,
+        "index_removed": False,
+        "file_removed": False,
+        "repaired_orphan": False,
     }
 
 
@@ -505,19 +502,8 @@ def add_fragment(
         }
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
-    with store._lock:
-        if store.locate(normalized) is not None:
-            raise FileExistsError(f"同名记忆已存在：{normalized}")
-        path = store.fragment_path(tier, normalized)
-        _atomic_text(path, body)
-        if tier in TEMPORARY_TIERS:
-            index = store.load_index(tier)
-            index[normalized] = store._new_meta(tier, utc_now())
-            try:
-                store.write_index(tier, index)
-            except Exception:
-                path.unlink(missing_ok=True)
-                raise
+    item = store.create_fragment(tier, normalized, body)
+    normalized = str(item["filename"])
     return {
         "action": "add",
         "tier": tier,
@@ -555,46 +541,17 @@ def edit_fragment(
         }
     store = MemoryStore(root, user, config)
     normalized = normalize_memory_filename(filename)
-    with store._lock:
-        location = store.locate_in_tier(tier, normalized)
-        if location is None or location.tier != tier:
-            raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
-        source_name = location.filename
-        target_name = normalize_memory_filename(new_filename or source_name)
-        if target_name.casefold() == source_name.casefold():
-            target_name = source_name
-        if target_name != source_name and store.locate(target_name) is not None:
-            raise FileExistsError(f"目标记忆已存在：{target_name}")
-        target_path = store.fragment_path(tier, target_name)
-        if target_name == source_name:
-            previous = location.path.read_text("utf-8")
-            _atomic_text(location.path, body)
-            if tier in TEMPORARY_TIERS:
-                try:
-                    store._touch_temporary(
-                        location,
-                        utc_now(),
-                        content_changed=True,
-                    )
-                except Exception:
-                    _atomic_text(location.path, previous)
-                    raise
-        else:
-            _atomic_text(target_path, body)
-            if tier in TEMPORARY_TIERS:
-                index = store.load_index(tier)
-                meta = dict(index.pop(source_name))
-                current = utc_now().isoformat()
-                meta["content_updated_at"] = current
-                meta["updated_at"] = current
-                meta["last_used_at"] = current
-                index[target_name] = meta
-                try:
-                    store.write_index(tier, index)
-                except Exception:
-                    target_path.unlink(missing_ok=True)
-                    raise
-            location.path.unlink()
+    location = store.locate_in_tier(tier, normalized)
+    if location is None:
+        raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
+    source_name = location.filename
+    target_name = store.edit_fragment(
+        tier,
+        source_name,
+        body,
+        new_filename=new_filename,
+        now=utc_now(),
+    )
     return {
         "action": "edit",
         "tier": tier,
@@ -659,14 +616,10 @@ def apply_important_memory_view(
                 raise MemoryError(f"permanent_reconciliations[{index}] 必须是对象")
             action = str(raw.get("action") or "").strip().casefold()
             if action not in {"drop_duplicate", "merge_permanent"}:
-                raise MemoryError(
-                    f"permanent_reconciliations[{index}].action 无效"
-                )
+                raise MemoryError(f"permanent_reconciliations[{index}].action 无效")
             tier = str(raw.get("tier") or "").strip()
             if tier not in TEMPORARY_TIERS:
-                raise MemoryError(
-                    f"permanent_reconciliations[{index}].tier 不是临时层"
-                )
+                raise MemoryError(f"permanent_reconciliations[{index}].tier 不是临时层")
             filename = normalize_memory_filename(raw.get("filename"))
             source = store.locate_in_tier(tier, filename)
             if source is None:
@@ -689,20 +642,23 @@ def apply_important_memory_view(
                 if contains_sensitive_credential(merged_content):
                     raise MemoryError("永久记忆融合内容包含疑似敏感凭据")
                 if target.filename in target_names:
-                    raise MemoryError(f"同一永久记忆不能在单次巡检中重复融合：{target.filename}")
+                    raise MemoryError(
+                        f"同一永久记忆不能在单次巡检中重复融合：{target.filename}"
+                    )
                 target_names.add(target.filename)
             else:
                 merged_content = None
             actions.append(
                 {
                     "action": action,
-                    "source": source,
-                    "target": target,
+                    "tier": source.tier,
+                    "filename": source.filename,
+                    "permanent_filename": target.filename,
                     "content": merged_content,
                 }
             )
 
-        reconciled_names = {item["source"].filename for item in actions}
+        reconciled_names = {str(item["filename"]) for item in actions}
         featured_names = list(
             dict.fromkeys(
                 filename
@@ -711,30 +667,16 @@ def apply_important_memory_view(
             )
         )
 
-        paths = {important_path, store.important_view_path()}
-        for item in actions:
-            source = item["source"]
-            paths.add(source.path)
-            paths.add(store.path(source.tier))
-            paths.add(item["target"].path)
-        snapshots = {
-            path: path.read_bytes() if path.is_file() else None
-            for path in paths
-        }
+        previous = important_path.read_bytes() if important_path.is_file() else None
 
         try:
             _atomic_text(important_path, body)
-            store.set_important_view_sources(featured_names)
-            for item in actions:
-                if item["action"] == "merge_permanent":
-                    _atomic_text(item["target"].path, item["content"])
-                store._delete_location(item["source"])
+            store.reconcile_important_memory(featured_names, actions)
         except Exception:
-            for path, previous in snapshots.items():
-                if previous is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    _atomic_bytes(path, previous)
+            if previous is None:
+                important_path.unlink(missing_ok=True)
+            else:
+                _atomic_bytes(important_path, previous)
             raise
 
     return {
@@ -742,8 +684,8 @@ def apply_important_memory_view(
         "reconciled": [
             {
                 "action": item["action"],
-                "filename": item["source"].filename,
-                "permanent_filename": item["target"].filename,
+                "filename": item["filename"],
+                "permanent_filename": item["permanent_filename"],
             }
             for item in actions
         ],

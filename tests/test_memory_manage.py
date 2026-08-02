@@ -15,7 +15,7 @@ from plugins.memory_manage.memory_ops import (
     search_by_title,
 )
 from plugins.memory_manage.tool import run as run_memory_manage
-from run.memory import MemoryError as RuntimeMemoryError, MemoryStore, utc_now
+from run.memory import MemoryError as RuntimeMemoryError, MemoryStore
 from run.tools import discover_tools, validate_arguments
 
 
@@ -49,19 +49,19 @@ class MemoryManageTests(unittest.TestCase):
         )
         filename = added["filename"]
         store = MemoryStore(self.root, "alice", self.config)
-        self.assertIn(filename, store.load_index("seven_days"))
+        self.assertIsNotNone(store.get_entry("seven_days", filename))
         self.assertEqual(added["memory_ref"], f"seven_days:{filename}")
         self.assertEqual(
-            search_by_title(
-                self.root, "alice", self.config, "seven_days", "editor"
-            )["matches"][0]["filename"],
+            search_by_title(self.root, "alice", self.config, "seven_days", "editor")[
+                "matches"
+            ][0]["filename"],
             filename,
         )
         self.assertIn(
             "Vim",
-            search_by_content(
-                self.root, "alice", self.config, "seven_days", "prefers"
-            )["matches"][0]["snippet"],
+            search_by_content(self.root, "alice", self.config, "seven_days", "prefers")[
+                "matches"
+            ][0]["snippet"],
         )
 
         edited = edit_fragment(
@@ -74,10 +74,10 @@ class MemoryManageTests(unittest.TestCase):
             new_filename="terminal editor",
         )
         renamed = edited["new_filename"]
-        self.assertNotIn(filename, store.load_index("seven_days"))
-        self.assertIn(renamed, store.load_index("seven_days"))
+        self.assertIsNone(store.get_entry("seven_days", filename))
+        self.assertIsNotNone(store.get_entry("seven_days", renamed))
         self.assertEqual(
-            store.fragment_path("seven_days", renamed).read_text("utf-8").strip(),
+            store.get_entry("seven_days", renamed)["content"],
             "User prefers Neovim.",
         )
 
@@ -85,80 +85,39 @@ class MemoryManageTests(unittest.TestCase):
             self.root, "alice", self.config, "seven_days", renamed
         )
         self.assertTrue(deleted["deleted"])
-        self.assertNotIn(renamed, store.load_index("seven_days"))
-        self.assertFalse(store.fragment_path("seven_days", renamed).exists())
+        self.assertIsNone(store.get_entry("seven_days", renamed))
 
-    def test_cross_tier_duplicates_can_be_read_renamed_deleted_and_repaired(self) -> None:
+    def test_cross_tier_duplicate_names_are_rejected(self) -> None:
         store = MemoryStore(self.root, "alice", self.config)
         filename = "shared-device.md"
-        now = utc_now()
-        for tier in ("seven_days", "one_month", "half_year"):
-            path = store.fragment_path(tier, filename)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"content from {tier}", "utf-8")
-            store.write_index(tier, {filename: store._new_meta(tier, now)})
-        permanent_path = store.fragment_path("permanent", filename)
-        permanent_path.parent.mkdir(parents=True, exist_ok=True)
-        permanent_path.write_text("content from permanent", "utf-8")
-
-        self.assertEqual(
-            get_fragment(
-                self.root, "alice", self.config, "half_year", filename
-            )["content"],
-            "content from half_year",
-        )
-        self.assertEqual(
-            get_fragment(
-                self.root, "alice", self.config, "half_year", filename
-            )["memory_ref"],
-            f"half_year:{filename}",
-        )
-        self.assertEqual(
-            get_fragment(
-                self.root, "alice", self.config, "permanent", filename
-            )["content"],
-            "content from permanent",
-        )
-
+        store.create_fragment("seven_days", filename, "content from seven days")
+        with self.assertRaises(FileExistsError):
+            store.create_fragment("one_month", filename, "content from one month")
         renamed = edit_fragment(
             self.root,
             "alice",
             self.config,
-            "half_year",
+            "seven_days",
             filename,
-            "renamed half-year content",
-            new_filename="shared-device-half-year.md",
+            "renamed content",
+            new_filename="renamed-device.md",
         )["new_filename"]
-        self.assertNotIn(filename, store.load_index("half_year"))
-        self.assertIn(renamed, store.load_index("half_year"))
-        self.assertIn(filename, store.load_index("seven_days"))
-        self.assertIn(filename, store.load_index("one_month"))
-        self.assertTrue(permanent_path.is_file())
-
+        self.assertEqual(
+            get_fragment(self.root, "alice", self.config, "seven_days", renamed)[
+                "content"
+            ],
+            "renamed content",
+        )
         deleted = delete_fragment(
-            self.root, "alice", self.config, "one_month", filename
+            self.root, "alice", self.config, "seven_days", renamed
         )
         self.assertTrue(deleted["deleted"])
-        self.assertEqual(deleted["memory_ref"], f"one_month:{filename}")
-        self.assertTrue(deleted["index_removed"])
-        self.assertTrue(deleted["file_removed"])
+        self.assertEqual(deleted["memory_ref"], f"seven_days:{renamed}")
+        self.assertTrue(deleted["row_removed"])
+        self.assertFalse(deleted["index_removed"])
+        self.assertFalse(deleted["file_removed"])
         self.assertFalse(deleted["repaired_orphan"])
-        self.assertNotIn(filename, store.load_index("one_month"))
-        self.assertIn(filename, store.load_index("seven_days"))
-        self.assertTrue(permanent_path.is_file())
-
-        orphan = "orphan.md"
-        index = store.load_index("seven_days")
-        index[orphan] = store._new_meta("seven_days", now)
-        store.write_index("seven_days", index)
-        repaired = delete_fragment(
-            self.root, "alice", self.config, "seven_days", orphan
-        )
-        self.assertTrue(repaired["deleted"])
-        self.assertTrue(repaired["index_removed"])
-        self.assertFalse(repaired["file_removed"])
-        self.assertTrue(repaired["repaired_orphan"])
-        self.assertNotIn(orphan, store.load_index("seven_days"))
+        self.assertEqual(store.integrity_issues(), [])
 
     def test_permanent_and_important_documents_are_managed(self) -> None:
         permanent = add_fragment(
@@ -227,9 +186,9 @@ class MemoryManageTests(unittest.TestCase):
             "Alice likes concise replies.",
         )
         self.assertEqual(
-            search_by_content(
-                self.root, "bob", self.config, "one_month", "Alice"
-            )["matches"],
+            search_by_content(self.root, "bob", self.config, "one_month", "Alice")[
+                "matches"
+            ],
             [],
         )
         with self.assertRaisesRegex(ValueError, "敏感凭据"):
@@ -276,7 +235,9 @@ class MemoryManageTests(unittest.TestCase):
                 context=context,
             )
 
-    def test_background_memory_work_cannot_read_important_but_user_review_can(self) -> None:
+    def test_background_memory_work_cannot_read_important_but_user_review_can(
+        self,
+    ) -> None:
         important = self.root / "users" / "alice" / "memory_temporary_important.md"
         important.write_text("# 临时重要记忆\n\n- 用户偏好简洁回复。", "utf-8")
 
@@ -336,9 +297,9 @@ class MemoryManageTests(unittest.TestCase):
             context=context,
         )
 
-        metadata = MemoryStore(self.root, "alice", self.config).load_index("seven_days")[
-            filename
-        ]
+        metadata = MemoryStore(self.root, "alice", self.config).get_entry(
+            "seven_days", filename
+        )
         self.assertEqual(metadata["weight"], 0)
         self.assertIsNone(metadata["last_weight_date"])
 
@@ -388,9 +349,7 @@ class MemoryManageTests(unittest.TestCase):
                     f"Device {index} details",
                 )["filename"]
             )
-        listed = list_entries(
-            self.root, "alice", self.config, "half_year", limit=3
-        )
+        listed = list_entries(self.root, "alice", self.config, "half_year", limit=3)
         self.assertEqual(listed["total"], 4)
         self.assertEqual(len(listed["entries"]), 3)
         self.assertTrue(listed["truncated"])
@@ -424,9 +383,7 @@ class MemoryManageTests(unittest.TestCase):
             "stable profile",
             "Permanent body",
         )
-        permanent_list = list_entries(
-            self.root, "alice", self.config, "permanent"
-        )
+        permanent_list = list_entries(self.root, "alice", self.config, "permanent")
         self.assertIsNone(permanent_list["entries"][0]["weight"])
         self.assertIsNone(permanent_list["entries"][0]["expires_at"])
         permanent_get = get_fragment(
@@ -465,9 +422,7 @@ class MemoryManageTests(unittest.TestCase):
         self.assertTrue(content_result["truncated"])
         for match in content_result["matches"]:
             self.assertNotIn("content", match)
-            self.assertEqual(
-                match["memory_ref"], f"one_month:{match['filename']}"
-            )
+            self.assertEqual(match["memory_ref"], f"one_month:{match['filename']}")
             self.assertLessEqual(len(match["snippet"]), 80)
             self.assertIn("RaspberryPi", match["snippet"])
             self.assertTrue(match["snippet"].startswith("…"))
@@ -507,13 +462,9 @@ class MemoryManageTests(unittest.TestCase):
             0,
         )
         with self.assertRaisesRegex(ValueError, "list action"):
-            search_by_content(
-                self.root, "alice", self.config, "one_month", ""
-            )
+            search_by_content(self.root, "alice", self.config, "one_month", "")
         with self.assertRaisesRegex(ValueError, "list action"):
-            search_by_title(
-                self.root, "alice", self.config, "one_month", ""
-            )
+            search_by_title(self.root, "alice", self.config, "one_month", "")
 
     def test_search_many_matches_a_batch_across_memory_tiers(self) -> None:
         add_fragment(

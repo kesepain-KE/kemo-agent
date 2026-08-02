@@ -20,6 +20,7 @@ from run.config import load_config
 from run.engine import EngineError, context_status, handle_request, iter_request_events
 from run.kemo_graph import KemoGraphLayerStatus, KemoGraphPromptContext
 from run.memory import MemoryStore
+from tests.memory_db import update_fragment_metadata
 from run.prompt import (
     PROMPT_SECTION_ORDER,
     PromptConfigError,
@@ -31,7 +32,7 @@ from run.prompt_sources import (
     load_prompt_source_registry,
     natural_path_key,
 )
-from run.task_plan_store import select_prompt_plans
+from run.task_plan_store import PlanStore, normalize_plan, select_prompt_plans
 from run.tools import discover_tools
 
 
@@ -44,7 +45,9 @@ class CaptureProvider:
         self.requests.append(request)
         if self.fail:
             raise RuntimeError("provider failed")
-        return ChatResponse(text="ok", usage=Usage(1, 1, 2, source="mock"), model="mock")
+        return ChatResponse(
+            text="ok", usage=Usage(1, 1, 2, source="mock"), model="mock"
+        )
 
     def chat_stream(self, request):
         raise AssertionError("streaming not expected")
@@ -60,7 +63,9 @@ class CaptureProvider:
 
 
 class PromptPipelineTests(unittest.TestCase):
-    def test_repository_instruction_contract_preserves_user_directed_path_rules(self) -> None:
+    def test_repository_instruction_contract_preserves_user_directed_path_rules(
+        self,
+    ) -> None:
         root = Path(__file__).resolve().parents[1]
         global_soul = (root / "config" / "global_soul.md").read_text("utf-8")
         agents_manual = (root / "agents.md").read_text("utf-8")
@@ -68,7 +73,9 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertIn("## 用户明确路径优先", global_soul)
         self.assertIn("必须按用户指定路径执行", global_soul)
         self.assertIn("未获授权时停在冲突步骤", global_soul)
-        self.assertLess(global_soul.index("## 硬性底线"), global_soul.index("## 用户明确路径优先"))
+        self.assertLess(
+            global_soul.index("## 硬性底线"), global_soul.index("## 用户明确路径优先")
+        )
 
         self.assertIn("### 用户指定执行路径", agents_manual)
         for requirement in (
@@ -102,12 +109,27 @@ class PromptPipelineTests(unittest.TestCase):
         ):
             path.mkdir(parents=True, exist_ok=True)
         registrars = (
-            (root / "global_expand" / "register.py", 'registry.add_expand_root("global", Path(__file__).resolve().parent)'),
-            (root / "shared_expand" / "register.py", 'registry.add_expand_root("shared", Path(__file__).resolve().parent)'),
+            (
+                root / "global_expand" / "register.py",
+                'registry.add_expand_root("global", Path(__file__).resolve().parent)',
+            ),
+            (
+                root / "shared_expand" / "register.py",
+                'registry.add_expand_root("shared", Path(__file__).resolve().parent)',
+            ),
             (root / "users" / "alice" / "expand" / "register.py", "pass"),
-            (root / "shared_skills" / "register.py", 'registry.add_skills("shared", Path(__file__).resolve().parent)'),
-            (root / "users" / "alice" / "user_skills" / "register.py", 'registry.add_skills("user", Path(__file__).resolve().parent)'),
-            (root / "global_sense" / "register.py", "registry.add_perception(Path(__file__).resolve().parent)"),
+            (
+                root / "shared_skills" / "register.py",
+                'registry.add_skills("shared", Path(__file__).resolve().parent)',
+            ),
+            (
+                root / "users" / "alice" / "user_skills" / "register.py",
+                'registry.add_skills("user", Path(__file__).resolve().parent)',
+            ),
+            (
+                root / "global_sense" / "register.py",
+                "registry.add_perception(Path(__file__).resolve().parent)",
+            ),
         )
         for path, statement in registrars:
             path.write_text(
@@ -133,7 +155,9 @@ class PromptPipelineTests(unittest.TestCase):
                 "token_compression_ratio": 0.6,
             },
         }
-        global_config = {key: value for key, value in config.items() if key != "provider"}
+        global_config = {
+            key: value for key, value in config.items() if key != "provider"
+        }
         (root / "config" / "global_config.json").write_text(
             json.dumps(global_config),
             "utf-8",
@@ -142,13 +166,6 @@ class PromptPipelineTests(unittest.TestCase):
             json.dumps({"schema_version": 1, "provider": config["provider"]}),
             "utf-8",
         )
-        for tier in ("seven_days", "one_month", "half_year", "permanent"):
-            folder = root / "users" / "alice" / "improve" / tier
-            folder.mkdir(parents=True)
-            if tier != "permanent":
-                (folder / "data.json").write_text(
-                    json.dumps({"schema_version": 2, "files": {}}), "utf-8"
-                )
         return temporary, root, config
 
     def write_plugin(self, root: Path, name: str = "clock") -> None:
@@ -157,7 +174,11 @@ class PromptPipelineTests(unittest.TestCase):
         tool = {
             "name": name,
             "description": f"{name} tool schema description",
-            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
             "version": "1",
             "enabled": True,
             "entrypoint": "tool.py:run",
@@ -167,7 +188,9 @@ class PromptPipelineTests(unittest.TestCase):
             f"{json.dumps(tool)}\n```\n",
             "utf-8",
         )
-        (directory / "tool.py").write_text("def run():\n    return {'ok': True}\n", "utf-8")
+        (directory / "tool.py").write_text(
+            "def run():\n    return {'ok': True}\n", "utf-8"
+        )
 
     def write_sense_module(
         self,
@@ -244,27 +267,28 @@ class PromptPipelineTests(unittest.TestCase):
         return module
 
     def write_memory(self, root: Path, tier: str, items: list[dict]) -> None:
-        directory = root / "users" / "alice" / "improve" / tier
-        directory.mkdir(parents=True, exist_ok=True)
-        files = {}
+        store = MemoryStore(root, "alice", result_config(root))
         entered = datetime(2098, 1, 1, tzinfo=timezone.utc)
         days = {"seven_days": 7, "one_month": 30, "half_year": 180}
         for item in items:
-            filename = str(item.get("filename") or "memory")
+            filename = str(item.get("filename") or item.get("id") or "memory")
             if not filename.endswith(".md"):
                 filename += ".md"
-            (directory / filename).write_text(str(item.get("content") or ""), "utf-8")
-            if tier != "permanent":
-                files[filename] = {
-                    "weight": int(item.get("weight", 0)),
-                    "updated_at": entered.isoformat(),
-                    "last_weight_date": item.get("last_weight_date"),
-                    "expires_at": (entered + timedelta(days=days[tier])).isoformat(),
-                }
-        if tier != "permanent":
-            (directory / "data.json").write_text(
-                json.dumps({"schema_version": 2, "files": files}), "utf-8"
+            store.create_fragment(
+                tier,
+                filename,
+                str(item.get("content") or ""),
+                now=entered,
             )
+            if tier != "permanent":
+                update_fragment_metadata(
+                    store,
+                    tier,
+                    filename,
+                    weight=int(item.get("weight", 0)),
+                    last_weight_date=item.get("last_weight_date"),
+                    expires_at=entered + timedelta(days=days[tier]),
+                )
 
     def populate_all_sections(self, root: Path) -> None:
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
@@ -273,22 +297,34 @@ class PromptPipelineTests(unittest.TestCase):
         self.write_plugin(root)
         shared_skill = root / "shared_skills" / "shared"
         shared_skill.mkdir()
-        (shared_skill / "SKILL.md").write_text("# shared\nshared trigger\n\n## Details\nhidden", "utf-8")
-        (root / "users" / "alice" / "knowledge" / "index.md").write_text("INDEX", "utf-8")
+        (shared_skill / "SKILL.md").write_text(
+            "# shared\nshared trigger\n\n## Details\nhidden", "utf-8"
+        )
+        (root / "users" / "alice" / "knowledge" / "index.md").write_text(
+            "INDEX", "utf-8"
+        )
         self.write_memory(root, "permanent", [{"id": "p", "content": "PERMANENT"}])
         self.write_memory(root, "seven_days", [{"id": "s", "content": "SEVEN"}])
         self.write_memory(root, "one_month", [{"id": "m", "content": "MONTH"}])
         self.write_memory(root, "half_year", [{"id": "h", "content": "HALF"}])
-        (root / "users" / "alice" / "memory_temporary_important.md").write_text("IMPORTANT", "utf-8")
-        plan = {
-            "plan_id": "plan_00000001",
-            "title": "Plan",
-            "description": "Active plan",
-            "status": "running",
-            "steps": [{"description": "Do it", "status": "pending"}],
-        }
-        (root / "users" / "alice" / "task_plan" / "plan_00000001.json").write_text(
-            json.dumps(plan), "utf-8"
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            "IMPORTANT", "utf-8"
+        )
+        PlanStore(root, "alice").create(
+            normalize_plan(
+                plan_id="plan_00000001",
+                title="Plan",
+                description="Active plan",
+                user="alice",
+                status="running",
+                steps=[{
+                    "step_id": "step_1",
+                    "title": "Do it",
+                    "description": "Do it",
+                    "status": "pending",
+                    "critical": True,
+                }],
+            )
         )
         self.write_expand_module(
             root,
@@ -403,9 +439,7 @@ class PromptPipelineTests(unittest.TestCase):
         )
         bundle = build_prompt_bundle(root, "alice", config)
         global_section = next(
-            item
-            for item in bundle.sections
-            if item.name == "global_subagent_registry"
+            item for item in bundle.sections if item.name == "global_subagent_registry"
         )
         user_section = next(
             item for item in bundle.sections if item.name == "user_subagent_registry"
@@ -472,12 +506,8 @@ class PromptPipelineTests(unittest.TestCase):
             "kemo_graph_shared_knowledge": True,
             "kemo_graph_user_knowledge": True,
         }
-        (root / "shared_knowledge" / "index.md").write_text(
-            "SHARED_INDEX", "utf-8"
-        )
-        (root / "global_knowledge" / "index.md").write_text(
-            "GLOBAL_INDEX", "utf-8"
-        )
+        (root / "shared_knowledge" / "index.md").write_text("SHARED_INDEX", "utf-8")
+        (root / "global_knowledge" / "index.md").write_text("GLOBAL_INDEX", "utf-8")
 
         bundle = build_prompt_bundle(root, "alice", config)
 
@@ -494,7 +524,9 @@ class PromptPipelineTests(unittest.TestCase):
         )
         self.assertEqual(knowledge.content.count("已被知识图谱替代"), 3)
         self.assertNotIn("INDEX", knowledge.content)
-        graph = next(section for section in bundle.sections if section.name == "kemo_graph")
+        graph = next(
+            section for section in bundle.sections if section.name == "kemo_graph"
+        )
         self.assertEqual(graph.content.count("该层检索结果暂不可用"), 3)
         self.assertIn("PERMANENT", bundle.text)
         self.assertIn("IMPORTANT", bundle.text)
@@ -559,7 +591,9 @@ class PromptPipelineTests(unittest.TestCase):
 
         bundle = build_prompt_bundle(root, "alice", config)
 
-        graph = next(section for section in bundle.sections if section.name == "kemo_graph")
+        graph = next(
+            section for section in bundle.sections if section.name == "kemo_graph"
+        )
         self.assertEqual(graph.content.count("该层检索结果暂不可用"), 6)
         self.assertEqual(graph.content.count("# 外部知识图谱向量化检索"), 3)
         self.assertEqual(graph.content.count("# 用户的临时重要记忆"), 3)
@@ -601,16 +635,24 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaises(PromptConfigError):
             parse_prompt_settings({"prompt": {"char_limits": {"perception": -1}}})
         with self.assertRaisesRegex(PromptConfigError, "未知项"):
-            parse_prompt_settings({"memory": {"temporary_injection_limits": {"typo": 1}}})
+            parse_prompt_settings(
+                {"memory": {"temporary_injection_limits": {"typo": 1}}}
+            )
         with self.assertRaisesRegex(PromptConfigError, "暂不支持"):
-            parse_prompt_settings({"prompt": {"injection_mode": {"knowledge_index": "search"}}})
+            parse_prompt_settings(
+                {"prompt": {"injection_mode": {"knowledge_index": "search"}}}
+            )
 
-    def test_user_prompt_override_deep_merges_and_base_sections_are_always_on(self) -> None:
+    def test_user_prompt_override_deep_merges_and_base_sections_are_always_on(
+        self,
+    ) -> None:
         _, root, config = self.make_root()
         (root / "config" / "global_soul.md").write_text("GLOBAL", "utf-8")
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
         (root / "agents.md").write_text("AGENTS", "utf-8")
-        (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            "HOT", "utf-8"
+        )
         config["prompt"] = {"char_limits": {"perception": 200}}
         (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
         (root / "users" / "alice" / "user_config.json").write_text(
@@ -650,7 +692,9 @@ class PromptPipelineTests(unittest.TestCase):
                 f"# {name}\n{name} trigger\nline two\n\n## Tool\nSECRET_SCHEMA", "utf-8"
             )
         bundle = build_prompt_bundle(root, "alice", config)
-        content = next(section.content for section in bundle.sections if section.name == "skills")
+        content = next(
+            section.content for section in bundle.sections if section.name == "skills"
+        )
         self.assertLess(content.index("skill2"), content.index("skill10"))
         self.assertIn("line two", content)
         self.assertNotIn("SECRET_SCHEMA", content)
@@ -659,21 +703,23 @@ class PromptPipelineTests(unittest.TestCase):
         _, root, config = self.make_root()
         nested_skill = root / "shared_skills" / "development" / "python"
         nested_skill.mkdir(parents=True)
-        (nested_skill / "SKILL.md").write_text(
-            "# python\nSHARED_KEEP", "utf-8"
-        )
+        (nested_skill / "SKILL.md").write_text("# python\nSHARED_KEEP", "utf-8")
         dropped_skill = root / "shared_skills" / "dropped"
         dropped_skill.mkdir()
-        (dropped_skill / "SKILL.md").write_text(
-            "# dropped\nSHARED_DROP", "utf-8"
-        )
+        (dropped_skill / "SKILL.md").write_text("# dropped\nSHARED_DROP", "utf-8")
         user_skill = root / "users" / "alice" / "user_skills" / "private"
         user_skill.mkdir()
         (user_skill / "SKILL.md").write_text("# private\nUSER_DROP", "utf-8")
 
-        self.write_expand_module(root, "global", "keep", input_text="GLOBAL_KEEP", open_control=False)
-        self.write_expand_module(root, "global", "drop", input_text="GLOBAL_DROP", open_control=False)
-        self.write_expand_module(root, "user", "personal", input_text="USER_EXPAND", open_control=False)
+        self.write_expand_module(
+            root, "global", "keep", input_text="GLOBAL_KEEP", open_control=False
+        )
+        self.write_expand_module(
+            root, "global", "drop", input_text="GLOBAL_DROP", open_control=False
+        )
+        self.write_expand_module(
+            root, "user", "personal", input_text="USER_EXPAND", open_control=False
+        )
 
         self.write_sense_module(root, "runtime", "SENSE_KEEP")
         self.write_sense_module(root, "network", "SENSE_DROP", health="异常")
@@ -688,9 +734,7 @@ class PromptPipelineTests(unittest.TestCase):
                     "global_whitelist": ["keep", "missing/expand"],
                     "shared_whitelist": [],
                 },
-                "perception": {
-                    "global_whitelist": ["runtime", "missing/sense"]
-                },
+                "perception": {"global_whitelist": ["runtime", "missing/sense"]},
             }
         )
         bundle = build_prompt_bundle(root, "alice", config)
@@ -735,7 +779,9 @@ class PromptPipelineTests(unittest.TestCase):
             ["missing/sense"],
         )
 
-    def test_plugin_tool_block_stays_out_of_prompt_and_user_skill_tool_is_ignored(self) -> None:
+    def test_plugin_tool_block_stays_out_of_prompt_and_user_skill_tool_is_ignored(
+        self,
+    ) -> None:
         _, root, config = self.make_root()
         self.write_plugin(root, "clock")
         skill = root / "users" / "alice" / "user_skills" / "danger"
@@ -761,7 +807,9 @@ class PromptPipelineTests(unittest.TestCase):
         user_skill.mkdir()
         (user_skill / "SKILL.md").write_text("# private\nprivate description", "utf-8")
         bundle = build_prompt_bundle(root, "alice", config)
-        skills = next(section.content for section in bundle.sections if section.name == "skills")
+        skills = next(
+            section.content for section in bundle.sections if section.name == "skills"
+        )
         self.assertIn("shared description", skills)
         self.assertIn("private description", skills)
         (root / "users" / "alice" / "user_skills" / "register.py").write_text(
@@ -769,12 +817,16 @@ class PromptPipelineTests(unittest.TestCase):
             "utf-8",
         )
         bundle = build_prompt_bundle(root, "alice", config)
-        skills = next(section.content for section in bundle.sections if section.name == "skills")
+        skills = next(
+            section.content for section in bundle.sections if section.name == "skills"
+        )
         self.assertIn("shared description", skills)
         self.assertIn("private description", skills)
         (user_skill / "SKILL.md").unlink()
         bundle = build_prompt_bundle(root, "alice", config)
-        skills = next(section.content for section in bundle.sections if section.name == "skills")
+        skills = next(
+            section.content for section in bundle.sections if section.name == "skills"
+        )
         self.assertNotIn("private description", skills)
         (root / "shared_skills" / "register.py").write_text(
             "from pathlib import Path\n\n"
@@ -785,7 +837,9 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaises(PromptRegistrationError):
             build_prompt_bundle(root, "alice", config)
 
-    def test_memory_tiers_weight_limits_stability_and_important_char_limit(self) -> None:
+    def test_memory_tiers_weight_limits_stability_and_important_char_limit(
+        self,
+    ) -> None:
         _, root, config = self.make_root()
         self.write_memory(
             root,
@@ -800,30 +854,36 @@ class PromptPipelineTests(unittest.TestCase):
         config["memory"] = {}
         config["memory"]["temporary_injection_limits"] = {"seven_days": 2}
         config["memory"]["important_memory_max_chars"] = 4
-        (root / "users" / "alice" / "memory_temporary_important.md").write_text("IMPORTANT", "utf-8")
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            "IMPORTANT", "utf-8"
+        )
         bundle = build_prompt_bundle(root, "alice", config)
-        temporary = next(s for s in bundle.sections if s.name == "temporary_memory:seven_days")
+        temporary = next(
+            s for s in bundle.sections if s.name == "temporary_memory:seven_days"
+        )
         important = next(s for s in bundle.sections if s.name == "important_memory")
         self.assertEqual(temporary.item_ids, ("first.md", "second.md"))
-        self.assertLess(temporary.content.index("FIRST"), temporary.content.index("SECOND"))
+        self.assertLess(
+            temporary.content.index("FIRST"), temporary.content.index("SECOND")
+        )
         self.assertTrue(temporary.truncated)
         self.assertEqual(important.content, "IMPO")
 
-    def test_missing_memory_body_does_not_block_prompt_and_is_diagnosed(self) -> None:
+    def test_legacy_memory_file_is_ignored_without_affecting_table_prompt(self) -> None:
         _, root, config = self.make_root()
         self.write_memory(
             root,
             "half_year",
             [
-                {"filename": "missing", "content": "MISSING", "weight": 10},
                 {"filename": "valid", "content": "VALID", "weight": 1},
             ],
         )
-        (root / "users" / "alice" / "improve" / "half_year" / "missing.md").unlink()
+        legacy = root / "users" / "alice" / "improve" / "half_year"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "missing.md").write_text("MISSING", "utf-8")
         config["memory"] = {"temporary_injection_limits": {"half_year": 1}}
 
-        with self.assertLogs("run.memory", level="WARNING"):
-            bundle = build_prompt_bundle(root, "alice", config)
+        bundle = build_prompt_bundle(root, "alice", config)
 
         section = next(
             item
@@ -834,47 +894,59 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertIn("VALID", section.content)
         self.assertEqual(
             bundle.diagnostics["memory_integrity_warnings"],
-            ["missing_file:half_year/missing.md"],
+            [],
         )
 
     def test_plan_mapping_finished_omission_and_step_format(self) -> None:
         _, root, _ = self.make_root()
-        directory = root / "users" / "alice" / "task_plan"
         plans = [
-            ("plan_2.json", "approved", "active", "running"),
-            ("plan_10.json", "completed", "completed", "completed"),
-            ("plan_11.json", "failed", "aborted", "failed"),
+            ("plan_00000002", "approved", "active", "running"),
+            ("plan_00000010", "completed", "completed", "completed"),
+            ("plan_00000011", "failed", "aborted", "failed"),
         ]
-        for name, status, _, step_status in plans:
-            (directory / name).write_text(
-                json.dumps(
-                    {
-                        "plan_id": name[:-5],
-                        "title": name,
-                        "description": "desc",
-                        "status": status,
-                        "steps": [{"description": "step desc", "status": step_status}],
-                    }
-                ),
-                "utf-8",
+        store = PlanStore(root, "alice")
+        for plan_id, status, _, step_status in plans:
+            store.create(
+                normalize_plan(
+                    plan_id=plan_id,
+                    title=plan_id,
+                    description="desc",
+                    user="alice",
+                    status=status,
+                    steps=[{
+                        "step_id": "step_1",
+                        "title": "step desc",
+                        "description": "step desc",
+                        "status": step_status,
+                        "critical": True,
+                    }],
+                )
             )
         selection = select_prompt_plans(root, "alice", max_chars=1000)
         self.assertIn("status: active", selection.text)
         self.assertIn("step desc（running）", selection.text)
-        self.assertNotIn("plan_10", selection.text)
-        self.assertNotIn("plan_11", selection.text)
+        self.assertNotIn("plan_00000010", selection.text)
+        self.assertNotIn("plan_00000011", selection.text)
 
-    def test_expand_registration_module_controls_root_and_rejects_wrong_root(self) -> None:
+    def test_expand_registration_module_controls_root_and_rejects_wrong_root(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
-        self.write_expand_module(root, "global", "registered", input_text="REGISTERED", open_control=False)
-        self.write_expand_module(root, "global", "second", input_text="SECOND", open_control=False)
+        self.write_expand_module(
+            root, "global", "registered", input_text="REGISTERED", open_control=False
+        )
+        self.write_expand_module(
+            root, "global", "second", input_text="SECOND", open_control=False
+        )
         registrar = root / "global_expand" / "register.py"
         sources = load_prompt_source_registry(root, "alice")
         selection = sources.select_expand(max_chars=1000)
         self.assertIn("REGISTERED", selection.text)
         self.assertIn("SECOND", selection.text)
         registrar.unlink()
-        selection = load_prompt_source_registry(root, "alice").select_expand(max_chars=1000)
+        selection = load_prompt_source_registry(root, "alice").select_expand(
+            max_chars=1000
+        )
         self.assertNotIn("REGISTERED", selection.text)
         self.assertNotIn("SECOND", selection.text)
         registrar.write_text(
@@ -896,7 +968,9 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(PromptRegistrationError, "重复"):
             load_prompt_source_registry(root, "alice")
 
-    def test_expand_standard_module_injects_data_and_only_control_injection_layer(self) -> None:
+    def test_expand_standard_module_injects_data_and_only_control_injection_layer(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
         self.write_expand_module(
             root,
@@ -919,12 +993,18 @@ class PromptPipelineTests(unittest.TestCase):
                 "global_expand/light/expand_control.md",
             ),
         )
-        status = registry.selection_diagnostics()["expand"]["global"]["health_status"]["light"]
+        status = registry.selection_diagnostics()["expand"]["global"]["health_status"][
+            "light"
+        ]
         self.assertTrue(status["valid"])
         self.assertEqual(status["input_health"], "正常")
-        self.assertEqual(status["control_file"], "global_expand/light/expand_control.md")
+        self.assertEqual(
+            status["control_file"], "global_expand/light/expand_control.md"
+        )
 
-    def test_expand_switches_health_and_missing_control_file_are_independent(self) -> None:
+    def test_expand_switches_health_and_missing_control_file_are_independent(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
         self.write_expand_module(
             root,
@@ -961,39 +1041,69 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertTrue(status["missing_control"]["valid"])
         self.assertEqual(status["unhealthy"]["input_health"], "异常")
 
-    def test_expand_invalid_manifests_are_diagnosed_and_scope_user_isolation_holds(self) -> None:
+    def test_expand_invalid_manifests_are_diagnosed_and_scope_user_isolation_holds(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
         missing = root / "global_expand" / "missing_manifest"
         missing.mkdir()
-        missing_field = self.write_expand_module(root, "global", "missing_field", input_text="MISSING_FIELD")
+        missing_field = self.write_expand_module(
+            root, "global", "missing_field", input_text="MISSING_FIELD"
+        )
         missing_payload = json.loads((missing_field / "expand.json").read_text("utf-8"))
         missing_payload.pop("input_health")
         (missing_field / "expand.json").write_text(json.dumps(missing_payload), "utf-8")
-        bad_bool = self.write_expand_module(root, "global", "bad_bool", input_text="BAD_BOOL")
+        bad_bool = self.write_expand_module(
+            root, "global", "bad_bool", input_text="BAD_BOOL"
+        )
         bad_payload = json.loads((bad_bool / "expand.json").read_text("utf-8"))
         bad_payload["open_input"] = "true"
         (bad_bool / "expand.json").write_text(json.dumps(bad_payload), "utf-8")
-        traversal = self.write_expand_module(root, "global", "traversal", input_text="TRAVERSAL")
+        traversal = self.write_expand_module(
+            root, "global", "traversal", input_text="TRAVERSAL"
+        )
         traversal_payload = json.loads((traversal / "expand.json").read_text("utf-8"))
         traversal_payload["input_data"] = "../outside.md"
         (traversal / "expand.json").write_text(json.dumps(traversal_payload), "utf-8")
 
-        self.write_expand_module(root, "global", "global_ok", input_text="GLOBAL_LAYER", open_control=False)
-        self.write_expand_module(root, "shared", "shared_ok", input_text="SHARED_LAYER", open_control=False)
-        self.write_expand_module(root, "user", "alice_only", input_text="ALICE_LAYER", open_control=False)
-        self.write_expand_module(root, "user", "bob_only", input_text="BOB_LAYER", open_control=False, user="bob")
+        self.write_expand_module(
+            root, "global", "global_ok", input_text="GLOBAL_LAYER", open_control=False
+        )
+        self.write_expand_module(
+            root, "shared", "shared_ok", input_text="SHARED_LAYER", open_control=False
+        )
+        self.write_expand_module(
+            root, "user", "alice_only", input_text="ALICE_LAYER", open_control=False
+        )
+        self.write_expand_module(
+            root,
+            "user",
+            "bob_only",
+            input_text="BOB_LAYER",
+            open_control=False,
+            user="bob",
+        )
 
         alice_registry = load_prompt_source_registry(root, "alice")
         alice = alice_registry.select_expand(max_chars=5000)
-        self.assertLess(alice.text.index("GLOBAL_LAYER"), alice.text.index("SHARED_LAYER"))
-        self.assertLess(alice.text.index("SHARED_LAYER"), alice.text.index("ALICE_LAYER"))
+        self.assertLess(
+            alice.text.index("GLOBAL_LAYER"), alice.text.index("SHARED_LAYER")
+        )
+        self.assertLess(
+            alice.text.index("SHARED_LAYER"), alice.text.index("ALICE_LAYER")
+        )
         self.assertNotIn("BOB_LAYER", alice.text)
         diagnostics = alice_registry.selection_diagnostics()["expand"]["global"]
         self.assertEqual(
             set(diagnostics["invalid"]),
             {"bad_bool", "missing_field", "missing_manifest", "traversal"},
         )
-        self.assertTrue(all(not diagnostics["health_status"][name]["valid"] for name in diagnostics["invalid"]))
+        self.assertTrue(
+            all(
+                not diagnostics["health_status"][name]["valid"]
+                for name in diagnostics["invalid"]
+            )
+        )
 
         bob = load_prompt_source_registry(root, "bob").select_expand(max_chars=5000)
         self.assertIn("BOB_LAYER", bob.text)
@@ -1008,7 +1118,9 @@ class PromptPipelineTests(unittest.TestCase):
         (base / ".hidden").mkdir()
         (base / ".hidden" / "secret.md").write_text("SECRET", "utf-8")
         (base / "root.md").write_text("ROOT", "utf-8")
-        selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=1000)
+        selection = load_prompt_source_registry(root, "alice").select_perception(
+            max_chars=1000
+        )
         self.assertEqual(selection.text, "[sensors]\nONLY_DECLARED")
         self.assertNotIn("EXTRA_MARKDOWN", selection.text)
         self.assertNotIn("SECRET_HELPER", selection.text)
@@ -1073,7 +1185,16 @@ class PromptPipelineTests(unittest.TestCase):
 
         registry = load_prompt_source_registry(root, "alice")
         inventory = {item["name"]: item for item in registry.perception_inventory()}
-        self.assertEqual(set(inventory), {"broken_json", "missing_field", "missing_file", "missing_manifest", "traversal"})
+        self.assertEqual(
+            set(inventory),
+            {
+                "broken_json",
+                "missing_field",
+                "missing_file",
+                "missing_manifest",
+                "traversal",
+            },
+        )
         self.assertTrue(all(not item["valid"] for item in inventory.values()))
         self.assertTrue(all(item["health"] == "异常" for item in inventory.values()))
         self.assertTrue(all(item["status"] == "invalid" for item in inventory.values()))
@@ -1081,9 +1202,13 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(selection.text, "")
         diagnostics = registry.selection_diagnostics()["perception"]["global"]
         self.assertEqual(set(diagnostics["invalid"]), set(inventory))
-        self.assertTrue(all(not item["valid"] for item in diagnostics["health_status"].values()))
+        self.assertTrue(
+            all(not item["valid"] for item in diagnostics["health_status"].values())
+        )
 
-    def test_perception_health_diagnostics_and_zero_budget_preserve_discovery(self) -> None:
+    def test_perception_health_diagnostics_and_zero_budget_preserve_discovery(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
         self.write_sense_module(root, "healthy", "HEALTHY")
         self.write_sense_module(root, "reported_error", "REPORTED_ERROR", health="异常")
@@ -1094,18 +1219,24 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(diagnostics["selected"], ["healthy"])
         self.assertEqual(diagnostics["filtered"], ["reported_error"])
         self.assertEqual(diagnostics["health_status"]["healthy"]["health"], "正常")
-        self.assertEqual(diagnostics["health_status"]["reported_error"]["health"], "异常")
+        self.assertEqual(
+            diagnostics["health_status"]["reported_error"]["health"], "异常"
+        )
 
     def test_perception_registration_module_controls_source(self) -> None:
         _, root, _ = self.make_root()
         base = root / "global_sense"
         self.write_sense_module(root, "registered", "REGISTERED")
         self.write_sense_module(root, "unregistered", "UNREGISTERED")
-        selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=1000)
+        selection = load_prompt_source_registry(root, "alice").select_perception(
+            max_chars=1000
+        )
         self.assertIn("REGISTERED", selection.text)
         self.assertIn("UNREGISTERED", selection.text)
         (base / "register.py").unlink()
-        selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=1000)
+        selection = load_prompt_source_registry(root, "alice").select_perception(
+            max_chars=1000
+        )
         self.assertEqual(selection.text, "")
         (base / "register.py").write_text(
             "from pathlib import Path\n\n"
@@ -1116,13 +1247,24 @@ class PromptPipelineTests(unittest.TestCase):
         with self.assertRaises(PromptRegistrationError):
             load_prompt_source_registry(root, "alice")
 
-    def test_engine_uses_bundle_without_weighting_prompt_memory_after_commit(self) -> None:
+    def test_engine_uses_bundle_without_weighting_prompt_memory_after_commit(
+        self,
+    ) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
+        self.write_memory(
+            root,
+            "seven_days",
+            [{"filename": "memory", "content": "MEMORY", "weight": 0}],
+        )
         provider = CaptureProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             result = handle_request(
-                {"user": "alice", "source": "cli", "session_id": "ok", "prompt": "unrelated"},
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "ok",
+                    "prompt": "unrelated",
+                },
                 root=root,
                 provider_factory=lambda _: provider,
             )
@@ -1133,23 +1275,38 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", provider.requests[0].extra)
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         self.assertEqual(result["memory"]["weighted_files"], [])
-        unchanged = MemoryStore(root, "alice", result_config(root)).load_tier("seven_days")
+        unchanged = MemoryStore(root, "alice", result_config(root)).load_tier(
+            "seven_days"
+        )
         self.assertEqual(unchanged[0]["weight"], 0)
         status = context_status(
             {"user": "alice", "source": "cli", "session_id": "ok"},
             root=root,
         )
-        self.assertEqual(status["prompt"]["section_order"], result["prompt"]["section_order"])
-        self.assertEqual(status["prompt"]["total_chars"], result["prompt"]["total_chars"])
+        self.assertEqual(
+            status["prompt"]["section_order"], result["prompt"]["section_order"]
+        )
+        self.assertEqual(
+            status["prompt"]["total_chars"], result["prompt"]["total_chars"]
+        )
 
     def test_failed_provider_does_not_weight_memory(self) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
+        self.write_memory(
+            root,
+            "seven_days",
+            [{"filename": "memory", "content": "MEMORY", "weight": 0}],
+        )
         provider = CaptureProvider(fail=True)
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             with self.assertRaises(EngineError):
                 handle_request(
-                    {"user": "alice", "source": "cli", "session_id": "fail", "prompt": "go"},
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "fail",
+                        "prompt": "go",
+                    },
                     root=root,
                     provider_factory=lambda _: provider,
                 )
@@ -1158,7 +1315,11 @@ class PromptPipelineTests(unittest.TestCase):
 
     def test_cancelled_provider_does_not_weight_memory(self) -> None:
         _, root, _ = self.make_root()
-        self.write_memory(root, "seven_days", [{"filename": "memory", "content": "MEMORY", "weight": 0}])
+        self.write_memory(
+            root,
+            "seven_days",
+            [{"filename": "memory", "content": "MEMORY", "weight": 0}],
+        )
         cancel = threading.Event()
 
         class CancellingProvider(CaptureProvider):
@@ -1196,9 +1357,16 @@ class PromptPipelineTests(unittest.TestCase):
         (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
         provider = CaptureProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            with self.assertRaisesRegex(EngineError, "memory.temporary_injection_limits"):
+            with self.assertRaisesRegex(
+                EngineError, "memory.temporary_injection_limits"
+            ):
                 handle_request(
-                    {"user": "alice", "source": "cli", "session_id": "large", "prompt": "go"},
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "large",
+                        "prompt": "go",
+                    },
                     root=root,
                     provider_factory=lambda _: provider,
                 )

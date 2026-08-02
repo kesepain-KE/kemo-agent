@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import os
 import re
 import shutil
 import sys
@@ -27,6 +26,7 @@ _NAME_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f.][^\\/:*?\"<>|\x00-\x1f]{0,63}$"
 
 
 # ── 工具函数 ──
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent
@@ -62,12 +62,11 @@ def _read_json(path: Path) -> dict:
 
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8"
-    )
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
 
 
 # ── 核心：创建用户 ──
+
 
 def create_user(
     name: str,
@@ -110,8 +109,8 @@ def create_user(
 
     # ── 后处理 ──
     _post_process_knowledge(root, name)
-    _post_process_storage(root, name)
     _post_process_dirs(root, name)
+    _post_process_memory(root, name)
 
     # ── 引导 API 配置 ──
     if interactive:
@@ -143,15 +142,18 @@ def _post_process_knowledge(root: Path, name: str) -> None:
     )
 
 
-def _post_process_storage(root: Path, name: str) -> None:
-    """初始化 improve/storage.json"""
-    from run.memory import MEMORY_SCHEMA_VERSION
+def _post_process_memory(root: Path, name: str) -> None:
+    """初始化每用户独立的 SQLite 记忆、历史与任务计划库。"""
 
-    storage_path = root / "users" / name / "improve" / "storage.json"
-    storage_path.parent.mkdir(parents=True, exist_ok=True)
-    if storage_path.exists() and storage_path.stat().st_size > 0:
-        return
-    _write_json(storage_path, {"schema_version": MEMORY_SCHEMA_VERSION, "last_compaction": None})
+    from run.history_store import connection as history_connection
+    from run.memory_store import connection
+    from run.task_plan_store import PlanStore
+
+    with connection(root, name):
+        pass
+    with history_connection(root, name):
+        pass
+    PlanStore(root, name).list_plans()
 
 
 def _post_process_dirs(root: Path, name: str) -> None:
@@ -166,10 +168,7 @@ def _post_process_dirs(root: Path, name: str) -> None:
         "agents",
         "history",
         "avatar",
-        "improve/seven_days",
-        "improve/one_month",
-        "improve/half_year",
-        "improve/permanent",
+        "improve",
         "knowledge",
         "user_skills/agent_create",
         "user_skills/user_create",
@@ -179,6 +178,7 @@ def _post_process_dirs(root: Path, name: str) -> None:
 
 
 # ── API 配置引导 ──
+
 
 def _guide_api_config(
     provider_type: str = "kemo",
@@ -243,6 +243,7 @@ def _apply_api_config(
 
 # ── 编辑用户 ──
 
+
 def edit_user_api_config(root: Path | None = None, name: str = "") -> None:
     """交互式编辑用户的 Provider 配置。
 
@@ -289,6 +290,7 @@ def edit_user_api_config(root: Path | None = None, name: str = "") -> None:
 
 # ── 删除用户 ──
 
+
 def delete_user(
     root: Path | None = None,
     name: str = "",
@@ -326,14 +328,14 @@ def delete_user(
 
     if not confirm:
         print(f"\n  ⚠  将永久删除用户 {name} 的所有数据:")
-        print(f"      - 对话历史")
-        print(f"      - 记忆碎片")
-        print(f"      - 知识库")
-        print(f"      - 定时任务")
-        print(f"      - 配置文件")
+        print("      - 对话历史")
+        print("      - 记忆碎片")
+        print("      - 知识库")
+        print("      - 定时任务")
+        print("      - 配置文件")
         print()
         try:
-            answer = input(f"  输入用户名确认删除: ").strip()
+            answer = input("  输入用户名确认删除: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  → 已取消\n")
             return False
@@ -346,6 +348,7 @@ def delete_user(
 
 
 # ── 交互菜单 ──
+
 
 def _pick_user(users: list[str], action: str) -> str | None:
     """让用户从列表中选一个，返回用户名或 None"""
@@ -462,7 +465,7 @@ def _menu_create(root: Path) -> None:
 
     print(f"  ✅ 用户 {name} 创建成功")
     print(f"  路径: {dest}")
-    print(f"")
+    print("")
     print(f"  配置文件:  users/{name}/user_config.json")
     print(f"  人格文件:  users/{name}/user_soul.md")
     print(f"  知识库:    users/{name}/knowledge/")
@@ -470,6 +473,7 @@ def _menu_create(root: Path) -> None:
 
 
 # ── CLI 入口 ──
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -495,7 +499,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"用户 {args.name} 创建成功: {dest}")
             return 0
         except FileExistsError:
-            print(f"错误: 用户 {args.name} 已存在，使用 --overwrite 覆盖", file=sys.stderr)
+            print(
+                f"错误: 用户 {args.name} 已存在，使用 --overwrite 覆盖", file=sys.stderr
+            )
             return 1
         except (ValueError, FileNotFoundError) as exc:
             print(f"错误: {exc}", file=sys.stderr)

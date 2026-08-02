@@ -47,7 +47,9 @@ class PromptKnowledgeTests(unittest.TestCase):
         (root / "config" / "global_soul.md").write_text("GLOBAL", "utf-8")
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
         (root / "agents.md").write_text("AGENTS", "utf-8")
-        (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            "HOT", "utf-8"
+        )
         config = {
             "provider": {
                 "type": "kemo",
@@ -60,21 +62,15 @@ class PromptKnowledgeTests(unittest.TestCase):
         }
         (root / "config" / "global_config.json").write_text("{}", "utf-8")
         (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({
-                "schema_version": 1,
-                "provider": config["provider"],
-                "knowledge": config["knowledge"],
-            }),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": config["provider"],
+                    "knowledge": config["knowledge"],
+                }
+            ),
             "utf-8",
         )
-        for tier in ("seven_days", "one_month", "half_year", "permanent"):
-            folder = root / "users" / "alice" / "improve" / tier
-            folder.mkdir()
-            if tier != "permanent":
-                (folder / "data.json").write_text(
-                    json.dumps({"schema_version": 2, "files": {}}),
-                    "utf-8",
-                )
         return temporary, root, config
 
     def test_prompt_order_is_fixed(self) -> None:
@@ -109,7 +105,9 @@ class PromptKnowledgeTests(unittest.TestCase):
             )
         self.assertIn("Project Alpha Index", seen[0][0]["content"])
         self.assertNotIn("ORDINARY_BODY_MUST_NOT_BE_INJECTED", seen[0][0]["content"])
-        self.assertEqual(result["knowledge"]["documents"][0]["path"], "data_structure.md")
+        self.assertEqual(
+            result["knowledge"]["documents"][0]["path"], "data_structure.md"
+        )
 
     def test_indexes_are_full_ordered_and_only_named_index_files(self) -> None:
         _, root, _ = self.make_root()
