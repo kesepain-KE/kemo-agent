@@ -99,7 +99,9 @@ def prepare_root_layout(root: Path, *, repository_root: Path = PROJECT_ROOT) -> 
         _copy_if_file(repository_root / relative, root / relative)
 
 
-def prepare_user(root: Path, user: str, *, config: dict[str, Any] | None = None) -> Path:
+def prepare_user(
+    root: Path, user: str, *, config: dict[str, Any] | None = None
+) -> Path:
     directory = root / "users" / user
     for relative in (
         "agents",
@@ -107,10 +109,7 @@ def prepare_user(root: Path, user: str, *, config: dict[str, Any] | None = None)
         "user_skills/agent_create",
         "user_skills/user_create",
         "knowledge",
-        "improve/permanent",
-        "improve/half_year",
-        "improve/one_month",
-        "improve/seven_days",
+        "improve",
         "download",
         "file_upload",
         "history",
@@ -135,7 +134,7 @@ def sandbox(*, repository_root: Path = PROJECT_ROOT) -> Iterator[Path]:
         yield root
 
 
-_IMPORT_PROBE = r'''
+_IMPORT_PROBE = r"""
 import importlib
 import importlib.util
 import inspect
@@ -212,7 +211,7 @@ except BaseException as exc:
         "error": str(exc),
     }
 print(MARKER + json.dumps(result, ensure_ascii=False, default=str))
-'''
+"""
 
 
 def hidden_startupinfo() -> subprocess.STARTUPINFO | None:
@@ -264,7 +263,11 @@ def probe_python_entry(
         ) from exc
     marker = "KEMO_TEMPLATE_TEST_RESULT="
     payload_line = next(
-        (line[len(marker) :] for line in reversed(completed.stdout.splitlines()) if line.startswith(marker)),
+        (
+            line[len(marker) :]
+            for line in reversed(completed.stdout.splitlines())
+            if line.startswith(marker)
+        ),
         "",
     )
     if not payload_line:
@@ -284,4 +287,3 @@ def probe_python_entry(
             str(payload.get("error") or ""),
         )
     raise ContractValidationError(str(payload.get("error") or "入口合同不符合要求"))
-

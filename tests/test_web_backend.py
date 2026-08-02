@@ -22,6 +22,7 @@ from provider.schema import ProviderError
 from run.attachments import history_attachment_descriptors
 from run.guidance import GuidanceInput
 from run.cron_store import CronStore, normalize_task
+from run.config import load_config
 from run.history import (
     commit_window,
     empty_window,
@@ -35,6 +36,9 @@ from run.history_index import (
     finish_summary_claim,
     queue_summary,
 )
+from run.history_store import window_exists
+from run.memory import MemoryStore
+from tests.memory_db import update_fragment_metadata
 from run.prompt import PROMPT_SECTION_ORDER
 from run.model_capabilities import clear_model_capability_cache
 from run.task_plan_store import PlanStore, normalize_plan
@@ -44,7 +48,9 @@ from web.service import ActiveRun, WebRunService, _usage_cache_tokens
 
 
 class FakeService:
-    def __init__(self, *, events: list[RunEvent] | None = None, failure: Exception | None = None) -> None:
+    def __init__(
+        self, *, events: list[RunEvent] | None = None, failure: Exception | None = None
+    ) -> None:
         self.events = events or []
         self.failure = failure
         self.cancel_event: threading.Event | None = None
@@ -58,14 +64,31 @@ class FakeService:
     def users(self):
         return [{"name": "alice"}]
 
-    def sessions(self, user, *, source="web", query=""):
-        return {"user": user, "source": source, "query": query, "sessions": []}
+    def sessions(self, user, *, source="web", query="", limit=50, before=""):
+        return {
+            "user": user,
+            "source": source,
+            "query": query,
+            "sessions": [],
+            "has_more": False,
+            "next_cursor": "",
+        }
 
     def history(self, user, session_id, *, source="web"):
-        return {"user": user, "source": source, "session_id": session_id, "messages": []}
+        return {
+            "user": user,
+            "source": source,
+            "session_id": session_id,
+            "messages": [],
+        }
 
     def rename_session(self, user, session_id, title, *, source="web"):
-        self.seen = {"user": user, "session_id": session_id, "title": title, "source": source}
+        self.seen = {
+            "user": user,
+            "session_id": session_id,
+            "title": title,
+            "source": source,
+        }
         return {
             "user": user,
             "source": source,
@@ -82,7 +105,12 @@ class FakeService:
         self.seen = {"user": user, "session_id": session_id, "source": source}
         if client_id:
             self.seen["client_id"] = client_id
-        return {"user": user, "source": source, "session_id": session_id, "deleted": True}
+        return {
+            "user": user,
+            "source": source,
+            "session_id": session_id,
+            "deleted": True,
+        }
 
     def delete_all_sessions(self, user, *, source="web"):
         self.seen = {"user": user, "source": source}
@@ -122,15 +150,32 @@ class FakeService:
     def settings(self, user):
         return {"user": user, "schema_version": 1}
 
-    def stream_chat(self, user, session_id, prompt, *, cancel_event, run_id="", client_id="", **kwargs):
+    def stream_chat(
+        self,
+        user,
+        session_id,
+        prompt,
+        *,
+        cancel_event,
+        run_id="",
+        client_id="",
+        **kwargs,
+    ):
         self.cancel_event = cancel_event
-        self.seen = {"user": user, "session_id": session_id, "prompt": prompt, "run_id": run_id}
+        self.seen = {
+            "user": user,
+            "session_id": session_id,
+            "prompt": prompt,
+            "run_id": run_id,
+        }
         if client_id:
             self.seen["client_id"] = client_id
         self.seen.update(kwargs)
         return iter(self.events)
 
-    def stream_plan(self, user, session_id, plan_id, *, cancel_event, run_id="", client_id=""):
+    def stream_plan(
+        self, user, session_id, plan_id, *, cancel_event, run_id="", client_id=""
+    ):
         self.cancel_event = cancel_event
         self.seen = {
             "user": user,
@@ -213,7 +258,9 @@ class WebBackendTests(unittest.TestCase):
         discover.assert_called_once_with(task="llm")
         self.assertEqual(config_path.read_bytes(), original)
 
-    def test_kemo_model_capabilities_use_catalog_url_and_keep_credentials_server_side(self) -> None:
+    def test_kemo_model_capabilities_use_catalog_url_and_keep_credentials_server_side(
+        self,
+    ) -> None:
         clear_model_capability_cache()
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -461,7 +508,9 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400, response.text)
 
-    def test_upload_avoids_overwrite_and_chat_validates_attached_file_paths(self) -> None:
+    def test_upload_avoids_overwrite_and_chat_validates_attached_file_paths(
+        self,
+    ) -> None:
         _, root = self.make_root()
         captured: list[dict[str, Any]] = []
 
@@ -476,8 +525,14 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(first["renamed"])
         self.assertEqual(second["path"], "note (2).txt")
         self.assertTrue(second["renamed"])
-        self.assertEqual((root / "users" / "alice" / "file_upload" / "note.txt").read_bytes(), b"first")
-        self.assertEqual((root / "users" / "alice" / "file_upload" / "note (2).txt").read_bytes(), b"second")
+        self.assertEqual(
+            (root / "users" / "alice" / "file_upload" / "note.txt").read_bytes(),
+            b"first",
+        )
+        self.assertEqual(
+            (root / "users" / "alice" / "file_upload" / "note (2).txt").read_bytes(),
+            b"second",
+        )
 
         events = list(
             service.stream_chat(
@@ -522,9 +577,13 @@ class WebBackendTests(unittest.TestCase):
                 )
             )
 
-    def test_usage_cache_tokens_prefers_normalized_fields_and_preserves_zero(self) -> None:
+    def test_usage_cache_tokens_prefers_normalized_fields_and_preserves_zero(
+        self,
+    ) -> None:
         self.assertEqual(
-            _usage_cache_tokens({"cached_input_tokens": 12, "provider_raw": [{"cached_tokens": 3}]}),
+            _usage_cache_tokens(
+                {"cached_input_tokens": 12, "provider_raw": [{"cached_tokens": 3}]}
+            ),
             12,
         )
         self.assertEqual(_usage_cache_tokens({"cached_prompt_tokens": 0}), 0)
@@ -536,8 +595,11 @@ class WebBackendTests(unittest.TestCase):
     def request(self, app, method: str, url: str, **kwargs):
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 return await client.request(method, url, **kwargs)
+
         return asyncio.run(invoke())
 
     def skill_zip(self, files: dict[str, str | bytes]) -> bytes:
@@ -581,7 +643,11 @@ class WebBackendTests(unittest.TestCase):
                     "schema_version": 1,
                     "private_note": "must not leak",
                     "components": {
-                        "web": {"version": "0.2.1", "description": "Web 前端+后端", "secret": "hidden"},
+                        "web": {
+                            "version": "0.2.1",
+                            "description": "Web 前端+后端",
+                            "secret": "hidden",
+                        },
                         "core": {"version": "0.2.0", "description": "核心引擎"},
                     },
                 },
@@ -622,7 +688,9 @@ class WebBackendTests(unittest.TestCase):
         remote["version"] = "0.3.0"
         remote["components"]["core"]["version"] = "0.3.0"
         remote["components"]["web"]["version"] = "0.3.0"
-        (root / "version.json").write_text(json.dumps(local, ensure_ascii=False), "utf-8")
+        (root / "version.json").write_text(
+            json.dumps(local, ensure_ascii=False), "utf-8"
+        )
         fetches: list[tuple[str, float]] = []
 
         def fetcher(url: str, timeout: float) -> dict[str, Any]:
@@ -638,9 +706,16 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(payload["local_version"], "0.2.0")
         self.assertEqual(payload["remote_version"], "0.3.0")
         self.assertTrue(payload["read_only"])
-        self.assertEqual(payload["commands"]["all"], f"{'python' if os.name == 'nt' else 'python3'} update.py --module all")
         self.assertEqual(
-            [item["id"] for item in payload["components"] if item["status"] == "update_available"],
+            payload["commands"]["all"],
+            f"{'python' if os.name == 'nt' else 'python3'} update.py --module all",
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in payload["components"]
+                if item["status"] == "update_available"
+            ],
             ["core", "web"],
         )
         self.assertEqual(len(fetches), 1)
@@ -667,7 +742,9 @@ class WebBackendTests(unittest.TestCase):
         (root / "version.json").write_text(json.dumps(manifest), "utf-8")
         service = WebRunService(
             root,
-            version_manifest_fetcher=lambda _url, _timeout: {"version": "not-a-version"},
+            version_manifest_fetcher=lambda _url, _timeout: {
+                "version": "not-a-version"
+            },
         )
         response = self.request(
             create_app(root=root, service=service),
@@ -689,7 +766,9 @@ class WebBackendTests(unittest.TestCase):
                 json={"port": 1360},
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json(), {"ok": True, "port": 1360, "helper_pid": 4321})
+        self.assertEqual(
+            response.json(), {"ok": True, "port": 1360, "helper_pid": 4321}
+        )
         launcher.assert_called_once_with(root.resolve(), 1360)
 
     def test_restart_endpoint_rejects_invalid_port_and_active_chat(self) -> None:
@@ -760,8 +839,12 @@ class WebBackendTests(unittest.TestCase):
         response = self.request(app, "GET", "/api/users/alice/agents")
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
-        self.assertEqual(payload["summary"], {"total": 2, "enabled": 2, "global": 1, "user": 1})
-        user_agent = next(item for item in payload["agents"] if item["name"] == "custom_agent")
+        self.assertEqual(
+            payload["summary"], {"total": 2, "enabled": 2, "global": 1, "user": 1}
+        )
+        user_agent = next(
+            item for item in payload["agents"] if item["name"] == "custom_agent"
+        )
         self.assertEqual(user_agent["version"], "1.4.0")
         self.assertEqual(user_agent["trigger"], "用户明确指定 custom_agent 时")
         self.assertIn("Apply the user agent rules.", user_agent["rules"])
@@ -774,21 +857,35 @@ class WebBackendTests(unittest.TestCase):
         deleted = self.request(app, "DELETE", "/api/users/alice/agents/custom_agent")
         self.assertEqual(deleted.status_code, 200, deleted.text)
         self.assertTrue(deleted.json()["deleted"])
-        self.assertFalse((root / "users" / "alice" / "agents" / "custom_agent").exists())
+        self.assertFalse(
+            (root / "users" / "alice" / "agents" / "custom_agent").exists()
+        )
         self.assertEqual(
-            self.request(app, "DELETE", "/api/users/alice/agents/custom_agent").status_code,
+            self.request(
+                app, "DELETE", "/api/users/alice/agents/custom_agent"
+            ).status_code,
             404,
         )
 
-    def test_skill_registry_management_respects_category_permissions_and_whitelists(self) -> None:
+    def test_skill_registry_management_respects_category_permissions_and_whitelists(
+        self,
+    ) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
         (root / "config" / "global_config.json").write_text(
-            json.dumps({"schema_version": 1, "tools": {"enabled": True, "timeout": 30}}),
+            json.dumps(
+                {"schema_version": 1, "tools": {"enabled": True, "timeout": 30}}
+            ),
             "utf-8",
         )
         (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1, "plugins": {"whitelist": []}, "skills": {"shared_whitelist": []}}),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "plugins": {"whitelist": []},
+                    "skills": {"shared_whitelist": []},
+                }
+            ),
             "utf-8",
         )
         plugin = root / "plugins" / "clock"
@@ -807,7 +904,9 @@ class WebBackendTests(unittest.TestCase):
             + "\n```\n",
             "utf-8",
         )
-        (plugin / "tool.py").write_text("def run(*, context):\n    return {'ok': True}\n", "utf-8")
+        (plugin / "tool.py").write_text(
+            "def run(*, context):\n    return {'ok': True}\n", "utf-8"
+        )
 
         shared_root = root / "shared_skills"
         shared_root.mkdir()
@@ -819,9 +918,13 @@ class WebBackendTests(unittest.TestCase):
         shared.mkdir()
         (shared / "SKILL.md").write_text("# observer\n\n共享观察技能。\n", "utf-8")
 
-        agent_skill = root / "users" / "alice" / "user_skills" / "agent_create" / "generated"
+        agent_skill = (
+            root / "users" / "alice" / "user_skills" / "agent_create" / "generated"
+        )
         agent_skill.mkdir(parents=True)
-        (agent_skill / "SKILL.md").write_text("# generated\n\n智能体生成技能。\n", "utf-8")
+        (agent_skill / "SKILL.md").write_text(
+            "# generated\n\n智能体生成技能。\n", "utf-8"
+        )
         user_skill = root / "users" / "alice" / "user_skills" / "user_create" / "manual"
         user_skill.mkdir(parents=True)
         (user_skill / "SKILL.md").write_text("# manual\n\n用户自建技能。\n", "utf-8")
@@ -858,10 +961,16 @@ class WebBackendTests(unittest.TestCase):
             json={"enabled": False},
         )
         self.assertEqual(disabled.status_code, 200, disabled.text)
-        stored = json.loads((root / "users" / "alice" / "user_config.json").read_text("utf-8"))
+        stored = json.loads(
+            (root / "users" / "alice" / "user_config.json").read_text("utf-8")
+        )
         self.assertEqual(stored["plugins"]["whitelist"], ["__kemo_none__"])
         refreshed = self.request(app, "GET", "/api/users/alice/skills").json()
-        self.assertFalse(next(item for item in refreshed["items"] if item["id"] == "builtin:clock")["enabled"])
+        self.assertFalse(
+            next(item for item in refreshed["items"] if item["id"] == "builtin:clock")[
+                "enabled"
+            ]
+        )
 
         updated = self.request(
             app,
@@ -885,7 +994,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200, deleted.text)
         self.assertFalse(user_skill.exists())
 
-    def test_user_skill_zip_upload_installs_nested_packages_with_all_internal_files(self) -> None:
+    def test_user_skill_zip_upload_installs_nested_packages_with_all_internal_files(
+        self,
+    ) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
         (root / "config" / "global_config.json").write_text(
@@ -921,7 +1032,9 @@ class WebBackendTests(unittest.TestCase):
         )
         destination = root / "users" / "alice" / "user_skills" / "user_create"
         self.assertTrue((destination / "alpha" / "SKILL.md").is_file())
-        self.assertIn("SKILL.md", {path.name for path in (destination / "alpha").iterdir()})
+        self.assertIn(
+            "SKILL.md", {path.name for path in (destination / "alpha").iterdir()}
+        )
         self.assertEqual(
             (destination / "alpha" / "tools" / "run.py").read_text("utf-8"),
             "print('alpha')\n",
@@ -938,7 +1051,9 @@ class WebBackendTests(unittest.TestCase):
         }
         self.assertEqual(user_names, {"user_create/alpha", "user_create/beta"})
 
-    def test_user_skill_zip_upload_rejects_invalid_archives_without_partial_install(self) -> None:
+    def test_user_skill_zip_upload_rejects_invalid_archives_without_partial_install(
+        self,
+    ) -> None:
         _, root = self.make_root()
         service = WebRunService(root)
         app = create_app(service=service)
@@ -955,21 +1070,39 @@ class WebBackendTests(unittest.TestCase):
             app,
             "POST",
             endpoint,
-            files={"file": ("skill.tar", self.skill_zip({"x/SKILL.md": "# X"}), "application/zip")},
+            files={
+                "file": (
+                    "skill.tar",
+                    self.skill_zip({"x/SKILL.md": "# X"}),
+                    "application/zip",
+                )
+            },
         )
         self.assertEqual(wrong_extension.status_code, 400, wrong_extension.text)
         missing_manifest = self.request(
             app,
             "POST",
             endpoint,
-            files={"file": ("skill.zip", self.skill_zip({"x/readme.md": "# X"}), "application/zip")},
+            files={
+                "file": (
+                    "skill.zip",
+                    self.skill_zip({"x/readme.md": "# X"}),
+                    "application/zip",
+                )
+            },
         )
         self.assertEqual(missing_manifest.status_code, 400, missing_manifest.text)
         traversal = self.request(
             app,
             "POST",
             endpoint,
-            files={"file": ("skill.zip", self.skill_zip({"../escape/SKILL.md": "# Escape"}), "application/zip")},
+            files={
+                "file": (
+                    "skill.zip",
+                    self.skill_zip({"../escape/SKILL.md": "# Escape"}),
+                    "application/zip",
+                )
+            },
         )
         self.assertEqual(traversal.status_code, 400, traversal.text)
         self.assertFalse((root / "escape").exists())
@@ -996,7 +1129,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse((destination / "good").exists())
         self.assertFalse((destination / "bad").exists())
 
-    def test_user_skill_zip_upload_conflict_does_not_overwrite_or_install_siblings(self) -> None:
+    def test_user_skill_zip_upload_conflict_does_not_overwrite_or_install_siblings(
+        self,
+    ) -> None:
         _, root = self.make_root()
         destination = root / "users" / "alice" / "user_skills" / "user_create"
         existing = destination / "existing"
@@ -1021,7 +1156,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual((existing / "SKILL.md").read_text("utf-8"), original)
         self.assertFalse((destination / "new-skill").exists())
 
-    def test_auth_config_rejects_partial_password_and_generates_session_secret(self) -> None:
+    def test_auth_config_rejects_partial_password_and_generates_session_secret(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(WebAuthConfigError, "必须同时配置"):
             WebAuthConfig(username="alice")
         generated = WebAuthConfig(access_token="token")
@@ -1066,7 +1203,9 @@ class WebBackendTests(unittest.TestCase):
             "198.51.100.8",
         )
 
-    def test_token_and_password_auth_protect_business_api_and_persist_session(self) -> None:
+    def test_token_and_password_auth_protect_business_api_and_persist_session(
+        self,
+    ) -> None:
         fake = FakeService()
         config = WebAuthConfig(
             access_token="token-secret",
@@ -1079,7 +1218,9 @@ class WebBackendTests(unittest.TestCase):
 
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 status = await client.get("/api/auth/status")
                 health = await client.get("/api/health")
                 denied = await client.get("/api/users")
@@ -1143,9 +1284,13 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(result["status"].json()["authenticated"])
         self.assertEqual(result["health"].status_code, 200)
         self.assertEqual(result["denied"].status_code, 401)
-        self.assertEqual(result["denied"].json()["error"]["code"], "authentication_required")
+        self.assertEqual(
+            result["denied"].json()["error"]["code"], "authentication_required"
+        )
         self.assertEqual(result["denied_chat"].status_code, 401)
-        self.assertTrue(result["denied_chat"].headers["content-type"].startswith("application/json"))
+        self.assertTrue(
+            result["denied_chat"].headers["content-type"].startswith("application/json")
+        )
         self.assertIsNone(fake.cancel_event)
         self.assertEqual(result["header_only"].status_code, 401)
         self.assertEqual(result["wrong"].status_code, 401)
@@ -1184,7 +1329,9 @@ class WebBackendTests(unittest.TestCase):
 
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 status = await client.get("/api/auth/status")
                 login = await client.post(
                     "/api/auth/login",
@@ -1223,13 +1370,19 @@ class WebBackendTests(unittest.TestCase):
                 raise_app_exceptions=False,
                 client=("198.51.100.11", 1234),
             )
-            async with httpx.AsyncClient(transport=first_transport, base_url="http://test") as first:
-                first_failure = await first.post("/api/auth/token", json={"token": "wrong"})
+            async with httpx.AsyncClient(
+                transport=first_transport, base_url="http://test"
+            ) as first:
+                first_failure = await first.post(
+                    "/api/auth/token", json={"token": "wrong"}
+                )
                 locked = await first.post("/api/auth/token", json={"token": "wrong"})
                 blocked_correct = await first.post(
                     "/api/auth/token", json={"token": "token-secret"}
                 )
-            async with httpx.AsyncClient(transport=second_transport, base_url="http://test") as second:
+            async with httpx.AsyncClient(
+                transport=second_transport, base_url="http://test"
+            ) as second:
                 other_ip = await second.post(
                     "/api/auth/token", json={"token": "token-secret"}
                 )
@@ -1252,7 +1405,7 @@ class WebBackendTests(unittest.TestCase):
                     "schema_version": 1,
                     "provider": {
                         "type": "kemo",
-                "base_url": "http://127.0.0.1:8741",
+                        "base_url": "http://127.0.0.1:8741",
                         "model": "old-model",
                         "api_key": "disk-secret",
                         "stream": False,
@@ -1269,7 +1422,9 @@ class WebBackendTests(unittest.TestCase):
 
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 denied = await client.get("/api/users/alice/config/full")
                 await client.post("/api/auth/token", json={"token": "view-token"})
                 loaded = await client.get("/api/users/alice/config/full")
@@ -1311,7 +1466,9 @@ class WebBackendTests(unittest.TestCase):
 
         async def invoke():
             first_transport = httpx.ASGITransport(app=first, raise_app_exceptions=False)
-            second_transport = httpx.ASGITransport(app=second, raise_app_exceptions=False)
+            second_transport = httpx.ASGITransport(
+                app=second, raise_app_exceptions=False
+            )
             async with httpx.AsyncClient(
                 transport=first_transport, base_url="http://test"
             ) as first_client:
@@ -1389,23 +1546,29 @@ class WebBackendTests(unittest.TestCase):
             {"role": "assistant", "content": "world"},
         ]
         window["think"]["rounds"] = [{"round": 1, "content": "inspect first"}]
-        window["tool"]["rounds"] = [{
-            "round": 1,
-            "calls": [{
-                "id": "call-1",
-                "name": "clock",
-                "arguments": {"zone": "local"},
-                "result": "x" * 5200,
-                "status": "completed",
-                "elapsed_ms": 12,
-            }],
-        }]
+        window["tool"]["rounds"] = [
+            {
+                "round": 1,
+                "calls": [
+                    {
+                        "id": "call-1",
+                        "name": "clock",
+                        "arguments": {"zone": "local"},
+                        "result": "x" * 5200,
+                        "status": "completed",
+                        "elapsed_ms": 12,
+                    }
+                ],
+            }
+        ]
         window["data"]["rounds"] = 1
         commit_window(root / "users" / "alice" / "history" / "window-1", window)
         app = create_app(service=WebRunService(root))
 
         users = self.request(app, "GET", "/api/users")
-        self.assertEqual([item["name"] for item in users.json()["users"]], ["alice", "bob"])
+        self.assertEqual(
+            [item["name"] for item in users.json()["users"]], ["alice", "bob"]
+        )
         sessions = self.request(app, "GET", "/api/users/alice/sessions")
         self.assertEqual(sessions.json()["sessions"][0]["session_id"], "s1")
         history = self.request(app, "GET", "/api/users/alice/sessions/s1/history")
@@ -1426,9 +1589,7 @@ class WebBackendTests(unittest.TestCase):
         missing_history = self.request(
             app, "GET", "/api/users/alice/sessions/s1/history"
         ).json()
-        self.assertFalse(
-            missing_history["messages"][0]["attachments"][0]["available"]
-        )
+        self.assertFalse(missing_history["messages"][0]["attachments"][0]["available"])
 
     def test_history_paginates_complete_rounds_from_newest_to_oldest(self) -> None:
         _, root = self.make_root()
@@ -1507,7 +1668,9 @@ class WebBackendTests(unittest.TestCase):
         full = self.request(app, "GET", "/api/users/alice/sessions/s1/history").json()
         self.assertEqual(len(full["messages"]), 90)
 
-    def test_active_create_and_close_session_api_uses_durable_reservations(self) -> None:
+    def test_active_create_and_close_session_api_uses_durable_reservations(
+        self,
+    ) -> None:
         _, root = self.make_root()
         app = create_app(service=WebRunService(root))
 
@@ -1613,7 +1776,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(closed.json()["closed"])
         self.assertFalse(closed.json()["deferred"])
 
-    def test_session_delete_rejects_other_page_lease_and_allows_expired_lease(self) -> None:
+    def test_session_delete_rejects_other_page_lease_and_allows_expired_lease(
+        self,
+    ) -> None:
         _, root = self.make_root()
         service = WebRunService(root)
         app = create_app(service=service)
@@ -1695,7 +1860,9 @@ class WebBackendTests(unittest.TestCase):
         window_dir = root / "users" / "alice" / "history" / "window-1"
         commit_window(window_dir, empty_window("alice", "web", "s1"))
         app = create_app(service=WebRunService(root))
-        before = self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"][0]
+        before = self.request(app, "GET", "/api/users/alice/sessions").json()[
+            "sessions"
+        ][0]
         stale_window = load_window(window_dir)
 
         response = self.request(
@@ -1707,14 +1874,60 @@ class WebBackendTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["session"]["title"], "我的重要对话")
-        after = self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"][0]
+        after = self.request(app, "GET", "/api/users/alice/sessions").json()[
+            "sessions"
+        ][0]
         self.assertEqual(after["title"], "我的重要对话")
         self.assertEqual(after["updated_at"], before["updated_at"])
-        stored = json.loads((window_dir / "data.json").read_text("utf-8"))
+        stored = load_window(window_dir)["data"]
         self.assertEqual(stored["title"], "我的重要对话")
         commit_window(window_dir, stale_window)
-        stored_after_stale_commit = json.loads((window_dir / "data.json").read_text("utf-8"))
+        stored_after_stale_commit = load_window(window_dir)["data"]
         self.assertEqual(stored_after_stale_commit["title"], "我的重要对话")
+
+    def test_session_list_uses_cursor_pagination_and_table_body_search(self) -> None:
+        _, root = self.make_root()
+        for index in range(12):
+            window = empty_window("alice", "web", f"page-{index:02d}")
+            window["text"]["messages"] = [
+                {"role": "user", "content": f"普通消息 {index}"},
+                {
+                    "role": "assistant",
+                    "content": "只有第七条包含检索暗号" if index == 7 else "普通回答",
+                },
+            ]
+            window["data"]["rounds"] = 1
+            commit_window(
+                root / "users" / "alice" / "history" / f"window-{index:02d}",
+                window,
+            )
+        app = create_app(service=WebRunService(root))
+
+        first = self.request(app, "GET", "/api/users/alice/sessions?limit=5").json()
+        self.assertEqual(len(first["sessions"]), 5)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["next_cursor"])
+        second = self.request(
+            app,
+            "GET",
+            f"/api/users/alice/sessions?limit=5&before={first['next_cursor'].replace('+', '%2B')}",
+        ).json()
+        self.assertEqual(len(second["sessions"]), 5)
+        self.assertTrue(
+            {item["session_id"] for item in first["sessions"]}.isdisjoint(
+                {item["session_id"] for item in second["sessions"]}
+            )
+        )
+
+        searched = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions?query=%E6%A3%80%E7%B4%A2%E6%9A%97%E5%8F%B7",
+        ).json()
+        self.assertEqual(
+            [item["session_id"] for item in searched["sessions"]],
+            ["page-07"],
+        )
 
     def test_session_rename_validates_title(self) -> None:
         _, root = self.make_root()
@@ -1734,7 +1947,9 @@ class WebBackendTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
-    def test_session_delete_removes_all_matching_windows_and_preserves_other_users(self) -> None:
+    def test_session_delete_removes_all_matching_windows_and_preserves_other_users(
+        self,
+    ) -> None:
         _, root = self.make_root()
         for name in ("window-1", "window-2"):
             commit_window(
@@ -1754,10 +1969,12 @@ class WebBackendTests(unittest.TestCase):
             [],
         )
         self.assertEqual(
-            self.request(app, "GET", "/api/users/alice/sessions/s1/history").status_code,
+            self.request(
+                app, "GET", "/api/users/alice/sessions/s1/history"
+            ).status_code,
             404,
         )
-        self.assertTrue(bob_window.is_dir())
+        self.assertTrue(window_exists(bob_window))
         self.assertEqual(
             self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code,
             404,
@@ -1775,14 +1992,12 @@ class WebBackendTests(unittest.TestCase):
             observed.update({"request": request, "root": root})
             return {
                 "context": {"rounds_removed": 3},
-                "summary_cache": "context_summary.json",
+                "summary_cache": "history.sqlite3#history_context_summaries",
                 "compressed": True,
                 "compression_verified": True,
             }
 
-        app = create_app(
-            service=WebRunService(root, context_compressor=compressor)
-        )
+        app = create_app(service=WebRunService(root, context_compressor=compressor))
         response = self.request(
             app,
             "POST",
@@ -1825,7 +2040,7 @@ class WebBackendTests(unittest.TestCase):
         def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
             return {
                 "context": {"rounds_removed": 1},
-                "summary_cache": "context_summary.json",
+                "summary_cache": "history.sqlite3#history_context_summaries",
                 "compressed": True,
                 "compression_verified": True,
             }
@@ -1842,9 +2057,7 @@ class WebBackendTests(unittest.TestCase):
             ) as extracted,
         ):
             response = self.request(
-                create_app(
-                    service=WebRunService(root, context_compressor=compressor)
-                ),
+                create_app(service=WebRunService(root, context_compressor=compressor)),
                 "POST",
                 "/api/users/alice/sessions/s1/compress",
             )
@@ -1874,7 +2087,7 @@ class WebBackendTests(unittest.TestCase):
         def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
             return {
                 "context": {"rounds_removed": 2},
-                "summary_cache": "context_summary.json",
+                "summary_cache": "history.sqlite3#history_context_summaries",
                 "compressed": True,
                 "compression_verified": True,
             }
@@ -1922,9 +2135,7 @@ class WebBackendTests(unittest.TestCase):
 
         with patch("web.service.queue_memory_extraction") as queued:
             response = self.request(
-                create_app(
-                    service=WebRunService(root, context_compressor=compressor)
-                ),
+                create_app(service=WebRunService(root, context_compressor=compressor)),
                 "POST",
                 "/api/users/alice/sessions/s1/compress",
             )
@@ -1978,8 +2189,12 @@ class WebBackendTests(unittest.TestCase):
 
         with (
             patch("web.service.AgentRunner", return_value=object()),
-            patch("run.memory_analysis.analyze_memory_batch", side_effect=extract) as extracted,
-            patch("run.memory_analysis.persist_round_memory_analysis", side_effect=persist),
+            patch(
+                "run.memory_analysis.analyze_memory_batch", side_effect=extract
+            ) as extracted,
+            patch(
+                "run.memory_analysis.persist_round_memory_analysis", side_effect=persist
+            ),
         ):
             app = create_app(service=WebRunService(root))
             response = self.request(
@@ -2089,7 +2304,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()["rolled_back"])
         self.assertEqual(response.json()["remaining_rounds"], 1)
-        self.assertEqual(response.json()["content"], [{"type": "text", "text": "retry me"}])
+        self.assertEqual(
+            response.json()["content"], [{"type": "text", "text": "retry me"}]
+        )
         for path in (archive_path, runtime_path):
             rolled_back = load_window(path)
             self.assertEqual(rolled_back["data"]["rounds"], 1)
@@ -2100,12 +2317,18 @@ class WebBackendTests(unittest.TestCase):
                     {"role": "assistant", "content": "first answer"},
                 ],
             )
-            self.assertEqual([item["round"] for item in rolled_back["think"]["rounds"]], [1])
-            self.assertEqual([item["round"] for item in rolled_back["tool"]["rounds"]], [1])
-            self.assertTrue(all(
-                (item.get("metadata") or {}).get("round") == 1
-                for item in rolled_back["items"]["items"]
-            ))
+            self.assertEqual(
+                [item["round"] for item in rolled_back["think"]["rounds"]], [1]
+            )
+            self.assertEqual(
+                [item["round"] for item in rolled_back["tool"]["rounds"]], [1]
+            )
+            self.assertTrue(
+                all(
+                    (item.get("metadata") or {}).get("round") == 1
+                    for item in rolled_back["items"]["items"]
+                )
+            )
             self.assertEqual(rolled_back["data"]["token_usage"]["total_tokens"], 12)
             self.assertEqual(rolled_back["data"]["memory_processed_round"], 1)
             self.assertEqual(rolled_back["data"]["memory_status"], "completed")
@@ -2146,7 +2369,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
 
-        service._active_runs["run_busy_undo"] = ActiveRun("run_busy_undo", "alice", "s1")
+        service._active_runs["run_busy_undo"] = ActiveRun(
+            "run_busy_undo", "alice", "s1"
+        )
         active = self.request(
             app,
             "POST",
@@ -2180,26 +2405,28 @@ class WebBackendTests(unittest.TestCase):
             self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"],
             [],
         )
-        self.assertTrue(bob_window.is_dir())
+        self.assertTrue(window_exists(bob_window))
 
     def test_active_session_cannot_be_deleted(self) -> None:
         _, root = self.make_root()
         window_dir = root / "users" / "alice" / "history" / "window-1"
         commit_window(window_dir, empty_window("alice", "web", "busy"))
         service = WebRunService(root)
-        service._active_runs["run_busy_123"] = ActiveRun("run_busy_123", "alice", "busy")
+        service._active_runs["run_busy_123"] = ActiveRun(
+            "run_busy_123", "alice", "busy"
+        )
         app = create_app(service=service)
 
         response = self.request(app, "DELETE", "/api/users/alice/sessions/busy")
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "conflict")
-        self.assertTrue(window_dir.is_dir())
+        self.assertTrue(window_exists(window_dir))
 
         bulk_response = self.request(app, "DELETE", "/api/users/alice/sessions")
         self.assertEqual(bulk_response.status_code, 409)
         self.assertEqual(bulk_response.json()["error"]["code"], "conflict")
-        self.assertTrue(window_dir.is_dir())
+        self.assertTrue(window_exists(window_dir))
 
     def test_history_summary_manual_retry_api_requeues_and_wakes_worker(self) -> None:
         _, root = self.make_root()
@@ -2267,14 +2494,18 @@ class WebBackendTests(unittest.TestCase):
         missing_user = self.request(app, "GET", "/api/users/mallory/sessions")
         self.assertEqual(missing_user.status_code, 404)
         self.assertEqual(missing_user.json()["error"]["code"], "not_found")
-        invalid_source = self.request(app, "GET", "/api/users/alice/sessions?source=cli")
+        invalid_source = self.request(
+            app, "GET", "/api/users/alice/sessions?source=cli"
+        )
         self.assertEqual(invalid_source.status_code, 400)
         cross_user = self.request(app, "GET", "/api/users/bob/sessions/private/history")
         self.assertEqual(cross_user.status_code, 404)
         self.assertNotIn("secret", cross_user.text)
 
     def test_validation_and_internal_error_are_sanitized(self) -> None:
-        invalid = self.request(create_app(service=FakeService()), "POST", "/api/chat", json={})
+        invalid = self.request(
+            create_app(service=FakeService()), "POST", "/api/chat", json={}
+        )
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("input", invalid.text)
         secret = "API_KEY=super-secret"
@@ -2356,7 +2587,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response["queued"], 0)
         self.assertEqual(active.guidance.qsize(), 0)
 
-    def test_web_guidance_accepts_attachment_only_and_revalidates_user_scope(self) -> None:
+    def test_web_guidance_accepts_attachment_only_and_revalidates_user_scope(
+        self,
+    ) -> None:
         _, root = self.make_root()
         upload = root / "users" / "alice" / "file_upload"
         upload.mkdir(parents=True)
@@ -2414,7 +2647,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 404, denied.text)
         self.assertFalse(active.cancel_event.is_set())
 
-    def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(self) -> None:
+    def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(
+        self,
+    ) -> None:
         _, root = self.make_root()
 
         def source(request, *, cancel_event, **_kwargs):
@@ -2448,10 +2683,22 @@ class WebBackendTests(unittest.TestCase):
         events = [
             RunEvent(type="reasoning_delta", content="think"),
             RunEvent(type="text_delta", content="hello"),
-            RunEvent(type="tool_call_start", tool_call_id="c1", tool_name="clock", arguments={"x": 1}),
-            RunEvent(type="tool_call_result", tool_call_id="c1", tool_name="clock", result={"ok": True}),
+            RunEvent(
+                type="tool_call_start",
+                tool_call_id="c1",
+                tool_name="clock",
+                arguments={"x": 1},
+            ),
+            RunEvent(
+                type="tool_call_result",
+                tool_call_id="c1",
+                tool_name="clock",
+                result={"ok": True},
+            ),
             RunEvent(type="usage", usage={"total_tokens": 3}),
-            RunEvent(type="done", usage={"total_tokens": 3}, metadata={"committed": True}),
+            RunEvent(
+                type="done", usage={"total_tokens": 3}, metadata={"committed": True}
+            ),
         ]
         fake = FakeService(events=events)
         response = self.request(
@@ -2461,7 +2708,9 @@ class WebBackendTests(unittest.TestCase):
             json={"user": "alice", "session_id": "s1", "prompt": "hello"},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        self.assertTrue(
+            response.headers["content-type"].startswith("text/event-stream")
+        )
         parsed = self.parse_sse(response.text)
         self.assertEqual([item[0] for item in parsed], [event.type for event in events])
         self.assertEqual(parsed[2][1]["arguments"], {"x": 1})
@@ -2487,7 +2736,12 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(fake.seen["uploaded_files"], ["screenshot.png"])
 
     def test_plan_chat_route_starts_plan_stream_without_a_prompt(self) -> None:
-        fake = FakeService(events=[RunEvent(type="text_delta", content="执行中"), RunEvent(type="done")])
+        fake = FakeService(
+            events=[
+                RunEvent(type="text_delta", content="执行中"),
+                RunEvent(type="done"),
+            ]
+        )
         response = self.request(
             create_app(service=fake),
             "POST",
@@ -2501,7 +2755,9 @@ class WebBackendTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual([item[0] for item in self.parse_sse(response.text)], ["text_delta", "done"])
+        self.assertEqual(
+            [item[0] for item in self.parse_sse(response.text)], ["text_delta", "done"]
+        )
         self.assertEqual(
             fake.seen,
             {
@@ -2584,7 +2840,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(requests[0]["_task_plan_id"], plan["plan_id"])
         self.assertEqual(requests[0]["_task_plan_mode"], "agent_managed")
         self.assertIn("【任务计划连续执行】", requests[0]["prompt"])
-        self.assertEqual([event.type for event in events], ["tool_call_result", "tool_call_result", "text_delta", "done"])
+        self.assertEqual(
+            [event.type for event in events],
+            ["tool_call_result", "tool_call_result", "text_delta", "done"],
+        )
         stored = store.read(plan["plan_id"])
         self.assertEqual(stored["status"], "completed")
         self.assertTrue(all(step["status"] == "completed" for step in stored["steps"]))
@@ -2608,7 +2867,9 @@ class WebBackendTests(unittest.TestCase):
                 ],
             )
         )
-        store.update(plan["plan_id"], lambda current: {**current, "current_step": "step_1"})
+        store.update(
+            plan["plan_id"], lambda current: {**current, "current_step": "step_1"}
+        )
         app = create_app(service=WebRunService(root))
 
         response = self.request(
@@ -2732,9 +2993,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(fetched_memory.status_code, 200, fetched_memory.text)
         self.assertEqual(fetched_memory.json()["content"], "remember this")
-        self.assertEqual(
-            fetched_memory.json()["memory_ref"], "one_month:web-memory.md"
-        )
+        self.assertEqual(fetched_memory.json()["memory_ref"], "one_month:web-memory.md")
         deleted_memory = self.request(
             app,
             "DELETE",
@@ -2833,7 +3092,9 @@ class WebBackendTests(unittest.TestCase):
         _, root = self.make_root()
         (root / "config").mkdir()
         (root / "config" / "global_config.json").write_text(
-            json.dumps({"web": {"host": "127.0.0.1", "port": 1478, "log_level": "info"}}),
+            json.dumps(
+                {"web": {"host": "127.0.0.1", "port": 1478, "log_level": "info"}}
+            ),
             "utf-8",
         )
         import start_web
@@ -2904,14 +3165,20 @@ class WebBackendTests(unittest.TestCase):
 
     def test_missing_terminal_and_invalid_event_become_sse_error(self) -> None:
         missing = self.request(
-            create_app(service=FakeService(events=[RunEvent(type="text_delta", content="partial")])),
+            create_app(
+                service=FakeService(
+                    events=[RunEvent(type="text_delta", content="partial")]
+                )
+            ),
             "POST",
             "/api/chat",
             json={"user": "alice", "session_id": "s1", "prompt": "hello"},
         )
         parsed = self.parse_sse(missing.text)
         self.assertEqual([item[0] for item in parsed], ["text_delta", "error"])
-        self.assertEqual(parsed[-1][1]["error"]["exception_type"], "MissingTerminalEvent")
+        self.assertEqual(
+            parsed[-1][1]["error"]["exception_type"], "MissingTerminalEvent"
+        )
 
         invalid = FakeService(events=["bad"])  # type: ignore[list-item]
         response = self.request(
@@ -2972,7 +3239,9 @@ class WebBackendTests(unittest.TestCase):
             "utf-8",
         )
         (root / "users" / "alice" / "knowledge").mkdir()
-        (root / "users" / "alice" / "knowledge" / "notes.md").write_text("# Alice Notes\nprivate index", "utf-8")
+        (root / "users" / "alice" / "knowledge" / "notes.md").write_text(
+            "# Alice Notes\nprivate index", "utf-8"
+        )
         (root / "shared_knowledge").mkdir()
         (root / "shared_knowledge" / "team.md").write_text("# Team Shared", "utf-8")
         (root / "global_knowledge").mkdir()
@@ -3038,7 +3307,9 @@ class WebBackendTests(unittest.TestCase):
                     f"    registry.add_expand_root('{scope}', Path(__file__).resolve().parent)\n",
                     "utf-8",
                 )
-            module_name = {"global": "lights", "shared": "bridge", "user": "personal"}[scope]
+            module_name = {"global": "lights", "shared": "bridge", "user": "personal"}[
+                scope
+            ]
             module = expand_root / module_name
             module.mkdir()
             (module / "input_data.md").write_text(f"# {scope} data\nready", "utf-8")
@@ -3156,39 +3427,31 @@ class WebBackendTests(unittest.TestCase):
             root / "users" / "alice" / "history" / "other-window",
             other_window,
         )
-        runtime_cache = runtime_window_path(
+        runtime_path = runtime_window_path(
             root / "users" / "alice" / "history" / "observer-window"
-        ) / "context_summary.json"
-        runtime_cache.parent.mkdir(parents=True, exist_ok=True)
-        runtime_cache.write_text(
-            json.dumps(
-                {
-                    "source_hash": "hash",
-                    "covered_rounds": [1],
-                    "created_at": "2026-07-18T00:00:00+00:00",
-                    "summary": {"narrative": "must not be exposed"},
-                }
-            ),
-            "utf-8",
         )
-        memory_dir = root / "users" / "alice" / "improve" / "seven_days"
-        memory_dir.mkdir(parents=True)
-        (memory_dir / "safe-memory.md").write_text("safe memory preview", "utf-8")
-        (memory_dir / "data.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "files": {
-                        "safe-memory.md": {
-                            "weight": 2,
-                            "updated_at": "2026-07-18T00:00:00+00:00",
-                            "last_weight_date": None,
-                            "expires_at": "2099-07-25T00:00:00+00:00",
-                        }
-                    }
-                }
-            ),
-            "utf-8",
+        commit_window(
+            runtime_path,
+            window,
+            summary_cache={
+                "schema_version": 3,
+                "source_hash": "hash",
+                "covered_rounds": [1],
+                "covered_through_round": 1,
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "summary": {"narrative": "must not be exposed"},
+                "memory_extractions": [],
+            },
+        )
+        memory_store = MemoryStore(root, "alice", load_config("alice", root))
+        memory_store.create_fragment(
+            "seven_days", "safe-memory.md", "safe memory preview"
+        )
+        update_fragment_metadata(
+            memory_store,
+            "seven_days",
+            "safe-memory.md",
+            weight=2,
         )
         create_user_agent_package(
             root,
@@ -3263,7 +3526,9 @@ class WebBackendTests(unittest.TestCase):
             list(PROMPT_SECTION_ORDER),
         )
         runtime_sense = next(
-            item for item in runtime_payload["components"]["sense"] if item["id"] == "runtime"
+            item
+            for item in runtime_payload["components"]["sense"]
+            if item["id"] == "runtime"
         )
         self.assertEqual(runtime_sense["name"], "runtime display")
         self.assertEqual(len(runtime_payload["components"]["expand"]), 3)
@@ -3274,14 +3539,51 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertIn("active_requests", runtime_payload["congestion"]["provider"])
         self.assertIn("active_chats", runtime_payload["congestion"]["web"])
-        self.assertIn("queued_messages", runtime_payload["congestion"]["message_router"])
+        self.assertIn(
+            "queued_messages", runtime_payload["congestion"]["message_router"]
+        )
         self.assertNotIn("api_key", runtime_status.text)
+
+        prompt_status = self.request(
+            app,
+            "GET",
+            "/api/users/alice/runtime/status?session_id=observer-session&sections=summary,prompt",
+        )
+        self.assertEqual(prompt_status.status_code, 200, prompt_status.text)
+        prompt_payload = prompt_status.json()
+        self.assertEqual(
+            set(prompt_payload["included_sections"]),
+            {"summary", "prompt"},
+        )
+        self.assertTrue(prompt_payload["prompt"]["content"])
+        self.assertEqual(prompt_payload["context"]["rounds"], 1)
+        self.assertEqual(prompt_payload["tokens"]["total_tokens"], 0)
+        self.assertEqual(prompt_payload["components"], {"sense": [], "expand": []})
+        self.assertEqual(prompt_payload["system_cron"]["tracking"], "not_requested")
+
+        token_status = self.request(
+            app,
+            "GET",
+            "/api/users/alice/runtime/status?session_id=observer-session&sections=summary,tokens",
+        )
+        self.assertEqual(token_status.status_code, 200, token_status.text)
+        token_payload = token_status.json()
+        self.assertEqual(
+            set(token_payload["included_sections"]),
+            {"summary", "tokens"},
+        )
+        self.assertEqual(token_payload["tokens"]["total_tokens"], 1500)
+        self.assertEqual(token_payload["tokens"]["request_count"], 1)
+        self.assertEqual(token_payload["prompt"]["content"], "")
+        self.assertEqual(token_payload["runtime_host"]["state"], "not_requested")
 
         tasks = self.request(app, "GET", "/api/users/alice/tasks")
         self.assertEqual(len(tasks.json()["plans"]), 1)
         self.assertEqual(len(tasks.json()["cron_tasks"]), 1)
         self.assertTrue(tasks.json()["cron_tasks"][0]["user_defined"])
-        self.assertFalse(WebRunService._cron_summary({"exec_mode": "system"})["user_defined"])
+        self.assertFalse(
+            WebRunService._cron_summary({"exec_mode": "system"})["user_defined"]
+        )
         self.assertNotIn("do not expose", tasks.text)
 
         knowledge = self.request(app, "GET", "/api/users/alice/knowledge")
@@ -3335,7 +3637,9 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(refreshed_expand.status_code, 200)
         self.assertTrue(refreshed_expand.json()["updated"])
-        self.assertIn("refreshed", refreshed_expand.json()["item"]["collected_markdown"])
+        self.assertIn(
+            "refreshed", refreshed_expand.json()["item"]["collected_markdown"]
+        )
         self.assertEqual(
             refreshed_expand.json()["item"]["runtime"]["update"]["status"],
             "completed",
@@ -3352,7 +3656,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(
             next(
                 item
-                for group in self.request(app, "GET", "/api/users/alice/expand").json()["expands"]
+                for group in self.request(app, "GET", "/api/users/alice/expand").json()[
+                    "expands"
+                ]
                 if group["scope"] == "global"
                 for item in group["items"]
                 if item["name"] == "lights"
@@ -3376,7 +3682,9 @@ class WebBackendTests(unittest.TestCase):
             400,
         )
         self.assertEqual(
-            self.request(app, "DELETE", "/api/users/alice/expand/global/lights").status_code,
+            self.request(
+                app, "DELETE", "/api/users/alice/expand/global/lights"
+            ).status_code,
             400,
         )
         deleted_expand = self.request(
@@ -3411,7 +3719,9 @@ class WebBackendTests(unittest.TestCase):
             {item["id"]: item["status"] for item in sense.json()["sources"]},
             {"broken": "invalid", "network": "filtered", "runtime": "active"},
         )
-        runtime_source = next(item for item in sense.json()["sources"] if item["id"] == "runtime")
+        runtime_source = next(
+            item for item in sense.json()["sources"] if item["id"] == "runtime"
+        )
         self.assertEqual(runtime_source["display_name"], "runtime display")
         self.assertEqual(runtime_source["data_md"], "sense.md")
         self.assertEqual(runtime_source["recent_update"], "2026-07-19 12:00:00")
@@ -3422,7 +3732,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(runtime_source["whitelisted"])
         self.assertEqual(runtime_source["update_interval"], "")
         self.assertTrue(runtime_source["valid"])
-        broken_source = next(item for item in sense.json()["sources"] if item["id"] == "broken")
+        broken_source = next(
+            item for item in sense.json()["sources"] if item["id"] == "broken"
+        )
         self.assertFalse(broken_source["enabled"])
         self.assertFalse(broken_source["valid"])
         self.assertEqual(broken_source["health"], "异常")
@@ -3434,7 +3746,9 @@ class WebBackendTests(unittest.TestCase):
         refreshed = self.request(app, "POST", "/api/users/alice/sense/runtime/refresh")
         self.assertEqual(refreshed.status_code, 200)
         self.assertTrue(refreshed.json()["updated"])
-        self.assertEqual(refreshed.json()["source"]["collected_markdown"], "runtime refreshed")
+        self.assertEqual(
+            refreshed.json()["source"]["collected_markdown"], "runtime refreshed"
+        )
 
         disabled_runtime = self.request(
             app,
@@ -3445,7 +3759,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(disabled_runtime.status_code, 200)
         self.assertEqual(disabled_runtime.json()["whitelist"], ["__kemo_none__"])
         self.assertEqual(
-            self.request(app, "GET", "/api/users/alice/sense").json()["summary"]["enabled"],
+            self.request(app, "GET", "/api/users/alice/sense").json()["summary"][
+                "enabled"
+            ],
             0,
         )
         reenabled_runtime = self.request(
@@ -3465,7 +3781,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(enabled_network.status_code, 200)
         self.assertTrue(enabled_network.json()["enabled"])
         self.assertEqual(
-            self.request(app, "GET", "/api/users/alice/sense").json()["summary"]["enabled"],
+            self.request(app, "GET", "/api/users/alice/sense").json()["summary"][
+                "enabled"
+            ],
             2,
         )
         disabled_network = self.request(

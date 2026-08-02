@@ -7,6 +7,7 @@ import argparse
 import copy
 import importlib
 import importlib.util
+import json
 import platform
 import shutil
 import subprocess
@@ -87,7 +88,11 @@ def prune_backups() -> None:
     if not backups_root.is_dir():
         return
     backups = sorted(
-        [path for path in backups_root.iterdir() if path.is_dir() and path.name.startswith("update-")],
+        [
+            path
+            for path in backups_root.iterdir()
+            if path.is_dir() and path.name.startswith("update-")
+        ],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -127,7 +132,9 @@ def migrate_user_skeletons(*, dry_run: bool) -> None:
         print(yellow(f"用户目录补齐跳过: {exc}"))
 
 
-def migrate_user_memories(*, dry_run: bool) -> None:
+def initialize_user_memory_databases(*, dry_run: bool) -> None:
+    """Initialize the SQLite memory store without importing legacy files."""
+
     users_dir = ROOT / "users"
     if not users_dir.is_dir():
         return
@@ -137,23 +144,54 @@ def migrate_user_memories(*, dry_run: bool) -> None:
         if path.is_dir()
         and not path.name.startswith("_")
         and (path / "user_config.json").is_file()
-        and (path / "improve").is_dir()
-        and not (path / "improve" / "storage.json").is_file()
     ]
     if not candidates:
         return
     if dry_run:
-        print(f"[dry-run] 将迁移 {len(candidates)} 个用户的文件型记忆到 schema v2")
+        print(f"[dry-run] 将初始化 {len(candidates)} 个用户的 SQLite 记忆库")
         return
     try:
         sys.path.insert(0, str(ROOT))
-        from run.memory_migrate import migrate_user_memory
+        from run.memory_store import connection
 
-        reports = [migrate_user_memory(ROOT, path.name) for path in candidates]
-        migrated = sum(1 for report in reports if report.migrated)
-        print(green(f"用户记忆已迁移到 schema v2: {migrated} 个用户"))
+        for path in candidates:
+            with connection(ROOT, path.name):
+                pass
+        print(green(f"用户 SQLite 记忆库已就绪: {len(candidates)} 个用户"))
     except Exception as exc:
-        raise UpdateError(f"用户记忆迁移失败，旧数据已保留：{exc}") from exc
+        raise UpdateError(f"用户 SQLite 记忆库初始化失败：{exc}") from exc
+
+
+def initialize_runtime_state_databases(*, dry_run: bool) -> None:
+    """Initialize current SQLite stores without scanning obsolete file formats."""
+
+    users_dir = ROOT / "users"
+    users = [
+        path for path in sorted(users_dir.iterdir())
+        if path.is_dir() and not path.name.startswith("_")
+        and (path / "user_config.json").is_file()
+    ] if users_dir.is_dir() else []
+    if dry_run:
+        print(f"[dry-run] 将初始化 {len(users)} 个用户的运行状态数据库")
+        return
+    try:
+        sys.path.insert(0, str(ROOT))
+        from message.state import ProcessedMessageStore
+        from run.history_store import connection
+        from run.log_store import LogStore
+        from run.task_plan_store import PlanStore
+
+        for user_path in users:
+            with connection(ROOT, user_path.name):
+                pass
+            ProcessedMessageStore(ROOT, user_path.name).recover_interrupted()
+            PlanStore(ROOT, user_path.name).list_plans()
+        LogStore(ROOT).list_cron("__system__", limit=1)
+        print(green("运行状态 SQLite 数据库已就绪"))
+    except UpdateError:
+        raise
+    except Exception as exc:
+        raise UpdateError(f"运行状态 SQLite 初始化失败：{exc}") from exc
 
 
 def build_web_frontend(*, dry_run: bool) -> None:
@@ -213,7 +251,9 @@ def version_for_module(document: dict, module: str) -> str:
         value = document.get("version")
     else:
         components = document.get("components")
-        if not isinstance(components, dict) or not isinstance(components.get(module), dict):
+        if not isinstance(components, dict) or not isinstance(
+            components.get(module), dict
+        ):
             raise UpdateError(f"version.json 缺少 components.{module}")
         value = components[module].get("version")
     version = str(value or "").strip()
@@ -243,7 +283,9 @@ def should_update(
         if force:
             print(yellow("版本相同，强制重新安装指定板块。"))
             return True
-        return ask_yes_no("版本相同，仍要重新安装？", default=False, assume_yes=assume_yes)
+        return ask_yes_no(
+            "版本相同，仍要重新安装？", default=False, assume_yes=assume_yes
+        )
     if comparison < 0:
         print(green(f"发现更新: {local_version} -> {remote_version}"))
         return ask_yes_no("是否继续更新？", default=True, assume_yes=assume_yes)
@@ -286,7 +328,9 @@ def run_modules(
                     raise UpdateError(f"{import_path}.update() 未返回字典")
                 status = str(result.get("status", ""))
                 if status not in {"ok", "skipped", "partial", "failed"}:
-                    raise UpdateError(f"{import_path}.update() 返回无效状态: {status!r}")
+                    raise UpdateError(
+                        f"{import_path}.update() 返回无效状态: {status!r}"
+                    )
                 result.setdefault("module", name)
                 result.setdefault("details", [])
                 result.setdefault("warnings", [])
@@ -352,7 +396,9 @@ def version_document_after_update(
         raise UpdateError(f"远程 version.json 缺少 components.{requested_module}")
     result = copy.deepcopy(local_document)
     result_components = result.setdefault("components", {})
-    result_components[requested_module] = copy.deepcopy(remote_components[requested_module])
+    result_components[requested_module] = copy.deepcopy(
+        remote_components[requested_module]
+    )
     return result
 
 
@@ -371,7 +417,9 @@ def finalize_version_document(
     target = ROOT / "version.json"
     final_version = version_for_module(final_document, requested_module)
     if dry_run:
-        print(f"[dry-run] 将在全部步骤成功后写入 {requested_module} 版本: {final_version}")
+        print(
+            f"[dry-run] 将在全部步骤成功后写入 {requested_module} 版本: {final_version}"
+        )
         return
     try:
         write_json_atomic(target, final_document)
@@ -407,7 +455,9 @@ def print_version_report(local: dict, remote: dict, requested_module: str) -> No
         remote_version = version_for_module(remote, name)
         comparison = compare_versions(local_version, remote_version)
         label = "全部" if name == "all" else MODULES[name][0]
-        state = "最新" if comparison == 0 else "可更新" if comparison < 0 else "本地较新"
+        state = (
+            "最新" if comparison == 0 else "可更新" if comparison < 0 else "本地较新"
+        )
         print(f"{label:<10} 本地 {local_version:<12} 远程 {remote_version:<12} {state}")
 
 
@@ -423,16 +473,28 @@ def _print_platform_warning() -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按板块更新 kemo-agent（全平台）")
-    parser.add_argument("--module", choices=["all", *MODULES], default="all", help="更新板块，默认 all")
+    parser.add_argument(
+        "--module", choices=["all", *MODULES], default="all", help="更新板块，默认 all"
+    )
     parser.add_argument("--check", action="store_true", help="仅检查本地和远程版本")
     parser.add_argument("--force", action="store_true", help="版本相同时强制重新安装")
-    parser.add_argument("--yes", "-y", action="store_true", help="使用默认选项确认所有提示")
-    parser.add_argument("--dry-run", action="store_true", help="仅展示计划的操作，不实际修改")
-    parser.add_argument("--skip-web-build", action="store_true", help="跳过 Web 前端构建")
-    parser.add_argument("--skip-deps", action="store_true", help="跳过 pip install -r requirements.txt")
+    parser.add_argument(
+        "--yes", "-y", action="store_true", help="使用默认选项确认所有提示"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="仅展示计划的操作，不实际修改"
+    )
+    parser.add_argument(
+        "--skip-web-build", action="store_true", help="跳过 Web 前端构建"
+    )
+    parser.add_argument(
+        "--skip-deps", action="store_true", help="跳过 pip install -r requirements.txt"
+    )
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="Git 仓库 URL")
     parser.add_argument("--branch", default=DEFAULT_BRANCH, help="Git 分支")
-    parser.add_argument("--remote-version-url", default="", help="远程 version.json URL 覆盖")
+    parser.add_argument(
+        "--remote-version-url", default="", help="远程 version.json URL 覆盖"
+    )
     return parser.parse_args(argv)
 
 
@@ -441,7 +503,9 @@ def main(argv: list[str] | None = None) -> int:
     backup_dir: Path | None = None
     try:
         _print_platform_warning()
-        remote_url = args.remote_version_url or VERSION_URL_TEMPLATE.format(branch=args.branch)
+        remote_url = args.remote_version_url or VERSION_URL_TEMPLATE.format(
+            branch=args.branch
+        )
         local_document, remote_document = load_version_documents(remote_url)
         validate_version_document(local_document, "本地")
         validate_version_document(remote_document, "远程")
@@ -482,7 +546,8 @@ def main(argv: list[str] | None = None) -> int:
 
             if "core" in selected_modules:
                 migrate_user_skeletons(dry_run=args.dry_run)
-                migrate_user_memories(dry_run=args.dry_run)
+                initialize_user_memory_databases(dry_run=args.dry_run)
+                initialize_runtime_state_databases(dry_run=args.dry_run)
 
         if "web" in selected_modules and not args.skip_web_build:
             build_web_frontend(dry_run=args.dry_run)

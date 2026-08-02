@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,31 @@ class UpdateModuleTests(unittest.TestCase):
 
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], "2.0.0")
             self.assertEqual(list(path.parent.glob(".version.json.*.tmp")), [])
+
+    def test_runtime_state_initialization_creates_current_databases(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_runtime_state_initialization")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            user_dir = root / "users" / "alice"
+            write_json(user_dir / "user_config.json", {})
+
+            with mock.patch.object(dispatcher, "ROOT", root):
+                dispatcher.initialize_runtime_state_databases(dry_run=False)
+
+            database = sqlite3.connect(user_dir / "task_plan" / "task_plans.sqlite3")
+            try:
+                self.assertEqual(database.execute("SELECT COUNT(*) FROM task_plans").fetchone()[0], 0)
+            finally:
+                database.close()
+            database = sqlite3.connect(user_dir / "history" / "history.sqlite3")
+            try:
+                self.assertEqual(
+                    database.execute("SELECT COUNT(*) FROM message_processed_messages").fetchone()[0],
+                    0,
+                )
+            finally:
+                database.close()
+            self.assertTrue((root / "runtime" / "logs.sqlite3").is_file())
 
     def test_build_requires_npm_even_when_stale_dist_exists(self) -> None:
         dispatcher = self.load_dispatcher("kemo_update_build_requires_npm")
@@ -398,7 +424,12 @@ class UpdateModuleTests(unittest.TestCase):
                 return_value=[{"module": "plugins", "status": "ok", "details": [], "warnings": []}],
             ) as run_modules,
             mock.patch.object(dispatcher, "migrate_user_skeletons") as migrate_skeletons,
-            mock.patch.object(dispatcher, "migrate_user_memories") as migrate_memories,
+            mock.patch.object(
+                dispatcher, "initialize_user_memory_databases"
+            ) as initialize_memories,
+            mock.patch.object(
+                dispatcher, "initialize_runtime_state_databases"
+            ) as initialize_runtime_state,
             mock.patch.object(dispatcher, "build_web_frontend") as build_web,
             mock.patch.object(dispatcher, "refresh_dependencies") as refresh_dependencies,
             mock.patch.object(dispatcher, "finalize_version_document") as finalize_version,
@@ -408,7 +439,8 @@ class UpdateModuleTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(run_modules.call_args.args[0], ["plugins"])
         migrate_skeletons.assert_not_called()
-        migrate_memories.assert_not_called()
+        initialize_memories.assert_not_called()
+        initialize_runtime_state.assert_not_called()
         build_web.assert_not_called()
         refresh_dependencies.assert_not_called()
         finalize_version.assert_called_once_with(
@@ -442,7 +474,8 @@ class UpdateModuleTests(unittest.TestCase):
             mock.patch.object(dispatcher, "make_backup", return_value=ROOT / ".backups" / "test"),
             mock.patch.object(dispatcher, "run_modules", return_value=results),
             mock.patch.object(dispatcher, "migrate_user_skeletons"),
-            mock.patch.object(dispatcher, "migrate_user_memories"),
+            mock.patch.object(dispatcher, "initialize_user_memory_databases"),
+            mock.patch.object(dispatcher, "initialize_runtime_state_databases"),
             mock.patch.object(
                 dispatcher,
                 "build_web_frontend",

@@ -6,8 +6,8 @@ python -m tests.template_tests.message --target message/out/<platform>
 
 ## 必须成立
 
-- `message.json`、`state.json`、平台能力和绑定用户符合统一消息合同；
-- 输入端提供 `start(config, buffer_path, files_path, state_path)` 与 `stop()`；
+- `message.json`、平台能力和绑定用户符合统一消息合同；
+- 输入端提供 `start(config, buffer_path, files_path)` 与 `stop()`；
 - 输出端提供 `send(payload) -> True`，检测端提供 `check(config, state) -> dict`；
 - `message.md` 初始为空或已经是可消费的 YAML front matter 消息序列；
 - 合成入站消息可转换为框架统一消息对象，Transport 可被发现。

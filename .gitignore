@@ -64,6 +64,9 @@ web/frontend/output/
 users/*/
 users/_template/
 !users/.gitkeep
+template/user/history/*.sqlite3*
+template/user/improve/*.sqlite3*
+template/user/task_plan/*.sqlite3*
 
 # Expand / Sense / Skills — only register.py is tracked
 global_expand/*

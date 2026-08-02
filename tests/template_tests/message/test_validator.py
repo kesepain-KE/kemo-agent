@@ -39,28 +39,14 @@ def test_dependency_free_message_plugin_completes_discovery() -> None:
                     "allowed_tools": [],
                     "message_buffer": "message.md",
                     "files_dir": "files",
-                    "log_dir": "log",
                 },
                 ensure_ascii=False,
             ),
             "utf-8",
         )
-        (target / "state.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "health": "unknown",
-                    "messages_received_today": 0,
-                    "messages_sent_today": 0,
-                    "input_status": "unknown",
-                    "input_restart_count": 0,
-                }
-            ),
-            "utf-8",
-        )
         (target / "message.md").write_text("", "utf-8")
         (target / "input.py").write_text(
-            "def start(config, buffer_path, files_path, state_path):\n    return None\n\n"
+            "def start(config, buffer_path, files_path):\n    return None\n\n"
             "def stop():\n    return None\n",
             "utf-8",
         )
@@ -74,4 +60,3 @@ def test_dependency_free_message_plugin_completes_discovery() -> None:
         )
         report = validate(target, repository_root=ROOT, timeout=8)
         assert report.complete, report.render_text()
-

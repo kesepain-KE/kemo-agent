@@ -8,7 +8,6 @@ from typing import Any
 
 from message.plugin import (
     MessagePluginConfig,
-    _normalize_state,
     discover_message_plugins,
     parse_message_buffer,
 )
@@ -96,18 +95,6 @@ def _validate(
         ):
             return
         config = holder["config"]
-        try:
-            state = read_json_object(config.state_path, label="state.json")
-            normalized = _normalize_state(state)
-        except BaseException as exc:
-            record_exception(report, "message.state", exc, template_mode=template_mode)
-        else:
-            report.passed(
-                "message.state",
-                "state.json 符合健康、计数和输入保活状态合同",
-                health=normalized["health"],
-                input_status=normalized["input_status"],
-            )
 
         buffer_text = (
             config.buffer_path.read_text("utf-8-sig")
@@ -147,7 +134,7 @@ def _validate(
 
         import_ready = True
         for role, required in (
-            ("input", {"start": 4, "stop": 0}),
+            ("input", {"start": 3, "stop": 0}),
             ("output", {"send": 1}),
             ("detect", {"check": 2}),
         ):
@@ -198,4 +185,3 @@ def _validate(
                 "message.discovery",
                 "真实 Transport 发现器完成平台加载；未启动网络、发送消息或在线检测",
             )
-

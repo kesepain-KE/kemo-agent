@@ -8,7 +8,8 @@ python -m tests.template_tests.user --target users/<name>
 
 - `user_config.json` 能与全局配置合并，`user_soul.md` 能进入真实 Prompt；
 - 用户技能、拓展、子代理、知识、上传、下载、历史、头像和运行目录已经初始化；
-- `seven_days`、`one_month`、`half_year` 三层索引使用当前记忆 Schema，永久记忆目录存在；
+- 参考用户模板的 `history/` 只保留目录标记，不预置 SQLite、旧索引或会话正文；
+- 参考模板只保留 `improve/.gitkeep`，不预置二进制数据库、Markdown 碎片或 `data.json`；复制为真实用户后可初始化独立 `improve/memory.sqlite3`，并通过表结构完整性检查；
 - 多用户发现和目录解析互相隔离；报告不回显 Provider 密钥。
 
 ## 外部条件
