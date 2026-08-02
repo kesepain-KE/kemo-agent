@@ -14,13 +14,23 @@ from pydantic import ValidationError
 from events import RunEvent
 from provider.adapters.compat import (
     chat_request_to_kemo,
+    chat_response_to_kemo,
     chat_stream_to_protocol,
     kemo_request_to_chat,
     kemo_response_to_chat,
 )
 from provider.adapters.gateway import KemoGatewayAdapter
-from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus, StreamEventType
-from provider.protocol.errors import CapabilityError, ProtocolValidationError, StreamProtocolError
+from provider.protocol.enums import (
+    MessagePhase,
+    MessageRole,
+    ResponseStatus,
+    StreamEventType,
+)
+from provider.protocol.errors import (
+    CapabilityError,
+    ProtocolValidationError,
+    StreamProtocolError,
+)
 from provider.protocol.models import (
     AudioContent,
     EmbeddingInput,
@@ -32,6 +42,7 @@ from provider.protocol.models import (
     Measurement,
     MessageItem,
     ModelCapabilities,
+    ReasoningConfig,
     ReasoningItem,
     RerankDocument,
     RerankRequest,
@@ -49,9 +60,20 @@ from provider.protocol.streaming import (
     parse_sse_events,
 )
 from provider.protocol.validation import validate_request
-from provider.schema import ChatRequest, ChatResponse, ProviderError, Usage as ChatUsage
+from provider.schema import (
+    ChatRequest,
+    ChatResponse,
+    ProviderError,
+    ToolCall,
+    Usage as ChatUsage,
+)
 from run.engine import handle_request, iter_request_events
 from run.history import commit_window, empty_window, find_window, load_window
+from run.history_store import connection
+from run.provider_events import (
+    events_for_protocol_response,
+    run_events_for_protocol_event,
+)
 
 
 def make_request(*, stream: bool = True) -> KemoRequest:
@@ -75,7 +97,9 @@ def make_request(*, stream: bool = True) -> KemoRequest:
     )
 
 
-def make_response(request: KemoRequest, *, response_id: str = "resp_test") -> KemoResponse:
+def make_response(
+    request: KemoRequest, *, response_id: str = "resp_test"
+) -> KemoResponse:
     return KemoResponse(
         id=response_id,
         request_id=request.request_id,
@@ -191,12 +215,20 @@ class ChatOnlyProvider:
     def chat_stream(self, request: ChatRequest):
         self.requests.append(request)
         yield RunEvent(type="text_delta", content="legacy")
-        yield RunEvent(type="usage", usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
-        yield RunEvent(type="done", usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+        yield RunEvent(
+            type="usage",
+            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        )
+        yield RunEvent(
+            type="done",
+            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        )
 
 
 class UnifiedProtocolTests(unittest.TestCase):
-    def make_root(self, *, stream: bool = False) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    def make_root(
+        self, *, stream: bool = False
+    ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -246,9 +278,7 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         converted = list(chat_stream_to_protocol(events, request))
         usage_event = next(
-            event
-            for event in converted
-            if event.type == StreamEventType.USAGE_UPDATED
+            event for event in converted if event.type == StreamEventType.USAGE_UPDATED
         )
         self.assertEqual(usage_event.usage.cached_input_tokens, 60)
         self.assertEqual(usage_event.usage.reasoning_tokens, 3)
@@ -277,11 +307,101 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         converted = list(chat_stream_to_protocol(events, request))
         usage_event = next(
-            event
-            for event in converted
-            if event.type == StreamEventType.USAGE_UPDATED
+            event for event in converted if event.type == StreamEventType.USAGE_UPDATED
         )
         self.assertEqual(usage_event.usage.cached_input_tokens, 5)
+
+    def test_chat_truncated_tool_call_is_incomplete_and_not_executable(self) -> None:
+        request = make_request(stream=False)
+        response = ChatResponse(
+            text="先查询历史",
+            tool_calls=[
+                ToolCall(
+                    id="call_truncated",
+                    name="history_search",
+                    arguments={},
+                    arguments_raw='{"query":"unfinished',
+                    parse_error={"message": "Unterminated string"},
+                )
+            ],
+            finish_reason="length",
+            model=request.model,
+        )
+
+        converted = chat_response_to_kemo(response, request)
+
+        self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
+        self.assertEqual(converted.incomplete_details["reason"], "output_truncated")
+        self.assertEqual(converted.incomplete_details["finish_reason"], "length")
+        self.assertFalse(
+            any(isinstance(item, ToolCallItem) for item in converted.output)
+        )
+
+    def test_chat_stream_length_does_not_publish_completed_tool_call(self) -> None:
+        request = make_request(stream=True)
+        converted = list(
+            chat_stream_to_protocol(
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="call_1",
+                        tool_name="history_search",
+                        arguments={"query": "safe"},
+                        metadata={
+                            "raw_arguments": '{"query":"safe"}',
+                            "finish_reason": "length",
+                        },
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "length"}),
+                ],
+                request,
+            )
+        )
+
+        self.assertFalse(
+            any(
+                event.type == StreamEventType.TOOL_CALL_COMPLETED
+                for event in converted
+            )
+        )
+        terminal = converted[-1]
+        self.assertEqual(terminal.type, StreamEventType.RESPONSE_INCOMPLETE)
+        self.assertEqual(terminal.response.status, ResponseStatus.INCOMPLETE)
+        self.assertEqual(
+            terminal.response.incomplete_details["finish_reason"], "length"
+        )
+        runtime_terminal = list(run_events_for_protocol_event(terminal))
+        self.assertEqual(runtime_terminal[0].type, "error")
+        self.assertEqual(
+            runtime_terminal[0].error["exception_type"],
+            "ProviderResponseIncomplete",
+        )
+        self.assertEqual(runtime_terminal[0].error["stop_reason"], "output_truncated")
+
+    def test_kemo_parse_error_tool_call_is_rejected_before_runtime(self) -> None:
+        request = make_request(stream=False)
+        response = KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.REQUIRES_ACTION,
+            model=request.model,
+            output=[
+                ToolCallItem(
+                    id="call_item_bad",
+                    call_id="call_bad",
+                    name="history_search",
+                    arguments={},
+                    arguments_raw='{"query":"unfinished',
+                    parse_error={"message": "Unterminated string"},
+                )
+            ],
+        )
+
+        events = list(events_for_protocol_response(response))
+
+        self.assertEqual([event.type for event in events], ["error"])
+        self.assertEqual(
+            events[0].error["exception_type"], "ProviderToolArgumentsError"
+        )
 
     def test_json_roundtrip_and_protocol_version_validation(self) -> None:
         request = make_request()
@@ -294,7 +414,9 @@ class UnifiedProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolValidationError):
             parse_request(invalid)
 
-    def test_gateway_nullable_created_at_and_extensible_incomplete_details_parse(self) -> None:
+    def test_gateway_nullable_created_at_and_extensible_incomplete_details_parse(
+        self,
+    ) -> None:
         request = make_request(stream=False)
         payload = make_response(request).model_dump(mode="json")
         payload["output"][0]["created_at"] = None
@@ -399,7 +521,10 @@ class UnifiedProtocolTests(unittest.TestCase):
                         {"type": "text", "text": "look"},
                         {
                             "type": "image_url",
-                            "image_url": {"url": "https://example.test/a.png", "detail": "low"},
+                            "image_url": {
+                                "url": "https://example.test/a.png",
+                                "detail": "low",
+                            },
                         },
                     ],
                 },
@@ -410,11 +535,16 @@ class UnifiedProtocolTests(unittest.TestCase):
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"},
+                            "function": {"name": "lookup", "arguments": '{"q":"x"}'},
                         }
                     ],
                 },
-                {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "ok"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "lookup",
+                    "content": "ok",
+                },
             ],
         )
         request = chat_request_to_kemo(chat)
@@ -436,7 +566,9 @@ class UnifiedProtocolTests(unittest.TestCase):
                 MessageItem(
                     id="msg_audio",
                     role="user",
-                    content=[AudioContent(asset_id="asset_audio", mime_type="audio/wav")],
+                    content=[
+                        AudioContent(asset_id="asset_audio", mime_type="audio/wav")
+                    ],
                 )
             ],
         )
@@ -480,7 +612,9 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual([item.id for item in reasoning], ["rs_valid"])
         self.assertEqual(reasoning[0].summary, "valid summary")
 
-    def test_chat_bridge_preserves_kemo_max_and_can_omit_reasoning_entirely(self) -> None:
+    def test_chat_bridge_preserves_kemo_max_and_can_omit_reasoning_entirely(
+        self,
+    ) -> None:
         enabled = chat_request_to_kemo(
             ChatRequest(
                 model="test",
@@ -501,6 +635,20 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertIsNone(disabled.reasoning)
         self.assertNotIn("reasoning_effort", disabled.provider_options)
         self.assertNotIn("reasoning_enabled", disabled.provider_options)
+
+    def test_kemo_reasoning_uses_gateway_declared_efforts_and_excludes_none(self) -> None:
+        capabilities = ModelCapabilities.model_validate(
+            {
+                "model": "dynamic-model",
+                "reasoning": {
+                    "supported": True,
+                    "efforts": ["none", "low", "ultra"],
+                },
+            }
+        )
+        self.assertEqual(capabilities.reasoning.efforts, ["low", "ultra"])
+        reasoning = ReasoningConfig(enabled=True, effort="ultra")
+        self.assertEqual(reasoning.effort, "ultra")
 
     def test_chat_tool_without_explicit_strict_defaults_to_non_strict(self) -> None:
         request = chat_request_to_kemo(
@@ -561,24 +709,38 @@ class UnifiedProtocolTests(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "lookup", "arguments": "{}"},
-                    }],
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
                 },
-                {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "one"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "lookup",
+                    "content": "one",
+                },
                 assistant("second", "think second"),
                 {
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "lookup", "arguments": "{}"},
-                    }],
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
                 },
-                {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "two"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "lookup",
+                    "content": "two",
+                },
             ],
         )
 
@@ -589,11 +751,15 @@ class UnifiedProtocolTests(unittest.TestCase):
         messages = [item for item in request.input if isinstance(item, MessageItem)]
         calls = [item for item in request.input if isinstance(item, ToolCallItem)]
         results = [item for item in request.input if isinstance(item, ToolResultItem)]
-        self.assertEqual([item.content for item in reasoning], ["think first", "think second"])
+        self.assertEqual(
+            [item.content for item in reasoning], ["think first", "think second"]
+        )
         self.assertEqual(len({item.id for item in reasoning}), 2)
         self.assertEqual(len({item.id for item in messages}), 2)
         self.assertEqual(len({item.call_id for item in calls}), 2)
-        self.assertEqual([item.call_id for item in results], [item.call_id for item in calls])
+        self.assertEqual(
+            [item.call_id for item in results], [item.call_id for item in calls]
+        )
 
     def test_chat_bridge_rebuilds_legacy_empty_native_message(self) -> None:
         chat = ChatRequest(
@@ -619,7 +785,9 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         messages = [item for item in request.input if isinstance(item, MessageItem)]
         self.assertEqual(len(messages), 1)
-        self.assertEqual(text_from_content(messages[0].content), "[历史兼容：旧附件消息]")
+        self.assertEqual(
+            text_from_content(messages[0].content), "[历史兼容：旧附件消息]"
+        )
         self.assertNotEqual(messages[0].id, "msg_legacy_empty")
 
     def test_gateway_native_json_and_sse_transport(self) -> None:
@@ -662,9 +830,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     "embedding": None,
                     "rerank": None,
                     "metadata": {"source": "provider_package"},
-                    "extensions": {
-                        "operations": {"vision": {"supported": True}}
-                    },
+                    "extensions": {"operations": {"vision": {"supported": True}}},
                 }
             ).encode("utf-8")
         )
@@ -884,7 +1050,9 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(seen[0].data)["input_type"], "document")
         self.assertEqual(json.loads(seen[1].data)["top_n"], 1)
 
-    def test_run_native_protocol_history_items_and_rejects_chat_only_provider(self) -> None:
+    def test_run_native_protocol_history_items_and_rejects_chat_only_provider(
+        self,
+    ) -> None:
         _, root = self.make_root(stream=False)
         native = NativeProvider()
         request = {
@@ -896,19 +1064,26 @@ class UnifiedProtocolTests(unittest.TestCase):
             "run_id": "run_native_123",
         }
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            events = list(iter_request_events(request, root=root, provider_factory=lambda _: native))
+            events = list(
+                iter_request_events(
+                    request, root=root, provider_factory=lambda _: native
+                )
+            )
         self.assertEqual(events[-1].type, "done")
-        self.assertEqual([event.run_sequence for event in events], list(range(len(events))))
+        self.assertEqual(
+            [event.run_sequence for event in events], list(range(len(events)))
+        )
         self.assertTrue(all(event.event_id for event in events))
         self.assertEqual(native.requests[0].metadata["iteration"], 1)
         user_item = native.requests[0].input[-1]
         self.assertIsInstance(user_item, MessageItem)
         self.assertEqual([block.type for block in user_item.content], ["text", "image"])
         window_path = find_window(root, "alice", "web", "native")
-        self.assertTrue((window_path / "items.json").is_file())
         window = load_window(window_path)
         self.assertEqual(window["items"]["schema_version"], 2)
-        self.assertTrue(any(item.get("type") == "reasoning" for item in window["items"]["items"]))
+        self.assertTrue(
+            any(item.get("type") == "reasoning" for item in window["items"]["items"])
+        )
 
         chat_only = ChatOnlyProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -925,10 +1100,9 @@ class UnifiedProtocolTests(unittest.TestCase):
                 )
         self.assertEqual(len(chat_only.requests), 0)
 
-    def test_v1_history_loads_without_items_and_is_dual_written_on_commit(self) -> None:
+    def test_sqlite_history_repairs_a_missing_items_partition_on_load(self) -> None:
         _, root = self.make_root()
-        directory = root / "users" / "alice" / "history" / "legacy-window"
-        directory.mkdir()
+        directory = root / "users" / "alice" / "history" / "items-repair"
         window = empty_window("alice", "web", "old")
         window["text"]["messages"] = [
             {"role": "user", "content": "old question"},
@@ -936,11 +1110,14 @@ class UnifiedProtocolTests(unittest.TestCase):
         ]
         window["data"]["rounds"] = 1
         commit_window(directory, window)
-        (directory / "items.json").unlink()
+        with connection(root, "alice", write=True) as database:
+            database.execute(
+                "UPDATE history_windows SET items_json='{}' WHERE window_kind='archive' AND window_name='items-repair'"
+            )
         migrated = load_window(directory)
         self.assertEqual(len(migrated["items"]["items"]), 2)
         commit_window(directory, migrated)
-        self.assertTrue((directory / "items.json").is_file())
+        self.assertEqual(len(load_window(directory)["items"]["items"]), 2)
 
 
 if __name__ == "__main__":

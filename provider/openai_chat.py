@@ -50,16 +50,33 @@ def _decode_json(raw: bytes, context: str) -> dict[str, Any]:
     return data
 
 
-def _parse_arguments(value: Any) -> dict[str, Any]:
+def _parse_arguments(
+    value: Any,
+) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
     if isinstance(value, dict):
-        return value
+        return value, json.dumps(value, ensure_ascii=False), None
     if not isinstance(value, str) or not value:
-        return {}
+        return {}, value if isinstance(value, str) else None, None
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {"_raw": value}
-    return parsed if isinstance(parsed, dict) else {"_value": parsed}
+    except json.JSONDecodeError as exc:
+        return (
+            {},
+            value,
+            {
+                "message": str(exc),
+                "line": exc.lineno,
+                "column": exc.colno,
+                "position": exc.pos,
+            },
+        )
+    if not isinstance(parsed, dict):
+        return (
+            {},
+            value,
+            {"message": "工具参数 JSON 根节点必须是对象"},
+        )
+    return parsed, value, None
 
 
 def _estimate_tokens(text: str) -> int:
@@ -189,15 +206,29 @@ class OpenAIChatTransport:
         text = message.get("content") or ""
         reasoning = message.get("reasoning_content") or ""
         tool_calls: list[ToolCall] = []
-        for raw_call in message.get("tool_calls") or []:
+        raw_tool_calls = message.get("tool_calls") or []
+        legacy_function_call = message.get("function_call")
+        if not raw_tool_calls and isinstance(legacy_function_call, dict):
+            raw_tool_calls = [
+                {
+                    "id": "function-call-0",
+                    "function": legacy_function_call,
+                }
+            ]
+        for raw_call in raw_tool_calls:
             if not isinstance(raw_call, dict):
                 continue
             function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
+            arguments, arguments_raw, parse_error = _parse_arguments(
+                function.get("arguments")
+            )
             tool_calls.append(
                 ToolCall(
                     id=str(raw_call.get("id") or ""),
                     name=str(function.get("name") or ""),
-                    arguments=_parse_arguments(function.get("arguments")),
+                    arguments=arguments,
+                    arguments_raw=arguments_raw,
+                    parse_error=parse_error,
                 )
             )
         return ChatResponse(
@@ -294,7 +325,25 @@ class OpenAIChatTransport:
                             part["name"] += str(function["name"])
                         if function.get("arguments"):
                             part["arguments"] += str(function["arguments"])
-            if not done_received:
+                    legacy_function = delta.get("function_call")
+                    if isinstance(legacy_function, dict):
+                        part = tool_parts.setdefault(
+                            0,
+                            {
+                                "id": "function-call-0",
+                                "name": "",
+                                "arguments": "",
+                            },
+                        )
+                        if legacy_function.get("name"):
+                            part["name"] += str(legacy_function["name"])
+                        if legacy_function.get("arguments"):
+                            part["arguments"] += str(legacy_function["arguments"])
+            # A few OpenAI-compatible services close the HTTP body cleanly after
+            # the final choice instead of sending the optional literal [DONE].
+            # A real finish_reason is sufficient; EOF without either marker is
+            # still treated as an interrupted stream.
+            if not done_received and not finish_reason:
                 raise ProviderError(
                     "Provider 流在收到 [DONE] 前关闭",
                     category="stream_interrupted",
@@ -302,12 +351,20 @@ class OpenAIChatTransport:
                 )
             for index in sorted(tool_parts):
                 part = tool_parts[index]
+                arguments, arguments_raw, parse_error = _parse_arguments(
+                    part["arguments"]
+                )
                 yield RunEvent(
                     type="tool_call_start",
                     tool_call_id=part["id"] or f"tool-call-{index}",
                     tool_name=part["name"],
-                    arguments=_parse_arguments(part["arguments"]),
-                    metadata={"index": index, "raw_arguments": part["arguments"]},
+                    arguments=arguments,
+                    metadata={
+                        "index": index,
+                        "raw_arguments": arguments_raw,
+                        "parse_error": parse_error,
+                        "finish_reason": finish_reason,
+                    },
                 )
             if final_usage is None:
                 final_usage = self._usage(None, request, "".join(text_parts))
@@ -317,6 +374,7 @@ class OpenAIChatTransport:
                 usage=final_usage.to_dict(),
                 metadata={
                     "finish_reason": finish_reason,
+                    "done_marker_received": done_received,
                     "model": response_model,
                     "response_id": response_id,
                 },

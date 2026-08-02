@@ -45,6 +45,7 @@ from run.context import (
 from run.context_summary import (
     SUMMARY_CHUNK_TOKEN_BUDGET,
     SUMMARY_MAX_OUTPUT_TOKENS,
+    SUMMARY_STORE_REF,
     build_summary_message,
     get_or_create_summary,
     read_summary_cache,
@@ -299,7 +300,6 @@ def _commit_verified_manual_compression(
     runtime_path: Path,
     original_window: dict[str, Any],
     compacted_window: dict[str, Any],
-    summary_path: Path,
     summary_cache: dict[str, Any],
     previous_summary_cache: dict[str, Any] | None,
     removed_round_numbers: list[int],
@@ -310,7 +310,11 @@ def _commit_verified_manual_compression(
     """Commit temp compaction and roll both artifacts back if verification fails."""
 
     try:
-        commit_window(runtime_path, compacted_window)
+        commit_window(
+            runtime_path,
+            compacted_window,
+            summary_cache=summary_cache,
+        )
         stored = load_window(runtime_path)
         stored_data = stored.get("data") or {}
         stored_context = stored_data.get("context") or {}
@@ -330,7 +334,7 @@ def _commit_verified_manual_compression(
                 f"实际 workspace={actual_rounds}/{actual_workspace_rounds}、"
                 f"offset={actual_offset}"
             )
-        stored_cache = read_summary_cache(summary_path)
+        stored_cache = read_summary_cache(runtime_path)
         if stored_cache is None:
             raise EngineError("上下文压缩落盘校验失败：摘要缓存不可读取")
         if stored_cache.get("source_hash") != summary_cache.get("source_hash"):
@@ -347,7 +351,7 @@ def _commit_verified_manual_compression(
         }
         if not expected_covered.issubset(covered_rounds):
             raise EngineError("上下文压缩落盘校验失败：摘要未覆盖全部移除轮次")
-        if stored_context.get("summary_cache") != "context_summary.json":
+        if stored_context.get("summary_cache") != SUMMARY_STORE_REF:
             raise EngineError("上下文压缩落盘校验失败：运行窗口未登记摘要缓存")
         snapshot = stored_data.get("context_snapshot") or {}
         if int(snapshot.get("workspace_rounds") or 0) != expected_rounds:
@@ -355,13 +359,13 @@ def _commit_verified_manual_compression(
     except BaseException:
         rollback_errors: list[str] = []
         try:
-            commit_window(runtime_path, original_window)
+            commit_window(
+                runtime_path,
+                original_window,
+                summary_cache=previous_summary_cache,
+            )
         except BaseException as exc:
-            rollback_errors.append(f"运行窗口回滚失败：{exc}")
-        try:
-            restore_summary_cache(summary_path, previous_summary_cache)
-        except BaseException as exc:
-            rollback_errors.append(f"摘要缓存回滚失败：{exc}")
+            rollback_errors.append(f"运行窗口与摘要回滚失败：{exc}")
         if rollback_errors:
             raise EngineError("；".join(rollback_errors))
         raise
@@ -683,8 +687,7 @@ def _iter_request_events_impl(
                 else {"role": "user", "content": _content_for_message(provider_content_blocks)}
             )
             force_compress = bool(request.get("compress", False) or compress_only)
-            summary_path = runtime_path / "context_summary.json"
-            persisted_summary_cache = read_summary_cache(summary_path)
+            persisted_summary_cache = read_summary_cache(runtime_path)
             persisted_summary_message = build_summary_message(persisted_summary_cache)
             context_selection = select_context(
                 window=window,
@@ -755,7 +758,7 @@ def _iter_request_events_impl(
                     else ("manual" if force_compress else "round_limit")
                 )
                 summary_cache, summary_diagnostics = get_or_create_summary(
-                    cache_path=summary_path,
+                    runtime_path=runtime_path,
                     groups=context_selection.removed_rounds,
                     agent_runner=agent_runner,
                     agent_name=summary_agent,
@@ -783,6 +786,7 @@ def _iter_request_events_impl(
                             )
                         ),
                     ),
+                    persist=False,
                 )
                 next_selection = select_context(
                     window=window,
@@ -804,7 +808,8 @@ def _iter_request_events_impl(
             # runtime workspace; the next request would otherwise read a
             # summary for rounds that were never removed.
             if bool(summary_diagnostics.get("failed")):
-                restore_summary_cache(summary_path, persisted_summary_cache)
+                restore_summary_cache(runtime_path, persisted_summary_cache)
+                summary_cache = persisted_summary_cache
 
             terminal_committer = TerminalRoundCommitter(
                 TerminalRoundContext(
@@ -846,7 +851,7 @@ def _iter_request_events_impl(
                 compression_applied = False
                 summary_failed = bool(summary_diagnostics.get("failed"))
                 if summary_failed:
-                    restore_summary_cache(summary_path, persisted_summary_cache)
+                    restore_summary_cache(runtime_path, persisted_summary_cache)
                     summary_cache = persisted_summary_cache
                 if (
                     not summary_failed
@@ -875,7 +880,7 @@ def _iter_request_events_impl(
                         "workspace_rounds": int(
                             runtime_window["data"].get("rounds") or 0
                         ),
-                        "summary_cache": "context_summary.json",
+                        "summary_cache": SUMMARY_STORE_REF,
                     }
                     runtime_selection = select_context(
                         window=runtime_window,
@@ -903,7 +908,6 @@ def _iter_request_events_impl(
                         runtime_path=runtime_path,
                         original_window=window,
                         compacted_window=runtime_window,
-                        summary_path=summary_path,
                         summary_cache=summary_cache,
                         previous_summary_cache=persisted_summary_cache,
                         removed_round_numbers=[
@@ -960,7 +964,7 @@ def _iter_request_events_impl(
                         "context": context_stats,
                         "prompt": prompt_bundle.diagnostics,
                         "summary_cache": (
-                            str(runtime_path / "context_summary.json")
+                            SUMMARY_STORE_REF
                             if summary_cache is not None
                             else None
                         ),
@@ -1310,7 +1314,7 @@ def _iter_request_events_impl(
                                 )
                         retry_events: list[RunEvent] = []
                         summary_cache, retry_diagnostics = get_or_create_summary(
-                            cache_path=summary_path,
+                            runtime_path=runtime_path,
                             groups=retry_selection.removed_rounds,
                             agent_runner=agent_runner,
                             agent_name="context_manage",
@@ -1343,6 +1347,7 @@ def _iter_request_events_impl(
                                     )
                                 ),
                             ),
+                            persist=False,
                         )
                         if summary_cache is None:
                             raise ContextLengthExceededError(
@@ -1704,7 +1709,7 @@ def _iter_request_events_impl(
                 "round_offset": max(0, archive_round_number - round_number),
                 "workspace_rounds": round_number,
                 "summary_cache": (
-                    "context_summary.json" if summary_cache is not None else None
+                    SUMMARY_STORE_REF if summary_cache is not None else None
                 ),
             }
             _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
@@ -1771,7 +1776,7 @@ def _iter_request_events_impl(
                 ),
                 "workspace_rounds": int(runtime_window["data"].get("rounds", 0)),
                 "summary_cache": (
-                    "context_summary.json" if summary_cache is not None else None
+                    SUMMARY_STORE_REF if summary_cache is not None else None
                 ),
             }
             runtime_window["data"]["context_snapshot"] = build_context_snapshot(
@@ -1804,7 +1809,11 @@ def _iter_request_events_impl(
             archive_data["memory_status"] = initial_memory_status
             archive_data.pop("memory_error", None)
             commit_window(window_path, archive_window)
-            commit_window(runtime_path, runtime_window)
+            commit_window(
+                runtime_path,
+                runtime_window,
+                summary_cache=summary_cache,
+            )
             round_state.finalized = True
             if queue_compression_memory and compression_applied:
                 compression_memory = _queue_summary_memory_extraction(

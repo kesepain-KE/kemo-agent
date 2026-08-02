@@ -53,6 +53,55 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+_INCOMPLETE_CHAT_FINISH_REASONS = frozenset(
+    {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "content_filter",
+    }
+)
+_TOOL_CHAT_FINISH_REASONS = frozenset({"tool_calls", "function_call"})
+
+
+def _chat_incomplete_details(
+    finish_reason: str,
+    *,
+    calls: list[ToolCallItem],
+    invalid_calls: list[ToolCallItem],
+) -> dict[str, Any] | None:
+    normalized = str(finish_reason or "").strip().casefold()
+    if normalized in _INCOMPLETE_CHAT_FINISH_REASONS:
+        reason = "content_filtered" if normalized == "content_filter" else "output_truncated"
+        details: dict[str, Any] = {
+            "reason": reason,
+            "finish_reason": normalized,
+        }
+    elif invalid_calls:
+        details = {
+            "reason": "invalid_tool_arguments",
+            "finish_reason": normalized or None,
+        }
+    elif normalized in _TOOL_CHAT_FINISH_REASONS and not calls:
+        details = {
+            "reason": "missing_tool_call",
+            "finish_reason": normalized,
+        }
+    else:
+        return None
+    if invalid_calls:
+        details["invalid_tool_calls"] = [
+            {
+                "call_id": item.call_id,
+                "name": item.name,
+                "parse_error": copy.deepcopy(item.parse_error),
+                "arguments_raw": (item.arguments_raw or "")[:500],
+            }
+            for item in invalid_calls
+        ]
+    return details
+
+
 def _unique_id(value: Any, prefix: str, used: set[str]) -> str:
     """Keep provider IDs when possible, but make a request-local ID unique."""
     candidate = str(value or "")
@@ -481,6 +530,24 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
 
 def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoResponse:
     output: list[Any] = []
+    call_items = [
+        ToolCallItem(
+            id=_id("call"),
+            call_id=call.id or _id("callid"),
+            name=call.name,
+            arguments=call.arguments,
+            arguments_raw=call.arguments_raw,
+            parse_error=copy.deepcopy(call.parse_error),
+        )
+        for call in response.tool_calls
+    ]
+    invalid_calls = [item for item in call_items if item.parse_error is not None]
+    incomplete_details = _chat_incomplete_details(
+        response.finish_reason,
+        calls=call_items,
+        invalid_calls=invalid_calls,
+    )
+    executable_calls = call_items if incomplete_details is None else []
     if response.reasoning:
         output.append(ReasoningItem(id=_id("rs"), content=response.reasoning))
     if response.text:
@@ -488,24 +555,32 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
             MessageItem.text(
                 MessageRole.ASSISTANT,
                 response.text,
-                phase=(MessagePhase.COMMENTARY if response.tool_calls else MessagePhase.FINAL_ANSWER),
+                phase=(
+                    MessagePhase.COMMENTARY
+                    if response.tool_calls
+                    else MessagePhase.FINAL_ANSWER
+                ),
             )
         )
-    for call in response.tool_calls:
-        output.append(
-            ToolCallItem(
-                id=_id("call"),
-                call_id=call.id or _id("callid"),
-                name=call.name,
-                arguments=call.arguments,
-            )
+    output.extend(executable_calls)
+    status = (
+        ResponseStatus.INCOMPLETE
+        if incomplete_details is not None
+        else (
+            ResponseStatus.REQUIRES_ACTION
+            if executable_calls
+            else (ResponseStatus.COMPLETED if output else ResponseStatus.INCOMPLETE)
         )
+    )
+    if status == ResponseStatus.INCOMPLETE and incomplete_details is None:
+        incomplete_details = {"reason": "empty_output"}
     return KemoResponse(
         request_id=request.request_id,
-        status=(ResponseStatus.REQUIRES_ACTION if response.tool_calls else ResponseStatus.COMPLETED),
+        status=status,
         model=response.model or request.model,
         output=output,
         usage=_protocol_usage_from_chat(response.usage),
+        incomplete_details=incomplete_details,
         provider_response_id=response.response_id or None,
         metadata={"finish_reason": response.finish_reason},
     )
@@ -556,9 +631,11 @@ def chat_stream_to_protocol(
     reasoning_parts: list[str] = []
     text_parts: list[str] = []
     calls: list[ToolCallItem] = []
+    invalid_calls: list[ToolCallItem] = []
     usage = Usage()
     reasoning_added = False
     message_added = False
+    finish_reason = ""
     for event in events:
         if event.type == "reasoning_delta":
             if not reasoning_added:
@@ -612,19 +689,33 @@ def chat_stream_to_protocol(
                 name=event.tool_name,
                 arguments=event.arguments or {},
                 arguments_raw=str(event.metadata.get("raw_arguments") or "") or None,
+                parse_error=(
+                    copy.deepcopy(event.metadata.get("parse_error"))
+                    if isinstance(event.metadata.get("parse_error"), dict)
+                    else None
+                ),
             )
             calls.append(item)
-            yield ProviderStreamEvent(
-                type=StreamEventType.TOOL_CALL_COMPLETED,
-                sequence=sequence,
-                request_id=request.request_id,
-                response_id=response_id,
-                item_id=item.id,
-                call_id=item.call_id,
-                name=item.name,
-                item=item,
-            )
-            sequence += 1
+            if item.parse_error is not None:
+                invalid_calls.append(item)
+            event_finish_reason = str(
+                event.metadata.get("finish_reason") or ""
+            ).strip().casefold()
+            if (
+                item.parse_error is None
+                and event_finish_reason not in _INCOMPLETE_CHAT_FINISH_REASONS
+            ):
+                yield ProviderStreamEvent(
+                    type=StreamEventType.TOOL_CALL_COMPLETED,
+                    sequence=sequence,
+                    request_id=request.request_id,
+                    response_id=response_id,
+                    item_id=item.id,
+                    call_id=item.call_id,
+                    name=item.name,
+                    item=item,
+                )
+                sequence += 1
         elif event.type == "usage":
             raw = event.usage or {}
             usage = _protocol_usage_from_chat(_chat_usage_from_raw(dict(raw)))
@@ -653,6 +744,8 @@ def chat_stream_to_protocol(
                 ),
             )
             return
+        elif event.type == "done":
+            finish_reason = str(event.metadata.get("finish_reason") or finish_reason)
     output: list[Any] = []
     if reasoning_parts:
         output.append(ReasoningItem(id=reasoning_id, content="".join(reasoning_parts)))
@@ -665,10 +758,24 @@ def chat_stream_to_protocol(
                 item_id=message_id,
             )
         )
-    output.extend(calls)
-    status = ResponseStatus.REQUIRES_ACTION if calls else (
-        ResponseStatus.COMPLETED if output else ResponseStatus.INCOMPLETE
+    incomplete_details = _chat_incomplete_details(
+        finish_reason,
+        calls=calls,
+        invalid_calls=invalid_calls,
     )
+    executable_calls = calls if incomplete_details is None else []
+    output.extend(executable_calls)
+    status = (
+        ResponseStatus.INCOMPLETE
+        if incomplete_details is not None
+        else (
+            ResponseStatus.REQUIRES_ACTION
+            if executable_calls
+            else (ResponseStatus.COMPLETED if output else ResponseStatus.INCOMPLETE)
+        )
+    )
+    if status == ResponseStatus.INCOMPLETE and incomplete_details is None:
+        incomplete_details = {"reason": "empty_output"}
     response = KemoResponse(
         id=response_id,
         request_id=request.request_id,
@@ -676,9 +783,8 @@ def chat_stream_to_protocol(
         model=request.model,
         output=output,
         usage=usage,
-        incomplete_details=(
-            {"reason": "empty_output"} if status == ResponseStatus.INCOMPLETE else None
-        ),
+        incomplete_details=incomplete_details,
+        metadata={"finish_reason": finish_reason},
     )
     terminal_type = (
         StreamEventType.RESPONSE_INCOMPLETE

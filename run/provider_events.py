@@ -57,6 +57,44 @@ def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
     }
 
 
+def invalid_tool_call_error(item: ToolCallItem) -> dict[str, Any]:
+    return {
+        "message": f"Provider 返回的工具 {item.name!r} 参数不是完整 JSON 对象",
+        "exception_type": "ProviderToolArgumentsError",
+        "phase": "provider",
+        "stop_reason": "invalid_tool_arguments",
+        "call_id": item.call_id,
+        "tool_name": item.name,
+        "parse_error": copy.deepcopy(item.parse_error or {}),
+        "arguments_raw": (item.arguments_raw or "")[:500],
+    }
+
+
+def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
+    if response.error is not None:
+        return protocol_error(response.error)
+    if response.status == ResponseStatus.INCOMPLETE:
+        details = copy.deepcopy(response.incomplete_details or {})
+        reason = str(details.get("reason") or "incomplete")
+        return {
+            "message": f"Provider 输出未完整结束：{reason}",
+            "exception_type": "ProviderResponseIncomplete",
+            "phase": "provider",
+            "status": str(response.status),
+            "stop_reason": reason,
+            "incomplete_details": details,
+        }
+    if response.status == ResponseStatus.CANCELLED:
+        return {
+            "message": "Provider 已取消本次响应",
+            "exception_type": "ProviderResponseCancelled",
+            "phase": "provider",
+            "status": str(response.status),
+            "stop_reason": "provider_cancelled",
+        }
+    return protocol_error(response.error)
+
+
 def is_context_length_exceeded(value: Any) -> bool:
     if isinstance(value, ContextLengthExceededError):
         return True
@@ -131,6 +169,24 @@ def events_for_protocol_response(
 ) -> Iterator[RunEvent]:
     if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
         raise_if_context_length_exceeded(response.error)
+    invalid_call = next(
+        (
+            item
+            for item in response.output
+            if isinstance(item, ToolCallItem) and item.parse_error is not None
+        ),
+        None,
+    )
+    if invalid_call is not None:
+        yield RunEvent(
+            type="error",
+            error=invalid_tool_call_error(invalid_call),
+            protocol_event_type="tool_call.invalid",
+            request_id=response.request_id,
+            response_id=response.id,
+            item_id=invalid_call.id,
+        )
+        return
     common = {
         "request_id": response.request_id,
         "response_id": response.id,
@@ -202,7 +258,7 @@ def events_for_protocol_response(
     else:
         yield RunEvent(
             type="error",
-            error=protocol_error(response.error),
+            error=response_terminal_error(response),
             protocol_event_type=f"response.{response.status}",
             metadata={"provider_response": response_payload},
             **common,
@@ -239,6 +295,14 @@ def run_events_for_protocol_event(
         )
     elif event.type == StreamEventType.TOOL_CALL_COMPLETED:
         item = event.item if isinstance(event.item, ToolCallItem) else None
+        if item is not None and item.parse_error is not None:
+            yield RunEvent(
+                type="error",
+                error=invalid_tool_call_error(item),
+                metadata=metadata,
+                **common,
+            )
+            return
         arguments = item.arguments if item is not None else event.data.get("arguments", {})
         yield RunEvent(
             type="tool_call_start",
@@ -314,7 +378,7 @@ def run_events_for_protocol_event(
         else:
             yield RunEvent(
                 type="error",
-                error=protocol_error(response.error),
+                error=response_terminal_error(response),
                 metadata=terminal_metadata,
                 **common,
             )

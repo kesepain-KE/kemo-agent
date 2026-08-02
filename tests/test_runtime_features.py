@@ -41,6 +41,7 @@ from run.engine import (
 )
 from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
+from run.memory import MemoryStore
 from run.memory_analysis import extract_memory_backlog, extract_round_memory
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
@@ -57,7 +58,11 @@ from run.tools import (
 
 
 class ScriptedProvider:
-    def __init__(self, responses: list[ChatResponse | BaseException] | None = None, streams: list[list[RunEvent]] | None = None) -> None:
+    def __init__(
+        self,
+        responses: list[ChatResponse | BaseException] | None = None,
+        streams: list[list[RunEvent]] | None = None,
+    ) -> None:
         self.responses = list(responses or [])
         self.streams = list(streams or [])
         self.requests = []
@@ -84,9 +89,13 @@ class ScriptedProvider:
 
 
 class RuntimeFeatureTests(unittest.TestCase):
-    def test_uploaded_file_context_reaches_provider_without_polluting_saved_user_text(self) -> None:
+    def test_uploaded_file_context_reaches_provider_without_polluting_saved_user_text(
+        self,
+    ) -> None:
         _, root = self.make_root()
-        provider = ScriptedProvider(responses=[ChatResponse(text="attachment received")])
+        provider = ScriptedProvider(
+            responses=[ChatResponse(text="attachment received")]
+        )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             handle_request(
                 {
@@ -94,17 +103,20 @@ class RuntimeFeatureTests(unittest.TestCase):
                     "source": "web",
                     "session_id": "uploaded-file",
                     "prompt": "请读取附件",
-                    "uploaded_files": [{
-                        "name": "note.md",
-                        "path": "users/alice/file_upload/note.md",
-                        "size": 128,
-                    }],
+                    "uploaded_files": [
+                        {
+                            "name": "note.md",
+                            "path": "users/alice/file_upload/note.md",
+                            "size": 128,
+                        }
+                    ],
                 },
                 root=root,
                 provider_factory=lambda _: provider,
             )
         current_user = next(
-            message for message in reversed(provider.requests[0].messages)
+            message
+            for message in reversed(provider.requests[0].messages)
             if message.get("role") == "user"
         )
         self.assertIn("users/alice/file_upload/note.md", current_user["content"])
@@ -112,7 +124,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         window = load_window(find_window(root, "alice", "web", "uploaded-file"))
         self.assertEqual(window["text"]["messages"][0]["content"], "请读取附件")
 
-    def make_root(self, *, stream: bool = False) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    def make_root(
+        self, *, stream: bool = False
+    ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -133,9 +147,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             "stream": stream,
         }
         (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {"tools": {"enabled": True, "timeout": 2, "max_iterations": 4}}
-            ),
+            json.dumps({"tools": {"enabled": True, "timeout": 2, "max_iterations": 4}}),
             "utf-8",
         )
         (root / "users" / "alice" / "user_config.json").write_text(
@@ -151,7 +163,15 @@ class RuntimeFeatureTests(unittest.TestCase):
         for name in ("memory_manage", "skill_creater"):
             shutil.copytree(project_plugins / name, root / "plugins" / name)
 
-    def write_tool(self, base: Path, name: str, source_value: str, *, enabled: bool = True, async_tool: bool = False) -> None:
+    def write_tool(
+        self,
+        base: Path,
+        name: str,
+        source_value: str,
+        *,
+        enabled: bool = True,
+        async_tool: bool = False,
+    ) -> None:
         directory = base / name
         directory.mkdir(parents=True)
         manifest = {
@@ -202,12 +222,18 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.write_tool(root / "plugins", "async_tool", "async", async_tool=True)
         registry = discover_tools(root, "alice")
         context = {"root": str(root), "user": "alice"}
-        sync = execute_tool(registry.get("sync_tool"), {"value": "a"}, context=context, timeout=2)
-        async_result = execute_tool(registry.get("async_tool"), {"value": "b"}, context=context, timeout=2)
+        sync = execute_tool(
+            registry.get("sync_tool"), {"value": "a"}, context=context, timeout=2
+        )
+        async_result = execute_tool(
+            registry.get("async_tool"), {"value": "b"}, context=context, timeout=2
+        )
         self.assertEqual(sync["source"], "sync")
         self.assertEqual(async_result["source"], "async")
 
-    def test_tool_execution_rejects_oversized_inline_result_with_range_hint(self) -> None:
+    def test_tool_execution_rejects_oversized_inline_result_with_range_hint(
+        self,
+    ) -> None:
         tool = ToolDefinition(
             name="file",
             description="file",
@@ -245,12 +271,18 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn("file.read_range", error["instruction"])
         self.assertNotIn("X" * 100, json.dumps(error, ensure_ascii=False))
 
-    def test_running_tool_observes_emergency_cancel_without_waiting_for_timeout(self) -> None:
+    def test_running_tool_observes_emergency_cancel_without_waiting_for_timeout(
+        self,
+    ) -> None:
         cancel = threading.Event()
         tool = ToolDefinition(
             name="slow_tool",
             description="slow",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
             version="1.0.0",
             enabled=True,
             entrypoint="tool.py:run",
@@ -277,7 +309,9 @@ class RuntimeFeatureTests(unittest.TestCase):
     def test_explicit_tool_timeout_overrides_global_default(self) -> None:
         observed: dict[str, Any] = {}
 
-        def run_with_timeout(timeout: float, *, context: dict[str, Any]) -> dict[str, Any]:
+        def run_with_timeout(
+            timeout: float, *, context: dict[str, Any]
+        ) -> dict[str, Any]:
             time.sleep(0.08)
             observed.update(context)
             return {"timeout": timeout}
@@ -320,7 +354,11 @@ class RuntimeFeatureTests(unittest.TestCase):
         tool = ToolDefinition(
             name="timeout_tool",
             description="timeout",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
             version="1.0.0",
             enabled=True,
             entrypoint="tool.py:run",
@@ -341,7 +379,11 @@ class RuntimeFeatureTests(unittest.TestCase):
         tool = ToolDefinition(
             name="subagent_dispatch",
             description="subagent",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
             version="1.0.0",
             enabled=True,
             entrypoint="tool.py:run",
@@ -382,7 +424,9 @@ class RuntimeFeatureTests(unittest.TestCase):
             {"other_tool"},
         )
 
-    def test_plugin_whitelist_filters_registry_independently_of_graph_mode(self) -> None:
+    def test_plugin_whitelist_filters_registry_independently_of_graph_mode(
+        self,
+    ) -> None:
         _, root = self.make_root()
         for name in ("clock", "weather"):
             self.write_tool(root / "plugins", name, name)
@@ -466,7 +510,7 @@ class RuntimeFeatureTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "provider": json.loads(user_config.read_text("utf-8"))["provider"],
-                    "knowledge": {"use_shared": False, "use_global": True}
+                    "knowledge": {"use_shared": False, "use_global": True},
                 }
             ),
             "utf-8",
@@ -533,7 +577,9 @@ class RuntimeFeatureTests(unittest.TestCase):
                 ChatResponse(
                     text="",
                     reasoning="完整工具续轮推理状态",
-                    tool_calls=[ToolCall(id="c1", name="lookup", arguments={"value": "x"})],
+                    tool_calls=[
+                        ToolCall(id="c1", name="lookup", arguments={"value": "x"})
+                    ],
                     finish_reason="tool_calls",
                     usage=Usage(
                         1,
@@ -559,7 +605,12 @@ class RuntimeFeatureTests(unittest.TestCase):
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
-                    {"user": "alice", "source": "cli", "session_id": "tool", "prompt": "go"},
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "tool",
+                        "prompt": "go",
+                    },
                     root=root,
                     provider_factory=lambda _: provider,
                 )
@@ -590,7 +641,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         window = load_window(path)
         self.assertEqual(window["text"]["messages"][-1]["content"], "final")
         self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["status"], "completed")
-        self.assertGreaterEqual(window["tool"]["rounds"][0]["calls"][0]["elapsed_ms"], 0)
+        self.assertGreaterEqual(
+            window["tool"]["rounds"][0]["calls"][0]["elapsed_ms"], 0
+        )
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 6)
         self.assertEqual(window["data"]["token_usage"]["provider_request_count"], 2)
         _, runtime_window = load_runtime_window(path, window)
@@ -605,7 +658,9 @@ class RuntimeFeatureTests(unittest.TestCase):
             + snapshot["other_tokens"],
         )
         self.assertEqual(window["data"]["token_usage"]["cached_prompt_tokens"], 2)
-        self.assertEqual(window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1)
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1
+        )
         done = events[-1]
         self.assertEqual(done.usage["cached_prompt_tokens"], 2)
         self.assertEqual(done.usage["provider_request_count"], 2)
@@ -678,8 +733,8 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(stored_call["status"], "result_too_large")
         self.assertTrue(stored_call["result"]["error"]["content_omitted"])
         self.assertNotIn("X" * 100, json.dumps(window, ensure_ascii=False))
-        self.assertLess((window_path / "tool.json").stat().st_size, 10_000)
-        self.assertLess((window_path / "items.json").stat().st_size, 20_000)
+        self.assertLess(len(json.dumps(window["tool"], ensure_ascii=False)), 10_000)
+        self.assertLess(len(json.dumps(window["items"], ensure_ascii=False)), 20_000)
 
     def test_native_provider_state_is_preserved_across_tool_continuation(self) -> None:
         _, root = self.make_root()
@@ -851,7 +906,9 @@ class RuntimeFeatureTests(unittest.TestCase):
                 ChatResponse(
                     text="正在查询",
                     tool_calls=[
-                        ToolCall(id="pending-limit", name="lookup", arguments={"value": "x"})
+                        ToolCall(
+                            id="pending-limit", name="lookup", arguments={"value": "x"}
+                        )
                     ],
                     finish_reason="tool_calls",
                     usage=Usage(10, 2, 12),
@@ -897,7 +954,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         durable_items = window["items"]["items"]
         call_item = next(item for item in durable_items if item["type"] == "tool_call")
-        result_item = next(item for item in durable_items if item["type"] == "tool_result")
+        result_item = next(
+            item for item in durable_items if item["type"] == "tool_result"
+        )
         self.assertEqual(call_item["call_id"], "pending-limit")
         self.assertEqual(result_item["call_id"], "pending-limit")
         self.assertTrue(result_item["is_error"])
@@ -924,7 +983,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(resumed["text"]["messages"][-2]["content"], "继续")
         self.assertEqual(resumed["text"]["messages"][-1]["content"], "继续完成")
 
-    def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(self) -> None:
+    def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(
+        self,
+    ) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
@@ -974,7 +1035,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(events[-1].type, "done")
         self.assertFalse(any(event.type == "error" for event in events))
 
-    def test_tool_loop_guard_reports_exact_projection_and_file_result_size(self) -> None:
+    def test_tool_loop_guard_reports_exact_projection_and_file_result_size(
+        self,
+    ) -> None:
         _, root = self.make_root()
         project_file_tool = Path(__file__).resolve().parents[1] / "plugins" / "file"
         shutil.copytree(project_file_tool, root / "plugins" / "file")
@@ -1108,7 +1171,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(indexed["memory_processed_round"], 1)
         self.assertEqual(indexed["memory_status"], "completed")
 
-    def test_extract_round_memory_persists_candidates_and_contains_failures(self) -> None:
+    def test_extract_round_memory_persists_candidates_and_contains_failures(
+        self,
+    ) -> None:
         _, root = self.make_root()
         config = {"memory": {}}
 
@@ -1154,9 +1219,14 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidate_count"], 1)
-        self.assertEqual(runner.input_data["source"], {"source": "round_commit", "round": 3})
-        self.assertTrue(
-            (root / "users" / "alice" / "improve" / "seven_days" / "device.md").is_file()
+        self.assertEqual(
+            runner.input_data["source"], {"source": "round_commit", "round": 3}
+        )
+        self.assertEqual(
+            MemoryStore(root, "alice", {}).get_entry("seven_days", "device.md")[
+                "content"
+            ],
+            "用户设备为 J1900。",
         )
 
         failed = extract_round_memory(
@@ -1176,9 +1246,11 @@ class RuntimeFeatureTests(unittest.TestCase):
 
     def test_failed_round_is_skipped_by_later_memory_extraction(self) -> None:
         _, root = self.make_root(stream=True)
-        provider = ScriptedProvider(streams=[[
-            RunEvent(type="error", error={"message": "upstream unavailable"})
-        ]])
+        provider = ScriptedProvider(
+            streams=[
+                [RunEvent(type="error", error={"message": "upstream unavailable"})]
+            ]
+        )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             list(
                 iter_request_events(
@@ -1214,9 +1286,7 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidates"], 0)
-        self.assertEqual(
-            result["extraction"]["reason"], "failed_rounds"
-        )
+        self.assertEqual(result["extraction"]["reason"], "failed_rounds")
         self.assertEqual(result["extraction"]["skipped_rounds"], [1])
 
     def test_runtime_guidance_is_injected_at_tool_boundary_and_persisted(self) -> None:
@@ -1261,14 +1331,18 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(result["run_id"], "run_guided_test")
         applied = [event for event in events if event.type == "guidance_applied"]
         self.assertEqual(len(applied), 1)
-        self.assertEqual(applied[0].metadata["guidance"], ["focus on the revised target"])
+        self.assertEqual(
+            applied[0].metadata["guidance"], ["focus on the revised target"]
+        )
         window = load_window(find_window(root, "alice", "cli", "guided"))
         self.assertEqual(
             window["data"]["round_metrics"][0]["guidance"],
             ["focus on the revised target"],
         )
 
-    def test_runtime_attachment_only_guidance_reaches_provider_and_history(self) -> None:
+    def test_runtime_attachment_only_guidance_reaches_provider_and_history(
+        self,
+    ) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         upload = root / "users" / "alice" / "file_upload"
@@ -1281,10 +1355,12 @@ class RuntimeFeatureTests(unittest.TestCase):
             {"path": "users/alice/file_upload/revised-target.md"},
         )
         guidance: queue.Queue[GuidanceInput] = queue.Queue()
-        guidance.put(GuidanceInput(
-            id="guidance_attachment_only",
-            uploaded_files=[descriptor],
-        ))
+        guidance.put(
+            GuidanceInput(
+                id="guidance_attachment_only",
+                uploaded_files=[descriptor],
+            )
+        )
         provider = ScriptedProvider(
             responses=[
                 ChatResponse(
@@ -1297,21 +1373,24 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            events = list(iter_request_events(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "guided-attachment",
-                    "prompt": "start",
-                    "run_id": "run_guided_attachment",
-                    "_guidance_queue": guidance,
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-            ))
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "guided-attachment",
+                        "prompt": "start",
+                        "run_id": "run_guided_attachment",
+                        "_guidance_queue": guidance,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
 
         guidance_message = next(
-            item for item in provider.requests[1].messages
+            item
+            for item in provider.requests[1].messages
             if item.get("role") == "user" and "运行中引导" in item.get("content", "")
         )
         self.assertIn("revised-target.md", guidance_message["content"])
@@ -1341,7 +1420,11 @@ class RuntimeFeatureTests(unittest.TestCase):
                 yield RunEvent(type="text_delta", content="B")
                 yield RunEvent(
                     type="usage",
-                    usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                    usage={
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3,
+                    },
                 )
 
         provider = IncrementalProvider()
@@ -1464,9 +1547,7 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         self.assertEqual([event.type for event in events], ["error"])
         self.assertEqual(events[0].metadata["status"], "failed")
-        self.assertEqual(
-            events[0].metadata["stop_reason"], "provider_congestion"
-        )
+        self.assertEqual(events[0].metadata["stop_reason"], "provider_congestion")
         window = load_window(find_window(root, "alice", "cli", "provider-busy"))
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
@@ -1501,44 +1582,54 @@ class RuntimeFeatureTests(unittest.TestCase):
             events[0].metadata["stop_reason"],
             "provider_context_recovery_failed",
         )
-        window = load_window(
-            find_window(root, "alice", "cli", "context-unrecoverable")
-        )
+        window = load_window(find_window(root, "alice", "cli", "context-unrecoverable"))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
     def test_error_and_cancel_both_commit_terminal_rounds(self) -> None:
         _, root = self.make_root(stream=True)
-        error_provider = ScriptedProvider(streams=[[
-            RunEvent(type="text_delta", content="partial"),
-            RunEvent(
-                type="tool_call_start",
-                tool_call_id="pending-error",
-                tool_name="lookup",
-                arguments={"value": "x"},
-            ),
-            RunEvent(
-                type="error",
-                error={
-                    "message": "sensitive upstream body",
-                    "code": "rate_limit",
-                    "provider_status": 429,
-                },
-            ),
-        ]])
+        error_provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(type="text_delta", content="partial"),
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="pending-error",
+                        tool_name="lookup",
+                        arguments={"value": "x"},
+                    ),
+                    RunEvent(
+                        type="error",
+                        error={
+                            "message": "sensitive upstream body",
+                            "code": "rate_limit",
+                            "provider_status": 429,
+                        },
+                    ),
+                ]
+            ]
+        )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
-                    {"user": "alice", "source": "cli", "session_id": "err", "prompt": "go"},
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "err",
+                        "prompt": "go",
+                    },
                     root=root,
                     provider_factory=lambda _: error_provider,
                 )
             )
-        self.assertEqual([event.type for event in events], [
-            "text_delta",
-            "tool_call_start",
-            "error",
-        ])
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "text_delta",
+                "tool_call_start",
+                "error",
+            ],
+        )
         self.assertTrue(events[-1].metadata["committed"])
         self.assertEqual(events[-1].metadata["status"], "failed")
         self.assertEqual(events[-1].metadata["stop_reason"], "provider_error_event")
@@ -1568,11 +1659,22 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         cancel = threading.Event()
         cancel_provider = ScriptedProvider(
-            streams=[[RunEvent(type="text_delta", content="partial"), RunEvent(type="usage", usage={}), RunEvent(type="done", usage={})]]
+            streams=[
+                [
+                    RunEvent(type="text_delta", content="partial"),
+                    RunEvent(type="usage", usage={}),
+                    RunEvent(type="done", usage={}),
+                ]
+            ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             iterator = iter_request_events(
-                {"user": "alice", "source": "cli", "session_id": "cancel", "prompt": "go"},
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "cancel",
+                    "prompt": "go",
+                },
                 root=root,
                 provider_factory=lambda _: cancel_provider,
                 cancel_event=cancel,
@@ -1585,17 +1687,21 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(cancelled_events[0].metadata["status"], "cancelled")
         cancel_window = load_window(find_window(root, "alice", "cli", "cancel"))
         self.assertEqual(cancel_window["data"]["rounds"], 1)
-        self.assertEqual(cancel_window["data"]["round_metrics"][0]["status"], "cancelled")
+        self.assertEqual(
+            cancel_window["data"]["round_metrics"][0]["status"], "cancelled"
+        )
         self.assertEqual(cancel_window["text"]["messages"][0]["content"], "go")
         self.assertIn("partial", cancel_window["text"]["messages"][1]["content"])
         self.assertIn("紧急停止", cancel_window["text"]["messages"][1]["content"])
 
         next_provider = ScriptedProvider(
-            streams=[[
-                RunEvent(type="text_delta", content="next"),
-                RunEvent(type="usage", usage={}),
-                RunEvent(type="done", usage={}),
-            ]]
+            streams=[
+                [
+                    RunEvent(type="text_delta", content="next"),
+                    RunEvent(type="usage", usage={}),
+                    RunEvent(type="done", usage={}),
+                ]
+            ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             next_events = list(
@@ -1620,7 +1726,14 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(text="", tool_calls=[ToolCall("1", "lookup", {"value": "x"}), ToolCall("2", "lookup", {"value": "x"})], usage=Usage()),
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("1", "lookup", {"value": "x"}),
+                        ToolCall("2", "lookup", {"value": "x"}),
+                    ],
+                    usage=Usage(),
+                ),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
@@ -1636,7 +1749,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
 
-    def test_failed_duplicate_call_executes_again_and_preserves_retry_metadata(self) -> None:
+    def test_failed_duplicate_call_executes_again_and_preserves_retry_metadata(
+        self,
+    ) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
@@ -1694,16 +1809,18 @@ class RuntimeFeatureTests(unittest.TestCase):
         _, root = self.make_root(stream=True)
         cancel = threading.Event()
         provider = ScriptedProvider(
-            streams=[[
-                RunEvent(
-                    type="tool_call_start",
-                    tool_call_id="pending-1",
-                    tool_name="lookup",
-                    arguments={"value": "x"},
-                ),
-                RunEvent(type="usage", usage={}),
-                RunEvent(type="done", usage={}),
-            ]]
+            streams=[
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="pending-1",
+                        tool_name="lookup",
+                        arguments={"value": "x"},
+                    ),
+                    RunEvent(type="usage", usage={}),
+                    RunEvent(type="done", usage={}),
+                ]
+            ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             iterator = iter_request_events(
@@ -1732,7 +1849,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(calls[0]["result"]["error"]["cancelled"])
         durable_items = window["items"]["items"]
         call_item = next(item for item in durable_items if item["type"] == "tool_call")
-        result_item = next(item for item in durable_items if item["type"] == "tool_result")
+        result_item = next(
+            item for item in durable_items if item["type"] == "tool_result"
+        )
         self.assertEqual(call_item["call_id"], "pending-1")
         self.assertEqual(result_item["call_id"], "pending-1")
         self.assertTrue(result_item["is_error"])
@@ -1747,7 +1866,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(tracker.record("lookup", {"a": 2, "b": 2}), 1)
         self.assertEqual(tracker.record("other", {"a": 2, "b": 2}), 1)
 
-    def test_ninth_consecutive_identical_call_is_blocked_but_changed_arguments_continue(self) -> None:
+    def test_ninth_consecutive_identical_call_is_blocked_but_changed_arguments_continue(
+        self,
+    ) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         global_path = root / "config" / "global_config.json"
@@ -1787,7 +1908,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         window = load_window(find_window(root, "alice", "cli", "identical-limit"))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual(calls[0]["status"], "completed")
-        self.assertTrue(all(call["status"] == "duplicate_reused" for call in calls[1:8]))
+        self.assertTrue(
+            all(call["status"] == "duplicate_reused" for call in calls[1:8])
+        )
         self.assertEqual(calls[8]["status"], "identical_call_blocked")
         self.assertEqual(
             calls[8]["result"]["error"]["exception_type"],
@@ -1810,9 +1933,15 @@ class RuntimeFeatureTests(unittest.TestCase):
         global_path.write_text(json.dumps(config), "utf-8")
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(text="", tool_calls=[ToolCall("f1", "unstable", {"value": "1"})]),
-                ChatResponse(text="", tool_calls=[ToolCall("f2", "unstable", {"value": "2"})]),
-                ChatResponse(text="", tool_calls=[ToolCall("f3", "unstable", {"value": "3"})]),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("f1", "unstable", {"value": "1"})]
+                ),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("f2", "unstable", {"value": "2"})]
+                ),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("f3", "unstable", {"value": "3"})]
+                ),
                 ChatResponse(text="changed approach"),
             ]
         )
@@ -1852,7 +1981,10 @@ class RuntimeFeatureTests(unittest.TestCase):
         }
         global_config_path.write_text(json.dumps(global_config), "utf-8")
         provider = ScriptedProvider(
-            responses=[ChatResponse(text=f"reply-{index}", usage=Usage()) for index in range(12)]
+            responses=[
+                ChatResponse(text=f"reply-{index}", usage=Usage())
+                for index in range(12)
+            ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             for index in range(12):
@@ -1907,7 +2039,7 @@ class RuntimeFeatureTests(unittest.TestCase):
                             }
                         ),
                         usage=Usage(3, 1, 4, source="mock"),
-                    )
+                    ),
                 ]
             )
             result = compress_context(
@@ -1929,8 +2061,11 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(window["data"]["memory_status"], "completed")
         self.assertEqual(result["memory"]["status"], "completed")
         self.assertEqual(len(window["text"]["messages"]), 24)
-        self.assertTrue(
-            (root / "users" / "alice" / "improve" / "seven_days" / "压缩记忆.md").is_file()
+        self.assertEqual(
+            MemoryStore(root, "alice", {}).get_entry("seven_days", "压缩记忆.md")[
+                "content"
+            ],
+            "old rounds fact",
         )
 
     def test_queued_manual_compress_only_waits_for_summary(self) -> None:
@@ -1951,7 +2086,10 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         global_config_path.write_text(json.dumps(global_config), "utf-8")
         provider = ScriptedProvider(
-            responses=[ChatResponse(text=f"reply-{index}", usage=Usage()) for index in range(12)]
+            responses=[
+                ChatResponse(text=f"reply-{index}", usage=Usage())
+                for index in range(12)
+            ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             for index in range(12):
@@ -2006,7 +2144,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(window["data"]["memory_target_round"], 12)
         self.assertEqual(window["data"]["memory_processed_round"], 0)
 
-    def test_manual_compression_of_seventy_five_rounds_is_verified_and_next_round_runs(self) -> None:
+    def test_manual_compression_of_seventy_five_rounds_is_verified_and_next_round_runs(
+        self,
+    ) -> None:
         _, root = self.make_root()
         global_config_path = root / "config" / "global_config.json"
         global_config = json.loads(global_config_path.read_text("utf-8"))
@@ -2040,7 +2180,11 @@ class RuntimeFeatureTests(unittest.TestCase):
             ]
         )
         summary_provider = ScriptedProvider(
-            responses=[ChatResponse(text=json.dumps(summary, ensure_ascii=False), usage=Usage())]
+            responses=[
+                ChatResponse(
+                    text=json.dumps(summary, ensure_ascii=False), usage=Usage()
+                )
+            ]
         )
         continuation_provider = ScriptedProvider(
             responses=[ChatResponse(text="round-76-reply", usage=Usage())]
@@ -2100,7 +2244,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(stored_archive["data"]["rounds"], 76)
         self.assertEqual(stored_runtime["data"]["rounds"], 21)
         self.assertEqual(stored_runtime["data"]["context"]["round_offset"], 55)
-        self.assertEqual(stored_runtime["data"]["context_snapshot"]["workspace_rounds"], 21)
+        self.assertEqual(
+            stored_runtime["data"]["context_snapshot"]["workspace_rounds"], 21
+        )
         self.assertEqual(continued["text"], "round-76-reply")
         self.assertTrue(
             any(
@@ -2306,26 +2452,43 @@ class RuntimeFeatureTests(unittest.TestCase):
 
         json_out = io.StringIO()
         cli.emit_event_stream(
-            iter([RunEvent(type="usage", usage={"total_tokens": 2}), RunEvent(type="done")]),
+            iter(
+                [
+                    RunEvent(type="usage", usage={"total_tokens": 2}),
+                    RunEvent(type="done"),
+                ]
+            ),
             output="json",
             stdout=json_out,
             stderr=io.StringIO(),
             show_reasoning=True,
         )
-        self.assertEqual([json.loads(line)["type"] for line in json_out.getvalue().splitlines()], ["usage", "done"])
+        self.assertEqual(
+            [json.loads(line)["type"] for line in json_out.getvalue().splitlines()],
+            ["usage", "done"],
+        )
 
         class Interrupting:
             closed = False
+
             def __iter__(self):
                 return self
+
             def __next__(self):
                 raise KeyboardInterrupt
+
             def close(self):
                 self.closed = True
 
         source = Interrupting()
         with self.assertRaises(KeyboardInterrupt):
-            cli.emit_event_stream(source, output="text", stdout=io.StringIO(), stderr=io.StringIO(), show_reasoning=False)
+            cli.emit_event_stream(
+                source,
+                output="text",
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                show_reasoning=False,
+            )
         self.assertTrue(source.closed)
 
 

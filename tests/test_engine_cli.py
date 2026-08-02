@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +20,7 @@ from provider.protocol.models import (
 from run.engine import handle_request
 from run.attachments import describe_uploaded_asset
 from run.history import find_window, load_window, runtime_window_path
+from run.history_store import delete_window
 
 
 class MockProvider:
@@ -66,7 +66,9 @@ class EngineAndCLITests(unittest.TestCase):
         (root / "config" / "global_soul.md").write_text("GLOBAL", "utf-8")
         (root / "agents.md").write_text("AGENTS", "utf-8")
         (root / "users" / "alice" / "user_soul.md").write_text("USER", "utf-8")
-        (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            "HOT", "utf-8"
+        )
         provider = {
             "type": "kemo",
             "base_url": "http://127.0.0.1:1",
@@ -75,9 +77,7 @@ class EngineAndCLITests(unittest.TestCase):
             "stream": False,
         }
         (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {}
-            ),
+            json.dumps({}),
             "utf-8",
         )
         (root / "users" / "alice" / "user_config.json").write_text(
@@ -93,17 +93,28 @@ class EngineAndCLITests(unittest.TestCase):
         def factory(_):
             return MockProvider(seen)
 
-        request = {"user": "alice", "source": "cli", "session_id": "s1", "prompt": "one"}
+        request = {
+            "user": "alice",
+            "source": "cli",
+            "session_id": "s1",
+            "prompt": "one",
+        }
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             first = handle_request(request, root=root, provider_factory=factory)
             request["prompt"] = "two"
             second = handle_request(request, root=root, provider_factory=factory)
         self.assertEqual(first["text"], "reply:one")
         self.assertEqual(second["text"], "reply:two")
-        roles = [str(item.role) for item in seen[1].input if isinstance(item, MessageItem)]
+        roles = [
+            str(item.role) for item in seen[1].input if isinstance(item, MessageItem)
+        ]
         self.assertEqual(roles, ["user", "assistant", "user"])
-        self.assertLess(seen[1].system_prompt.index("USER"), seen[1].system_prompt.index("GLOBAL"))
-        self.assertLess(seen[1].system_prompt.index("GLOBAL"), seen[1].system_prompt.index("AGENTS"))
+        self.assertLess(
+            seen[1].system_prompt.index("USER"), seen[1].system_prompt.index("GLOBAL")
+        )
+        self.assertLess(
+            seen[1].system_prompt.index("GLOBAL"), seen[1].system_prompt.index("AGENTS")
+        )
         path = find_window(root, "alice", "cli", "s1")
         window = load_window(path)
         self.assertEqual(window["data"]["rounds"], 2)
@@ -163,7 +174,7 @@ class EngineAndCLITests(unittest.TestCase):
             )
             self.assertEqual(temp["data"]["context"]["round_offset"], 2)
 
-            shutil.rmtree(temp_path)
+            self.assertTrue(delete_window(temp_path))
             request["prompt"] = "round-5"
             handle_request(request, root=root, provider_factory=factory)
 
@@ -199,7 +210,12 @@ class EngineAndCLITests(unittest.TestCase):
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(
-                    {"user": "alice", "source": "cli", "session_id": "fail", "prompt": "one"},
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "fail",
+                        "prompt": "one",
+                    },
                     root=root,
                     provider_factory=lambda _: FailingProvider([]),
                 )
@@ -214,12 +230,8 @@ class EngineAndCLITests(unittest.TestCase):
         )
         failed_metric = failed_window["data"]["round_metrics"][0]
         self.assertEqual(failed_metric["status"], "failed")
-        self.assertEqual(
-            failed_metric["failure"]["exception_type"], "RuntimeError"
-        )
-        self.assertEqual(
-            failed_metric["failure"]["message"], "模型服务调用未完成"
-        )
+        self.assertEqual(failed_metric["failure"]["exception_type"], "RuntimeError")
+        self.assertEqual(failed_metric["failure"]["message"], "模型服务调用未完成")
         self.assertNotIn("failed", json.dumps(failed_metric["failure"]))
 
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -341,7 +353,13 @@ class EngineAndCLITests(unittest.TestCase):
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             text_out = io.StringIO()
             self.assertEqual(
-                cli.main(["--user", "alice", "hello"], handler=handler, stdout=text_out, stderr=io.StringIO(), root=root),
+                cli.main(
+                    ["--user", "alice", "hello"],
+                    handler=handler,
+                    stdout=text_out,
+                    stderr=io.StringIO(),
+                    root=root,
+                ),
                 0,
             )
             self.assertEqual(text_out.getvalue(), "reply:hello\n")
@@ -349,7 +367,15 @@ class EngineAndCLITests(unittest.TestCase):
             json_out = io.StringIO()
             self.assertEqual(
                 cli.main(
-                    ["--user", "alice", "--stdin", "--session", "pipe", "--output", "json"],
+                    [
+                        "--user",
+                        "alice",
+                        "--stdin",
+                        "--session",
+                        "pipe",
+                        "--output",
+                        "json",
+                    ],
                     handler=handler,
                     stdin=io.StringIO("piped"),
                     stdout=json_out,

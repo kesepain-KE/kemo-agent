@@ -67,6 +67,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    arguments_raw: str | None = None
+    parse_error: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

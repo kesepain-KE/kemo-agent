@@ -285,6 +285,27 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(request.reasoning.effort, expected)
                 self.assertEqual(request.provider_options["reasoning_effort"], expected)
 
+    def test_runner_submits_new_gateway_declared_effort_without_mapping(self) -> None:
+        provider = MockProvider(reasoning_efforts=["low", "ultra"])
+        config = {
+            **self.config,
+            "provider": {**self.config["provider"], "reasoning_effort": "ultra"},
+        }
+        runner = AgentRunner(
+            self.root,
+            "kesepain",
+            config=config,
+            provider_factory=lambda _: provider,
+        )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            runner.run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        request = provider.requests[0]
+        self.assertEqual(request.reasoning.effort, "ultra")
+        self.assertEqual(request.provider_options["reasoning_effort"], "ultra")
+
     def test_runner_keeps_chat_reasoning_chain_without_capability_lookup(self) -> None:
         provider = MockProvider()
         config = {

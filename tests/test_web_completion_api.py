@@ -389,25 +389,27 @@ class WebCompletionApiTests(unittest.TestCase):
                     "allowed_tools": None,
                     "message_buffer": "message.md",
                     "files_dir": "files",
-                    "log_dir": "log",
                 }
             ),
             "utf-8",
         )
-        (plugin / "state.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "health": "healthy",
-                    "last_check": "2026-07-21T00:00:00+08:00",
-                    "last_message_at": None,
-                    "error": None,
-                    "latency_ms": 3,
-                    "messages_received_today": 2,
-                    "messages_sent_today": 1,
-                }
-            ),
-            "utf-8",
+        from run.log_store import LogStore
+        LogStore(root).write_message_route_state(
+            "example_01",
+            user="alice",
+            platform="example",
+            state={
+                "schema_version": 1,
+                "health": "healthy",
+                "last_check": "2026-07-21T00:00:00+08:00",
+                "last_message_at": None,
+                "error": None,
+                "latency_ms": 3,
+                "messages_received_today": 2,
+                "messages_sent_today": 1,
+                "input_status": "running",
+                "input_restart_count": 0,
+            },
         )
         service = WebRunService(
             root,

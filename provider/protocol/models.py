@@ -23,10 +23,8 @@ PROTOCOL_VERSION = "1.0"
 SUPPORTED_PROTOCOL_MAJOR = 1
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 USER_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "max"})
-KEMO_REASONING_EFFORTS = frozenset(
-    {"minimal", "low", "medium", "high", "xhigh", "max"}
-)
 DEFAULT_REASONING_EFFORT = "medium"
+_MAX_REASONING_EFFORT_LENGTH = 64
 
 
 def _identifier(prefix: str) -> str:
@@ -40,11 +38,23 @@ def normalize_reasoning_effort(value: Any) -> str:
     return effort if effort in USER_REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
-def normalize_kemo_reasoning_effort(value: Any) -> str:
-    """Normalize one Kemo logical effort without applying any vendor mapping."""
+def _dynamic_reasoning_effort(value: Any, *, allow_none: bool = False) -> str:
+    effort = str(value or "").strip().casefold()
+    if (
+        not effort
+        or len(effort) > _MAX_REASONING_EFFORT_LENGTH
+        or any(ord(character) < 32 for character in effort)
+        or (effort == "none" and not allow_none)
+    ):
+        return ""
+    return effort
 
-    effort = str(value or "").strip().lower()
-    return effort if effort in KEMO_REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
+
+def normalize_kemo_reasoning_effort(value: Any) -> str:
+    """Preserve one gateway-declared Kemo effort without vendor-side mapping."""
+
+    effort = _dynamic_reasoning_effort(value)
+    return effort or DEFAULT_REASONING_EFFORT
 
 
 class ProtocolModel(BaseModel):
@@ -264,11 +274,19 @@ Item = Annotated[
 
 class ReasoningConfig(ProtocolModel):
     enabled: bool = False
-    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] = "none"
+    effort: str = "none"
     return_mode: Literal["none", "summary", "content", "auto"] = Field(
         default="none", alias="return"
     )
     context: Literal["none", "current_turn", "all_turns", "auto"] = "auto"
+
+    @field_validator("effort")
+    @classmethod
+    def validate_effort(cls, value: str) -> str:
+        effort = _dynamic_reasoning_effort(value, allow_none=True)
+        if not effort:
+            raise ValueError("reasoning.effort 必须是有效的网关逻辑档位")
+        return effort
 
 
 class GenerationConfig(ProtocolModel):
@@ -342,9 +360,11 @@ class ReasoningCapabilities(ProtocolModel):
     def validate_efforts(cls, values: list[str]) -> list[str]:
         normalized: list[str] = []
         for raw in values:
-            effort = str(raw or "").strip().casefold()
-            if effort not in KEMO_REASONING_EFFORTS:
-                raise ValueError(f"reasoning.efforts 包含未知逻辑档位：{raw!r}")
+            effort = _dynamic_reasoning_effort(raw, allow_none=True)
+            if not effort:
+                raise ValueError(f"reasoning.efforts 包含无效逻辑档位：{raw!r}")
+            if effort == "none":
+                continue
             if effort in normalized:
                 raise ValueError(f"reasoning.efforts 不得重复：{effort}")
             normalized.append(effort)
