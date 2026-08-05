@@ -44,6 +44,7 @@ MULTIMODAL_CAPABILITIES = frozenset(
     }
 )
 AGENT_MODEL_PROFILES = frozenset({"default", "cheap", "reasoning"})
+SYSTEM_UPDATE_RATE_KEYS = frozenset({"sense_update_rate", "expand_update_rate"})
 
 
 class ConfigError(RuntimeError):
@@ -149,6 +150,20 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
 
     validate_multimodal_config(merged)
     return merged
+
+
+def system_update_rate(config: dict[str, Any], key: str) -> int:
+    """Return a validated framework-owned module refresh rate in seconds."""
+
+    if key not in SYSTEM_UPDATE_RATE_KEYS:
+        raise ConfigError(f"未知系统模块刷新配置：{key}")
+    task_config = config.get("task_cron_system") or {}
+    if not isinstance(task_config, dict):
+        return 5
+    value = task_config.get(key, 5)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 5
+    return value
 
 
 def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:

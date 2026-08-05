@@ -10,6 +10,7 @@ python -m tests.template_tests.sense --target global_sense/<name>
 - 更新脚本提供同步零参数 `update()` 或 `main()`；
 - 成功执行后，清单声明的 Markdown 出口非空，时间和健康状态有效；
 - Prompt 来源注册器能发现并注入该出口。
+- `sense.json` 不声明模块级刷新频率；框架调度统一读取全局 `task_cron_system.sense_update_rate`。
 
 ## 不限制
 

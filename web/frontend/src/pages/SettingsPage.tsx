@@ -44,7 +44,6 @@ interface UserConfigDraft {
   multimodal_models: Record<MultimodalKey, string>
   multimodal_routing: { vision: VisionRoutingMode }
   knowledge: { use_shared: boolean; use_global: boolean }
-  kemo_graph: GraphDraft
   skills: { shared_whitelist: string[] }
   expand: { shared_whitelist: string[]; global_whitelist: string[] }
   perception: { global_whitelist: string[] }
@@ -52,17 +51,9 @@ interface UserConfigDraft {
   task_plan: { auto_accept: boolean }
 }
 
-interface GraphDraft {
-  kemo_graph_global_knowledge: boolean
-  kemo_graph_shared_knowledge: boolean
-  kemo_graph_user_knowledge: boolean
-  kemo_graph_temporary_memory: boolean
-}
-
 interface GlobalConfigDraft {
   agents: { token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
   memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
-  kemo_graph: GraphDraft
   tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
@@ -112,13 +103,6 @@ const agentModelFields: Array<{ key: AgentModelProfile; label: string; descripti
   { key: 'default', label: '默认子智能体模型', description: '普通子智能体使用；留空时继承主对话模型' },
   { key: 'cheap', label: '轻量子智能体模型', description: '摘要、上下文整理等轻量任务使用；留空时继承主对话模型' },
   { key: 'reasoning', label: '推理子智能体模型', description: '任务规划和深度整理使用；留空时继承主对话模型' },
-]
-
-const graphFields: Array<{ key: keyof GraphDraft; label: string }> = [
-  { key: 'kemo_graph_global_knowledge', label: '图谱—全局知识库' },
-  { key: 'kemo_graph_shared_knowledge', label: '图谱—共享知识库' },
-  { key: 'kemo_graph_user_knowledge', label: '图谱—用户知识库' },
-  { key: 'kemo_graph_temporary_memory', label: '图谱—临时记忆' },
 ]
 
 function isSettingsTab(value: string | null): value is SettingsTab {
@@ -172,16 +156,6 @@ function stringList(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
-function graphDraft(value: unknown): GraphDraft {
-  const item = record(value)
-  return {
-    kemo_graph_global_knowledge: booleanValue(item.kemo_graph_global_knowledge, false),
-    kemo_graph_shared_knowledge: booleanValue(item.kemo_graph_shared_knowledge, false),
-    kemo_graph_user_knowledge: booleanValue(item.kemo_graph_user_knowledge, false),
-    kemo_graph_temporary_memory: booleanValue(item.kemo_graph_temporary_memory, false),
-  }
-}
-
 function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
   const provider = record(config.provider)
   const providerType: ProviderType = provider.type === 'kemo' ? 'kemo' : 'chat'
@@ -233,7 +207,6 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
       use_shared: booleanValue(knowledge.use_shared, true),
       use_global: booleanValue(knowledge.use_global, true),
     },
-    kemo_graph: graphDraft(config.kemo_graph),
     skills: { shared_whitelist: stringList(skills.shared_whitelist) },
     expand: {
       shared_whitelist: stringList(expand.shared_whitelist),
@@ -269,7 +242,6 @@ function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
       one_month: numberValue(memoryLimits.one_month, 200),
       half_year: numberValue(memoryLimits.half_year, 300),
     } },
-    kemo_graph: graphDraft(config.kemo_graph),
     tools: {
       timeout: numberValue(tools.timeout, 240),
       max_iterations: numberValue(tools.max_iterations, 80),
@@ -846,18 +818,16 @@ export function SettingsPage() {
   }
 
   const savePermissions = () => {
-    if (!userDraft || !globalDraft) return
+    if (!userDraft) return
     submit({
       label: '保存权限边界',
       userChanges: {
         knowledge: userDraft.knowledge,
-        kemo_graph: userDraft.kemo_graph,
         skills: userDraft.skills,
         expand: userDraft.expand,
         perception: userDraft.perception,
         plugins: userDraft.plugins,
       },
-      globalChanges: { kemo_graph: globalDraft.kemo_graph },
     })
   }
 
@@ -1112,20 +1082,12 @@ export function SettingsPage() {
           </article>
         </> : null}
 
-        {tab === 'permissions' && userDraft && globalDraft ? <>
-          <ConfigSaveBar label="保存权限边界" description="用户白名单与全局图谱底层开关会分别写入各自配置文件。" pending={saveMutation.isPending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
+        {tab === 'permissions' && userDraft ? <>
+          <ConfigSaveBar label="保存权限边界" description="知识范围与模块白名单写入当前用户配置；知识图谱外挂由普通拓展和插件权限控制。" pending={saveMutation.isPending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>知识库开关</strong><span>用户知识库始终有效；以下开关控制额外知识层。</span></div>
             <SettingRow title="使用共享知识库" description="将 shared_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_shared} label="使用共享知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_shared: value } })} />} />
             <SettingRow title="使用全局知识库" description="将 global_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_global} label="使用全局知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_global: value } })} />} />
-          </article>
-          <article className="setting-section">
-            <div className="setting-section-head"><strong>知识图谱—用户级选择</strong><span>控制当前用户希望由图谱替换的知识和临时记忆来源。</span></div>
-            {graphFields.map((field) => <SettingRow key={field.key} title={field.label} description="启用后不再回退注入对应的原始来源" source="user" control={<Toggle checked={userDraft.kemo_graph[field.key]} label={`${field.label}用户级`} onChange={(value) => setUserDraft({ ...userDraft, kemo_graph: { ...userDraft.kemo_graph, [field.key]: value } })} />} />)}
-          </article>
-          <article className="setting-section global-boundary-section">
-            <div className="setting-section-head"><strong>知识图谱—全局底层</strong><span>决定用户目录是否实际生成图谱数据；关闭后，即使用户级开关打开也不生效。</span></div>
-            {graphFields.map((field) => <SettingRow key={field.key} title={field.label} description="系统级图谱生成与连接闸门" source="global" control={<Toggle checked={globalDraft.kemo_graph[field.key]} label={`${field.label}全局底层`} onChange={(value) => setGlobalDraft({ ...globalDraft, kemo_graph: { ...globalDraft.kemo_graph, [field.key]: value } })} />} />)}
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>来源白名单</strong><span>输入资源 ID 后按 Enter 或逗号添加；空白名单表示全部允许。</span></div>

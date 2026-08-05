@@ -14,6 +14,8 @@
 
 RuntimeHost 启用后台调度时，系统任务按 `task_cron_system.sense_update_rate` 扫描所有合法全局感知模块并执行其 `start_update`。每个入口都运行在独立、受超时约束的 Python 子进程中，不会把热插拔代码导入 Web/Runtime 主进程。
 
+这是所有感知模块共享的框架级频率，不是 `sense.json` 的模块级字段。Web `/api/users/{user}/sense` 接口从同一份全局配置为每个来源返回整数 `update_interval_seconds`，并提供兼容显示字段 `update_interval`；前端依据秒数显示“每 N 秒/分钟/小时”。因此不得在模块清单中重复添加 `update_interval` 或 `interval_seconds`，也不得根据 `recent_update` 时间差猜测频率。用户配置中的同名值不会改变这项全局系统任务。
+
 Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通无交互子进程。感知模块不需要也不应该自行设置 `CREATE_NO_WINDOW`、`CREATE_NEW_CONSOLE`、`pythonw` 或终端窗口参数。用户手动执行 `python data_update.py` 属于前台调试，是否显示当前终端由用户的启动方式决定。
 
 ## sense.json
@@ -65,7 +67,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 ## 创建流程
 
 1. 确认需求是只读采集，不含操控。
-2. 确认名称、采集指标、刷新频率、数据可见范围。
+2. 确认名称、采集指标、数据可见范围，并核对现有全局 `sense_update_rate` 是否满足需要；修改它会同时影响所有感知模块。
 3. 设计初始数据出口，明确哪些信息允许进入 Prompt；不要预先规定内部工程结构。
 4. 列出现有模块查重并获得最终确认。
 5. 使用 `sense_creater action=create` 建立最小框架合同；随后可按需求在新模块目录内自由创建或迁入其他文件和完整工程，再执行 `validate`。
@@ -74,6 +76,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 ## 验收清单
 
 - `sense.json` 恰好五字段且值合法。
+- 刷新频率只由全局 `task_cron_system.sense_update_rate` 声明，模块清单不重复保存调度频率。
 - `sense.md` 与 `data_update.py` 均存在，路径没有越界。
 - 采集脚本提供零参数同步 `update()` 或 `main()`，可重复运行、可在超时内结束，导入时无副作用。
 - 脚本不自行创建终端窗口、守护进程或无限循环；后台隐藏由框架负责。

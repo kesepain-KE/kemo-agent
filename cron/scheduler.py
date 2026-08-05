@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
 from provider.factory import create_provider, provider_semaphore_status
+from run.config import system_update_rate
 from run.cron_store import CronStore, CronValidationError, normalize_task
 from run.log_store import LogStore
 from run.tools import ToolRegistry, discover_tools
@@ -194,22 +195,12 @@ def _promotion_spec() -> dict[str, Any]:
     }
 
 
-def _configured_update_rate(config: dict[str, Any], key: str) -> int:
-    task_cron = config.get("task_cron_system") or {}
-    if not isinstance(task_cron, dict):
-        return 5
-    rate = task_cron.get(key, 5)
-    if isinstance(rate, bool) or not isinstance(rate, int) or rate < 1:
-        return 5
-    return rate
-
-
 def _perception_spec(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": PERCEPTION_TASK_ID,
         "title": _PERCEPTION_TITLE,
         "type": "recurring",
-        "interval_seconds": _configured_update_rate(config, "sense_update_rate"),
+        "interval_seconds": system_update_rate(config, "sense_update_rate"),
         "exec_mode": "system",
         "action": "perception_update",
     }
@@ -220,7 +211,7 @@ def _expand_spec(config: dict[str, Any]) -> dict[str, Any]:
         "task_id": EXPAND_TASK_ID,
         "title": _EXPAND_TITLE,
         "type": "recurring",
-        "interval_seconds": _configured_update_rate(config, "expand_update_rate"),
+        "interval_seconds": system_update_rate(config, "expand_update_rate"),
         "exec_mode": "system",
         "action": "expand_update",
     }

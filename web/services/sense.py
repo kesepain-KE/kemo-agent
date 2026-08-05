@@ -11,7 +11,7 @@ import sys
 from typing import Any
 import uuid
 
-from run.config import load_config
+from run.config import load_config, read_json_object, system_update_rate
 from run.context import estimate_text_tokens
 from run.process_utils import hidden_subprocess_kwargs
 from run.prompt import parse_prompt_settings
@@ -25,6 +25,11 @@ class SenseServiceMixin:
     def sense(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
+        global_config = read_json_object(self.root / "config" / "global_config.json")
+        update_interval_seconds = system_update_rate(
+            global_config,
+            "sense_update_rate",
+        )
         source_policy = MainAgentSourcePolicy.from_config(config)
         core_dir = self.root / "global_sense"
         registry_available = (core_dir / "register.py").is_file()
@@ -87,10 +92,11 @@ class SenseServiceMixin:
                 "collected_markdown": collected_markdown,
                 "injected_markdown": injected_markdown,
                 "injected_tokens": estimate_text_tokens(injected_markdown),
-                # Sense modules currently have no required refresh interval
-                # in sense.json. Keep this explicit so clients can render a
-                # truthful fallback instead of inventing one.
-                "update_interval": "",
+                # All perception modules share the framework-owned system
+                # schedule.  Keep the human-readable field for older clients
+                # and expose seconds as the canonical API value.
+                "update_interval": f"每 {update_interval_seconds} 秒",
+                "update_interval_seconds": update_interval_seconds,
                 "updated_at": item["updated_at"],
             })
         core_files = sum(item["files"] for item in inventory)
@@ -278,5 +284,3 @@ class SenseServiceMixin:
             if len(" · ".join(lines)) >= 160:
                 break
         return " · ".join(lines)[:160]
-
-
