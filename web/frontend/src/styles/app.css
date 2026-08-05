@@ -703,6 +703,9 @@ label > input[type="search"]::-webkit-search-results-decoration {
   color: var(--brand);
 }
 .pending-attachment-preview img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.pending-attachment-file-icon.audio { color: #8b5cf6; }
+.pending-attachment-file-icon.video { color: #0ea5e9; }
+.pending-attachment-file-icon.file { color: var(--text-muted); }
 .pending-attachment-preview:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 30%, transparent); outline-offset: 2px; }
 .pending-attachment-copy { min-width: 0; display: grid; gap: 5px; }
 .pending-attachment-copy strong,
@@ -912,7 +915,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 }
 .message.user .message-actions { order: 1; justify-content: flex-end; }
 .user-attachment-list {
-  width: min(100%, 440px);
+  width: min(100%, 380px);
   display: grid;
   justify-items: end;
   gap: 7px;
@@ -921,7 +924,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   width: 100%;
   min-height: 58px;
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   overflow: hidden;
@@ -931,27 +934,24 @@ label > input[type="search"]::-webkit-search-results-decoration {
   color: var(--text);
   box-shadow: var(--shadow-soft);
 }
-.user-attachment-card.file { padding: 9px 10px; }
-.user-attachment-card.image {
-  grid-template-columns: minmax(0, 1fr) auto;
-  max-width: 440px;
-}
+.user-attachment-card { padding: 7px 9px; }
 .user-attachment-preview {
-  grid-column: 1 / -1;
-  width: 100%;
-  max-height: 320px;
+  width: 56px;
+  height: 56px;
+  display: block;
   overflow: hidden;
+  border-radius: 10px;
   background: rgba(0, 0, 0, .08);
 }
 .user-attachment-preview img {
   display: block;
   width: 100%;
-  max-height: 320px;
-  object-fit: contain;
+  height: 100%;
+  object-fit: cover;
 }
 .user-attachment-icon {
-  width: 38px;
-  height: 38px;
+  width: 56px;
+  height: 56px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -959,12 +959,14 @@ label > input[type="search"]::-webkit-search-results-decoration {
   background: var(--surface-3);
   color: var(--brand);
 }
+.user-attachment-icon.audio { color: #8b5cf6; }
+.user-attachment-icon.video { color: #0ea5e9; }
+.user-attachment-icon.file { color: var(--text-muted); }
 .user-attachment-copy {
   min-width: 0;
   display: grid;
   gap: 3px;
 }
-.user-attachment-card.image .user-attachment-copy { padding: 0 0 10px 12px; }
 .user-attachment-copy strong,
 .user-attachment-copy small {
   overflow: hidden;
@@ -984,7 +986,6 @@ label > input[type="search"]::-webkit-search-results-decoration {
   color: var(--text);
   background: var(--surface-2);
 }
-.user-attachment-card.image > button { align-self: end; margin: 0 10px 9px 0; }
 .user-attachment-card.unavailable {
   border-style: dashed;
   background: color-mix(in srgb, var(--surface-elevated) 78%, var(--surface-3));
@@ -1322,8 +1323,8 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .guidance-message > span { color: var(--brand); font-size: .625rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
 .guidance-message > strong { color: var(--text); font-size: .8125rem; }
 .guidance-message > small { color: var(--muted); font-size: .625rem; }
-.guidance-attachment-list { width: 100%; justify-items: stretch; margin-top: 4px; }
-.guidance-attachment-list .user-attachment-card { max-width: none; }
+.guidance-attachment-list { width: 100%; justify-items: start; margin-top: 4px; }
+.guidance-attachment-list .user-attachment-card { width: min(100%, 380px); }
 .guidance-message.error { border-color: color-mix(in srgb, var(--red) 35%, var(--line)); background: var(--red-soft); }
 .guidance-mode-label { color: var(--brand); font-weight: 800; }
 .send-btn.guidance { background: var(--brand-soft); color: var(--brand); border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--line)); }

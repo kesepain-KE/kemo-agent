@@ -2,12 +2,15 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 
 const sourcePolicy = {
-  knowledge: { enabled: true, effective_scopes: ['user', 'shared', 'global'] },
+  knowledge: {
+    enabled: true,
+    configured_scopes: ['user', 'shared', 'global'],
+    effective_scopes: ['user', 'shared', 'global'],
+  },
   plugins: { mode: 'all', names: [] },
   skills: { shared: { mode: 'all', names: [] }, user: { mode: 'all', names: [] } },
   expand: { global: { mode: 'all', names: [] }, shared: { mode: 'all', names: [] } },
   perception: { global: { mode: 'all', names: [] } },
-  kemo_graph: { requested: false, connected: false, effective: false, status: 'disabled', replacement_active: false, replaces_knowledge: false, replaces_memory: false },
 }
 
 const userFileEntries = [
@@ -163,7 +166,7 @@ export const handlers = [
       conversation: { foreground_rounds: 8, archived_rounds: 36, total_tool_calls: 19, session_total_rounds: 44, session_tool_calls: 19 },
       tasks: { active_plans: 2, waiting_crons: 3 },
       capabilities: { tools_enabled: 12, tools_disabled: 2, agents_enabled: 4 },
-      knowledge: { enabled: 9, disabled: 2, graph_enabled: true },
+      knowledge: { enabled: 9, disabled: 2 },
       messages: { connected: 1 },
       integrations: { expands: 2, senses: 1 },
     },
@@ -208,7 +211,7 @@ export const handlers = [
   })),
   http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 1, completed_plans: 0 }, plans: [], cron_tasks: [{ task_id: 'daily-check', title: '每日检查', user_defined: true, status: 'enabled', type: 'daily', time: '18:00', next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never' }], executions: [] })),
   http.post('/api/users/kesepain/tasks/plans/:planId/actions/:action', ({ params }) => HttpResponse.json({ user: 'kesepain', action: params.action, updated: true, plan: { plan_id: params.planId, status: params.action === 'cancel' ? 'cancelled' : 'paused', revision: 2, title: '测试计划', description: '', auto_accept: false, reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', created_at: '', updated_at: '', progress: { completed: 0, total: 1, percent: 0 }, steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }] } })),
-  http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true, retrieval: { mode: 'index_only', full_index: true }, summary: { documents: 3, user_documents: 1, shared_documents: 1, global_documents: 1 }, documents: [{ scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true }, { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, active_for_main_agent: true }, { scope: 'global', relative_path: 'guide.md', title: '全局指南', size: 160, updated_at: 1, active_for_main_agent: true }], extensions: { kemo_graph: 'disabled' }, source_policy: sourcePolicy })),
+  http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true, retrieval: { mode: 'index_only', full_index: true }, summary: { documents: 3, user_documents: 1, shared_documents: 1, global_documents: 1 }, documents: [{ scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true }, { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, active_for_main_agent: true }, { scope: 'global', relative_path: 'guide.md', title: '全局指南', size: 160, updated_at: 1, active_for_main_agent: true }], source_policy: sourcePolicy })),
   http.get('/api/users/kesepain/knowledge/:scope/document', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: params.scope === 'shared' ? 'team.md' : params.scope === 'global' ? 'guide.md' : 'notes.md', content: '# 知识正文\n\n测试内容', size: 24, updated_at: 1 })),
   http.put('/api/users/kesepain/knowledge/:scope/document', async ({ params, request }) => { const body = await request.json() as { content?: string }; return HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: new URL(request.url).searchParams.get('path') || 'notes.md', size: String(body.content || '').length, updated: true, index_refresh: 'next_request' }) }),
   http.delete('/api/users/kesepain/knowledge/:scope/document', ({ params, request }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: new URL(request.url).searchParams.get('path') || 'notes.md', deleted: true })),
@@ -248,7 +251,7 @@ export const handlers = [
     core_available: true,
     core_files: 1,
     summary: { registered: 1, enabled: 1, user: 0, shared: 0, global: 1, healthy: 1, unhealthy: 0, invalid: 0, registered_data: 1, injected_data: 1 },
-    sources: [{ id: 'runtime', name: 'runtime', display_name: '运行时感知', description: '标准数据文件：sense.md', layer: 'global', enabled: true, whitelisted: true, active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-19 12:00:00', health: '正常', valid: true, error: '', start_update: 'data_update.py', files: 1, registered_items: 1, injected_items: 1, data_items: ['sense.md'], value_preview: 'CPU 使用率 23%', collected_markdown: '# 运行时采集\n\n- CPU 使用率：23%', injected_markdown: '[runtime]\n# 运行时采集\n\n- CPU 使用率：23%', injected_tokens: 12, update_interval: '', updated_at: 1 }],
+    sources: [{ id: 'runtime', name: 'runtime', display_name: '运行时感知', description: '标准数据文件：sense.md', layer: 'global', enabled: true, whitelisted: true, active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-19 12:00:00', health: '正常', valid: true, error: '', start_update: 'data_update.py', files: 1, registered_items: 1, injected_items: 1, data_items: ['sense.md'], value_preview: 'CPU 使用率 23%', collected_markdown: '# 运行时采集\n\n- CPU 使用率：23%', injected_markdown: '[runtime]\n# 运行时采集\n\n- CPU 使用率：23%', injected_tokens: 12, update_interval: '每 5 秒', update_interval_seconds: 5, updated_at: 1 }],
     injection: { enabled: true, registered_items: 1, injected_items: 1, original_chars: 23, injected_chars: 23, estimated_tokens: 12, truncated: false, preview: '[runtime]\nruntime ready', preview_truncated: false, content: '[runtime]\n# 运行时采集\n\n- CPU 使用率：23%', source_files: ['global_sense/runtime/sense.md'], prompt_section: 'perception', prompt_position: 'System Prompt / Global Sense' },
     decisions: [],
     source_policy: sourcePolicy,
@@ -269,7 +272,6 @@ export const handlers = [
       multimodal_models: { vision: 'vision-model', image_generation: '', image_edit: '', audio_transcription: '', speech_generation: '', speech_to_speech: '', video_generation: '' },
       task_plan: { auto_accept: false },
       knowledge: { use_shared: true, use_global: true },
-      kemo_graph: { kemo_graph_global_knowledge: false, kemo_graph_shared_knowledge: false, kemo_graph_user_knowledge: false, kemo_graph_temporary_memory: false },
       skills: { shared_whitelist: [] },
       expand: { shared_whitelist: [], global_whitelist: [] },
       perception: { global_whitelist: [] },
@@ -337,7 +339,6 @@ export const handlers = [
       schema_version: 1,
       agents: { token_limit: 1000000, token_compression_ratio: 0.3, max_rounds: 80, rounds_after_compression: 20 },
       memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
-      kemo_graph: { kemo_graph_global_knowledge: false, kemo_graph_shared_knowledge: false, kemo_graph_user_knowledge: false, kemo_graph_temporary_memory: false },
       tools: { timeout: 240, max_iterations: 80, consecutive_identical_call_limit: 8 },
       history: { consecutive_tool_fail_limit: 5 },
       task_plan: { max_steps: 20 },

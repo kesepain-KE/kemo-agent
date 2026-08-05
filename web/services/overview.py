@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
+import copy
 from pathlib import Path
+import time
 from typing import Any
 
 from run.agents import discover_agents
@@ -14,6 +15,26 @@ from web.services.runtime_status import _nonnegative_int
 
 
 class OverviewServiceMixin:
+    def overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_session = self.require_session_id(session_id) if session_id else ""
+        key = (name, normalized_session)
+        now = time.monotonic()
+        with self._overview_cache_lock:
+            cached = self._overview_cache.get(key)
+            if cached is not None and now - cached[0] < 0.5:
+                return copy.deepcopy(cached[1])
+        result = self._build_overview(name, session_id=normalized_session)
+        with self._overview_cache_lock:
+            self._overview_cache[key] = (time.monotonic(), copy.deepcopy(result))
+            if len(self._overview_cache) > 32:
+                oldest = min(
+                    self._overview_cache,
+                    key=lambda item: self._overview_cache[item][0],
+                )
+                self._overview_cache.pop(oldest, None)
+        return result
+
     def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
         empty = {
             "exists": False,
@@ -62,7 +83,7 @@ class OverviewServiceMixin:
             "components": dict(components) if isinstance(components, dict) else {},
         }
 
-    def overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
+    def _build_overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
         name = self.require_user(user)
         normalized_session = ""
         if session_id:
@@ -183,9 +204,6 @@ class OverviewServiceMixin:
             bool(item.get("active_for_main_agent"))
             for item in knowledge_documents
             if isinstance(item, dict)
-        )
-        knowledge_graph_status = str(
-            ((knowledge_data.get("extensions") or {}).get("kemo_graph") or "disabled")
         )
         skill_catalog = skill_data.get("catalog_summary") or {}
         registered_tools = _nonnegative_int(skill_catalog.get("total"))
@@ -319,7 +337,6 @@ class OverviewServiceMixin:
                 "knowledge": {
                     "enabled": enabled_knowledge,
                     "disabled": max(0, len(knowledge_documents) - enabled_knowledge),
-                    "graph_enabled": knowledge_graph_status not in {"", "disabled", "unavailable"},
                 },
                 "messages": {
                     "connected": _nonnegative_int(

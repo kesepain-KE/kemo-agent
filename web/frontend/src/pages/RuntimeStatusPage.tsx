@@ -33,7 +33,6 @@ const sectionLabels: Record<string, string> = {
   plugins: '基础插件',
   skills: '技能指令',
   knowledge_index: '知识库索引',
-  kemo_graph: 'Kemo Graph',
   permanent_memory: '永久记忆',
   important_memory: '临时重要记忆',
   'temporary_memory:half_year': '半年记忆',

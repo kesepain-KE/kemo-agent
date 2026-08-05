@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import os
+import re
+import warnings
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from run.attachments import AttachmentError, describe_uploaded_asset
 from web.constants import (
@@ -38,6 +43,12 @@ from web.services._paths import (
 
 
 class FileServiceMixin:
+    _ATTACHMENT_THUMBNAIL_SIZE = (320, 240)
+    _ATTACHMENT_THUMBNAIL_RE = re.compile(r"^[a-f0-9]{64}$")
+    _ATTACHMENT_IMAGE_SUFFIXES = frozenset(
+        {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+    )
+
     def _project_path(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
 
@@ -118,7 +129,145 @@ class FileServiceMixin:
                 data,
                 avoid_overwrite=True,
             )
-        return {"user": name, "scope": normalized_scope, **result}
+            thumbnail_metadata: dict[str, Any] = {}
+            if (
+                normalized_scope == "file_upload"
+                and Path(str(result["path"])).suffix.casefold()
+                in self._ATTACHMENT_IMAGE_SUFFIXES
+            ):
+                _, target = _safe_relative_target(directory, result["path"])
+                try:
+                    descriptor = describe_uploaded_asset(
+                        self.root,
+                        name,
+                        {"path": self._project_path(target)},
+                    )
+                except (AttachmentError, OSError):
+                    descriptor = None
+                if descriptor is not None:
+                    checksum = str(descriptor.get("checksum_sha256") or "")
+                    thumbnail_metadata = {
+                        "checksum_sha256": checksum,
+                        "media_kind": str(descriptor.get("media_kind") or "file"),
+                        "mime_type": str(
+                            descriptor.get("mime_type")
+                            or "application/octet-stream"
+                        ),
+                        "thumbnail_available": bool(
+                            self._ensure_attachment_thumbnail(
+                                name,
+                                target,
+                                descriptor,
+                            )
+                        ),
+                    }
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            **result,
+            **thumbnail_metadata,
+        }
+
+    def _attachment_thumbnail_path(self, user: str, checksum: str) -> Path:
+        normalized = str(checksum or "").strip().lower()
+        if not self._ATTACHMENT_THUMBNAIL_RE.fullmatch(normalized):
+            raise InvalidRequestError("附件缩略图标识无效")
+        return (
+            self.root
+            / "users"
+            / user
+            / "history"
+            / "thumbnails"
+            / f"{normalized}.webp"
+        )
+
+    def _ensure_attachment_thumbnail(
+        self,
+        user: str,
+        source: Path,
+        descriptor: dict[str, Any],
+    ) -> str:
+        """Create one small durable preview without retaining the source file."""
+
+        if str(descriptor.get("media_kind") or "") != "image":
+            return ""
+        checksum = str(descriptor.get("checksum_sha256") or "").strip().lower()
+        try:
+            target = self._attachment_thumbnail_path(user, checksum)
+        except InvalidRequestError:
+            return ""
+        if target.is_file() and not target.is_symlink():
+            return checksum
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(source) as opened:
+                    opened.seek(0)
+                    image = ImageOps.exif_transpose(opened)
+                    image.thumbnail(
+                        self._ATTACHMENT_THUMBNAIL_SIZE,
+                        Image.Resampling.LANCZOS,
+                    )
+                    if image.mode not in {"RGB", "RGBA"}:
+                        image = image.convert(
+                            "RGBA" if "transparency" in image.info else "RGB"
+                        )
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="WEBP", quality=78, method=4)
+            _atomic_write(target, buffer.getvalue())
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+            OSError,
+            SyntaxError,
+            UnidentifiedImageError,
+            ValueError,
+        ):
+            return ""
+        return checksum
+
+    def attachment_thumbnail(
+        self,
+        user: Any,
+        checksum: Any,
+        *,
+        path: Any = "",
+    ) -> Path:
+        """Return a cached preview, lazily backfilling legacy attachments."""
+
+        name = self.require_user(user)
+        normalized = str(checksum or "").strip().lower()
+        target = self._attachment_thumbnail_path(name, normalized)
+        if target.is_file() and not target.is_symlink():
+            return target
+
+        if isinstance(path, str) and path.strip():
+            upload_root = (self.root / "users" / name / "file_upload").resolve()
+            _, source = _safe_relative_target(upload_root, path)
+            _reject_link_path(upload_root, source)
+            if (
+                source.suffix.casefold() in self._ATTACHMENT_IMAGE_SUFFIXES
+                and source.is_file()
+                and not source.is_symlink()
+            ):
+                try:
+                    descriptor = describe_uploaded_asset(
+                        self.root,
+                        name,
+                        {"path": self._project_path(source)},
+                    )
+                except (AttachmentError, OSError):
+                    descriptor = None
+                if (
+                    descriptor is not None
+                    and str(descriptor.get("checksum_sha256") or "").lower()
+                    == normalized
+                ):
+                    with self._file_upload_lock:
+                        self._ensure_attachment_thumbnail(name, source, descriptor)
+        if target.is_file() and not target.is_symlink():
+            return target
+        raise NotFoundError("附件缩略图不存在")
 
     def require_uploaded_files(self, user: str, uploaded_files: Any) -> list[dict[str, Any]]:
         if uploaded_files in (None, []):
@@ -140,7 +289,7 @@ class FileServiceMixin:
                 raise NotFoundError(f"上传文件不存在：{relative_path}")
             seen.add(relative_path)
             try:
-                normalized.append(describe_uploaded_asset(
+                descriptor = describe_uploaded_asset(
                     self.root,
                     user,
                     {
@@ -148,7 +297,9 @@ class FileServiceMixin:
                     "path": self._project_path(target),
                     "size": target.stat().st_size,
                     },
-                ))
+                )
+                self._ensure_attachment_thumbnail(user, target, descriptor)
+                normalized.append(descriptor)
             except AttachmentError as exc:
                 raise InvalidRequestError(str(exc)) from None
         return normalized

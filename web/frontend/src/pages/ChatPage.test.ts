@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
@@ -171,7 +171,7 @@ describe('reduceRunEvent', () => {
       id: 'active', name: 'active', display_name: '运行时感知', description: '', layer: 'global', enabled: true,
       whitelisted: true, active_for_main_agent: true, status: 'active', data_md: 'sense.md', recent_update: '2026-07-20 12:00:00',
       health: '正常', valid: true, error: '', start_update: '', files: 1, registered_items: 1, injected_items: 1,
-      data_items: ['sense.md'], value_preview: 'CPU 23%', collected_markdown: 'CPU 23%', injected_markdown: '[active]\nCPU 23%', injected_tokens: 5, update_interval: '', updated_at: 1,
+      data_items: ['sense.md'], value_preview: 'CPU 23%', collected_markdown: 'CPU 23%', injected_markdown: '[active]\nCPU 23%', injected_tokens: 5, update_interval: '旧字段', update_interval_seconds: 5, updated_at: 1,
     }
     const items = buildSenseDataItems([
       base,
@@ -179,7 +179,10 @@ describe('reduceRunEvent', () => {
       { ...base, id: 'filtered', active_for_main_agent: false, status: 'filtered' },
     ])
     expect(items).toHaveLength(1)
-    expect(items[0]).toMatchObject({ id: 'active', value: 'CPU 23%', injected: true })
+    expect(items[0]).toMatchObject({ id: 'active', value: 'CPU 23%', updateInterval: '每 5 秒', injected: true })
+    expect(formatSenseUpdateInterval(3600)).toBe('每 1 小时')
+    expect(formatSenseUpdateInterval(90)).toBe('每 90 秒')
+    expect(formatSenseUpdateInterval(0)).toBe('')
   })
 
   it('仅在视口接近底部时自动跟随流式输出', () => {

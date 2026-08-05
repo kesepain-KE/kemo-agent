@@ -352,20 +352,15 @@ export interface NamePolicySummary {
 }
 
 export interface MainAgentSourcePolicySummary {
-    knowledge: { enabled: boolean; effective_scopes: string[] }
-    plugins: NamePolicySummary
-    skills: { shared: NamePolicySummary; user: NamePolicySummary }
+  knowledge: {
+    enabled: boolean
+    configured_scopes: string[]
+    effective_scopes: string[]
+  }
+  plugins: NamePolicySummary
+  skills: { shared: NamePolicySummary; user: NamePolicySummary }
   expand: { global: NamePolicySummary; shared: NamePolicySummary }
   perception: { global: NamePolicySummary }
-  kemo_graph: {
-    requested: boolean
-    connected: false
-    effective: false
-    status: 'disabled' | 'not_connected'
-    replacement_active: boolean
-    replaces_knowledge: boolean
-    replaces_memory: boolean
-  }
 }
 
 export interface KnowledgeResponse {
@@ -377,7 +372,6 @@ export interface KnowledgeResponse {
   }
   summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
-  extensions: { kemo_graph: string }
   source_policy: MainAgentSourcePolicySummary
 }
 
@@ -489,6 +483,7 @@ export interface SenseSourceSummary {
   injected_markdown: string
   injected_tokens: number
   update_interval: string
+  update_interval_seconds: number
   updated_at: number
 }
 
@@ -830,7 +825,6 @@ export interface OverviewResponse {
     knowledge: {
       enabled: number
       disabled: number
-      graph_enabled: boolean
     }
     messages: { connected: number }
     integrations: {
@@ -1112,6 +1106,10 @@ export interface FileMutationResponse {
   created?: boolean
   moved?: boolean
   renamed?: boolean
+  checksum_sha256?: string
+  media_kind?: 'image' | 'audio' | 'video' | 'file'
+  mime_type?: string
+  thumbnail_available?: boolean
 }
 
 export interface PreferencesResponse {

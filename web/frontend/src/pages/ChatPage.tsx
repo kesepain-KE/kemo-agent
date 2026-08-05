@@ -11,6 +11,7 @@ import {
   File as FileIcon,
   FileX2,
   Image as ImageIcon,
+  Music2,
   Pencil,
   RotateCcw,
   Save,
@@ -18,11 +19,12 @@ import {
   TimerReset,
   Trash2,
   UserRound,
+  Video,
   X,
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -75,7 +77,7 @@ function pendingInputAttachment(file: PendingUploadedFile): InputAttachment {
     media_kind: mediaKind,
     mime_type: mimeType,
     size: file.size,
-    checksum_sha256: '',
+    checksum_sha256: file.checksumSha256 || '',
     scope: 'file_upload',
     relative_path: file.path,
     available: true,
@@ -119,12 +121,20 @@ function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaAr
 
 function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
   const [unavailable, setUnavailable] = useState(!attachment.available)
+  const [thumbnailFailed, setThumbnailFailed] = useState(false)
   const downloadable = attachment.scope === 'file_upload' && Boolean(attachment.relative_path) && !unavailable
   const url = downloadable
     ? getUserFileDownloadUrl(user, 'file_upload', attachment.relative_path)
     : ''
+  const image = attachment.media_kind === 'image'
+  const thumbnailUrl = image && attachment.checksum_sha256
+    ? getUserAttachmentThumbnailUrl(user, attachment.checksum_sha256, attachment.relative_path)
+    : ''
 
-  useEffect(() => setUnavailable(!attachment.available), [attachment.asset_id, attachment.available, attachment.relative_path])
+  useEffect(() => {
+    setUnavailable(!attachment.available)
+    setThumbnailFailed(false)
+  }, [attachment.asset_id, attachment.available, attachment.relative_path, attachment.checksum_sha256])
 
   const download = async () => {
     if (!url) return
@@ -145,16 +155,22 @@ function UserAttachmentCard({ user, attachment }: { user: string; attachment: In
     }
   }
 
-  const image = attachment.media_kind === 'image'
+  const typeIcon = attachment.media_kind === 'audio'
+    ? <Music2 size={20} />
+    : attachment.media_kind === 'video'
+      ? <Video size={20} />
+      : image
+        ? <ImageIcon size={20} />
+        : <FileIcon size={20} />
   return (
-    <article className={`user-attachment-card ${image ? 'image' : 'file'}${unavailable ? ' unavailable' : ''}`} aria-label={`${unavailable ? '已清理附件' : '附件'}：${attachment.name}`}>
-      {image && !unavailable ? (
-        <div className="user-attachment-preview">
-          <img src={url} alt={attachment.name} loading="lazy" onError={() => setUnavailable(true)} />
-        </div>
+    <article className={`user-attachment-card ${attachment.media_kind}${unavailable ? ' unavailable' : ''}`} aria-label={`${unavailable ? '已清理附件' : '附件'}：${attachment.name}`}>
+      {thumbnailUrl && !thumbnailFailed ? (
+        <span className="user-attachment-preview">
+          <img src={thumbnailUrl} alt={attachment.name} loading="lazy" onError={() => setThumbnailFailed(true)} />
+        </span>
       ) : (
-        <span className="user-attachment-icon" aria-hidden="true">
-          {unavailable ? <FileX2 size={20} /> : image ? <ImageIcon size={20} /> : <FileIcon size={20} />}
+        <span role="img" className={`user-attachment-icon ${attachment.media_kind}`} aria-label={`${attachment.media_kind === 'audio' ? '音频' : attachment.media_kind === 'video' ? '视频' : image ? '图片' : '文件'}缩略图`}>
+          {unavailable && !image ? <FileX2 size={20} /> : typeIcon}
         </span>
       )}
       <span className="user-attachment-copy">
@@ -177,7 +193,18 @@ function PendingAttachmentCard({
 }) {
   const [previewFailed, setPreviewFailed] = useState(false)
   const image = file.mediaKind === 'image' || file.mimeType?.startsWith('image/')
+  const mediaKind = file.mediaKind || (image ? 'image' : 'file')
   const previewUrl = image ? getUserFilePreviewUrl(user, 'file_upload', file.path) : ''
+  const thumbnailUrl = image && file.checksumSha256
+    ? getUserAttachmentThumbnailUrl(user, file.checksumSha256, file.path)
+    : previewUrl
+  const typeIcon = mediaKind === 'audio'
+    ? <Music2 size={22} />
+    : mediaKind === 'video'
+      ? <Video size={22} />
+      : image
+        ? <ImageIcon size={22} />
+        : <FileIcon size={22} />
 
   useEffect(() => setPreviewFailed(false), [file.path])
 
@@ -186,11 +213,11 @@ function PendingAttachmentCard({
       <span className="pending-attachment-status">已上传 {file.name}</span>
       {image && !previewFailed ? (
         <a className="pending-attachment-preview" href={previewUrl} target="_blank" rel="noreferrer" aria-label={`预览图片 ${file.name}`}>
-          <img src={previewUrl} alt={file.name} onError={() => setPreviewFailed(true)} />
+          <img src={thumbnailUrl} alt={file.name} onError={() => setPreviewFailed(true)} />
         </a>
       ) : (
-        <span className="pending-attachment-file-icon" aria-hidden="true">
-          {image ? <ImageIcon size={22} /> : <FileIcon size={22} />}
+        <span role="img" className={`pending-attachment-file-icon ${mediaKind}`} aria-label={`${mediaKind === 'audio' ? '音频' : mediaKind === 'video' ? '视频' : image ? '图片' : '文件'}缩略图`}>
+          {typeIcon}
         </span>
       )}
       <span className="pending-attachment-copy">
@@ -872,6 +899,14 @@ export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTask
     }))
 }
 
+export function formatSenseUpdateInterval(value: unknown) {
+  const seconds = Number(value)
+  if (!Number.isInteger(seconds) || seconds < 1) return ''
+  if (seconds % 3600 === 0) return `每 ${seconds / 3600} 小时`
+  if (seconds % 60 === 0) return `每 ${seconds / 60} 分钟`
+  return `每 ${seconds} 秒`
+}
+
 export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataItem[] {
   return [...sources]
     .filter((source) => source.active_for_main_agent && source.status === 'active' && source.injected_items > 0)
@@ -880,7 +915,7 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
       id: source.id,
       name: source.display_name || source.name,
       value: source.value_preview,
-      updateInterval: source.update_interval,
+      updateInterval: formatSenseUpdateInterval(source.update_interval_seconds) || source.update_interval,
       updatedAt: formatDateTime(source.recent_update || source.updated_at),
       injected: true,
       icon: senseIconFor(source),
@@ -1225,14 +1260,15 @@ export function ChatPage() {
               path,
               name: path.split('/').at(-1) || file.name,
               size: result.size ?? file.size,
-              mimeType: file.type || 'application/octet-stream',
-              mediaKind: file.type.startsWith('image/')
+              mimeType: result.mime_type || file.type || 'application/octet-stream',
+              mediaKind: result.media_kind || (file.type.startsWith('image/')
                 ? 'image'
                 : file.type.startsWith('audio/')
                   ? 'audio'
                   : file.type.startsWith('video/')
                     ? 'video'
-                    : 'file',
+                    : 'file'),
+              checksumSha256: result.checksum_sha256,
             }
           } catch (error) {
             results[index] = error instanceof Error ? error : new Error('上传失败')

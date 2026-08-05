@@ -139,10 +139,6 @@ _CONFIG_SOURCE_PATHS = (
     "expand.global_whitelist",
     "expand.shared_whitelist",
     "perception.global_whitelist",
-    "kemo_graph.kemo_graph_global_knowledge",
-    "kemo_graph.kemo_graph_shared_knowledge",
-    "kemo_graph.kemo_graph_user_knowledge",
-    "kemo_graph.kemo_graph_temporary_memory",
 )
 
 
@@ -769,4 +765,3 @@ class SettingsServiceMixin:
             "source_selection": source_selection,
             "expand": source_selection.get("expand") or {},
         }
-

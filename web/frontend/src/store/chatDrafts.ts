@@ -6,6 +6,7 @@ export interface PendingUploadedFile {
   size: number
   mimeType?: string
   mediaKind?: 'image' | 'audio' | 'video' | 'file'
+  checksumSha256?: string
 }
 
 export interface UploadFeedback {

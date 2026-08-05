@@ -932,10 +932,9 @@ export function AppShell() {
 
           <section className="context-drawer-card">
             <div className="context-card-head"><span><BookOpen size={17} /><strong>知识库状态</strong></span><small>当前注入范围</small></div>
-            <div className="context-metric-grid three-columns">
+            <div className="context-metric-grid two-columns">
               <div className="context-metric"><span>启用知识</span><strong>{contextWindow?.knowledge.enabled ?? '—'}</strong><small>项</small></div>
               <div className="context-metric"><span>禁用知识</span><strong>{contextWindow?.knowledge.disabled ?? '—'}</strong><small>项</small></div>
-              <div className="context-metric status-metric"><span>知识图谱</span><strong className={contextWindow?.knowledge.graph_enabled ? 'status-on' : 'status-off'}>{contextWindow ? (contextWindow.knowledge.graph_enabled ? '已启动' : '未启动') : '—'}</strong></div>
             </div>
           </section>
 

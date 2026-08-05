@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from PIL import Image
 from unittest.mock import patch
 
 from events import RunEvent
@@ -548,6 +549,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(attached["name"], "note (2).txt")
         self.assertEqual(attached["path"], "users/alice/file_upload/note (2).txt")
         self.assertEqual(attached["size"], 6)
+
         self.assertEqual(attached["mime_type"], "text/plain")
         self.assertEqual(attached["scope"], "file_upload")
         self.assertEqual(attached["relative_path"], "note (2).txt")
@@ -576,6 +578,41 @@ class WebBackendTests(unittest.TestCase):
                     uploaded_files=["missing.txt"],
                 )
             )
+
+    def test_image_attachment_thumbnail_survives_source_cleanup(self) -> None:
+        _, root = self.make_root()
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (1200, 800), (47, 126, 210)).save(
+            image_bytes,
+            format="PNG",
+        )
+        service = WebRunService(root)
+        uploaded = service.save_file(
+            "alice",
+            "file_upload",
+            "large-preview.png",
+            image_bytes.getvalue(),
+        )
+
+        checksum = uploaded["checksum_sha256"]
+        self.assertTrue(uploaded["thumbnail_available"])
+        self.assertEqual(uploaded["media_kind"], "image")
+        app = create_app(service=service)
+        thumbnail_url = (
+            f"/api/users/alice/attachment-thumbnails/{checksum}"
+            "?path=large-preview.png"
+        )
+        preview = self.request(app, "GET", thumbnail_url)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.headers["content-type"], "image/webp")
+        with Image.open(io.BytesIO(preview.content)) as thumbnail:
+            self.assertLessEqual(thumbnail.width, 320)
+            self.assertLessEqual(thumbnail.height, 240)
+
+        service.delete_file("alice", "file_upload", "large-preview.png")
+        retained = self.request(app, "GET", thumbnail_url)
+        self.assertEqual(retained.status_code, 200, retained.text)
+        self.assertEqual(retained.content, preview.content)
 
     def test_usage_cache_tokens_prefers_normalized_fields_and_preserves_zero(
         self,
@@ -2882,6 +2919,95 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["plan"]["status"], "paused")
         self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
 
+    def test_knowledge_api_hides_and_protects_kemo_graph_storage(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1, "knowledge": {}}),
+            "utf-8",
+        )
+        scope_roots = {
+            "user": root / "users" / "alice" / "knowledge",
+            "shared": root / "shared_knowledge",
+            "global": root / "global_knowledge",
+        }
+        for scope, base in scope_roots.items():
+            base.mkdir(parents=True)
+            (base / f"{scope}.md").write_text(f"# {scope}", "utf-8")
+            runtime = base / "kemo-graph-storage"
+            (runtime / "content" / "markdown").mkdir(parents=True)
+            (runtime / "manifest.json").write_text('{"runtime": true}', "utf-8")
+            (runtime / "content" / "markdown" / "derived.md").write_text(
+                "RUNTIME_DERIVED_CONTENT",
+                "utf-8",
+            )
+
+        app = create_app(service=WebRunService(root))
+        listed = self.request(app, "GET", "/api/users/alice/knowledge")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        payload = listed.json()
+        self.assertEqual(payload["summary"]["documents"], 3)
+        self.assertEqual(
+            {item["relative_path"] for item in payload["documents"]},
+            {"user.md", "shared.md", "global.md"},
+        )
+        self.assertNotIn("kemo-graph-storage", listed.text)
+        self.assertNotIn("RUNTIME_DERIVED_CONTENT", listed.text)
+
+        for scope, base in scope_roots.items():
+            endpoint = f"/api/users/alice/knowledge/{scope}/document"
+            read = self.request(
+                app,
+                "GET",
+                endpoint,
+                params={"path": "kemo-graph-storage/manifest.json"},
+            )
+            self.assertEqual(read.status_code, 400, read.text)
+            create = self.request(
+                app,
+                "PUT",
+                endpoint,
+                params={"path": "kemo-graph-storage/new.md"},
+                json={"content": "blocked"},
+            )
+            self.assertEqual(create.status_code, 400, create.text)
+            delete = self.request(
+                app,
+                "DELETE",
+                endpoint,
+                params={"path": "kemo-graph-storage/manifest.json"},
+            )
+            self.assertEqual(delete.status_code, 400, delete.text)
+            move_into = self.request(
+                app,
+                "PATCH",
+                endpoint,
+                params={
+                    "path": f"{scope}.md",
+                    "new_path": "kemo-graph-storage/moved.md",
+                },
+            )
+            self.assertEqual(move_into.status_code, 400, move_into.text)
+            move_out = self.request(
+                app,
+                "PATCH",
+                endpoint,
+                params={
+                    "path": "kemo-graph-storage/manifest.json",
+                    "new_path": "escaped.json",
+                },
+            )
+            self.assertEqual(move_out.status_code, 400, move_out.text)
+            self.assertTrue((base / f"{scope}.md").is_file())
+            self.assertEqual(
+                (base / "kemo-graph-storage" / "manifest.json").read_text("utf-8"),
+                '{"runtime": true}',
+            )
+
     def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -3199,13 +3325,10 @@ class WebBackendTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
-                    "kemo_graph": {
-                        "kemo_graph_user_knowledge": True,
-                        "kemo_graph_temporary_memory": True,
-                    },
                     "memory": {"history_read_enabled": True},
                     "task_plan": {"auto_accept": False, "max_steps": 8},
                     "cron": {"enabled": True},
+                    "task_cron_system": {"sense_update_rate": 12},
                     "agents": {"max_rounds": 30, "token_limit": 100000},
                 }
             ),
@@ -3234,6 +3357,7 @@ class WebBackendTests(unittest.TestCase):
                     },
                     "perception": {"global_whitelist": ["runtime"]},
                     "plugins": {"whitelist": []},
+                    "task_cron_system": {"sense_update_rate": 99},
                 }
             ),
             "utf-8",
@@ -3503,8 +3627,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(context_window["conversation"]["foreground_rounds"], 1)
         self.assertEqual(context_window["conversation"]["archived_rounds"], 0)
         self.assertEqual(context_window["conversation"]["total_tool_calls"], 0)
-        self.assertEqual(context_window["knowledge"]["enabled"], 1)
-        self.assertIsInstance(context_window["knowledge"]["graph_enabled"], bool)
+        self.assertEqual(context_window["knowledge"]["enabled"], 2)
+        self.assertNotIn("graph_enabled", context_window["knowledge"])
         self.assertIn("connected", context_window["messages"])
         self.assertIn("expands", context_window["integrations"])
         self.assertIn("senses", context_window["integrations"])
@@ -3596,13 +3720,14 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["active_for_main_agent"] for item in knowledge.json()["documents"]],
-            [False, False, True],
+            [True, False, True],
         )
         self.assertEqual(
             knowledge.json()["source_policy"]["knowledge"]["effective_scopes"],
-            ["global"],
+            ["user", "global"],
         )
-        self.assertEqual(knowledge.json()["extensions"]["kemo_graph"], "not_connected")
+        self.assertNotIn("extensions", knowledge.json())
+        self.assertNotIn("kemo_graph", knowledge.json()["source_policy"])
         self.assertNotIn("private index", knowledge.text)
 
         skills = self.request(app, "GET", "/api/users/alice/skills")
@@ -3730,7 +3855,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_source["collected_markdown"], "runtime")
         self.assertEqual(runtime_source["injected_markdown"], "[runtime]\nruntime")
         self.assertTrue(runtime_source["whitelisted"])
-        self.assertEqual(runtime_source["update_interval"], "")
+        self.assertEqual(runtime_source["update_interval"], "每 12 秒")
+        self.assertEqual(runtime_source["update_interval_seconds"], 12)
         self.assertTrue(runtime_source["valid"])
         broken_source = next(
             item for item in sense.json()["sources"] if item["id"] == "broken"
@@ -3811,10 +3937,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(settings.json()["provider"]["model"], "test-model")
         self.assertEqual(settings.json()["provider"]["reasoning_effort"], "medium")
         self.assertFalse(settings.json()["authentication"]["enabled"])
-        self.assertEqual(
-            settings.json()["source_policy"]["kemo_graph"]["status"],
-            "not_connected",
-        )
+        self.assertNotIn("kemo_graph", settings.json()["source_policy"])
         self.assertNotIn("super-secret", settings.text)
         self.assertNotIn("api_key", settings.text)
 

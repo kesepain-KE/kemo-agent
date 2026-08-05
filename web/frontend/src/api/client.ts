@@ -597,6 +597,15 @@ export function getUserFilePreviewUrl(
   return `${apiBase}/api/users/${encodeURIComponent(user)}/files/${scope}/preview?path=${encodeURIComponent(path)}`
 }
 
+export function getUserAttachmentThumbnailUrl(
+  user: string,
+  checksum: string,
+  path = '',
+): string {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/attachment-thumbnails/${encodeURIComponent(checksum)}${query}`
+}
+
 export function getTmpFilePreviewUrl(path: string): string {
   return `${apiBase}/api/tmp/preview?path=${encodeURIComponent(path)}`
 }

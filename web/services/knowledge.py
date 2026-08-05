@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from run.config import load_config
-from run.prompt_sources import iter_files
+from run.prompt_sources import IGNORED_RUNTIME_DIRECTORY_NAMES, iter_files
 from run.source_policy import MainAgentSourcePolicy
 from web.constants import _KNOWLEDGE_SCOPES, _KNOWLEDGE_SUFFIXES
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
@@ -64,7 +64,6 @@ class KnowledgeServiceMixin:
                 "global_documents": sum(item["scope"] == "global" for item in documents),
             },
             "documents": documents,
-            "extensions": {"kemo_graph": policy_summary["kemo_graph"]["status"]},
             "source_policy": policy_summary,
         }
 
@@ -82,6 +81,11 @@ class KnowledgeServiceMixin:
     def _knowledge_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
         name, root = self._knowledge_root(user, scope)
         relative, target = _safe_relative_target(root, path)
+        if any(
+            part.casefold() in IGNORED_RUNTIME_DIRECTORY_NAMES
+            for part in Path(relative).parts
+        ):
+            raise InvalidRequestError("知识图谱运行时目录不能作为知识文件访问或修改")
         _reject_link_path(root.resolve(), target)
         if Path(relative).suffix.lower() not in _KNOWLEDGE_SUFFIXES:
             raise InvalidRequestError("知识文件只允许 .md、.txt 或 .json")
@@ -169,5 +173,3 @@ class KnowledgeServiceMixin:
             "new_relative_path": target.relative_to(root).as_posix(),
             "moved": True,
         }
-
-

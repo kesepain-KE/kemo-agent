@@ -422,7 +422,7 @@ describe('AppShell navigation', () => {
           conversation: { foreground_rounds: 0, archived_rounds: 0, session_total_rounds: 0, session_tool_calls: 0, total_tool_calls: 0 },
           tasks: { active_plans: 0, waiting_crons: 0 },
           capabilities: { tools_enabled: 0, tools_disabled: 0, agents_enabled: 0 },
-          knowledge: { enabled: 0, disabled: 0, graph_enabled: false },
+          knowledge: { enabled: 0, disabled: 0 },
           messages: { connected: 0 },
           integrations: { expands: 0, senses: 0 },
         },
@@ -477,7 +477,7 @@ describe('AppShell navigation', () => {
         {
           role: 'user', content: '请识别这张图', attachments: [{
             asset_id: 'asset_photo', name: 'photo.png', media_kind: 'image',
-            mime_type: 'image/png', size: 1024, checksum_sha256: 'abc',
+            mime_type: 'image/png', size: 1024, checksum_sha256: 'a'.repeat(64),
             scope: 'file_upload', relative_path: 'photo.png', available: true,
           }],
         },
@@ -489,18 +489,18 @@ describe('AppShell navigation', () => {
     renderApp('/chat?user=kesepain&session=s1')
 
     const card = await screen.findByLabelText('附件：photo.png')
-    expect(within(card).getByRole('img', { name: 'photo.png' })).toBeInTheDocument()
+    expect(within(card).getByRole('img', { name: 'photo.png' })).toHaveAttribute('src', expect.stringContaining('/attachment-thumbnails/'))
     expect(within(card).getByRole('button', { name: '下载附件 photo.png' })).toBeInTheDocument()
   })
 
-  it('源文件已清理时保留灰色附件空气泡', async () => {
+  it('源文件已清理时仍保留轻量图片缩略图', async () => {
     server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
       user: 'kesepain', source: 'web', session_id: 's1',
       messages: [
         {
           role: 'user', content: '', attachments: [{
             asset_id: 'asset_removed', name: 'removed.png', media_kind: 'image',
-            mime_type: 'image/png', size: 2048, checksum_sha256: 'def',
+            mime_type: 'image/png', size: 2048, checksum_sha256: 'd'.repeat(64),
             scope: 'file_upload', relative_path: 'removed.png', available: false,
           }],
         },
@@ -513,7 +513,7 @@ describe('AppShell navigation', () => {
 
     const card = await screen.findByLabelText('已清理附件：removed.png')
     expect(within(card).getByText(/源文件已清理/)).toBeInTheDocument()
-    expect(within(card).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(card).getByRole('img', { name: 'removed.png' })).toHaveAttribute('src', expect.stringContaining('/attachment-thumbnails/'))
     expect(within(card).queryByRole('button', { name: /下载附件/ })).not.toBeInTheDocument()
     expect(screen.queryByText('[附件] removed.png')).not.toBeInTheDocument()
   })
@@ -605,7 +605,7 @@ describe('AppShell navigation', () => {
     expect(within(imageCard).getByRole('img', { name: 'screenshot.png' })).toBeInTheDocument()
     expect(within(imageCard).getByRole('link', { name: '预览图片 screenshot.png' })).toHaveAttribute('href', expect.stringContaining('/preview?path=screenshot.png'))
     const fileCard = screen.getByLabelText('待发送附件：bundle.zip')
-    expect(within(fileCard).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(fileCard).getByRole('img', { name: '文件缩略图' })).toBeInTheDocument()
     fireEvent.click(within(fileCard).getByRole('button', { name: '取消引用 bundle.zip' }))
     expect(screen.queryByLabelText('待发送附件：bundle.zip')).not.toBeInTheDocument()
     expect(screen.getByLabelText('待发送附件：screenshot.png')).toBeInTheDocument()
@@ -909,6 +909,8 @@ describe('AppShell navigation', () => {
     }))
     expect(await screen.findByText('voice.mp3')).toBeInTheDocument()
     expect(screen.getByText('clip.mp4')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '音频缩略图' })).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '视频缩略图' })).toBeInTheDocument()
     const guidanceId = String(guidanceBody?.guidance_id || '')
     streamController.enqueue(encoder.encode(`event: guidance_applied\ndata: ${JSON.stringify({
       type: 'guidance_applied',
@@ -1194,7 +1196,7 @@ describe('AppShell navigation', () => {
     expect(screen.getAllByText('外部消息').length).toBeGreaterThan(0)
     expect(screen.getByText('拓展与感知')).toBeInTheDocument()
     expect(screen.getAllByText('18.67%').length).toBeGreaterThan(0)
-    expect(screen.getByText('已启动')).toBeInTheDocument()
+    expect(screen.queryByText('知识图谱')).not.toBeInTheDocument()
     expect(document.querySelector('.context-drawer-body')).toHaveClass('drawer-body')
   })
 

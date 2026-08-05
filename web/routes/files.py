@@ -25,6 +25,20 @@ def _preview_response(target: Any, media_type: str) -> FileResponse:
     )
 
 
+def _thumbnail_response(target: Any) -> FileResponse:
+    return FileResponse(
+        target,
+        media_type="image/webp",
+        filename=target.name,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'",
+        },
+    )
+
+
 def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     """Register file-space endpoints without changing their public contract."""
 
@@ -110,6 +124,15 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> FileResponse:
         target, media_type, _ = backend.file_preview(user, scope, path)
         return _preview_response(target, media_type)
+
+    @app.get("/api/users/{user}/attachment-thumbnails/{checksum}")
+    async def attachment_thumbnail(
+        user: str,
+        checksum: str,
+        path: str = Query(default="", max_length=500),
+    ) -> FileResponse:
+        target = backend.attachment_thumbnail(user, checksum, path=path)
+        return _thumbnail_response(target)
 
     @app.delete("/api/users/{user}/files/{scope}")
     async def delete_file(

@@ -239,6 +239,8 @@ class WebRunService(
         self._skill_upload_lock = threading.RLock()
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
+        self._overview_cache_lock = threading.RLock()
+        self._overview_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._kemo_catalog_lock = threading.RLock()
         self._kemo_catalog_cache: dict[
             tuple[str, str, str], tuple[float, Any]
