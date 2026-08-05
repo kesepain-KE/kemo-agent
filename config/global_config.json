@@ -35,12 +35,6 @@
       "perception": "full"
     }
   },
-  "kemo_graph": {
-    "kemo_graph_global_knowledge": false,
-    "kemo_graph_shared_knowledge": false,
-    "kemo_graph_user_knowledge": false,
-    "kemo_graph_temporary_memory": false
-  },
   "memory": {
     "storage_schema_version": 1,
     "extraction_mode": "compression_only",
@@ -97,7 +91,12 @@
     "poll_interval": 5,
     "max_jobs_per_cycle": 1,
     "max_attempts": 5,
-    "retry_delays_seconds": [30, 120, 600, 1800]
+    "retry_delays_seconds": [
+      30,
+      120,
+      600,
+      1800
+    ]
   },
   "message": {
     "max_workers": 8,
