@@ -26,6 +26,8 @@ def run(
     content: str | None = None,
     new_filename: str | None = None,
     limit: int = 50,
+    offset: int = 0,
+    compact: bool = False,
     context_chars: int = 240,
     case_sensitive: bool = False,
     *,
@@ -60,7 +62,15 @@ def run(
         )
     config = load_config(user, root)
     if action == "list":
-        return list_entries(root, user, config, tier, limit=limit)
+        return list_entries(
+            root,
+            user,
+            config,
+            tier,
+            limit=limit,
+            offset=offset,
+            compact=compact,
+        )
     if action == "get":
         if not filename:
             raise ValueError("get 需要 filename")

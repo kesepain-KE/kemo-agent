@@ -144,57 +144,89 @@ def list_entries(
     config: dict[str, Any],
     tier: str,
     limit: int = 50,
+    offset: int = 0,
+    compact: bool = False,
 ) -> dict[str, Any]:
     _validate_tier(tier)
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
+    normalized_offset = _bounded_integer(
+        offset,
+        field="offset",
+        minimum=0,
+        maximum=1_000_000,
+    )
+    if not isinstance(compact, bool):
+        raise ValueError("compact 必须是布尔值")
     if tier == "important":
         names = [IMPORTANT_FILENAME] if _important_entry(root, user, config) else []
-        entries = [
-            {
+        entries = []
+        for filename in names[
+            normalized_offset : normalized_offset + normalized_limit
+        ]:
+            entry = {
                 "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
                 "weight": None,
-                "expires_at": None,
             }
-            for filename in names[:normalized_limit]
-        ]
+            if not compact:
+                entry["expires_at"] = None
+            entries.append(entry)
     elif tier == "permanent":
         names = [
             str(item["filename"])
             for item in MemoryStore(root, user, config).load_tier("permanent")
         ]
-        entries = [
-            {
+        entries = []
+        for filename in names[
+            normalized_offset : normalized_offset + normalized_limit
+        ]:
+            entry = {
                 "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
                 "weight": None,
-                "expires_at": None,
             }
-            for filename in names[:normalized_limit]
-        ]
+            if not compact:
+                entry["expires_at"] = None
+            entries.append(entry)
     else:
         items = MemoryStore(root, user, config).load_tier(tier)
         names = [str(item["filename"]) for item in items]
         by_name = {str(item["filename"]): item for item in items}
-        entries = [
-            {
+        selected_names = names[
+            normalized_offset : normalized_offset + normalized_limit
+        ]
+        entries = []
+        for filename in selected_names:
+            entry = {
                 "memory_ref": _memory_ref(tier, filename),
                 "filename": filename,
                 "weight": int(by_name[filename].get("weight", 0)),
-                "created_at": by_name[filename].get("created_at"),
-                "content_updated_at": by_name[filename].get("content_updated_at"),
-                "last_used_at": by_name[filename].get("last_used_at"),
-                "expires_at": by_name[filename].get("expires_at"),
             }
-            for filename in names[:normalized_limit]
-        ]
+            if not compact:
+                entry.update(
+                    {
+                        "created_at": by_name[filename].get("created_at"),
+                        "content_updated_at": by_name[filename].get(
+                            "content_updated_at"
+                        ),
+                        "last_used_at": by_name[filename].get("last_used_at"),
+                        "expires_at": by_name[filename].get("expires_at"),
+                    }
+                )
+            entries.append(entry)
+    page_end = normalized_offset + len(entries)
+    has_more = page_end < len(names)
     return {
         "action": "list",
         "tier": tier,
         "timezone": "UTC",
         "entries": entries,
         "total": len(names),
-        "truncated": len(names) > normalized_limit,
+        "offset": normalized_offset,
+        "next_offset": page_end if has_more else None,
+        "has_more": has_more,
+        "truncated": has_more,
+        "compact": compact,
     }
 
 

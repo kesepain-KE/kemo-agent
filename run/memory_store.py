@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Iterator
 
 from run.users import user_dir
@@ -16,16 +17,19 @@ from run.users import user_dir
 
 MEMORY_DB_FILENAME = "memory.sqlite3"
 MEMORY_DB_SCHEMA_VERSION = 1
+_READY_DATABASES: set[str] = set()
+_READY_DATABASES_LOCK = threading.Lock()
 
 
 def database_path(root: Path, user: str) -> Path:
     return user_dir(user, root) / "improve" / MEMORY_DB_FILENAME
 
 
-def _configure(database: sqlite3.Connection) -> None:
+def _configure(database: sqlite3.Connection, *, initialize: bool = False) -> None:
     database.row_factory = sqlite3.Row
-    database.execute("PRAGMA journal_mode=WAL")
-    database.execute("PRAGMA synchronous=NORMAL")
+    if initialize:
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("PRAGMA synchronous=NORMAL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA busy_timeout=5000")
 
@@ -104,6 +108,23 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_database(path: Path) -> None:
+    key = str(path.resolve()).casefold()
+    with _READY_DATABASES_LOCK:
+        if key in _READY_DATABASES and path.is_file():
+            return
+        _READY_DATABASES.discard(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        database = sqlite3.connect(path, timeout=5.0)
+        try:
+            _configure(database, initialize=True)
+            _ensure_schema(database)
+            database.commit()
+        finally:
+            database.close()
+        _READY_DATABASES.add(key)
+
+
 @contextmanager
 def connection(
     root: Path,
@@ -112,14 +133,14 @@ def connection(
     write: bool = False,
 ) -> Iterator[sqlite3.Connection]:
     path = database_path(root, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_database(path)
     database = sqlite3.connect(path, timeout=5.0)
     try:
         _configure(database)
-        _ensure_schema(database)
-        database.commit()
         if write:
             database.execute("BEGIN IMMEDIATE")
+        else:
+            database.execute("PRAGMA query_only=ON")
         yield database
         if write:
             database.commit()

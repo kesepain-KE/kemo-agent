@@ -386,6 +386,17 @@ class MemoryManageTests(unittest.TestCase):
         permanent_list = list_entries(self.root, "alice", self.config, "permanent")
         self.assertIsNone(permanent_list["entries"][0]["weight"])
         self.assertIsNone(permanent_list["entries"][0]["expires_at"])
+        compact_permanent = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            compact=True,
+        )
+        self.assertEqual(
+            set(compact_permanent["entries"][0]),
+            {"memory_ref", "filename", "weight"},
+        )
         permanent_get = get_fragment(
             self.root,
             "alice",
@@ -395,6 +406,90 @@ class MemoryManageTests(unittest.TestCase):
         )
         self.assertIsNone(permanent_get["weight"])
         self.assertEqual(permanent_get["content"], "Permanent body")
+
+    def test_list_supports_compact_pagination_without_losing_entries(self) -> None:
+        filenames = [
+            add_fragment(
+                self.root,
+                "alice",
+                self.config,
+                "seven_days",
+                f"paged memory {index}",
+                f"Paged memory body {index}",
+            )["filename"]
+            for index in range(5)
+        ]
+
+        first = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=2,
+            offset=0,
+            compact=True,
+        )
+        self.assertEqual(first["total"], 5)
+        self.assertEqual(first["offset"], 0)
+        self.assertEqual(first["next_offset"], 2)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["truncated"])
+        self.assertTrue(first["compact"])
+        self.assertEqual(
+            set(first["entries"][0]),
+            {"memory_ref", "filename", "weight"},
+        )
+
+        second = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=2,
+            offset=first["next_offset"],
+            compact=True,
+        )
+        self.assertEqual(second["offset"], 2)
+        self.assertEqual(second["next_offset"], 4)
+        self.assertTrue(second["has_more"])
+
+        final = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=2,
+            offset=second["next_offset"],
+            compact=True,
+        )
+        self.assertEqual(final["offset"], 4)
+        self.assertIsNone(final["next_offset"])
+        self.assertFalse(final["has_more"])
+        self.assertFalse(final["truncated"])
+        self.assertEqual(
+            [
+                entry["filename"]
+                for page in (first, second, final)
+                for entry in page["entries"]
+            ],
+            filenames,
+        )
+
+        detailed = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=1,
+        )
+        self.assertFalse(detailed["compact"])
+        for field in (
+            "created_at",
+            "content_updated_at",
+            "last_used_at",
+            "expires_at",
+        ):
+            self.assertIn(field, detailed["entries"][0])
 
     def test_search_is_bounded_case_aware_and_never_returns_full_content(self) -> None:
         long_body = "prefix " * 80 + "RaspberryPi" + " suffix" * 80
@@ -562,7 +657,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.5.0")
+        self.assertEqual(tool.version, "1.6.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),
@@ -577,8 +672,25 @@ class MemoryManageTests(unittest.TestCase):
                 "delete",
             },
         )
-        for field in ("queries", "limit", "context_chars", "case_sensitive"):
+        for field in (
+            "queries",
+            "limit",
+            "offset",
+            "compact",
+            "context_chars",
+            "case_sensitive",
+        ):
             self.assertIn(field, schema["properties"])
+        validate_arguments(
+            schema,
+            {
+                "action": "list",
+                "tier": "seven_days",
+                "limit": 100,
+                "offset": 200,
+                "compact": True,
+            },
+        )
         validate_arguments(
             schema,
             {

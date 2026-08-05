@@ -11,10 +11,10 @@
    - `permanent`：永久记忆碎片，不会过期，权重为 null。
    - `important`：单文件临时重要记忆热画像，由 `memory_temporary_important` 子代理自动维护，权重和到期时间为 null。**此文件不可删除，不可写入空内容。** 主智能体只允许 `get` 和 `search_by_title`/`search_by_content` 读取此层级，不得使用 `add`、`edit` 或 `delete` 操作。
 2. **权限范围**：主智能体可以使用全部 action，但 `important` 层级只允许读取（`get`、`search_by_title`、`search_by_content`、`search_many`），禁止写入或删除；`self_improve` 子代理只能使用三个搜索 action，且后台 `context_compression` / `memory_promotion` 模式禁止读取 `important`，只有用户主动的 `manual_review` 保留只读白名单；`memory_temporary_important` 只能使用 `list/get`。候选、热视图、遗忘、永久协调和晋升均由运行时原子持久化。所有查看和搜索都不改变权重。
-3. **搜索、列出与获取**：列出整层摘要使用 `list`；按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；三个搜索 action 均可传 `tier: "all"` 跨 `seven_days`、`one_month`、`half_year`、`permanent` 四个碎片层查询，结果中的 `tier` 与 `memory_ref` 用于精确定位；多个候选应优先使用一次 `search_many` 同时搜索标题和正文；获取单条完整正文使用 `get`。
+3. **搜索、列出与获取**：列出整层摘要使用 `list`；大层级使用 `offset`、`next_offset`、`has_more` 逐页读取，后台热画像巡检应同时传 `compact=true`，避免元数据挤占工具结果预算。按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；三个搜索 action 均可传 `tier: "all"` 跨 `seven_days`、`one_month`、`half_year`、`permanent` 四个碎片层查询，结果中的 `tier` 与 `memory_ref` 用于精确定位；多个候选应优先使用一次 `search_many` 同时搜索标题和正文；获取单条完整正文使用 `get`。
 4. **禁止空搜索**：两个搜索 action 的 query 都必须是非空字符串。列出全部记忆不能再依赖空 query，应使用 `list`，需要正文时再逐条 `get`。
 5. **敏感凭据检测**：`add` 与 `edit` 会拒绝包含疑似密码、API Key、Token、Cookie 或私钥的内容。
-6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`truncated=true` 表示还有结果，可缩小层级或关键词后继续查询。
+6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`list.has_more=true` 时使用返回的 `next_offset` 读取下一页；`truncated` 为兼容字段，与 `has_more` 同义。`compact=true` 时列表只返回稳定引用、文件名和权重，正文仍用 `get` 精确读取。
 7. **精确寻址**：`get`、`edit`、`delete` 使用 `tier + filename` 寻址 SQLite 表行；逻辑文件名在全部层级全局唯一，跨层同名会由数据库拒绝。删除成功返回 `row_removed=true`，不再存在文件孤儿修复语义。
 8. **稳定引用**：`list`、搜索及所有单条 CRUD 结果均返回 `memory_ref`，格式为 `tier:filename`；展示标题仍使用 `filename`，程序传递目标时优先保留 `memory_ref`。
 
@@ -30,6 +30,8 @@
 | `content` | add / edit | — | Markdown 记忆正文 |
 | `new_filename` | edit | 无 | 重命名后的目标文件名 |
 | `limit` | list / search_* | 50 | 最大返回条数（1–500） |
+| `offset` | list | 0 | 从第几条开始读取（≥0）；下一页使用返回的 `next_offset` |
+| `compact` | list | false | 省略时间与到期元数据，适合后台全层巡检和大规模列表 |
 | `context_chars` | search_by_content | 240 | snippet 最大字符数（60–2000，包含省略号） |
 | `case_sensitive` | search_* | false | 是否区分英文字母大小写 |
 
@@ -40,6 +42,7 @@
 | `entries` | list | 记忆摘要数组，不包含正文 |
 | `memory_ref` | list / get / search_* / add / edit / delete | 稳定组合引用，格式为 `tier:filename` |
 | `total` | list | 当前层级总条目数 |
+| `offset` / `next_offset` / `has_more` | list | 当前页起点、下一页起点和是否仍有后续页面 |
 | `content` | get | 单条完整记忆正文 |
 | `featured_sources` | get important | 当前有效热画像来源的 `{tier, filename}` 数组 |
 | `filename` | get / add / edit / delete | 记忆文件名 |
@@ -107,6 +110,18 @@
         "default": 50,
         "description": "list/search 最大返回条数"
       },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000,
+        "default": 0,
+        "description": "list 分页起点；使用上一页 next_offset 继续"
+      },
+      "compact": {
+        "type": "boolean",
+        "default": false,
+        "description": "list 是否省略时间与到期元数据"
+      },
       "context_chars": {
         "type": "integer",
         "minimum": 60,
@@ -123,7 +138,7 @@
     "required": ["action", "tier"],
     "additionalProperties": false
   },
-  "version": "1.5.0",
+  "version": "1.6.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

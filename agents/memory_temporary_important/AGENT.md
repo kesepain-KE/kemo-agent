@@ -27,8 +27,8 @@
 ### 读取与分类
 
 1. 先读取 `important/memory_temporary_important.md`，同时取得 `featured_sources`，作为失败时保持旧视图的依据。
-2. 对 `seven_days`、`one_month`、`half_year` 分别调用 `list(limit=500)`，再逐条调用 `get` 读取完整正文。
-3. 对 `permanent` 调用 `list(limit=500)` 并逐条 `get`，对每个临时候选做语义覆盖判断。
+2. 对 `seven_days`、`one_month`、`half_year` 分别调用 `list(limit=100, offset=0, compact=true)`；只要 `has_more=true`，就使用返回的 `next_offset` 继续，直到完整覆盖 `total`，再逐条调用 `get` 读取完整正文。
+3. 对 `permanent` 使用同样的紧凑分页方式完整列出并逐条 `get`，对每个临时候选做语义覆盖判断。
 4. 永久记忆完全覆盖临时碎片：不进入热画像，输出 `drop_duplicate` 协调项。
 5. 永久记忆只覆盖一部分：输出 `merge_permanent` 协调项，并提供包含旧永久事实与新增稳定事实的完整融合正文；不进入热画像。
 6. 永久记忆未覆盖且满足热画像门槛：写入完整新热画像，并在 `featured` 中登记其 `tier` 与 `filename`。
@@ -39,7 +39,7 @@
 - 禁止调用 `memory_manage add/edit/delete`。子代理只负责读取和返回决策，热画像、来源索引、永久融合及临时副本清理由运行时统一原子持久化。
 - `featured` 是当前热画像的完整来源快照，不是本轮增量；从热画像移除的条目必须同时从 `featured` 移除，使其恢复普通临时 Prompt 注入。
 - 热画像中的内容不得超过 `memory.important_memory_max_chars`，不得收录没有对应临时源碎片的事实。
-- 任一次 `list` 返回 `truncated=true` 时，不得输出任何永久协调项；返回原热画像和原 `featured_sources`，避免基于不完整数据清理记忆。
+- 任一层未能沿 `next_offset` 读取到 `has_more=false`，或各页累计条目数与 `total` 不一致时，不得输出任何永久协调项；返回原热画像和原 `featured_sources`，避免基于不完整数据清理记忆。单个中间页的 `truncated=true` 仅表示还有下一页，不等同于最终数据不完整。
 - 临时源碎片进入热画像后不得删除，仍继续走 `7d→30d→180d→permanent` 生命周期。
 
 ---

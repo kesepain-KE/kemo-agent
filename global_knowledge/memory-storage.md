@@ -40,6 +40,8 @@ Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为�
 
 后台整理临时三层时禁止把 `memory_temporary_important.md` 作为输入证据。热视图发布时，`memory_important_sources` 记录来源行和内容摘要；来源被修改、删除或晋升后，旧热视图立即视为失效，普通临时层恢复注入，等待下次巡检重建。主动查看记忆时仍可读取该文件，但查看本身不加权。
 
+热视图巡检不能一次性返回整个大型层级。`memory_temporary_important` 使用 `memory_manage list(limit=100, offset, compact=true)` 逐页列出三层临时记忆和永久记忆，沿 `next_offset` 读取到 `has_more=false` 后，再对稳定引用逐条 `get` 正文。`compact=true` 省略时间与到期元数据，避免列表超过工具结果字符上限；如果分页没有完整覆盖 `total`，运行时必须保持旧热视图，不得基于局部数据执行永久协调或清理。
+
 ## 模板、升级与旧格式
 
 `template/user/improve/` 只包含 `.gitkeep`，不得提交预生成的二进制数据库。`user_create.py` 在真实用户目录落地后初始化 schema；更新器也只初始化缺失数据库，不导入或删除部署者的旧文件。当前源代码旧记忆已被抛弃；需要保留旧部署数据时，应在升级前自行导出，不能假定框架会自动迁移。

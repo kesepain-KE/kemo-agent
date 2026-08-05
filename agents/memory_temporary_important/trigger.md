@@ -20,11 +20,11 @@
 ## periodic_scan
 
 1. 读取当前 `important` 正文及 `featured_sources`。
-2. `list/get` 三层临时碎片和永久记忆全文；禁止用空查询代替全量列出。
+2. 通过 `list(limit=100, offset, compact=true)` 沿 `next_offset` 分页列出三层临时碎片和永久记忆，再用 `get` 读取全文；禁止用空查询代替全量列出，也不得只读取第一页。
 3. 只有同时具备长期价值、用户证据、不可从系统重读且近期高频有用的内容才进入热画像。
 4. 永久层完全覆盖时返回 `drop_duplicate`；部分覆盖时返回带完整融合正文的 `merge_permanent`；未覆盖的高价值碎片进入 `featured`。
 5. `featured` 必须是新热画像的完整来源快照。进入热画像不会删除临时源碎片，也不会阻断正常晋升。
-6. 任一列表截断时保持旧正文和旧来源，不返回永久协调项。
+6. 任一层未分页读取到 `has_more=false` 或累计数量不等于 `total` 时，保持旧正文和旧来源，不返回永久协调项。
 
 ## daily_consolidate
 
