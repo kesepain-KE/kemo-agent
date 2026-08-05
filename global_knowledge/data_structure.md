@@ -73,6 +73,7 @@ kemo-agent/
 |------|------|
 | `expand-creation.md` | 拓展层级、清单、数据注入与操控入口 |
 | `kemo-gateway-status-expand.md` | 内置 Kemo 网关状态拓展的激活、权限、产物与更新边界 |
+| `kemo-graph-expand.md` | Kemo Graph 外挂文档站、绝对路径注册表、手动同步与按需查询边界 |
 | `kemo-transport-reliability.md` | Kemo 请求幂等、SSE 续传、有限重试、取消、完整性与 HTTPS 边界 |
 | `sense-creation.md` | 全局感知模块的创建与刷新规则 |
 | `skill-creation.md` | 共享技能和用户技能的结构与作用域 |

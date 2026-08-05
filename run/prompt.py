@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from plugins.manifest import PluginManifest, discover_plugin_manifests
 from run.knowledge import KnowledgeIndexSelection, select_knowledge_index
-from run.kemo_graph import KemoGraphPromptContext, load_kemo_graph_prompt_context
 from run.memory import MemoryStore
 from run.prompt_sources import (
     SkillDescriptor,
@@ -30,7 +29,6 @@ PROMPT_SECTION_ORDER = (
     "plugins",
     "skills",
     "knowledge_index",
-    "kemo_graph",
     "permanent_memory",
     "important_memory",
     "temporary_memory:half_year",
@@ -64,7 +62,6 @@ DEFAULT_INJECTION_MODES = {
     "expand_data": "full",
     "perception": "full",
 }
-
 
 class PromptConfigError(RuntimeError):
     pass
@@ -310,33 +307,17 @@ def _user_subagent_registry_section(root: Path, user: str) -> PromptSection | No
     )
 
 
-_KNOWLEDGE_REPLACEMENT_PATHS = {
-    "shared": "shared_knowledge/",
-    "global": "global_knowledge/",
-}
-
-
 def _knowledge_index_prompt(
     selection: KnowledgeIndexSelection,
     *,
-    user: str,
     scopes: tuple[str, ...],
-    replaced_scopes: tuple[str, ...],
 ) -> tuple[str, tuple[Path, ...], int]:
-    """Render full indexes while retaining explicit graph-replacement markers."""
+    """Render every enabled local knowledge index without external replacement."""
 
-    replaced = set(replaced_scopes)
     pieces: list[str] = []
     injected_paths: list[Path] = []
     injected_items = 0
     for scope in scopes:
-        if scope in replaced:
-            base = _KNOWLEDGE_REPLACEMENT_PATHS.get(
-                scope, f"users/{user}/knowledge/"
-            )
-            pieces.append(f"# {base} 目录结构，已被知识图谱替代")
-            injected_items += 1
-            continue
         for document in selection.documents:
             if document.scope != scope:
                 continue
@@ -368,29 +349,12 @@ def build_prompt_bundle(
     *,
     plugin_manifests: tuple[PluginManifest, ...] | None = None,
     memory_store: MemoryStore | None = None,
-    graph_context_loader: Callable[..., KemoGraphPromptContext] = (
-        load_kemo_graph_prompt_context
-    ),
 ) -> PromptBundle:
     """Build one immutable prompt snapshot for a complete provider/tool loop."""
 
     root = root.resolve()
     settings = parse_prompt_settings(config)
     source_policy = MainAgentSourcePolicy.from_config(config)
-    replaces_knowledge = any(
-        (
-            source_policy.kemo_graph_global_knowledge,
-            source_policy.kemo_graph_shared_knowledge,
-            source_policy.kemo_graph_user_knowledge,
-        )
-    )
-    graph_context = graph_context_loader(
-        root,
-        user,
-        config,
-        replaces_knowledge=replaces_knowledge,
-        replaces_memory=source_policy.kemo_graph_replaces_temporary_memory,
-    )
     manifests = (
         discover_plugin_manifests(root)
         if plugin_manifests is None
@@ -446,12 +410,9 @@ def build_prompt_bundle(
         user,
         scopes=source_policy.knowledge_scopes,
     )
-    replaced_knowledge_scopes = source_policy.replaced_knowledge_scopes()
     knowledge_text, knowledge_paths, knowledge_injected_items = _knowledge_index_prompt(
         knowledge,
-        user=user,
         scopes=source_policy.knowledge_scopes,
-        replaced_scopes=replaced_knowledge_scopes,
     )
     if knowledge_text:
         sections.append(
@@ -465,22 +426,6 @@ def build_prompt_bundle(
                 injected_items=knowledge_injected_items,
                 truncated=knowledge.truncated,
                 mode=settings.injection_mode["knowledge_index"],
-            )
-        )
-
-    if graph_context.text:
-        sections.append(
-            PromptSection(
-                "kemo_graph",
-                graph_context.text,
-                tuple(relative_path(path, root) for path in graph_context.source_files),
-                original_chars=len(graph_context.text),
-                injected_chars=len(graph_context.text),
-                original_items=sum(layer.enabled for layer in graph_context.layers),
-                injected_items=sum(
-                    layer.enabled and bool(layer.text.strip())
-                    for layer in graph_context.layers
-                ),
             )
         )
 
@@ -505,11 +450,6 @@ def build_prompt_bundle(
             settings.temporary_memory_limits["seven_days"],
         ),
     )
-    memory_replacement_labels = {
-        "half_year": "# 用户的临时重要记忆，遗忘周期6个月，已被知识图谱替代",
-        "one_month": "# 用户的临时重要记忆，遗忘周期一个月，已被知识图谱替代",
-        "seven_days": "# 用户的临时重要记忆，遗忘周期七天，已被知识图谱替代",
-    }
     tier_sections: dict[str, PromptSection] = {}
     memory_ids: list[str] = []
     memory_files: list[str] = []
@@ -520,18 +460,6 @@ def build_prompt_bundle(
         config_name,
         max_files,
     ) in tier_specs_all:
-        if tier != "permanent" and source_policy.kemo_graph_replaces_temporary_memory:
-            content = memory_replacement_labels[tier]
-            tier_sections[section_name] = PromptSection(
-                section_name,
-                content,
-                original_chars=len(content),
-                injected_chars=len(content),
-                original_items=1,
-                injected_items=1,
-                mode=settings.injection_mode[config_name],
-            )
-            continue
         selection = store.select_tier_for_prompt(
             tier,
             max_files=max_files,
@@ -548,7 +476,7 @@ def build_prompt_bundle(
                 tuple(relative_path(path, root) for path in selection.source_files),
                 selection.selected_ids,
                 selection.original_chars,
-                selection.injected_chars,
+                len(selection.text),
                 selection.original_items,
                 selection.injected_items,
                 selection.truncated,
@@ -666,12 +594,7 @@ def build_prompt_bundle(
             {"scope": item.scope, "path": item.relative_path, "title": item.title}
             for item in knowledge.documents
         ],
-        "knowledge_replaced_scopes": list(replaced_knowledge_scopes),
         "source_policy": source_policy.public_summary(),
-        "kemo_graph": graph_context.diagnostics(
-            replaces_knowledge=replaces_knowledge,
-            replaces_memory=source_policy.kemo_graph_replaces_temporary_memory,
-        ),
         "source_selection": registered_sources.selection_diagnostics(),
         "memory_integrity_warnings": list(dict.fromkeys(memory_integrity_warnings)),
     }

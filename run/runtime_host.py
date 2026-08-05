@@ -33,7 +33,7 @@ from message.transport import (
     TransportRegistry,
 )
 from provider.factory import create_provider
-from run.config import read_json_object
+from run.config import read_json_object, system_update_rate
 from run.history_summary_scheduler import HistorySummaryScheduler
 from run.maintenance import MaintenanceScheduler
 from run.task_plan_scheduler import TaskPlanScheduler
@@ -66,16 +66,6 @@ def _positive_int(value: Any, fallback: int) -> int:
     return number if number >= 1 else fallback
 
 
-def _system_update_rate(config: dict[str, Any], key: str) -> float:
-    task_config = config.get("task_cron_system") or {}
-    if not isinstance(task_config, dict):
-        return 5.0
-    value = task_config.get(key, 5)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        return 5.0
-    return float(value)
-
-
 def _cron_poll_interval(config: dict[str, Any]) -> float:
     """Poll often enough to honor the shortest global collection task."""
 
@@ -83,8 +73,8 @@ def _cron_poll_interval(config: dict[str, Any]) -> float:
     if not isinstance(cron_config, dict):
         cron_config = {}
     poll = _positive_seconds(cron_config.get("poll_interval", 30), 30.0)
-    sense = _system_update_rate(config, "sense_update_rate")
-    expand = _system_update_rate(config, "expand_update_rate")
+    sense = system_update_rate(config, "sense_update_rate")
+    expand = system_update_rate(config, "expand_update_rate")
     return max(1.0, min(poll, sense, expand))
 
 
@@ -253,7 +243,9 @@ class RuntimeHost:
         )
         self.task_plans = task_plan_scheduler or TaskPlanScheduler(
             self.root,
-            poll_interval=1.0,
+            poll_interval=_positive_seconds(
+                5.0, 5.0
+            ),
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             transport_registry=self.router.transports,

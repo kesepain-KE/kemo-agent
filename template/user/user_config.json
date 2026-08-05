@@ -55,13 +55,6 @@
     "use_global": true
   },
 
-  "kemo_graph": {
-    "kemo_graph_global_knowledge": false,
-    "kemo_graph_shared_knowledge": false,
-    "kemo_graph_user_knowledge": false,
-    "kemo_graph_temporary_memory": false
-  },
-
   "plugins": {
     "whitelist": []
   }

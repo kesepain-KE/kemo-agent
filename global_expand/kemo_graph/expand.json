@@ -1,0 +1,12 @@
+{
+  "name": "Kemo Graph 外挂文档站",
+  "explain": "注册外部或内置知识图谱文档库，仅在用户明确要求时查询、同步或构建",
+  "open_input": false,
+  "input_data": "input_data.md",
+  "input_health": "正常",
+  "start_update": "data_update.py",
+  "open_control": true,
+  "start_expand": "start_expand.py",
+  "start_control": "expand_control.md",
+  "recent_update": "2026-08-05 00:00:00"
+}

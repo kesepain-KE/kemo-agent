@@ -1,8 +1,8 @@
 # user_config.json 配置项手册
 
-> 文档版本：v2.2
-> 最后核对：2026-08-02
-> 事实来源：`template/user/user_config.json`、`run/config.py`、`provider/protocol/models.py`
+> 文档版本：v2.3
+> 最后核对：2026-08-05
+> 事实来源：`template/user/user_config.json`、`run/config.py`、`run/source_policy.py`、`run/prompt.py`、`provider/protocol/models.py`
 
 kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
 
@@ -208,21 +208,6 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 ---
 
-## kemo_graph — 知识图谱检索开关
-
-四个字段全部默认 `false`。只有当 `global_expand/` 中接入 kemo-graph 模块后才实际生效。
-
-| 字段 | 说明 |
-|------|------|
-| `kemo_graph_global_knowledge` | 全局知识库 → 图谱检索 |
-| `kemo_graph_shared_knowledge` | 共享知识库 → 图谱检索 |
-| `kemo_graph_user_knowledge` | 用户知识库 → 图谱检索 |
-| `kemo_graph_temporary_memory` | 三层临时记忆 → 图谱检索 |
-
-> 注意：`global_config.json` 中也有同名开关。全局决定"图谱数据是否存在"，用户决定"该用户是否启用"。两者都开才生效。任一开关为 true 但未建立连接时返回 `not_connected`，不回退原始内容。
-
----
-
 ## plugins — 插件白名单
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -241,7 +226,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `recovery_max_rounds_per_scan` | int | 10 | Maintenance 每次扫描最多补提取的总轮数，范围 1–20 |
 | `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
 | `extraction_max_candidates_per_batch` | int | 10 | 每批候选总上限；仍受每轮最多 2 条限制 |
-| `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days` |
+| `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days`。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入 |
 | `important_memory_max_chars` | int | 5000 | 临时重要热画像最大字符数；热画像只镜像高价值临时碎片，不截断其正常生命周期 |
 | `history_read_enabled` | bool | true | 是否允许智能体使用 `history_search` 工具 |
 
@@ -339,7 +324,6 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `skills` | shared_whitelist |
 | `expand` | global_whitelist, shared_whitelist |
 | `perception` | global_whitelist |
-| `kemo_graph` | kemo_graph_global_knowledge, kemo_graph_shared_knowledge, kemo_graph_user_knowledge, kemo_graph_temporary_memory |
 | `plugins` | whitelist |
 | `task_plan` | auto_accept |
 

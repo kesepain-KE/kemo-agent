@@ -1,8 +1,8 @@
 # global_config.json 配置项手册
 
-> 文档版本：v2.2
-> 最后核对：2026-07-25
-> 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/conversation_runtime.py`、`run/context_service.py`、`run/prompt.py`、`run/runtime_host.py`
+> 文档版本：v2.3
+> 最后核对：2026-08-05
+> 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/conversation_runtime.py`、`run/context_service.py`、`run/source_policy.py`、`run/prompt.py`、`run/runtime_host.py`
 
 kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用户共享这些默认值，用户级 `user_config.json` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
 
@@ -107,21 +107,6 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 ---
 
-## kemo_graph — 知识图谱检索开关
-
-全部默认 `false`。只有当 `global_expand/` 中接入 kemo-graph 模块后才实际生效。
-
-| 字段 | 说明 |
-|------|------|
-| `kemo_graph_global_knowledge` | 全局知识库是否切换为图谱检索 |
-| `kemo_graph_shared_knowledge` | 共享知识库是否切换为图谱检索 |
-| `kemo_graph_user_knowledge` | 用户知识库是否切换为图谱检索 |
-| `kemo_graph_temporary_memory` | 三层临时记忆（half_year、one_month、seven_days）是否切换为图谱检索 |
-
-> 注意：全局配置的开关决定"图谱数据是否存在"，用户配置（`user_config.json → kemo_graph`）的开关决定"该用户是否启用"。两者都开才生效。任一开关为 true 但未建立连接时返回 `not_connected`，不自动回退原始内容。
-
----
-
 ## memory — 记忆系统
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -136,7 +121,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 ### temporary_injection_limits — 临时记忆注入上限
 
-按**文件数量**截断，优先保留高权重层级。仅限制单次 Prompt 注入，不限制磁盘存储数量。
+按**文件数量**截断，优先保留高权重层级。仅限制单次 Prompt 注入，不限制磁盘存储数量。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入。
 
 已被 `memory_important_sources` 表有效引用的临时碎片由热画像段承载，普通临时记忆段会跳过这些来源，避免同一事实重复注入。权威表行仍保留，但只能在保存/压缩的用户对话历史整理中加权，并正常到期和晋升；任一来源正文摘要或层级变化时旧热画像暂停注入，直到下次巡检重建。
 
@@ -205,6 +190,8 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `module_update_timeout` | number | `120` | 每个感知/拓展采集脚本的独立子进程超时（秒）；非法值回退到 120，最大 3600 |
 
 > 两个刷新间隔也影响 `cron.poll_interval` 的最小轮询粒度；单模块超时不改变轮询频率。
+>
+> 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `sense.json`；用户配置中的同名字段也不作为全局调度或页面展示来源。
 
 ---
 

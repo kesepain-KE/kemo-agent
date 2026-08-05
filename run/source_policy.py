@@ -77,11 +77,6 @@ class MainAgentSourcePolicy:
     global_expand: NameFilter
     shared_expand: NameFilter
     global_perception: NameFilter
-    kemo_graph_requested: bool
-    kemo_graph_global_knowledge: bool
-    kemo_graph_shared_knowledge: bool
-    kemo_graph_user_knowledge: bool
-    kemo_graph_replaces_temporary_memory: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MainAgentSourcePolicy":
@@ -91,7 +86,6 @@ class MainAgentSourcePolicy:
         skills = _object(config, "skills")
         expand = _object(config, "expand")
         perception = _object(config, "perception")
-        graph = _object(config, "kemo_graph")
         plugins = _object(config, "plugins")
         _reject_unknown(knowledge, {"use_shared", "use_global"}, field="knowledge")
         _reject_unknown(skills, {"shared_whitelist"}, field="skills")
@@ -101,16 +95,6 @@ class MainAgentSourcePolicy:
             field="expand",
         )
         _reject_unknown(perception, {"global_whitelist"}, field="perception")
-        _reject_unknown(
-            graph,
-            {
-                "kemo_graph_global_knowledge",
-                "kemo_graph_shared_knowledge",
-                "kemo_graph_user_knowledge",
-                "kemo_graph_temporary_memory",
-            },
-            field="kemo_graph",
-        )
         _reject_unknown(plugins, {"whitelist"}, field="plugins")
 
         use_shared = _boolean(
@@ -125,39 +109,11 @@ class MainAgentSourcePolicy:
             field="knowledge.use_global",
             default=True,
         )
-        graph_global = _boolean(
-            graph,
-            "kemo_graph_global_knowledge",
-            field="kemo_graph.kemo_graph_global_knowledge",
-            default=False,
-        )
-        graph_shared = _boolean(
-            graph,
-            "kemo_graph_shared_knowledge",
-            field="kemo_graph.kemo_graph_shared_knowledge",
-            default=False,
-        )
-        graph_user = _boolean(
-            graph,
-            "kemo_graph_user_knowledge",
-            field="kemo_graph.kemo_graph_user_knowledge",
-            default=False,
-        )
-        graph_memory = _boolean(
-            graph,
-            "kemo_graph_temporary_memory",
-            field="kemo_graph.kemo_graph_temporary_memory",
-            default=False,
-        )
         scopes: list[str] = ["user"]
         if use_shared:
             scopes.append("shared")
         if use_global:
             scopes.append("global")
-        graph_requested = any(
-            (graph_global, graph_shared, graph_user, graph_memory)
-        )
-
         return cls(
             knowledge_scopes=tuple(scopes),
             plugins=NameFilter.from_config(
@@ -181,46 +137,19 @@ class MainAgentSourcePolicy:
                 perception.get("global_whitelist", []),
                 field="perception.global_whitelist",
             ),
-            kemo_graph_requested=graph_requested,
-            kemo_graph_global_knowledge=graph_global,
-            kemo_graph_shared_knowledge=graph_shared,
-            kemo_graph_user_knowledge=graph_user,
-            kemo_graph_replaces_temporary_memory=graph_memory,
-        )
-
-    def replaced_knowledge_scopes(self) -> tuple[str, ...]:
-        """Return enabled knowledge scopes whose file indexes graph replaces."""
-
-        replacements = {
-            "user": self.kemo_graph_user_knowledge,
-            "shared": self.kemo_graph_shared_knowledge,
-            "global": self.kemo_graph_global_knowledge,
-        }
-        return tuple(
-            scope for scope in self.knowledge_scopes if replacements.get(scope, False)
         )
 
     def direct_knowledge_scopes(self) -> tuple[str, ...]:
         """Return enabled scopes still allowed to expose their local files."""
 
-        replaced = set(self.replaced_knowledge_scopes())
-        return tuple(scope for scope in self.knowledge_scopes if scope not in replaced)
+        return self.knowledge_scopes
 
     def public_summary(self) -> dict[str, Any]:
-        graph_status = "not_connected" if self.kemo_graph_requested else "disabled"
-        replaces_knowledge = any(
-            (
-                self.kemo_graph_global_knowledge,
-                self.kemo_graph_shared_knowledge,
-                self.kemo_graph_user_knowledge,
-            )
-        )
         return {
             "knowledge": {
                 "enabled": True,
                 "configured_scopes": list(self.knowledge_scopes),
                 "effective_scopes": list(self.direct_knowledge_scopes()),
-                "graph_replaced_scopes": list(self.replaced_knowledge_scopes()),
             },
             "plugins": self.plugins.public_summary(),
             "skills": {
@@ -233,20 +162,5 @@ class MainAgentSourcePolicy:
             },
             "perception": {
                 "global": self.global_perception.public_summary(),
-            },
-            "kemo_graph": {
-                "requested": self.kemo_graph_requested,
-                "connected": False,
-                "effective": False,
-                "status": graph_status,
-                "replacement_active": self.kemo_graph_requested,
-                "kemo_graph_global_knowledge": self.kemo_graph_global_knowledge,
-                "kemo_graph_shared_knowledge": self.kemo_graph_shared_knowledge,
-                "kemo_graph_user_knowledge": self.kemo_graph_user_knowledge,
-                "kemo_graph_temporary_memory": (
-                    self.kemo_graph_replaces_temporary_memory
-                ),
-                "replaces_knowledge": replaces_knowledge,
-                "replaces_temporary_memory": self.kemo_graph_replaces_temporary_memory,
             },
         }

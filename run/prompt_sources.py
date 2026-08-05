@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import sys
 import uuid
@@ -374,6 +375,9 @@ def read_required_text(path: Path) -> str:
         raise PromptSourceError(f"提示词来源不可读：{path}（{exc}）") from exc
 
 
+IGNORED_RUNTIME_DIRECTORY_NAMES = frozenset({"kemo-graph-storage"})
+
+
 def iter_files(
     base: Path,
     *,
@@ -386,19 +390,42 @@ def iter_files(
         return ()
     allowed_suffixes = {item.casefold() for item in suffixes or ()}
     allowed_names = {item.casefold() for item in names or ()}
-    candidates = base.rglob("*") if recursive else base.glob("*")
     result: list[Path] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        relative = path.relative_to(base)
-        if skip_hidden and any(part.startswith(".") for part in relative.parts):
-            continue
+    ignored_directories = {
+        "__pycache__",
+        "node_modules",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+    } | IGNORED_RUNTIME_DIRECTORY_NAMES
+
+    def include(path: Path) -> None:
         if allowed_suffixes and path.suffix.casefold() not in allowed_suffixes:
-            continue
+            return
         if allowed_names and path.name.casefold() not in allowed_names:
-            continue
+            return
         result.append(path)
+
+    if recursive:
+        for current, directories, files in os.walk(base, followlinks=False):
+            directories[:] = [
+                name
+                for name in directories
+                if name.casefold() not in ignored_directories
+                and (not skip_hidden or not name.startswith("."))
+            ]
+            current_path = Path(current)
+            for name in files:
+                if skip_hidden and name.startswith("."):
+                    continue
+                include(current_path / name)
+    else:
+        for path in base.iterdir():
+            if not path.is_file() or (skip_hidden and path.name.startswith(".")):
+                continue
+            include(path)
     result.sort(key=lambda item: natural_path_key(item.relative_to(base)))
     return tuple(result)
 

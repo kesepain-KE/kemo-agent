@@ -119,6 +119,17 @@ class PromptKnowledgeTests(unittest.TestCase):
         (root / "users" / "alice" / "knowledge" / "body.md").write_text("BODY", "utf-8")
         (root / "shared_knowledge" / "目录.md").write_text("SHARED INDEX", "utf-8")
         (root / "global_knowledge" / "索引.md").write_text("GLOBAL INDEX", "utf-8")
+        for base in (
+            root / "users" / "alice" / "knowledge",
+            root / "shared_knowledge",
+            root / "global_knowledge",
+        ):
+            runtime = base / "kemo-graph-storage" / "content" / "markdown"
+            runtime.mkdir(parents=True)
+            (runtime / "data_structure.md").write_text(
+                "RUNTIME_GRAPH_INDEX_MUST_BE_IGNORED",
+                "utf-8",
+            )
 
         selection = select_knowledge_index(root, "alice")
 
@@ -128,6 +139,7 @@ class PromptKnowledgeTests(unittest.TestCase):
         )
         self.assertIn(large, selection.text)
         self.assertNotIn("BODY", selection.text)
+        self.assertNotIn("RUNTIME_GRAPH_INDEX_MUST_BE_IGNORED", selection.text)
         self.assertEqual(selection.original_chars, selection.injected_chars)
         self.assertEqual(selection.original_items, selection.injected_items)
         self.assertFalse(selection.truncated)

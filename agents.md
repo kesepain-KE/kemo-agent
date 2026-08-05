@@ -230,7 +230,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 3. **未命中再走常规流程**：知识库无匹配时，才考虑网络搜索、Provider 内置知识或其他来源。
 4. **跨层合并**：用户层命中部分、共享/全局层命中另一部分时，合并所有命中结果，用户层内容优先展示。
 
-> **kemo-graph 场景**：当用户配置中任一 `kemo_graph_*` 开关为 `true` 时，对应知识层的检索入口切换为 kemo-graph 接口而非 `data_structure.md` 文件索引。若 kemo-graph 未连接（返回 `not_connected`），该层不回退到原始索引，直接跳过。开关为 `false` 的知识层仍走文件索引。三层各自独立判断。
+> **Kemo Graph 外挂场景**：`global_expand/kemo_graph/` 是独立的侧载文档站连接器，`plugins/kemo_graph/` 只解释注册表并生成规范调用。它不替换、不增强、不缩减三层知识库或任何记忆，也没有专用 Prompt 段、核心配置开关或后台自动同步任务。管理员在拓展自己的 `graph_config.json` 中注册稳定 Library ID 与绝对路径；只有用户明确要求查询、更新或维护此外挂时，才通过 `expand_call(scope="global", module="kemo_graph", ...)` 操作。其本地目录摘要只按普通 `[expand_data][global:kemo_graph]` 规则注入；“继续、下一步、重来”等短指令不得触发新查询。完整合同见 `global_knowledge/kemo-graph-expand.md`。
 
 ---
 
@@ -258,7 +258,6 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `skills` | object | 共享 Prompt 技能白名单；用户技能始终允许 |
 | `expand` | object | 全局/共享 Expand 白名单 |
 | `perception` | object | 全局感知模块白名单 |
-| `kemo_graph` | object | 知识与记忆 Prompt 来源替换器 |
 | `plugins` | object | 可执行插件白名单 |
 | `memory` | object | 记忆挡位、注入上限与历史读取工具开关 |
 | `agent_runtime` | object | 子代理运行时参数 |
@@ -281,16 +280,13 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `expand.global_whitelist` | 全局 Expand 白名单 |
 | `expand.shared_whitelist` | 共享 Expand 白名单；用户 Expand 始终按当前用户目录动态解析 |
 | `perception.global_whitelist` | `global_sense/` 直接子目录模块白名单 |
-| `kemo_graph.kemo_graph_global_knowledge` | 仅以图谱替换全局知识库索引 |
-| `kemo_graph.kemo_graph_shared_knowledge` | 仅以图谱替换共享知识库索引 |
-| `kemo_graph.kemo_graph_user_knowledge` | 仅以图谱替换用户知识库索引 |
-| `kemo_graph.kemo_graph_temporary_memory` | 仅以图谱替换 half_year、one_month、seven_days 三层临时记忆；永久记忆与临时重要记忆始终保留 |
 
 主智能体白名单 `[]` 表示全量允许；非空数组按资源 ID 精确匹配。技能 ID 支持相对路径（如 `development/python`）。`"*"` 不属于主配置协议。
 
 `knowledge.enabled` 与 `skills.user_whitelist` 已从配置契约删除，继续提供会被判定为未知字段。
-任一 `kemo_graph` 替换开关为 `true` 时不会自动启动外部项目；未建立连接接口时明确返回
-`not_connected`，并且不回退注入该开关已替换的原始知识或临时记忆内容。
+Kemo Graph 不属于用户配置合同。是否能看到目录摘要由普通 `expand.global_whitelist` 控制，
+是否能获得引导和执行入口由 `plugins.whitelist` 对 `kemo_graph`、`expand_call` 的授权控制；
+注册路径、服务地址和 Library ID 只存在于全局拓展自己的管理员配置中。
 
 这些字段不控制子代理。子代理只服从各自 `agent-config.json`，不与主智能体策略求交集。
 
@@ -393,7 +389,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - `memory_weight_events(fragment_id, evidence_date)` 由数据库唯一约束同一碎片同一天最多加权一次；晋升、融合、删除、幂等批次结果和热画像来源变更必须在事务内完成。
 - `updated_at` 仅作为 `content_updated_at` 的兼容别名；记忆被注入使用时不得覆盖内容更新时间。
 - 旧 Markdown、`storage.json`、三层 `data.json`、`.memory_operations.json` 和 `important_view.json` 不参与读取，也不会自动导入。
-- 当前生命周期搜索按逻辑文件名与正文执行普通表查询；外部 `kemo-graph` 是否接管临时记忆 Prompt 由独立开关决定。
+- 当前生命周期搜索按逻辑文件名与正文执行普通表查询；外部 `kemo-graph` 不接管记忆 Prompt，也不参与权重、晋升或热画像生成。
 
 ### 临时重要热画像
 
@@ -401,6 +397,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - `memory_important_sources` 表保存热画像当前引用的临时源行及内容摘要。临时源仍是权威数据，只能由用户对话历史整理继续加权，并正常到期和晋升。
 - 数据流必须保持单向：`用户对话原文 → 临时三层 → 临时重要热画像`。后台提取、整理和晋升临时三层时，禁止读取 `important`，也禁止把助手回复、推理或工具结果当作用户证据。
 - 用户或主智能体主动查看记忆属于白名单只读场景，可读取 `important`，但查看本身不得改变任何临时记忆权重。
+- 后台热画像巡检必须使用 `memory_manage list(limit=100, offset, compact=true)` 分页遍历三层临时记忆和永久记忆，并沿 `next_offset` 读取到 `has_more=false`。中间页的 `truncated=true` 只表示仍有下一页；未完整覆盖返回的 `total` 时必须保留旧热画像，禁止基于部分数据做永久融合或副本清理。
 - 已进入热画像且内容摘要仍匹配的源碎片不再重复注入普通临时记忆段；任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容恢复正常注入，等待下次巡检重建。
 - 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像来源、永久融合和临时副本清理由运行时统一事务化，子代理不得直接修改数据库。
 - 普通记忆提取不得覆盖已有永久正文；只有用户本轮明确要求记住的 `explicit=true` 候选才允许更新永久记忆。
@@ -525,7 +522,7 @@ users/<user>/agents/<name>/
 - 子代理只接收调用方显式传入的数据，不自动拥有主会话历史或当前请求。
 - 只有 `agent-config.json` 白名单中的插件会进入该子代理的 Provider 工具定义；缺失授权默认拒绝。
 - 新骨架只允许显式白名单中的 `shared_skills` 进入子代理提示词；不再注入用户技能和三层 Expand。
-- 知识能力只注入授权范围内的完整索引文件；正文关键词检索链路已删除，由外部 kemo-graph 承担后续检索能力。
+- 知识能力只注入授权范围内的完整索引文件；需要正文时由已授权的文件/知识读取能力显式获取。Kemo Graph 只在调用方明确选择此外挂文档站时使用，不是子代理知识正文的默认后端。
 - `subagent_dispatch` 不会下发给子代理，避免递归调度链。
 - 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；默认上限来自 `agent_runtime.default_timeout`，同步调度工具的外层看门狗会晚于该期限触发，不能被普通 `tools.timeout` 提前截断。
 - 子代理达到期限后运行时会自动请求协作式取消并等待清理；已退出记为 `timed_out`，未在清理窗口内退出记为 `timed_out_running`。Python 线程不能被不安全地强杀，后一状态必须保留真实诊断信息。
@@ -578,6 +575,7 @@ users/<user>/agents/<name>/
 - `cron.poll_interval` 控制常规轮询间隔（默认 30 秒）；运行时会自动取它与两个系统数据刷新间隔的最小值，保证短周期任务按时被扫描。
 - `cron.avoid_congestion=true` 时，Provider 可用槽位低于 `cron.congestion_threshold_ratio` 指定比例会推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避。
 - `task_cron_system.sense_update_rate` 控制全局感知刷新间隔，`task_cron_system.expand_update_rate` 控制三层拓展刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。`module_update_timeout` 是每个采集脚本的独立子进程超时，默认 120 秒。
+- 感知刷新频率是框架级统一调度值，不写入单个 `sense.json`。Web 感知 API 从全局配置通过调度器同源校验返回 `update_interval_seconds` 和兼容显示文本；前端不得根据模块更新时间猜测频率，也不得读取用户配置中的同名覆盖值。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
   自动管理 Cron 与上下文整理。
 - 普通任务通过主智能体执行；系统任务可通过 `subagent` 直调内部子代理，或通过白名单 `function` 模式执行内部函数。
@@ -604,18 +602,24 @@ system prompt 按以下固定顺序拼接：
 6. **插件提示词** — `plugins/*/SKILL.md` 的描述部分
 7. **技能提示词** — 注册全部共享/用户技能后，按主智能体白名单选择描述部分
 8. **知识库索引** — 按 `knowledge.use_shared/use_global` 选择用户 + 共享 + 全局索引
-9. **kemo-graph** — 六个独立图谱子层的检索结果或未连接状态
-10. **永久记忆** — `improve/memory.sqlite3` 的 `permanent` 行
-11. **临时重要记忆** — `memory_temporary_important.md`
-12. **临时记忆 half_year** — `improve/memory.sqlite3` 的 `half_year` 行
-13. **临时记忆 one_month** — `improve/memory.sqlite3` 的 `one_month` 行
-14. **临时记忆 seven_days** — `improve/memory.sqlite3` 的 `seven_days` 行
-15. **任务计划** — 当前活跃计划的描述
-16. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行
-17. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
+9. **永久记忆** — `improve/memory.sqlite3` 的 `permanent` 行
+10. **临时重要记忆** — `memory_temporary_important.md`
+11. **临时记忆 half_year** — `improve/memory.sqlite3` 的 `half_year` 行
+12. **临时记忆 one_month** — `improve/memory.sqlite3` 的 `one_month` 行
+13. **临时记忆 seven_days** — `improve/memory.sqlite3` 的 `seven_days` 行
+14. **任务计划** — 当前活跃计划的描述
+15. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行。Kemo Graph 若激活，只在这里以普通 `[expand_data][global:kemo_graph]` 目录摘要出现
+16. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
+
+Kemo Graph 使用两层授权：主配置的全局 Expand 白名单决定模块访问，Library 的
+`allowed_users` 决定读取范围；省略时仅 `admin_users` 可见，`["*"]` 才是公共库。
+全局 Prompt 不得包含私有 Library ID 或绝对路径，写操作仅管理员可执行；`owner_id`
+只是 kemo-graph Store 元数据，不等同于框架授权。
 
 每段有字符上限配置（`prompt.char_limits`）。知识正文不自动注入，只注入索引；需要正文时使用显式搜索机制或工具。
-图谱替换按来源独立生效：被替换的知识索引和三层临时记忆仍保留固定 Prompt 段，但正文改为“已被知识图谱替代”；`kemo_graph` 按用户、共享、全局知识与半年、一月、七天记忆拆成六个子层逐项报告。未连接时不回退原始内容。永久记忆和临时重要记忆始终保留。
+Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索引与全部记忆始终按原规则注入，
+不存在图谱替换、增强标记、临时记忆减半或连接失败回退分支。其目录摘要属于普通拓展数据，
+查询结果只在用户明确调用后作为当轮工具结果进入上下文。
 
 ---
 

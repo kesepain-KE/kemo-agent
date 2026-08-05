@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "base_url": "http://127.0.0.1:8000/api/v1",
+  "admin_users": ["kesepain"],
+  "allow_remote": false,
+  "timeout_seconds": 15,
+  "ingest_timeout_seconds": 1800,
+  "libraries": [
+    {
+      "id": "project_docs",
+      "kind": "portable",
+      "display_name": "项目大型文档库",
+      "enabled": true,
+      "store_root": "E:\\kemo-graph-stores\\project-docs",
+      "source_roots": ["E:\\documents\\project"],
+      "scope": "knowledge.user",
+      "owner_id": "kesepain",
+      "allowed_users": ["kesepain"]
+    },
+    {
+      "id": "kemo_graph_builtin",
+      "kind": "service_default",
+      "display_name": "Kemo Graph 内置文档库",
+      "enabled": true,
+      "allowed_users": ["kesepain"]
+    }
+  ]
+}

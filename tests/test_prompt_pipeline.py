@@ -18,7 +18,6 @@ from provider.adapters.compat import (
 from provider.schema import ChatResponse, Usage
 from run.config import load_config
 from run.engine import EngineError, context_status, handle_request, iter_request_events
-from run.kemo_graph import KemoGraphLayerStatus, KemoGraphPromptContext
 from run.memory import MemoryStore
 from tests.memory_db import update_fragment_metadata
 from run.prompt import (
@@ -453,135 +452,11 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("USER_OPERATION_SECRET", user_section.content)
         self.assertEqual(user_section.item_ids, ("user_demo",))
 
-    def test_kemo_graph_replaces_selected_knowledge_scope_only(self) -> None:
+    def test_legacy_graph_config_does_not_change_prompt_sources(self) -> None:
         _, root, config = self.make_root()
         self.populate_all_sections(root)
         (root / "shared_knowledge" / "index.md").write_text("SHARED_INDEX", "utf-8")
         (root / "global_knowledge" / "index.md").write_text("GLOBAL_INDEX", "utf-8")
-        config["kemo_graph"] = {"kemo_graph_user_knowledge": True}
-
-        def graph_loader(*_args, **kwargs):
-            self.assertTrue(kwargs["replaces_knowledge"])
-            self.assertFalse(kwargs["replaces_memory"])
-            return KemoGraphPromptContext(
-                layers=(
-                    KemoGraphLayerStatus(
-                        name="外部知识图谱向量化检索，用户知识库层",
-                        switch="kemo_graph_user_knowledge",
-                        enabled=True,
-                        connected=True,
-                        status="connected",
-                        text="GRAPH_RETRIEVAL_RESULT",
-                    ),
-                )
-            )
-
-        bundle = build_prompt_bundle(
-            root,
-            "alice",
-            config,
-            graph_context_loader=graph_loader,
-        )
-        self.assertEqual(
-            [item["scope"] for item in bundle.diagnostics["knowledge_documents"]],
-            ["user", "shared", "global"],
-        )
-        self.assertIn("GRAPH_RETRIEVAL_RESULT", bundle.text)
-        self.assertNotIn("[user:index.md]", bundle.text)
-        self.assertIn(
-            "# users/alice/knowledge/ 目录结构，已被知识图谱替代",
-            bundle.text,
-        )
-        self.assertIn("[shared:index.md]", bundle.text)
-        self.assertIn("[global:index.md]", bundle.text)
-        self.assertIn("PERMANENT", bundle.text)
-        self.assertIn("IMPORTANT", bundle.text)
-        self.assertIn("SEVEN", bundle.text)
-
-    def test_kemo_graph_can_replace_all_knowledge_scopes(self) -> None:
-        _, root, config = self.make_root()
-        self.populate_all_sections(root)
-        config["kemo_graph"] = {
-            "kemo_graph_global_knowledge": True,
-            "kemo_graph_shared_knowledge": True,
-            "kemo_graph_user_knowledge": True,
-        }
-        (root / "shared_knowledge" / "index.md").write_text("SHARED_INDEX", "utf-8")
-        (root / "global_knowledge" / "index.md").write_text("GLOBAL_INDEX", "utf-8")
-
-        bundle = build_prompt_bundle(root, "alice", config)
-
-        self.assertEqual(
-            [item["scope"] for item in bundle.diagnostics["knowledge_documents"]],
-            ["user", "shared", "global"],
-        )
-        self.assertEqual(
-            bundle.diagnostics["knowledge_replaced_scopes"],
-            ["user", "shared", "global"],
-        )
-        knowledge = next(
-            section for section in bundle.sections if section.name == "knowledge_index"
-        )
-        self.assertEqual(knowledge.content.count("已被知识图谱替代"), 3)
-        self.assertNotIn("INDEX", knowledge.content)
-        graph = next(
-            section for section in bundle.sections if section.name == "kemo_graph"
-        )
-        self.assertEqual(graph.content.count("该层检索结果暂不可用"), 3)
-        self.assertIn("PERMANENT", bundle.text)
-        self.assertIn("IMPORTANT", bundle.text)
-        self.assertIn("SEVEN", bundle.text)
-
-    def test_kemo_graph_temporary_memory_keeps_permanent_and_important(self) -> None:
-        _, root, config = self.make_root()
-        self.populate_all_sections(root)
-        config["kemo_graph"] = {"kemo_graph_temporary_memory": True}
-
-        def graph_loader(*_args, **kwargs):
-            self.assertFalse(kwargs["replaces_knowledge"])
-            self.assertTrue(kwargs["replaces_memory"])
-            return KemoGraphPromptContext(
-                layers=tuple(
-                    KemoGraphLayerStatus(
-                        name=name,
-                        switch="kemo_graph_temporary_memory",
-                        enabled=True,
-                        connected=True,
-                        status="connected",
-                        text=f"GRAPH_MEMORY_RESULT:{name}",
-                    )
-                    for name in (
-                        "用户的临时重要记忆，遗忘周期6个月",
-                        "用户的临时重要记忆，遗忘周期一个月",
-                        "用户的临时重要记忆，遗忘周期七天",
-                    )
-                )
-            )
-
-        bundle = build_prompt_bundle(
-            root,
-            "alice",
-            config,
-            graph_context_loader=graph_loader,
-        )
-        sections = {section.name: section for section in bundle.sections}
-        self.assertIn("INDEX", bundle.text)
-        self.assertIn("PERMANENT", sections["permanent_memory"].content)
-        self.assertIn("IMPORTANT", sections["important_memory"].content)
-        for name in (
-            "temporary_memory:half_year",
-            "temporary_memory:one_month",
-            "temporary_memory:seven_days",
-        ):
-            self.assertIn("已被知识图谱替代", sections[name].content)
-        self.assertNotIn("HALF", bundle.text)
-        self.assertNotIn("MONTH", bundle.text)
-        self.assertNotIn("SEVEN", bundle.text)
-        self.assertEqual(bundle.memory_ids, ())
-
-    def test_kemo_graph_default_loader_reports_all_six_enabled_layers(self) -> None:
-        _, root, config = self.make_root()
-        self.populate_all_sections(root)
         config["kemo_graph"] = {
             "kemo_graph_global_knowledge": True,
             "kemo_graph_shared_knowledge": True,
@@ -590,17 +465,44 @@ class PromptPipelineTests(unittest.TestCase):
         }
 
         bundle = build_prompt_bundle(root, "alice", config)
+        section_names = [section.name for section in bundle.sections]
 
-        graph = next(
-            section for section in bundle.sections if section.name == "kemo_graph"
+        self.assertNotIn("kemo_graph", section_names)
+        self.assertNotIn("kemo_graph", bundle.diagnostics)
+        self.assertNotIn("knowledge_replaced_scopes", bundle.diagnostics)
+        self.assertEqual(
+            [item["scope"] for item in bundle.diagnostics["knowledge_documents"]],
+            ["user", "shared", "global"],
         )
-        self.assertEqual(graph.content.count("该层检索结果暂不可用"), 6)
-        self.assertEqual(graph.content.count("# 外部知识图谱向量化检索"), 3)
-        self.assertEqual(graph.content.count("# 用户的临时重要记忆"), 3)
-        diagnostics = bundle.diagnostics["kemo_graph"]
-        self.assertEqual(diagnostics["status"], "not_connected")
-        self.assertEqual(len(diagnostics["layers"]), 6)
-        self.assertTrue(all(layer["enabled"] for layer in diagnostics["layers"]))
+        self.assertIn("INDEX", bundle.text)
+        self.assertIn("SHARED_INDEX", bundle.text)
+        self.assertIn("GLOBAL_INDEX", bundle.text)
+        self.assertIn("PERMANENT", bundle.text)
+        self.assertIn("IMPORTANT", bundle.text)
+        self.assertIn("HALF", bundle.text)
+        self.assertIn("MONTH", bundle.text)
+        self.assertIn("SEVEN", bundle.text)
+        self.assertEqual(bundle.memory_ids, ("h.md", "m.md", "s.md"))
+
+    def test_kemo_graph_catalog_is_only_ordinary_expand_data(self) -> None:
+        _, root, config = self.make_root()
+        self.populate_all_sections(root)
+        self.write_expand_module(
+            root,
+            "global",
+            "kemo_graph",
+            input_text="# Kemo Graph 外挂文档站\n\n| project_docs | ready |",
+            control_injection="图谱只按用户明确要求查询。",
+        )
+
+        bundle = build_prompt_bundle(root, "alice", config)
+        section_names = [section.name for section in bundle.sections]
+
+        self.assertNotIn("kemo_graph", section_names)
+        expand = next(section for section in bundle.sections if section.name == "expand_data")
+        self.assertIn("[global:kemo_graph]", expand.content)
+        self.assertIn("Kemo Graph 外挂文档站", expand.content)
+        self.assertIn("图谱只按用户明确要求查询", expand.content)
 
     def test_plugin_whitelist_filters_prompt_manifests(self) -> None:
         _, root, config = self.make_root()
@@ -1375,7 +1277,6 @@ class PromptPipelineTests(unittest.TestCase):
 
 def result_config(root: Path) -> dict:
     return json.loads((root / "config" / "global_config.json").read_text("utf-8"))
-
 
 if __name__ == "__main__":
     unittest.main()

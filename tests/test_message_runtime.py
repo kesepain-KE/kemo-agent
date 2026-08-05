@@ -925,9 +925,16 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.maintenance.started, 1)
         self.assertEqual(host.history_summaries.started, 1)
         self.assertEqual(len(CronStore(self.root, "alice").list_tasks()), 0)
+        system_tasks = CronStore(self.root, "__system__", system=True).list_tasks()
         self.assertEqual(
-            len(CronStore(self.root, "__system__", system=True).list_tasks()),
-            5,
+            {task["task_id"] for task in system_tasks},
+            {
+                "expand_update",
+                "memory_daily_consolidate",
+                "memory_periodic_scan",
+                "memory_promotion",
+                "perception_update",
+            },
         )
         host.stop()
         host.stop()

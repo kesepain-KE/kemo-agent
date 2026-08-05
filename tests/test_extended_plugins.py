@@ -34,7 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_sixteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_seventeen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -46,6 +46,7 @@ class PluginManifestTests(unittest.TestCase):
                 "file",
                 "get_current_time",
                 "history_search",
+                "kemo_graph",
                 "memory_manage",
                 "multimodal",
                 "network",
@@ -63,7 +64,7 @@ class PluginManifestTests(unittest.TestCase):
             self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 16)
+        self.assertEqual(len(registry.tools), 17)
         expand_call = registry.get("expand_call")
         self.assertFalse(expand_call.strict)
         self.assertFalse(expand_call.openai_schema()["function"]["strict"])
