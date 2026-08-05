@@ -146,6 +146,44 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertFalse((target / "provider" / "obsolete.py").exists())
             self.assertEqual((target / "README_EN.md").read_text(encoding="utf-8"), "new readme")
 
+    def test_core_preserves_kemo_graph_store_inside_global_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            write(source / "global_knowledge" / "current.md", "new knowledge")
+            write(target / "global_knowledge" / "obsolete.md", "remove me")
+            write(
+                target / "global_knowledge" / "kemo-graph-storage" / "sources.db",
+                "runtime database",
+            )
+            write(
+                target / "global_knowledge" / "nested" / "kemo-graph-storage" / "index.faiss",
+                "runtime index",
+            )
+
+            core_update.update(source, target, assume_yes=True)
+
+            self.assertEqual(
+                (target / "global_knowledge" / "current.md").read_text("utf-8"),
+                "new knowledge",
+            )
+            self.assertFalse((target / "global_knowledge" / "obsolete.md").exists())
+            self.assertEqual(
+                (target / "global_knowledge" / "kemo-graph-storage" / "sources.db").read_text("utf-8"),
+                "runtime database",
+            )
+            self.assertEqual(
+                (
+                    target
+                    / "global_knowledge"
+                    / "nested"
+                    / "kemo-graph-storage"
+                    / "index.faiss"
+                ).read_text("utf-8"),
+                "runtime index",
+            )
+
     def test_core_contains_runtime_entrypoints_but_does_not_commit_version(self) -> None:
         expected = {
             "start_web.py",
@@ -198,6 +236,90 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertTrue(manifest["open_input"])
             self.assertEqual(manifest["input_health"], "异常")
             self.assertEqual(manifest["recent_update"], "2026-07-28 12:00:00")
+
+    def test_core_installs_kemo_graph_expand_and_preserves_local_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_GRAPH_EXPAND)
+            for name in core_update.KEMO_GRAPH_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {
+                "name": "Kemo Graph 外挂文档站",
+                "open_input": False,
+                "input_health": "正常",
+            })
+            write(source / module / "input_data.md", "source inactive")
+            write_json(target / module / "graph_config.json", {
+                "schema_version": 1,
+                "base_url": "http://127.0.0.1:8000/api/v1",
+                "allow_remote": False,
+            })
+            write_json(target / module / "sync_state.json", {"cursor": "local-cursor"})
+            write_json(target / module / "auto_update_state.json", {"pending_domains": ["global:knowledge"]})
+            write_json(target / module / "_last_run.json", {"status": "ok"})
+            write_json(target / module / "_runtime.json", {"running": False})
+            write_json(target / module / "expand.json", {
+                "name": "old",
+                "open_input": True,
+                "input_health": "异常",
+                "recent_update": "2026-08-05 12:00:00",
+            })
+            write(target / module / "input_data.md", "local graph status")
+            write(target / module / "data" / "kemo_graph_status.json", "local snapshot")
+            write_json(target / module / "data" / "library_sync_state.json", {"cursor": "new-cursor"})
+            write_json(target / module / "data" / "library_status.json", {"status": "ready"})
+            write(target / module / "artifacts" / "query.json", "local query artifact")
+
+            result = core_update.update(source, target, assume_yes=True)
+
+            self.assertIn(str(module).replace("\\", "/"), "\n".join(result["details"]))
+            self.assertEqual((target / module / "graph_core.py").read_text("utf-8"), "new graph_core.py")
+            self.assertEqual((target / module / "registry.py").read_text("utf-8"), "new registry.py")
+            self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "source inactive")
+            self.assertEqual(
+                json.loads((target / module / "graph_config.json").read_text("utf-8"))["base_url"],
+                "http://127.0.0.1:8000/api/v1",
+            )
+            self.assertFalse((target / module / "sync_state.json").exists())
+            self.assertFalse((target / module / "auto_update_state.json").exists())
+            self.assertFalse((target / module / "data" / "kemo_graph_status.json").exists())
+            self.assertEqual(
+                json.loads((target / module / "data" / "library_sync_state.json").read_text("utf-8"))["cursor"],
+                "new-cursor",
+            )
+            self.assertEqual(
+                json.loads((target / module / "data" / "library_status.json").read_text("utf-8"))["status"],
+                "ready",
+            )
+            self.assertEqual((target / module / "artifacts" / "query.json").read_text("utf-8"), "local query artifact")
+            self.assertTrue((target / module / "_last_run.json").is_file())
+            self.assertTrue((target / module / "_runtime.json").is_file())
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertFalse(manifest["open_input"])
+            self.assertEqual(manifest["input_health"], "异常")
+            self.assertEqual(manifest["recent_update"], "2026-08-05 12:00:00")
+
+    def test_core_keeps_valid_kemo_graph_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_GRAPH_EXPAND)
+            for name in core_update.KEMO_GRAPH_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {"open_input": False})
+            write(source / module / "input_data.md", "new catalog")
+            write_json(target / module / "graph_config.json", {
+                "schema_version": 2,
+                "base_url": "http://127.0.0.1:8000/api/v1",
+                "admin_users": ["alice"],
+                "libraries": [{"id": "docs", "kind": "service_default", "enabled": True}],
+            })
+            core_update.update(source, target, assume_yes=True)
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertTrue(manifest["open_input"])
 
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

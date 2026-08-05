@@ -26,9 +26,12 @@ DIRECTORIES = (
     "cron",
     "template",
     "tests",
-    "global_knowledge",
     "update",
 )
+
+RUNTIME_PRESERVING_DIRECTORIES = {
+    "global_knowledge": ("kemo-graph-storage/",),
+}
 
 FILES = (
     "cli.py",
@@ -67,6 +70,67 @@ GATEWAY_STATUS_EXPAND_FILES = (
     "start_expand.py",
     "expand_control.md",
 )
+
+KEMO_GRAPH_EXPAND = "global_expand/kemo_graph"
+KEMO_GRAPH_EXPAND_FILES = (
+    ".gitignore",
+    "graph_config.example.json",
+    "errors.py",
+    "registry.py",
+    "client.py",
+    "library_sync.py",
+    "operations.py",
+    "render.py",
+    "graph_core.py",
+    "data_update.py",
+    "start_expand.py",
+    "expand_control.md",
+)
+KEMO_GRAPH_OBSOLETE_FILES = (
+    "sync_sources.py",
+    "auto_maintenance.py",
+    "auto_sync.py",
+    "auto_ingest.py",
+    "sync_state.json",
+    "auto_update_state.json",
+    "data/kemo_graph_status.json",
+    "artifacts/kemo_graph_status.png",
+)
+
+BUILTIN_GLOBAL_EXPANDS = (
+    (GATEWAY_STATUS_EXPAND, GATEWAY_STATUS_EXPAND_FILES, "gateway_config.json", ()),
+    (
+        KEMO_GRAPH_EXPAND,
+        KEMO_GRAPH_EXPAND_FILES,
+        "graph_config.json",
+        KEMO_GRAPH_OBSOLETE_FILES,
+    ),
+)
+
+
+def _preserved_directory_differs(
+    source: Path,
+    target: Path,
+    excludes: tuple[str, ...],
+) -> bool:
+    """Compare distributable files while ignoring runtime-owned directories."""
+
+    excluded_names = {item.replace("\\", "/").rstrip("/") for item in excludes}
+
+    def snapshot(root: Path) -> dict[str, bytes]:
+        if not root.is_dir():
+            return {}
+        result: dict[str, bytes] = {}
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if any(name in relative.parts for name in excluded_names):
+                continue
+            result[relative.as_posix()] = path.read_bytes()
+        return result
+
+    return snapshot(source) != snapshot(target)
 
 
 def _json_diff(source: Path, target: Path) -> str:
@@ -173,17 +237,20 @@ def _sync_file_if_changed(
     return True
 
 
-def _update_gateway_status_expand(
+def _update_builtin_global_expand(
     source_root: Path,
     target_root: Path,
     *,
+    relative: str,
+    source_files: tuple[str, ...],
+    config_file: str,
+    obsolete_files: tuple[str, ...],
     dry_run: bool,
     details: list[str],
     warnings: list[str],
 ) -> bool:
-    """Install the built-in status Expand without overwriting local credentials or data."""
+    """Install one built-in Expand without overwriting local configuration or runtime data."""
 
-    relative = GATEWAY_STATUS_EXPAND
     source = source_root / relative
     target = target_root / relative
     if not source.is_dir():
@@ -191,9 +258,22 @@ def _update_gateway_status_expand(
         return False
 
     changed = False
-    for name in GATEWAY_STATUS_EXPAND_FILES:
+    for name in source_files:
+        if not (source / name).is_file():
+            warnings.append(f"源缺少文件: {relative}/{name}")
+            continue
         if copy_file_safe(source / name, target / name, dry_run=dry_run):
             changed = True
+
+    for name in obsolete_files:
+        obsolete = target / name
+        if not obsolete.is_file():
+            continue
+        if dry_run:
+            print(f"[dry-run]  删除旧文件  {relative}/{name}")
+        else:
+            obsolete.unlink()
+        changed = True
 
     source_manifest = source / "expand.json"
     target_manifest = target / "expand.json"
@@ -201,7 +281,24 @@ def _update_gateway_status_expand(
         warnings.append(f"源缺少文件: {relative}/expand.json")
     else:
         manifest = read_json(source_manifest)
-        manifest["open_input"] = (target / "gateway_config.json").is_file()
+        config_path = target / config_file
+        active = config_path.is_file()
+        if relative == KEMO_GRAPH_EXPAND:
+            try:
+                local_config = read_json(config_path)
+            except Exception:
+                local_config = {}
+            admins = local_config.get("admin_users")
+            libraries = local_config.get("libraries")
+            active = (
+                local_config.get("schema_version") == 2
+                and isinstance(admins, list)
+                and bool(admins)
+                and all(isinstance(item, str) and item.strip() and item != "*" for item in admins)
+                and isinstance(libraries, list)
+                and any(isinstance(item, dict) and item.get("enabled", True) for item in libraries)
+            )
+        manifest["open_input"] = active
         if target_manifest.is_file():
             try:
                 current = read_json(target_manifest)
@@ -227,6 +324,9 @@ def _update_gateway_status_expand(
     target_input = target / "input_data.md"
     if not source_input.is_file():
         warnings.append(f"源缺少文件: {relative}/input_data.md")
+    elif relative == KEMO_GRAPH_EXPAND:
+        if copy_file_safe(source_input, target_input, dry_run=dry_run):
+            changed = True
     elif not target_input.is_file():
         if copy_file_safe(source_input, target_input, dry_run=dry_run):
             changed = True
@@ -234,6 +334,29 @@ def _update_gateway_status_expand(
     if changed:
         details.append(f"更新内置拓展: {relative}/（保留本地凭据与采集数据）")
     return changed
+
+
+def _update_gateway_status_expand(
+    source_root: Path,
+    target_root: Path,
+    *,
+    dry_run: bool,
+    details: list[str],
+    warnings: list[str],
+) -> bool:
+    """Compatibility wrapper for callers that update only the gateway status Expand."""
+
+    return _update_builtin_global_expand(
+        source_root,
+        target_root,
+        relative=GATEWAY_STATUS_EXPAND,
+        source_files=GATEWAY_STATUS_EXPAND_FILES,
+        config_file="gateway_config.json",
+        obsolete_files=(),
+        dry_run=dry_run,
+        details=details,
+        warnings=warnings,
+    )
 
 
 def update(
@@ -308,13 +431,40 @@ def update(
             warnings=warnings,
         )
 
-    changed |= _update_gateway_status_expand(
-        source_root,
-        target_root,
-        dry_run=dry_run,
-        details=details,
-        warnings=warnings,
-    )
+    for relative, excludes in RUNTIME_PRESERVING_DIRECTORIES.items():
+        source = source_root / relative
+        if not source.is_dir():
+            warnings.append(f"源缺少目录: {relative}/")
+            continue
+        directory_changed = _preserved_directory_differs(
+            source, target_root / relative, excludes
+        )
+        if not directory_changed:
+            continue
+        sync_directory(
+            source,
+            target_root / relative,
+            delete=True,
+            excludes=excludes,
+            dry_run=dry_run,
+        )
+        details.append(
+            f"覆盖目录: {relative}/（保留 {', '.join(excludes)}）"
+        )
+        changed = True
+
+    for relative, source_files, config_file, obsolete_files in BUILTIN_GLOBAL_EXPANDS:
+        changed |= _update_builtin_global_expand(
+            source_root,
+            target_root,
+            relative=relative,
+            source_files=source_files,
+            config_file=config_file,
+            obsolete_files=obsolete_files,
+            dry_run=dry_run,
+            details=details,
+            warnings=warnings,
+        )
 
     config_changed, config_detail = _update_global_config(
         source_root,
