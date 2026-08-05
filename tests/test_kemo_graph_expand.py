@@ -423,11 +423,12 @@ class KemoGraphExpandTests(unittest.TestCase):
     def test_public_library_is_rendered_in_global_catalog(self) -> None:
         mapping = self.portable_mapping()
         mapping["libraries"][0]["allowed_users"] = ["*"]
-        graph.save_config(graph.config_from_mapping(mapping))
+        config = graph.config_from_mapping(mapping)
+        graph.save_config(config)
         render.refresh_catalog()
         text = self.paths["INPUT_PATH"].read_text("utf-8")
         self.assertIn("project_docs", text)
-        self.assertIn(str(self.store), text)
+        self.assertIn(config.libraries[0].store_root, text)
 
 
 if __name__ == "__main__":
