@@ -60,16 +60,42 @@ _SERIAL_EXECUTION_LOCAL = threading.local()
 
 
 def _response_items_for_next_request(output: list[Any]) -> list[Any]:
-    """Copy Provider output into local history with request-unique reasoning IDs."""
+    """Copy Provider output into local history with request-unique IDs.
+
+    Provider item and tool-call IDs are only guaranteed to be unique inside a
+    single response.  A subagent request carries several response iterations,
+    so every local item and tool call needs a fresh identity.  Tool results
+    created by the runner use the normalized call IDs and remain linked.
+    """
+
+    call_id_map: dict[str, str] = {}
+    normalized_call_ids: dict[int, str] = {}
+    for item in output:
+        if not isinstance(item, ToolCallItem):
+            continue
+        call_id = f"call_{uuid.uuid4().hex}"
+        normalized_call_ids[id(item)] = call_id
+        call_id_map.setdefault(item.call_id, call_id)
 
     normalized: list[Any] = []
     for item in output:
-        if isinstance(item, ReasoningItem):
-            # Provider response item IDs are only guaranteed to be unique inside
-            # one response. Some gateways reuse values such as ``rs_0`` across
-            # tool iterations, while the next KemoRequest requires global input
-            # uniqueness. Keep provider_state intact and only replace the local ID.
-            item = item.model_copy(update={"id": f"rs_{uuid.uuid4().hex}"})
+        prefix = (
+            "rs"
+            if isinstance(item, ReasoningItem)
+            else "call"
+            if isinstance(item, ToolCallItem)
+            else "result"
+            if isinstance(item, ToolResultItem)
+            else "msg"
+            if isinstance(item, MessageItem)
+            else "item"
+        )
+        updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
+        if isinstance(item, ToolCallItem):
+            updates["call_id"] = normalized_call_ids[id(item)]
+        elif isinstance(item, ToolResultItem) and item.call_id in call_id_map:
+            updates["call_id"] = call_id_map[item.call_id]
+        item = item.model_copy(update=updates)
         normalized.append(item)
     return normalized
 
@@ -568,9 +594,10 @@ class AgentRunner:
             if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
                 message = response.error.message if response.error is not None else str(response.status)
                 raise AgentRunError(f"子代理 Provider 响应失败：{message}")
-            calls = [item for item in response.output if isinstance(item, ToolCallItem)]
-            messages = [item for item in response.output if isinstance(item, MessageItem)]
-            items.extend(_response_items_for_next_request(response.output))
+            normalized_output = _response_items_for_next_request(response.output)
+            calls = [item for item in normalized_output if isinstance(item, ToolCallItem)]
+            messages = [item for item in normalized_output if isinstance(item, MessageItem)]
+            items.extend(normalized_output)
             structured_calls = [
                 call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
             ]

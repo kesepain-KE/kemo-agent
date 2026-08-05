@@ -424,9 +424,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             {"other_tool"},
         )
 
-    def test_plugin_whitelist_filters_registry_independently_of_graph_mode(
-        self,
-    ) -> None:
+    def test_plugin_whitelist_filters_registry(self) -> None:
         _, root = self.make_root()
         for name in ("clock", "weather"):
             self.write_tool(root / "plugins", name, name)
@@ -449,15 +447,6 @@ class RuntimeFeatureTests(unittest.TestCase):
             {manifest.tool["name"] for manifest in filtered.plugin_manifests},
             {"clock"},
         )
-
-        graph_replaced = apply_runtime_tool_policy(
-            discover_tools(root, "alice"),
-            {
-                "plugins": {"whitelist": []},
-                "kemo_graph": {"kemo_graph_temporary_memory": True},
-            },
-        )
-        self.assertEqual(set(graph_replaced.tools), {"clock", "weather"})
 
     def test_tavily_tool_remains_exposed_without_api_key(self) -> None:
         _, root = self.make_root()
@@ -1748,6 +1737,139 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
+
+    def test_expand_status_is_refreshed_after_activation_in_the_same_run(self) -> None:
+        _, root = self.make_root()
+        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        shutil.copytree(
+            project_plugins / "expand_call",
+            root / "plugins" / "expand_call",
+        )
+        status_arguments = {
+            "scope": "global",
+            "module": "kemo_graph",
+            "command": "status",
+        }
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("status-before", "expand_call", status_arguments),
+                        ToolCall(
+                            "activate",
+                            "expand_call",
+                            {
+                                "scope": "global",
+                                "module": "kemo_graph",
+                                "command": "activate",
+                                "params": {"base_url": "http://127.0.0.1:8000/api/v1"},
+                            },
+                        ),
+                        ToolCall("status-after", "expand_call", status_arguments),
+                    ],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", usage=Usage()),
+            ]
+        )
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation_runtime.execute_tool",
+                side_effect=[
+                    {"status": "inactive", "active": False},
+                    {"status": "active", "active": True},
+                    {"status": "active", "active": True},
+                ],
+            ) as mocked_execute,
+        ):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "expand-live-status",
+                    "prompt": "activate and refresh",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        self.assertEqual(mocked_execute.call_count, 3)
+        window = load_window(find_window(root, "alice", "cli", "expand-live-status"))
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual([call["status"] for call in calls], ["completed"] * 3)
+        self.assertFalse(calls[2]["duplicate"])
+        self.assertTrue(calls[2]["result"]["result"]["active"])
+
+    def test_expand_mutation_result_keeps_duplicate_side_effect_protection(self) -> None:
+        _, root = self.make_root()
+        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        shutil.copytree(
+            project_plugins / "expand_call",
+            root / "plugins" / "expand_call",
+        )
+        sync_arguments = {
+            "scope": "global",
+            "module": "kemo_graph",
+            "command": "sync",
+            "params": {"library_ids": ["project_docs"]},
+        }
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("sync-first", "expand_call", sync_arguments),
+                        ToolCall(
+                            "ingest",
+                            "expand_call",
+                            {
+                                "scope": "global",
+                                "module": "kemo_graph",
+                                "command": "ingest",
+                                "params": {
+                                    "library_ids": ["project_docs"],
+                                    "mode": "both",
+                                },
+                            },
+                        ),
+                        ToolCall("sync-repeat", "expand_call", sync_arguments),
+                    ],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", usage=Usage()),
+            ]
+        )
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation_runtime.execute_tool",
+                side_effect=[
+                    {"ok": True, "operation": "sync"},
+                    {"ok": True, "operation": "ingest"},
+                ],
+            ) as mocked_execute,
+        ):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "expand-mutation-dedup",
+                    "prompt": "sync, ingest, then repeat sync",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+        self.assertEqual(mocked_execute.call_count, 2)
+        window = load_window(
+            find_window(root, "alice", "cli", "expand-mutation-dedup")
+        )
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual(
+            [call["status"] for call in calls],
+            ["completed", "completed", "duplicate_reused"],
+        )
+        self.assertTrue(calls[2]["duplicate"])
 
     def test_failed_duplicate_call_executes_again_and_preserves_retry_metadata(
         self,

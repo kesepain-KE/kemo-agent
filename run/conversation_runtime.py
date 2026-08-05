@@ -119,6 +119,26 @@ from run.usage import (
 )
 
 
+_EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
+    {"configuration_status", "query", "refresh", "status"}
+)
+
+
+def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
+    """Return whether a successful result is stable for the rest of this run.
+
+    Expand status and query results reflect external state that may change after an
+    activate/sync/ingest call, or simply while an asynchronous server operation is
+    still progressing. Replaying them makes a real active Store look permanently
+    inactive or processing.
+    """
+
+    if name != "expand_call":
+        return True
+    command = str(arguments.get("command") or "").strip().casefold()
+    return command not in _EXPAND_CALL_LIVE_READ_COMMANDS
+
+
 def _drain_guidance(channel: Any) -> list[Any]:
     drain = getattr(channel, "drain", None)
     if callable(drain):
@@ -1455,6 +1475,10 @@ def _iter_request_events_impl(
                         yield commit_cancelled_round()
                         return
                     signature = tool_call_signature(call.name, call.arguments)
+                    reuse_allowed = _tool_result_reuse_allowed(
+                        call.name,
+                        call.arguments,
+                    )
                     identical_call_count = identical_calls.record(
                         call.name, call.arguments
                     )
@@ -1494,7 +1518,7 @@ def _iter_request_events_impl(
                         }
                         status = "temporarily_unavailable"
                     else:
-                        duplicate = signature in seen_calls
+                        duplicate = reuse_allowed and signature in seen_calls
                         if duplicate:
                             result_payload = copy.deepcopy(seen_calls[signature])
                             status = "duplicate_reused"
@@ -1554,7 +1578,10 @@ def _iter_request_events_impl(
                                     )
                                 )
                             if result_payload.get("ok") is True:
-                                seen_calls[signature] = copy.deepcopy(result_payload)
+                                if reuse_allowed:
+                                    seen_calls[signature] = copy.deepcopy(result_payload)
+                                else:
+                                    seen_calls.pop(signature, None)
                             else:
                                 seen_calls.pop(signature, None)
                         failure_count = failures.record(

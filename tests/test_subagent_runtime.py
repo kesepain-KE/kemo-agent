@@ -17,6 +17,7 @@ from provider.protocol.models import (
     ModelCapabilities,
     ReasoningItem,
     ToolCallItem,
+    ToolResultItem,
     Usage,
     text_from_content,
 )
@@ -330,8 +331,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(provider.capability_calls, [])
         self.assertEqual(provider.requests[0].reasoning.effort, "high")
 
-    def test_runner_rewrites_reused_reasoning_ids_across_tool_iterations(self) -> None:
-        class ReusedReasoningIdProvider(MockProvider):
+    def test_runner_rewrites_reused_response_and_tool_ids_across_iterations(self) -> None:
+        class ReusedResponseIdProvider(MockProvider):
             def __init__(inner_self) -> None:
                 super().__init__()
                 inner_self.responses = []
@@ -343,8 +344,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     output = [
                         ReasoningItem(id="rs_0", summary=f"reasoning {iteration}"),
                         ToolCallItem(
-                            id=f"call_item_{iteration}",
-                            call_id=f"call_{iteration}",
+                            id="call_0_0",
+                            call_id="call_0_0",
                             name="memory_manage",
                             arguments={
                                 "action": "search_by_content",
@@ -379,7 +380,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 inner_self.responses.append(response)
                 return response
 
-        provider = ReusedReasoningIdProvider()
+        provider = ReusedResponseIdProvider()
         with (
             patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
             patch("run.agent_runner.execute_tool", return_value={"matches": []}),
@@ -405,6 +406,33 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 for response in provider.responses
                 for item in response.output
                 if isinstance(item, ReasoningItem)
+            )
+        )
+        carried_calls = [
+            item
+            for item in provider.requests[2].input
+            if isinstance(item, ToolCallItem)
+        ]
+        carried_results = [
+            item
+            for item in provider.requests[2].input
+            if isinstance(item, ToolResultItem)
+        ]
+        self.assertEqual(len(carried_calls), 2)
+        self.assertEqual(len({item.id for item in carried_calls}), 2)
+        self.assertEqual(len({item.call_id for item in carried_calls}), 2)
+        self.assertTrue(all(item.id != "call_0_0" for item in carried_calls))
+        self.assertTrue(all(item.call_id != "call_0_0" for item in carried_calls))
+        self.assertEqual(
+            {item.call_id for item in carried_results},
+            {item.call_id for item in carried_calls},
+        )
+        self.assertTrue(
+            all(
+                item.id == "call_0_0" and item.call_id == "call_0_0"
+                for response in provider.responses[:2]
+                for item in response.output
+                if isinstance(item, ToolCallItem)
             )
         )
 

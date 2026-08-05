@@ -95,6 +95,47 @@ class ExpandCallPluginTests(unittest.TestCase):
         )
         self.assertEqual(result["result"]["data"], {"action": "legacy", "value": 42})
 
+    def test_execute_receives_trusted_call_context(self) -> None:
+        self._create(code=(
+            "def execute(command, params=None, *, context=None):\n"
+            "    return {'ok': True, 'context': context}\n"
+        ))
+        result = invoke_expand(
+            root=self.root,
+            user="alice",
+            scope="user",
+            module="flexible_data",
+            command="context",
+            params={},
+            timeout=10,
+        )
+        self.assertEqual(result["result"]["context"], {
+            "user": "alice", "scope": "user", "module": "flexible_data"
+        })
+
+    def test_structured_domain_failure_keeps_the_original_error(self) -> None:
+        self._create(
+            code=(
+                "def execute(command, params=None):\n"
+                "    return {'ok': False, 'initialized': 1, 'failed': 1, 'domains': [\n"
+                "        {'domain_id': 'global:knowledge', 'ok': True},\n"
+                "        {'domain_id': 'user:alice:history', 'ok': False, "
+                "         'status': 'failed', 'error': 'HTTP 422 INVALID_PARAM: scope'}\n"
+                "    ]}\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ExpandRuntimeError,
+            r"user:alice:history: HTTP 422 INVALID_PARAM: scope",
+        ):
+            call_expand(
+                "user",
+                "flexible_data",
+                "initialize",
+                context=self.context,
+            )
+
     def test_shared_allowlist_and_artifact_boundary_are_enforced(self) -> None:
         module = self._create(
             scope="shared",

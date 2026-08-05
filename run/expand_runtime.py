@@ -76,10 +76,13 @@ try:
         raise TypeError("拓展调用请求必须是 JSON 对象")
     command = request.get("command")
     params = request.get("params", {})
+    context = request.get("context", {})
     if not isinstance(command, str) or not command:
         raise ValueError("拓展调用缺少 command")
     if not isinstance(params, dict):
         raise TypeError("拓展调用 params 必须是 JSON 对象")
+    if not isinstance(context, dict):
+        raise TypeError("拓展调用 context 必须是 JSON 对象")
 
     sys.path.insert(0, str(module_root))
     if entry_path.parent != module_root:
@@ -95,19 +98,29 @@ try:
 
     signature = inspect.signature(execute)
     try:
-        signature.bind(command, params)
+        signature.bind(command, params, context=context)
     except TypeError:
-        legacy = dict(params)
-        legacy.setdefault("action", command)
         try:
-            signature.bind(legacy)
-        except TypeError as exc:
-            raise TypeError(
-                "execute() 必须兼容 execute(command, params) 或 execute(command_dict)"
-            ) from exc
-        result = execute(legacy)
+            signature.bind(command, params)
+        except TypeError:
+            legacy = dict(params)
+            legacy.setdefault("action", command)
+            try:
+                signature.bind(legacy, context=context)
+            except TypeError:
+                try:
+                    signature.bind(legacy)
+                except TypeError as exc:
+                    raise TypeError(
+                        "execute() 必须兼容 execute(command, params) 或 execute(command_dict)"
+                    ) from exc
+                result = execute(legacy)
+            else:
+                result = execute(legacy, context=context)
+        else:
+            result = execute(command, params)
     else:
-        result = execute(command, params)
+        result = execute(command, params, context=context)
     if inspect.isawaitable(result):
         result = asyncio.run(result)
     if isinstance(result, str):
@@ -136,6 +149,56 @@ class ExpandRuntimeError(RuntimeError):
 class ExpandOperationError(ExpandRuntimeError):
     category = "expand_operation_error"
     retryable = False
+
+
+def _failure_value_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _operation_failure_reason(result: dict[str, Any]) -> str:
+    """Keep structured child failures visible instead of replacing them with a generic error."""
+
+    direct = result.get("error") or result.get("message") or result.get("reason")
+    direct_text = _failure_value_text(direct)
+    if direct_text:
+        return direct_text[:4000]
+
+    details: list[str] = []
+    for collection_name in ("domains", "failures", "results", "items"):
+        collection = result.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for index, item in enumerate(collection):
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().casefold()
+            failed = item.get("ok") is False or status in {"error", "failed", "failure", "source_missing"}
+            if not failed:
+                continue
+            identity = next(
+                (
+                    str(item.get(key)).strip()
+                    for key in ("domain_id", "source_uri", "name", "id")
+                    if item.get(key) not in (None, "")
+                ),
+                f"{collection_name}[{index}]",
+            )
+            detail = (
+                item.get("error")
+                or item.get("message")
+                or item.get("reason")
+                or item.get("status")
+                or "failed"
+            )
+            details.append(f"{identity}: {_failure_value_text(detail)}")
+    return ("；".join(details) or "拓展操作返回失败状态")[:4000]
 
 
 def _is_link(path: Path) -> bool:
@@ -522,7 +585,15 @@ def invoke_expand(
     if not entry.is_file() or _is_link(entry):
         raise ExpandRuntimeError("start_expand 不是安全的普通文件")
     request_text = json.dumps(
-        {"command": command, "params": params or {}},
+        {
+            "command": command,
+            "params": params or {},
+            "context": {
+                "user": user,
+                "scope": scope,
+                "module": module,
+            },
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -571,8 +642,7 @@ def invoke_expand(
             if isinstance(result, dict):
                 status = str(result.get("status") or "").strip().casefold()
                 if result.get("ok") is False or status in {"error", "failed", "failure"}:
-                    reason = result.get("error") or result.get("message") or result.get("reason")
-                    raise ExpandOperationError(str(reason or "拓展操作返回失败状态"))
+                    raise ExpandOperationError(_operation_failure_reason(result))
             try:
                 artifacts = _publish_artifacts(root.resolve(), user, module_root, result)
             except ExpandOperationError as exc:
