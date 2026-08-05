@@ -93,14 +93,9 @@ class TaskPlanScheduler:
         for user in list_users(self.root):
             if self._stop_event.is_set():
                 return None
-            plans = sorted(
-                PlanStore(self.root, user).list_plans(),
-                key=lambda item: str(item.get("created_at") or ""),
-            )
-            for plan in plans:
-                if plan.get("status") != "approved":
-                    continue
-                return self._execute(user, str(plan.get("plan_id") or ""))
+            plan_id = PlanStore(self.root, user).first_approved_plan_id()
+            if plan_id:
+                return self._execute(user, plan_id)
         return None
 
     def _execute(self, user: str, plan_id: str) -> dict[str, Any]:
@@ -150,9 +145,7 @@ class TaskPlanScheduler:
                 "user": user,
                 "plan_id": plan_id,
                 "status": "error",
-                "errors": [
-                    {"message": str(exc), "exception_type": type(exc).__name__}
-                ],
+                "errors": [{"message": str(exc), "exception_type": type(exc).__name__}],
             }
         with self._lock:
             self._last_result = result

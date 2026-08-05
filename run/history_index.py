@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Iterator
 
 from run.history_store import (
+    claim_registry_record,
     database_path as history_database_path,
     list_windows as list_stored_windows,
     query_session_records,
@@ -747,60 +748,42 @@ def claim_pending_memory(
         batch_size = max(1, min(20, int(max_rounds)))
     except (TypeError, ValueError) as exc:
         raise ValueError("max_rounds 必须是正整数") from exc
-    with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        reconciled = _reconcile_unlocked(root, user, index)
-        now = datetime.now(timezone.utc)
-        candidates: list[tuple[str, str, dict[str, Any]]] = []
-        for key, record in index.setdefault("sessions", {}).items():
-            if not isinstance(record, dict) or record.get("lifecycle") == "deleted":
-                continue
-            try:
-                processed_round = max(0, int(record.get("memory_processed_round") or 0))
-                committed_round = max(0, int(record.get("last_committed_round") or 0))
-            except (TypeError, ValueError):
-                continue
-            try:
-                target_round = max(0, int(record.get("memory_target_round") or 0))
-            except (TypeError, ValueError):
-                target_round = 0
-            claim_limit = (
-                min(committed_round, target_round) if target_round else committed_round
-            )
-            if processed_round >= claim_limit or not record.get("archive_window"):
-                continue
-            status = str(record.get("memory_status") or "pending")
-            stale = _claim_is_stale(
-                record,
-                now=now,
-                stale_after_seconds=stale_after_seconds,
-            )
-            if status == "processing" and not stale:
-                continue
-            if status == "failed" and not _claim_is_stale(
-                record,
-                now=now,
-                stale_after_seconds=min(
-                    stale_after_seconds,
-                    MEMORY_RETRY_DELAY_SECONDS,
-                ),
-            ):
-                continue
-            if status not in claimable_statuses:
-                continue
-            if record.get("run_state") == "running" and not _run_is_stale(
-                record,
-                now=now,
-                stale_after_seconds=stale_after_seconds,
-            ):
-                continue
-            candidates.append((str(record.get("updated_at") or ""), str(key), record))
-        if not candidates:
-            if reconciled:
-                _write_index_unlocked(root, user, index)
-            return None
-        _, key, record = min(candidates, key=lambda item: (item[0], item[1]))
-        claim_id = worker_id or f"memory_{uuid.uuid4().hex}"
+    now = datetime.now(timezone.utc)
+    claim_id = worker_id or f"memory_{uuid.uuid4().hex}"
+
+    def eligible(record: dict[str, Any]) -> bool:
+        try:
+            processed_round = max(0, int(record.get("memory_processed_round") or 0))
+            committed_round = max(0, int(record.get("last_committed_round") or 0))
+        except (TypeError, ValueError):
+            return False
+        try:
+            target_round = max(0, int(record.get("memory_target_round") or 0))
+        except (TypeError, ValueError):
+            target_round = 0
+        claim_limit = (
+            min(committed_round, target_round) if target_round else committed_round
+        )
+        if processed_round >= claim_limit or not record.get("archive_window"):
+            return False
+        status = str(record.get("memory_status") or "pending")
+        if status == "processing" and not _claim_is_stale(
+            record, now=now, stale_after_seconds=stale_after_seconds
+        ):
+            return False
+        if status == "failed" and not _claim_is_stale(
+            record,
+            now=now,
+            stale_after_seconds=min(stale_after_seconds, MEMORY_RETRY_DELAY_SECONDS),
+        ):
+            return False
+        if record.get("run_state") == "running" and not _run_is_stale(
+            record, now=now, stale_after_seconds=stale_after_seconds
+        ):
+            return False
+        return True
+
+    def claim(record: dict[str, Any]) -> dict[str, Any]:
         next_round = max(0, int(record.get("memory_processed_round") or 0)) + 1
         committed_round = max(0, int(record.get("last_committed_round") or 0))
         target_round = max(0, int(record.get("memory_target_round") or 0))
@@ -817,14 +800,17 @@ def claim_pending_memory(
         record["memory_claim_start_round"] = next_round
         record["memory_claim_end_round"] = end_round
         record["memory_state_updated_at"] = now.isoformat()
-        index["sessions"][key] = record
-        written = _write_index_unlocked(root, user, index)
-        result = copy.deepcopy(written["sessions"][key])
-        result["memory_claim_id"] = claim_id
-        result["memory_claim_round"] = next_round
-        result["memory_claim_start_round"] = next_round
-        result["memory_claim_end_round"] = end_round
-        return result
+        return record
+
+    return claim_registry_record(
+        root,
+        user,
+        status_column="memory_status",
+        statuses=claimable_statuses,
+        predicate=eligible,
+        mutator=claim,
+        updated_at=now.isoformat(),
+    )
 
 
 def finish_memory_claim(
@@ -1056,42 +1042,32 @@ def claim_pending_summary(
 ) -> dict[str, Any] | None:
     """Atomically lease one closed-session summary job."""
 
-    with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        reconciled = _reconcile_unlocked(root, user, index)
-        now = datetime.now(timezone.utc)
-        candidates: list[tuple[str, str, dict[str, Any]]] = []
-        for key, record in index.setdefault("sessions", {}).items():
-            if not isinstance(record, dict) or record.get("lifecycle") != "closed":
-                continue
-            target_round = max(0, int(record.get("summary_target_round") or 0))
-            completed_round = max(0, int(record.get("summary_completed_round") or 0))
-            if (
-                target_round < 1
-                or completed_round >= target_round
-                or not record.get("archive_window")
-            ):
-                continue
-            status = str(record.get("summary_status") or "none")
-            if status == "processing":
-                claimed_at = _timestamp(record.get("summary_claimed_at"))
-                if claimed_at is not None and (now - claimed_at).total_seconds() < max(
-                    1.0, stale_after_seconds
-                ):
-                    continue
-            elif status in {"failed", "retry_wait"}:
-                retry_at = _timestamp(record.get("summary_retry_at"))
-                if retry_at is not None and now < retry_at:
-                    continue
-            elif status != "queued":
-                continue
-            candidates.append((str(record.get("updated_at") or ""), str(key), record))
-        if not candidates:
-            if reconciled:
-                _write_index_unlocked(root, user, index)
-            return None
-        _, key, record = min(candidates, key=lambda item: (item[0], item[1]))
-        claim_id = worker_id or f"summary_{uuid.uuid4().hex}"
+    now = datetime.now(timezone.utc)
+    claim_id = worker_id or f"summary_{uuid.uuid4().hex}"
+
+    def eligible(record: dict[str, Any]) -> bool:
+        if record.get("lifecycle") != "closed":
+            return False
+        target_round = max(0, int(record.get("summary_target_round") or 0))
+        completed_round = max(0, int(record.get("summary_completed_round") or 0))
+        if (
+            target_round < 1
+            or completed_round >= target_round
+            or not record.get("archive_window")
+        ):
+            return False
+        status = str(record.get("summary_status") or "none")
+        if status == "processing":
+            claimed_at = _timestamp(record.get("summary_claimed_at"))
+            return claimed_at is None or (now - claimed_at).total_seconds() >= max(
+                1.0, stale_after_seconds
+            )
+        if status in {"failed", "retry_wait"}:
+            retry_at = _timestamp(record.get("summary_retry_at"))
+            return retry_at is None or now >= retry_at
+        return status == "queued"
+
+    def claim(record: dict[str, Any]) -> dict[str, Any]:
         record["summary_status"] = "processing"
         record["summary_claim_id"] = claim_id
         record["summary_claimed_at"] = now.isoformat()
@@ -1100,11 +1076,17 @@ def claim_pending_summary(
             max(0, int(record.get("summary_attempt_count") or 0)) + 1
         )
         record["summary_state_updated_at"] = now.isoformat()
-        index["sessions"][key] = record
-        written = _write_index_unlocked(root, user, index)
-        result = copy.deepcopy(written["sessions"][key])
-        result["summary_claim_id"] = claim_id
-        return result
+        return record
+
+    return claim_registry_record(
+        root,
+        user,
+        status_column="summary_status",
+        statuses={"queued", "processing", "failed", "retry_wait"},
+        predicate=eligible,
+        mutator=claim,
+        updated_at=now.isoformat(),
+    )
 
 
 def finish_summary_claim(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -31,12 +32,28 @@ _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
+_LIST_CACHE: dict[
+    tuple[str, str],
+    tuple[tuple[tuple[str, int, int], ...], tuple[dict[str, Any], ...]],
+] = {}
+_LIST_CACHE_GUARD = threading.Lock()
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
     key = (str(root.resolve()).casefold(), user)
     with _STORE_LOCKS_GUARD:
         return _STORE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _task_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
 
 
 class CronError(RuntimeError):
@@ -325,14 +342,26 @@ class CronStore:
         with self._lock:
             if not self._dir.is_dir():
                 return []
-            tasks: list[dict[str, Any]] = []
             pattern = "*.json" if self._system else "cron_*.json"
-            for path in sorted(self._dir.glob(pattern), key=lambda item: item.name):
+            paths = sorted(self._dir.glob(pattern), key=lambda item: item.name)
+            signature = _task_signature(paths)
+            cache_key = (str(self._dir.resolve()).casefold(), pattern)
+            with _LIST_CACHE_GUARD:
+                cached = _LIST_CACHE.get(cache_key)
+                if cached is not None and cached[0] == signature:
+                    return copy.deepcopy(list(cached[1]))
+            tasks: list[dict[str, Any]] = []
+            for path in paths:
                 try:
                     tasks.append(self._load(path))
                 except (CronError, CronValidationError):
                     continue
-            return tasks
+            with _LIST_CACHE_GUARD:
+                _LIST_CACHE[cache_key] = (
+                    _task_signature(paths),
+                    tuple(copy.deepcopy(tasks)),
+                )
+            return copy.deepcopy(tasks)
 
     def update(
         self,

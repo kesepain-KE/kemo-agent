@@ -12,7 +12,8 @@ import copy
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+import threading
+from typing import Any, Callable, Iterable, Iterator
 
 from run.users import user_dir
 
@@ -20,6 +21,8 @@ from run.users import user_dir
 HISTORY_DB_FILENAME = "history.sqlite3"
 HISTORY_SCHEMA_VERSION = 1
 _SUMMARY_UNSET = object()
+_READY_DATABASES: set[str] = set()
+_READY_DATABASES_LOCK = threading.Lock()
 
 
 def database_path(root: Path, user: str) -> Path:
@@ -40,10 +43,11 @@ def _object(value: Any, default: Any) -> Any:
     return parsed
 
 
-def _configure(connection: sqlite3.Connection) -> None:
+def _configure(connection: sqlite3.Connection, *, initialize: bool = False) -> None:
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=NORMAL")
+    if initialize:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=5000")
 
@@ -160,19 +164,42 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _ready_key(path: Path) -> str:
+    return str(path.resolve()).casefold()
+
+
+def _ensure_database(path: Path) -> None:
+    """Initialize/migrate once per process instead of on every read query."""
+
+    key = _ready_key(path)
+    with _READY_DATABASES_LOCK:
+        if key in _READY_DATABASES and path.is_file():
+            return
+        _READY_DATABASES.discard(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        database = sqlite3.connect(path, timeout=5.0)
+        try:
+            _configure(database, initialize=True)
+            _ensure_schema(database)
+            database.commit()
+        finally:
+            database.close()
+        _READY_DATABASES.add(key)
+
+
 @contextmanager
 def connection(
     root: Path, user: str, *, write: bool = False
 ) -> Iterator[sqlite3.Connection]:
     path = database_path(root, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_database(path)
     database = sqlite3.connect(path, timeout=5.0)
     try:
         _configure(database)
-        _ensure_schema(database)
-        database.commit()
         if write:
             database.execute("BEGIN IMMEDIATE")
+        else:
+            database.execute("PRAGMA query_only=ON")
         yield database
         if write:
             database.commit()
@@ -441,10 +468,13 @@ def write_context_summary(runtime_path: Path, cache: dict[str, Any] | None) -> N
 def context_summary_exists(runtime_path: Path) -> bool:
     root, user, name = _summary_window(runtime_path)
     with connection(root, user) as database:
-        return database.execute(
-            "SELECT 1 FROM history_context_summaries WHERE window_name=?",
-            (name,),
-        ).fetchone() is not None
+        return (
+            database.execute(
+                "SELECT 1 FROM history_context_summaries WHERE window_name=?",
+                (name,),
+            ).fetchone()
+            is not None
+        )
 
 
 def load_window(directory: Path) -> dict[str, Any] | None:
@@ -578,7 +608,9 @@ def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]
                 (source,),
             ).fetchone()[0]
         )
-        database.execute("DELETE FROM history_context_summaries WHERE source=?", (source,))
+        database.execute(
+            "DELETE FROM history_context_summaries WHERE source=?", (source,)
+        )
         database.execute("DELETE FROM history_messages WHERE source=?", (source,))
         result = database.execute(
             "DELETE FROM history_windows WHERE source=?", (source,)
@@ -763,6 +795,70 @@ def upsert_registry_record(
             (str(updated_at or record.get("updated_at") or ""),),
         )
     return rendered
+
+
+def claim_registry_record(
+    root: Path,
+    user: str,
+    *,
+    status_column: str,
+    statuses: Iterable[str],
+    predicate: Callable[[dict[str, Any]], bool],
+    mutator: Callable[[dict[str, Any]], dict[str, Any]],
+    updated_at: str,
+) -> dict[str, Any] | None:
+    """Atomically select and mutate one background-job registry row.
+
+    Candidate filtering stays on the indexed status column, while the less
+    frequently queried lease metadata remains in ``record_json``.  This keeps
+    idle workers away from complete registry/window reconciliation.
+    """
+
+    if status_column not in {"memory_status", "summary_status"}:
+        raise ValueError(f"不支持的历史任务状态列：{status_column}")
+    normalized_statuses = sorted({str(value) for value in statuses if str(value)})
+    if not normalized_statuses:
+        return None
+    placeholders = ",".join("?" for _ in normalized_statuses)
+    sql = (
+        f"SELECT record_json FROM history_sessions "
+        f"WHERE lifecycle != 'deleted' AND {status_column} IN ({placeholders}) "
+        "ORDER BY updated_at, source, session_id"
+    )
+
+    def eligible_records(database: sqlite3.Connection) -> Iterator[dict[str, Any]]:
+        for row in database.execute(sql, normalized_statuses).fetchall():
+            record = _object(row["record_json"], {})
+            if isinstance(record, dict) and predicate(record):
+                yield record
+
+    # The overwhelmingly common scheduler pass has no eligible job.  Keep that
+    # path on a query-only connection and acquire SQLite's write lease only
+    # after a candidate exists.  The predicate is evaluated again under the
+    # write transaction so concurrent workers remain exclusive.
+    with connection(root, user) as database:
+        if next(eligible_records(database), None) is None:
+            return None
+    with connection(root, user, write=True) as database:
+        for record in eligible_records(database):
+            rendered = mutator(copy.deepcopy(record))
+            if not isinstance(rendered, dict):
+                raise ValueError("历史任务领取 mutator 必须返回对象")
+            _upsert_session_row(database, rendered)
+            database.execute(
+                """
+                INSERT INTO history_meta(key, value) VALUES('registry_revision', '1')
+                ON CONFLICT(key) DO UPDATE SET
+                    value=CAST(COALESCE(NULLIF(history_meta.value, ''), '0') AS INTEGER) + 1
+                """
+            )
+            database.execute(
+                "INSERT OR REPLACE INTO history_meta(key, value) "
+                "VALUES('registry_updated_at', ?)",
+                (str(updated_at or rendered.get("updated_at") or ""),),
+            )
+            return copy.deepcopy(rendered)
+    return None
 
 
 def write_registry(

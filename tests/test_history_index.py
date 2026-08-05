@@ -86,6 +86,28 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertTrue(window_exists(directory))
         self.assertEqual(load_window(directory)["data"]["rounds"], 1)
 
+    def test_repeated_history_reads_use_query_only_connections(self) -> None:
+        _, root = self.make_root()
+        self.commit_archive(
+            root,
+            source="web",
+            session_id="query-only-session",
+            directory_name="conv_query_only",
+        )
+        with connection(root, "alice") as database:
+            before = database.execute(
+                "SELECT rowid FROM history_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            self.assertEqual(database.execute("PRAGMA query_only").fetchone()[0], 1)
+
+        query_session_records(root, "alice", source="web")
+
+        with connection(root, "alice") as database:
+            after = database.execute(
+                "SELECT rowid FROM history_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+        self.assertEqual(after, before)
+
     def test_session_cursor_does_not_skip_equal_timestamps(self) -> None:
         _, root = self.make_root()
         timestamp = "2026-08-02T00:00:00+00:00"

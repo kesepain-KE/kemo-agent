@@ -31,6 +31,8 @@ _BLOCKED_TOOL_NAMES = frozenset({"task_plan"})
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
+_READY_DATABASES: set[str] = set()
+_READY_DATABASES_GUARD = threading.Lock()
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
@@ -266,17 +268,21 @@ class PlanStore:
         self.path = self._dir / TASK_PLAN_DB_FILENAME
         self._lock = _store_lock(self.root, self.user)
 
-    @contextmanager
-    def _connection(self, *, write: bool = False):
-        self._dir.mkdir(parents=True, exist_ok=True)
-        database = sqlite3.connect(self.path, timeout=5.0)
-        database.row_factory = sqlite3.Row
-        try:
-            database.execute("PRAGMA journal_mode=WAL")
-            database.execute("PRAGMA synchronous=NORMAL")
-            database.execute("PRAGMA foreign_keys=ON")
-            database.execute("PRAGMA busy_timeout=5000")
-            database.executescript(
+    def _ensure_database(self) -> None:
+        key = str(self.path.resolve()).casefold()
+        with _READY_DATABASES_GUARD:
+            if key in _READY_DATABASES and self.path.is_file():
+                return
+            _READY_DATABASES.discard(key)
+            self._dir.mkdir(parents=True, exist_ok=True)
+            database = sqlite3.connect(self.path, timeout=5.0)
+            database.row_factory = sqlite3.Row
+            try:
+                database.execute("PRAGMA journal_mode=WAL")
+                database.execute("PRAGMA synchronous=NORMAL")
+                database.execute("PRAGMA foreign_keys=ON")
+                database.execute("PRAGMA busy_timeout=5000")
+                database.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS task_plan_meta (
                     key TEXT PRIMARY KEY,
@@ -300,6 +306,8 @@ class PlanStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_plans_status_time
                     ON task_plans(status, updated_at DESC, plan_id);
+                CREATE INDEX IF NOT EXISTS idx_task_plans_claim
+                    ON task_plans(status, created_at, plan_id);
                 CREATE TABLE IF NOT EXISTS task_plan_steps (
                     plan_id TEXT NOT NULL,
                     position INTEGER NOT NULL,
@@ -330,14 +338,28 @@ class PlanStore:
                         REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE
                 );
                 """
-            )
-            database.execute(
-                "INSERT INTO task_plan_meta(key, value) VALUES('schema_version', '1') "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-            )
-            database.commit()
+                )
+                database.execute(
+                    "INSERT INTO task_plan_meta(key, value) VALUES('schema_version', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+                )
+                database.commit()
+            finally:
+                database.close()
+            _READY_DATABASES.add(key)
+
+    @contextmanager
+    def _connection(self, *, write: bool = False):
+        self._ensure_database()
+        database = sqlite3.connect(self.path, timeout=5.0)
+        database.row_factory = sqlite3.Row
+        try:
+            database.execute("PRAGMA foreign_keys=ON")
+            database.execute("PRAGMA busy_timeout=5000")
             if write:
                 database.execute("BEGIN IMMEDIATE")
+            else:
+                database.execute("PRAGMA query_only=ON")
             yield database
             if write:
                 database.commit()
@@ -510,6 +532,24 @@ class PlanStore:
                     return [plan for plan_id in ids if (plan := self._load(database, plan_id)) is not None]
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+
+    def first_approved_plan_id(self) -> str | None:
+        """Return only the next runnable id for the scheduler hot path."""
+
+        with self._lock:
+            try:
+                with self._connection() as database:
+                    row = database.execute(
+                        """
+                        SELECT plan_id FROM task_plans
+                        WHERE status='approved'
+                        ORDER BY created_at, plan_id
+                        LIMIT 1
+                        """
+                    ).fetchone()
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+        return str(row["plan_id"]) if row is not None else None
 
     def update(self, plan_id: str, mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
         """Atomically read, mutate, validate and persist a plan."""
