@@ -15,7 +15,7 @@ from update import web as web_update
 from update._utils import UpdateError, sync_directory, write_json_atomic
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def write(path: Path, content: str) -> None:

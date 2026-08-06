@@ -14,7 +14,7 @@ from plugins.sense_creater.tool import run
 from run.prompt_sources import load_prompt_source_registry
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REGISTER_SOURCE = (
     "from pathlib import Path\n\n"
     "def register(registry):\n"

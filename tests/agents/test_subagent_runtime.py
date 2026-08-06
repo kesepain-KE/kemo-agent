@@ -136,7 +136,7 @@ class StubRunner:
 class SubAgentRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_model_capability_cache()
-        self.root = Path(__file__).resolve().parents[1]
+        self.root = Path(__file__).resolve().parents[2]
         self.config = {
             "provider": {
                 "type": "kemo",

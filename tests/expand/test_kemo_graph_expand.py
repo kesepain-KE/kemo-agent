@@ -8,11 +8,12 @@ import unittest
 from unittest.mock import patch
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MODULE_ROOT = ROOT / "global_expand" / "kemo_graph"
 sys.path.insert(0, str(MODULE_ROOT))
 
 import graph_core as graph  # noqa: E402
+import client as graph_client  # noqa: E402
 import library_sync as sync  # noqa: E402
 import operations  # noqa: E402
 import registry  # noqa: E402
@@ -403,6 +404,120 @@ class KemoGraphExpandTests(unittest.TestCase):
             context=context,
         )
         self.assertEqual(document["arguments"]["params"]["confirm"], "delete")
+
+        source = self.root / "upload.txt"
+        source.write_text("upload body", "utf-8")
+        imported = graph_guide(
+            "operation_guide",
+            operation="import_file",
+            library_ids=["project_docs"],
+            path=str(source),
+            context=context,
+        )
+        self.assertEqual(imported["arguments"]["command"], "import_file")
+        self.assertEqual(imported["arguments"]["params"]["path"], str(source))
+        self.assertFalse(imported["arguments"]["params"]["ingest_after_import"])
+        self.assertEqual(imported["arguments"]["timeout"], 3600)
+
+    def test_multipart_client_keeps_store_root_out_of_url(self) -> None:
+        config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
+        source = self.root / "说明.txt"
+        source.write_bytes(b"portable upload")
+        captured: dict = {}
+
+        def perform(_config, request, *, timeout=None):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = bytes(request.data)
+            captured["timeout"] = timeout
+            return {"result": {"source_id": "source-1"}}
+
+        with patch.object(graph_client, "_perform_request", side_effect=perform):
+            result = graph_client.api_upload_file(
+                config,
+                "/stores/import",
+                source,
+                fields={"store_root": str(self.store)},
+                query={"ingest": "false"},
+                timeout=123,
+            )
+
+        self.assertEqual(result["result"]["source_id"], "source-1")
+        self.assertIn("/stores/import?ingest=false", captured["url"])
+        self.assertNotIn("store_root", captured["url"])
+        self.assertIn("multipart/form-data", captured["headers"]["Content-type"])
+        self.assertIn(str(self.store).encode("utf-8"), captured["body"])
+        self.assertIn(b"portable upload", captured["body"])
+        self.assertEqual(captured["timeout"], 123)
+
+    def test_import_file_routes_portable_upload_and_rejects_bad_inputs(self) -> None:
+        config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
+        source = self.root / "manual.pdf"
+        source.write_bytes(b"%PDF-test")
+        with patch.object(
+            operations,
+            "api_upload_file",
+            return_value={"result": {"source_id": "source-1"}},
+        ) as upload:
+            result = operations.import_file(
+                config,
+                {
+                    "library_ids": ["project_docs"],
+                    "path": str(source),
+                    "ingest_after_import": False,
+                },
+                caller_user="alice",
+            )
+
+        self.assertTrue(result["import_started"])
+        self.assertFalse(result["ingest_started"])
+        upload.assert_called_once()
+        call = upload.call_args
+        self.assertEqual(call.args[1], "/stores/import")
+        self.assertEqual(call.args[2], source.resolve())
+        self.assertEqual(call.kwargs["fields"], {"store_root": str(self.store)})
+        self.assertEqual(call.kwargs["query"], {"ingest": "false"})
+
+        unsupported = self.root / "payload.exe"
+        unsupported.write_bytes(b"MZ")
+        with self.assertRaisesRegex(graph.GraphExpandError, "不支持"):
+            operations.import_file(
+                config,
+                {"library_ids": ["project_docs"], "path": str(unsupported)},
+                caller_user="alice",
+            )
+        with self.assertRaisesRegex(graph.GraphExpandError, "绝对路径"):
+            operations.import_file(
+                config,
+                {"library_ids": ["project_docs"], "path": "relative.pdf"},
+                caller_user="alice",
+            )
+        with patch.object(graph_client, "MAX_UPLOAD_BYTES", 4):
+            with self.assertRaisesRegex(graph.GraphExpandError, "50 MB"):
+                graph_client.api_upload_file(config, "/stores/import", source)
+
+    def test_start_expand_dispatches_import_file_as_admin_write(self) -> None:
+        config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
+        graph.save_config(config)
+        with patch.object(
+            start_expand,
+            "import_file",
+            return_value={"ok": True, "library_id": "project_docs"},
+        ) as imported:
+            result = start_expand.execute(
+                "import_file",
+                {"library_ids": ["project_docs"], "path": str(self.root / "a.pdf")},
+                context={"user": "alice"},
+            )
+        self.assertTrue(result["ok"])
+        imported.assert_called_once()
+
+        with self.assertRaises(PermissionError):
+            start_expand.execute(
+                "import_file",
+                {"library_ids": ["project_docs"], "path": str(self.root / "a.pdf")},
+                context={"user": "bob"},
+            )
 
     def test_library_acl_filters_private_paths_and_write_operations(self) -> None:
         config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))

@@ -19,7 +19,7 @@ from run.memory import MemoryError as RuntimeMemoryError, MemoryStore
 from run.tools import discover_tools, validate_arguments
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class MemoryManageTests(unittest.TestCase):

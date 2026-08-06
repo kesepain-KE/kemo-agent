@@ -10,7 +10,7 @@ from run.task_plan_store import PlanStore, normalize_plan
 from run.tools import discover_tools, validate_arguments
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TaskPlanPluginTests(unittest.TestCase):

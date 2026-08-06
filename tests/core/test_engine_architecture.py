@@ -7,7 +7,7 @@ from pathlib import Path
 import run.engine as engine
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ENGINE_PUBLIC_API = {
     "ContextLengthExceededError",
     "EngineError",

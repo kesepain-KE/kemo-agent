@@ -9,7 +9,7 @@ from pathlib import Path
 from cron.executor import _run_module_updater
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class StaticModuleTemplateTests(unittest.TestCase):

@@ -9,7 +9,7 @@ from plugins.manifest import discover_plugin_manifests
 from run.history_store import save_window
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class HistorySearchPluginTests(unittest.TestCase):

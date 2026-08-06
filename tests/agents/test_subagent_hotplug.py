@@ -10,7 +10,7 @@ from plugins.subagent_dispatch.tool import run as dispatch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.agent_queue import AgentScheduler
-from run.agent_runner import AgentRunner
+from run.agent_runner import AgentRunError, AgentRunner
 from run.agents import AgentDisabledError, AgentError, AgentManifestError, discover_agents
 
 
@@ -289,7 +289,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
 
     def test_builtin_agent_callers_match_documented_invocation_paths(self) -> None:
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         registry = discover_agents(root)
         expected = {
             "self_improve": {"main_agent", "scheduler", "context_manage"},
@@ -505,6 +505,32 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
         self.assertEqual(result.metadata["tool_calls"][0]["status"], "completed")
+
+    def test_global_tool_call_limit_is_a_hard_ceiling_for_subagents(self) -> None:
+        _, root, config = self.make_root()
+        config["tools"]["max_iterations"] = 1
+        self.write_plugin(root, "echo")
+        self.write_agent(root, "alice", "limited_agent", tools=["echo"])
+        provider = ScriptedProvider(
+            [
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("call-1", "echo", {"value": "x"}),
+                        ToolCall("call-2", "echo", {"value": "y"}),
+                    ],
+                    usage=Usage(),
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(AgentRunError, "最大工具调用次数 1"):
+            AgentRunner(
+                root,
+                "alice",
+                config=config,
+                provider_factory=lambda _: provider,
+            ).run("limited_agent", {})
 
     def test_agent_blocks_only_consecutive_identical_tool_arguments(self) -> None:
         _, root, config = self.make_root()

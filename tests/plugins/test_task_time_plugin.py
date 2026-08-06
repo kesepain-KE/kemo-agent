@@ -10,7 +10,7 @@ from plugins.task_time.tool import run
 from run.cron_store import CronStore
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TaskTimePluginOptimizationTests(unittest.TestCase):

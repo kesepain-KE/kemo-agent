@@ -3325,7 +3325,11 @@ class WebBackendTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
-                    "memory": {"history_read_enabled": True},
+                    "history": {"schema_version": 3},
+                    "memory": {
+                        "storage_schema_version": 4,
+                        "history_read_enabled": True,
+                    },
                     "task_plan": {"auto_accept": False, "max_steps": 8},
                     "cron": {"enabled": True},
                     "task_cron_system": {"sense_update_rate": 12},
@@ -3337,12 +3341,13 @@ class WebBackendTests(unittest.TestCase):
         (root / "users" / "alice" / "user_config.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 9,
                     "provider": {
                         "type": "chat",
                         "base_url": "https://example.test/v1",
                         "model": "test-model",
                         "api_key": "super-secret",
+                        "timeout": 45,
                     },
                     "knowledge": {
                         "use_shared": False,
@@ -3936,6 +3941,16 @@ class WebBackendTests(unittest.TestCase):
         settings = self.request(app, "GET", "/api/users/alice/settings")
         self.assertEqual(settings.json()["provider"]["model"], "test-model")
         self.assertEqual(settings.json()["provider"]["reasoning_effort"], "medium")
+        self.assertEqual(settings.json()["provider"]["timeout"], 45.0)
+        self.assertEqual(settings.json()["schema_version"], 9)
+        self.assertEqual(
+            settings.json()["schema_versions"],
+            {
+                "config_schema": 1,
+                "history_schema": 3,
+                "memory_storage_schema": 4,
+            },
+        )
         self.assertFalse(settings.json()["authentication"]["enabled"])
         self.assertNotIn("kemo_graph", settings.json()["source_policy"])
         self.assertNotIn("super-secret", settings.text)

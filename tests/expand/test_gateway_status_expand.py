@@ -10,7 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MODULE_ROOT = ROOT / "global_expand" / "kemo_gateway_status"
 sys.path.insert(0, str(MODULE_ROOT))
 import gateway_status as gateway  # noqa: E402

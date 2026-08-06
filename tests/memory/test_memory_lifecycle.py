@@ -364,7 +364,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertNotIn(first, [item["filename"] for item in self.store.list_items()])
 
     def test_self_improve_compact_manifest_uses_trigger_and_loose_schema(self) -> None:
-        definition = discover_agents(Path(__file__).parents[1]).get("self_improve")
+        definition = discover_agents(Path(__file__).parents[2]).get("self_improve")
         self.assertEqual(
             definition.output_schema,
             {"type": "object", "additionalProperties": True},

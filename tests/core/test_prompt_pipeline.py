@@ -65,7 +65,7 @@ class PromptPipelineTests(unittest.TestCase):
     def test_repository_instruction_contract_preserves_user_directed_path_rules(
         self,
     ) -> None:
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         global_soul = (root / "config" / "global_soul.md").read_text("utf-8")
         agents_manual = (root / "agents.md").read_text("utf-8")
 
@@ -204,6 +204,10 @@ class PromptPipelineTests(unittest.TestCase):
         module = root / "global_sense" / name
         module.mkdir(parents=True, exist_ok=True)
         (module / "sense.md").write_text(content, "utf-8")
+        (module / "data_update.py").write_text(
+            "def main():\n    return None\n",
+            "utf-8",
+        )
         (module / "sense.json").write_text(
             json.dumps(
                 {
@@ -540,7 +544,11 @@ class PromptPipelineTests(unittest.TestCase):
             parse_prompt_settings(
                 {"memory": {"temporary_injection_limits": {"typo": 1}}}
             )
-        with self.assertRaisesRegex(PromptConfigError, "暂不支持"):
+        legacy = parse_prompt_settings(
+            {"prompt": {"injection_mode": {"knowledge_index": "full"}}}
+        )
+        self.assertEqual(legacy.char_limits["task_plan"], 6000)
+        with self.assertRaisesRegex(PromptConfigError, "已移除"):
             parse_prompt_settings(
                 {"prompt": {"injection_mode": {"knowledge_index": "search"}}}
             )

@@ -154,12 +154,12 @@ class RuntimeFeatureTests(unittest.TestCase):
             json.dumps({"schema_version": 1, "provider": provider}),
             "utf-8",
         )
-        project_agents = Path(__file__).resolve().parents[1] / "agents"
+        project_agents = Path(__file__).resolve().parents[2] / "agents"
         shutil.copytree(project_agents, root / "agents")
         return temporary, root
 
     def copy_self_improve_plugins(self, root: Path) -> None:
-        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        project_plugins = Path(__file__).resolve().parents[2] / "plugins"
         for name in ("memory_manage", "skill_creater"):
             shutil.copytree(project_plugins / name, root / "plugins" / name)
 
@@ -234,6 +234,37 @@ class RuntimeFeatureTests(unittest.TestCase):
     def test_tool_execution_rejects_oversized_inline_result_with_range_hint(
         self,
     ) -> None:
+        self.assertEqual(MAX_TOOL_RESULT_CHARS, 100_000)
+        allowed_value = "X" * (MAX_TOOL_RESULT_CHARS - 2)
+        allowed_tool = ToolDefinition(
+            name="file",
+            description="file",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["action", "path"],
+                "additionalProperties": False,
+            },
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=lambda action, path: allowed_value,
+        )
+        self.assertEqual(
+            execute_tool(
+                allowed_tool,
+                {"action": "read", "path": "large.log"},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=2,
+            ),
+            allowed_value,
+        )
+
         tool = ToolDefinition(
             name="file",
             description="file",
@@ -265,7 +296,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         error = raised.exception.error_payload()
         self.assertEqual(error["category"], "result_too_large")
         self.assertGreater(error["result_chars"], MAX_TOOL_RESULT_CHARS)
-        self.assertEqual(error["limit_chars"], MAX_TOOL_RESULT_CHARS)
+        self.assertEqual(error["limit_chars"], 100_000)
         self.assertTrue(error["content_omitted"])
         self.assertFalse(error["retryable"])
         self.assertIn("file.read_range", error["instruction"])
@@ -661,7 +692,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.write_tool(root / "plugins", "large_result", "large")
         (root / "plugins" / "large_result" / "tool.py").write_text(
             "def run(value, *, context):\n"
-            "    return {'content': 'X' * 25000, 'value': value}\n",
+            f"    return {{'content': 'X' * {MAX_TOOL_RESULT_CHARS + 1}, 'value': value}}\n",
             "utf-8",
         )
         provider = ScriptedProvider(
@@ -883,7 +914,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             "流式工具续轮状态",
         )
 
-    def test_tool_loop_limit_commits_terminal_round_and_can_continue(self) -> None:
+    def test_tool_call_limit_commits_terminal_round_and_can_continue(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         global_path = root / "config" / "global_config.json"
@@ -896,8 +927,11 @@ class RuntimeFeatureTests(unittest.TestCase):
                     text="正在查询",
                     tool_calls=[
                         ToolCall(
-                            id="pending-limit", name="lookup", arguments={"value": "x"}
-                        )
+                            id="allowed-call", name="lookup", arguments={"value": "x"}
+                        ),
+                        ToolCall(
+                            id="pending-limit", name="lookup", arguments={"value": "y"}
+                        ),
                     ],
                     finish_reason="tool_calls",
                     usage=Usage(10, 2, 12),
@@ -923,7 +957,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(terminal.metadata["committed"])
         self.assertEqual(terminal.metadata["status"], "limited")
         self.assertEqual(terminal.metadata["stop_reason"], "max_tool_iterations")
-        self.assertEqual(terminal.metadata["tool_calls"], 1)
+        self.assertEqual(terminal.metadata["tool_calls"], 2)
         window_path = find_window(root, "alice", "cli", "tool-limit")
         window = load_window(window_path)
         self.assertEqual(window["data"]["rounds"], 1)
@@ -935,20 +969,26 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(window["text"]["messages"][0]["content"], "开始")
         self.assertIn("最大次数 1", window["text"]["messages"][1]["content"])
         calls = window["tool"]["rounds"][0]["calls"]
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["status"], "not_executed")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["status"], "completed")
+        self.assertEqual(calls[1]["status"], "not_executed")
         self.assertEqual(
-            calls[0]["result"]["error"]["exception_type"],
-            "ToolLoopLimitExceeded",
+            calls[1]["result"]["error"]["exception_type"],
+            "ToolCallLimitExceeded",
         )
         durable_items = window["items"]["items"]
         call_item = next(item for item in durable_items if item["type"] == "tool_call")
         result_item = next(
             item for item in durable_items if item["type"] == "tool_result"
         )
-        self.assertEqual(call_item["call_id"], "pending-limit")
-        self.assertEqual(result_item["call_id"], "pending-limit")
-        self.assertTrue(result_item["is_error"])
+        self.assertIn(call_item["call_id"], {"allowed-call", "pending-limit"})
+        self.assertIn(result_item["call_id"], {"allowed-call", "pending-limit"})
+        pending_result = next(
+            item
+            for item in durable_items
+            if item["type"] == "tool_result" and item["call_id"] == "pending-limit"
+        )
+        self.assertTrue(pending_result["is_error"])
 
         continue_provider = ScriptedProvider(
             responses=[ChatResponse(text="继续完成", usage=Usage(5, 2, 7))]
@@ -1028,7 +1068,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         self,
     ) -> None:
         _, root = self.make_root()
-        project_file_tool = Path(__file__).resolve().parents[1] / "plugins" / "file"
+        project_file_tool = Path(__file__).resolve().parents[2] / "plugins" / "file"
         shutil.copytree(project_file_tool, root / "plugins" / "file")
         (root / "large.txt").write_text("payload", "utf-8")
         global_config_path = root / "config" / "global_config.json"
@@ -1738,9 +1778,55 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertTrue(calls[1]["duplicate"])
         self.assertEqual(calls[1]["status"], "duplicate_reused")
 
+    def test_file_live_read_is_executed_again_in_the_same_run(self) -> None:
+        _, root = self.make_root()
+        project_plugins = Path(__file__).resolve().parents[2] / "plugins"
+        shutil.copytree(project_plugins / "file", root / "plugins" / "file")
+        arguments = {"action": "list_dir", "path": str(root)}
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("list-before", "file", arguments),
+                        ToolCall("list-after", "file", arguments),
+                    ],
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", usage=Usage()),
+            ]
+        )
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation_runtime.execute_tool",
+                side_effect=[
+                    {"ok": True, "entries": [{"name": "old"}]},
+                    {"ok": True, "entries": [{"name": "new"}]},
+                ],
+            ) as mocked_execute,
+        ):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "file-live-read",
+                    "prompt": "list, modify, then list again",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(mocked_execute.call_count, 2)
+        window = load_window(find_window(root, "alice", "cli", "file-live-read"))
+        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual([call["status"] for call in calls], ["completed", "completed"])
+        self.assertFalse(calls[1]["duplicate"])
+        self.assertEqual(calls[1]["result"]["result"]["entries"][0]["name"], "new")
+
     def test_expand_status_is_refreshed_after_activation_in_the_same_run(self) -> None:
         _, root = self.make_root()
-        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        project_plugins = Path(__file__).resolve().parents[2] / "plugins"
         shutil.copytree(
             project_plugins / "expand_call",
             root / "plugins" / "expand_call",
@@ -1803,7 +1889,7 @@ class RuntimeFeatureTests(unittest.TestCase):
 
     def test_expand_mutation_result_keeps_duplicate_side_effect_protection(self) -> None:
         _, root = self.make_root()
-        project_plugins = Path(__file__).resolve().parents[1] / "plugins"
+        project_plugins = Path(__file__).resolve().parents[2] / "plugins"
         shutil.copytree(
             project_plugins / "expand_call",
             root / "plugins" / "expand_call",

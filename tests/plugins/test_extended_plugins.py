@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -30,7 +31,7 @@ from run.cron_store import CronStore
 from run.tools import discover_tools, validate_arguments
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginManifestTests(unittest.TestCase):
@@ -689,7 +690,14 @@ class ShellPluginTests(unittest.TestCase):
         cases = {
             "auto": ("external-command", True),
             "cmd": (["cmd", "/c", "external-command"], False),
-            "powershell": (["powershell", "-NoProfile", "-Command", "external-command"], False),
+            "powershell": (
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command"],
+                False,
+            ),
+            "pwsh": (
+                ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+                False,
+            ),
             "bash": (["bash", "-c", "external-command"], False),
             "bash_login": (["bash", "-l", "-c", "external-command"], False),
         }
@@ -699,7 +707,13 @@ class ShellPluginTests(unittest.TestCase):
             ) as spawned:
                 result = run_shell("external-command", shell_type=shell_type, context=self._context())
                 self.assertTrue(result["ok"])
-                self.assertEqual(spawned.call_args.args[0], expected_command)
+                actual_command = spawned.call_args.args[0]
+                if shell_type in {"powershell", "pwsh"}:
+                    self.assertEqual(actual_command[:-1], expected_command)
+                    self.assertIn("Set-StrictMode -Version Latest", actual_command[-1])
+                    self.assertTrue(actual_command[-1].endswith("external-command"))
+                else:
+                    self.assertEqual(actual_command, expected_command)
                 self.assertEqual(spawned.call_args.kwargs["shell"], expected_shell)
 
     def test_shell_and_timeout_modes_are_validated(self) -> None:
@@ -708,19 +722,50 @@ class ShellPluginTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "chain_timeout_mode"):
             run_shell("pwd", chain_timeout_mode="forever", context=self._context())
 
-    def test_chain_timeout_can_be_total_or_per_command(self) -> None:
+    def test_native_command_chain_runs_in_one_interpreter_process(self) -> None:
         process_result = {"ok": True, "output": "ok", "exit_code": 0, "timed_out": False, "truncated": False}
-        with patch("plugins.shell.tool._run_process", return_value=process_result) as process, patch(
-            "plugins.shell.tool.time.monotonic", side_effect=[100.0, 101.0, 103.0]
-        ):
-            result = run_shell("one; two", timeout=10, chain_timeout_mode="total", context=self._context())
-        self.assertTrue(result["ok"])
-        self.assertEqual([call.kwargs["timeout"] for call in process.call_args_list], [9.0, 7.0])
+        for timeout_mode in ("total", "per_command"):
+            with self.subTest(timeout_mode=timeout_mode), patch(
+                "plugins.shell.tool._run_process", return_value=process_result
+            ) as process:
+                result = run_shell(
+                    "one; two",
+                    timeout=10,
+                    chain_timeout_mode=timeout_mode,
+                    context=self._context(),
+                )
+            self.assertTrue(result["ok"])
+            process.assert_called_once()
+            self.assertEqual(process.call_args.args[0], "one; two")
+            self.assertEqual(process.call_args.kwargs["timeout"], 10.0)
 
-        with patch("plugins.shell.tool._run_process", return_value=process_result) as process:
-            result = run_shell("one; two", timeout=10, chain_timeout_mode="per_command", context=self._context())
-        self.assertTrue(result["ok"])
-        self.assertEqual([call.kwargs["timeout"] for call in process.call_args_list], [10.0, 10.0])
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "需要 Windows PowerShell")
+    def test_powershell_chain_preserves_variables_and_rejects_undefined_values(self) -> None:
+        preserved = run_shell(
+            '$a = 42; Write-Output "VAR_TEST a=$a"',
+            shell_type="powershell",
+            context=self._context(),
+        )
+        self.assertTrue(preserved["ok"], preserved)
+        self.assertIn("VAR_TEST a=42", preserved["output"])
+
+        rejected = run_shell(
+            'Write-Output "DST=$destinationThatWasNeverAssigned"',
+            shell_type="powershell",
+            context=self._context(),
+        )
+        self.assertFalse(rejected["ok"], rejected)
+        self.assertIn("destinationThatWasNeverAssigned", rejected["output"])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "需要 PowerShell 7")
+    def test_pwsh_chain_preserves_variables(self) -> None:
+        result = run_shell(
+            '$a = 42; Write-Output "VAR_TEST a=$a"',
+            shell_type="pwsh",
+            context=self._context(),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("VAR_TEST a=42", result["output"])
 
     def test_timeout_must_come_from_argument_or_context(self) -> None:
         with self.assertRaisesRegex(ValueError, "tool_timeout"):

@@ -12,7 +12,7 @@ from run.subagent_invocation import (
 
 class MainAgentSubagentInvocationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(__file__).resolve().parents[1]
+        self.root = Path(__file__).resolve().parents[2]
 
     def prepare(self, agent: str, payload: dict):
         return prepare_main_agent_invocation(

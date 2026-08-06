@@ -10,7 +10,7 @@ from plugins.manifest import parse_plugin_manifest
 from plugins.skill_creater.tool import run
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SkillCreaterPluginTests(unittest.TestCase):
