@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,9 +204,9 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.0.0`
+Current version: `1.0.1`
 
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem and its transition to a stable major version. Conversation, history, memory, knowledge, tools, skills, subagents, task planning, scheduling, perception, extensions, external messaging, the web interface, the CLI, and multimodal interaction now form one working loop. Future releases will focus primarily on adjacent ecosystem integrations, compatibility, performance, and long-term reliability.
+`1.0.0` marks the first complete release of the kemo-agent core ecosystem and its transition to a stable major version. `1.0.1` is the first systematic stability release after that milestone: it reviews the core runtime, configuration contracts, plugin and extension boundaries, memory and history storage, Web API/frontend compatibility, tool-call safety, and the release-validation workflow. Future releases will focus primarily on adjacent ecosystem integrations, compatibility, performance, and long-term reliability.
 
 Available today:
 

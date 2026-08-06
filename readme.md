@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,9 +204,9 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.0.0`
+当前版本：`1.0.1`
 
-`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本。从对话、历史、记忆和知识，到工具、技能、子代理、任务计划、定时调度、感知、拓展、外部消息，再到网页端、命令行和多模态交互，主要运行链路已经连接成完整闭环。后续版本将以边缘生态扩展、兼容性、性能和长期可靠性优化为主。
+`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本。`1.0.1` 是主生态补齐后的系统性稳定性版本，完成了核心运行链路、配置合同、插件与拓展边界、记忆与历史存储、Web API/前端适配、工具调用安全以及发布前测试工作流的全面复核。后续版本将以边缘生态扩展、兼容性、性能和长期可靠性优化为主。
 
 目前可以体验的内容包括：
 
