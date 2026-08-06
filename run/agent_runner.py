@@ -483,8 +483,20 @@ class AgentRunner:
         final_model = runtime["model"]
         response_ids: list[str] = []
         parent_request_id: str | None = None
-        max_iterations = definition.capabilities.max_tool_iterations
         tool_config = self.config.get("tools") or {}
+        raw_global_tool_calls = tool_config.get("max_iterations", 80)
+        if (
+            isinstance(raw_global_tool_calls, bool)
+            or not isinstance(raw_global_tool_calls, int)
+            or raw_global_tool_calls < 1
+        ):
+            raise AgentRunError("tools.max_iterations 必须是正整数")
+        max_tool_calls = min(
+            raw_global_tool_calls,
+            definition.capabilities.max_tool_iterations,
+        )
+        max_provider_iterations = max_tool_calls + 1
+        processed_tool_calls = 0
         tool_timeout = float(tool_config.get("timeout", 240))
         agent_timeout = (self.config.get("agent_runtime") or {}).get(
             "default_timeout", 600
@@ -515,7 +527,7 @@ class AgentRunner:
         identical_calls = ConsecutiveIdenticalToolCallTracker(
             identical_call_limit
         )
-        for iteration in range(1, max_iterations + 1):
+        for iteration in range(1, max_provider_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
             request_id = f"req_{uuid.uuid4().hex}"
@@ -637,9 +649,12 @@ class AgentRunner:
             if not calls:
                 final_text = "".join(text_from_content(item.content) for item in messages)
                 break
-            if iteration >= max_iterations:
-                raise AgentRunError(f"子代理 {definition.name} 工具调用超过最大循环次数 {max_iterations}")
             for call in calls:
+                if processed_tool_calls >= max_tool_calls:
+                    raise AgentRunError(
+                        f"子代理 {definition.name} 已达到最大工具调用次数 {max_tool_calls}"
+                    )
+                processed_tool_calls += 1
                 identical_call_count = identical_calls.record(
                     call.name, call.arguments
                 )
@@ -784,6 +799,7 @@ class AgentRunner:
         *,
         cancel_event: threading.Event | None = None,
         timeout: float | None = None,
+        timeout_survival_seconds: float | None = None,
         model_override: str | None = None,
         event_callback: Callable[[RunEvent], None] | None = None,
         task_id: str = "",
@@ -806,6 +822,17 @@ class AgentRunner:
             raise AgentRunError("子代理 timeout 必须是正数") from exc
         if not math.isfinite(effective_timeout) or effective_timeout <= 0:
             raise AgentRunError("子代理 timeout 必须是正数")
+        raw_survival = timeout_survival_seconds
+        if raw_survival is None:
+            raw_survival = (self.config.get("agent_runtime") or {}).get(
+                "timeout_survival_seconds", 0.0
+            )
+        try:
+            survival_seconds = float(raw_survival)
+        except (TypeError, ValueError) as exc:
+            raise AgentRunError("子代理 timeout_survival_seconds 必须是非负数") from exc
+        if not math.isfinite(survival_seconds) or survival_seconds < 0:
+            raise AgentRunError("子代理 timeout_survival_seconds 必须是非负数")
         prompt_bundle = build_agent_prompt_bundle(
             self.root,
             self.user,
@@ -859,6 +886,45 @@ class AgentRunner:
                     raise AgentCancelledError(f"子代理 {name} 已取消")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if survival_seconds > 0:
+                        survival_deadline = time.monotonic() + survival_seconds
+                        while not future.done():
+                            if (
+                                caller_cancel_event is not None
+                                and caller_cancel_event.is_set()
+                            ):
+                                stopped.set()
+                                future.cancel()
+                                raise AgentCancelledError(f"子代理 {name} 已取消")
+                            survival_remaining = survival_deadline - time.monotonic()
+                            if survival_remaining <= 0:
+                                break
+                            time.sleep(min(0.05, survival_remaining))
+                        if future.done():
+                            result = future.result()
+                            if not isinstance(result, AgentRunResult):
+                                raise AgentRunError(
+                                    f"子代理 {name} executor 必须返回 AgentRunResult"
+                                )
+                            result.metadata = {
+                                **result.metadata,
+                                "completed_after_timeout": True,
+                                "timeout_seconds": effective_timeout,
+                                "timeout_survival_seconds": survival_seconds,
+                            }
+                            _event(
+                                event_callback,
+                                agent=name,
+                                status="completed_after_timeout",
+                                task_id=task_id,
+                                detail={
+                                    "usage": result.usage,
+                                    "model": result.model,
+                                    "timeout_seconds": effective_timeout,
+                                    "timeout_survival_seconds": survival_seconds,
+                                },
+                            )
+                            return result
                     stopped.set()
                     future.cancel()
                     cleanup_deadline = (
@@ -877,6 +943,7 @@ class AgentRunner:
                     )
                     raise AgentTimeoutError(
                         f"子代理 {name} 执行超时（{effective_timeout:g}s）；"
+                        f"存活期 {survival_seconds:g}s 内未完成；"
                         f"已自动请求取消，{state}",
                         process_terminated=process_terminated,
                     )

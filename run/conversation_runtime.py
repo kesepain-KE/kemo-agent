@@ -122,6 +122,9 @@ from run.usage import (
 _EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
     {"configuration_status", "query", "refresh", "status"}
 )
+_FILE_LIVE_READ_ACTIONS = frozenset(
+    {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
+)
 
 
 def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
@@ -129,14 +132,17 @@ def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
 
     Expand status and query results reflect external state that may change after an
     activate/sync/ingest call, or simply while an asynchronous server operation is
-    still progressing. Replaying them makes a real active Store look permanently
-    inactive or processing.
+    still progressing. File reads likewise become stale after another tool or process
+    mutates the filesystem. Replaying either kind of live read hides the current state.
     """
 
-    if name != "expand_call":
-        return True
-    command = str(arguments.get("command") or "").strip().casefold()
-    return command not in _EXPAND_CALL_LIVE_READ_COMMANDS
+    if name == "expand_call":
+        command = str(arguments.get("command") or "").strip().casefold()
+        return command not in _EXPAND_CALL_LIVE_READ_COMMANDS
+    if name == "file":
+        action = str(arguments.get("action") or "").strip().casefold()
+        return action not in _FILE_LIVE_READ_ACTIONS
+    return True
 
 
 def _drain_guidance(channel: Any) -> list[Any]:
@@ -648,7 +654,18 @@ def _iter_request_events_impl(
             agent_timeout = (config.get("agent_runtime") or {}).get(
                 "default_timeout", 600
             )
-            max_iterations = max(1, int(tool_config.get("max_iterations", 80)))
+            raw_max_tool_calls = tool_config.get("max_iterations", 80)
+            if (
+                isinstance(raw_max_tool_calls, bool)
+                or not isinstance(raw_max_tool_calls, int)
+                or raw_max_tool_calls < 1
+            ):
+                raise EngineError("tools.max_iterations 必须是正整数")
+            max_tool_calls = raw_max_tool_calls
+            # A run that executes N tool calls needs at most N tool-producing
+            # Provider turns plus one final answer turn. This is only an internal
+            # safety bound; tools.max_iterations itself counts tool calls.
+            max_provider_iterations = max_tool_calls + 1
             raw_identical_call_limit = tool_config.get(
                 "consecutive_identical_call_limit", 8
             )
@@ -1060,7 +1077,7 @@ def _iter_request_events_impl(
                 pending_guidance_ack.extend(prepared.inputs)
                 return prepared.messages
 
-            for iteration in range(1, max_iterations + 1):
+            for iteration in range(1, max_provider_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
                     yield commit_cancelled_round()
                     return
@@ -1426,10 +1443,10 @@ def _iter_request_events_impl(
                 if not calls:
                     pending_guidance = (
                         _drain_or_close_guidance(guidance_channel)
-                        if iteration < max_iterations
+                        if iteration < max_provider_iterations
                         else []
                     )
-                    if pending_guidance and iteration < max_iterations:
+                    if pending_guidance and iteration < max_provider_iterations:
                         messages.append(
                             {"role": "assistant", "content": "".join(iteration_text)}
                         )
@@ -1441,22 +1458,6 @@ def _iter_request_events_impl(
                     _close_guidance(guidance_channel)
                     completed = True
                     break
-                if iteration >= max_iterations:
-                    _close_guidance(guidance_channel)
-                    yield commit_terminal_round(
-                        status="limited",
-                        reason="max_tool_iterations",
-                        marker=(
-                            f"[本轮工具循环已达到最大次数 {max_iterations}，"
-                            "本轮已停止]"
-                        ),
-                        pending_message=(
-                            "工具调用因本轮工具循环达到最大次数而未执行"
-                        ),
-                        pending_exception_type="ToolLoopLimitExceeded",
-                    )
-                    return
-
                 assistant_text = "".join(iteration_text)
                 iteration_reasoning_text = "".join(iteration_reasoning)
                 messages.append(
@@ -1471,6 +1472,21 @@ def _iter_request_events_impl(
                     )
                 )
                 for call in calls:
+                    if len(tool_records) >= max_tool_calls:
+                        _close_guidance(guidance_channel)
+                        yield commit_terminal_round(
+                            status="limited",
+                            reason="max_tool_iterations",
+                            marker=(
+                                f"[本轮工具调用已达到最大次数 {max_tool_calls}，"
+                                "本轮已停止]"
+                            ),
+                            pending_message=(
+                                "工具调用因本轮达到最大工具调用次数而未执行"
+                            ),
+                            pending_exception_type="ToolCallLimitExceeded",
+                        )
+                        return
                     if cancel_event is not None and cancel_event.is_set():
                         yield commit_cancelled_round()
                         return

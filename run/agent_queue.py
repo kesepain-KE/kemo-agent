@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import queue
 import threading
 import uuid
@@ -57,6 +58,8 @@ class AgentTask:
     started_at: str = ""
     finished_at: str = ""
     timeout: float | None = None
+    survival_seconds: float = 120.0
+    completed_after_timeout: bool = False
     model_override: str | None = None
     max_tokens: int | None = None
     result_handler: Callable[[AgentRunResult], None] | None = field(default=None, repr=False)
@@ -74,6 +77,8 @@ class AgentTask:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "timeout": self.timeout,
+            "survival_seconds": self.survival_seconds,
+            "completed_after_timeout": self.completed_after_timeout,
             "model_override": self.model_override,
             "result": (
                 {
@@ -142,6 +147,7 @@ class AgentScheduler:
         input_data: dict[str, Any],
         *,
         timeout: float | None = None,
+        timeout_survival_seconds: float | None = None,
         model_override: str | None = None,
         max_tokens: int | None = None,
         result_handler: Callable[[AgentRunResult], None] | None = None,
@@ -158,6 +164,20 @@ class AgentScheduler:
             raise AgentQueueError(f"子代理 {agent} 未声明 background_serial 执行模式")
         if not isinstance(input_data, dict):
             raise AgentQueueError("子代理输入必须是 JSON 对象")
+        if timeout_survival_seconds is None:
+            raw_survival = (self.runner.config.get("agent_runtime") or {}).get(
+                "timeout_survival_seconds", 0.0
+            )
+        else:
+            raw_survival = timeout_survival_seconds
+        try:
+            survival_seconds = float(raw_survival)
+        except (TypeError, ValueError) as exc:
+            raise AgentQueueError(
+                "timeout_survival_seconds 必须是非负数"
+            ) from exc
+        if not math.isfinite(survival_seconds) or survival_seconds < 0:
+            raise AgentQueueError("timeout_survival_seconds 必须是非负数")
         with self._lock:
             if self._closed:
                 raise AgentQueueClosedError("子代理调度队列已关闭")
@@ -166,6 +186,7 @@ class AgentScheduler:
                 agent=agent,
                 input_data=copy.deepcopy(input_data),
                 timeout=timeout,
+                survival_seconds=survival_seconds,
                 model_override=model_override,
                 max_tokens=max_tokens,
                 result_handler=result_handler,
@@ -278,6 +299,7 @@ class AgentScheduler:
                             task.input_data,
                             cancel_event=task.cancel_event,
                             timeout=task.timeout,
+                            timeout_survival_seconds=task.survival_seconds,
                             model_override=task.model_override,
                             event_callback=self.event_callback,
                             task_id=task.id,
@@ -287,6 +309,9 @@ class AgentScheduler:
                             task.result_handler(result)
                     with self._lock:
                         task.result = result
+                        task.completed_after_timeout = bool(
+                            result.metadata.get("completed_after_timeout")
+                        )
                         task.status = "completed"
                         task.finished_at = datetime.now(timezone.utc).isoformat()
                 except BaseException as exc:

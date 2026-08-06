@@ -86,7 +86,7 @@ class ToolResultTooLargeError(ToolError):
 _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
-MAX_TOOL_RESULT_CHARS = 20_000
+MAX_TOOL_RESULT_CHARS = 100_000
 
 
 def _oversized_result_instruction(tool_name: str, action: str) -> str:

@@ -46,22 +46,26 @@ DEFAULT_TEMPORARY_MEMORY_LIMITS = {
 }
 DEFAULT_CHAR_LIMITS = {
     "task_plan": 6000,
-    "perception": 8000,
-    "expand_data": 10000,
-    "skill_prompts": 8000,
-    "plugin_prompts": 10000,
+    "perception": 20000,
+    "expand_data": 20000,
+    "skill_prompts": 80000,
+    "plugin_prompts": 80000,
 }
-DEFAULT_INJECTION_MODES = {
-    "permanent_memory": "full",
-    "important_memory": "full",
-    "temporary_seven_days": "full",
-    "temporary_one_month": "full",
-    "temporary_half_year": "full",
-    "knowledge_index": "full",
-    "task_plan": "full",
-    "expand_data": "full",
-    "perception": "full",
-}
+INJECTION_MODE = "full"
+_LEGACY_INJECTION_MODE_KEYS = frozenset(
+    {
+        "permanent_memory",
+        "important_memory",
+        "temporary_seven_days",
+        "temporary_one_month",
+        "temporary_half_year",
+        "knowledge_index",
+        "task_plan",
+        "expand_data",
+        "perception",
+    }
+)
+
 
 class PromptConfigError(RuntimeError):
     pass
@@ -70,7 +74,6 @@ class PromptConfigError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class PromptSettings:
     char_limits: dict[str, int]
-    injection_mode: dict[str, str]
     temporary_memory_limits: dict[str, int]
     important_memory_max_chars: int
 
@@ -131,28 +134,23 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
 
     char_limits = _nonnegative_group(raw.get("char_limits"), DEFAULT_CHAR_LIMITS, "char_limits")
     mode_raw = raw.get("injection_mode")
-    if mode_raw is None:
-        mode_raw = {}
-    if not isinstance(mode_raw, dict):
-        raise PromptConfigError("prompt.injection_mode 必须是对象")
-    modes = dict(DEFAULT_INJECTION_MODES)
-    unknown_modes = sorted(set(mode_raw) - set(modes))
-    if unknown_modes:
-        raise PromptConfigError(
-            f"prompt.injection_mode 包含未知项：{', '.join(unknown_modes)}"
-        )
-    for key in modes:
-        if key not in mode_raw:
-            continue
-        value = mode_raw[key]
-        if not isinstance(value, str) or not value.strip():
-            raise PromptConfigError(f"prompt.injection_mode.{key} 必须是非空字符串")
-        modes[key] = value.strip().casefold()
-    for key, mode in modes.items():
-        if mode != "full":
+    if mode_raw is not None:
+        # Compatibility bridge for deployments that keep an older global or user
+        # config during update. The option is no longer configurable, but an old
+        # all-full declaration is semantically identical and can be ignored safely.
+        if not isinstance(mode_raw, dict):
+            raise PromptConfigError("已移除的 prompt.injection_mode 必须是对象")
+        unknown_modes = sorted(set(mode_raw) - _LEGACY_INJECTION_MODE_KEYS)
+        if unknown_modes:
             raise PromptConfigError(
-                f"prompt.injection_mode.{key}={mode!r} 暂不支持；当前只支持 'full'"
+                "已移除的 prompt.injection_mode 包含未知项："
+                + ", ".join(unknown_modes)
             )
+        for key, value in mode_raw.items():
+            if not isinstance(value, str) or value.strip().casefold() != INJECTION_MODE:
+                raise PromptConfigError(
+                    f"prompt.injection_mode.{key} 已移除；仅兼容旧值 'full'"
+                )
     memory_raw = config.get("memory") or {}
     if not isinstance(memory_raw, dict):
         raise PromptConfigError("memory 必须是对象")
@@ -180,7 +178,6 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
         raise PromptConfigError("memory.important_memory_max_chars 必须是非负整数")
     return PromptSettings(
         char_limits=char_limits,
-        injection_mode=modes,
         temporary_memory_limits=temporary_memory_limits,
         important_memory_max_chars=important_memory_max_chars,
     )
@@ -425,28 +422,25 @@ def build_prompt_bundle(
                 original_items=knowledge.original_items,
                 injected_items=knowledge_injected_items,
                 truncated=knowledge.truncated,
-                mode=settings.injection_mode["knowledge_index"],
+                mode=INJECTION_MODE,
             )
         )
 
     tier_specs_all = (
-        ("permanent", "permanent_memory", "permanent_memory", None),
+        ("permanent", "permanent_memory", None),
         (
             "half_year",
             "temporary_memory:half_year",
-            "temporary_half_year",
             settings.temporary_memory_limits["half_year"],
         ),
         (
             "one_month",
             "temporary_memory:one_month",
-            "temporary_one_month",
             settings.temporary_memory_limits["one_month"],
         ),
         (
             "seven_days",
             "temporary_memory:seven_days",
-            "temporary_seven_days",
             settings.temporary_memory_limits["seven_days"],
         ),
     )
@@ -457,13 +451,12 @@ def build_prompt_bundle(
     for (
         tier,
         section_name,
-        config_name,
         max_files,
     ) in tier_specs_all:
         selection = store.select_tier_for_prompt(
             tier,
             max_files=max_files,
-            mode=settings.injection_mode[config_name],
+            mode=INJECTION_MODE,
         )
         memory_integrity_warnings.extend(selection.integrity_warnings)
         memory_files.extend(f"{tier}/{filename}" for filename in selection.selected_ids)
@@ -480,7 +473,7 @@ def build_prompt_bundle(
                 selection.original_items,
                 selection.injected_items,
                 selection.truncated,
-                settings.injection_mode[config_name],
+                INJECTION_MODE,
             )
     if "permanent_memory" in tier_sections:
         sections.append(tier_sections["permanent_memory"])
@@ -505,7 +498,7 @@ def build_prompt_bundle(
                     original_items=1,
                     injected_items=1,
                     truncated=truncated,
-                    mode=settings.injection_mode["important_memory"],
+                    mode=INJECTION_MODE,
                 )
             )
     for name in (
@@ -528,12 +521,12 @@ def build_prompt_bundle(
                 original_items=plans.original_items,
                 injected_items=plans.injected_items,
                 truncated=plans.truncated,
-                mode=settings.injection_mode["task_plan"],
+                mode=INJECTION_MODE,
             )
         )
     expand = registered_sources.select_expand(
         max_chars=settings.char_limits["expand_data"],
-        mode=settings.injection_mode["expand_data"],
+        mode=INJECTION_MODE,
         allow={
             "global": source_policy.global_expand.selector(),
             "shared": source_policy.shared_expand.selector(),
@@ -551,12 +544,12 @@ def build_prompt_bundle(
                 original_items=expand.original_items,
                 injected_items=expand.injected_items,
                 truncated=expand.truncated,
-                mode=settings.injection_mode["expand_data"],
+                mode=INJECTION_MODE,
             )
         )
     perception = registered_sources.select_perception(
         max_chars=settings.char_limits["perception"],
-        mode=settings.injection_mode["perception"],
+        mode=INJECTION_MODE,
         allow_modules=source_policy.global_perception.selector(),
     )
     if perception.text:
@@ -570,7 +563,7 @@ def build_prompt_bundle(
                 original_items=perception.original_items,
                 injected_items=perception.injected_items,
                 truncated=perception.truncated,
-                mode=settings.injection_mode["perception"],
+                mode=INJECTION_MODE,
             )
         )
 

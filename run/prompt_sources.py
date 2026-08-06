@@ -264,7 +264,11 @@ def _read_sense_meta(module_dir: Path) -> SenseMeta:
     """Read one standardized perception module without failing the whole registry."""
 
     json_path = module_dir / "sense.json"
-    if not json_path.is_file():
+    try:
+        json_exists = json_path.is_file()
+    except OSError:
+        return _invalid_sense_meta(module_dir, "sense.json 不可访问")
+    if not json_exists:
         return _invalid_sense_meta(module_dir, "sense.json 缺失")
     try:
         raw = json.loads(json_path.read_text("utf-8-sig"))
@@ -323,14 +327,56 @@ def _read_sense_meta(module_dir: Path) -> SenseMeta:
             f"recent_update 必须符合 {_SENSE_TIME_FORMAT}",
             name=display_name,
         )
-    data_md_path = (module_dir / data_md).resolve()
     try:
-        data_md_path.relative_to(module_dir.resolve())
+        data_md_path = (module_dir / data_md).resolve()
+    except OSError:
+        return _invalid_sense_meta(
+            module_dir, "data_md 路径解析失败", name=display_name
+        )
+    try:
+        module_root = module_dir.resolve()
+        data_md_path.relative_to(module_root)
     except ValueError:
         return _invalid_sense_meta(module_dir, "data_md 不得跳出模块目录", name=display_name)
-    if not data_md_path.is_file():
+    except OSError:
+        return _invalid_sense_meta(
+            module_dir, "模块目录解析失败", name=display_name
+        )
+    try:
+        data_md_exists = data_md_path.is_file()
+    except OSError:
+        return _invalid_sense_meta(module_dir, "data_md 不可访问", name=display_name)
+    if not data_md_exists:
         return _invalid_sense_meta(
             module_dir, f"data_md 指向的文件不存在：{data_md}", name=display_name
+        )
+    try:
+        start_update_path = (module_dir / start_update).resolve()
+    except OSError:
+        return _invalid_sense_meta(
+            module_dir, "start_update 路径解析失败", name=display_name
+        )
+    try:
+        start_update_path.relative_to(module_root)
+    except ValueError:
+        return _invalid_sense_meta(
+            module_dir, "start_update 不得跳出模块目录", name=display_name
+        )
+    except OSError:
+        return _invalid_sense_meta(
+            module_dir, "模块目录解析失败", name=display_name
+        )
+    try:
+        start_update_exists = start_update_path.is_file()
+    except OSError:
+        return _invalid_sense_meta(
+            module_dir, "start_update 不可访问", name=display_name
+        )
+    if not start_update_exists:
+        return _invalid_sense_meta(
+            module_dir,
+            f"start_update 文件不存在：{start_update}",
+            name=display_name,
         )
     return SenseMeta(
         name=display_name,
@@ -476,6 +522,7 @@ class PromptSourceRegistry:
         self._expand_roots: list[tuple[str, Path]] = []
         self._skill_layers: list[tuple[str, Path]] = []
         self._perception_roots: list[Path] = []
+        self._perception_scan_errors: list[str] = []
         self._selection_diagnostics: dict[str, Any] = {}
 
     def _add_layer(
@@ -823,18 +870,32 @@ class PromptSourceRegistry:
 
     def _perception_module_dirs(self) -> tuple[tuple[Path, Path], ...]:
         result: list[tuple[Path, Path]] = []
+        self._perception_scan_errors = []
         for base in self._perception_roots:
-            if not base.is_dir():
+            try:
+                is_dir = base.is_dir()
+            except OSError:
+                self._perception_scan_errors.append(f"{base.name}: 目录不可访问")
                 continue
-            modules = [
-                path
-                for path in base.iterdir()
-                if path.is_dir()
-                and not path.name.startswith(".")
-                and path.name != "__pycache__"
-            ]
-            modules.sort(key=lambda path: natural_path_key(path.name))
-            result.extend((base, module) for module in modules)
+            if not is_dir:
+                continue
+            try:
+                candidates = list(base.iterdir())
+            except OSError:
+                self._perception_scan_errors.append(f"{base.name}: 目录不可读")
+                continue
+            for path in candidates:
+                try:
+                    path_is_dir = path.is_dir()
+                except OSError:
+                    path_is_dir = False
+                if (
+                    path_is_dir
+                    and not path.name.startswith(".")
+                    and path.name != "__pycache__"
+                ):
+                    result.append((base, path))
+        result.sort(key=lambda item: natural_path_key(item[1].name))
         return tuple(result)
 
     def select_perception(
@@ -908,6 +969,7 @@ class PromptSourceRegistry:
                     item for item in configured if item not in discovered_set
                 ],
                 "health_status": health_status,
+                "scan_errors": list(self._perception_scan_errors),
             }
         }
         full_text = "\n\n".join(pieces)
