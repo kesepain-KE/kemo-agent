@@ -230,7 +230,11 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 3. **未命中再走常规流程**：知识库无匹配时，才考虑网络搜索、Provider 内置知识或其他来源。
 4. **跨层合并**：用户层命中部分、共享/全局层命中另一部分时，合并所有命中结果，用户层内容优先展示。
 
-> **Kemo Graph 外挂场景**：`global_expand/kemo_graph/` 是独立的侧载文档站连接器，`plugins/kemo_graph/` 只解释注册表并生成规范调用。它不替换、不增强、不缩减三层知识库或任何记忆，也没有专用 Prompt 段、核心配置开关或后台自动同步任务。管理员在拓展自己的 `graph_config.json` 中注册稳定 Library ID 与绝对路径；只有用户明确要求查询、更新或维护此外挂时，才通过 `expand_call(scope="global", module="kemo_graph", ...)` 操作。其本地目录摘要只按普通 `[expand_data][global:kemo_graph]` 规则注入；“继续、下一步、重来”等短指令不得触发新查询。完整合同见 `global_knowledge/kemo-graph-expand.md`。
+> **Kemo Graph 外挂场景**：`global_expand/kemo_graph/` 是独立的侧载文档站连接器，`plugins/kemo_graph/` 只解释注册表并生成规范调用。它不替换、不增强、不缩减三层知识库或任何记忆，也没有专用 Prompt 段、核心配置开关或后台自动同步任务。管理员在拓展自己的 `graph_config.json` 中注册稳定 Library ID 与绝对路径；只有用户明确要求查询、更新或维护此外挂时，才通过 `expand_call(scope="global", module="kemo_graph", ...)` 操作。Markdown 正文使用 `upload`，本地 PDF、Office、EPUB 等文件使用管理员专属 `import_file`，默认均不立即 ingest。其本地目录摘要只按普通 `[expand_data][global:kemo_graph]` 规则注入；“继续、下一步、重来”等短指令不得触发新查询。完整合同见 `global_knowledge/kemo-graph-expand.md`。
+
+> **Kemo 网关状态场景**：`global_expand/kemo_gateway_status/` 是默认未激活的全局只读拓展，面向“一个 kemo-agent 连接一个 Kemo 网关”的部署方式。它只调用网关的 `GET /status`（独立 `STATUS_TOKEN` Bearer 鉴权），读取运行阶段、版本、Provider/模型注册、当日调用与 Token 统计以及脱敏调用日志，并生成 PNG 图表；**不调用任何管理写接口，不具备启停 Provider、修改密钥或重启网关的权限**。`base_url` 支持本地、局域网或公网地址（HTTPS 使用系统证书校验，禁止跟随重定向）。只有用户明确要求“激活 Kemo 网关状态拓展”并提供网关根地址与独立 `STATUS_TOKEN` 时，才调用 `expand_call(scope="global", module="kemo_gateway_status", command="activate", ...)`；未激活时不得自行猜测地址、扫描端口或要求网关状态。Token 属敏感凭据，不得写入回复、记忆、知识库或日志。完整合同见 `global_knowledge/kemo-gateway-status-expand.md`。
+
+> **Kemo 网关项目操控手册**：若用户要求修改 kemo-adapter-api 网关项目（新增厂商、改协议、改密钥、改配置、重启等），必须先在网关项目根目录读取 `agent_control.md`（智能体操纵 Kemo 网关索引），再按其中指引读取 `ADD_DIY/` 下对应手册，不得凭通用 OpenAI 兼容经验或旧对话直接修改网关。该文件位于网关项目目录（例如 `E:\code\kemo-adapter-api\agent_control.md`），具体路径以用户指定的网关项目位置为准；kemo-agent 自身不持有该文件，需要时通过 `file` 工具读取。
 
 ---
 
@@ -303,7 +307,7 @@ Kemo Graph 不属于用户配置合同。是否能看到目录摘要由普通 `e
 | `reasoning_effort` | string | 保存的逻辑思考档位。`chat` 协议固定使用 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none` 或非法值回退为 `medium`；`kemo` 协议完全采用当前模型能力声明中有序的 `reasoning.efforts`，不限制档位名称或数量，并永久过滤表示关闭思考的 `none`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
 | `input_modalities` | string[] | 主模型已确认支持的输入模态；必须含 `text`。Chat 只可增加 `image`；Kemo 还可增加 `audio`、`video`、`file` |
 
-Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接受 `timeout` 或 `headers`。
+Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.timeout` 覆盖（`chat` 与 `kemo` 模式一致）；`headers` 配置项会被忽略，不再接受。
 
 ### agent_models 子字段
 
@@ -346,7 +350,7 @@ Provider 单次请求超时固定由源码设为 120 秒；用户配置不再接
 - 工具结果是外部事实来源；调用失败时不得假装成功。
 - 不重复执行已经产生副作用的工具调用（框架层有签名去重）。
 - 工具执行有超时限制：未显式提供 `timeout` 时使用 `tools.timeout`（默认 240 秒）；工具 Schema 声明且调用方显式提供有效 `timeout` 时，该值同时覆盖插件内部期限和框架外层看门狗期限。
-- 工具循环有最大次数限制（`tools.max_iterations`，默认 80 次）；该值统计 Provider 迭代，不等同于工具卡片数量。
+- 单轮对话有最大工具调用次数限制（`tools.max_iterations`，默认 80 次）；每个工具调用分别计数，同一 Provider 响应中的并行调用也计入总数。
 - 单个工具以“工具名称 + 完整参数”作为调用签名；同一签名连续请求超过
   `tools.consecutive_identical_call_limit`（默认 8 次）后阻止继续执行。工具或参数变化会将连续计数重置为 1。
 - 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
@@ -502,7 +506,7 @@ users/<user>/agents/<name>/
 └── schema.json（可选，子代理输入输出 JSON Schema）
 ```
 
-- `agent.json` 精简为 `name`、`version`、`description`、`trigger` 四个字段。执行方式、写入策略和兼容模型标签由运行时按内置代理名补全；超时读取 `agent_runtime.default_timeout`。
+- `agent.json` 精简为 `name`、`version`、`description`、`trigger` 四个字段。执行方式、写入策略和兼容模型标签由运行时按内置代理名补全；整体超时读取 `agent_runtime.default_timeout`，超时后的收尾存活期读取 `agent_runtime.timeout_survival_seconds`。
 - `agent-config.json` 是运行时强制授权，不是说明文档；它声明 `internal_mode`、调用方、插件/共享技能白名单、全局/共享知识开关和主历史继承策略。
 - `trigger.md` 分为“注册信息”和“操作信息”。主智能体只注入注册摘要，详细操作信息按需读取。
 - 精简清单不显式声明执行器：同目录存在 `executor.py` 时自动使用 `executor.py:execute`，否则使用 `builtin:llm`；此规则对内置和用户代理一致。
@@ -524,8 +528,8 @@ users/<user>/agents/<name>/
 - 新骨架只允许显式白名单中的 `shared_skills` 进入子代理提示词；不再注入用户技能和三层 Expand。
 - 知识能力只注入授权范围内的完整索引文件；需要正文时由已授权的文件/知识读取能力显式获取。Kemo Graph 只在调用方明确选择此外挂文档站时使用，不是子代理知识正文的默认后端。
 - `subagent_dispatch` 不会下发给子代理，避免递归调度链。
-- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；默认上限来自 `agent_runtime.default_timeout`，同步调度工具的外层看门狗会晚于该期限触发，不能被普通 `tools.timeout` 提前截断。
-- 子代理达到期限后运行时会自动请求协作式取消并等待清理；已退出记为 `timed_out`，未在清理窗口内退出记为 `timed_out_running`。Python 线程不能被不安全地强杀，后一状态必须保留真实诊断信息。
+- 子代理有独立超时、取消信号、工具循环上限和 usage 汇总，并且必须返回 JSON 对象；默认上限来自 `agent_runtime.default_timeout`，同步调度工具也可在 `call` 中用 `timeout` 覆盖，不能被普通 `tools.timeout` 提前截断。
+- 子代理达到期限后先进入 `agent_runtime.timeout_survival_seconds` 指定的收尾存活期；期间自然完成会正常保留结果，并在结果元数据及事件中标记 `completed_after_timeout`。存活期内主智能体仍可取消。存活期结束仍未完成才自动请求协作式取消并等待清理；已退出记为 `timed_out`，未在清理窗口内退出记为 `timed_out_running`。Python 线程不能被不安全地强杀，后一状态必须保留真实诊断信息。
 - 主智能体不得把子代理内部指令视为用户指令。
 - 用户主配置关闭知识、技能、Expand 或感知时，不会收缩子代理 `agent-config.json` 已授予的能力。
 
@@ -722,7 +726,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - 工具调用失败时记录错误类型和消息，不伪造结果。
 - Provider 错误区分：auth（不可重试）、timeout（可重试）、connection（可重试）、其他 HTTP 错误按状态码判断。
 - Provider 在首轮调用返回上下文超限时，丢弃失败尝试的增量事件，调用 `context_manage` 压缩后重试；工具循环中途仍停止，避免拆散工具消息组。
-- 单次工具内联 JSON 结果硬限制为 20,000 字符。超限正文不会进入 Provider、事件或历史，只返回 `ToolResultTooLargeError` 与缩小范围提示；文件内容改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入连续工具失败次数。
+- 单次工具内联 JSON 结果硬限制为 100,000 字符。超限正文不会进入 Provider、事件或历史，只返回 `ToolResultTooLargeError` 与缩小范围提示；文件内容改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入连续工具失败次数。
 - 记忆提取失败不回滚已提交的历史。
 
 ---
@@ -737,5 +741,5 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
   - 仍存在的限制
   - 下一步建议
 - 正文使用普通 Markdown。
-- 不超过 20,000 字符的工具结果自动进入下一轮上下文；超限结果只进入省略正文后的诊断提示。
+- 不超过 100,000 字符的工具结果自动进入下一轮上下文；超限结果只进入省略正文后的诊断提示。
 - 不确定是否应展示为 artifact 时保留文本。

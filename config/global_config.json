@@ -18,21 +18,10 @@
   "prompt": {
     "char_limits": {
       "task_plan": 6000,
-      "perception": 8000,
-      "expand_data": 10000,
-      "skill_prompts": 8000,
-      "plugin_prompts": 10000
-    },
-    "injection_mode": {
-      "permanent_memory": "full",
-      "important_memory": "full",
-      "temporary_seven_days": "full",
-      "temporary_one_month": "full",
-      "temporary_half_year": "full",
-      "knowledge_index": "full",
-      "task_plan": "full",
-      "expand_data": "full",
-      "perception": "full"
+      "perception": 20000,
+      "expand_data": 20000,
+      "skill_prompts": 80000,
+      "plugin_prompts": 80000
     }
   },
   "memory": {
@@ -68,7 +57,8 @@
   },
   "agent_runtime": {
     "queue_maxsize": 50,
-    "default_timeout": 600
+    "default_timeout": 600,
+    "timeout_survival_seconds": 120
   },
   "task_plan": {
     "max_steps": 20
@@ -89,7 +79,7 @@
   },
   "history_summary": {
     "poll_interval": 5,
-    "max_jobs_per_cycle": 1,
+    "max_jobs_per_cycle": 3,
     "max_attempts": 5,
     "retry_delays_seconds": [
       30,
