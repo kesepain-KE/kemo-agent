@@ -250,6 +250,9 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)  
   与 kemo-agent 配合使用的模型服务适配项目。
 
+- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)  
+  知识图谱与 RAG 检索项目，可外挂为 kemo-agent 的超级文档站：注册文档库后，通过 `expand_call` 按需查询、同步与维护，不替换框架内置的知识库与记忆。
+
 ---
 
 ## 主要维护者

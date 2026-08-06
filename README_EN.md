@@ -250,6 +250,9 @@ If you are trying an early release, reports about problems, usability feedback, 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)  
   A model-service adapter designed to work with kemo-agent.
 
+- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)  
+  A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.
+
 ---
 
 ## Maintainer
