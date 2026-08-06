@@ -1102,9 +1102,9 @@ export function SettingsPage() {
         {tab === 'runtime' && userDraft && globalDraft ? <>
           <ConfigSaveBar label="保存运行限制" description="运行限制属于全局默认；任务计划自动接受为当前用户偏好。" pending={saveMutation.isPending} saved={savedLabel === '保存运行限制'} onSave={saveRuntime} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>工具执行</strong><span>分别约束工具等待时间、Provider 循环以及连续重复或失败行为。</span></div>
+            <div className="setting-section-head"><strong>工具执行</strong><span>分别约束工具等待时间、单轮调用总数以及连续重复或失败行为。</span></div>
             <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
-            <SettingRow title="每轮最大工具循环" description="单轮 Provider 工具循环的最大迭代次数；不是工具卡片数量" source="global" control={<NumberInput label="每轮最大工具循环" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
+            <SettingRow title="单轮最大工具调用数" description="一轮用户对话内允许处理的工具调用总数；同一响应中的并行调用分别计数" source="global" control={<NumberInput label="单轮最大工具调用数" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
             <SettingRow title="单个工具最大连续使用上限" description="仅当工具名称和完整参数连续完全相同时累计；参数变化后重新计数" source="global" control={<NumberInput label="单个工具最大连续使用上限" value={globalDraft.tools.consecutive_identical_call_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, consecutive_identical_call_limit: value } })} />} />
             <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
           </article>
@@ -1174,6 +1174,12 @@ export function SettingsPage() {
             <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || '未声明'}</span>} />
             <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">只读</span>} />
           </article>
+          {settingsQuery.data?.schema_versions ? <article className="setting-section">
+            <div className="setting-section-head"><strong>配置 Schema 版本</strong><span>仅供更新校验参考；历史与记忆运行时仍以数据库内部 Schema 为准。</span></div>
+            <SettingRow title="配置结构版本" description="config/global_config.json → schema_version" control={<span className="settings-version-value" aria-label="配置结构 Schema 版本">{settingsQuery.data.schema_versions.config_schema}</span>} />
+            <SettingRow title="历史结构版本" description="history.schema_version" control={<span className="settings-version-value" aria-label="历史结构 Schema 版本">{settingsQuery.data.schema_versions.history_schema}</span>} />
+            <SettingRow title="记忆存储版本" description="memory.storage_schema_version" control={<span className="settings-version-value" aria-label="记忆存储 Schema 版本">{settingsQuery.data.schema_versions.memory_storage_schema}</span>} />
+          </article> : null}
           <article className="setting-section">
             <div className="setting-section-head"><strong>组件版本</strong><span>分别查看核心引擎、子代理、插件生态和 Web 界面的版本声明。</span></div>
             {versionQuery.data.components.map((component) => <SettingRow

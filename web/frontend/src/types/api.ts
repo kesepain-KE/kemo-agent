@@ -603,6 +603,11 @@ export interface KemoModelCapabilitiesResponse {
 export interface SettingsResponse {
   user: string
   schema_version: number
+  schema_versions: {
+    config_schema: number
+    history_schema: number
+    memory_storage_schema: number
+  }
   provider: ProviderSummary
   features: {
     tools: boolean

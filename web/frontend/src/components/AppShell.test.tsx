@@ -1363,7 +1363,7 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('spinbutton', { name: '单用户最大并发聊天' })).toHaveValue(3)
     expect(screen.getByRole('spinbutton', { name: '消息路由队列上限' })).toHaveValue(20)
     expect(screen.getByRole('spinbutton', { name: '子代理队列上限' })).toHaveValue(50)
-    expect(screen.getByRole('spinbutton', { name: '每轮最大工具循环' })).toHaveValue(80)
+    expect(screen.getByRole('spinbutton', { name: '单轮最大工具调用数' })).toHaveValue(80)
     expect(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' })).toHaveValue(8)
     expect(screen.getByRole('switch', { name: 'Cron 自动退避' })).toBeChecked()
     expect(screen.getByRole('slider', { name: '退避触发阈值' })).toHaveValue('0.2')
