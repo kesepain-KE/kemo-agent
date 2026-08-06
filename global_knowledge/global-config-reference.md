@@ -35,12 +35,12 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `enabled` | bool | `true` | 全局工具开关。`false` 时所有 Provider 工具 schema 均不注册，智能体只能纯文本对话 |
 | `timeout` | int | `240` | 单次工具调用未提供 `timeout` 参数时的默认秒数；工具 Schema 声明且调用方显式提供有效 `timeout` 时，以显式值为准，插件内部期限与框架看门狗使用同一有效值 |
-| `max_iterations` | int | `80` | 单轮对话中 Provider 迭代的最大次数。该值统计 Provider 迭代次数，不等同于工具卡片数量。达到上限后抛出 `EngineError` |
+| `max_iterations` | int | `80` | 单轮对话允许处理的最大工具调用次数。每个调用分别计数，同一 Provider 响应中的并行调用也计入总数；达到上限后停止本轮，超出部分不执行 |
 | `consecutive_identical_call_limit` | int | `8` | 同一工具使用完全相同参数连续请求的允许次数；工具或参数变化后重新计数。超过后阻止继续执行 |
 
 > 用户配置 `tools` 为对象深合并，可覆盖其中任意字段。
 
-单次工具内联 JSON 结果有不可配置的 20,000 字符核心硬限制。超限时框架丢弃正文，只向智能体、事件和历史写入 `ToolResultTooLargeError`、原始字符数与缩小范围提示；文件内容应改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入 `consecutive_tool_fail_limit`。
+单次工具内联 JSON 结果有不可配置的 100,000 字符核心硬限制。超限时框架丢弃正文，只向智能体、事件和历史写入 `ToolResultTooLargeError`、原始字符数与缩小范围提示；文件内容应改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入 `consecutive_tool_fail_limit`。
 
 ---
 
@@ -80,30 +80,12 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `task_plan` | `6000` | 任务计划段注入上限 |
-| `perception` | `8000` | 感知模块数据注入上限 |
-| `expand_data` | `10000` | 拓展模块数据注入上限 |
-| `skill_prompts` | `8000` | 技能提示词（共享技能 + 用户技能）注入上限 |
-| `plugin_prompts` | `10000` | 插件提示词注入上限 |
+| `perception` | `20000` | 感知模块数据注入上限 |
+| `expand_data` | `20000` | 拓展模块数据注入上限 |
+| `skill_prompts` | `80000` | 技能提示词（共享技能 + 用户技能）注入上限 |
+| `plugin_prompts` | `80000` | 插件提示词注入上限 |
 
-> 以下 Prompt 段不使用 char_limits 字段控制：用户人格、全局人格、运行手册、子代理注册、知识库索引、四层记忆（永久 + 重要 + 三层临时）分别由各自独立的字符控制逻辑管理。
-
-### injection_mode — 各模块注入模式
-
-全部默认 `"full"`（全文注入）。可选值：`"full"`（全文）/ `"truncated"`（截断）/ `"off"`（关闭）。
-
-| 字段 | 说明 |
-|------|------|
-| `permanent_memory` | 永久记忆注入模式 |
-| `important_memory` | 临时重要记忆注入模式 |
-| `temporary_seven_days` | 7 天层临时记忆注入模式 |
-| `temporary_one_month` | 30 天层临时记忆注入模式 |
-| `temporary_half_year` | 180 天层临时记忆注入模式 |
-| `knowledge_index` | 知识库索引注入模式 |
-| `task_plan` | 任务计划注入模式 |
-| `expand_data` | 拓展数据注入模式 |
-| `perception` | 感知数据注入模式 |
-
-> 用户 `user_config.json` 可独立配置 `prompt.char_limits` 和 `prompt.injection_mode`，覆盖全局默认值。
+> 以下 Prompt 段不使用 char_limits 字段控制：用户人格、全局人格、运行手册、子代理注册、知识库索引、四层记忆（永久 + 重要 + 三层临时）分别由各自独立的字符控制逻辑管理。各 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项。
 
 ---
 
@@ -155,6 +137,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `queue_maxsize` | int | `50` | 用户级 `AgentScheduler` 的有界队列最大长度；0 表示无界 |
 | `default_timeout` | int | `600` | 子代理整体执行默认超时秒数；达到期限后自动发送协作式取消并等待清理，同步调度不会被普通工具默认超时提前截断 |
+| `timeout_survival_seconds` | number | `120` | 子代理达到整体超时后的收尾存活期；存活期内自然完成会保留结果并标记 `completed_after_timeout`，0 表示禁用 |
 
 > 注意：每个用户的 `AgentScheduler` 使用实例级串行锁和独立有界队列，不再由一个进程级锁串行所有用户。
 

@@ -1,0 +1,268 @@
+# kemo-agent 项目介绍
+
+## 项目定位
+
+kemo-agent 是面向个人智能基础设施的本地优先、多用户 Agent Runtime。它不是只保存当前窗口
+上下文的聊天壳，而是把对话历史、长期记忆、知识、工具、子代理、任务计划、定时调度、感知、
+拓展和多入口交互组织成持续存在的用户工作空间。
+
+当前稳定版本为 `1.0.1`。`1.0.0` 完成主生态闭环，`1.0.1` 对核心运行链路、配置合同、记忆与历史
+存储、工具调用、插件/拓展边界、Web 前后端适配以及发布前测试工作流进行了系统性稳定性复核。
+
+项目的核心目标是：
+
+- 让对话在不同时间和入口之间保持连续；
+- 让数据、授权和运行状态由部署者掌管；
+- 让复杂任务可规划、可暂停、可继续、可回溯；
+- 让能力通过明确合同扩展，而不是把所有逻辑堆入对话主循环。
+
+## 核心能力
+
+### 潮汐式生命周期记忆
+
+Kemo Tidal Engram 记忆系统把记忆分为七天、一个月、半年和永久四档。用户历史中的可回溯
+证据可以使临时记忆按日加权；达到阈值后晋升，未达到阈值的过期内容淡出。
+
+`memory_temporary_important.md` 是从临时三层单向提炼的可重建热视图，不是第五个记忆层，
+也不能反向作为源记忆加权证据。
+
+### 长对话与上下文压缩
+
+完整历史保存于 archive 窗口，Provider 使用可裁剪 runtime 窗口。达到轮次或 Token 条件时，
+框架通过 `context_manage` 生成摘要并事务化裁剪 runtime；完整归档不会因压缩而被删除。
+
+Web 只加载最近消息，需要时用游标继续读取更早正文，避免历史增多后每次启动全量扫盘。
+
+### 三层知识库
+
+知识分为：
+
+- `global_knowledge/`：框架级公共知识；
+- `shared_knowledge/`：跨用户共享资料；
+- `users/<user>/knowledge/`：用户私有资料。
+
+系统 Prompt 只自动注入各层索引，正文按需读取。Kemo Graph 是可选的侧载超级文档站，只有
+用户明确要求时才查询、同步或整理，不接管本地知识和记忆。
+
+### 工具与技能
+
+`plugins/` 是唯一能注册 Provider function call 的目录。每个插件使用 `SKILL.md` 描述操作规则
+和 Tool Schema，并由本地 Python 入口执行。
+
+技能只提供可复用指令，不注册工具。共享技能位于 `shared_skills/`，用户技能位于
+`users/<user>/user_skills/`。Web 支持安全上传技能 ZIP 并递归发现 `SKILL.md`。
+
+### 子代理
+
+内置子代理包括：
+
+- `context_manage`：上下文摘要和压缩；
+- `history_summary`：后台历史标题/摘要；
+- `memory_temporary_important`：临时重要热视图维护；
+- `self_improve`：记忆候选提取和晋升决策；
+- `task_plan`：任务计划生成；
+- `time_plan`：定时任务参数规划。
+
+用户可以在 `users/<user>/agents/` 创建自己的子代理。每个子代理拥有独立 Prompt、模型档位、
+工具白名单、知识权限、超时和取消信号，不继承主智能体全部权限。
+
+### 任务计划与定时任务
+
+任务计划支持创建、审批、逐步执行、暂停、继续、失败和取消。计划、步骤与依赖存入用户级
+SQLite。
+
+定时任务使用北京时间，支持一次性和周期性规则。RuntimeHost 负责 Cron 扫描、系统维护、
+历史摘要、任务计划调度和消息路由。
+
+### 感知、拓展和外部消息
+
+- 感知：从已授权数据源单向采集状态并注入 Prompt；
+- 拓展：提供状态摘要和显式操控入口；
+- 外部消息：把 Telegram 等平台适配为统一消息传输合同；
+- Kemo 网关状态拓展：只读查看已配置网关运行状态；
+- Kemo Graph 拓展：连接用户注册的内置或绝对路径 Library。
+
+这些模块采用“最小框架合同 + 内部自由工作区”。模块可以很小，也可以包含完整工程，但必须
+遵守清单、入口、权限、超时和输出协议。
+
+### 多模态
+
+首次输入和运行中引导都可携带图片、音频、视频和普通文件。Kemo 协议根据模型能力和 Asset
+API 处理已支持模态；Chat 兼容协议保留图片直传链路，其余资产通过专用多模态或文件工具处理。
+
+### 多入口
+
+同一用户可以通过：
+
+- Web；
+- `cli.py`；
+- 外部消息平台；
+- Cron/任务计划；
+- 框架内部维护任务
+
+访问同一历史、记忆和已授权资源。入口不同，不代表创建新的用户身份。
+
+## 本地数据与隐私边界
+
+kemo-agent 本地管理对话、记忆、知识、任务和用户文件。不同用户使用独立工作空间，主配置和
+模块白名单决定可使用的资源。
+
+本地优先不等于模型请求永不离开机器。发送给外部 Provider 的 Prompt、历史片段、附件和工具
+结果取决于用户选择的服务、模型能力和授权范围。部署者应同时审查 kemo-agent 配置和上游服务
+隐私政策。
+
+凭据通过 `.env`、用户配置或运行环境提供，不应写入知识库、记忆、日志、回复或 Git。
+
+## 环境要求
+
+基础环境：
+
+- Python 3.10 或更高版本；
+- Git；
+- Node.js 与 npm（构建 React 前端时需要）。
+
+如果机器暂时没有 Node.js，Python 后端仍可安装，但无法重新构建更新后的 Web 前端。
+
+## 获取与首次部署
+
+```bash
+git clone https://github.com/kesepain-KE/kemo-agent.git
+cd kemo-agent
+python setup.py
+```
+
+`setup.py` 引导依赖安装、环境配置、前端构建和用户创建。非交互默认部署：
+
+```bash
+python setup.py --yes
+```
+
+可选参数包括：
+
+- `--skip-deps`：跳过 Python 依赖安装；
+- `--skip-web`：跳过前端构建。
+
+跳过步骤后，部署者需要自行完成相应依赖或构建。
+
+## 用户创建
+
+setup 可在首次部署中引导创建用户，也可以独立运行：
+
+```bash
+python user_create.py
+```
+
+用户目录包含配置、人格、历史、记忆、知识、技能、拓展、子代理、上传和下载空间。完整结构见
+`user-directory-skeleton.md`。
+
+## 启动 Web
+
+```bash
+python start_web.py
+```
+
+默认监听端口为 1357：
+
+```text
+http://127.0.0.1:1357
+```
+
+如果默认端口被占用，启动器会在有限范围内尝试后续端口。也可以显式指定：
+
+```bash
+python start_web.py --host 0.0.0.0 --port 1357
+```
+
+开放局域网或公网监听前必须配置认证、TLS 反向代理、防火墙和可信代理边界。
+
+### Web 认证
+
+Web 认证支持：
+
+- `WEB_ACCESS_TOKEN`；
+- `WEB_USERNAME` + `WEB_PASSWORD`；
+- `WEB_SESSION_SECRET`；
+- 登录失败限流和可信反向代理配置。
+
+用户名和密码必须同时配置或同时留空。详细字段、优先级和安全规则见 `env-reference.md`。
+
+## 命令行入口
+
+```bash
+python cli.py
+```
+
+CLI 复用核心对话引擎和用户数据，不是另一套独立历史系统。需要后台 Cron、消息路由和维护任务
+时，应通过 RuntimeHost 入口运行，而不是假定一次性 CLI 进程会永久驻留。
+
+## 更新与重启
+
+更新：
+
+```bash
+python update.py
+```
+
+更新器支持按 core、agents、plugins、web 等板块同步，并保护用户数据、配置、运行时数据库和
+模块派生存储。详细规则见 `version-and-update-modules.md`。
+
+`restart.py` 是 Web 受控重启辅助入口，一般由 Web API 调用，不建议把它当作常规手工启动命令。
+重启后新进程会重新读取 `.env` 和磁盘配置。
+
+## 常用目录
+
+| 路径 | 内容 |
+|------|------|
+| `run/` | 对话、历史、Prompt、记忆、工具和运行时宿主 |
+| `provider/` | Kemo 与 Chat Provider 实现 |
+| `web/` | FastAPI 后端和 React 前端 |
+| `agents/` | 内置子代理 |
+| `plugins/` | Provider 可调用工具 |
+| `global_sense/` | 全局感知 |
+| `global_expand/` | 全局拓展 |
+| `shared_skills/` | 共享技能 |
+| `global_knowledge/` | 框架级知识库和主索引 |
+| `users/<name>/` | 用户私有工作空间 |
+| `template/` | 模块和用户创建骨架 |
+| `tests/template_tests/` | 六类模块创建后合同验收 |
+
+完整导航见 `data_structure.md`。
+
+## 关键入口
+
+| 文件 | 用途 |
+|------|------|
+| `start_web.py` | 启动 RuntimeHost、FastAPI 和前端 |
+| `cli.py` | 命令行对话 |
+| `setup.py` | 首次部署 |
+| `user_create.py` | 用户创建与管理 |
+| `update.py` | 分板块更新 |
+| `restart.py` | Web 受控重启辅助进程 |
+| `version.json` | core/agents/plugins/web/all 版本 |
+
+## 扩展开发入口
+
+| 需求 | 文档 |
+|------|------|
+| 开发工具插件 | `plugin-development.md` |
+| 创建技能 | `skill-creation.md` |
+| 创建子代理 | `subagent-creation.md` |
+| 创建感知 | `sense-creation.md` |
+| 创建拓展 | `expand-creation.md` |
+| 创建消息平台适配 | `external-message-route-creation.md` |
+| 理解整体运行方式 | `architecture-overview.md` |
+
+## 相关项目
+
+- `kemo-adapter-api`：Kemo 模型网关与 Provider 适配项目；
+- `kemo-graph`：可选知识图谱和大型文档 Library 服务；
+- `kemo-agent-doc`：面向用户的独立文档站；
+- `votx-agent`：独立维护的 Agent 项目，与 kemo-agent 不存在继承关系。
+
+这些项目可以协作使用，但 kemo-agent 的本地历史、记忆、知识和主对话能力不应因可选项目未启动
+而整体失效。
+
+## 开源协议
+
+kemo-agent 使用 Apache License 2.0。使用、修改、分发和 NOTICE/声明要求见
+`open-source-license.md` 与仓库根 `LICENSE`。

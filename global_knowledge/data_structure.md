@@ -92,6 +92,10 @@ kemo-agent/
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
 | `logging-storage.md` | Cron 与外部消息结构化日志、迁移和保留规则 |
+| `provider-tool-call-safety.md` | Chat/Kemo 工具调用完整性、终态、截断与参数安全边界 |
+| `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南 |
+| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期与并发模型 |
+| `project-introduction.md` | 项目定位、核心能力、部署与使用入口 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 
 ## 维护原则

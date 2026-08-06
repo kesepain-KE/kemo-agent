@@ -135,12 +135,12 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `timeout` | int | 240 | 工具未显式提供 `timeout` 时的默认秒数；显式有效参数会覆盖此值，并同时作用于插件内部期限和框架看门狗 |
-| `max_iterations` | int | 80 | 单轮最大 Provider 迭代次数 |
+| `max_iterations` | int | 80 | 单轮对话允许处理的最大工具调用次数；并行工具调用分别计数 |
 | `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
-单次工具内联 JSON 结果的 20,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。
+单次工具内联 JSON 结果的 100,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。
 
 ---
 
@@ -162,7 +162,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts` |
-| `injection_mode` | object | 各模块注入模式。同全局结构：`permanent_memory`、`important_memory`、`temporary_seven_days`、`temporary_one_month`、`temporary_half_year`、`knowledge_index`、`task_plan`、`expand_data`、`perception`。可选值：`"full"` / `"truncated"` / `"off"` |
+
+各 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项。旧配置中全部为 `full` 的声明可兼容读取，但不会再影响运行时。
 
 ---
 
@@ -240,6 +241,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 |------|------|-----------|------|
 | `queue_maxsize` | int | 50 | 用户级 `AgentScheduler` 有界队列最大长度；0 表示无界 |
 | `default_timeout` | int | 600 | 子代理整体默认超时（秒）；到期自动请求协作式取消并等待清理，不受普通工具默认超时提前截断 |
+| `timeout_survival_seconds` | number | 120 | 子代理超时后的收尾存活期（秒）；存活期内完成保留结果并标记 `completed_after_timeout`，设为 0 可恢复旧行为 |
 
 ---
 

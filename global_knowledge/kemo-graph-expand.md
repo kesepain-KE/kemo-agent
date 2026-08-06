@@ -1,6 +1,6 @@
 # Kemo Graph 外挂文档站
 
-> 最后核对：2026-08-05
+> 最后核对：2026-08-06
 
 Kemo Graph 在 kemo-agent 中的定位是“侧载超级文档站”，不是框架知识库、记忆系统或
 System Prompt 的替代层。
@@ -137,6 +137,7 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 | `ingest` | 联网高成本 | 逐库构建 Graph/RAG |
 | `query` | 联网只读 | graph/rag/hybrid/answer/global 查询 |
 | `upload` | 联网写入 | 上传 Markdown，保持 pending |
+| `import_file` | 联网写入 | 管理员明确指定本地文件，multipart 转换导入，默认保持 pending |
 | `documents` | 联网读写 | list/content/update/delete |
 | `jobs` | 联网只读 | 查看 portable Store 维护任务 |
 | `deactivate` | 本地写入 | 关闭激活配置，保留游标、状态和外部 Store |
@@ -144,6 +145,19 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 只有用户明确要求查询、使用、更新或维护此外挂文档站时才允许执行。普通问答不自动查询；
 “继续”“下一步”“重来”等短指令不构成新的查询授权。同一轮需要多个相关证据时应尽量
 合并成一次 query。
+
+### 文件导入
+
+`import_file` 与 `upload` 的边界不同：
+
+- `upload` 发送已经存在的 Markdown 正文；
+- `import_file` 发送本地 PDF、Office、EPUB、HTML、RTF、文本或结构化文本文件，由
+  kemo-graph 转换为规范 Markdown；
+- `library_ids` 仍必须来自注册表，portable Store 的 `store_root` 由拓展读取，并作为
+  multipart 表单字段发送，不进入 URL；
+- `path` 必须是管理员明确核对的绝对普通文件路径，拒绝符号链接，最大 50 MiB；
+- `ingest_after_import` 默认 `false`，只有用户明确要求才立即构建 Graph/RAG；
+- 客户端先校验扩展名与大小，服务端再次校验并作为最终权威。
 
 ## 增量扫描与同步
 
@@ -200,6 +214,7 @@ scan → 展示新增/修改/缺失项 → 用户确认 → sync
 - 默认只允许 localhost/回环地址。非回环地址必须 `allow_remote=true` 且使用 HTTPS。
 - HTTP 客户端拒绝重定向，响应体上限 16 MiB，不把绝对 Store 路径放进 URL。
 - 对话输入不能直接指定 `store_root` 或 `source_root`；只能选择注册的 Library ID。
+- `import_file.path` 仅在管理员明确发起文件导入时使用，不得把对话中任意路径静默转成上传操作。
 - `documents delete` 必须携带 `confirm="delete"`；来源批量删除默认关闭。
 - ingest 必须检查 HTTP 200 内的 `result.failed/details`，`failed>0` 仍是失败。
 - `409 PROCESSING` 先通过 `status/jobs` 观察，不能盲目清库、改表或并发重试。

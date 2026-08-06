@@ -60,7 +60,7 @@
 | `allowed_callers` | 明确允许的调用方，例如 `main_agent`、`engine` |
 | `tools.plugins.allow` | 可调用插件白名单；缺失授权默认拒绝 |
 | `tools.shared_skills.allow` | 可注入共享技能白名单 |
-| `tools.max_iterations` | 子智能体单次 Provider/工具循环上限，正整数 |
+| `tools.max_iterations` | 子智能体单次运行允许的工具调用上限，正整数；同时受全局同名配置的硬上限约束 |
 | `global_knowledge` | 是否注入全局知识索引 |
 | `shared_knowledge` | 是否注入共享知识索引 |
 | `inherit_main_history` | 是否继承主会话历史和当前请求；默认关闭 |
