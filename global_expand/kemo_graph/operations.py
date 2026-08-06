@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from client import api_request, verify_service
+from client import MAX_UPLOAD_BYTES, api_request, api_upload_file, verify_service
 from errors import GraphExpandError
 from registry import (
     GraphConfig,
@@ -21,6 +21,38 @@ from registry import (
     integer,
     library_signature,
     resolve_libraries,
+)
+
+
+# Mirrors kemo-graph provider/tools/document_tools.py::SUPPORTED_DOCUMENT_SUFFIXES.
+# Keep this client-side guard synchronized with the server and retain server-side
+# validation as the final authority.
+SUPPORTED_IMPORT_SUFFIXES = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".pptx",
+        ".xlsx",
+        ".xlsm",
+        ".xls",
+        ".html",
+        ".htm",
+        ".epub",
+        ".rtf",
+        ".txt",
+        ".log",
+        ".rst",
+        ".csv",
+        ".tsv",
+        ".json",
+        ".jsonl",
+        ".ndjson",
+        ".yaml",
+        ".yml",
+        ".xml",
+        ".md",
+        ".markdown",
+    }
 )
 
 
@@ -445,6 +477,74 @@ def upload_markdown(
         payload["store_root"] = library.store_root
     data = api_request(config, endpoint, payload)
     return {"ok": True, "library_id": library.id, "ingest_started": False, "data": data}
+
+
+def import_file(
+    config: GraphConfig,
+    arguments: dict[str, Any],
+    *,
+    caller_user: str | None = None,
+) -> dict[str, Any]:
+    libraries = resolve_libraries(
+        config,
+        arguments.get("library_ids"),
+        caller_user=caller_user,
+    )
+    if len(libraries) != 1:
+        raise GraphExpandError("import_file 每次必须明确选择一个 library_id")
+
+    raw_path = arguments.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise GraphExpandError("import_file 需要本地文件绝对路径 path")
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        raise GraphExpandError("import_file.path 必须是绝对路径")
+    if candidate.is_symlink():
+        raise GraphExpandError("import_file 不接受符号链接")
+    try:
+        source = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise GraphExpandError("import_file.path 不存在或无法访问") from exc
+    if not source.is_file():
+        raise GraphExpandError("import_file.path 必须是普通文件")
+    suffix = source.suffix.casefold()
+    if suffix not in SUPPORTED_IMPORT_SUFFIXES:
+        supported = ", ".join(sorted(SUPPORTED_IMPORT_SUFFIXES))
+        raise GraphExpandError(f"import_file 不支持 {suffix or '<无扩展名>'}；允许：{supported}")
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise GraphExpandError("无法读取 import_file.path 文件状态") from exc
+    if size > MAX_UPLOAD_BYTES:
+        raise GraphExpandError("import_file.path 超过 50 MB 上限")
+
+    ingest_after_import = arguments.get("ingest_after_import", False)
+    if not isinstance(ingest_after_import, bool):
+        raise GraphExpandError("ingest_after_import 必须是布尔值")
+
+    library = libraries[0]
+    endpoint = "/import"
+    fields: dict[str, str] | None = None
+    if library.kind == "portable":
+        endpoint = "/stores/import"
+        fields = {"store_root": str(library.store_root)}
+    data = api_upload_file(
+        config,
+        endpoint,
+        source,
+        fields=fields,
+        query={"ingest": str(ingest_after_import).lower()},
+        timeout=config.ingest_timeout_seconds,
+    )
+    return {
+        "ok": True,
+        "library_id": library.id,
+        "path": str(source),
+        "size": size,
+        "import_started": True,
+        "ingest_started": ingest_after_import,
+        "data": data,
+    }
 
 
 def document_operation(

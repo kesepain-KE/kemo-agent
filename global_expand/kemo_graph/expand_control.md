@@ -70,6 +70,10 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 - `ingest`：每次必须选择一个 Library ID，`mode` 只允许 `graph/rag/both`。这是可能调用
   LLM、Embedding 和 Rerank 的长耗时、高成本操作，完成后应再次手动 `status`。
 - `upload`：向一个库上传 Markdown，上传后保持待整理，不隐式 ingest。
+- `import_file`：向一个库上传本地文件并转换导入。需要一个 Library ID 和经过管理员核对的
+  绝对普通文件路径 `path`；拒绝符号链接、不支持的扩展名和超过 50 MB 的文件。支持 PDF、
+  DOCX、PPTX、XLSX、EPUB、HTML、RTF、Markdown、文本及常见结构化文本格式。默认
+  `ingest_after_import=false`，只有用户明确要求立即整理时才能设为 `true`。
 - `documents update`：需要 `source_id + content`，可附带 `expected_content_hash` 做并发保护。
 - `documents delete`：需要 `source_id + confirm="delete"`。
 - `deactivate`：删除本地激活配置并停止 Prompt 注入；保留同步游标、状态快照和全部外部
@@ -88,6 +92,15 @@ configuration_status → 用户明确选择 Library ID → status → query
 ```text
 scan → 向用户展示新增/修改/缺失项 → 用户确认 → sync → ingest（逐库）→ status
 ```
+
+上传单个本地文件：
+
+```text
+configuration_status → 用户明确选择 Library ID 和文件 → import_file → documents/status
+```
+
+`import_file` 与 `upload` 的区别：`upload` 直接提交已经存在的 Markdown 正文；
+`import_file` 使用 multipart 传输原始文件，并由 kemo-graph 转换成规范 Markdown。
 
 如果只有新增和修改，`sync` 仍不会自动构建；如果存在缺失文件，除非用户明确确认传播
 删除，否则必须保持 `confirm_deletions=false`。

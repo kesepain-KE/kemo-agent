@@ -11,6 +11,7 @@ from errors import GraphExpandError
 from library_sync import scan_libraries, sync_libraries
 from operations import (
     document_operation,
+    import_file,
     ingest_library,
     initialize_libraries,
     jobs_operation,
@@ -126,6 +127,14 @@ def execute(
         config = _active_config()
         _require_admin(config, caller_user, normalized)
         result = upload_markdown(
+            config,
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "import_file":
+        config = _active_config()
+        _require_admin(config, caller_user, normalized)
+        result = import_file(
             config,
             arguments,
             caller_user=caller_user,
