@@ -14,7 +14,7 @@ import uuid
 from run.config import load_config, read_json_object, system_update_rate
 from run.context import estimate_text_tokens
 from run.process_utils import hidden_subprocess_kwargs
-from run.prompt import parse_prompt_settings
+from run.prompt import INJECTION_MODE, parse_prompt_settings
 from run.prompt_sources import load_prompt_source_registry
 from run.source_policy import MainAgentSourcePolicy
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
@@ -40,7 +40,7 @@ class SenseServiceMixin:
         prompt_settings = parse_prompt_settings(config)
         selection = registry.select_perception(
             max_chars=prompt_settings.char_limits["perception"],
-            mode=prompt_settings.injection_mode["perception"],
+            mode=INJECTION_MODE,
             allow_modules=source_policy.global_perception.selector(),
         )
         injected_files = set(selection.source_files)

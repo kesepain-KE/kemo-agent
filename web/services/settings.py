@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -103,6 +104,18 @@ def _fetch_remote_version_manifest(url: str, timeout: float) -> dict[str, Any]:
             "云端 version.json 不是有效对象，暂时无法比较版本。",
         )
     return payload
+
+
+def _positive_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
+
+
 _CONFIG_SOURCE_PATHS = (
     "provider.type",
     "provider.base_url",
@@ -499,6 +512,11 @@ class SettingsServiceMixin:
     def settings(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
+        global_config = read_json_object(
+            self.root / "config" / "global_config.json"
+        )
+        global_history = global_config.get("history") or {}
+        global_memory = global_config.get("memory") or {}
         source_policy = MainAgentSourcePolicy.from_config(config)
         provider = config.get("provider") or {}
         env_name = str(provider.get("api_key_env") or "")
@@ -516,9 +534,20 @@ class SettingsServiceMixin:
         agent_runtime = config.get("agent_runtime") or {}
         runtime_host = config.get("runtime_host") or {}
         agents = config.get("agents") or {}
+        provider_timeout = _positive_float_or_default(
+            provider.get("timeout"),
+            120.0,
+        )
         return {
             "user": name,
             "schema_version": int(config.get("schema_version") or 1),
+            "schema_versions": {
+                "config_schema": int(global_config.get("schema_version") or 1),
+                "history_schema": int(global_history.get("schema_version") or 1),
+                "memory_storage_schema": int(
+                    global_memory.get("storage_schema_version") or 1
+                ),
+            },
             "provider": {
                 "type": str(provider.get("type") or ""),
                 "base_url": str(provider.get("base_url") or ""),
@@ -528,7 +557,7 @@ class SettingsServiceMixin:
                     if str(provider.get("type") or "").strip().casefold() == "kemo"
                     else normalize_reasoning_effort(provider.get("reasoning_effort"))
                 ),
-                "timeout": 120.0,
+                "timeout": provider_timeout,
                 "stream": bool(provider.get("stream", True)),
                 "credential_source": credential_source,
                 "configured": bool(provider.get("type") and provider.get("model") and provider.get("base_url")),

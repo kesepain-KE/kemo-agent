@@ -21,7 +21,7 @@ from run.module_runtime import (
     record_module_health,
     run_module_updater,
 )
-from run.prompt import parse_prompt_settings
+from run.prompt import INJECTION_MODE, parse_prompt_settings
 from run.prompt_sources import load_prompt_source_registry
 from run.source_policy import MainAgentSourcePolicy
 from web.constants import (
@@ -305,7 +305,7 @@ class MessageExpandServiceMixin:
         registry = load_prompt_source_registry(self.root, name)
         selection = registry.select_expand(
             max_chars=prompt_settings.char_limits["expand_data"],
-            mode=prompt_settings.injection_mode["expand_data"],
+            mode=INJECTION_MODE,
             allow={
                 "global": source_policy.global_expand.selector(),
                 "shared": source_policy.shared_expand.selector(),
