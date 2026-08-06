@@ -59,7 +59,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 ### 1. 快速搜索
 
-```json
+```text
 {
   "action": "search",
   "query": "2026年 AI Agent 框架对比",
@@ -71,7 +71,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 典型返回：
 
-```json
+```text
 {
   "ok": true,
   "query": "2026年 AI Agent 框架对比",
@@ -94,7 +94,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 ### 2. 提取网页正文
 
-```json
+```text
 {
   "action": "extract",
   "urls": "https://example.com/article1,https://example.com/article2",
@@ -105,7 +105,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 典型返回：
 
-```json
+```text
 {
   "ok": true,
   "urls": [
@@ -127,7 +127,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 ### 3. 深度爬取文档站
 
-```json
+```text
 {
   "action": "crawl",
   "urls": "https://docs.example.com",
@@ -141,7 +141,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 典型返回：
 
-```json
+```text
 {
   "ok": true,
   "url": "https://docs.example.com",
@@ -160,7 +160,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 ### 4. 网站地图侦察
 
-```json
+```text
 {
   "action": "map",
   "urls": "https://docs.example.com",
@@ -171,7 +171,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 典型返回：
 
-```json
+```text
 {
   "ok": true,
   "url": "https://docs.example.com",
@@ -188,7 +188,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 ### 5. 深度研究
 
-```json
+```text
 {
   "action": "research",
   "input": "对比 AutoGPT、CrewAI、LangGraph 三个 Agent 框架的架构差异",
@@ -199,7 +199,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 典型返回：
 
-```json
+```text
 {
   "ok": true,
   "topic": "对比 AutoGPT、CrewAI、LangGraph 三个 Agent 框架的架构差异",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ def run(
     definition: dict[str, Any] | None = None,
     wait: bool = True,
     task_id: str = "",
+    timeout: float | None = None,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -53,6 +55,14 @@ def run(
         }
     config = load_config(user, root)
     if action == "call":
+        if timeout is not None:
+            try:
+                timeout_value = float(timeout)
+            except (TypeError, ValueError) as exc:
+                raise AgentError("timeout 必须是正数") from exc
+            if not math.isfinite(timeout_value) or timeout_value <= 0:
+                raise AgentError("timeout 必须是正数")
+            timeout = timeout_value
         definition = public.get(agent)
         if definition is None:
             raise AgentError(f"子代理未公开或不存在：{agent}")
@@ -73,6 +83,8 @@ def run(
             run_kwargs = (
                 {"cancel_event": cancel_event} if cancel_event is not None else {}
             )
+            if timeout is not None:
+                run_kwargs["timeout"] = timeout
             result = AgentRunner(root, user, config=config).run(
                 agent, payload, **run_kwargs
             )
@@ -94,12 +106,14 @@ def run(
                 "data": result.data,
                 "usage": result.usage,
                 "model": result.model,
+                "metadata": result.metadata,
             }
             if agent == "task_plan":
                 response["plan"] = persisted
             return response
         scheduler = get_agent_scheduler(root, user, config=config)
-        submitted = scheduler.submit(agent, payload)
+        submit_kwargs = {"timeout": timeout} if timeout is not None else {}
+        submitted = scheduler.submit(agent, payload, **submit_kwargs)
         return {"status": "queued", "agent": agent, "task_id": submitted}
     scheduler = get_agent_scheduler(root, user, config=config)
     if action == "status":

@@ -23,6 +23,26 @@ _SESSION_HISTORY_LIMIT = 2000
 _SESSION_MAX_COUNT = 500
 _SESSION_TTL_SECONDS = 86400
 _OUTPUT_MAX_CHARS = 100_000
+_BUILTIN_NAMES = frozenset(
+    {
+        "cat",
+        "cd",
+        "chdir",
+        "del",
+        "dir",
+        "echo",
+        "env",
+        "export",
+        "history",
+        "ls",
+        "mkdir",
+        "pwd",
+        "rm",
+        "set",
+        "type",
+        "unset",
+    }
+)
 _SESSION_LOCK = threading.RLock()
 _SESSION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
@@ -99,7 +119,7 @@ def _reset_session(key: tuple[str, str, str, str]) -> None:
 
 
 def _split_chain(command: str) -> tuple[list[str], list[str]]:
-    """按未被引号包裹的 &&、||、; 拆分，并保留操作符。"""
+    """拆分仅由框架内置命令组成的简单命令链。"""
     commands: list[str] = []
     operators: list[str] = []
     current: list[str] = []
@@ -146,6 +166,21 @@ def _split_chain(command: str) -> tuple[list[str], list[str]]:
         raise ValueError("command 不能为空或不能以链操作符结尾")
     commands.append(segment)
     return commands, operators
+
+
+def _is_builtin_command(command: str) -> bool:
+    parts = command.strip().split(maxsplit=1)
+    return bool(parts) and parts[0].casefold() in _BUILTIN_NAMES
+
+
+def _powershell_script(command: str, *, modern: bool) -> str:
+    safeguards = [
+        "$ErrorActionPreference = 'Stop'",
+        "Set-StrictMode -Version Latest",
+    ]
+    if modern:
+        safeguards.append("$PSNativeCommandUseErrorActionPreference = $true")
+    return "; ".join((*safeguards, command))
 
 
 def _resolve_cwd(value: str, root: Path) -> Path:
@@ -282,7 +317,23 @@ def _run_process(
         process_command: str | list[str] = ["cmd", "/c", command]
         use_shell = False
     elif shell_type == "powershell":
-        process_command = ["powershell", "-NoProfile", "-Command", command]
+        process_command = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _powershell_script(command, modern=False),
+        ]
+        use_shell = False
+    elif shell_type == "pwsh":
+        process_command = [
+            "pwsh",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _powershell_script(command, modern=True),
+        ]
         use_shell = False
     elif shell_type == "bash":
         process_command = ["bash", "-c", command]
@@ -408,11 +459,32 @@ def _execute(
     shell_type: str = "auto",
     chain_timeout_mode: str = "total",
 ) -> dict[str, Any]:
-    commands, operators = _split_chain(command)
+    commands: list[str] = []
+    operators: list[str] = []
+    if shell_type == "auto":
+        try:
+            commands, operators = _split_chain(command)
+        except ValueError:
+            # Native interpreters own their full grammar. A framework parser must
+            # not reject valid PowerShell/Bash constructs merely because it cannot
+            # understand their quoting or escaping rules.
+            commands = []
+
+    if not commands or not all(_is_builtin_command(segment) for segment in commands):
+        result = _run_process(
+            command,
+            cwd=cwd,
+            env_extra=environment,
+            stdin=stdin,
+            timeout=timeout,
+            cancel_event=cancel_event,
+            shell_type=shell_type,
+        )
+        return {**result, "cwd": str(cwd)}
+
     deadline = time.monotonic() + timeout if chain_timeout_mode == "total" else None
     results: list[dict[str, Any]] = []
     current_cwd = cwd
-    stdin_used = False
     last: dict[str, Any] | None = None
     runtime_state = session if session is not None else {"cwd": str(cwd), "env": environment, "history": []}
 
@@ -438,21 +510,10 @@ def _execute(
             last = {"ok": False, "output": f"命令链超时 ({timeout:g}s)", "exit_code": -1, "timed_out": True}
         else:
             builtin = _builtin(segment, runtime_state, current_cwd)
-            if builtin is not None:
-                last = builtin
-                current_cwd = Path(str(builtin.get("cwd") or current_cwd))
-                environment.update(runtime_state.get("env", {}))
-            else:
-                last = _run_process(
-                    segment,
-                    cwd=current_cwd,
-                    env_extra=environment,
-                    stdin=stdin if not stdin_used else "",
-                    timeout=remaining,
-                    cancel_event=cancel_event,
-                    shell_type=shell_type,
-                )
-                stdin_used = True
+            assert builtin is not None
+            last = builtin
+            current_cwd = Path(str(builtin.get("cwd") or current_cwd))
+            environment.update(runtime_state.get("env", {}))
         results.append({"command": segment, **last})
 
     assert last is not None
@@ -491,7 +552,7 @@ def run(
 ) -> dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         raise ValueError("command 不能为空")
-    if shell_type not in {"auto", "cmd", "powershell", "bash", "bash_login"}:
+    if shell_type not in {"auto", "cmd", "powershell", "pwsh", "bash", "bash_login"}:
         raise ValueError(f"不支持的 shell_type: {shell_type}")
     if chain_timeout_mode not in {"total", "per_command"}:
         raise ValueError(f"不支持的 chain_timeout_mode: {chain_timeout_mode}")

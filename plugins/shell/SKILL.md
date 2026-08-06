@@ -1,6 +1,6 @@
 # shell
 
-系统命令执行工具。运行本地命令，支持会话模式、命令链、可选命令解释器和跨平台输出解码。无沙箱限制。
+系统命令执行工具。运行本地命令，支持会话模式、原生单进程命令链、可选命令解释器和跨平台输出解码。无沙箱限制。
 
 ## 使用原则
 
@@ -16,7 +16,9 @@
 
 cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / del 只允许删除文件，拒绝删除目录。未提供 `session_id` 时，文件类内置命令仍可使用，但 cwd 和环境变量不会跨调用保留。
 
-支持命令链语法：`&&`（前序成功才执行）、`||`（前序失败才执行）、`;`（无条件顺序执行）。
+支持命令链语法：`&&`（前序成功才执行）、`||`（前序失败才执行）、`;`（无条件顺序执行）。只要命令需要外部解释器，完整命令都会在同一个进程中执行，变量、函数和 Shell 会话状态不会因链操作符被拆散。显式使用 `powershell` 或 `pwsh` 时启用未定义变量和非终止错误保护；`pwsh` 对应 PowerShell 7，`powershell` 保留 Windows PowerShell 5.1 兼容入口。
+
+框架内置命令组成的简单链仍由框架执行，并可使用 `chain_timeout_mode`。外部命令或脚本的 `timeout` 始终约束整个单进程脚本；如需在一个持久会话中切换目录，建议单独调用一次 `cd`，再用相同 `session_id` 执行后续命令。
 
 ## 参数说明
 
@@ -29,15 +31,15 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
 | `env` | object | | 附加环境变量；会话模式下写入会话状态 |
 | `session_id` | string | | 会话标识，相同值共享 cwd / env / history |
 | `reset_session` | bool | | 重置指定 `session_id` 的状态 |
-| `shell_type` | string | | 命令解释器：auto / cmd / powershell / bash / bash_login，默认 auto |
-| `chain_timeout_mode` | string | | 超时策略：total（全链共享）/ per_command（逐段独立），默认 total |
+| `shell_type` | string | | 命令解释器：auto / cmd / powershell / pwsh / bash / bash_login，默认 auto |
+| `chain_timeout_mode` | string | | 框架内置命令链超时策略：total（全链共享）/ per_command（逐段独立），默认 total；外部脚本始终整体计时 |
 
 ## Tool
 
 ```json
 {
   "name": "shell",
-  "description": "执行本地系统命令。专用工具优先，不可逆操作须先确认；支持会话、命令链、解释器选择、逐段超时和跨平台输出解码。",
+  "description": "执行本地系统命令。专用工具优先，不可逆操作须先确认；支持会话、原生单进程命令链、解释器选择和跨平台输出解码。",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -50,21 +52,21 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
       "reset_session": {"type": "boolean", "description": "是否重置指定 session_id 的状态"},
       "shell_type": {
         "type": "string",
-        "enum": ["auto", "cmd", "powershell", "bash", "bash_login"],
+        "enum": ["auto", "cmd", "powershell", "pwsh", "bash", "bash_login"],
         "default": "auto",
-        "description": "命令解释器：auto=系统默认、cmd=cmd.exe /c、powershell=powershell -NoProfile -Command、bash=bash -c、bash_login=bash -l -c（登录 shell）"
+        "description": "命令解释器：auto=系统默认、cmd=cmd.exe /c、powershell=Windows PowerShell 5.1、pwsh=PowerShell 7、bash=bash -c、bash_login=bash -l -c（登录 shell）"
       },
       "chain_timeout_mode": {
         "type": "string",
         "enum": ["total", "per_command"],
         "default": "total",
-        "description": "命令链超时策略：total=全链共享 timeout，per_command=每段独立使用 timeout"
+        "description": "框架内置命令链超时策略：total=全链共享 timeout，per_command=每段独立使用 timeout；外部脚本始终整体计时"
       }
     },
     "required": ["command"],
     "additionalProperties": false
   },
-  "version": "1.1.0",
+  "version": "1.2.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

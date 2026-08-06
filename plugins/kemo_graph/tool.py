@@ -19,6 +19,7 @@ _OPERATIONS = {
     "ingest",
     "query",
     "upload",
+    "import_file",
     "documents",
     "jobs",
     "deactivate",
@@ -113,6 +114,8 @@ def _operation_guide(
     mode: str,
     filename: str,
     content: str,
+    path: str,
+    ingest_after_import: bool,
     document_action: str,
     source_id: str,
     expected_content_hash: str,
@@ -146,6 +149,15 @@ def _operation_guide(
         if len(selected) != 1 or not filename.strip() or not content.strip():
             raise ValueError("upload 需要一个 library_id、filename 和 content")
         params.update({"filename": filename.strip(), "content": content})
+    elif operation == "import_file":
+        if len(selected) != 1 or not path.strip():
+            raise ValueError("import_file 需要一个 library_id 和本地文件绝对路径 path")
+        params.update(
+            {
+                "path": path.strip(),
+                "ingest_after_import": ingest_after_import,
+            }
+        )
     elif operation == "documents":
         if len(selected) != 1:
             raise ValueError("documents 每次必须且只能选择一个 library_id")
@@ -195,13 +207,18 @@ def _operation_guide(
         warning = "长耗时操作，可能调用 LLM、Embedding 和 Rerank；完成后再手动 status。"
     elif operation == "query":
         warning = "仅在用户明确要求时查询；同一轮默认合并一次，继续/下一步/重来不触发新查询。"
+    elif operation == "import_file":
+        warning = (
+            "将管理员明确指定的本地文件上传到所选 Library；默认只转换导入，"
+            "不立即 ingest。支持格式和 50 MB 上限仍由两端共同校验。"
+        )
     arguments: dict[str, Any] = {
         "scope": "global",
         "module": "kemo_graph",
         "command": operation,
         "params": params,
     }
-    if operation == "ingest":
+    if operation in {"ingest", "import_file"}:
         arguments["timeout"] = 3600
     return {"tool": "expand_call", "arguments": arguments, "warning": warning}
 
@@ -214,6 +231,8 @@ def run(
     mode: str = "",
     filename: str = "",
     content: str = "",
+    path: str = "",
+    ingest_after_import: bool = False,
     document_action: str = "",
     source_id: str = "",
     expected_content_hash: str = "",
@@ -236,7 +255,7 @@ def run(
             "principles": [
                 "不替换、不增强、不缩减本地知识库和记忆",
                 "普通 Prompt 刷新不访问 kemo-graph",
-                "绝对路径只能来自管理员注册表，工具调用只传 library_id",
+                "Store 绝对路径只能来自管理员注册表；文件导入路径必须由管理员明确指定",
                 "查询、扫描、同步和构建仅在用户明确要求后执行",
                 "真实操作统一使用 expand_call",
             ],
@@ -273,6 +292,7 @@ def run(
             "sync",
             "ingest",
             "upload",
+            "import_file",
             "deactivate",
         } or (
             normalized_operation == "documents"
@@ -290,6 +310,8 @@ def run(
                 mode=str(mode or "").strip().casefold(),
                 filename=filename,
                 content=content,
+                path=path,
+                ingest_after_import=ingest_after_import,
                 document_action=document_action,
                 source_id=source_id,
                 expected_content_hash=expected_content_hash,
