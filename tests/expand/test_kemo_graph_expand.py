@@ -475,7 +475,9 @@ class KemoGraphExpandTests(unittest.TestCase):
         call = upload.call_args
         self.assertEqual(call.args[1], "/stores/import")
         self.assertEqual(call.args[2], source.resolve())
-        self.assertEqual(call.kwargs["fields"], {"store_root": str(self.store)})
+        fields = call.kwargs["fields"]
+        self.assertEqual(set(fields), {"store_root"})
+        self.assertTrue(Path(fields["store_root"]).samefile(self.store))
         self.assertEqual(call.kwargs["query"], {"ingest": "false"})
 
         unsupported = self.root / "payload.exe"
