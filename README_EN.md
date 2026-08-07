@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,16 +204,16 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.0.1`
+Current version: `1.0.2`
 
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem and its transition to a stable major version. `1.0.1` is the first systematic stability release after that milestone: it reviews the core runtime, configuration contracts, plugin and extension boundaries, memory and history storage, Web API/frontend compatibility, tool-call safety, and the release-validation workflow. Future releases will focus primarily on adjacent ecosystem integrations, compatibility, performance, and long-term reliability.
+`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior: the important-memory file limit is separated from its Prompt injection budget; existing fragments are found through confidence-gated multi-keyword scoring instead of exact long-sentence matching; `search_many` loads each memory tier only once per batch; and `self_improve` reuses confirmed filenames so daily weighting and later promotion can work again. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
 
 Available today:
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
 - a per-user SQLite history store with transactional commits, table-backed content search, and cursor pagination;
-- a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; weight changes still require traceable matches in the user's archived words before memories advance through tiers or fade over time;
-- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories;
+- a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; archived user evidence now finds existing fragments through confidence-gated keyword coverage before applying at most one weight increase per day, reducing duplicate-fragment growth;
+- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories; 5,000 characters is an injection budget, while 20,000 characters is the separate runaway-output guard;
 - personal, shared, and global knowledge layers grounded in real source material;
 - task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support;
 - one-time and recurring scheduled tasks that wake automatically at the agreed time;
@@ -227,7 +227,7 @@ Available today:
 - shared identity and memory across the web interface, CLI, and messaging platforms;
 - isolated workspaces and configuration for multiple users;
 - separate management of uploaded files and agent-generated content, with bounded image, audio, and video previews;
-- cross-tier memory search plus a ten-item moving conversation navigator that centers the active round at 180° and can continue loading earlier history;
+- explainable scored memory search across all four lifecycle tiers, with batch queries loading each tier once and returning matched fields, terms, coverage, and scores; plus a ten-item moving conversation navigator that centers the active round at 180° and can continue loading earlier history;
 - a layered Web backend organized around routes, domain services, and shared contracts while retaining compatibility entry points;
 - runtime status and maintenance interfaces with background tasks operating automatically.
 

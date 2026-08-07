@@ -30,6 +30,20 @@
 
 Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为只读操作，不写加权事件。只有保存、手动压缩、Token 超限压缩等用户对话历史整理管线能提供临时记忆加权证据。
 
+## 搜索命中与每日加权
+
+`self_improve` 先把每个候选提炼为 2～4 个核心关键词，再通过一次 `memory_manage search_many tier=all`
+搜索整批候选。搜索优先规范化完整短语；模糊查询使用英文词、中文关键词和 bigram 计算覆盖率，
+多片段查询至少命中两个有效片段且覆盖率不低于 50%，单个较长中文片段要求至少两个 bigram
+且覆盖率不低于 60%。单个公共词不能直接证明两个碎片语义相同。
+
+搜索结果返回 `match_score`、`match_coverage`、`matched_by`、`matched_terms` 和 `exact_match`。
+子代理必须结合命中正文确认语义一致，并复制已有 `filename` 返回同名 upsert；数据库随后利用
+`memory_weight_events` 保证每日最多加权一次。只有高置信度候选均不相符时才创建新文件。
+
+`search_many` 在一次调用中只加载一次目标记忆层，再在内存中处理最多 20 个查询，不会随候选
+数量重复访问四层数据库。该路径面向数百至数千碎片；单项搜索同样使用相同评分规则和全局排序。
+
 ## 临时重要热视图
 
 数据流固定为：
@@ -40,7 +54,11 @@ Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为�
 
 后台整理临时三层时禁止把 `memory_temporary_important.md` 作为输入证据。热视图发布时，`memory_important_sources` 记录来源行和内容摘要；来源被修改、删除或晋升后，旧热视图立即视为失效，普通临时层恢复注入，等待下次巡检重建。主动查看记忆时仍可读取该文件，但查看本身不加权。
 
-热视图巡检不能一次性返回整个大型层级。`memory_temporary_important` 使用 `memory_manage list(limit=100, offset, compact=true)` 逐页列出三层临时记忆和永久记忆，沿 `next_offset` 读取到 `has_more=false` 后，再对稳定引用逐条 `get` 正文。`compact=true` 省略时间与到期元数据，避免列表超过工具结果字符上限；如果分页没有完整覆盖 `total`，运行时必须保持旧热视图，不得基于局部数据执行永久协调或清理。
+热视图巡检不能一次性返回整个大型层级。`memory_temporary_important` 使用 `memory_manage list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 按“条目数 + 序列化字符数”双重边界分页读取三层临时记忆和永久记忆，正文随列表批量返回，不再对全部碎片逐条 `get`。沿 `next_offset` 读取到 `has_more=false` 且累计数量等于 `total` 后才能发布新热视图；否则必须保持旧视图，不得基于局部数据执行永久协调或清理。
+
+热视图文件正文尽量保持在 `important_memory_max_chars`（默认 5000）以内，但该值只是 Prompt
+注入预算，不是落盘硬限制。合理的 5000～20000 字符正文完整保存，Prompt 构建时只截取预算内
+内容；只有超过 `important_memory_output_max_chars`（默认 20000）才拒绝本次更新且保留旧视图。
 
 ## 模板、升级与旧格式
 

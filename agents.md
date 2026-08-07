@@ -344,7 +344,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 ## 5. 工具使用规则
 
 - **`action` 必填参数**：以下工具使用统一的 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会导致调用失败并报「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、`task_time`、`expand_creater`、`external_message`、`sense_creater`、`skill_creater`。特别注意 `file` 工具的所有操作（读、写、编辑、搜索、复制、移动、删除等）都必须带 `action`；编辑文件应传 `action: "edit"`、`edit_mode` 和推荐的新内容参数 `new_text`，旧参数 `content` 仅作兼容。
-- **文件编辑安全流程**：已有文件的小范围修改禁止使用 `write` 覆盖全文。编辑前先读取目标范围，使用 `read_range.lines` 的显式行号，不得靠数组位置猜测。精确文本块使用 `replace_text`；单行/连续范围使用 `replace_line`/`replace_range`，并必须传入最近读取到的 `expected_old_text`；插入操作必须传入读取结果的 `sha256` 作为 `expected_hash`。删除完整行使用 `delete_line`/`delete_range`，禁止通过空 `replace_range` 隐式删除。`replace_line`/`replace_range` 的 `new_text` 末尾不要主动附加换行。`replace_text` 默认使用 `expected_count=1`；匹配或前置校验失败后重新读取，禁止直接改成 `-1` 强行替换。编辑后先检查返回的带行号 `preview`，再重新读取目标范围验证格式和内容；默认编号备份不得关闭或覆盖。
+- **文件编辑安全流程**：已有文件的小范围修改禁止使用 `write` 覆盖全文。编辑前先读取目标范围，使用 `read_range.lines` 的显式行号，不得靠数组位置猜测；刚由 `write` 创建的文件可直接使用其返回的 `lines` 和完整 `sha256` 作为同次工作流快照，快照截断时仍需 `read_range`。精确文本块使用 `replace_text`；单行/连续范围使用 `replace_line`/`replace_range`，并必须传入已确认的 `expected_old_text`；插入操作必须传入读取或写入结果的 `sha256` 作为 `expected_hash`。删除完整行使用 `delete_line`/`delete_range`，禁止通过空 `replace_range` 隐式删除。`replace_line`/`replace_range` 的 `new_text` 末尾不要主动附加换行。`replace_text` 默认使用 `expected_count=1`；匹配或前置校验失败后重新读取，禁止直接改成 `-1` 强行替换。编辑后先检查返回的带行号 `preview`，再重新读取目标范围验证格式和内容；默认编号备份不得关闭或覆盖。`list_dir`/`tree_dir` 返回 `has_more=true` 时必须沿 `next_offset` 继续分页，不能把当前页当作完整目录。
 - **`scope` 必填参数**：`expand_creater` 和 `skill_creater` 的 `scope` 为必填，漏传会报「缺少必填参数：scope」。取值仅 `"user"`（当前用户私有的拓展/技能）或 `"shared"`（所有用户共享），不存在 `"global"`。创建前应在流程中向用户确认 scope，不得自行猜测。
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；调用失败时不得假装成功。
@@ -401,7 +401,8 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - `memory_important_sources` 表保存热画像当前引用的临时源行及内容摘要。临时源仍是权威数据，只能由用户对话历史整理继续加权，并正常到期和晋升。
 - 数据流必须保持单向：`用户对话原文 → 临时三层 → 临时重要热画像`。后台提取、整理和晋升临时三层时，禁止读取 `important`，也禁止把助手回复、推理或工具结果当作用户证据。
 - 用户或主智能体主动查看记忆属于白名单只读场景，可读取 `important`，但查看本身不得改变任何临时记忆权重。
-- 后台热画像巡检必须使用 `memory_manage list(limit=100, offset, compact=true)` 分页遍历三层临时记忆和永久记忆，并沿 `next_offset` 读取到 `has_more=false`。中间页的 `truncated=true` 只表示仍有下一页；未完整覆盖返回的 `total` 时必须保留旧热画像，禁止基于部分数据做永久融合或副本清理。
+- `memory.important_memory_max_chars` 只控制热画像进入 Prompt 的字符预算；热画像文件可以更长并完整落盘。`memory.important_memory_output_max_chars` 才是模型输出防失控硬上限，超过时拒绝本次更新且不得覆盖旧热画像。
+- 后台热画像巡检必须使用 `memory_manage list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 分页批量读取三层临时记忆和永久记忆，并沿 `next_offset` 读取到 `has_more=false`；不得对全部条目逐条 `get`。分页同时受条目数与序列化字符预算约束；中间页的 `truncated=true` 或 `page_limited_by_chars=true` 只表示仍有下一页。未完整覆盖返回的 `total` 时必须保留旧热画像，禁止基于部分数据做永久融合或副本清理。
 - 已进入热画像且内容摘要仍匹配的源碎片不再重复注入普通临时记忆段；任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容恢复正常注入，等待下次巡检重建。
 - 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像来源、永久融合和临时副本清理由运行时统一事务化，子代理不得直接修改数据库。
 - 普通记忆提取不得覆盖已有永久正文；只有用户本轮明确要求记住的 `explicit=true` 候选才允许更新永久记忆。
@@ -587,6 +588,8 @@ users/<user>/agents/<name>/
 - `agents.important_memory_review_hours` 和 `agents.daily_memory_review_time` 是宿主级全局调度参数，只从 `config/global_config.json` 创建统一系统任务；用户配置不得声明不同时间表。任务到期后仍按用户分别执行，用户之间的数据和写入锁彼此隔离。
 - 所有声明为 `background_serial` 的子代理在真实 executor 线程内按“项目根目录 + 用户”共享串行锁；网页同步调用、后台子代理队列、Maintenance 与 Cron 不得绕开该锁并发修改同一用户的派生数据。
 - 记忆类系统任务按用户分别执行；感知只以 `__system__` 身份刷新全局层。拓展任务先以 `__system__` 身份各刷新一次全局层和共享层，再按用户身份只刷新对应的 `users/<user>/expand/`，不得跨用户聚合执行。
+- 记忆晋升扫描必须处理本轮全部到期且达标碎片，不允许用单次批量上限截断总量。`review_due` 按目标层分批调用 `self_improve`：普通层每批最多 20 条、永久层每批最多 8 条；成功批次立即事务落盘，未成功条目保持原层并由后续扫描重试。
+- `self_improve` 匹配已有碎片时必须使用单次 `memory_manage search_many` 批量提交 2～4 个核心关键词；搜索按完整短语和多关键词覆盖率评分，单个公共词不得直接触发复用。确认语义相同后必须复制已有文件名返回同名 upsert，才能进入每日一次的加权链路。`search_many` 每次调用只加载一次目标记忆层，不得随候选数量重复扫库。
 - 模块更新脚本在独立 Python 子进程中运行，优先调用 `update()`，兼容调用 `main()`；超时、非零退出码、`False`、`{ok: false}` 或失败状态均记为失败。
 - 拓展的 `input_data.md` 只承载长期采集摘要或资源索引；完整 JSON/CSV/HTML、图片、音视频和大型日志保存在模块内并按需读取，不能自动全部注入 Prompt。
 - 主智能体使用 `expand_call` 操控当前用户获准使用的三层拓展。调用参数经 stdin 进入隔离子进程；操控结果直接进入当前工具结果，不绕写 `input_data.md`。大型结果必须以模块内 artifact 返回并由框架校验后发布到用户下载空间。
