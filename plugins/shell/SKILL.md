@@ -6,9 +6,10 @@
 
 1. **专用工具优先**：有对应专用工具时不得使用 shell。文件读写用 `file` 插件，网络请求用 `network`，下载用 `download`。shell 仅在没有专用工具或需要执行系统级命令时使用。
 2. **不可逆操作先确认**：执行 rm / del / format / 覆盖写入 / 批量删除等不可逆操作前，必须先列目录确认目标范围，向用户展示将要影响的内容，获确认后再执行。
-3. **匹配当前平台**：在 Windows 环境优先使用 PowerShell 或 cmd 命令；在 Unix 环境使用对应 shell 命令。不确定操作系统时先探测运行环境。
+3. **匹配当前平台**：在 Windows 环境优先使用 PowerShell 或 cmd 命令，不要直接使用 Unix 专属的 `head`；PowerShell 按条目限制可用 `Select-Object -First`，文件分段读取优先使用 `file.read_range`。在 Unix 环境使用对应 shell 命令。不确定操作系统时先探测运行环境。
 4. **连续失败即停止**：同一命令连续失败 2 次即停止重试，向用户报告操作目标、错误信息和需要的帮助，不得以相同参数反复尝试。
 5. **合理设置超时**：编译、下载、数据处理等长时间命令应主动设置 `timeout`；未显式设置时使用 `global_config.json → tools.timeout` 注入的运行时默认值，显式有效值会同时覆盖 shell 内部期限和框架外层看门狗。
+6. **哈希能力降级**：Windows PowerShell 若缺少 `Get-FileHash`，优先改用 `file` 工具的 `hash` action；必须走系统命令时使用 `certutil -hashfile <path> SHA256`。shell 会在识别到这类失败时保留原错误并附加 `hint`。
 
 ## 会话模式
 
@@ -66,7 +67,7 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
     "required": ["command"],
     "additionalProperties": false
   },
-  "version": "1.2.0",
+  "version": "1.3.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

@@ -45,6 +45,39 @@ _BUILTIN_NAMES = frozenset(
 )
 _SESSION_LOCK = threading.RLock()
 _SESSION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_WINDOWS_HEAD_PIPE_RE = re.compile(r"\|\s*head(?:\.exe)?(?:\s|$)", re.IGNORECASE)
+
+
+def _failure_hint(command: str, shell_type: str, result: dict[str, Any]) -> str:
+    if os.name != "nt" or result.get("ok"):
+        return ""
+    output = str(result.get("output") or "")
+    lowered = output.casefold()
+    if _WINDOWS_HEAD_PIPE_RE.search(command):
+        return (
+            "当前为 Windows 环境，head 通常不可用。PowerShell 可使用 "
+            "Select-Object -First；按字符截断时可使用 Out-String 后 Substring，"
+            "读取文件内容优先使用 file.read_range。"
+        )
+    if (
+        re.search(r"\bget-filehash\b", command, re.IGNORECASE)
+        and shell_type in {"auto", "powershell", "pwsh"}
+        and any(
+            marker in lowered
+            for marker in (
+                "commandnotfoundexception",
+                "is not recognized",
+                "not recognized",
+                "无法将",
+                "识别为 cmdlet",
+            )
+        )
+    ):
+        return (
+            "当前 PowerShell 无法使用 Get-FileHash。优先调用 file 工具的 hash action；"
+            "必须使用系统命令时可运行 certutil -hashfile <path> SHA256。"
+        )
+    return ""
 
 
 def _now() -> float:
@@ -73,7 +106,9 @@ def _truncate(value: str) -> tuple[str, bool]:
     return value[:_OUTPUT_MAX_CHARS] + "\n…(输出已截断)", True
 
 
-def _session_key(context: dict[str, Any], root: Path, session_id: str) -> tuple[str, str, str, str]:
+def _session_key(
+    context: dict[str, Any], root: Path, session_id: str
+) -> tuple[str, str, str, str]:
     return (
         str(root).casefold(),
         str(context.get("user") or ""),
@@ -85,13 +120,18 @@ def _session_key(context: dict[str, Any], root: Path, session_id: str) -> tuple[
 def _cleanup_expired_sessions() -> None:
     deadline = _now() - _SESSION_TTL_SECONDS
     expired = [
-        key for key, session in _SESSION_CACHE.items()
-        if not isinstance(session, dict) or float(session.get("last_used", 0)) < deadline
+        key
+        for key, session in _SESSION_CACHE.items()
+        if not isinstance(session, dict)
+        or float(session.get("last_used", 0)) < deadline
     ]
     for key in expired:
         _SESSION_CACHE.pop(key, None)
     if len(_SESSION_CACHE) > _SESSION_MAX_COUNT:
-        oldest = sorted(_SESSION_CACHE, key=lambda key: float(_SESSION_CACHE[key].get("last_used", 0)))
+        oldest = sorted(
+            _SESSION_CACHE,
+            key=lambda key: float(_SESSION_CACHE[key].get("last_used", 0)),
+        )
         for key in oldest[: len(_SESSION_CACHE) - (_SESSION_MAX_COUNT // 2)]:
             _SESSION_CACHE.pop(key, None)
 
@@ -144,8 +184,8 @@ def _split_chain(command: str) -> tuple[list[str], list[str]]:
             continue
         operator = ""
         if not single and not double:
-            if command[index:index + 2] in {"&&", "||"}:
-                operator = command[index:index + 2]
+            if command[index : index + 2] in {"&&", "||"}:
+                operator = command[index : index + 2]
             elif char == ";":
                 operator = ";"
         if operator:
@@ -210,7 +250,7 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
     argument = parts[1].strip() if len(parts) > 1 else ""
 
     if name in {"cd", "chdir"}:
-        target_text = argument.strip('"\'') if argument else str(Path.home())
+        target_text = argument.strip("\"'") if argument else str(Path.home())
         target = Path(target_text).expanduser()
         if not target.is_absolute():
             target = cwd / target
@@ -226,7 +266,9 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
     if name in {"export", "set", "env"}:
         if not argument:
             values = session.get("env", {})
-            output = "\n".join(f"{key}={values[key]}" for key in sorted(values)) or "(empty)"
+            output = (
+                "\n".join(f"{key}={values[key]}" for key in sorted(values)) or "(empty)"
+            )
             return {"ok": True, "output": output, "exit_code": 0}
         if "=" not in argument:
             return {"ok": False, "output": f"{name}: 需要 KEY=VALUE", "exit_code": 1}
@@ -234,7 +276,7 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
         key = key.strip()
         if not _ENV_KEY_RE.fullmatch(key):
             return {"ok": False, "output": f"{name}: 无效变量名: {key}", "exit_code": 1}
-        value = value.strip().strip('"\'')
+        value = value.strip().strip("\"'")
         session.setdefault("env", {})[key] = value
         return {"ok": True, "output": f"{key}={value}", "exit_code": 0}
 
@@ -246,7 +288,9 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
 
     if name == "history":
         history = session.get("history", [])
-        output = "\n".join(f"[{index}] {item}" for index, item in enumerate(history[-50:], 1))
+        output = "\n".join(
+            f"[{index}] {item}" for index, item in enumerate(history[-50:], 1)
+        )
         return {"ok": True, "output": output or "(empty)", "exit_code": 0}
 
     if name in {"cat", "type"}:
@@ -254,7 +298,11 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
             return {"ok": False, "output": f"{name}: 需要文件路径", "exit_code": 1}
         target = _resolve_path(argument, cwd)
         if not target.is_file():
-            return {"ok": False, "output": f"{name}: 文件不存在: {target}", "exit_code": 1}
+            return {
+                "ok": False,
+                "output": f"{name}: 文件不存在: {target}",
+                "exit_code": 1,
+            }
         try:
             content = target.read_text("utf-8")
         except UnicodeDecodeError:
@@ -265,8 +313,15 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
     if name in {"ls", "dir"}:
         target = _resolve_path(argument, cwd) if argument else cwd
         if not target.is_dir():
-            return {"ok": False, "output": f"{name}: 目录不存在: {target}", "exit_code": 1}
-        entries = [child.name + ("/" if child.is_dir() else "") for child in sorted(target.iterdir())]
+            return {
+                "ok": False,
+                "output": f"{name}: 目录不存在: {target}",
+                "exit_code": 1,
+            }
+        entries = [
+            child.name + ("/" if child.is_dir() else "")
+            for child in sorted(target.iterdir())
+        ]
         output, truncated = _truncate("\n".join(entries) or "(空目录)")
         return {"ok": True, "output": output, "exit_code": 0, "truncated": truncated}
 
@@ -275,7 +330,11 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
             return {"ok": False, "output": "mkdir: 需要目录路径", "exit_code": 1}
         target = _resolve_path(argument, cwd)
         if target.exists():
-            return {"ok": False, "output": f"mkdir: 路径已存在: {target}", "exit_code": 1}
+            return {
+                "ok": False,
+                "output": f"mkdir: 路径已存在: {target}",
+                "exit_code": 1,
+            }
         target.mkdir(parents=True, exist_ok=False)
         return {"ok": True, "output": str(target), "exit_code": 0}
 
@@ -287,7 +346,11 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
             return {"ok": False, "output": f"{name}: 需要文件路径", "exit_code": 1}
         target = _resolve_path(argument, cwd)
         if not target.exists():
-            return {"ok": False, "output": f"{name}: 文件不存在: {target}", "exit_code": 1}
+            return {
+                "ok": False,
+                "output": f"{name}: 文件不存在: {target}",
+                "exit_code": 1,
+            }
         if target.is_dir():
             return {
                 "ok": False,
@@ -386,15 +449,15 @@ def _run_process(
             "truncated": truncated,
         }
     process = subprocess.Popen(
-            process_command,
-            shell=use_shell,
-            cwd=str(cwd),
-            env=environment,
-            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **cancellable_subprocess_kwargs(),
-        )
+        process_command,
+        shell=use_shell,
+        cwd=str(cwd),
+        env=environment,
+        stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **cancellable_subprocess_kwargs(),
+    )
     input_data = stdin.encode("utf-8") if stdin else None
     deadline = time.monotonic() + timeout
     cancelled = False
@@ -418,10 +481,13 @@ def _run_process(
     if cancelled or timed_out:
         stdout = _decode_output(stdout_data or b"")
         stderr = _decode_output(stderr_data or b"")
-        output, truncated = _truncate("\n".join(value for value in (stdout, stderr) if value).strip())
+        output, truncated = _truncate(
+            "\n".join(value for value in (stdout, stderr) if value).strip()
+        )
         return {
             "ok": False,
-            "output": output or (
+            "output": output
+            or (
                 "命令因用户紧急停止而取消" if cancelled else f"命令超时 ({timeout:g}s)"
             ),
             "exit_code": -1,
@@ -486,7 +552,11 @@ def _execute(
     results: list[dict[str, Any]] = []
     current_cwd = cwd
     last: dict[str, Any] | None = None
-    runtime_state = session if session is not None else {"cwd": str(cwd), "env": environment, "history": []}
+    runtime_state = (
+        session
+        if session is not None
+        else {"cwd": str(cwd), "env": environment, "history": []}
+    )
 
     for index, segment in enumerate(commands):
         if cancel_event is not None and cancel_event.is_set():
@@ -503,11 +573,18 @@ def _execute(
             if (operator == "&&" and last is not None and not last["ok"]) or (
                 operator == "||" and last is not None and last["ok"]
             ):
-                results.append({"command": segment, "skipped": True, "operator": operator})
+                results.append(
+                    {"command": segment, "skipped": True, "operator": operator}
+                )
                 continue
         remaining = timeout if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
-            last = {"ok": False, "output": f"命令链超时 ({timeout:g}s)", "exit_code": -1, "timed_out": True}
+            last = {
+                "ok": False,
+                "output": f"命令链超时 ({timeout:g}s)",
+                "exit_code": -1,
+                "timed_out": True,
+            }
         else:
             builtin = _builtin(segment, runtime_state, current_cwd)
             assert builtin is not None
@@ -522,9 +599,13 @@ def _execute(
     rendered = []
     for index, result in enumerate(results, 1):
         if result.get("skipped"):
-            rendered.append(f"[{index}] skipped ({result['operator']}): {result['command']}")
+            rendered.append(
+                f"[{index}] skipped ({result['operator']}): {result['command']}"
+            )
         else:
-            rendered.append(f"[{index}] {result['command']}\n{result.get('output', '')}")
+            rendered.append(
+                f"[{index}] {result['command']}\n{result.get('output', '')}"
+            )
     output, truncated = _truncate("\n\n".join(rendered))
     return {
         "ok": bool(last["ok"]),
@@ -574,7 +655,11 @@ def run(
 
     def invoke() -> dict[str, Any]:
         base_cwd = Path(str(session["cwd"])) if session is not None else root
-        cwd = _resolve_cwd(working_dir, root) if working_dir else _resolve_cwd(str(base_cwd), root)
+        cwd = (
+            _resolve_cwd(working_dir, root)
+            if working_dir
+            else _resolve_cwd(str(base_cwd), root)
+        )
         environment = dict(session.get("env", {})) if session is not None else {}
         for name, value in (env or {}).items():
             if not _ENV_KEY_RE.fullmatch(str(name)):
@@ -593,6 +678,9 @@ def run(
             shell_type=shell_type,
             chain_timeout_mode=chain_timeout_mode,
         )
+        hint = _failure_hint(command.strip(), shell_type, result)
+        if hint:
+            result = {**result, "hint": hint}
         if session is not None:
             history = session.setdefault("history", [])
             history.append(command.strip())

@@ -7,7 +7,7 @@
 
 1. **未知大文件先检查**：先用 `stat` 查看文件大小。框架对单次工具内联结果执行 100,000 字符硬限制，超限正文会被完全省略并要求缩小范围；因此只有确认是小文件时才使用 `read`，其他情况使用 `read_range` 的 `start_line`/`end_line` 或 `tail` 分段读取。底层扫描默认最多 50 MB，超过限制还会返回 `truncated=true`。
 2. **编辑前后均要读取**：用 `edit` 前先读取并确认当前内容，优先使用 `read_range.lines` 中的显式行号；编辑后检查工具返回的 `preview`，必要时再次读取。`edit` 默认创建不覆盖的编号备份（`.bak`、`.bak.1`……），除非明确不需要，否则保持 `create_backup=true`。
-3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。`delete` 只删除文件，不删除目录。
+3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。目录结果带 `total`、`has_more` 和 `next_offset`；存在下一页时沿 `next_offset` 分页读取，不能把当前页误当完整目录。`delete` 只删除文件，不删除目录。
 4. **搜索与浏览分工**：找文件或搜索代码使用 `search`；查看目录树使用 `tree_dir`；查看单层目录使用 `list_dir`。
 5. **目录复制须显式授权**：复制目录必须设置 `recursive=true`。文件和目录都不能复制或移动到自身子目录。
 6. **编码回退**：默认 UTF-8，解码失败时尝试 UTF-8 BOM 和操作系统首选编码；可通过 `encoding` 显式指定。
@@ -16,6 +16,7 @@
 9. **精确替换优先**：编辑的新内容推荐使用 `new_text`；`content` 只为兼容旧调用保留。`replace_text` 默认保持 `expected_count=1`，匹配失败后重新读取目标内容，不要直接改成 `-1`。只有用户明确要求批量替换时才使用 `expected_count=-1`。
 10. **行编辑必须带原文保护**：`replace_line`、`replace_range`、`delete_line`、`delete_range` 必须传入从最近一次读取获得的 `expected_old_text`；Tab、空格和文本必须一致。`insert` 必须传入最近一次读取返回的 `sha256` 作为 `expected_hash`。校验失败后重新读取，禁止猜行号继续修改。
 11. **不要手工补行尾**：`replace_line` 和 `replace_range` 会保留目标区域原有的行尾，`new_text` 末尾无需附加换行。编辑器会保留文件编码、BOM、LF/CRLF/CR 和末尾换行；未修改区域不会被统一改写。
+12. **新文件可直接安全续编**：`write` 成功后会返回完整文件 `sha256` 和有界的带行号 `lines` 快照。刚创建的文件可依据这些字段定位后续 `edit`；快照被截断时仍应先使用 `read_range` 获取目标区域，不能猜测行号。
 
 ## 参数说明
 
@@ -37,8 +38,8 @@
 | `write` | `content`：覆盖写入内容 |
 | `append` | `content`：追加内容 |
 | `edit` | `edit_mode`、`new_text`（推荐）/`content`（兼容）、`old_text`、`expected_old_text`、`expected_hash`、`expected_count`、`line`、`column`、`end_line`、`end_column`、`create_backup` |
-| `list_dir` | 无 |
-| `tree_dir` | `max_depth`、`max_entries`、`include_hidden` |
+| `list_dir` | `offset`、`limit`（默认 200、最高 1000） |
+| `tree_dir` | `max_depth`、`max_entries`（兼容页大小）、`offset`、`limit`、`include_hidden` |
 | `search` | `query`、`mode`、`file_glob`、`regex`、`max_results`、`context_lines`、`include_hidden`、`max_file_bytes` |
 | `hash` | `algorithm`：md5/sha1/sha256，默认 sha256 |
 | `copy` | `dst_path`、`overwrite`、`recursive`（目录必须为 true） |
@@ -56,8 +57,8 @@
 | `dst_path` | copy/move | 目标路径 |
 | `content` | read/read_range | 正文；read_range 返回字符串数组 |
 | `lines` | read_range | 带显式 1-based 行号的 `[{line, text}]` 数组；优先使用此字段定位编辑 |
-| `sha256` | read/read_range | 完整读取时整个文件的 SHA256，可作为后续 `expected_hash`；截断读取为空字符串，避免为读取日志尾部扫描整个大文件 |
-| `sha256_complete` | read/read_range | `sha256` 是否覆盖整个文件；为 false 时如需插入操作，先显式调用 `hash` |
+| `sha256` | read/read_range/write | 完整读取或写入后整个文件的 SHA256，可作为后续 `expected_hash`；截断读取为空字符串，避免为读取日志尾部扫描整个大文件 |
+| `sha256_complete` | read/read_range/write | `sha256` 是否覆盖整个文件；为 false 时如需插入操作，先显式调用 `hash` |
 | `size` | read/stat | 原始文件大小（字节） |
 | `read_bytes` | read | 实际读取字节数 |
 | `truncated` | read/read_range/search | 是否因限制截断 |
@@ -77,7 +78,10 @@
 | `newline_style` | edit | 编辑后换行风格：LF、CRLF、CR、mixed 或 none |
 | `results` | search | 匹配结果数组 |
 | `skipped_large` | search | 因超过单文件大小限制而跳过的文件数组 |
-| `entries` | list_dir/tree_dir | 目录条目数组或目录树条目数 |
+| `entries` | list_dir/tree_dir | 单层目录当前页条目数组，或目录树当前页条目数 |
+| `items` | tree_dir | 当前页结构化目录树条目，包含相对路径、类型、深度和显示文本 |
+| `total`/`returned` | list_dir/tree_dir | 符合条件的总条目数 / 当前页返回数 |
+| `offset`/`limit`/`next_offset`/`has_more` | list_dir/tree_dir | 分页位置、页大小、下一页位置和是否仍有后续条目 |
 | `recursive` | copy | 是否递归复制 |
 | `deleted` | delete | 删除确认 |
 
@@ -120,6 +124,8 @@
       "recursive": {"type": "boolean", "description": "copy 是否递归复制目录；目录复制必须为 true"},
       "max_depth": {"type": "integer", "minimum": 0, "maximum": 50, "description": "tree_dir 最大深度，默认 2"},
       "max_entries": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "tree_dir 最大条目数，默认 200"},
+      "offset": {"type": "integer", "minimum": 0, "description": "list_dir/tree_dir 分页偏移，默认 0"},
+      "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "list_dir/tree_dir 当前页最大条目数，默认 200；tree_dir 省略时兼容使用 max_entries"},
       "include_hidden": {"type": "boolean", "description": "tree_dir/search 是否包含隐藏文件"},
       "query": {"type": "string", "description": "search 搜索词或正则"},
       "mode": {"type": "string", "enum": ["file", "name", "text", "content", "code"], "description": "search 搜索模式"},
@@ -134,7 +140,7 @@
     "required": ["action", "path"],
     "additionalProperties": false
   },
-  "version": "1.3.0",
+  "version": "1.4.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

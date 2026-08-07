@@ -14,21 +14,89 @@ from typing import Any
 _DEFAULT_READ_MAX_BYTES = 52_428_800
 _MAX_READ_BYTES_LIMIT = 536_870_912
 _DEFAULT_SEARCH_FILE_MAX_BYTES = 52_428_800
-_SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+_DEFAULT_DIR_PAGE_SIZE = 200
+_MAX_DIR_PAGE_SIZE = 1000
+_WRITE_SNAPSHOT_MAX_LINES = 200
+_WRITE_SNAPSHOT_MAX_CHARS = 20_000
+_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+}
 _BINARY_EXTENSIONS = {
-    ".exe", ".dll", ".so", ".dylib", ".bin", ".dat", ".db", ".sqlite",
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz",
-    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".zst",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".ttf", ".otf", ".woff", ".woff2", ".eot",
-    ".pyc", ".pyo", ".class", ".o", ".obj", ".a", ".lib",
-    ".iso", ".img", ".dmg", ".vmdk", ".qcow2",
-    ".pkl", ".pickle", ".npy", ".npz", ".parquet", ".avro",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".bin",
+    ".dat",
+    ".db",
+    ".sqlite",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".ico",
+    ".webp",
+    ".svgz",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".7z",
+    ".rar",
+    ".zst",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".ttf",
+    ".otf",
+    ".woff",
+    ".woff2",
+    ".eot",
+    ".pyc",
+    ".pyo",
+    ".class",
+    ".o",
+    ".obj",
+    ".a",
+    ".lib",
+    ".iso",
+    ".img",
+    ".dmg",
+    ".vmdk",
+    ".qcow2",
+    ".pkl",
+    ".pickle",
+    ".npy",
+    ".npz",
+    ".parquet",
+    ".avro",
 }
 
 
 # ── 工具函数 ─────────────────────────────────────────────────────
+
 
 def _system_encodings() -> tuple[str, ...]:
     encodings = ["utf-8", "utf-8-sig"]
@@ -42,7 +110,9 @@ def _system_encodings() -> tuple[str, ...]:
 
 
 def _encoding_candidates(encoding: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(value for value in (encoding, *_system_encodings()) if value))
+    return tuple(
+        dict.fromkeys(value for value in (encoding, *_system_encodings()) if value)
+    )
 
 
 def _read_with_encoding_bytes(
@@ -57,10 +127,13 @@ def _read_with_encoding_bytes(
             return data.decode(candidate), candidate
         except UnicodeDecodeError as error:
             tail_error = error.end == len(data) and error.start >= max(0, len(data) - 4)
-            incomplete = "end" in error.reason.casefold() or "incomplete" in error.reason.casefold()
+            incomplete = (
+                "end" in error.reason.casefold()
+                or "incomplete" in error.reason.casefold()
+            )
             if allow_incomplete_tail and tail_error and incomplete:
                 try:
-                    return data[:error.start].decode(candidate), candidate
+                    return data[: error.start].decode(candidate), candidate
                 except (LookupError, UnicodeError):
                     pass
             continue
@@ -142,7 +215,7 @@ def _is_same_or_child(path: Path, parent: Path) -> bool:
 def _line_parts(value: str) -> tuple[str, str]:
     for ending in ("\r\n", "\n", "\r"):
         if value.endswith(ending):
-            return value[:-len(ending)], ending
+            return value[: -len(ending)], ending
     return value, ""
 
 
@@ -252,6 +325,23 @@ def _preview_lines(text: str, line: int, radius: int = 2) -> list[dict[str, Any]
     return _line_entries(lines[start:end], start)
 
 
+def _bounded_line_snapshot(text: str) -> tuple[list[dict[str, Any]], int, bool]:
+    lines = text.splitlines()
+    selected: list[str] = []
+    used_chars = 0
+    for value in lines[:_WRITE_SNAPSHOT_MAX_LINES]:
+        added = len(value) + (1 if selected else 0)
+        if selected and used_chars + added > _WRITE_SNAPSHOT_MAX_CHARS:
+            break
+        if not selected and len(value) > _WRITE_SNAPSHOT_MAX_CHARS:
+            selected.append(value[:_WRITE_SNAPSHOT_MAX_CHARS])
+            used_chars = _WRITE_SNAPSHOT_MAX_CHARS
+            break
+        selected.append(value)
+        used_chars += added
+    return _line_entries(selected, 0), len(lines), len(selected) < len(lines)
+
+
 def _validate_expected_hash(expected_hash: str, actual_hash: str) -> None:
     expected = str(expected_hash or "").strip().casefold()
     if not expected:
@@ -259,18 +349,24 @@ def _validate_expected_hash(expected_hash: str, actual_hash: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("expected_hash 必须是 64 位 SHA256 十六进制字符串")
     if expected != actual_hash:
-        raise ValueError("文件已在读取后发生变化，expected_hash 不匹配，拒绝写入；请重新读取")
+        raise ValueError(
+            "文件已在读取后发生变化，expected_hash 不匹配，拒绝写入；请重新读取"
+        )
 
 
 def _validate_expected_text(expected: str | None, actual: str, *, label: str) -> None:
     if expected is None:
-        raise ValueError(f"{label} 必须提供 expected_old_text，防止行号误判覆盖错误内容")
+        raise ValueError(
+            f"{label} 必须提供 expected_old_text，防止行号误判覆盖错误内容"
+        )
     normalized_expected = _normalize_newlines(expected)
     normalized_actual = _normalize_newlines(actual)
     if normalized_expected != normalized_actual:
         raise ValueError(
             f"{label} 的 expected_old_text 与当前目标区域不一致，拒绝写入；"
-            "请重新使用 read_range 获取带行号内容"
+            f"预期 {len(normalized_expected)} 字符，实际 {len(normalized_actual)} 字符。"
+            "若文件刚由 write 创建，可依据 write 返回的 lines/sha256 核对范围；"
+            "否则请重新使用 read_range 获取带行号内容"
         )
 
 
@@ -286,14 +382,19 @@ def _range_text(
     if start_index == end_index:
         return first[start_column:finish_column]
     parts = [first[start_column:]]
-    parts.extend(_line_parts(lines[index])[0] for index in range(start_index + 1, end_index))
+    parts.extend(
+        _line_parts(lines[index])[0] for index in range(start_index + 1, end_index)
+    )
     parts.append(last[:finish_column])
     return "\n".join(parts)
 
 
 # ── 读取 ──────────────────────────────────────────────────────────
 
-def _run_read(path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any) -> dict[str, Any]:
+
+def _run_read(
+    path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any
+) -> dict[str, Any]:
     p = Path(path)
     if not p.is_file():
         if p.is_dir():
@@ -304,11 +405,7 @@ def _run_read(path: str, encoding: str = "", max_bytes: int = 0, **_kw: Any) -> 
     read_size = min(file_size, limit)
     with p.open("rb") as handle:
         raw = handle.read(read_size)
-    snapshot_hash = (
-        hashlib.sha256(raw).hexdigest()
-        if read_size == file_size
-        else ""
-    )
+    snapshot_hash = hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
     content, used_encoding = _read_with_encoding_bytes(
         raw,
         encoding or "utf-8",
@@ -358,16 +455,18 @@ def _run_read_range(
             handle.seek(start_offset)
             raw = handle.read(read_size)
         snapshot_hash = (
-            hashlib.sha256(raw).hexdigest()
-            if read_size == file_size
-            else ""
+            hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
         )
         if start_offset and previous not in (b"\n", b"\r"):
-            newline_positions = [position for marker in (b"\n", b"\r") if (position := raw.find(marker)) >= 0]
-            raw = raw[min(newline_positions) + 1:] if newline_positions else b""
+            newline_positions = [
+                position
+                for marker in (b"\n", b"\r")
+                if (position := raw.find(marker)) >= 0
+            ]
+            raw = raw[min(newline_positions) + 1 :] if newline_positions else b""
         text, used_encoding = _read_with_encoding_bytes(raw, encoding or "utf-8")
         lines = text.splitlines()
-        selected = lines[-min(requested_tail, len(lines)):]
+        selected = lines[-min(requested_tail, len(lines)) :]
         total_lines, estimated = _count_lines_fast(p)
         selected_start = max(0, total_lines - len(selected))
         return _result(
@@ -391,11 +490,7 @@ def _run_read_range(
     read_size = min(file_size, limit)
     with p.open("rb") as handle:
         raw = handle.read(read_size)
-    snapshot_hash = (
-        hashlib.sha256(raw).hexdigest()
-        if read_size == file_size
-        else ""
-    )
+    snapshot_hash = hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
     text, used_encoding = _read_with_encoding_bytes(
         raw,
         encoding or "utf-8",
@@ -406,7 +501,11 @@ def _run_read_range(
     total_lines, estimated = _count_lines_fast(p) if truncated else (len(lines), False)
     maximum_lines = min(max(1, int(max_lines)), 50_000)
     start = max(1, int(start_line or 1)) - 1
-    end = min(len(lines), int(end_line)) if end_line and end_line > 0 else min(len(lines), start + maximum_lines)
+    end = (
+        min(len(lines), int(end_line))
+        if end_line and end_line > 0
+        else min(len(lines), start + maximum_lines)
+    )
     selected = lines[start:end]
     return _result(
         True,
@@ -429,14 +528,39 @@ def _run_read_range(
 
 # ── 写入 ──────────────────────────────────────────────────────────
 
-def _run_write(path: str, content: str = "", encoding: str = "", **_kw: Any) -> dict[str, Any]:
+
+def _run_write(
+    path: str, content: str = "", encoding: str = "", **_kw: Any
+) -> dict[str, Any]:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding=encoding or "utf-8")
-    return _result(True, path=path, size=len(content.encode(encoding or "utf-8")))
+    requested_encoding = encoding or "utf-8"
+    p.write_text(content, encoding=requested_encoding)
+    written = p.read_bytes()
+    snapshot_text, used_encoding = _read_with_encoding_bytes(
+        written, requested_encoding, replace=False
+    )
+    lines, total_lines, snapshot_truncated = _bounded_line_snapshot(
+        _normalize_newlines(snapshot_text)
+    )
+    return _result(
+        True,
+        action="write",
+        path=path,
+        size=len(written),
+        sha256=hashlib.sha256(written).hexdigest(),
+        sha256_complete=True,
+        encoding=used_encoding,
+        total_lines=total_lines,
+        shown=len(lines),
+        lines=lines,
+        snapshot_truncated=snapshot_truncated,
+    )
 
 
-def _run_append(path: str, content: str = "", encoding: str = "", **_kw: Any) -> dict[str, Any]:
+def _run_append(
+    path: str, content: str = "", encoding: str = "", **_kw: Any
+) -> dict[str, Any]:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding=encoding or "utf-8") as handle:
@@ -445,6 +569,7 @@ def _run_append(path: str, content: str = "", encoding: str = "", **_kw: Any) ->
 
 
 # ── 编辑 ──────────────────────────────────────────────────────────
+
 
 def _run_edit(
     path: str,
@@ -473,7 +598,9 @@ def _run_edit(
         raise ValueError(f"{edit_mode} 不接受 new_text/content；删除范围由行号决定")
     if not delete_mode and content is None and new_text is None:
         raise ValueError("edit 需要提供 new_text（旧版调用可继续使用 content）")
-    replacement_text = "" if delete_mode else (new_text if new_text is not None else content)
+    replacement_text = (
+        "" if delete_mode else (new_text if new_text is not None else content)
+    )
     assert replacement_text is not None
     if edit_mode == "replace_range" and replacement_text == "":
         raise ValueError("replace_range 不接受空 new_text；删除整行请使用 delete_range")
@@ -519,8 +646,15 @@ def _run_edit(
     elif edit_mode == "replace_range":
         start_index = line - 1
         end_index = (end_line or line) - 1
-        if start_index < 0 or start_index >= total_lines or end_index < start_index or end_index >= total_lines:
-            raise ValueError(f"替换行范围无效: {line}-{end_line or line} (共 {total_lines} 行)")
+        if (
+            start_index < 0
+            or start_index >= total_lines
+            or end_index < start_index
+            or end_index >= total_lines
+        ):
+            raise ValueError(
+                f"替换行范围无效: {line}-{end_line or line} (共 {total_lines} 行)"
+            )
         first, _ = _line_parts(original_lines[start_index])
         last, last_ending = _line_parts(original_lines[end_index])
         start_column = _column(first, column, label="起始列号")
@@ -541,7 +675,7 @@ def _run_edit(
         body = _strip_trailing_newlines(replacement_text)
         body = _convert_newlines(body, last_ending or dominant_ending)
         replacement = first[:start_column] + body + last[finish_column:] + last_ending
-        original_lines[start_index:end_index + 1] = [replacement]
+        original_lines[start_index : end_index + 1] = [replacement]
         updated = "".join(original_lines)
         changed_lines = end_index - start_index + 1
     elif edit_mode in {"delete_line", "delete_range"}:
@@ -549,9 +683,7 @@ def _run_edit(
         if edit_mode == "delete_line" and end_line not in {0, line}:
             raise ValueError("delete_line 只能删除 line 指定的一行")
         end_index = (
-            start_index
-            if edit_mode == "delete_line"
-            else (end_line or line) - 1
+            start_index if edit_mode == "delete_line" else (end_line or line) - 1
         )
         if (
             start_index < 0
@@ -573,7 +705,7 @@ def _run_edit(
             current,
             label=f"{edit_mode} 第 {line}-{end_line or line} 行",
         )
-        del original_lines[start_index:end_index + 1]
+        del original_lines[start_index : end_index + 1]
         updated = "".join(original_lines)
         changed_lines = end_index - start_index + 1
     elif edit_mode == "replace_text":
@@ -586,7 +718,9 @@ def _run_edit(
             raise ValueError(f"期望匹配 {expected_count} 次，实际匹配 {occurrences} 次")
         matches: list[tuple[int, int]] = []
         cursor = 0
-        while normalized_old and (match := normalized.find(normalized_old, cursor)) >= 0:
+        while (
+            normalized_old and (match := normalized.find(normalized_old, cursor)) >= 0
+        ):
             matches.append((boundaries[match], boundaries[match + len(normalized_old)]))
             cursor = match + len(normalized_old)
         pieces: list[str] = []
@@ -596,7 +730,12 @@ def _run_edit(
             pieces.append(original[cursor:start])
             ending = _newline_near(original, start, end, dominant_ending)
             pieces.append(_convert_newlines(replacement_text, ending))
-            touched_lines.add(original.count("\n", 0, start) + original.count("\r", 0, start) - original.count("\r\n", 0, start) + 1)
+            touched_lines.add(
+                original.count("\n", 0, start)
+                + original.count("\r", 0, start)
+                - original.count("\r\n", 0, start)
+                + 1
+            )
             cursor = end
         pieces.append(original[cursor:])
         updated = "".join(pieces)
@@ -651,60 +790,139 @@ def _run_edit(
 
 # ── 目录与元数据 ──────────────────────────────────────────────────
 
-def _run_list_dir(path: str, **_kw: Any) -> dict[str, Any]:
+
+def _run_list_dir(
+    path: str,
+    offset: int = 0,
+    limit: int = _DEFAULT_DIR_PAGE_SIZE,
+    **_kw: Any,
+) -> dict[str, Any]:
     p = Path(path)
     if not p.is_dir():
         raise NotADirectoryError(f"不是目录: {path}")
-    entries = []
-    for item in sorted(p.iterdir(), key=lambda value: (not value.is_dir(), str(value).casefold())):
-        entries.append({
-            "name": item.name,
-            "type": "dir" if item.is_dir() else "file",
-            "size": item.stat().st_size if item.is_file() else 0,
-        })
-    return _result(True, path=path, entries=entries, count=len(entries))
+    entries: list[dict[str, Any]] = []
+    for item in sorted(
+        p.iterdir(), key=lambda value: (not value.is_dir(), str(value).casefold())
+    ):
+        entries.append(
+            {
+                "name": item.name,
+                "type": "dir" if item.is_dir() else "file",
+                "size": item.stat().st_size if item.is_file() else 0,
+            }
+        )
+    page_offset = max(0, int(offset))
+    page_limit = min(max(1, int(limit or _DEFAULT_DIR_PAGE_SIZE)), _MAX_DIR_PAGE_SIZE)
+    total = len(entries)
+    page = entries[page_offset : page_offset + page_limit]
+    next_offset = page_offset + len(page)
+    has_more = next_offset < total
+    return _result(
+        True,
+        action="list_dir",
+        path=path,
+        total=total,
+        count=total,
+        returned=len(page),
+        offset=page_offset,
+        limit=page_limit,
+        next_offset=next_offset if has_more else None,
+        has_more=has_more,
+        entries=page,
+    )
 
 
 def _run_tree_dir(
     path: str,
     max_depth: int = 2,
     max_entries: int = 200,
+    offset: int = 0,
+    limit: int = 0,
     include_hidden: bool = False,
     **_kw: Any,
 ) -> dict[str, Any]:
     p = Path(path)
     if not p.is_dir():
         raise NotADirectoryError(f"不是目录: {path}")
-    max_entries = min(max(1, max_entries), 1000)
+    page_limit = min(
+        max(1, int(limit or max_entries or _DEFAULT_DIR_PAGE_SIZE)),
+        _MAX_DIR_PAGE_SIZE,
+    )
+    page_offset = max(0, int(offset))
     max_depth = min(max(0, max_depth), 50)
-    lines: list[str] = []
-    count = 0
+    all_items: list[dict[str, Any]] = []
     for root, dirs, files in os.walk(str(p)):
         relative = Path(root).relative_to(p)
         depth = len(relative.parts) if relative != Path(".") else 0
         if depth > max_depth:
             dirs.clear()
             continue
-        dirs[:] = sorted(directory for directory in dirs if include_hidden or not directory.startswith("."))
+        dirs[:] = sorted(
+            directory
+            for directory in dirs
+            if include_hidden or not directory.startswith(".")
+        )
         if not include_hidden:
             dirs[:] = [directory for directory in dirs if directory not in _SKIP_DIRS]
         prefix = "  " * depth + ("└─ " if depth > 0 else "")
-        if relative != Path(".") and count < max_entries:
-            lines.append(f"{prefix}{relative.name}/")
-            count += 1
-        for filename in sorted(filename for filename in files if include_hidden or not filename.startswith(".")):
-            if count >= max_entries:
-                lines.append(f"{'  ' * (depth + 1)}…({count} 项)")
-                return _result(True, path=path, tree="\n".join(lines), entries=count, truncated=True)
-            lines.append(f"{'  ' * (depth + 1)}{filename}")
-            count += 1
-    return _result(True, path=path, tree="\n".join(lines), entries=count, truncated=False)
+        if relative != Path("."):
+            all_items.append(
+                {
+                    "path": relative.as_posix(),
+                    "name": relative.name,
+                    "type": "dir",
+                    "depth": depth,
+                    "display": f"{prefix}{relative.name}/",
+                }
+            )
+        for filename in sorted(
+            filename
+            for filename in files
+            if include_hidden or not filename.startswith(".")
+        ):
+            relative_path = (
+                (relative / filename) if relative != Path(".") else Path(filename)
+            )
+            all_items.append(
+                {
+                    "path": relative_path.as_posix(),
+                    "name": filename,
+                    "type": "file",
+                    "depth": depth + 1,
+                    "display": f"{'  ' * (depth + 1)}{filename}",
+                }
+            )
+    total = len(all_items)
+    items = all_items[page_offset : page_offset + page_limit]
+    next_offset = page_offset + len(items)
+    has_more = next_offset < total
+    lines = [str(item["display"]) for item in items]
+    if has_more:
+        lines.append(f"…(还有 {total - next_offset} 项；下一页 offset={next_offset})")
+    return _result(
+        True,
+        action="tree_dir",
+        path=path,
+        total=total,
+        count=len(items),
+        entries=len(items),
+        returned=len(items),
+        offset=page_offset,
+        limit=page_limit,
+        next_offset=next_offset if has_more else None,
+        has_more=has_more,
+        truncated=has_more,
+        tree="\n".join(lines),
+        items=items,
+    )
 
 
 def _run_exists(path: str, **_kw: Any) -> dict[str, Any]:
     p = Path(path)
     if p.exists():
-        return _result(True, path=path, exists=True, type="dir" if p.is_dir() else "file")
+        return _result(
+            True, path=path, exists=True, type="dir" if p.is_dir() else "file"
+        )
     return _result(True, path=path, exists=False, type=None)
 
 
@@ -722,6 +940,7 @@ def _run_stat(path: str, **_kw: Any) -> dict[str, Any]:
 
 
 # ── 搜索与校验 ────────────────────────────────────────────────────
+
 
 def _search_result(
     path: str,
@@ -772,7 +991,11 @@ def _run_search(
             compiled = re.compile(re.escape(query), re.IGNORECASE)
         for root, dirs, files in os.walk(str(walk_root)):
             if not include_hidden:
-                dirs[:] = [directory for directory in dirs if not directory.startswith(".") and directory not in _SKIP_DIRS]
+                dirs[:] = [
+                    directory
+                    for directory in dirs
+                    if not directory.startswith(".") and directory not in _SKIP_DIRS
+                ]
                 files = [filename for filename in files if not filename.startswith(".")]
             for filename in files + dirs:
                 candidate = Path(root) / filename
@@ -781,7 +1004,12 @@ def _run_search(
                 if file_glob and not fnmatch.fnmatch(filename, file_glob):
                     continue
                 if compiled.search(filename):
-                    results.append({"path": str(candidate.relative_to(base)), "type": "dir" if candidate.is_dir() else "file"})
+                    results.append(
+                        {
+                            "path": str(candidate.relative_to(base)),
+                            "type": "dir" if candidate.is_dir() else "file",
+                        }
+                    )
                     if len(results) >= max_results:
                         return _search_result(path, query, results, skipped_large, True)
         return _search_result(path, query, results, skipped_large, False)
@@ -796,7 +1024,11 @@ def _run_search(
 
     for root, dirs, files in os.walk(str(walk_root)):
         if not include_hidden:
-            dirs[:] = [directory for directory in dirs if not directory.startswith(".") and directory not in _SKIP_DIRS]
+            dirs[:] = [
+                directory
+                for directory in dirs
+                if not directory.startswith(".") and directory not in _SKIP_DIRS
+            ]
             files = [filename for filename in files if not filename.startswith(".")]
         for filename in sorted(files):
             candidate = Path(root) / filename
@@ -812,14 +1044,20 @@ def _run_search(
                     skipped_large.append(relative)
                     continue
                 raw = candidate.read_bytes()
-                text, _ = _read_with_encoding_bytes(raw, encoding or "utf-8", replace=False)
+                text, _ = _read_with_encoding_bytes(
+                    raw, encoding or "utf-8", replace=False
+                )
             except (OSError, ValueError):
                 continue
             lines = text.splitlines()
             for line_number, line_text in enumerate(lines, 1):
                 if not pattern.search(line_text):
                     continue
-                entry: dict[str, Any] = {"path": relative, "line": line_number, "text": line_text.strip()}
+                entry: dict[str, Any] = {
+                    "path": relative,
+                    "line": line_number,
+                    "text": line_text.strip(),
+                }
                 if context_lines:
                     context_start = max(0, line_number - 1 - context_lines)
                     context_end = min(len(lines), line_number + context_lines)
@@ -846,6 +1084,7 @@ def _run_hash(path: str, algorithm: str = "sha256", **_kw: Any) -> dict[str, Any
 
 # ── 复制/移动 ─────────────────────────────────────────────────────
 
+
 def _run_copy(
     path: str,
     dst_path: str = "",
@@ -865,7 +1104,9 @@ def _run_copy(
         raise ValueError("不能将目录复制到自身或自身子目录")
     if source.is_dir():
         if not recursive:
-            raise IsADirectoryError(f"源是目录，如需递归复制请设置 recursive=true: {path}")
+            raise IsADirectoryError(
+                f"源是目录，如需递归复制请设置 recursive=true: {path}"
+            )
         if destination.exists() and not overwrite:
             raise FileExistsError(f"目标已存在: {dst_path}")
         if destination.exists() and not destination.is_dir():
@@ -882,7 +1123,9 @@ def _run_copy(
     return _result(True, path=path, dst_path=dst_path, type="file", recursive=False)
 
 
-def _run_move(path: str, dst_path: str = "", overwrite: bool = False, **_kw: Any) -> dict[str, Any]:
+def _run_move(
+    path: str, dst_path: str = "", overwrite: bool = False, **_kw: Any
+) -> dict[str, Any]:
     if not dst_path:
         raise ValueError("move 需要 dst_path")
     source = Path(path)
@@ -899,8 +1142,14 @@ def _run_move(path: str, dst_path: str = "", overwrite: bool = False, **_kw: Any
     if destination.exists() and destination.is_dir() != source_is_dir:
         source_type = "目录" if source_is_dir else "文件"
         destination_type = "目录" if destination.is_dir() else "文件"
-        raise IsADirectoryError(f"源是{source_type}但目标是{destination_type}: {dst_path}")
-    if source_is_dir and destination.exists() and _is_same_or_child(source, destination):
+        raise IsADirectoryError(
+            f"源是{source_type}但目标是{destination_type}: {dst_path}"
+        )
+    if (
+        source_is_dir
+        and destination.exists()
+        and _is_same_or_child(source, destination)
+    ):
         raise ValueError("不能覆盖源目录的父目录")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -909,10 +1158,13 @@ def _run_move(path: str, dst_path: str = "", overwrite: bool = False, **_kw: Any
         else:
             destination.unlink()
     shutil.move(str(source), str(destination))
-    return _result(True, path=path, dst_path=dst_path, type="dir" if source_is_dir else "file")
+    return _result(
+        True, path=path, dst_path=dst_path, type="dir" if source_is_dir else "file"
+    )
 
 
 # ── 创建/删除 ─────────────────────────────────────────────────────
+
 
 def _run_make_dir(path: str, parents: bool = True, **_kw: Any) -> dict[str, Any]:
     p = Path(path)
@@ -953,7 +1205,9 @@ _ACTIONS = {
 }
 
 
-def run(action: str, path: str, *, context: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+def run(
+    action: str, path: str, *, context: dict[str, Any], **kwargs: Any
+) -> dict[str, Any]:
     handler = _ACTIONS.get(action)
     if handler is None:
         raise ValueError(f"未知 action: {action}，可选: {', '.join(sorted(_ACTIONS))}")
