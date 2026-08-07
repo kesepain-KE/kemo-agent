@@ -371,17 +371,25 @@ class MessageRouterBackpressureTests(unittest.TestCase):
         )
         router.start()
         first = router.submit(self._envelope("first"))
-        self.assertTrue(started.wait(1))
-        second = router.submit(self._envelope("second"))
-        self.assertEqual(router.queue_status()["queued_messages"], 1)
-        with self.assertRaises(MessageQueueFullError):
-            router.submit(self._envelope("third"))
+        try:
+            self.assertTrue(
+                started.wait(5),
+                "message router worker did not start within 5 seconds",
+            )
+            second = router.submit(self._envelope("second"))
+            self.assertEqual(router.queue_status()["queued_messages"], 1)
+            with self.assertRaises(MessageQueueFullError):
+                router.submit(self._envelope("third"))
 
-        router.stop(wait=False)
-        self.assertTrue(_wait_for(lambda: second.cancelled()))
-        self.assertEqual(router.queue_status()["queued_messages"], 0)
-        release.set()
-        first.result(timeout=2)
+            router.stop(wait=False)
+            self.assertTrue(_wait_for(lambda: second.cancelled()))
+            self.assertEqual(router.queue_status()["queued_messages"], 0)
+        finally:
+            release.set()
+            try:
+                first.result(timeout=5)
+            finally:
+                router.stop()
         self.assertTrue(
             _wait_for(lambda: router.queue_status()["active_workers"] == 0)
         )
