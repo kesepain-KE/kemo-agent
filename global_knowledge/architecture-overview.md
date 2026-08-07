@@ -23,7 +23,7 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 | `run/conversation_runtime.py` | 一轮对话的主编排、Provider/工具循环、提交和终态 |
 | `run/request_input.py` | 用户文本、多模态和上传文件输入规范化 |
 | `run/provider_events.py` | Provider 响应事件与终态解释 |
-| `run/prompt.py` | 系统 Prompt 的固定顺序拼装和字符预算 |
+| `run/prompt.py` | 系统 Prompt 的固定顺序拼装、字符预算与拓展/感知动态段刷新 |
 | `run/prompt_sources.py` | 插件、技能、知识索引、拓展和感知来源发现 |
 | `run/history.py` / `run/history_store.py` | archive/runtime 双窗口和历史数据库事务 |
 | `run/memory.py` / `run/memory_store.py` | 记忆生命周期、提取模式和 SQLite 门面 |
@@ -105,6 +105,12 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 知识库只自动注入索引文件，普通正文按需读取。Kemo Graph 是手动调用的侧载文档站，不替换
 本地知识和记忆 Prompt。
+
+PromptBundle 分为两类生命周期：人格、手册、注册信息、知识索引、记忆和任务计划等静态段在
+一轮用户对话开始时构建一次；`[expand_data]` 与 `[perception]` 在每一次逻辑 Provider 请求前
+从当前磁盘重新读取并替换。工具续轮、运行中引导续轮和上下文恢复重试因此都能看到后台采集器
+最近一次已经发布的数据。请求前刷新不运行采集脚本；采集频率和超时仍由 RuntimeHost/Cron
+统一管理。同一网络请求内部的重试或 SSE 续传复用已经生成的请求正文，不中途改变 Prompt。
 
 ### 6. 估算上下文并按需压缩
 
