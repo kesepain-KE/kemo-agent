@@ -48,8 +48,12 @@ _SESSION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 _WINDOWS_HEAD_PIPE_RE = re.compile(r"\|\s*head(?:\.exe)?(?:\s|$)", re.IGNORECASE)
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def _failure_hint(command: str, shell_type: str, result: dict[str, Any]) -> str:
-    if os.name != "nt" or result.get("ok"):
+    if not _is_windows() or result.get("ok"):
         return ""
     output = str(result.get("output") or "")
     lowered = output.casefold()

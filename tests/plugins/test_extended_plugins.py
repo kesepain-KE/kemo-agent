@@ -998,7 +998,7 @@ class ShellPluginTests(unittest.TestCase):
             "cwd": str(PROJECT_ROOT),
         }
         with (
-            patch("plugins.shell.tool.os.name", "nt"),
+            patch("plugins.shell.tool._is_windows", return_value=True),
             patch("plugins.shell.tool._execute", return_value=failure),
         ):
             head = run_shell(
@@ -1012,7 +1012,7 @@ class ShellPluginTests(unittest.TestCase):
 
         missing_hash = {**failure, "output": "无法将 Get-FileHash 识别为 cmdlet"}
         with (
-            patch("plugins.shell.tool.os.name", "nt"),
+            patch("plugins.shell.tool._is_windows", return_value=True),
             patch("plugins.shell.tool._execute", return_value=missing_hash),
         ):
             hashed = run_shell(
