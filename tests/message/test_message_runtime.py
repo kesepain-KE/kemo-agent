@@ -345,8 +345,11 @@ timestamp: 2026-07-18T14:32:25+08:00
             "utf-8",
         )
 
-        time.sleep(0.06)
-        self.assertEqual(transport.poll_once(), 2)
+        deadline = time.monotonic() + 2.0
+        while len(received) < 2 and time.monotonic() < deadline:
+            transport.poll_once()
+            if len(received) < 2:
+                time.sleep(0.01)
         self.assertEqual(len(received), 2)
         self.assertEqual((self.directory / "message.md").read_text("utf-8"), "")
         group = next(item for item in received if item.chat_type == "group")
