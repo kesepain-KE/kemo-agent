@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,6 +39,7 @@ PROMPT_SECTION_ORDER = (
     "expand_data",
     "perception",
 )
+DYNAMIC_PROMPT_SECTION_NAMES = ("expand_data", "perception")
 
 DEFAULT_TEMPORARY_MEMORY_LIMITS = {
     "half_year": 300,
@@ -339,6 +341,74 @@ def _section_diagnostic(section: PromptSection) -> dict[str, Any]:
     }
 
 
+def _dynamic_prompt_sections(
+    registered_sources: Any,
+    settings: PromptSettings,
+    source_policy: MainAgentSourcePolicy,
+) -> dict[str, PromptSection]:
+    sections: dict[str, PromptSection] = {}
+    expand = registered_sources.select_expand(
+        max_chars=settings.char_limits["expand_data"],
+        mode=INJECTION_MODE,
+        allow={
+            "global": source_policy.global_expand.selector(),
+            "shared": source_policy.shared_expand.selector(),
+            "user": None,
+        },
+    )
+    if expand.text:
+        sections["expand_data"] = PromptSection(
+            "expand_data",
+            expand.text,
+            expand.source_files,
+            original_chars=expand.original_chars,
+            injected_chars=expand.injected_chars,
+            original_items=expand.original_items,
+            injected_items=expand.injected_items,
+            truncated=expand.truncated,
+            mode=INJECTION_MODE,
+        )
+    perception = registered_sources.select_perception(
+        max_chars=settings.char_limits["perception"],
+        mode=INJECTION_MODE,
+        allow_modules=source_policy.global_perception.selector(),
+    )
+    if perception.text:
+        sections["perception"] = PromptSection(
+            "perception",
+            perception.text,
+            perception.source_files,
+            original_chars=perception.original_chars,
+            injected_chars=perception.injected_chars,
+            original_items=perception.original_items,
+            injected_items=perception.injected_items,
+            truncated=perception.truncated,
+            mode=INJECTION_MODE,
+        )
+    return sections
+
+
+def _ordered_prompt_sections(
+    sections: Iterable[PromptSection],
+) -> tuple[PromptSection, ...]:
+    section_map = {section.name: section for section in sections}
+    padded = tuple(
+        section_map.get(name, PromptSection(name=name, content="（无）"))
+        for name in PROMPT_SECTION_ORDER
+    )
+    order = [section.name for section in padded]
+    expected = list(PROMPT_SECTION_ORDER)
+    if order != expected:
+        raise AssertionError(f"提示词段顺序偏离固定契约：{order}")
+    return padded
+
+
+def _render_prompt_sections(sections: Iterable[PromptSection]) -> str:
+    return "\n\n".join(
+        f"[{section.name}]\n{section.content}" for section in sections
+    )
+
+
 def build_prompt_bundle(
     root: Path,
     user: str,
@@ -347,7 +417,7 @@ def build_prompt_bundle(
     plugin_manifests: tuple[PluginManifest, ...] | None = None,
     memory_store: MemoryStore | None = None,
 ) -> PromptBundle:
-    """Build one immutable prompt snapshot for a complete provider/tool loop."""
+    """Build the initial prompt snapshot for one user-visible conversation run."""
 
     root = root.resolve()
     settings = parse_prompt_settings(config)
@@ -524,61 +594,17 @@ def build_prompt_bundle(
                 mode=INJECTION_MODE,
             )
         )
-    expand = registered_sources.select_expand(
-        max_chars=settings.char_limits["expand_data"],
-        mode=INJECTION_MODE,
-        allow={
-            "global": source_policy.global_expand.selector(),
-            "shared": source_policy.shared_expand.selector(),
-            "user": None,
-        },
+    sections.extend(
+        _dynamic_prompt_sections(
+            registered_sources,
+            settings,
+            source_policy,
+        ).values()
     )
-    if expand.text:
-        sections.append(
-            PromptSection(
-                "expand_data",
-                expand.text,
-                expand.source_files,
-                original_chars=expand.original_chars,
-                injected_chars=expand.injected_chars,
-                original_items=expand.original_items,
-                injected_items=expand.injected_items,
-                truncated=expand.truncated,
-                mode=INJECTION_MODE,
-            )
-        )
-    perception = registered_sources.select_perception(
-        max_chars=settings.char_limits["perception"],
-        mode=INJECTION_MODE,
-        allow_modules=source_policy.global_perception.selector(),
-    )
-    if perception.text:
-        sections.append(
-            PromptSection(
-                "perception",
-                perception.text,
-                perception.source_files,
-                original_chars=perception.original_chars,
-                injected_chars=perception.injected_chars,
-                original_items=perception.original_items,
-                injected_items=perception.injected_items,
-                truncated=perception.truncated,
-                mode=INJECTION_MODE,
-            )
-        )
 
-    section_map = {section.name: section for section in sections}
-    padded: list[PromptSection] = []
-    for name in PROMPT_SECTION_ORDER:
-        if name in section_map:
-            padded.append(section_map[name])
-        else:
-            padded.append(PromptSection(name=name, content="（无）"))
+    padded = _ordered_prompt_sections(sections)
     order = [section.name for section in padded]
-    expected = list(PROMPT_SECTION_ORDER)
-    if order != expected:
-        raise AssertionError(f"提示词段顺序偏离固定契约：{order}")
-    text = "\n\n".join(f"[{section.name}]\n{section.content}" for section in padded)
+    text = _render_prompt_sections(padded)
     diagnostics = {
         "total_chars": len(text),
         "section_order": order,
@@ -593,10 +619,63 @@ def build_prompt_bundle(
     }
     return PromptBundle(
         text=text,
-        sections=tuple(padded),
+        sections=padded,
         memory_ids=tuple(memory_ids),
         diagnostics=diagnostics,
         memory_files=tuple(memory_files),
+    )
+
+
+def refresh_dynamic_prompt_bundle(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+    bundle: PromptBundle,
+) -> PromptBundle:
+    """Reload the latest collected Expand and perception files without collecting."""
+
+    root = root.resolve()
+    settings = parse_prompt_settings(config)
+    source_policy = MainAgentSourcePolicy.from_config(config)
+    registered_sources = load_prompt_source_registry(root, user)
+    dynamic_sections = _dynamic_prompt_sections(
+        registered_sources,
+        settings,
+        source_policy,
+    )
+    refreshed_sections = tuple(
+        (
+            dynamic_sections.get(
+                section.name,
+                PromptSection(name=section.name, content="（无）"),
+            )
+            if section.name in DYNAMIC_PROMPT_SECTION_NAMES
+            else section
+        )
+        for section in bundle.sections
+    )
+    refreshed_sections = _ordered_prompt_sections(refreshed_sections)
+    text = _render_prompt_sections(refreshed_sections)
+    diagnostics = copy.deepcopy(bundle.diagnostics)
+    diagnostics["total_chars"] = len(text)
+    diagnostics["sections"] = {
+        section.name: _section_diagnostic(section)
+        for section in refreshed_sections
+    }
+    source_selection = diagnostics.setdefault("source_selection", {})
+    latest_selection = registered_sources.selection_diagnostics()
+    for name in ("expand", "perception"):
+        if name in latest_selection:
+            source_selection[name] = latest_selection[name]
+        else:
+            source_selection.pop(name, None)
+    diagnostics["dynamic_sections_refreshed"] = True
+    return PromptBundle(
+        text=text,
+        sections=refreshed_sections,
+        memory_ids=bundle.memory_ids,
+        diagnostics=diagnostics,
+        memory_files=bundle.memory_files,
     )
 
 

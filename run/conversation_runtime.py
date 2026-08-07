@@ -76,7 +76,11 @@ from run.memory_analysis import (
 )
 from run.model_capabilities import resolve_reasoning_selection
 from run.multimodal import main_model_supports_input, select_vision_route
-from run.prompt import PromptBundle, build_prompt_bundle
+from run.prompt import (
+    PromptBundle,
+    build_prompt_bundle,
+    refresh_dynamic_prompt_bundle,
+)
 from run.provider_events import (
     is_context_length_exceeded as _is_context_length_exceeded,
     provider_events as _provider_events,
@@ -404,6 +408,20 @@ def _memory_injected_chars(bundle: PromptBundle) -> int:
         if section.name in {"permanent_memory", "important_memory"}
         or section.name.startswith("temporary_memory:")
     )
+
+
+def _replace_primary_system_message(
+    messages: list[dict[str, Any]],
+    system_message: dict[str, Any] | None,
+) -> None:
+    if messages and messages[0].get("role") == "system":
+        if system_message is None:
+            messages.pop(0)
+        else:
+            messages[0] = system_message
+        return
+    if system_message is not None:
+        messages.insert(0, system_message)
 
 
 def _committed_failure_event(
@@ -1077,10 +1095,31 @@ def _iter_request_events_impl(
                 pending_guidance_ack.extend(prepared.inputs)
                 return prepared.messages
 
+            def refresh_dynamic_system_message() -> None:
+                nonlocal prompt_bundle, system_message
+                prompt_bundle = refresh_dynamic_prompt_bundle(
+                    base,
+                    user,
+                    config,
+                    prompt_bundle,
+                )
+                system_message = (
+                    {"role": "system", "content": prompt_bundle.text}
+                    if prompt_bundle.text
+                    else None
+                )
+                _replace_primary_system_message(messages, system_message)
+                terminal_committer.context = replace(
+                    terminal_committer.context,
+                    system_message=system_message,
+                    prompt_bundle=prompt_bundle,
+                )
+
             for iteration in range(1, max_provider_iterations + 1):
                 if cancel_event is not None and cancel_event.is_set():
                     yield commit_cancelled_round()
                     return
+                refresh_dynamic_system_message()
                 if iteration > 1:
                     active_tool_schemas = (
                         registry.schemas(exclude=failures.unavailable) or None
@@ -1146,7 +1185,11 @@ def _iter_request_events_impl(
                     if configured_max_tokens is not None
                     else None
                 )
+                provider_attempt = 0
                 while True:
+                    if provider_attempt > 0:
+                        refresh_dynamic_system_message()
+                    provider_attempt += 1
                     request_local_tokens = estimate_messages_tokens(
                         messages
                     ) + estimate_tools_tokens(active_tool_schemas)
