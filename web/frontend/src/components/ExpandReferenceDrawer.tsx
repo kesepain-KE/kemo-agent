@@ -60,10 +60,8 @@ export function ExpandReferenceDrawer({
     }
   }, [open])
 
-  if (!open) return null
-
   return createPortal(<>
-    <aside className={`drawer ${styles.drawer} show`} role="dialog" aria-modal="true" aria-label="拓展引用">
+    <aside className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="拓展引用" aria-hidden={!open}>
       <div className="drawer-head">
         <div className={styles.headerLead}>
           <span className={styles.headerIcon}><Boxes size={18} /></span>
@@ -122,6 +120,6 @@ export function ExpandReferenceDrawer({
         </div>
       </div>
     </aside>
-    <button type="button" className="drawer-backdrop" aria-label="关闭拓展引用" onClick={onClose} />
+    {open && <button type="button" className="drawer-backdrop" aria-label="关闭拓展引用" onClick={onClose} />}
   </>, document.body)
 }

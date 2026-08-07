@@ -10,6 +10,22 @@ const modules = [
 ] as ExpandModuleSummary[]
 
 describe('ExpandReferenceDrawer', () => {
+  it('关闭时保留抽屉节点并通过 show 类驱动过渡', () => {
+    const props = { modules, onClose: vi.fn(), onReference: vi.fn() }
+    const { rerender } = render(<ExpandReferenceDrawer open={false} {...props} />)
+    const drawer = screen.getByRole('dialog', { hidden: true })
+    expect(drawer).toHaveAttribute('aria-label', '拓展引用')
+
+    expect(drawer).not.toHaveClass('show')
+    expect(drawer).toHaveAttribute('aria-hidden', 'true')
+    expect(drawer).toHaveAttribute('inert')
+
+    rerender(<ExpandReferenceDrawer open {...props} />)
+    expect(screen.getByRole('dialog', { name: '拓展引用' })).toHaveClass('show')
+    expect(drawer).toHaveAttribute('aria-hidden', 'false')
+    expect(drawer).not.toHaveAttribute('inert')
+  })
+
   it('按层级和搜索词过滤拓展卡片并触发引用', () => {
     const onReference = vi.fn()
     render(<ExpandReferenceDrawer open modules={modules} onClose={() => undefined} onReference={onReference} />)
