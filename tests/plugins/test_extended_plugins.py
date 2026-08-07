@@ -61,8 +61,12 @@ class PluginManifestTests(unittest.TestCase):
             ],
         )
         for manifest in manifests:
-            self.assertEqual(manifest.descriptor.title, manifest.descriptor.path.parent.name)
-            self.assertEqual(manifest.tool["name"], manifest.descriptor.path.parent.name)
+            self.assertEqual(
+                manifest.descriptor.title, manifest.descriptor.path.parent.name
+            )
+            self.assertEqual(
+                manifest.tool["name"], manifest.descriptor.path.parent.name
+            )
 
         registry = discover_tools(PROJECT_ROOT, "alice")
         self.assertEqual(len(registry.tools), 17)
@@ -91,13 +95,17 @@ class PluginManifestTests(unittest.TestCase):
         shell_schema = registry.get("shell").input_schema
         validate_arguments(shell_schema, {"command": "pwd"})
         with self.assertRaises(Exception):
-            validate_arguments(shell_schema, {"action": "run_command", "command": "pwd"})
+            validate_arguments(
+                shell_schema, {"action": "run_command", "command": "pwd"}
+            )
         network_schema = registry.get("network").input_schema
         self.assertEqual(
             set(network_schema["properties"]["action"]["enum"]),
             {"get", "post", "put", "delete", "patch", "read"},
         )
-        self.assertEqual(network_schema["properties"]["max_bytes"]["maximum"], 10_000_000)
+        self.assertEqual(
+            network_schema["properties"]["max_bytes"]["maximum"], 10_000_000
+        )
         file_schema = registry.get("file").input_schema
         self.assertEqual(
             set(file_schema["properties"]["edit_mode"]["enum"]),
@@ -123,7 +131,9 @@ class PluginManifestTests(unittest.TestCase):
                 '{"name":"duplicate","description":"x","input_schema":{"type":"object"},'
                 '"version":"1","enabled":true,"entrypoint":"tool.py:run"}\n```'
             )
-            (plugin / "SKILL.md").write_text(f"# duplicate\ndescription\n\n{block}\n\n{block}\n", "utf-8")
+            (plugin / "SKILL.md").write_text(
+                f"# duplicate\ndescription\n\n{block}\n\n{block}\n", "utf-8"
+            )
             with self.assertRaisesRegex(PluginManifestError, "只能声明一个"):
                 discover_plugin_manifests(root)
 
@@ -146,23 +156,146 @@ class PluginManifestTests(unittest.TestCase):
 
 
 class FilePluginTests(unittest.TestCase):
+    def test_write_returns_safe_snapshot_for_immediate_range_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            written = run_file(
+                "write",
+                "created.txt",
+                content="alpha\nbeta\n",
+                context=context,
+            )
+            target = root / "created.txt"
+            self.assertEqual(
+                written["sha256"], hashlib.sha256(target.read_bytes()).hexdigest()
+            )
+            self.assertTrue(written["sha256_complete"])
+            self.assertEqual(
+                written["lines"],
+                [{"line": 1, "text": "alpha"}, {"line": 2, "text": "beta"}],
+            )
+            self.assertFalse(written["snapshot_truncated"])
+
+            edited = run_file(
+                "edit",
+                target.name,
+                edit_mode="replace_range",
+                line=1,
+                end_line=2,
+                expected_old_text="\n".join(item["text"] for item in written["lines"]),
+                expected_hash=written["sha256"],
+                new_text="gamma\ndelta",
+                create_backup=False,
+                context=context,
+            )
+            self.assertTrue(edited["changed"])
+            self.assertEqual(target.read_text("utf-8"), "gamma\ndelta\n")
+
+            with self.assertRaisesRegex(ValueError, "write 返回的 lines/sha256"):
+                run_file(
+                    "edit",
+                    target.name,
+                    edit_mode="replace_line",
+                    line=1,
+                    expected_old_text="wrong",
+                    new_text="value",
+                    context=context,
+                )
+
+    def test_directory_actions_are_pageable_and_report_complete_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": str(root)}
+            target = root / "docs"
+            target.mkdir()
+            (target / "folder").mkdir()
+            for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+                (target / name).write_text(name, "utf-8")
+
+            first = run_file("list_dir", "docs", offset=0, limit=2, context=context)
+            self.assertEqual(first["action"], "list_dir")
+            self.assertEqual(first["total"], 5)
+            self.assertEqual(first["count"], 5)
+            self.assertEqual(first["returned"], 2)
+            self.assertTrue(first["has_more"])
+            self.assertEqual(first["next_offset"], 2)
+            second = run_file(
+                "list_dir",
+                "docs",
+                offset=first["next_offset"],
+                limit=10,
+                context=context,
+            )
+            self.assertEqual(second["returned"], 3)
+            self.assertFalse(second["has_more"])
+            self.assertIsNone(second["next_offset"])
+
+            tree_first = run_file(
+                "tree_dir", "docs", max_depth=2, limit=2, context=context
+            )
+            self.assertEqual(tree_first["action"], "tree_dir")
+            self.assertEqual(tree_first["total"], 5)
+            self.assertEqual(tree_first["returned"], 2)
+            self.assertEqual(len(tree_first["items"]), 2)
+            self.assertTrue(tree_first["has_more"])
+            self.assertIn("下一页 offset=2", tree_first["tree"])
+            tree_second = run_file(
+                "tree_dir",
+                "docs",
+                max_depth=2,
+                offset=tree_first["next_offset"],
+                limit=10,
+                context=context,
+            )
+            self.assertEqual(tree_second["returned"], 3)
+            self.assertFalse(tree_second["truncated"])
+
     def test_all_fifteen_actions_and_context_relative_paths(self) -> None:
         self.assertEqual(
             set(FILE_ACTIONS),
-            {"exists", "read", "read_range", "write", "append", "edit", "list_dir", "tree_dir", "stat", "search", "hash", "copy", "move", "make_dir", "delete"},
+            {
+                "exists",
+                "read",
+                "read_range",
+                "write",
+                "append",
+                "edit",
+                "list_dir",
+                "tree_dir",
+                "stat",
+                "search",
+                "hash",
+                "copy",
+                "move",
+                "make_dir",
+                "delete",
+            },
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = {"root": str(root), "user": "alice"}
-            self.assertFalse(run_file("exists", "docs/a.txt", context=context)["exists"])
+            self.assertFalse(
+                run_file("exists", "docs/a.txt", context=context)["exists"]
+            )
             self.assertTrue(run_file("make_dir", "docs", context=context)["ok"])
-            self.assertTrue(run_file("write", "docs/a.txt", content="alpha\n", context=context)["ok"])
-            self.assertTrue(run_file("append", "docs/a.txt", content="beta\n", context=context)["ok"])
+            self.assertTrue(
+                run_file("write", "docs/a.txt", content="alpha\n", context=context)[
+                    "ok"
+                ]
+            )
+            self.assertTrue(
+                run_file("append", "docs/a.txt", content="beta\n", context=context)[
+                    "ok"
+                ]
+            )
             read = run_file("read", "docs/a.txt", context=context)
             self.assertEqual(read["content"], "alpha\nbeta\n")
             self.assertFalse(read["truncated"])
             self.assertNotIn("requested_path", read)
-            self.assertEqual(run_file("exists", "docs/a.txt", context=context)["type"], "file")
+            self.assertEqual(
+                run_file("exists", "docs/a.txt", context=context)["type"], "file"
+            )
             self.assertEqual(run_file("exists", "docs", context=context)["type"], "dir")
             ranged = run_file("read_range", "docs/a.txt", start_line=2, context=context)
             self.assertEqual(ranged["content"], ["beta"])
@@ -182,13 +315,25 @@ class FilePluginTests(unittest.TestCase):
                 context=context,
             )
             self.assertTrue(edited["ok"])
-            self.assertEqual(run_file("stat", "docs/a.txt", context=context)["type"], "file")
+            self.assertEqual(
+                run_file("stat", "docs/a.txt", context=context)["type"], "file"
+            )
             self.assertEqual(run_file("list_dir", "docs", context=context)["count"], 1)
-            self.assertIn("a.txt", run_file("tree_dir", "docs", context=context)["tree"])
+            self.assertIn(
+                "a.txt", run_file("tree_dir", "docs", context=context)["tree"]
+            )
             matches = run_file("search", "docs", query="gamma", context=context)
             self.assertEqual(matches["results"][0]["path"], "a.txt")
-            self.assertTrue(run_file("copy", "docs/a.txt", dst_path="docs/b.txt", context=context)["ok"])
-            self.assertTrue(run_file("move", "docs/b.txt", dst_path="docs/c.txt", context=context)["ok"])
+            self.assertTrue(
+                run_file("copy", "docs/a.txt", dst_path="docs/b.txt", context=context)[
+                    "ok"
+                ]
+            )
+            self.assertTrue(
+                run_file("move", "docs/b.txt", dst_path="docs/c.txt", context=context)[
+                    "ok"
+                ]
+            )
             self.assertTrue(run_file("delete", "docs/c.txt", context=context)["ok"])
             self.assertFalse((root / "docs" / "c.txt").exists())
 
@@ -206,11 +351,15 @@ class FilePluginTests(unittest.TestCase):
             self.assertFalse(limited["sha256_complete"])
 
             (root / "unicode.txt").write_text("你你", "utf-8")
-            unicode_limited = run_file("read", "unicode.txt", max_bytes=4, context=context)
+            unicode_limited = run_file(
+                "read", "unicode.txt", max_bytes=4, context=context
+            )
             self.assertEqual(unicode_limited["content"], "你")
             self.assertEqual(unicode_limited["encoding"], "utf-8")
 
-            tail = run_file("read_range", "large.log", tail=3, max_bytes=40, context=context)
+            tail = run_file(
+                "read_range", "large.log", tail=3, max_bytes=40, context=context
+            )
             self.assertEqual(tail["content"], ["line-097", "line-098", "line-099"])
             self.assertTrue(tail["tail_mode"])
             self.assertTrue(tail["total_lines_estimated"] is False)
@@ -219,7 +368,9 @@ class FilePluginTests(unittest.TestCase):
 
             japanese = "日本語のテキスト"
             (root / "locale.txt").write_bytes(japanese.encode("cp932"))
-            with patch("plugins.file.tool.locale.getpreferredencoding", return_value="cp932"):
+            with patch(
+                "plugins.file.tool.locale.getpreferredencoding", return_value="cp932"
+            ):
                 decoded = run_file("read", "locale.txt", context=context)
             self.assertEqual(decoded["content"], japanese)
             self.assertEqual(decoded["encoding"], "cp932")
@@ -457,8 +608,13 @@ class FilePluginTests(unittest.TestCase):
             )
             self.assertEqual(target.read_bytes(), b"A\r\n")
             self.assertTrue(Path(second["backup_path"]).name.endswith(".bak.1"))
-            self.assertEqual((root / "guarded.txt.bak").read_bytes(), before.replace(b"D", b"external"))
-            self.assertEqual((root / "guarded.txt.bak.1").read_bytes(), b"A\r\nC\r\nexternal\r\n")
+            self.assertEqual(
+                (root / "guarded.txt.bak").read_bytes(),
+                before.replace(b"D", b"external"),
+            )
+            self.assertEqual(
+                (root / "guarded.txt.bak.1").read_bytes(), b"A\r\nC\r\nexternal\r\n"
+            )
 
             with self.assertRaisesRegex(ValueError, "delete_range"):
                 run_file(
@@ -477,7 +633,9 @@ class FilePluginTests(unittest.TestCase):
             context = {"root": str(root)}
             target = root / "atomic.txt"
             target.write_bytes(b"before\r\n")
-            with patch("plugins.file.tool.os.replace", side_effect=OSError("replace failed")):
+            with patch(
+                "plugins.file.tool.os.replace", side_effect=OSError("replace failed")
+            ):
                 result = run_file(
                     "edit",
                     target.name,
@@ -495,13 +653,25 @@ class FilePluginTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = {"root": str(root)}
-            for filename in ("main.c", "lib.rs", "server.go", "build.sh", "Makefile", "icon.svg"):
+            for filename in (
+                "main.c",
+                "lib.rs",
+                "server.go",
+                "build.sh",
+                "Makefile",
+                "icon.svg",
+            ):
                 (root / filename).write_text("needle\n", "utf-8")
             (root / "image.png").write_bytes(b"needle")
             (root / "large.txt").write_text("needle-too-large", "utf-8")
-            result = run_file("search", ".", query="needle", max_file_bytes=10, context=context)
+            result = run_file(
+                "search", ".", query="needle", max_file_bytes=10, context=context
+            )
             paths = {entry["path"] for entry in result["results"]}
-            self.assertEqual(paths, {"main.c", "lib.rs", "server.go", "build.sh", "Makefile", "icon.svg"})
+            self.assertEqual(
+                paths,
+                {"main.c", "lib.rs", "server.go", "build.sh", "Makefile", "icon.svg"},
+            )
             self.assertEqual(result["skipped_large"], ["large.txt"])
             self.assertFalse(result["truncated"])
 
@@ -514,18 +684,32 @@ class FilePluginTests(unittest.TestCase):
             (source / "data.txt").write_bytes(b"abc")
 
             self.assertEqual(
-                run_file("hash", "source/data.txt", algorithm="sha-256", context=context)["hash"],
+                run_file(
+                    "hash", "source/data.txt", algorithm="sha-256", context=context
+                )["hash"],
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             )
-            self.assertEqual(run_file("hash", "source/data.txt", algorithm="sha-1", context=context)["algorithm"], "sha1")
-            self.assertEqual(run_file("hash", "source/data.txt", algorithm="md5", context=context)["algorithm"], "md5")
+            self.assertEqual(
+                run_file("hash", "source/data.txt", algorithm="sha-1", context=context)[
+                    "algorithm"
+                ],
+                "sha1",
+            )
+            self.assertEqual(
+                run_file("hash", "source/data.txt", algorithm="md5", context=context)[
+                    "algorithm"
+                ],
+                "md5",
+            )
             with self.assertRaisesRegex(ValueError, "不支持的哈希算法"):
                 run_file("hash", "source/data.txt", algorithm="crc32", context=context)
 
             refused = run_file("copy", "source", dst_path="copy", context=context)
             self.assertFalse(refused["ok"])
             self.assertIn("recursive=true", refused["error"])
-            copied = run_file("copy", "source", dst_path="copy", recursive=True, context=context)
+            copied = run_file(
+                "copy", "source", dst_path="copy", recursive=True, context=context
+            )
             self.assertEqual(copied["type"], "dir")
             self.assertEqual(copied["path"], str(source.resolve()))
             self.assertEqual(copied["dst_path"], str((root / "copy").resolve()))
@@ -536,13 +720,25 @@ class FilePluginTests(unittest.TestCase):
             self.assertTrue((root / "moved" / "data.txt").is_file())
             self.assertFalse((root / "copy").exists())
             with self.assertRaisesRegex(ValueError, "自身子目录"):
-                run_file("copy", "source", dst_path="source/child", recursive=True, context=context)
+                run_file(
+                    "copy",
+                    "source",
+                    dst_path="source/child",
+                    recursive=True,
+                    context=context,
+                )
             with self.assertRaisesRegex(ValueError, "自身子目录"):
                 run_file("move", "source", dst_path="source/child", context=context)
 
             (root / "same.txt").write_text("keep", "utf-8")
             with self.assertRaisesRegex(ValueError, "不能相同"):
-                run_file("move", "same.txt", dst_path="same.txt", overwrite=True, context=context)
+                run_file(
+                    "move",
+                    "same.txt",
+                    dst_path="same.txt",
+                    overwrite=True,
+                    context=context,
+                )
             self.assertEqual((root / "same.txt").read_text("utf-8"), "keep")
 
             delete_directory = run_file("delete", "moved", context=context)
@@ -553,7 +749,13 @@ class FilePluginTests(unittest.TestCase):
         registry = discover_tools(PROJECT_ROOT, "alice")
         schema = registry.get("file").input_schema
         self.assertEqual(set(schema["properties"]["action"]["enum"]), set(FILE_ACTIONS))
-        for name in ("recursive", "max_bytes", "max_file_bytes", "algorithm", "new_text"):
+        for name in (
+            "recursive",
+            "max_bytes",
+            "max_file_bytes",
+            "algorithm",
+            "new_text",
+        ):
             self.assertIn(name, schema["properties"])
         self.assertEqual(schema["properties"]["max_bytes"]["maximum"], 536_870_912)
 
@@ -571,7 +773,10 @@ class CurrentTimePluginTests(unittest.TestCase):
         self.assertNotIn("target", result)
 
         tokyo = run_get_current_time(target_timezone=" Asia/Tokyo ")
-        self.assertEqual(datetime.fromisoformat(tokyo["utc"]), datetime.fromisoformat(tokyo["target"]))
+        self.assertEqual(
+            datetime.fromisoformat(tokyo["utc"]),
+            datetime.fromisoformat(tokyo["target"]),
+        )
         self.assertEqual(tokyo["target_timezone"], "Asia/Tokyo")
         self.assertEqual(tokyo["target_offset"], "+0900")
 
@@ -600,9 +805,13 @@ class CurrentTimePluginTests(unittest.TestCase):
         self.assertEqual(definition.version, "1.1.0")
         schema = definition.input_schema
         self.assertEqual(set(schema["properties"]), {"target_timezone", "format"})
-        self.assertEqual(schema["properties"]["format"]["enum"], ["iso", "unix", "date", "time"])
+        self.assertEqual(
+            schema["properties"]["format"]["enum"], ["iso", "unix", "date", "time"]
+        )
         validate_arguments(schema, {})
-        validate_arguments(schema, {"target_timezone": "Europe/London", "format": "time"})
+        validate_arguments(
+            schema, {"target_timezone": "Europe/London", "format": "time"}
+        )
         with self.assertRaises(Exception):
             validate_arguments(schema, {"unknown": True})
 
@@ -610,7 +819,13 @@ class CurrentTimePluginTests(unittest.TestCase):
 class ShellPluginTests(unittest.TestCase):
     @staticmethod
     def _context(root: Path = PROJECT_ROOT, **values) -> dict:
-        return {"root": str(root), "user": "alice", "source": "cli", "tool_timeout": 30, **values}
+        return {
+            "root": str(root),
+            "user": "alice",
+            "source": "cli",
+            "tool_timeout": 30,
+            **values,
+        }
 
     def test_stdin_is_forwarded_to_subprocess(self) -> None:
         command = f'"{sys.executable}" -c "import sys;print(sys.stdin.read())"'
@@ -649,13 +864,19 @@ class ShellPluginTests(unittest.TestCase):
             changed = run_shell(f'cd "{alice_dir}"', session_id="same", context=alice)
             self.assertTrue(changed["ok"])
             self.assertTrue(
-                Path(run_shell("pwd", session_id="same", context=alice)["output"]).samefile(alice_dir)
+                Path(
+                    run_shell("pwd", session_id="same", context=alice)["output"]
+                ).samefile(alice_dir)
             )
             self.assertTrue(
-                Path(run_shell("pwd", session_id="same", context=alice_web)["output"]).samefile(root)
+                Path(
+                    run_shell("pwd", session_id="same", context=alice_web)["output"]
+                ).samefile(root)
             )
             self.assertTrue(
-                Path(run_shell("pwd", session_id="same", context=bob)["output"]).samefile(root)
+                Path(
+                    run_shell("pwd", session_id="same", context=bob)["output"]
+                ).samefile(root)
             )
 
     def test_file_builtins_work_without_session_or_subprocess(self) -> None:
@@ -664,12 +885,22 @@ class ShellPluginTests(unittest.TestCase):
             (root / "hello.txt").write_text("你好", "utf-8")
             (root / "folder").mkdir()
             with patch("plugins.shell.tool.subprocess.run") as spawned:
-                self.assertTrue(run_shell('mkdir "nested dir"', context=self._context(root))["ok"])
-                self.assertEqual(run_shell("cat hello.txt", context=self._context(root))["output"], "你好")
+                self.assertTrue(
+                    run_shell('mkdir "nested dir"', context=self._context(root))["ok"]
+                )
+                self.assertEqual(
+                    run_shell("cat hello.txt", context=self._context(root))["output"],
+                    "你好",
+                )
                 listing = run_shell("dir", context=self._context(root))["output"]
                 self.assertIn("folder/", listing)
                 self.assertIn("hello.txt", listing)
-                self.assertEqual(run_shell("echo hello world", context=self._context(root))["output"], "hello world")
+                self.assertEqual(
+                    run_shell("echo hello world", context=self._context(root))[
+                        "output"
+                    ],
+                    "hello world",
+                )
                 refused = run_shell("rm folder", context=self._context(root))
                 self.assertFalse(refused["ok"])
                 self.assertIn("目标是目录", refused["output"])
@@ -680,9 +911,13 @@ class ShellPluginTests(unittest.TestCase):
 
     def test_decode_output_uses_system_locale_then_replacement(self) -> None:
         encoded = "日本語".encode("cp932")
-        with patch("plugins.shell.tool.locale.getpreferredencoding", return_value="cp932"):
+        with patch(
+            "plugins.shell.tool.locale.getpreferredencoding", return_value="cp932"
+        ):
             self.assertEqual(_decode_output(encoded), "日本語")
-        with patch("plugins.shell.tool.locale.getpreferredencoding", side_effect=RuntimeError):
+        with patch(
+            "plugins.shell.tool.locale.getpreferredencoding", side_effect=RuntimeError
+        ):
             self.assertIn("�", _decode_output(b"\xff"))
 
     def test_shell_type_selects_explicit_interpreter(self) -> None:
@@ -702,10 +937,15 @@ class ShellPluginTests(unittest.TestCase):
             "bash_login": (["bash", "-l", "-c", "external-command"], False),
         }
         for shell_type, (expected_command, expected_shell) in cases.items():
-            with self.subTest(shell_type=shell_type), patch(
-                "plugins.shell.tool.subprocess.run", return_value=completed
-            ) as spawned:
-                result = run_shell("external-command", shell_type=shell_type, context=self._context())
+            with (
+                self.subTest(shell_type=shell_type),
+                patch(
+                    "plugins.shell.tool.subprocess.run", return_value=completed
+                ) as spawned,
+            ):
+                result = run_shell(
+                    "external-command", shell_type=shell_type, context=self._context()
+                )
                 self.assertTrue(result["ok"])
                 actual_command = spawned.call_args.args[0]
                 if shell_type in {"powershell", "pwsh"}:
@@ -723,11 +963,20 @@ class ShellPluginTests(unittest.TestCase):
             run_shell("pwd", chain_timeout_mode="forever", context=self._context())
 
     def test_native_command_chain_runs_in_one_interpreter_process(self) -> None:
-        process_result = {"ok": True, "output": "ok", "exit_code": 0, "timed_out": False, "truncated": False}
+        process_result = {
+            "ok": True,
+            "output": "ok",
+            "exit_code": 0,
+            "timed_out": False,
+            "truncated": False,
+        }
         for timeout_mode in ("total", "per_command"):
-            with self.subTest(timeout_mode=timeout_mode), patch(
-                "plugins.shell.tool._run_process", return_value=process_result
-            ) as process:
+            with (
+                self.subTest(timeout_mode=timeout_mode),
+                patch(
+                    "plugins.shell.tool._run_process", return_value=process_result
+                ) as process,
+            ):
                 result = run_shell(
                     "one; two",
                     timeout=10,
@@ -739,8 +988,47 @@ class ShellPluginTests(unittest.TestCase):
             self.assertEqual(process.call_args.args[0], "one; two")
             self.assertEqual(process.call_args.kwargs["timeout"], 10.0)
 
-    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "需要 Windows PowerShell")
-    def test_powershell_chain_preserves_variables_and_rejects_undefined_values(self) -> None:
+    def test_windows_command_failures_include_platform_specific_hints(self) -> None:
+        failure = {
+            "ok": False,
+            "output": "STDERR:\n命令不存在",
+            "exit_code": 255,
+            "timed_out": False,
+            "truncated": False,
+            "cwd": str(PROJECT_ROOT),
+        }
+        with (
+            patch("plugins.shell.tool.os.name", "nt"),
+            patch("plugins.shell.tool._execute", return_value=failure),
+        ):
+            head = run_shell(
+                "Get-Content large.log | head -c 2000",
+                shell_type="powershell",
+                context=self._context(),
+            )
+        self.assertIn("Select-Object -First", head["hint"])
+        self.assertEqual(head["output"], failure["output"])
+        self.assertEqual(head["exit_code"], 255)
+
+        missing_hash = {**failure, "output": "无法将 Get-FileHash 识别为 cmdlet"}
+        with (
+            patch("plugins.shell.tool.os.name", "nt"),
+            patch("plugins.shell.tool._execute", return_value=missing_hash),
+        ):
+            hashed = run_shell(
+                "Get-FileHash -LiteralPath data.bin",
+                shell_type="powershell",
+                context=self._context(),
+            )
+        self.assertIn("file 工具的 hash action", hashed["hint"])
+        self.assertIn("certutil -hashfile", hashed["hint"])
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("powershell"), "需要 Windows PowerShell"
+    )
+    def test_powershell_chain_preserves_variables_and_rejects_undefined_values(
+        self,
+    ) -> None:
         preserved = run_shell(
             '$a = 42; Write-Output "VAR_TEST a=$a"',
             shell_type="powershell",
@@ -777,10 +1065,18 @@ class ShellPluginTests(unittest.TestCase):
 
 class NetworkPluginTests(unittest.TestCase):
     def test_all_six_actions_are_registered(self) -> None:
-        self.assertEqual(set(NETWORK_ACTIONS), {"get", "post", "put", "delete", "patch", "read"})
+        self.assertEqual(
+            set(NETWORK_ACTIONS), {"get", "post", "put", "delete", "patch", "read"}
+        )
 
     def test_rest_actions_forward_method_body_timeout_and_max_bytes(self) -> None:
-        response = (201, {"Content-Type": "application/json"}, b'{"saved":true}', False, None)
+        response = (
+            201,
+            {"Content-Type": "application/json"},
+            b'{"saved":true}',
+            False,
+            None,
+        )
         cases = {
             "get": ("GET", None),
             "post": ("POST", b"payload"),
@@ -789,7 +1085,10 @@ class NetworkPluginTests(unittest.TestCase):
             "patch": ("PATCH", b"payload"),
         }
         for action, (method, data) in cases.items():
-            with self.subTest(action=action), patch("plugins.network.tool._open", return_value=response) as opened:
+            with (
+                self.subTest(action=action),
+                patch("plugins.network.tool._open", return_value=response) as opened,
+            ):
                 result = run_network(
                     action,
                     "https://example.test/items",
@@ -809,15 +1108,22 @@ class NetworkPluginTests(unittest.TestCase):
     def test_http_and_connection_failures_have_uniform_error_fields(self) -> None:
         response = (404, {"Content-Type": "text/plain"}, b"missing", False, "Not Found")
         with patch("plugins.network.tool._open", return_value=response):
-            result = run_network("get", "https://example.test/missing", context={"tool_timeout": 10})
+            result = run_network(
+                "get", "https://example.test/missing", context={"tool_timeout": 10}
+            )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "Not Found")
         self.assertEqual(result["status"], 404)
         self.assertEqual(result["content_type"], "text/plain")
         self.assertFalse(result["truncated"])
 
-        with patch("plugins.network.tool._open", side_effect=ConnectionError("连接失败: refused")):
-            result = run_network("delete", "https://example.test/items/1", context={"tool_timeout": 10})
+        with patch(
+            "plugins.network.tool._open",
+            side_effect=ConnectionError("连接失败: refused"),
+        ):
+            result = run_network(
+                "delete", "https://example.test/items/1", context={"tool_timeout": 10}
+            )
         self.assertEqual(
             result,
             {
@@ -832,17 +1138,33 @@ class NetworkPluginTests(unittest.TestCase):
         )
 
     def test_read_returns_content_type_and_auto_falls_back_to_reader(self) -> None:
-        direct = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<html><body>short</body></html>", False, None)
-        reader = (200, {"Content-Type": "text/markdown"}, b"# Article\n" + b"body " * 20, False, None)
+        direct = (
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+            b"<html><body>short</body></html>",
+            False,
+            None,
+        )
+        reader = (
+            200,
+            {"Content-Type": "text/markdown"},
+            b"# Article\n" + b"body " * 20,
+            False,
+            None,
+        )
         with patch("plugins.network.tool._open", side_effect=[direct, reader]):
-            result = run_network("read", "https://example.test/article", context={"tool_timeout": 10})
+            result = run_network(
+                "read", "https://example.test/article", context={"tool_timeout": 10}
+            )
         self.assertTrue(result["ok"])
         self.assertEqual(result["source"], "reader:jina")
         self.assertEqual(result["content_type"], "text/markdown")
         self.assertFalse(result["truncated"])
 
     def test_read_failure_keeps_unified_fields(self) -> None:
-        with patch("plugins.network.tool._open", side_effect=ConnectionError("offline")):
+        with patch(
+            "plugins.network.tool._open", side_effect=ConnectionError("offline")
+        ):
             result = run_network(
                 "read",
                 "https://example.test/article",
@@ -896,7 +1218,12 @@ class TaskTimePluginTests(unittest.TestCase):
     def test_crud_and_title_only_update_preserves_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            context = {"root": str(root), "user": "alice", "source": "cli", "session_id": "s1"}
+            context = {
+                "root": str(root),
+                "user": "alice",
+                "source": "cli",
+                "session_id": "s1",
+            }
             created = run_task_time(
                 "create",
                 title="heartbeat",
@@ -907,18 +1234,24 @@ class TaskTimePluginTests(unittest.TestCase):
             )
             self.assertTrue(created["ok"])
             task_id = created["task"]["task_id"]
-            updated = run_task_time("update", task_id=task_id, title="renamed", context=context)
+            updated = run_task_time(
+                "update", task_id=task_id, title="renamed", context=context
+            )
             self.assertTrue(updated["ok"])
             self.assertEqual(updated["task"]["type"], "recurring")
             self.assertEqual(updated["task"]["interval_seconds"], 300)
-            paused = run_task_time("update", task_id=task_id, status="paused", context=context)
+            paused = run_task_time(
+                "update", task_id=task_id, status="paused", context=context
+            )
             self.assertEqual(paused["task"]["status"], "paused")
             self.assertEqual(run_task_time("list", context=context)["total"], 1)
             stored = CronStore(root, "alice").read(task_id)
             self.assertEqual(stored["user"], "alice")
             self.assertNotIn("source", stored)
             self.assertNotIn("session_id", stored)
-            self.assertTrue(run_task_time("delete", task_id=task_id, context=context)["deleted"])
+            self.assertTrue(
+                run_task_time("delete", task_id=task_id, context=context)["deleted"]
+            )
 
 
 class _FakeTavily:
@@ -927,7 +1260,11 @@ class _FakeTavily:
 
     def search(self, **kwargs):
         self.calls.append(("search", kwargs))
-        return {"answer": "answer", "results": [{"title": "one", "content": "body"}], "images": []}
+        return {
+            "answer": "answer",
+            "results": [{"title": "one", "content": "body"}],
+            "images": [],
+        }
 
     def map(self, **kwargs):
         self.calls.append(("map", kwargs))
@@ -935,27 +1272,42 @@ class _FakeTavily:
 
     def research(self, **kwargs):
         self.calls.append(("research", kwargs))
-        return {"request_id": "req-1", "status": "completed", "content": "report", "sources": []}
+        return {
+            "request_id": "req-1",
+            "status": "completed",
+            "content": "report",
+            "sources": [],
+        }
 
 
 class WebSearchPluginTests(unittest.TestCase):
-    def test_missing_api_key_returns_actionable_configuration_error_without_network(self) -> None:
+    def test_missing_api_key_returns_actionable_configuration_error_without_network(
+        self,
+    ) -> None:
         with (
             patch.dict(os.environ, {"TAVILY_API_KEY": ""}, clear=False),
             patch("plugins.web_search.tool.HAS_TAVILY", True),
             patch("plugins.web_search.tool.TavilyClient") as client,
         ):
-            with self.assertRaisesRegex(RuntimeError, r"\.env.*TAVILY_API_KEY.*重启智能体"):
+            with self.assertRaisesRegex(
+                RuntimeError, r"\.env.*TAVILY_API_KEY.*重启智能体"
+            ):
                 run_web_search("search", query="kemo", context={})
         client.assert_not_called()
 
-    def test_missing_dependency_returns_installation_error_without_network(self) -> None:
+    def test_missing_dependency_returns_installation_error_without_network(
+        self,
+    ) -> None:
         with (
-            patch.dict(os.environ, {"TAVILY_API_KEY": "configured-for-test"}, clear=False),
+            patch.dict(
+                os.environ, {"TAVILY_API_KEY": "configured-for-test"}, clear=False
+            ),
             patch("plugins.web_search.tool.HAS_TAVILY", False),
             patch("plugins.web_search.tool.TavilyClient") as client,
         ):
-            with self.assertRaisesRegex(RuntimeError, r"pip install tavily-python.*重启智能体"):
+            with self.assertRaisesRegex(
+                RuntimeError, r"pip install tavily-python.*重启智能体"
+            ):
                 run_web_search("search", query="kemo", context={})
         client.assert_not_called()
 

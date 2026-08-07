@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from plugins.memory_manage import memory_ops
 from plugins.memory_manage.memory_ops import (
     add_fragment,
     delete_fragment,
@@ -318,8 +320,15 @@ class MemoryManageTests(unittest.TestCase):
             "agent": "memory_temporary_important",
             "agent_trigger": "periodic_scan",
         }
-        listed = run_memory_manage("list", "seven_days", context=context)
+        listed = run_memory_manage(
+            "list",
+            "seven_days",
+            compact=True,
+            include_content=True,
+            context=context,
+        )
         self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["entries"][0]["content"], "stable source")
         with self.assertRaises(PermissionError):
             run_memory_manage(
                 "delete",
@@ -439,6 +448,7 @@ class MemoryManageTests(unittest.TestCase):
             set(first["entries"][0]),
             {"memory_ref", "filename", "weight"},
         )
+        self.assertFalse(first["include_content"])
 
         second = list_entries(
             self.root,
@@ -490,6 +500,122 @@ class MemoryManageTests(unittest.TestCase):
             "expires_at",
         ):
             self.assertIn(field, detailed["entries"][0])
+
+        with_content = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=2,
+            compact=True,
+            include_content=True,
+        )
+        self.assertTrue(with_content["include_content"])
+        self.assertEqual(
+            [entry["content"] for entry in with_content["entries"]],
+            ["Paged memory body 0", "Paged memory body 1"],
+        )
+
+        permanent = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            "batch permanent",
+            "Permanent batch body",
+        )
+        permanent_page = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "permanent",
+            compact=True,
+            include_content=True,
+        )
+        self.assertEqual(
+            permanent_page["entries"][0]["filename"], permanent["filename"]
+        )
+        self.assertEqual(
+            permanent_page["entries"][0]["content"], "Permanent batch body"
+        )
+
+        add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "important",
+            "ignored",
+            "# 临时重要记忆\n\n- Batch view body",
+        )
+        important_page = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "important",
+            compact=True,
+            include_content=True,
+        )
+        self.assertIn("Batch view body", important_page["entries"][0]["content"])
+
+        with self.assertRaisesRegex(ValueError, "include_content 必须是布尔值"):
+            list_entries(
+                self.root,
+                "alice",
+                self.config,
+                "seven_days",
+                include_content=1,
+            )
+
+    def test_list_content_pages_are_bounded_by_serialized_character_budget(
+        self,
+    ) -> None:
+        for index in range(4):
+            add_fragment(
+                self.root,
+                "alice",
+                self.config,
+                "seven_days",
+                f"large page {index}",
+                f"entry-{index}-" + ("x" * 700),
+            )
+
+        first = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=500,
+            compact=True,
+            include_content=True,
+            page_char_limit=1_000,
+        )
+        self.assertEqual(len(first["entries"]), 1)
+        self.assertEqual(first["next_offset"], 1)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["page_limited_by_chars"])
+        self.assertEqual(first["page_char_limit"], 1_000)
+
+        second = list_entries(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            limit=500,
+            offset=first["next_offset"],
+            compact=True,
+            include_content=True,
+            page_char_limit=1_000,
+        )
+        self.assertEqual(second["entries"][0]["filename"], "large page 1.md")
+
+        with self.assertRaisesRegex(ValueError, "page_char_limit 必须是整数"):
+            list_entries(
+                self.root,
+                "alice",
+                self.config,
+                "seven_days",
+                page_char_limit=True,
+            )
 
     def test_search_is_bounded_case_aware_and_never_returns_full_content(self) -> None:
         long_body = "prefix " * 80 + "RaspberryPi" + " suffix" * 80
@@ -579,18 +705,25 @@ class MemoryManageTests(unittest.TestCase):
             "用户的主力设备是工作站。",
         )
 
-        result = search_many(
-            self.root,
-            "alice",
-            self.config,
-            "all",
-            [
-                {"title": "回答偏好", "content": "简洁回答"},
-                {"title": "设备", "content": "主力设备"},
-            ],
-        )
+        with patch(
+            "plugins.memory_manage.memory_ops._tier_entries",
+            wraps=memory_ops._tier_entries,
+        ) as tier_entries:
+            result = search_many(
+                self.root,
+                "alice",
+                self.config,
+                "all",
+                [
+                    {"title": "回答偏好", "content": "简洁回答"},
+                    {"title": "设备", "content": "主力设备"},
+                ],
+                include_content=True,
+            )
+        self.assertEqual(tier_entries.call_count, 4)
 
         self.assertEqual(len(result["results"]), 2)
+        self.assertTrue(result["include_content"])
         self.assertEqual(
             result["results"][0]["matches"][0]["memory_ref"],
             "seven_days:回答偏好.md",
@@ -599,10 +732,108 @@ class MemoryManageTests(unittest.TestCase):
             result["results"][0]["matches"][0]["matched_by"],
             ["title", "content"],
         )
+        self.assertTrue(result["results"][0]["matches"][0]["matched_terms"])
+        self.assertGreater(result["results"][0]["matches"][0]["match_score"], 0)
         self.assertEqual(
             result["results"][1]["matches"][0]["memory_ref"],
             "permanent:设备信息.md",
         )
+        self.assertEqual(
+            result["results"][1]["matches"][0]["content"],
+            "用户的主力设备是工作站。",
+        )
+
+    def test_long_keyword_query_matches_related_memory_without_common_term_noise(
+        self,
+    ) -> None:
+        related = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "Git 提交风格偏好",
+            "用户要求 Git 提交说明必须独特，并且不使用表情符号。",
+        )["filename"]
+        unrelated = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "项目提交时间",
+            "项目需要提交测试报告并确认更新时间。",
+        )["filename"]
+
+        result = search_by_content(
+            self.root,
+            "alice",
+            self.config,
+            "all",
+            "Git 提交 独特更新说明 无表情包",
+        )
+
+        filenames = [item["filename"] for item in result["matches"]]
+        self.assertIn(related, filenames)
+        self.assertNotIn(unrelated, filenames)
+        match = next(item for item in result["matches"] if item["filename"] == related)
+        self.assertFalse(match["exact_match"])
+        self.assertGreaterEqual(match["match_coverage"], 0.5)
+        self.assertIn("提交", match["matched_terms"])
+
+        persisted = MemoryStore(self.root, "alice", self.config).upsert_candidates(
+            [
+                {
+                    "filename": match["filename"],
+                    "content": "用户要求 Git 提交说明必须独特，并且不使用表情符号。",
+                }
+            ]
+        )
+        self.assertEqual(persisted["created"], [])
+        self.assertEqual(persisted["updated"], [related])
+        self.assertEqual(
+            MemoryStore(self.root, "alice", self.config).get_entry(
+                "seven_days", related
+            )["weight"],
+            1,
+        )
+
+    def test_title_search_ranks_exact_before_fuzzy_and_rejects_one_bigram(self) -> None:
+        exact = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "Git 提交风格",
+            "exact",
+        )["filename"]
+        fuzzy = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "Git 提交偏好与说明风格",
+            "fuzzy",
+        )["filename"]
+        unrelated = add_fragment(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "项目提交排期",
+            "unrelated",
+        )["filename"]
+
+        result = search_by_title(
+            self.root,
+            "alice",
+            self.config,
+            "seven_days",
+            "Git 提交风格",
+        )
+
+        self.assertEqual(result["matches"][0]["filename"], exact)
+        self.assertTrue(result["matches"][0]["exact_match"])
+        self.assertIn(fuzzy, [item["filename"] for item in result["matches"]])
+        self.assertNotIn(unrelated, [item["filename"] for item in result["matches"]])
 
     def test_single_search_actions_accept_all_memory_fragment_tiers(self) -> None:
         for tier, title in (
@@ -657,7 +888,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.6.0")
+        self.assertEqual(tool.version, "1.8.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),
@@ -677,6 +908,8 @@ class MemoryManageTests(unittest.TestCase):
             "limit",
             "offset",
             "compact",
+            "include_content",
+            "page_char_limit",
             "context_chars",
             "case_sensitive",
         ):
@@ -689,6 +922,8 @@ class MemoryManageTests(unittest.TestCase):
                 "limit": 100,
                 "offset": 200,
                 "compact": True,
+                "include_content": True,
+                "page_char_limit": 80000,
             },
         )
         validate_arguments(

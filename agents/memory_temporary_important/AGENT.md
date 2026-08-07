@@ -27,8 +27,8 @@
 ### 读取与分类
 
 1. 先读取 `important/memory_temporary_important.md`，同时取得 `featured_sources`，作为失败时保持旧视图的依据。
-2. 对 `seven_days`、`one_month`、`half_year` 分别调用 `list(limit=100, offset=0, compact=true)`；只要 `has_more=true`，就使用返回的 `next_offset` 继续，直到完整覆盖 `total`，再逐条调用 `get` 读取完整正文。
-3. 对 `permanent` 使用同样的紧凑分页方式完整列出并逐条 `get`，对每个临时候选做语义覆盖判断。
+2. 对 `seven_days`、`one_month`、`half_year` 分别调用 `list(limit=500, offset=0, compact=true, include_content=true, page_char_limit=80000)`；只要 `has_more=true`，就使用返回的 `next_offset` 继续，直到完整覆盖 `total`。列表条目已经包含完整正文，无需再逐条 `get`。分页同时受条目数和字符预算约束；`page_limited_by_chars=true` 只是正常的字符预算截页，继续读取下一页即可。
+3. 对 `permanent` 使用同样的批量正文分页方式完整列出，对每个临时候选做语义覆盖判断。
 4. 永久记忆完全覆盖临时碎片：不进入热画像，输出 `drop_duplicate` 协调项。
 5. 永久记忆只覆盖一部分：输出 `merge_permanent` 协调项，并提供包含旧永久事实与新增稳定事实的完整融合正文；不进入热画像。
 6. 永久记忆未覆盖且满足热画像门槛：写入完整新热画像，并在 `featured` 中登记其 `tier` 与 `filename`。
@@ -38,9 +38,10 @@
 
 - 禁止调用 `memory_manage add/edit/delete`。子代理只负责读取和返回决策，热画像、来源索引、永久融合及临时副本清理由运行时统一原子持久化。
 - `featured` 是当前热画像的完整来源快照，不是本轮增量；从热画像移除的条目必须同时从 `featured` 移除，使其恢复普通临时 Prompt 注入。
-- 热画像中的内容不得超过 `memory.important_memory_max_chars`，不得收录没有对应临时源碎片的事实。
+- 热画像正文尽量控制在 `memory.important_memory_max_chars`（默认 5000 字符）以内；该值只是 Prompt 注入预算，候选较多时应优先保证信息完整，可以适当超出，文件会完整落盘而注入时仅显示预算内正文。只有超过 `memory.important_memory_output_max_chars`（默认 20000 字符）才会被运行时整体拒绝。不得收录没有对应临时源碎片的事实。
 - 任一层未能沿 `next_offset` 读取到 `has_more=false`，或各页累计条目数与 `total` 不一致时，不得输出任何永久协调项；返回原热画像和原 `featured_sources`，避免基于不完整数据清理记忆。单个中间页的 `truncated=true` 仅表示还有下一页，不等同于最终数据不完整。
 - 临时源碎片进入热画像后不得删除，仍继续走 `7d→30d→180d→permanent` 生命周期。
+- 巡检不得对全部碎片逐条 `get`；`get` 仅用于读取当前热画像及确需复核的少量单条。
 
 ---
 
@@ -54,7 +55,7 @@
 
 1. 调用 `get` 读取当前热画像及 `featured_sources`。
 2. 合并同主题、精简冗余并统一格式，但不得引入源碎片中不存在的新事实。
-3. 优先精简表述；仍超限时移除最低价值条目。
+3. 优先精简表述并尽量保持在 5000 字符以内；候选较多时信息完整性优先，但不得超过 20000 字符输出硬上限。
 4. 输出正文仍保留的完整 `featured` 来源；被移除条目的来源也必须移除。
 5. 每日整理的 `permanent_reconciliations` 必须为空数组。
 
@@ -90,6 +91,8 @@
 - `featured` 只能引用当前三层临时记忆中真实存在的文件。
 - 永久协调只能由 `periodic_scan` 输出；每日整理必须返回空数组。
 - 即使无内容也不得删除或清空 `memory_temporary_important.md`。
+- 正文超过 5000 字符时不得为了迎合注入预算而丢弃已确认的重要候选；5000～20000 字符会完整落盘，只有 Prompt 注入时截断。超过 20000 字符会被拒绝，下一次巡检再按正常完整数据重新整理。
+- `featured`、永久协调来源和永久目标必须复制工具结果中的真实文件名。运行时只会对同层唯一且高置信度的轻微笔误自动纠正；模糊或低置信度名称仍会拒绝，禁止依赖猜测。
 
 ---
 

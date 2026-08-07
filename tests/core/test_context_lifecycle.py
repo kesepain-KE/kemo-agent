@@ -347,6 +347,48 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIn('"compressed": true', groups[0].messages[2]["content"])
         self.assertNotIn('"compressed": true', groups[-1].messages[2]["content"])
 
+    def test_small_file_directory_results_remain_complete_in_older_rounds(self) -> None:
+        window = make_window(4, with_tools=True)
+        first_call = window["tool"]["rounds"][0]["calls"][0]
+        first_call["name"] = "file"
+        first_call["result"] = {
+            "ok": True,
+            "action": "list_dir",
+            "total": 2,
+            "returned": 2,
+            "offset": 0,
+            "limit": 200,
+            "next_offset": None,
+            "has_more": False,
+            "entries": [
+                {"name": "a.txt", "type": "file", "size": 1},
+                {"name": "b.txt", "type": "file", "size": 1},
+            ],
+        }
+        policy = ContextPolicy(
+            recent_tool_rounds=1,
+            max_rounds=100,
+            token_limit=100000,
+            older_tool_result_chars=50,
+        )
+        groups = build_round_groups(window, policy)
+        payload = json.loads(groups[0].messages[2]["content"])
+        self.assertFalse(payload.get("compressed", False))
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(len(payload["entries"]), 2)
+
+        first_call["result"]["entries"] = [
+            {"name": "x" * 5_000, "type": "file", "size": 1}
+        ]
+        groups = build_round_groups(window, policy)
+        payload = json.loads(groups[0].messages[2]["content"])
+        self.assertTrue(payload["compressed"])
+        self.assertGreater(payload["original_chars"], 4_000)
+        self.assertEqual(payload["action"], "list_dir")
+        self.assertEqual(payload["total"], 2)
+        self.assertIsNone(payload["next_offset"])
+        self.assertIn("重新读取", payload["message"])
+
     def test_recent_historical_tool_result_has_independent_hard_limit(self) -> None:
         window = make_window(1, with_tools=True)
         window["tool"]["rounds"][0]["calls"][0]["result"] = {

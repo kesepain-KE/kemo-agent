@@ -11,7 +11,12 @@ from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, ToolCall, Usage
 from run.agent_queue import AgentScheduler
 from run.agent_runner import AgentRunError, AgentRunner
-from run.agents import AgentDisabledError, AgentError, AgentManifestError, discover_agents
+from run.agents import (
+    AgentDisabledError,
+    AgentError,
+    AgentManifestError,
+    discover_agents,
+)
 
 
 class ScriptedProvider:
@@ -114,11 +119,16 @@ class SubAgentHotPlugTests(unittest.TestCase):
                 "scopes": [],
                 "index_enabled": False,
             },
-            "context": {"inherit_main_history": False, "inherit_current_request": False},
+            "context": {
+                "inherit_main_history": False,
+                "inherit_current_request": False,
+            },
         }
         (directory / "agent.json").write_text(json.dumps(manifest), "utf-8")
         (directory / "agent-config.json").write_text(json.dumps(capabilities), "utf-8")
-        (directory / "AGENT.md").write_text(f"# {name}\n{user} agent instruction", "utf-8")
+        (directory / "AGENT.md").write_text(
+            f"# {name}\n{user} agent instruction", "utf-8"
+        )
         return directory
 
     def write_plugin(self, root: Path, name: str) -> None:
@@ -151,7 +161,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
         provider = ScriptedProvider(
             [ChatResponse(text='{"answer":"ok"}', model="mock", usage=Usage())]
         )
-        runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
+        runner = AgentRunner(
+            root, "alice", config=config, provider_factory=lambda _: provider
+        )
         self.assertEqual(runner.registry.agents, {})
         directory = self.write_agent(root, "alice", "custom")
         result = runner.run("custom", {"value": 1})
@@ -262,7 +274,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
 
         manifest["executor"] = "../outside.py:execute"
         manifest_path.write_text(json.dumps(manifest), "utf-8")
-        (package.parent / "outside.py").write_text("def execute(context, input_data): pass\n", "utf-8")
+        (package.parent / "outside.py").write_text(
+            "def execute(context, input_data): pass\n", "utf-8"
+        )
         with self.assertRaisesRegex(AgentManifestError, "同目录"):
             discover_agents(root, "alice")
 
@@ -309,9 +323,29 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(set(context_manage.capabilities.allowed_callers), {"engine"})
         self.assertIn("manual_review", registry.get("self_improve").trigger_content)
         self.assertIn(
+            "search_many tier=all",
+            registry.get("self_improve").trigger_content,
+        )
+        self.assertIn(
+            "2～4 个空格分隔的核心关键词",
+            registry.get("self_improve").trigger_content,
+        )
+        self.assertIn(
+            "单个公共词命中不得直接复用",
+            registry.get("self_improve").trigger_content,
+        )
+        self.assertNotIn(
+            "逐条通过 memory_manage 搜索匹配",
+            registry.get("self_improve").trigger_content,
+        )
+        self.assertIn(
             "subagent_dispatch",
             registry.get("memory_temporary_important").trigger_content,
         )
+        important_trigger = registry.get("memory_temporary_important").trigger_content
+        self.assertIn("include_content=true", important_trigger)
+        self.assertIn("page_char_limit=80000", important_trigger)
+        self.assertIn("不得再对全部结果逐条 `get`", important_trigger)
 
     def test_dispatch_create_is_immediately_hot_plugged(self) -> None:
         _, root, _ = self.make_root()
@@ -399,12 +433,12 @@ class SubAgentHotPlugTests(unittest.TestCase):
         bob_provider = ScriptedProvider(
             [ChatResponse(text='{"answer":"b"}', model="mock", usage=Usage())]
         )
-        AgentRunner(root, "alice", config=config, provider_factory=lambda _: alice_provider).run(
-            "alice_agent", {}
-        )
-        AgentRunner(root, "bob", config=config, provider_factory=lambda _: bob_provider).run(
-            "bob_agent", {}
-        )
+        AgentRunner(
+            root, "alice", config=config, provider_factory=lambda _: alice_provider
+        ).run("alice_agent", {})
+        AgentRunner(
+            root, "bob", config=config, provider_factory=lambda _: bob_provider
+        ).run("bob_agent", {})
         alice_system = alice_provider.requests[0].messages[0]["content"]
         bob_system = bob_provider.requests[0].messages[0]["content"]
         self.assertNotIn("ALICE_ONLY", alice_system)
@@ -492,12 +526,14 @@ class SubAgentHotPlugTests(unittest.TestCase):
                     tool_calls=[ToolCall("call-1", "echo", {"value": "x"})],
                     usage=Usage(1, 1, 2),
                 ),
-                ChatResponse(text='{"answer":"done"}', model="mock", usage=Usage(1, 1, 2)),
+                ChatResponse(
+                    text='{"answer":"done"}', model="mock", usage=Usage(1, 1, 2)
+                ),
             ]
         )
-        result = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider).run(
-            "tool_agent", {}
-        )
+        result = AgentRunner(
+            root, "alice", config=config, provider_factory=lambda _: provider
+        ).run("tool_agent", {})
         self.assertEqual(result.data["answer"], "done")
         self.assertEqual(
             [item["function"]["name"] for item in provider.requests[0].tools],
@@ -543,10 +579,18 @@ class SubAgentHotPlugTests(unittest.TestCase):
         agent_config_path.write_text(json.dumps(agent_config), "utf-8")
         provider = ScriptedProvider(
             [
-                ChatResponse(text="", tool_calls=[ToolCall("same-1", "echo", {"value": "x"})]),
-                ChatResponse(text="", tool_calls=[ToolCall("same-2", "echo", {"value": "x"})]),
-                ChatResponse(text="", tool_calls=[ToolCall("same-3", "echo", {"value": "x"})]),
-                ChatResponse(text="", tool_calls=[ToolCall("changed", "echo", {"value": "y"})]),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("same-1", "echo", {"value": "x"})]
+                ),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("same-2", "echo", {"value": "x"})]
+                ),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("same-3", "echo", {"value": "x"})]
+                ),
+                ChatResponse(
+                    text="", tool_calls=[ToolCall("changed", "echo", {"value": "y"})]
+                ),
                 ChatResponse(text='{"answer":"done"}', model="mock", usage=Usage()),
             ]
         )
@@ -569,7 +613,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
         provider = ScriptedProvider(
             [ChatResponse(text='{"answer":"queued"}', model="mock", usage=Usage())]
         )
-        runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
+        runner = AgentRunner(
+            root, "alice", config=config, provider_factory=lambda _: provider
+        )
         scheduler = AgentScheduler.from_runner(runner)
         try:
             self.write_agent(

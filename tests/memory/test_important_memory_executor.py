@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from agents.memory_temporary_important.executor import execute
+from agents.memory_temporary_important.executor import _important_output_limit, execute
 from run.agent_runner import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore
 
@@ -18,18 +18,26 @@ class _Context:
         *,
         featured: object | None = None,
         reconciliations: object | None = None,
-        limit: int = 2000,
+        injection_limit: int = 2000,
+        output_limit: int = 20000,
     ) -> None:
         self.runner = SimpleNamespace(
             root=root,
             user="alice",
-            config={"memory": {"important_memory_max_chars": limit}},
+            config={
+                "memory": {
+                    "important_memory_max_chars": injection_limit,
+                    "important_memory_output_max_chars": output_limit,
+                }
+            },
         )
         self.content = content
         self.featured = [] if featured is None else featured
         self.reconciliations = [] if reconciliations is None else reconciliations
+        self.calls: list[dict[str, object]] = []
 
     def run_model(self, input_data):
+        self.calls.append(input_data)
         return AgentRunResult(
             agent="memory_temporary_important",
             data={
@@ -70,14 +78,52 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertTrue(self.path.is_file())
         self.assertIn("暂无可提取的重要记忆", self.path.read_text("utf-8"))
 
-    def test_daily_output_over_limit_is_rejected_without_overwrite(self) -> None:
+    def test_output_above_prompt_budget_is_written_without_repair(self) -> None:
+        content = "x" * 20000
+        context = _Context(
+            self.root,
+            content,
+            injection_limit=5000,
+            output_limit=20000,
+        )
+        result = execute(context, {"trigger": "daily_consolidate"})
+        self.assertEqual(self.path.read_text("utf-8").rstrip("\n"), content)
+        self.assertEqual(len(context.calls), 1)
+        self.assertNotIn("automatic_repair", result.metadata)
+
+    def test_output_above_hard_limit_is_rejected_without_overwrite(self) -> None:
         self.path.write_text("original", "utf-8")
-        with self.assertRaisesRegex(AgentOutputError, "超过字符上限"):
+        context = _Context(
+            self.root,
+            "x" * 20001,
+            injection_limit=5000,
+            output_limit=20000,
+        )
+        with self.assertRaisesRegex(AgentOutputError, "超过输出上限"):
             execute(
-                _Context(self.root, "123456", limit=5),
+                context,
                 {"trigger": "daily_consolidate"},
             )
         self.assertEqual(self.path.read_text("utf-8"), "original")
+        self.assertEqual(len(context.calls), 1)
+
+    def test_output_limit_defaults_and_invalid_values(self) -> None:
+        self.assertEqual(_important_output_limit({}), 20000)
+        self.assertEqual(_important_output_limit({"memory": {}}), 20000)
+        self.assertEqual(
+            _important_output_limit(
+                {"memory": {"important_memory_output_max_chars": 12345}}
+            ),
+            12345,
+        )
+        for invalid in (0, -1, True, "20000"):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(
+                    _important_output_limit(
+                        {"memory": {"important_memory_output_max_chars": invalid}}
+                    ),
+                    20000,
+                )
 
     def test_periodic_view_keeps_source_and_excludes_it_from_regular_prompt(
         self,
@@ -111,6 +157,54 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertFalse(store.important_view_is_current())
         refreshed = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(refreshed.selected_ids, (filename,))
+
+    def test_unique_high_confidence_featured_filename_typo_is_corrected(self) -> None:
+        store = self._store()
+        filename = store.upsert_candidates(
+            [
+                {
+                    "filename": "kemo-adapter-api 推送工作流程",
+                    "content": "推送前先完成测试。",
+                }
+            ]
+        )["created"][0]
+
+        result = execute(
+            _Context(
+                self.root,
+                "# 临时重要记忆\n\n- 推送前先完成测试。",
+                featured=[
+                    {
+                        "tier": "seven_days",
+                        "filename": "kemo-adapter-api 推送工作流.md",
+                    }
+                ],
+            ),
+            {"trigger": "periodic_scan"},
+        )
+
+        update = result.metadata["important_memory_update"]
+        self.assertEqual(update["featured"], [filename])
+        self.assertEqual(update["reference_corrections"][0]["resolved"], filename)
+        self.assertEqual(store.load_important_view_sources(), {filename})
+
+    def test_ambiguous_featured_filename_typo_is_rejected(self) -> None:
+        store = self._store()
+        store.upsert_candidates(
+            [
+                {"filename": "项目流程甲", "content": "甲流程。"},
+                {"filename": "项目流程乙", "content": "乙流程。"},
+            ]
+        )
+        with self.assertRaisesRegex(AgentOutputError, "来源不存在"):
+            execute(
+                _Context(
+                    self.root,
+                    "# 临时重要记忆\n\n- 项目流程。",
+                    featured=[{"tier": "seven_days", "filename": "项目流程.md"}],
+                ),
+                {"trigger": "periodic_scan"},
+            )
 
     def test_one_stale_source_restores_every_featured_fragment_to_regular_prompt(
         self,

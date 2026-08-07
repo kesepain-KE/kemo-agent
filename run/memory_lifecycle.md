@@ -55,9 +55,12 @@ seven_days → one_month → half_year → permanent
 - `memory.extraction_mode` 控制提取边界；默认 `compression_only` 只在保存或上下文压缩时处理延期轮次。
 - 后台提取只向 `self_improve` 传入用户消息；助手回复、推理、工具结果和 `important` 层均不可作为提取来源。
 - 后台 `context_compression` / `memory_promotion` 禁止搜索 `important`；用户或主智能体主动查看记忆时保留只读权限，且查看不加权。
+- 临时重要热画像的 `important_memory_max_chars` 仅是 Prompt 注入预算；文件正文不在该值处截断。`important_memory_output_max_chars` 是独立输出硬上限，防止模型失控重复，超限时保留旧热画像。
+- 临时重要热画像巡检通过 `memory_manage list(limit=500, compact=true, include_content=true, page_char_limit=80000)` 按条目数与字符预算双重边界分页批量读取三层临时记忆和永久记忆，不得对全量条目逐条 `get`；`self_improve` 的候选匹配和晋升融合使用 `search_many` 批量查询，只有命中项需要完整正文时才传 `include_content=true`。
 - 所有保存与压缩入口共用连续 `memory_processed_round` 游标；`context_manage` 只负责摘要，不重复持久化同一轮记忆。
 - 成功提交的对话才能产生记忆候选；失败、取消或未提交轮次不得写入。
 - 用户明确要求长期记住的有效内容直接进入永久层。
 - 密码、API Key、Token、Cookie、私钥、验证码等敏感凭据禁止入库。
 - 加权、晋升、融合、删除、幂等结果和热画像来源使用 SQLite 事务原子提交。
+- 到期晋升不设置总数量上限：调度器按目标层遍历全部达标碎片，普通层每批最多 20 条、永久层每批最多 8 条；每批成功后立即落盘，失败或缺少决策的条目保持原层并在后续 30 秒扫描中重试。
 - 当前阶段不调用或修改 `E:\code\kemo-graph`。

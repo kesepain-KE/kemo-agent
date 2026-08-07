@@ -7,17 +7,17 @@ from run.agent_runner import AgentOutputError, AgentRunResult
 from run.memory import contains_sensitive_credential
 
 
-DEFAULT_IMPORTANT_MEMORY_MAX_CHARS = 2000
+DEFAULT_IMPORTANT_MEMORY_OUTPUT_MAX_CHARS = 20000
 TRIGGERS = frozenset({"periodic_scan", "daily_consolidate"})
 
 
-def _important_memory_limit(config: dict[str, Any]) -> int:
+def _important_output_limit(config: dict[str, Any]) -> int:
     value = (config.get("memory") or {}).get(
-        "important_memory_max_chars",
-        DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
+        "important_memory_output_max_chars",
+        DEFAULT_IMPORTANT_MEMORY_OUTPUT_MAX_CHARS,
     )
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return DEFAULT_IMPORTANT_MEMORY_MAX_CHARS
+        return DEFAULT_IMPORTANT_MEMORY_OUTPUT_MAX_CHARS
     return value
 
 
@@ -29,11 +29,10 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
         )
 
     result = context.run_model(input_data)
+    limit = _important_output_limit(context.runner.config)
     content = result.data.get("content")
     if not isinstance(content, str):
-        raise AgentOutputError(
-            "memory_temporary_important 输出缺少 content 字符串"
-        )
+        raise AgentOutputError("memory_temporary_important 输出缺少 content 字符串")
     body = content.strip()
     if contains_sensitive_credential(body):
         raise AgentOutputError("临时重要记忆包含疑似敏感凭据，已拒绝持久化")
@@ -49,10 +48,10 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
     if trigger == "daily_consolidate" and reconciliations:
         raise AgentOutputError("每日整理不得执行永久记忆协调")
 
-    limit = _important_memory_limit(context.runner.config)
     if len(body) > limit:
         raise AgentOutputError(
-            f"临时重要记忆超过字符上限：{len(body)} > {limit}"
+            f"临时重要记忆超过输出上限：{len(body)} > {limit}；"
+            "请精简合并后重试。正文超过 Prompt 注入预算不会影响完整落盘"
         )
 
     try:

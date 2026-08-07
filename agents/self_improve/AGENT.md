@@ -91,8 +91,10 @@
 }
 ```
 
-手动模式使用 `memory_manage` 搜索相关记忆，返回 `candidates`。执行器会自动将
-候选写入 `MemoryStore`；纯搜索允许返回空 `candidates`，并在其他输出字段中说明结果。
+手动模式使用 `memory_manage` 的搜索 action 查询相关记忆；多个目标使用
+`search_many`，需要完整命中正文时传 `include_content=true`。该子代理无
+`list/get` 权限，不得尝试全层扫描。返回 `candidates` 后，执行器会自动将候选写入
+`MemoryStore`；纯搜索允许返回空 `candidates`，并在其他输出字段中说明结果。
 
 ---
 
@@ -101,8 +103,10 @@
 ### 流程
 
 1. 将传入的批量对话数据分解为独立的微记忆碎片
-2. 汇总整批候选后，只调用一次 `memory_manage action=search_many tier=all`，在
-   `queries` 中同时提交每个候选的标题和内容；禁止逐候选、逐层串行搜索
+2. 汇总整批候选后，只调用一次 `memory_manage action=search_many tier=all`。每个
+   `queries` 项的 `title` / `content` 应提炼为 2～4 个用空格分隔的核心关键词，
+   不要直接提交完整句子；禁止逐候选、逐层串行搜索。搜索会优先完整短语，再按
+   多关键词覆盖率返回带 `match_score` 的候选；单个普通词命中不代表语义相同
 3. 命中逻辑：
 
 | 命中层 | 操作 |
@@ -111,6 +115,10 @@
 | one_month | 同上 |
 | half_year | 同上 |
 | permanent | **不返回候选、不修改**；只有用户本轮明确要求记住（`explicit=true`）时才允许更新永久正文 |
+
+命中后必须核对返回正文和证据。确认语义属于同一碎片时，upsert 候选的
+`filename` 必须复制已有命中的文件名，才能进入每日最多 +1 的加权链路；只有所有
+高置信度候选都不相符时才允许创建新文件，禁止仅凭一个公共关键词复用旧碎片。
 
 4. 返回候选数组，由调用方统一写入 MemoryStore：未命中时在 seven_days 创建；命中临时层时按每日锁加权；命中永久层且不是本轮显式记忆请求时，必须省略该候选。运行时也会拒绝普通候选覆盖永久正文
 
@@ -139,13 +147,13 @@ for tier in TEMPORARY_TIERS:
             → 调用 self_improve(trigger="memory_promotion", ...)
 ```
 
-**self_improve 不主动扫描**，由 cron 任务发现合规碎片后唤起。
+**self_improve 不主动扫描**，由 cron 任务发现合规碎片后唤起。调用方会把本轮全部应晋升碎片按目标层分组并分批调用：普通层每批最多 20 条，永久层每批最多 8 条；批次只限制单次工具预算，不限制本轮总晋升数量，所有未成功项保留到后续调度继续处理。
 
 ### 7d→30d / 30d→180d 晋升流程
 
-1. 接收 cron 传入的达标碎片信息
-2. 读取下一层的全部碎片（通过 `memory_manage`）
-3. 检查是否有相似/重复的碎片：
+1. 接收 cron 传入的达标碎片信息。
+2. 按 `to_tier` 对待晋升项分组；每组使用 `memory_manage action=search_many tier=<目标层> include_content=true` 批量查询标题和正文，单次最多 20 个查询，超过时分批。禁止调用无权使用的 `list/get`，也不得逐条、逐层重复搜索。
+3. 根据批量搜索返回的完整命中正文检查是否有相似/重复碎片：
    - **有相似** → 返回目标文件名与完整融合正文
    - **无相似** → 返回直接晋升决策
 4. cron 根据决策在 SQLite 事务内更新正文和 tier，目标行 weight 归零并重设 `expires_at`

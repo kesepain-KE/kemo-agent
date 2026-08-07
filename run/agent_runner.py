@@ -82,13 +82,15 @@ def _response_items_for_next_request(output: list[Any]) -> list[Any]:
         prefix = (
             "rs"
             if isinstance(item, ReasoningItem)
-            else "call"
-            if isinstance(item, ToolCallItem)
-            else "result"
-            if isinstance(item, ToolResultItem)
-            else "msg"
-            if isinstance(item, MessageItem)
-            else "item"
+            else (
+                "call"
+                if isinstance(item, ToolCallItem)
+                else (
+                    "result"
+                    if isinstance(item, ToolResultItem)
+                    else "msg" if isinstance(item, MessageItem) else "item"
+                )
+            )
         )
         updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
         if isinstance(item, ToolCallItem):
@@ -219,7 +221,9 @@ def _type_matches(value: Any, expected: Any) -> bool:
     }.get(expected, True)
 
 
-def validate_json_schema(value: Any, schema: dict[str, Any], *, location: str = "$") -> None:
+def validate_json_schema(
+    value: Any, schema: dict[str, Any], *, location: str = "$"
+) -> None:
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
         matches = 0
@@ -315,14 +319,19 @@ def _parse_json_object(text: str) -> dict[str, Any]:
             raise AgentOutputError(
                 f"子代理 JSON 疑似被截断：{diagnostic_error}"
             ) from diagnostic_error
-        raise AgentOutputError(f"子代理 JSON 无效：{diagnostic_error}") from diagnostic_error
+        raise AgentOutputError(
+            f"子代理 JSON 无效：{diagnostic_error}"
+        ) from diagnostic_error
     if not isinstance(value, dict):
         raise AgentOutputError("子代理输出必须是 JSON 对象")
     return value
 
 
 def resolve_agent_provider_config(
-    config: dict[str, Any], definition: AgentDefinition, *, model_override: str | None = None
+    config: dict[str, Any],
+    definition: AgentDefinition,
+    *,
+    model_override: str | None = None,
 ) -> dict[str, Any]:
     runtime = provider_runtime_config(config)
     runtime["model"] = resolve_agent_model(
@@ -350,7 +359,9 @@ class AgentExecutionContext:
         return self.runner._run_model(self, input_data)
 
 
-def _load_executor(definition: AgentDefinition) -> Callable[[AgentExecutionContext, dict[str, Any]], Any]:
+def _load_executor(
+    definition: AgentDefinition,
+) -> Callable[[AgentExecutionContext, dict[str, Any]], Any]:
     if definition.executor == "builtin:llm":
         return lambda context, input_data: context.run_model(input_data)
     file_name, _, function_name = definition.executor.partition(":")
@@ -413,13 +424,17 @@ class AgentRunner:
     def _merge_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total[key] = int(total.get(key, 0)) + int(usage.get(key, 0))
-        total["estimated"] = bool(total.get("estimated", False) or usage.get("estimated", False))
+        total["estimated"] = bool(
+            total.get("estimated", False) or usage.get("estimated", False)
+        )
 
     @staticmethod
     def _tool_definitions(schemas: list[dict[str, Any]]) -> list[ToolDefinition]:
         definitions: list[ToolDefinition] = []
         for raw in schemas:
-            function = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+            function = (
+                raw.get("function") if isinstance(raw.get("function"), dict) else raw
+            )
             definitions.append(
                 ToolDefinition(
                     name=str(function.get("name") or ""),
@@ -509,9 +524,7 @@ class AgentRunner:
             or not isinstance(raw_identical_call_limit, int)
             or raw_identical_call_limit < 1
         ):
-            raise AgentRunError(
-                "tools.consecutive_identical_call_limit 必须是正整数"
-            )
+            raise AgentRunError("tools.consecutive_identical_call_limit 必须是正整数")
         identical_call_limit = raw_identical_call_limit
         raw_failure_limit = (self.config.get("history") or {}).get(
             "consecutive_tool_fail_limit", 5
@@ -524,9 +537,7 @@ class AgentRunner:
             raise AgentRunError("history.consecutive_tool_fail_limit 必须是正整数")
         failure_limit = raw_failure_limit
         failures = ConsecutiveToolFailureTracker(failure_limit)
-        identical_calls = ConsecutiveIdenticalToolCallTracker(
-            identical_call_limit
-        )
+        identical_calls = ConsecutiveIdenticalToolCallTracker(identical_call_limit)
         for iteration in range(1, max_provider_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
@@ -595,7 +606,9 @@ class AgentRunner:
                     )
             except ProviderCongestionError as exc:
                 if context.cancel_event.is_set():
-                    raise AgentCancelledError(f"子代理 {definition.name} 已取消") from exc
+                    raise AgentCancelledError(
+                        f"子代理 {definition.name} 已取消"
+                    ) from exc
                 raise
             if not isinstance(response, KemoResponse):
                 raise AgentRunError("Provider create() 必须返回 KemoResponse")
@@ -603,12 +616,23 @@ class AgentRunner:
             parent_request_id = parent_request_id or request_id
             self._merge_usage(total_usage, self._usage_dict(response.usage))
             final_model = response.model or runtime["model"]
-            if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
-                message = response.error.message if response.error is not None else str(response.status)
+            if response.status not in {
+                ResponseStatus.COMPLETED,
+                ResponseStatus.REQUIRES_ACTION,
+            }:
+                message = (
+                    response.error.message
+                    if response.error is not None
+                    else str(response.status)
+                )
                 raise AgentRunError(f"子代理 Provider 响应失败：{message}")
             normalized_output = _response_items_for_next_request(response.output)
-            calls = [item for item in normalized_output if isinstance(item, ToolCallItem)]
-            messages = [item for item in normalized_output if isinstance(item, MessageItem)]
+            calls = [
+                item for item in normalized_output if isinstance(item, ToolCallItem)
+            ]
+            messages = [
+                item for item in normalized_output if isinstance(item, MessageItem)
+            ]
             items.extend(normalized_output)
             structured_calls = [
                 call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
@@ -647,7 +671,9 @@ class AgentRunner:
                 )
                 break
             if not calls:
-                final_text = "".join(text_from_content(item.content) for item in messages)
+                final_text = "".join(
+                    text_from_content(item.content) for item in messages
+                )
                 break
             for call in calls:
                 if processed_tool_calls >= max_tool_calls:
@@ -655,9 +681,7 @@ class AgentRunner:
                         f"子代理 {definition.name} 已达到最大工具调用次数 {max_tool_calls}"
                     )
                 processed_tool_calls += 1
-                identical_call_count = identical_calls.record(
-                    call.name, call.arguments
-                )
+                identical_call_count = identical_calls.record(call.name, call.arguments)
                 if identical_calls.is_blocked(identical_call_count):
                     payload = {
                         "ok": False,
@@ -705,7 +729,9 @@ class AgentRunner:
                                 "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
                                 "agent_timeout": agent_timeout,
-                                "knowledge_scopes": list(definition.capabilities.knowledge_scopes),
+                                "knowledge_scopes": list(
+                                    definition.capabilities.knowledge_scopes
+                                ),
                             },
                             timeout=tool_timeout,
                             cancel_event=context.cancel_event,
@@ -727,8 +753,7 @@ class AgentRunner:
                     failure_count = failures.record(
                         call.name,
                         succeeded=(
-                            bool(payload.get("ok"))
-                            or status == "result_too_large"
+                            bool(payload.get("ok")) or status == "result_too_large"
                         ),
                     )
                     if failure_count >= failure_limit:
@@ -927,9 +952,7 @@ class AgentRunner:
                             return result
                     stopped.set()
                     future.cancel()
-                    cleanup_deadline = (
-                        time.monotonic() + _AGENT_TIMEOUT_CLEANUP_GRACE
-                    )
+                    cleanup_deadline = time.monotonic() + _AGENT_TIMEOUT_CLEANUP_GRACE
                     while not future.done():
                         cleanup_remaining = cleanup_deadline - time.monotonic()
                         if cleanup_remaining <= 0:
@@ -967,11 +990,7 @@ class AgentRunner:
             if isinstance(exc, AgentCancelledError):
                 status = "cancelled"
             elif isinstance(exc, AgentTimeoutError):
-                status = (
-                    "timed_out"
-                    if exc.process_terminated
-                    else "timed_out_running"
-                )
+                status = "timed_out" if exc.process_terminated else "timed_out_running"
             else:
                 status = "failed"
             detail = {"error": str(exc), "exception_type": type(exc).__name__}

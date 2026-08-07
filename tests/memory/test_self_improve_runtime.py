@@ -169,6 +169,179 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertIsNone(store.get_entry("seven_days", low))
         self.assertIsNotNone(store.get_entry("one_month", high))
 
+    def test_due_scan_promotes_every_eligible_fragment_across_all_batches(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        filenames = [
+            self._seed(
+                "seven_days",
+                f"batch-{index:02d}",
+                content=f"batch content {index}",
+                weight=3,
+                expires_at=now,
+            )
+            for index in range(45)
+        ]
+        calls: list[list[dict[str, object]]] = []
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                batch = input_data["promotions"]
+                calls.append(batch)
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": item["from_tier"],
+                            "to_tier": item["to_tier"],
+                            "filename": item["filename"],
+                            "merged_with": None,
+                            "skill_created": False,
+                        }
+                        for item in batch
+                    ]
+                )
+
+        with patch("cron.review_due.AgentRunner", Runner):
+            result = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+
+        self.assertEqual([len(batch) for batch in calls], [20, 20, 5])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["requested"], 45)
+        self.assertEqual(result["applied"], filenames)
+        self.assertEqual(result["pending"], [])
+        self.assertEqual(result["total_batches"], 3)
+        store = MemoryStore(self.root, "alice", CONFIG)
+        self.assertEqual(store.load_tier("seven_days"), [])
+        self.assertEqual(
+            [item["filename"] for item in store.load_tier("one_month")],
+            filenames,
+        )
+
+    def test_permanent_promotions_use_smaller_batches_without_total_cap(self) -> None:
+        now = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        filenames = [
+            self._seed(
+                "half_year",
+                f"permanent-batch-{index:02d}",
+                content=f"stable work memory {index}",
+                weight=60,
+                expires_at=now,
+            )
+            for index in range(18)
+        ]
+        calls: list[list[dict[str, object]]] = []
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                batch = input_data["promotions"]
+                calls.append(batch)
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": item["from_tier"],
+                            "to_tier": item["to_tier"],
+                            "filename": item["filename"],
+                            "merged_with": None,
+                            "skill_created": True,
+                        }
+                        for item in batch
+                    ]
+                )
+
+        with patch("cron.review_due.AgentRunner", Runner):
+            result = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+
+        self.assertEqual([len(batch) for batch in calls], [8, 8, 2])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["applied"], filenames)
+        self.assertEqual(result["pending"], [])
+        store = MemoryStore(self.root, "alice", CONFIG)
+        self.assertEqual(store.load_tier("half_year"), [])
+        self.assertEqual(
+            [item["filename"] for item in store.load_tier("permanent")],
+            filenames,
+        )
+
+    def test_missing_batch_decision_remains_due_and_is_promoted_on_next_scan(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        filenames = [
+            self._seed(
+                "seven_days",
+                f"retry-{index}",
+                content=f"retry content {index}",
+                weight=3,
+                expires_at=now,
+            )
+            for index in range(3)
+        ]
+        run_count = 0
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                nonlocal run_count
+                run_count += 1
+                batch = input_data["promotions"]
+                selected = batch[:2] if run_count == 1 else batch
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": item["from_tier"],
+                            "to_tier": item["to_tier"],
+                            "filename": item["filename"],
+                            "merged_with": None,
+                            "skill_created": False,
+                        }
+                        for item in selected
+                    ]
+                )
+
+        with patch("cron.review_due.AgentRunner", Runner):
+            first = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+            second = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+
+        self.assertEqual(first["status"], "partial")
+        self.assertEqual(first["pending"], [filenames[2]])
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(second["applied"], [filenames[2]])
+        store = MemoryStore(self.root, "alice", CONFIG)
+        self.assertEqual(store.load_tier("seven_days"), [])
+        self.assertEqual(
+            [item["filename"] for item in store.load_tier("one_month")],
+            filenames,
+        )
+
     def test_merged_promotion_overwrites_target_and_resets_lifecycle(self) -> None:
         now = datetime(2026, 7, 19, tzinfo=timezone.utc)
         filename = self._seed(

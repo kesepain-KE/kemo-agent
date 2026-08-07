@@ -28,6 +28,8 @@ def run(
     limit: int = 50,
     offset: int = 0,
     compact: bool = False,
+    include_content: bool = False,
+    page_char_limit: int = 80_000,
     context_chars: int = 240,
     case_sensitive: bool = False,
     *,
@@ -70,6 +72,8 @@ def run(
             limit=limit,
             offset=offset,
             compact=compact,
+            include_content=include_content,
+            page_char_limit=page_char_limit,
         )
     if action == "get":
         if not filename:
@@ -77,13 +81,24 @@ def run(
         return get_fragment(root, user, config, tier, filename)
     if action == "search_by_title":
         return search_by_title(
-            root, user, config, tier, query or "",
-            limit=limit, case_sensitive=case_sensitive,
+            root,
+            user,
+            config,
+            tier,
+            query or "",
+            limit=limit,
+            case_sensitive=case_sensitive,
         )
     if action == "search_by_content":
         return search_by_content(
-            root, user, config, tier, query or "",
-            limit=limit, context_chars=context_chars, case_sensitive=case_sensitive,
+            root,
+            user,
+            config,
+            tier,
+            query or "",
+            limit=limit,
+            context_chars=context_chars,
+            case_sensitive=case_sensitive,
         )
     if action == "search_many":
         return search_many(
@@ -95,6 +110,7 @@ def run(
             limit=limit,
             context_chars=context_chars,
             case_sensitive=case_sensitive,
+            include_content=include_content,
         )
     if action == "delete":
         if not filename:

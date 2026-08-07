@@ -39,8 +39,8 @@
 
 流程:
   1. 分解批量对话为微记忆碎片
-  2. 逐条通过 memory_manage 搜索匹配
-  3. 命中: 返回同名 upsert 候选，由 MemoryStore 依据 last_weight_date 每天最多+1
+  2. 汇总候选后只调用一次 memory_manage `search_many tier=all` 批量搜索匹配；每项使用 2～4 个空格分隔的核心关键词，不提交完整句子。单批超过 20 个查询时分批，禁止逐候选、逐层串行搜索
+  3. 命中: 依据 `match_score`、`matched_terms` 和返回正文核对语义；确认同一事实后复制已有文件名返回同名 upsert 候选，由 MemoryStore 依据 last_weight_date 每天最多+1。单个公共词命中不得直接复用
   4. 未命中: seven_days 创建新碎片，weight=0
   5. 每个 upsert 必须携带 `durable=true` 与 `evidence`；单轮最多 2 条，批量最多 5 条
   6. 没有合格信息时返回空 candidates[]
@@ -53,12 +53,14 @@
 
 ### 模式二：记忆晋升（trigger = `"memory_promotion"`）
 
+调度器会遍历本轮全部到期且达标的碎片，按目标层分批调用本模式：普通层每批最多 20 条，永久层每批最多 8 条。批次大小不是总量上限；每批成功后立即事务落盘，未成功项保持原层并由后续调度继续重试。
+
 ```
 输入: { trigger: "memory_promotion", promotions: [{from_tier, to_tier, filename, ...}] }
 
 流程:
   7d→30d / 30d→180d:
-    1. 查下一层全部碎片
+    1. 按目标层分组，通过 memory_manage `search_many tier=<目标层> include_content=true` 批量查询相似碎片；禁止调用 list/get 或扫描整层
     2. 相似 → 返回 merged_with + 完整融合 content；无相似 → merged_with=null
     3. cron 根据决策在 SQLite 事务内更新或融合表行，来源删除，目标 weight=0，重设 expires_at
 
@@ -75,7 +77,7 @@
 输入: { trigger: "manual_review", request: "用户的具体审阅/整理/搜索要求" }
 
 流程:
-  1. 按 request 使用 memory_manage 搜索和读取相关记忆
+  1. 按 request 使用 memory_manage 的搜索 action 查询相关记忆；多个目标使用 search_many，需要完整命中正文时传 include_content=true；不得调用 list/get
   2. 返回 candidates[]；纯搜索时允许返回空数组并在其他输出字段中说明结果
   3. executor 将 upsert / forget 候选统一写入 MemoryStore
   4. 返回 memory_update 元数据，报告 created / updated / forgotten / rejected
@@ -117,7 +119,7 @@
 - 候选文件名基础名称最长 20 字符，并遵守全层级唯一命名规则
 - context_compression 模式下 memory_manage 只用于搜索，不直接增删改
 - context_compression / memory_promotion 模式下禁止搜索 `important`；用户主动 manual_review 可只读查看
-- memory_promotion 模式下 memory_manage 只用于读取和比对，不直接删除或移动；cron 根据 promotions 决策原子落盘
+- memory_promotion 模式下 memory_manage 只通过批量搜索读取命中项并比对，不调用 list/get，也不直接删除或移动；cron 根据 promotions 决策原子落盘
 - 永久记忆不自动修改（除非 explicit=true 或 180d 晋升）
 - skill_creater 只写 `agent_create` 目录，不写 `user_create`
 - 敏感凭据检测失败时直接拒绝，标记 rejected

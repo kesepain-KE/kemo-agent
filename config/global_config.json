@@ -36,6 +36,7 @@
       "seven_days": 300
     },
     "important_memory_max_chars": 5000,
+    "important_memory_output_max_chars": 20000,
     "history_read_enabled": true,
     "tiers": {
       "seven_days": {

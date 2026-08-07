@@ -17,6 +17,7 @@ from run.tools import MAX_TOOL_RESULT_CHARS, ToolResultTooLargeError
 
 
 DEFAULT_OLDER_TOOL_RESULT_CHARS = 200
+SMALL_FILE_DIRECTORY_RESULT_CHARS = 4_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,9 +35,7 @@ class ContextPolicy:
         agents = config.get("agents") or {}
         history = config.get("history") or {}
         policy = cls(
-            recent_tool_rounds=max(
-                0, int(agents.get("conserved_rounds", 3))
-            ),
+            recent_tool_rounds=max(0, int(agents.get("conserved_rounds", 3))),
             recent_full_rounds=max(0, int(history.get("recent_full_rounds", 3))),
             max_rounds=max(1, int(agents.get("max_rounds", 80))),
             rounds_after_compression=max(
@@ -48,7 +47,9 @@ class ContextPolicy:
         if not 0 < policy.compression_ratio < 1:
             raise ValueError("agents.token_compression_ratio 必须在 0 和 1 之间")
         if policy.rounds_after_compression > policy.max_rounds:
-            raise ValueError("agents.rounds_after_compression 不能大于 agents.max_rounds")
+            raise ValueError(
+                "agents.rounds_after_compression 不能大于 agents.max_rounds"
+            )
         return policy
 
     @property
@@ -122,7 +123,11 @@ def build_context_snapshot(
     remaining -= tool_schema_tokens
     summary_tokens = min(
         remaining,
-        estimate_messages_tokens([summary_message]) if summary_message is not None else 0,
+        (
+            estimate_messages_tokens([summary_message])
+            if summary_message is not None
+            else 0
+        ),
     )
     remaining -= summary_tokens
     conversation_tokens = remaining
@@ -234,7 +239,7 @@ def _text_rounds(messages: Any) -> list[list[dict[str, Any]]]:
         elif current:
             current.append(message)
         else:
-                        # 畸形的领导历史被作为一个不可分割的整体保留下来。
+            # 畸形的领导历史被作为一个不可分割的整体保留下来。
             current = [message]
     if current:
         groups.append(current)
@@ -371,8 +376,37 @@ def _context_tool_result(
             limit_chars=MAX_TOOL_RESULT_CHARS,
         )
         return _stable_json({"ok": False, "error": error.error_payload()})
-    if compact_limit is None or len(rendered) <= compact_limit:
+    file_directory_result = (
+        tool_name == "file"
+        and isinstance(value, dict)
+        and value.get("action") in {"list_dir", "tree_dir"}
+    )
+    preserve_small_directory_result = (
+        file_directory_result and len(rendered) <= SMALL_FILE_DIRECTORY_RESULT_CHARS
+    )
+    if (
+        compact_limit is None
+        or len(rendered) <= compact_limit
+        or preserve_small_directory_result
+    ):
         return rendered
+    if file_directory_result:
+        return _stable_json(
+            {
+                "ok": bool(value.get("ok", True)),
+                "action": value.get("action"),
+                "path": value.get("path"),
+                "total": value.get("total"),
+                "returned": value.get("returned"),
+                "offset": value.get("offset"),
+                "limit": value.get("limit"),
+                "next_offset": value.get("next_offset"),
+                "has_more": value.get("has_more"),
+                "compressed": True,
+                "original_chars": len(rendered),
+                "message": "目录条目已从旧上下文省略；需要时使用 next_offset 重新读取对应页。",
+            }
+        )
     return _stable_json(
         {
             "compressed": True,
@@ -411,7 +445,9 @@ def _tool_iteration_messages(
                     },
                 }
             )
-        messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+        messages.append(
+            {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        )
         for position, call in enumerate(calls):
             result = call.get("result")
             content = _context_tool_result(
@@ -422,7 +458,9 @@ def _tool_iteration_messages(
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": str(call.get("id") or f"history-{iteration}-{position}"),
+                    "tool_call_id": str(
+                        call.get("id") or f"history-{iteration}-{position}"
+                    ),
                     "name": str(call.get("name") or "unknown_tool"),
                     "content": content,
                 }
@@ -430,9 +468,13 @@ def _tool_iteration_messages(
     return messages
 
 
-def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[RoundGroup]:
+def build_round_groups(
+    window: dict[str, Any], policy: ContextPolicy
+) -> list[RoundGroup]:
     item_groups = _item_round_messages(window)
-    text_groups = item_groups or _text_rounds((window.get("text") or {}).get("messages"))
+    text_groups = item_groups or _text_rounds(
+        (window.get("text") or {}).get("messages")
+    )
     think_by_round = _round_lookup((window.get("think") or {}).get("rounds"))
     tool_by_round = _round_lookup((window.get("tool") or {}).get("rounds"))
     total = len(text_groups)
@@ -454,7 +496,11 @@ def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[Ro
                         ),
                     )
             raw_text_messages = [
-                {key: copy.deepcopy(value) for key, value in message.items() if not key.startswith("_")}
+                {
+                    key: copy.deepcopy(value)
+                    for key, value in message.items()
+                    if not key.startswith("_")
+                }
                 for message in raw_group
                 if message.get("role") in {"user", "assistant"}
             ]
@@ -469,7 +515,9 @@ def build_round_groups(window: dict[str, Any], policy: ContextPolicy) -> list[Ro
             )
             continue
         user_messages = [item for item in raw_group if item.get("role") == "user"]
-        assistant_messages = [item for item in raw_group if item.get("role") == "assistant"]
+        assistant_messages = [
+            item for item in raw_group if item.get("role") == "assistant"
+        ]
         other_messages = [
             item for item in raw_group if item.get("role") not in {"user", "assistant"}
         ]
@@ -507,7 +555,9 @@ def select_context(
 ) -> ContextSelection:
     """Select whole historical rounds under configured round and token budgets."""
     rounds = build_round_groups(window, policy)
-    fixed_prefix = [item for item in (system_message, summary_message) if item is not None]
+    fixed_prefix = [
+        item for item in (system_message, summary_message) if item is not None
+    ]
     fixed_suffix = [current_user_message] if current_user_message is not None else []
     tool_tokens = estimate_tools_tokens(tools)
     all_messages = [*fixed_prefix]
@@ -533,14 +583,19 @@ def select_context(
     else:
         kept = list(rounds)
 
-    fixed_tokens = estimate_messages_tokens([*fixed_prefix, *fixed_suffix]) + tool_tokens
+    fixed_tokens = (
+        estimate_messages_tokens([*fixed_prefix, *fixed_suffix]) + tool_tokens
+    )
     token_trigger = before > policy.token_limit
     while len(kept) > minimum_history_rounds and token_trigger:
         candidate_messages = [*fixed_prefix]
         for group in kept:
             candidate_messages.extend(group.messages)
         candidate_messages.extend(fixed_suffix)
-        if estimate_messages_tokens(candidate_messages) + tool_tokens <= policy.input_budget:
+        if (
+            estimate_messages_tokens(candidate_messages) + tool_tokens
+            <= policy.input_budget
+        ):
             break
         kept.pop(0)
 

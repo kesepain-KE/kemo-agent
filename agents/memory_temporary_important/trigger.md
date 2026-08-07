@@ -20,7 +20,7 @@
 ## periodic_scan
 
 1. 读取当前 `important` 正文及 `featured_sources`。
-2. 通过 `list(limit=100, offset, compact=true)` 沿 `next_offset` 分页列出三层临时碎片和永久记忆，再用 `get` 读取全文；禁止用空查询代替全量列出，也不得只读取第一页。
+2. 通过 `list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 沿 `next_offset` 分页批量读取三层临时碎片和永久记忆；条目已包含全文，不得再对全部结果逐条 `get`。分页同时受 500 条与 80,000 字符预算约束，`page_limited_by_chars=true` 时正常继续下一页。禁止用空查询代替全量列出，也不得只读取第一页。
 3. 只有同时具备长期价值、用户证据、不可从系统重读且近期高频有用的内容才进入热画像。
 4. 永久层完全覆盖时返回 `drop_duplicate`；部分覆盖时返回带完整融合正文的 `merge_permanent`；未覆盖的高价值碎片进入 `featured`。
 5. `featured` 必须是新热画像的完整来源快照。进入热画像不会删除临时源碎片，也不会阻断正常晋升。
@@ -42,8 +42,10 @@
 
 ## 注意事项
 
-- `memory_manage` 只允许 `list/get`，不得直接增删改。
+- `memory_manage` 只允许 `list/get`，不得直接增删改；全量巡检必须用 `list(include_content=true)`，`get` 仅用于热画像或少量精确复核。
 - 热画像是派生视图，临时碎片才是权威来源。
 - 普通临时 Prompt 会跳过已进入热画像的来源，避免重复注入；来源仍按正常生命周期到期和晋升，但只有后续历史整理依据用户原文命中时才能加权，Prompt 注入本身不加权。
 - 完全覆盖副本的清理、部分覆盖的永久融合、热画像与来源索引写入由 executor 在同一事务中执行。
 - 不得记录敏感凭据。
+- `memory.important_memory_max_chars`（默认 5000）只控制 Prompt 注入预算；正文可以适当超出并完整落盘。`memory.important_memory_output_max_chars`（默认 20000）才是输出防失控硬上限，超过后拒绝本次更新且不覆盖旧热画像。
+- 所有来源文件名必须从 `memory_ref`/`filename` 原样复制。运行时仅修复同层唯一、高置信度的一处轻微拼写差异，不能把模糊名称当作有效来源。
