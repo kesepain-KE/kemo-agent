@@ -11,8 +11,9 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 ```
 请求（user + source + session_id）
   → 加载配置（global_config.json + user_config.json 深合并）
-  → 构建 prompt bundle（人格 + 知识索引 + 记忆 + 拓展 + 感知）
+  → 构建本轮静态 prompt bundle（人格 + 知识索引 + 记忆等）
   → 上下文选择（轮次预算 + token 预算 + 压缩）
+  → 每次逻辑 Provider 请求前重读最新拓展与感知快照
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
   → 事务提交 SQLite 历史窗口（text + think + tool + items + data 五个逻辑分区）
@@ -617,6 +618,12 @@ system prompt 按以下固定顺序拼接：
 14. **任务计划** — 当前活跃计划的描述
 15. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行。Kemo Graph 若激活，只在这里以普通 `[expand_data][global:kemo_graph]` 目录摘要出现
 16. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
+
+人格、运行手册、子代理/插件/技能注册、知识索引、记忆和任务计划等静态段在一轮用户对话开始时构建一次；
+`[expand_data]` 与 `[perception]` 属于动态段，在每一次逻辑 Provider 请求前从当前磁盘快照重新读取并替换。
+因此首个模型请求、工具续轮、运行中引导续轮以及上下文超限压缩后的重试都会使用当时最新已采集数据。
+刷新只读取后台采集器已经发布的文件，不同步执行 `data_update.py`，不会把采集耗时叠加到每次模型请求。
+Provider 适配器对同一网络请求执行传输重试或 SSE 续传时继续复用同一请求正文，不在传输层中途改变 Prompt。
 
 Kemo Graph 使用两层授权：主配置的全局 Expand 白名单决定模块访问，Library 的
 `allowed_users` 决定读取范围；省略时仅 `admin_users` 可见，`["*"]` 才是公共库。
