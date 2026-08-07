@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.3-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,9 +204,9 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.0.2`
+当前版本：`1.0.3`
 
-`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路：临时重要热画像的落盘上限与 Prompt 注入预算正式解耦；已有碎片搜索从整句连续匹配升级为带置信门槛的多关键词评分；`search_many` 对整批候选只加载一次记忆层，避免碎片增长后重复扫库；`self_improve` 命中后复用已有文件名，恢复每日加权和后续晋升。后续版本将继续聚焦边缘生态、性能与长期可靠性。
+`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路。`1.0.3` 将 System Prompt 拆分为本轮静态段和请求级动态段：每次逻辑 Provider 请求都会重新读取后台已经采集完成的拓展与感知快照，工具续轮、运行中引导和上下文恢复不再沿用本轮开始时的陈旧状态；请求线程不会主动运行采集脚本，同一网络请求的传输重试仍复用同一正文。后续版本将继续聚焦边缘生态、性能与长期可靠性。
 
 目前可以体验的内容包括：
 
@@ -217,6 +217,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - 个人、共享与全局三层知识库，让回答贴近真实资料；
 - 任务计划从创建、审批到逐步执行，可暂停、可继续、可回溯；
 - 一次性和周期性定时任务，在约定时间自动醒来完成；
+- 拓展与感知由后台按配置频率采集，每次逻辑 Provider 请求只重读最新已发布快照，不把采集耗时叠加到模型请求；
 - 子代理协作：整理记忆、规划步骤、生成摘要、定时调度各有专人；
 - 多个内置工具与技能，可按需扩展；
 - Kemo 协议下根据网关模型能力动态展示思考档位，其他 Provider 协议继续使用原有配置方式；
