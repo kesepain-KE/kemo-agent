@@ -25,6 +25,7 @@ from run.prompt import (
     PromptConfigError,
     build_prompt_bundle,
     parse_prompt_settings,
+    refresh_dynamic_prompt_bundle,
 )
 from run.prompt_sources import (
     PromptRegistrationError,
@@ -356,6 +357,42 @@ class PromptPipelineTests(unittest.TestCase):
         )
         self.assertEqual(bundle.sections[-1].name, "perception")
         self.assertEqual(bundle.text.count("[perception]"), 1)
+
+    def test_dynamic_expand_and_perception_sections_refresh_without_rebuilding_static_sections(
+        self,
+    ) -> None:
+        _, root, config = self.make_root()
+        (root / "users" / "alice" / "user_soul.md").write_text(
+            "STATIC_USER_SOUL", "utf-8"
+        )
+        expand = self.write_expand_module(
+            root,
+            "global",
+            "live_expand",
+            input_text="EXPAND_OLD",
+            open_control=False,
+        )
+        sense = self.write_sense_module(root, "live_sense", "SENSE_OLD")
+        initial = build_prompt_bundle(root, "alice", config)
+
+        (expand / "input_data.md").write_text("EXPAND_NEW", "utf-8")
+        (sense / "sense.md").write_text("SENSE_NEW", "utf-8")
+        refreshed = refresh_dynamic_prompt_bundle(root, "alice", config, initial)
+
+        self.assertIn("EXPAND_OLD", initial.text)
+        self.assertIn("SENSE_OLD", initial.text)
+        self.assertNotIn("EXPAND_NEW", initial.text)
+        self.assertIn("EXPAND_NEW", refreshed.text)
+        self.assertIn("SENSE_NEW", refreshed.text)
+        self.assertNotIn("EXPAND_OLD", refreshed.text)
+        self.assertNotIn("SENSE_OLD", refreshed.text)
+        self.assertIn("STATIC_USER_SOUL", refreshed.text)
+        self.assertEqual(
+            tuple(section.name for section in refreshed.sections),
+            PROMPT_SECTION_ORDER,
+        )
+        self.assertTrue(refreshed.diagnostics["dynamic_sections_refreshed"])
+        self.assertEqual(initial.memory_ids, refreshed.memory_ids)
 
     def test_subagent_registries_split_global_and_user_registration_only(self) -> None:
         _, root, config = self.make_root()

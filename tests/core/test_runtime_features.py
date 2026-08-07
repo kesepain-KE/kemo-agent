@@ -687,6 +687,115 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
 
+    def test_each_provider_request_refreshes_expand_and_perception_snapshots(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+
+        global_expand = root / "global_expand"
+        global_expand.mkdir()
+        (global_expand / "register.py").write_text(
+            "from pathlib import Path\n\n"
+            "def register(registry):\n"
+            "    registry.add_expand_root('global', Path(__file__).resolve().parent)\n",
+            "utf-8",
+        )
+        expand = global_expand / "live"
+        expand.mkdir()
+        expand_data = expand / "input_data.md"
+        expand_data.write_text("EXPAND_REQUEST_ONE", "utf-8")
+        (expand / "expand_control.md").write_text(
+            "## 注入层\n\n\n## 操作层\n\nmanual", "utf-8"
+        )
+        (expand / "data_update.py").write_text("def update():\n    return True\n", "utf-8")
+        (expand / "start_expand.py").write_text("def execute(command, params):\n    return {}\n", "utf-8")
+        (expand / "expand.json").write_text(
+            json.dumps(
+                {
+                    "name": "live",
+                    "explain": "live data",
+                    "open_input": True,
+                    "input_data": "input_data.md",
+                    "input_health": "正常",
+                    "start_update": "data_update.py",
+                    "open_control": False,
+                    "start_expand": "start_expand.py",
+                    "start_control": "expand_control.md",
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+
+        global_sense = root / "global_sense"
+        global_sense.mkdir()
+        (global_sense / "register.py").write_text(
+            "from pathlib import Path\n\n"
+            "def register(registry):\n"
+            "    registry.add_perception(Path(__file__).resolve().parent)\n",
+            "utf-8",
+        )
+        sense = global_sense / "live"
+        sense.mkdir()
+        sense_data = sense / "sense.md"
+        sense_data.write_text("SENSE_REQUEST_ONE", "utf-8")
+        (sense / "data_update.py").write_text("def update():\n    return True\n", "utf-8")
+        (sense / "sense.json").write_text(
+            json.dumps(
+                {
+                    "name": "live",
+                    "data_md": "sense.md",
+                    "recent_update": "2026-08-07 20:00:00",
+                    "health": "正常",
+                    "start_update": "data_update.py",
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+
+        class UpdatingProvider(ScriptedProvider):
+            def chat(self, request):
+                response = super().chat(request)
+                if len(self.requests) == 1:
+                    expand_data.write_text("EXPAND_REQUEST_TWO", "utf-8")
+                    sense_data.write_text("SENSE_REQUEST_TWO", "utf-8")
+                return response
+
+        provider = UpdatingProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("refresh", "lookup", {"value": "x"})],
+                    finish_reason="tool_calls",
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", finish_reason="stop", usage=Usage()),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "dynamic-sources",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        first_system = provider.requests[0].messages[0]["content"]
+        second_system = provider.requests[1].messages[0]["content"]
+        self.assertIn("EXPAND_REQUEST_ONE", first_system)
+        self.assertIn("SENSE_REQUEST_ONE", first_system)
+        self.assertNotIn("EXPAND_REQUEST_TWO", first_system)
+        self.assertIn("EXPAND_REQUEST_TWO", second_system)
+        self.assertIn("SENSE_REQUEST_TWO", second_system)
+        self.assertNotIn("EXPAND_REQUEST_ONE", second_system)
+        self.assertNotIn("SENSE_REQUEST_ONE", second_system)
+
     def test_oversized_tool_result_is_omitted_before_provider_and_history(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "large_result", "large")
