@@ -76,7 +76,11 @@ class MainAgentSourcePolicy:
     user_skills: NameFilter
     global_expand: NameFilter
     shared_expand: NameFilter
+    expand_prompt_injection: bool
+    expand_realtime_injection: bool
     global_perception: NameFilter
+    perception_prompt_injection: bool
+    perception_realtime_injection: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MainAgentSourcePolicy":
@@ -91,10 +95,19 @@ class MainAgentSourcePolicy:
         _reject_unknown(skills, {"shared_whitelist"}, field="skills")
         _reject_unknown(
             expand,
-            {"global_whitelist", "shared_whitelist"},
+            {
+                "global_whitelist",
+                "shared_whitelist",
+                "prompt_injection",
+                "realtime_injection",
+            },
             field="expand",
         )
-        _reject_unknown(perception, {"global_whitelist"}, field="perception")
+        _reject_unknown(
+            perception,
+            {"global_whitelist", "prompt_injection", "realtime_injection"},
+            field="perception",
+        )
         _reject_unknown(plugins, {"whitelist"}, field="plugins")
 
         use_shared = _boolean(
@@ -133,9 +146,33 @@ class MainAgentSourcePolicy:
                 expand.get("shared_whitelist", []),
                 field="expand.shared_whitelist",
             ),
+            expand_prompt_injection=_boolean(
+                expand,
+                "prompt_injection",
+                field="expand.prompt_injection",
+                default=True,
+            ),
+            expand_realtime_injection=_boolean(
+                expand,
+                "realtime_injection",
+                field="expand.realtime_injection",
+                default=False,
+            ),
             global_perception=NameFilter.from_config(
                 perception.get("global_whitelist", []),
                 field="perception.global_whitelist",
+            ),
+            perception_prompt_injection=_boolean(
+                perception,
+                "prompt_injection",
+                field="perception.prompt_injection",
+                default=True,
+            ),
+            perception_realtime_injection=_boolean(
+                perception,
+                "realtime_injection",
+                field="perception.realtime_injection",
+                default=False,
             ),
         )
 
@@ -143,6 +180,26 @@ class MainAgentSourcePolicy:
         """Return enabled scopes still allowed to expose their local files."""
 
         return self.knowledge_scopes
+
+    @staticmethod
+    def _injection_mode(*, enabled: bool, realtime: bool) -> str:
+        if not enabled:
+            return "disabled"
+        return "realtime" if realtime else "round"
+
+    @property
+    def expand_injection_mode(self) -> str:
+        return self._injection_mode(
+            enabled=self.expand_prompt_injection,
+            realtime=self.expand_realtime_injection,
+        )
+
+    @property
+    def perception_injection_mode(self) -> str:
+        return self._injection_mode(
+            enabled=self.perception_prompt_injection,
+            realtime=self.perception_realtime_injection,
+        )
 
     def public_summary(self) -> dict[str, Any]:
         return {
@@ -159,8 +216,14 @@ class MainAgentSourcePolicy:
             "expand": {
                 "global": self.global_expand.public_summary(),
                 "shared": self.shared_expand.public_summary(),
+                "prompt_injection": self.expand_prompt_injection,
+                "realtime_injection": self.expand_realtime_injection,
+                "injection_mode": self.expand_injection_mode,
             },
             "perception": {
                 "global": self.global_perception.public_summary(),
+                "prompt_injection": self.perception_prompt_injection,
+                "realtime_injection": self.perception_realtime_injection,
+                "injection_mode": self.perception_injection_mode,
             },
         }

@@ -43,11 +43,15 @@
 
   "expand": {
     "shared_whitelist": [],
-    "global_whitelist": []
+    "global_whitelist": [],
+    "prompt_injection": true,
+    "realtime_injection": false
   },
 
   "perception": {
-    "global_whitelist": []
+    "global_whitelist": [],
+    "prompt_injection": true,
+    "realtime_injection": false
   },
 
   "knowledge": {

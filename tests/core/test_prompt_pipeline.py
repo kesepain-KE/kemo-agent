@@ -362,6 +362,15 @@ class PromptPipelineTests(unittest.TestCase):
         self,
     ) -> None:
         _, root, config = self.make_root()
+        config["expand"] = {
+            "global_whitelist": [],
+            "shared_whitelist": [],
+            "realtime_injection": True,
+        }
+        config["perception"] = {
+            "global_whitelist": [],
+            "realtime_injection": True,
+        }
         (root / "users" / "alice" / "user_soul.md").write_text(
             "STATIC_USER_SOUL", "utf-8"
         )
@@ -392,7 +401,142 @@ class PromptPipelineTests(unittest.TestCase):
             PROMPT_SECTION_ORDER,
         )
         self.assertTrue(refreshed.diagnostics["dynamic_sections_refreshed"])
+        self.assertEqual(
+            refreshed.diagnostics["dynamic_section_names"],
+            ["expand_data", "perception"],
+        )
         self.assertEqual(initial.memory_ids, refreshed.memory_ids)
+
+    def test_dynamic_snapshots_stay_fixed_within_round_when_switches_are_absent(
+        self,
+    ) -> None:
+        _, root, config = self.make_root()
+        expand = self.write_expand_module(
+            root,
+            "global",
+            "live_expand",
+            input_text="EXPAND_OLD",
+            open_control=False,
+        )
+        sense = self.write_sense_module(root, "live_sense", "SENSE_OLD")
+        initial = build_prompt_bundle(root, "alice", config)
+
+        (expand / "input_data.md").write_text("EXPAND_NEW", "utf-8")
+        (sense / "sense.md").write_text("SENSE_NEW", "utf-8")
+        refreshed = refresh_dynamic_prompt_bundle(root, "alice", config, initial)
+
+        self.assertIs(refreshed, initial)
+        self.assertIn("EXPAND_OLD", refreshed.text)
+        self.assertNotIn("EXPAND_NEW", refreshed.text)
+        self.assertIn("SENSE_OLD", refreshed.text)
+        self.assertNotIn("SENSE_NEW", refreshed.text)
+
+    def test_prompt_injection_master_switches_remove_disabled_sections(self) -> None:
+        _, root, config = self.make_root()
+        self.write_expand_module(
+            root,
+            "global",
+            "disabled_expand",
+            input_text="EXPAND_DISABLED",
+            open_control=False,
+        )
+        self.write_sense_module(root, "enabled_sense", "SENSE_ENABLED")
+        config["expand"] = {
+            "prompt_injection": False,
+            "realtime_injection": True,
+        }
+        config["perception"] = {
+            "prompt_injection": True,
+            "realtime_injection": False,
+        }
+
+        bundle = build_prompt_bundle(root, "alice", config)
+
+        self.assertNotIn("[expand_data]", bundle.text)
+        self.assertNotIn("EXPAND_DISABLED", bundle.text)
+        self.assertIn("[perception]", bundle.text)
+        self.assertIn("SENSE_ENABLED", bundle.text)
+        expand_section = next(
+            section for section in bundle.sections if section.name == "expand_data"
+        )
+        self.assertEqual(expand_section.mode, "disabled")
+        self.assertEqual(expand_section.content, "")
+        self.assertEqual(
+            bundle.diagnostics["source_policy"]["expand"]["injection_mode"],
+            "disabled",
+        )
+        self.assertIs(
+            refresh_dynamic_prompt_bundle(root, "alice", config, bundle),
+            bundle,
+        )
+
+    def test_both_prompt_injection_switches_can_disable_dynamic_prompt_data(
+        self,
+    ) -> None:
+        _, root, config = self.make_root()
+        self.write_expand_module(
+            root,
+            "global",
+            "disabled_expand",
+            input_text="EXPAND_DISABLED",
+            open_control=False,
+        )
+        self.write_sense_module(root, "disabled_sense", "SENSE_DISABLED")
+        config["expand"] = {"prompt_injection": False}
+        config["perception"] = {"prompt_injection": False}
+
+        bundle = build_prompt_bundle(root, "alice", config)
+
+        self.assertNotIn("[expand_data]", bundle.text)
+        self.assertNotIn("[perception]", bundle.text)
+        self.assertNotIn("EXPAND_DISABLED", bundle.text)
+        self.assertNotIn("SENSE_DISABLED", bundle.text)
+        self.assertEqual(
+            [
+                section.name
+                for section in bundle.sections
+                if section.mode == "disabled"
+            ],
+            ["expand_data", "perception"],
+        )
+
+    def test_expand_and_perception_realtime_switches_are_independent(self) -> None:
+        _, root, config = self.make_root()
+        expand = self.write_expand_module(
+            root,
+            "global",
+            "live_expand",
+            input_text="EXPAND_OLD",
+            open_control=False,
+        )
+        sense = self.write_sense_module(root, "live_sense", "SENSE_OLD")
+        initial = build_prompt_bundle(root, "alice", config)
+        (expand / "input_data.md").write_text("EXPAND_NEW", "utf-8")
+        (sense / "sense.md").write_text("SENSE_NEW", "utf-8")
+
+        expand_only = refresh_dynamic_prompt_bundle(
+            root,
+            "alice",
+            {**config, "expand": {"realtime_injection": True}},
+            initial,
+        )
+        perception_only = refresh_dynamic_prompt_bundle(
+            root,
+            "alice",
+            {**config, "perception": {"realtime_injection": True}},
+            initial,
+        )
+
+        self.assertIn("EXPAND_NEW", expand_only.text)
+        self.assertIn("SENSE_OLD", expand_only.text)
+        self.assertEqual(
+            expand_only.diagnostics["dynamic_section_names"], ["expand_data"]
+        )
+        self.assertIn("EXPAND_OLD", perception_only.text)
+        self.assertIn("SENSE_NEW", perception_only.text)
+        self.assertEqual(
+            perception_only.diagnostics["dynamic_section_names"], ["perception"]
+        )
 
     def test_subagent_registries_split_global_and_user_registration_only(self) -> None:
         _, root, config = self.make_root()
