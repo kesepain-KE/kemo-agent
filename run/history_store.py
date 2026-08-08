@@ -974,14 +974,36 @@ def query_session_records(
     if before_updated_at:
         cursor_updated_at = before_updated_at
         cursor_session_id = ""
+        cursor_source = ""
         parsed_cursor = _object(before_updated_at, None)
         if (
             isinstance(parsed_cursor, list)
-            and len(parsed_cursor) == 2
+            and len(parsed_cursor) in {2, 3}
             and all(isinstance(item, str) for item in parsed_cursor)
         ):
-            cursor_updated_at, cursor_session_id = parsed_cursor
-        if cursor_session_id:
+            cursor_updated_at, cursor_session_id = parsed_cursor[:2]
+            if len(parsed_cursor) == 3:
+                cursor_source = parsed_cursor[2]
+        if cursor_session_id and cursor_source:
+            clauses.append(
+                """(
+                    updated_at < ? OR (
+                        updated_at = ? AND (
+                            session_id < ? OR (session_id = ? AND source < ?)
+                        )
+                    )
+                )"""
+            )
+            params.extend(
+                (
+                    cursor_updated_at,
+                    cursor_updated_at,
+                    cursor_session_id,
+                    cursor_session_id,
+                    cursor_source,
+                )
+            )
+        elif cursor_session_id:
             clauses.append("(updated_at < ? OR (updated_at = ? AND session_id < ?))")
             params.extend((cursor_updated_at, cursor_updated_at, cursor_session_id))
         else:
@@ -990,7 +1012,7 @@ def query_session_records(
             params.append(cursor_updated_at)
     requested = None if limit is None else max(1, int(limit))
     sql = "SELECT record_json FROM history_sessions WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY updated_at DESC, session_id DESC"
+    sql += " ORDER BY updated_at DESC, session_id DESC, source DESC"
     if requested is not None:
         sql += " LIMIT ?"
         params.append(requested + 1)
@@ -1010,7 +1032,14 @@ def session_page_cursor(record: dict[str, Any]) -> str:
 
     updated_at = str(record.get("updated_at") or "")
     session_id = str(record.get("session_id") or "")
-    return _json([updated_at, session_id]) if updated_at and session_id else ""
+    source = str(record.get("source") or "")
+    return (
+        _json([updated_at, session_id, source])
+        if updated_at and session_id and source
+        else _json([updated_at, session_id])
+        if updated_at and session_id
+        else ""
+    )
 
 
 def message_windows(root: Path, user: str) -> list[dict[str, Any]]:

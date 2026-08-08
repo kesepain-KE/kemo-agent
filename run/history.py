@@ -987,6 +987,8 @@ def get_or_create_window(
 
 def _session_payload(record: dict[str, Any]) -> dict[str, Any]:
     return {
+        "source": str(record.get("source") or ""),
+        "bound_platform": str(record.get("bound_platform") or ""),
         "session_id": str(record.get("session_id") or ""),
         "conversation_id": str(record.get("conversation_id") or ""),
         "window": str(record.get("archive_window") or ""),
@@ -1018,6 +1020,18 @@ def _session_payload(record: dict[str, Any]) -> dict[str, Any]:
         "state": str(record.get("lifecycle") or "open"),
         "run_state": str(record.get("run_state") or "idle"),
         "chain": str(record.get("chain") or ""),
+        "memory_status": str(record.get("memory_status") or "unknown"),
+        "memory_processed_round": max(
+            0, int(record.get("memory_processed_round") or 0)
+        ),
+        "memory_target_round": max(0, int(record.get("memory_target_round") or 0)),
+        "memory_queue_reason": str(record.get("memory_queue_reason") or ""),
+        "memory_queued_at": str(record.get("memory_queued_at") or ""),
+        "memory_last_error": copy.deepcopy(
+            record.get("memory_last_error")
+            if isinstance(record.get("memory_last_error"), dict)
+            else None
+        ),
         "rounds": int(record.get("rounds") or 0),
         "updated_at": str(record.get("updated_at") or ""),
     }
@@ -1026,7 +1040,7 @@ def _session_payload(record: dict[str, Any]) -> dict[str, Any]:
 def list_sessions(
     root: Path,
     user: str,
-    source: str,
+    source: str | None,
     *,
     query: str = "",
 ) -> list[dict[str, Any]]:
@@ -1039,7 +1053,7 @@ def list_sessions(
 def list_sessions_page(
     root: Path,
     user: str,
-    source: str,
+    source: str | None,
     *,
     query: str = "",
     limit: int = 50,

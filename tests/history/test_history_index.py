@@ -145,6 +145,50 @@ class HistoryIndexTests(unittest.TestCase):
             ["same-4", "same-3", "same-2", "same-1", "same-0"],
         )
 
+    def test_cross_source_cursor_does_not_skip_same_session_and_timestamp(self) -> None:
+        _, root = self.make_root()
+        timestamp = "2026-08-08T00:00:00+00:00"
+        sessions = {
+            session_key(source, "same-session"): {
+                "conversation_id": f"{source}-conversation",
+                "session_id": "same-session",
+                "source": source,
+                "title": source,
+                "lifecycle": "closed",
+                "run_state": "idle",
+                "updated_at": timestamp,
+            }
+            for source in ("web", "cli", "message:telegram")
+        }
+        write_registry(root, "alice", sessions, {})
+
+        collected: list[tuple[str, str]] = []
+        cursor = ""
+        while True:
+            page, has_more = query_session_records(
+                root,
+                "alice",
+                source=None,
+                limit=1,
+                before_updated_at=cursor,
+            )
+            collected.extend(
+                (str(record["source"]), str(record["session_id"]))
+                for record in page
+            )
+            if not has_more:
+                break
+            cursor = session_page_cursor(page[-1])
+
+        self.assertEqual(
+            collected,
+            [
+                ("web", "same-session"),
+                ("message:telegram", "same-session"),
+                ("cli", "same-session"),
+            ],
+        )
+
     def test_missing_registry_rebuilds_from_sqlite_windows(self) -> None:
         _, root = self.make_root()
         self.commit_archive(

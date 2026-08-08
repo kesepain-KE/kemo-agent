@@ -58,7 +58,7 @@ class SessionServiceMixin:
         before: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
-        normalized_source = self.require_source(source)
+        normalized_source = self.require_history_source(source, allow_all=True)
         if not isinstance(query, str):
             raise InvalidRequestError("query 必须是字符串")
         if (
@@ -80,7 +80,7 @@ class SessionServiceMixin:
         next_cursor = session_page_cursor(sessions[-1]) if has_more and sessions else ""
         return {
             "user": name,
-            "source": normalized_source,
+            "source": normalized_source or "all",
             "query": query.strip(),
             "sessions": sessions,
             "has_more": has_more,
@@ -94,6 +94,8 @@ class SessionServiceMixin:
     @staticmethod
     def _index_session_payload(record: dict[str, Any]) -> dict[str, Any]:
         return {
+            "source": str(record.get("source") or ""),
+            "bound_platform": str(record.get("bound_platform") or ""),
             "session_id": str(record.get("session_id") or ""),
             "conversation_id": str(record.get("conversation_id") or ""),
             "window": str(record.get("archive_window") or ""),
@@ -129,6 +131,20 @@ class SessionServiceMixin:
             "state": str(record.get("lifecycle") or "open"),
             "run_state": str(record.get("run_state") or "idle"),
             "chain": str(record.get("chain") or "interactive"),
+            "memory_status": str(record.get("memory_status") or "unknown"),
+            "memory_processed_round": max(
+                0, int(record.get("memory_processed_round") or 0)
+            ),
+            "memory_target_round": max(
+                0, int(record.get("memory_target_round") or 0)
+            ),
+            "memory_queue_reason": str(record.get("memory_queue_reason") or ""),
+            "memory_queued_at": str(record.get("memory_queued_at") or ""),
+            "memory_last_error": (
+                dict(record["memory_last_error"])
+                if isinstance(record.get("memory_last_error"), dict)
+                else None
+            ),
             "rounds": max(0, int(record.get("rounds") or 0)),
             "updated_at": str(record.get("updated_at") or ""),
         }
@@ -375,7 +391,8 @@ class SessionServiceMixin:
         before: int | None = None,
     ) -> dict[str, Any]:
         name = self.require_user(user)
-        normalized_source = self.require_source(source)
+        normalized_source = self.require_history_source(source)
+        assert normalized_source is not None
         normalized_session = self.require_session_id(session_id)
         directory = find_window(self.root, name, normalized_source, normalized_session)
         if directory is None:

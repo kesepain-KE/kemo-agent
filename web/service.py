@@ -71,6 +71,7 @@ from web.errors import (
     TooManyChatsError,
     WebServiceError,
 )
+from web.services.artifact_resolver import DownloadArtifactResolver
 from web.services.files import FileServiceMixin
 from web.services.identity import IdentityServiceMixin
 from web.services.knowledge import KnowledgeServiceMixin
@@ -236,6 +237,7 @@ class WebRunService(
         self._chat_gates: dict[str, _UserChatGate] = {}
         self._chat_gates_lock = threading.Lock()
         self._file_upload_lock = threading.RLock()
+        self._download_artifact_resolver = DownloadArtifactResolver()
         self._skill_upload_lock = threading.RLock()
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
@@ -313,6 +315,30 @@ class WebRunService(
         if source != "web":
             raise InvalidRequestError("Web API 当前仅允许 source=web")
         return "web"
+
+    def require_history_source(
+        self,
+        source: Any = "web",
+        *,
+        allow_all: bool = False,
+    ) -> str | None:
+        """Validate a read-only history source without granting mutation rights."""
+
+        if not isinstance(source, str):
+            raise InvalidRequestError("source 必须是字符串")
+        value = source.strip()
+        if allow_all and value in {"", "all"}:
+            return None
+        if value in {"web", "cli", "interactive", "direct_api", "telegram", "onebot"}:
+            return value
+        if value.startswith("message:"):
+            platform = value.split(":", 1)[1]
+            if platform and len(platform) <= 64 and all(
+                character.isalnum() or character in {"-", "_", "."}
+                for character in platform
+            ):
+                return value
+        raise InvalidRequestError("source 不是受支持的历史来源")
 
     def require_session_id(self, session_id: Any) -> str:
         if not isinstance(session_id, str):
