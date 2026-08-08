@@ -78,6 +78,18 @@ def main(argv: list[str] | None = None) -> int:
     if f'VERSION = "{version}"' not in cli_text:
         errors.append(f"CLI 版本未指向 {version}")
 
+    project_introduction = (
+        ROOT / "global_knowledge" / "project-introduction.md"
+    ).read_text(encoding="utf-8")
+    if f"当前稳定版本为 `{version}`" not in project_introduction:
+        errors.append(f"项目介绍中的稳定版本未指向 {version}")
+
+    version_guide = (
+        ROOT / "global_knowledge" / "version-and-update-modules.md"
+    ).read_text(encoding="utf-8")
+    if f'"version": "{version}"' not in version_guide:
+        errors.append(f"版本与更新模块文档未展示根版本 {version}")
+
     tag = args.tag.strip()
     if not tag and os.getenv("GITHUB_REF_TYPE") == "tag":
         tag = os.getenv("GITHUB_REF_NAME", "").strip()
