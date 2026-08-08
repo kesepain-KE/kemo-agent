@@ -39,6 +39,20 @@ def _thumbnail_response(target: Any) -> FileResponse:
     )
 
 
+def _artifact_response(target: Any, media_type: str) -> FileResponse:
+    return FileResponse(
+        target,
+        media_type=media_type,
+        filename=target.name,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'",
+        },
+    )
+
+
 def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     """Register file-space endpoints without changing their public contract."""
 
@@ -115,6 +129,21 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> FileResponse:
         target = backend.file_download(user, scope, path)
         return FileResponse(target, filename=target.name)
+
+    @app.get("/api/users/{user}/artifacts/{checksum}")
+    async def generated_artifact(
+        user: str,
+        checksum: str,
+        path: str = Query(default="", max_length=500),
+        size: int = Query(..., ge=1),
+    ) -> FileResponse:
+        target, media_type = backend.download_artifact(
+            user,
+            checksum,
+            path=path,
+            size=size,
+        )
+        return _artifact_response(target, media_type)
 
     @app.get("/api/users/{user}/files/{scope}/preview")
     async def preview_file(

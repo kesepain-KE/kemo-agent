@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import mimetypes
 import os
 import re
 import warnings
@@ -40,11 +41,13 @@ from web.services._paths import (
     _safe_relative_target,
     _visible_children,
 )
+from web.services.artifact_resolver import DownloadArtifactResolver
 
 
 class FileServiceMixin:
     _ATTACHMENT_THUMBNAIL_SIZE = (320, 240)
     _ATTACHMENT_THUMBNAIL_RE = re.compile(r"^[a-f0-9]{64}$")
+    _DOWNLOAD_ARTIFACT_RE = re.compile(r"^[a-f0-9]{64}$")
     _ATTACHMENT_IMAGE_SUFFIXES = frozenset(
         {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
     )
@@ -379,6 +382,43 @@ class FileServiceMixin:
         if target.is_symlink() or not target.is_file():
             raise NotFoundError(f"文件不存在：{path}")
         return target
+
+    def download_artifact(
+        self,
+        user: Any,
+        checksum: Any,
+        *,
+        path: Any,
+        size: Any,
+    ) -> tuple[Path, str]:
+        """Resolve a generated artifact after safe moves or nested-path changes."""
+
+        name = self.require_user(user)
+        normalized = str(checksum or "").strip().lower()
+        if not self._DOWNLOAD_ARTIFACT_RE.fullmatch(normalized):
+            raise InvalidRequestError("产物校验和无效")
+        try:
+            expected_size = int(size)
+        except (TypeError, ValueError):
+            raise InvalidRequestError("产物大小无效") from None
+        if expected_size <= 0:
+            raise InvalidRequestError("产物大小必须大于 0")
+
+        directory = self.root / "users" / name / "download"
+        resolver = getattr(self, "_download_artifact_resolver", None)
+        if not isinstance(resolver, DownloadArtifactResolver):
+            resolver = DownloadArtifactResolver()
+            setattr(self, "_download_artifact_resolver", resolver)
+        candidate = resolver.resolve(
+            directory,
+            normalized,
+            path=path,
+            expected_size=expected_size,
+        )
+        return (
+            candidate,
+            mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
+        )
 
     def _media_preview(self, directory: Path, path: Any) -> tuple[Path, str, str]:
         relative, target = _safe_relative_target(directory, path)
