@@ -219,6 +219,18 @@ function sessionLabel(sessionId: string) {
   return sessionId
 }
 
+type InjectionPolicyMode = 'round' | 'realtime' | 'disabled'
+
+export function injectionPolicyPresentation(mode: InjectionPolicyMode | undefined) {
+  if (mode === 'realtime') {
+    return { mode: 'realtime', label: '实时注入', detail: '每次请求读取最新快照' }
+  }
+  if (mode === 'disabled') {
+    return { mode: 'disabled', label: '不注入', detail: '未进入系统提示词' }
+  }
+  return { mode: 'round', label: '按轮注入', detail: '本轮使用固定快照' }
+}
+
 const LAST_ACTIVE_USER_KEY = 'kemo-last-active-user'
 
 export function readLastActiveUser() {
@@ -271,6 +283,9 @@ export function AppShell() {
     queryFn: () => getSessions(user),
     enabled: Boolean(user),
   })
+  const webSessions = (sessionsQuery.data?.sessions ?? []).filter(
+    (session) => (session.source || 'web') === 'web',
+  )
   const activeSessionQuery = useQuery({
     queryKey: ['active-session', user, clientId],
     queryFn: () => getActiveSession(user, clientId),
@@ -614,7 +629,8 @@ export function AppShell() {
           ...current.sessions,
           ...nextPage.sessions.filter(
             (candidate) => !current.sessions.some(
-              (existing) => existing.session_id === candidate.session_id,
+              (existing) => (existing.source || 'web') === (candidate.source || 'web')
+                && existing.session_id === candidate.session_id,
             ),
           ),
         ],
@@ -683,7 +699,7 @@ export function AppShell() {
     setHistorySwitchingSessionId(targetSessionId)
     setHistorySwitchError('')
     try {
-        const currentSession = sessionsQuery.data?.sessions.find((session) => session.session_id === sessionId)
+        const currentSession = sessionsQuery.data?.sessions.find((session) => (session.source || 'web') === 'web' && session.session_id === sessionId)
         if (sessionId && currentSession?.state !== 'closed') {
           await closeSession(user, sessionId, clientId)
         }
@@ -790,6 +806,12 @@ export function AppShell() {
   const contextTotal = Number(contextTokens?.total_tokens ?? 0)
   const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
   const contextPercent = Number(contextTokens?.percent ?? 0)
+  const perceptionInjection = injectionPolicyPresentation(
+    contextWindow?.injection_policy?.perception,
+  )
+  const expandInjection = injectionPolicyPresentation(
+    contextWindow?.injection_policy?.expand,
+  )
   const provider = overview?.provider
   const kemoReasoning = providerCapabilitiesQuery.data?.capabilities.reasoning
   const kemoReasoningOptions = kemoReasoning?.supported
@@ -885,12 +907,25 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-        <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: sessionsQuery.data?.sessions ?? [], refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+          <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>
         <div className="drawer-head"><div className="context-drawer-heading"><strong>上下文窗口</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话 · 系统提示词已就绪'}</span></div><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
         <div className="drawer-body context-drawer-body">
+          <section className="context-injection-panel" aria-label="系统提示词数据注入策略">
+            <div className="context-injection-panel-head"><strong>数据注入策略</strong><small>当前用户配置 · 只读</small></div>
+            <div className="context-injection-grid">
+              <article className={`context-injection-bubble ${perceptionInjection.mode}`} aria-label={`感知数据注入情况：${perceptionInjection.label}`}>
+                <span className="context-injection-icon"><BrainCircuit size={17} /></span>
+                <span><small>感知数据注入情况</small><strong>{perceptionInjection.label}</strong><em>{perceptionInjection.detail}</em></span>
+              </article>
+              <article className={`context-injection-bubble ${expandInjection.mode}`} aria-label={`拓展数据注入情况：${expandInjection.label}`}>
+                <span className="context-injection-icon"><Shapes size={17} /></span>
+                <span><small>拓展数据注入情况</small><strong>{expandInjection.label}</strong><em>{expandInjection.detail}</em></span>
+              </article>
+            </div>
+          </section>
           <section className="context-drawer-card context-token-card">
             <div className="context-card-head"><span><CircleGauge size={17} /><strong>Token 占用概览</strong></span><small>{!contextAvailable ? '暂不可用' : contextTokens?.measurement === 'estimated' ? '运行时估算' : contextTokens?.measurement === 'provider_reference' ? 'Provider 参考' : '当前输入窗口'}</small></div>
             <div className="context-metric-grid two-columns">
@@ -944,7 +979,7 @@ export function AppShell() {
           </section>
 
           <section className="context-drawer-card compact-card">
-            <div className="context-card-head"><span><Shapes size={17} /><strong>拓展与感知</strong></span><small>外部接入</small></div>
+            <div className="context-card-head"><span><Shapes size={17} /><strong>拓展与感知</strong></span><small>模块接入数量</small></div>
             <div className="context-metric-grid two-columns">
               <div className="context-metric"><span>已接入拓展</span><strong>{contextWindow?.integrations.expands ?? '—'}</strong><small>个</small></div>
               <div className="context-metric"><span>已接入感知</span><strong>{contextWindow?.integrations.senses ?? '—'}</strong><small>个</small></div>
@@ -955,6 +990,7 @@ export function AppShell() {
       {ui.drawerOpen && <button className="drawer-backdrop" aria-label="关闭运行状态" onClick={() => ui.setDrawerOpen(false)} />}
 
       <HistorySearchDrawer
+        user={user}
         open={historyDrawerOpen}
         sessions={sessionsQuery.data?.sessions ?? []}
         activeSessionId={sessionId}

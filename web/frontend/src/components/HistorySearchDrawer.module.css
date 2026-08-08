@@ -108,6 +108,7 @@
 }
 .sessionCard:hover { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 28%, var(--surface-elevated)); transform: translateY(-1px); box-shadow: 0 9px 24px color-mix(in srgb, var(--brand) 8%, transparent); }
 .sessionCard:focus-within { border-color: var(--brand); outline: 0; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--brand) 32%, transparent); }
+.readOnlyCard { grid-template-columns: minmax(0, 1fr); }
 .activeCard { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 50%, var(--surface-elevated)); }
 
 .sessionSelect {
@@ -161,6 +162,8 @@
 .cardCopy .summaryText { cursor: help; }
 .cardCopy .summaryFailed { color: var(--amber); }
 .cardCopy small { margin-top: 5px; color: var(--muted-2); font-size: .625rem; }
+.cardCopy .memoryState { margin-top: 3px; color: var(--brand); }
+.cardCopy .memoryFailed { margin-top: 3px; color: var(--red); }
 
 .stateBadge { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .625rem; font-weight: 720; white-space: nowrap; }
 .activeBadge { color: var(--brand); background: var(--brand-soft); }

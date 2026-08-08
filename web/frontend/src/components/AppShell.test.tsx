@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { delay, http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AppShell, persistLastActiveUser, readLastActiveUser, resolveCurrentUser } from './AppShell'
+import { AppShell, injectionPolicyPresentation, persistLastActiveUser, readLastActiveUser, resolveCurrentUser } from './AppShell'
 import { ChatPage } from '../pages/ChatPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { server } from '../test/server'
@@ -18,6 +18,12 @@ afterEach(() => {
 })
 
 describe('AppShell user persistence', () => {
+  it('把注入策略状态码稳定映射为三个只读状态', () => {
+    expect(injectionPolicyPresentation('round').label).toBe('按轮注入')
+    expect(injectionPolicyPresentation('realtime').label).toBe('实时注入')
+    expect(injectionPolicyPresentation('disabled').label).toBe('不注入')
+  })
+
   it('URL 用户优先于浏览器中保存的上次用户', () => {
     expect(resolveCurrentUser('alice', 'bob', [{ name: 'alice' }, { name: 'bob' }])).toBe('alice')
   })
@@ -1189,6 +1195,9 @@ describe('AppShell navigation', () => {
     fireEvent.click(await screen.findByTitle('查看上下文与运行状态'))
 
     expect(screen.getByText('Token 占用概览')).toBeInTheDocument()
+    expect(screen.getByText('数据注入策略')).toBeInTheDocument()
+    expect(screen.getByLabelText('感知数据注入情况：按轮注入')).toBeInTheDocument()
+    expect(screen.getByLabelText('拓展数据注入情况：按轮注入')).toBeInTheDocument()
     expect(screen.getByText('对话统计')).toBeInTheDocument()
     expect(screen.getByText('任务与定时')).toBeInTheDocument()
     expect(screen.getByText('工具与子智能体')).toBeInTheDocument()
@@ -1365,12 +1374,14 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('spinbutton', { name: '子代理队列上限' })).toHaveValue(50)
     expect(screen.getByRole('spinbutton', { name: '单轮最大工具调用数' })).toHaveValue(80)
     expect(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' })).toHaveValue(8)
+    expect(screen.getByRole('spinbutton', { name: '工具参数异常重试次数' })).toHaveValue(2)
     expect(screen.getByRole('switch', { name: 'Cron 自动退避' })).toBeChecked()
     expect(screen.getByRole('slider', { name: '退避触发阈值' })).toHaveValue('0.2')
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '最大并发请求数' }), { target: { value: '12' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Web 排队槽位上限' }), { target: { value: '7' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' }), { target: { value: '9' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: '工具参数异常重试次数' }), { target: { value: '3' } })
     fireEvent.click(screen.getByRole('button', { name: '保存运行限制' }))
     await waitFor(() => expect(captured.globalChanges).toBeDefined())
 
@@ -1380,5 +1391,42 @@ describe('AppShell navigation', () => {
     expect(providerRuntime.max_concurrent_requests).toBe(12)
     expect(web.max_pending_chats).toBe(7)
     expect(tools.consecutive_identical_call_limit).toBe(9)
+    expect(tools.invalid_tool_arguments_retries).toBe(3)
+  })
+
+  it('拓展与感知支持不注入、按轮注入和实时注入三种用户策略', async () => {
+    let savedChanges: Record<string, unknown> | undefined
+    server.use(
+      http.patch('/api/users/kesepain/config', async ({ request }) => {
+        const payload = await request.json() as { changes: Record<string, unknown> }
+        savedChanges = payload.changes
+        return HttpResponse.json({ user: 'kesepain', config: payload.changes, redacted_paths: [], updated: true })
+      }),
+    )
+    renderApp('/settings?user=kesepain&tab=permissions')
+
+    const expandMaster = await screen.findByRole('switch', { name: '拓展数据注入' })
+    const expandRealtime = screen.getByRole('switch', { name: '拓展数据实时注入' })
+    const perceptionMaster = screen.getByRole('switch', { name: '感知数据注入' })
+    const perceptionRealtime = screen.getByRole('switch', { name: '感知数据实时注入' })
+    expect(expandMaster).toBeChecked()
+    expect(perceptionMaster).toBeChecked()
+    expect(expandRealtime).not.toBeChecked()
+    expect(perceptionRealtime).not.toBeChecked()
+    fireEvent.click(expandRealtime)
+    fireEvent.click(perceptionMaster)
+    expect(perceptionRealtime).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '保存权限边界' }))
+    await waitFor(() => expect(savedChanges).toBeDefined())
+
+    const expand = savedChanges?.expand as Record<string, unknown>
+    expect(expand.prompt_injection).toBe(true)
+    expect(expand.realtime_injection).toBe(true)
+    expect(expand.global_whitelist).toEqual([])
+    expect(expand.shared_whitelist).toEqual([])
+    const perception = savedChanges?.perception as Record<string, unknown>
+    expect(perception.prompt_injection).toBe(false)
+    expect(perception.realtime_injection).toBe(false)
+    expect(perception.global_whitelist).toEqual([])
   })
 })

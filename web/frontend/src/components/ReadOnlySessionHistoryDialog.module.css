@@ -1,0 +1,67 @@
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, #020617 58%, transparent);
+  backdrop-filter: blur(7px);
+}
+
+.dialog {
+  width: min(860px, 100%);
+  max-height: min(860px, calc(100vh - 40px));
+  display: grid;
+  grid-template-rows: auto auto auto minmax(180px, 1fr) auto;
+  gap: 12px;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  color: var(--text);
+  background: var(--surface-elevated);
+  box-shadow: 0 24px 80px color-mix(in srgb, #000 42%, transparent);
+}
+
+.header { display: grid; grid-template-columns: 38px minmax(0, 1fr) 34px; align-items: center; gap: 10px; }
+.icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: var(--radius-control-lg); color: var(--brand); background: var(--brand-soft); }
+.heading { min-width: 0; }
+.heading strong,
+.heading small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.heading strong { font-size: .9rem; }
+.heading small { margin-top: 4px; color: var(--muted); font-size: .68rem; }
+.header button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-control-lg); color: var(--muted); background: var(--surface-2); cursor: pointer; }
+
+.statusGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.statusGrid span { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-control-lg); background: var(--surface-2); }
+.statusGrid small,
+.statusGrid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusGrid small { color: var(--muted-2); font-size: .6rem; }
+.statusGrid strong { margin-top: 4px; font-size: .72rem; }
+
+.summary { padding: 10px 12px; border: 1px solid var(--brand-line); border-radius: var(--radius-control-lg); background: color-mix(in srgb, var(--brand-soft) 45%, var(--surface-2)); }
+.summary small { color: var(--brand); font-size: .62rem; font-weight: 750; }
+.summary p { max-height: 88px; margin: 5px 0 0; overflow: auto; color: var(--text-2); font-size: .72rem; line-height: 1.65; white-space: pre-wrap; }
+
+.messages { min-height: 0; display: flex; flex-direction: column; gap: 9px; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-1); }
+.message { align-self: flex-start; width: min(88%, 720px); padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-elevated); }
+.role_user { align-self: flex-end; border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 52%, var(--surface-elevated)); }
+.message small { color: var(--muted-2); font-size: .6rem; font-weight: 720; }
+.message pre { margin: 5px 0 0; overflow: visible; color: var(--text-2); font: inherit; font-size: .76rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.attachments span { padding: 4px 7px; border-radius: 999px; color: var(--brand); background: var(--brand-soft); font-size: .6rem; }
+.empty { min-height: 100px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: .72rem; }
+.error { padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--red) 28%, var(--line)); border-radius: var(--radius-control-lg); color: var(--red); background: var(--red-soft); font-size: .68rem; }
+.loadMore { align-self: center; min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--brand); background: var(--surface-2); cursor: pointer; }
+.dialog footer { color: var(--muted-2); font-size: .63rem; text-align: center; }
+.spinning { animation: spin .85s linear infinite; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 680px) {
+  .layer { padding: 8px; }
+  .dialog { max-height: calc(100vh - 16px); padding: 12px; }
+  .statusGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .message { width: 96%; }
+}

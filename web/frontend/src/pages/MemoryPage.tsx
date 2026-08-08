@@ -243,7 +243,7 @@ export function MemoryPage() {
   const weightToday = Boolean(item.data?.last_weight_date && item.data.last_weight_date === new Date().toISOString().slice(0, 10))
   const memoryRefreshing = summary.isFetching || important.isFetching
 
-  return <ModuleFrame kicker="Memory & Lifecycle" title="记忆" description="管理智能体不同时间尺度的记忆片段，让 kemo-agent 在对话中持续学习并提供更贴合的帮助。" actions={<div className={styles.headerActions}>
+  return <ModuleFrame kicker="Memory & Lifecycle" title="记忆" description="统一展示 Web、CLI 与外部消息渠道为当前用户形成的全部记忆；渠道只作为历史来源，不隔离记忆层。" actions={<div className={styles.headerActions}>
     <RefreshActionButton pending={memoryRefreshing} label="重新读取" pendingLabel="读取中…" onClick={reload} />
     <div className={styles.createControl}><button type="button" className="module-btn primary" onClick={() => setCreateOpen((value) => !value)}><Plus size={15} />新建记忆</button>{createOpen && <div className={styles.createPopover}><div className={styles.popoverHead}><strong>新增长期记忆</strong><button type="button" aria-label="关闭新建记忆" onClick={() => setCreateOpen(false)}><X size={15} /></button></div><p>新建记忆只能保存至长期记忆栏。</p><textarea value={newContent} maxLength={10000} placeholder="请输入要长期保存的记忆内容……" onChange={(event) => setNewContent(event.target.value)} /><small>{newContent.length} / 10000</small><div className={styles.popoverActions}><button type="button" className="module-btn" onClick={() => { setCreateOpen(false); setNewContent('') }}>取消</button><button type="button" className="module-btn primary" disabled={!newContent.trim() || create.isPending} onClick={() => create.mutate()}>{create.isPending ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}保存</button></div></div>}</div>
   </div>}>

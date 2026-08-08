@@ -45,8 +45,8 @@ interface UserConfigDraft {
   multimodal_routing: { vision: VisionRoutingMode }
   knowledge: { use_shared: boolean; use_global: boolean }
   skills: { shared_whitelist: string[] }
-  expand: { shared_whitelist: string[]; global_whitelist: string[] }
-  perception: { global_whitelist: string[] }
+  expand: { shared_whitelist: string[]; global_whitelist: string[]; prompt_injection: boolean; realtime_injection: boolean }
+  perception: { global_whitelist: string[]; prompt_injection: boolean; realtime_injection: boolean }
   plugins: { whitelist: string[] }
   task_plan: { auto_accept: boolean }
 }
@@ -54,7 +54,7 @@ interface UserConfigDraft {
 interface GlobalConfigDraft {
   agents: { token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
   memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
-  tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number }
+  tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number; invalid_tool_arguments_retries: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
   provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number }
@@ -211,8 +211,14 @@ function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
     expand: {
       shared_whitelist: stringList(expand.shared_whitelist),
       global_whitelist: stringList(expand.global_whitelist),
+      prompt_injection: booleanValue(expand.prompt_injection, true),
+      realtime_injection: booleanValue(expand.realtime_injection, false),
     },
-    perception: { global_whitelist: stringList(perception.global_whitelist) },
+    perception: {
+      global_whitelist: stringList(perception.global_whitelist),
+      prompt_injection: booleanValue(perception.prompt_injection, true),
+      realtime_injection: booleanValue(perception.realtime_injection, false),
+    },
     plugins: { whitelist: stringList(plugins.whitelist) },
     task_plan: { auto_accept: booleanValue(taskPlan.auto_accept, false) },
   }
@@ -246,6 +252,7 @@ function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
       timeout: numberValue(tools.timeout, 240),
       max_iterations: numberValue(tools.max_iterations, 80),
       consecutive_identical_call_limit: numberValue(tools.consecutive_identical_call_limit, 8),
+      invalid_tool_arguments_retries: numberValue(tools.invalid_tool_arguments_retries, 2),
     },
     history: { consecutive_tool_fail_limit: numberValue(history.consecutive_tool_fail_limit, 5) },
     task_plan: { max_steps: numberValue(taskPlan.max_steps, 20) },
@@ -278,8 +285,8 @@ function SettingRow({ title, description, control, source }: { title: string; de
   return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{source === 'user' ? '用户' : '全局'}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
 }
 
-function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (value: boolean) => void }) {
-  return <button type="button" role="switch" aria-label={label} aria-checked={checked} className={`config-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
+function Toggle({ checked, label, disabled = false, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (value: boolean) => void }) {
+  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} className={`config-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
     <span>{checked ? '已开启' : '已关闭'}</span><i aria-hidden="true"><b /></i>
   </button>
 }
@@ -834,7 +841,7 @@ export function SettingsPage() {
   const saveRuntime = () => {
     if (!userDraft || !globalDraft) return
     const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
-    const nonnegativeIntegers = [globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
+    const nonnegativeIntegers = [globalDraft.tools.invalid_tool_arguments_retries, globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
     let validation = positiveIntegers.every((value) => Number.isInteger(value) && value > 0) ? '' : '超时、轮询和并发上限必须为大于 0 的整数。'
     if (!validation && !nonnegativeIntegers.every((value) => Number.isInteger(value) && value >= 0)) validation = '队列与等待槽上限必须为大于等于 0 的整数。'
     if (!validation && (globalDraft.cron.congestion_threshold_ratio <= 0 || globalDraft.cron.congestion_threshold_ratio > 1)) validation = 'Cron 退避阈值必须大于 0 且不超过 1。'
@@ -1091,10 +1098,14 @@ export function SettingsPage() {
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>来源白名单</strong><span>输入资源 ID 后按 Enter 或逗号添加；空白名单表示全部允许。</span></div>
+            <SettingRow title="拓展数据注入" description="控制全部拓展数据是否进入系统提示词；关闭后仍可运行和主动调用拓展" source="user" control={<Toggle checked={userDraft.expand.prompt_injection} label="拓展数据注入" onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, prompt_injection: value } })} />} />
+            <SettingRow title="拓展数据实时注入" description={userDraft.expand.prompt_injection ? '开启后每次逻辑 Provider 请求都读取最新拓展快照；关闭时每轮对话只读取一次' : '拓展数据当前不进入系统提示词'} source="user" control={<Toggle checked={userDraft.expand.realtime_injection} disabled={!userDraft.expand.prompt_injection} label="拓展数据实时注入" onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, realtime_injection: value } })} />} />
+            <SettingRow title="感知数据注入" description="控制全部感知数据是否进入系统提示词；关闭后后台采集仍可继续" source="user" control={<Toggle checked={userDraft.perception.prompt_injection} label="感知数据注入" onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, prompt_injection: value } })} />} />
+            <SettingRow title="感知数据实时注入" description={userDraft.perception.prompt_injection ? '开启后每次逻辑 Provider 请求都读取最新感知快照；关闭时每轮对话只读取一次' : '感知数据当前不进入系统提示词'} source="user" control={<Toggle checked={userDraft.perception.realtime_injection} disabled={!userDraft.perception.prompt_injection} label="感知数据实时注入" onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, realtime_injection: value } })} />} />
             <SettingRow title="共享技能白名单" description="shared_skills 中允许进入主智能体 Prompt 的技能" source="user" control={<TagInput label="共享技能白名单" value={userDraft.skills.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, skills: { shared_whitelist: value } })} />} />
             <SettingRow title="共享拓展白名单" description="shared_expand 中允许加载的模块" source="user" control={<TagInput label="共享拓展白名单" value={userDraft.expand.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, shared_whitelist: value } })} />} />
             <SettingRow title="全局拓展白名单" description="global_expand 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
-            <SettingRow title="全局感知白名单" description="global_sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { global_whitelist: value } })} />} />
+            <SettingRow title="全局感知白名单" description="global_sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, global_whitelist: value } })} />} />
             <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { whitelist: value } })} />} />
           </article>
         </> : null}
@@ -1106,6 +1117,7 @@ export function SettingsPage() {
             <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
             <SettingRow title="单轮最大工具调用数" description="一轮用户对话内允许处理的工具调用总数；同一响应中的并行调用分别计数" source="global" control={<NumberInput label="单轮最大工具调用数" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
             <SettingRow title="单个工具最大连续使用上限" description="仅当工具名称和完整参数连续完全相同时累计；参数变化后重新计数" source="global" control={<NumberInput label="单个工具最大连续使用上限" value={globalDraft.tools.consecutive_identical_call_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, consecutive_identical_call_limit: value } })} />} />
+            <SettingRow title="工具参数异常重试次数" description="Provider 生成的工具参数不是完整 JSON 对象、且尚未发布可见输出或执行工具时，自动重新请求模型的次数" source="global" control={<NumberInput label="工具参数异常重试次数" value={globalDraft.tools.invalid_tool_arguments_retries} min={0} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, invalid_tool_arguments_retries: value } })} />} />
             <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
           </article>
           <article className="setting-section">

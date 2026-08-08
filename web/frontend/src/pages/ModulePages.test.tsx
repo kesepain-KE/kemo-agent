@@ -508,6 +508,8 @@ describe('V16 module pages', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '权限边界 ›' }))
     expect(await screen.findByRole('switch', { name: '使用共享知识库' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('switch', { name: '拓展数据实时注入' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: '感知数据实时注入' })).not.toBeChecked()
     expect(screen.getByLabelText('插件白名单输入')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '版本查看 ›' }))
@@ -529,6 +531,7 @@ describe('V16 module pages', () => {
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
     expect(screen.getByLabelText('单轮最大工具调用数')).toHaveValue(80)
     expect(screen.getByLabelText('单个工具最大连续使用上限')).toHaveValue(8)
+    expect(screen.getByLabelText('工具参数异常重试次数')).toHaveValue(2)
     expect(screen.getByRole('switch', { name: '自动接受任务计划' })).toHaveAttribute('aria-checked', 'false')
     fireEvent.click(screen.getByRole('button', { name: '重启智能体' }))
     const restartDialog = screen.getByRole('alertdialog', { name: '确认重启智能体' })

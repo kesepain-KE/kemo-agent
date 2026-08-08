@@ -207,6 +207,25 @@ button[aria-busy="true"] { cursor: progress; }
 .context-drawer-heading strong { color: var(--text); font-size: .9375rem; line-height: 1.2; }
 .context-drawer-heading span { max-width: 260px; overflow: hidden; color: var(--muted-2); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
 .context-drawer-body { overscroll-behavior: contain; scrollbar-gutter: stable; }
+.context-injection-panel { margin: 0 0 11px; padding: 11px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface-elevated); box-shadow: var(--shadow-soft); }
+.context-injection-panel-head { margin: 0 2px 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.context-injection-panel-head strong { color: var(--text); font-size: .75rem; }
+.context-injection-panel-head small { color: var(--muted-2); font-size: .5625rem; }
+.context-injection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.context-injection-bubble { min-width: 0; min-height: 68px; padding: 9px 10px; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--line) 84%, transparent); border-radius: 15px; background: var(--surface-2); }
+.context-injection-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: var(--brand); background: var(--brand-soft); }
+.context-injection-bubble > span:last-child { min-width: 0; }
+.context-injection-bubble small,
+.context-injection-bubble strong,
+.context-injection-bubble em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-injection-bubble small { color: var(--muted-2); font-size: .5625rem; }
+.context-injection-bubble strong { margin-top: 3px; color: var(--text); font-size: .75rem; }
+.context-injection-bubble em { margin-top: 3px; color: var(--muted); font-size: .5625rem; font-style: normal; }
+.context-injection-bubble.realtime { border-color: color-mix(in srgb, var(--brand) 42%, var(--line)); background: color-mix(in srgb, var(--brand-soft) 54%, var(--surface-2)); }
+.context-injection-bubble.realtime .context-injection-icon { color: var(--green); background: color-mix(in srgb, var(--green) 15%, var(--surface-2)); }
+.context-injection-bubble.disabled { background: color-mix(in srgb, var(--surface-3) 72%, var(--surface-2)); }
+.context-injection-bubble.disabled .context-injection-icon,
+.context-injection-bubble.disabled strong { color: var(--muted-2); }
 .context-drawer-card {
   margin: 0 0 11px;
   padding: 13px;
@@ -251,6 +270,7 @@ button[aria-busy="true"] { cursor: progress; }
 .context-drawer-card.compact-card .context-card-head { margin-bottom: 9px; }
 
 @media (max-width: 420px) {
+  .context-injection-grid { grid-template-columns: 1fr; }
   .context-metric-grid.three-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -1319,9 +1339,9 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .drawer-agent-list small, .drawer-agent-list > div > span:last-child { color: var(--muted); font-size: .625rem; }
 .drawer-agent-list > div > span:last-child { flex: 0 0 auto; align-self: center; }
 
-.guidance-message { width: calc(100% - 49px); margin: 6px 0 10px 49px; padding: 10px 12px; display: grid; gap: 4px; border: 1px solid color-mix(in srgb, var(--brand) 38%, var(--line)); border-radius: 10px; background: var(--brand-soft); }
+.guidance-message { width: calc(100% - 49px); min-width: 0; max-width: 100%; margin: 6px 0 10px 49px; padding: 10px 12px; display: grid; gap: 4px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--brand) 38%, var(--line)); border-radius: 10px; background: var(--brand-soft); }
 .guidance-message > span { color: var(--brand); font-size: .625rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
-.guidance-message > strong { color: var(--text); font-size: .8125rem; }
+.guidance-message > strong { min-width: 0; max-width: 100%; padding: 1px 0 4px; display: block; overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; color: var(--text); font-size: .8125rem; white-space: pre; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .guidance-message > small { color: var(--muted); font-size: .625rem; }
 .guidance-attachment-list { width: 100%; justify-items: start; margin-top: 4px; }
 .guidance-attachment-list .user-attachment-card { width: min(100%, 380px); }

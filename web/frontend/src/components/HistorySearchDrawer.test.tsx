@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
+import * as api from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
 
 const sessions = [
@@ -106,5 +108,59 @@ describe('HistorySearchDrawer', () => {
     expect(screen.queryByText('正在生成摘要 · 1/3…')).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: 'conv_pending_456' } })
     expect(screen.getByText('正在生成摘要 · 1/3…')).toBeInTheDocument()
+  })
+
+  it('外部消息和 CLI 归档按来源展示，并以只读方式打开完整历史和记忆状态', async () => {
+    const onSelectSession = vi.fn()
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+      user: 'alice',
+      source: 'message:telegram',
+      session_id: 'tg-1',
+      messages: [
+        { role: 'user', content: '来自 Telegram 的问题' },
+        { role: 'assistant', content: '来自智能体的回答' },
+      ],
+      round_metrics: [],
+      round_traces: [],
+      pagination: {
+        limit: 40,
+        total_rounds: 1,
+        first_round: 1,
+        last_round: 1,
+        has_more_before: false,
+        next_before: null,
+      },
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
+      user="alice"
+      open
+      sessions={[
+        {
+          source: 'message:telegram', bound_platform: 'telegram', session_id: 'tg-1',
+          window: 'tg-window', title: 'Telegram 对话', state: 'closed', chain: 'message',
+          memory_status: 'queued', memory_processed_round: 2, memory_target_round: 4,
+          rounds: 4, updated_at: '2026-08-08T00:00:00+08:00',
+        },
+      ]}
+      activeSessionId=""
+      onClose={() => undefined}
+      onSelectSession={onSelectSession}
+      onDeleteSession={() => undefined}
+      onDeleteAllSessions={() => undefined}
+      onRetrySummary={() => undefined}
+    /></QueryClientProvider>)
+
+    expect(screen.getByText(/telegram · 4 轮 · 08\/08 00:00/)).toBeInTheDocument()
+    expect(screen.getByText('记忆 queued · 2/4')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '删除对话 Telegram 对话' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '只读查看对话 Telegram 对话' }))
+
+    expect(await screen.findByRole('dialog', { name: '只读历史归档' })).toBeInTheDocument()
+    expect(await screen.findByText('来自 Telegram 的问题')).toBeInTheDocument()
+    expect(screen.getByText('来自智能体的回答')).toBeInTheDocument()
+    expect(screen.getByText('2/4')).toBeInTheDocument()
+    expect(onSelectSession).not.toHaveBeenCalled()
+    history.mockRestore()
   })
 })

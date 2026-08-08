@@ -133,8 +133,9 @@ export async function getSessions(
   query = '',
   limit = 50,
   before = '',
+  source = 'all',
 ): Promise<SessionsResponse> {
-  const params = new URLSearchParams({ limit: String(limit) })
+  const params = new URLSearchParams({ limit: String(limit), source })
   if (query.trim()) params.set('query', query.trim())
   if (before) params.set('before', before)
   return requestJson(`/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`)
@@ -214,9 +215,10 @@ export async function releaseSessionLease(
 export async function getHistory(
   user: string,
   sessionId: string,
-  options: { limit?: number; before?: number } = {},
+  options: { limit?: number; before?: number; source?: string } = {},
 ): Promise<HistoryResponse> {
   const query = new URLSearchParams()
+  if (options.source) query.set('source', options.source)
   if (options.limit !== undefined) query.set('limit', String(options.limit))
   if (options.before !== undefined) query.set('before', String(options.before))
   const suffix = query.size ? `?${query.toString()}` : ''
@@ -587,6 +589,16 @@ export function getUserFileDownloadUrl(
   path: string,
 ): string {
   return `${apiBase}/api/users/${encodeURIComponent(user)}/files/${scope}/download?path=${encodeURIComponent(path)}`
+}
+
+export function getUserArtifactUrl(
+  user: string,
+  checksum: string,
+  path: string,
+  size: number,
+): string {
+  const query = new URLSearchParams({ path, size: String(size) })
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/artifacts/${encodeURIComponent(checksum)}?${query.toString()}`
 }
 
 export function getUserFilePreviewUrl(

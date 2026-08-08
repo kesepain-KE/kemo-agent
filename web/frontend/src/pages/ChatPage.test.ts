@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
-import type { ChatItem, CronTaskSummary, PlanSummary, SenseSourceSummary } from '../types/api'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
   it('取消编辑后仍沿用撤销成功返回的历史轮次基线', () => {
@@ -461,5 +461,22 @@ describe('reduceRunEvent', () => {
     const twice = reduceRunEvent(once, event)
     expect(once[0]).toMatchObject({ kind: 'media', artifact: { path: 'answer.mp3', type: 'audio' } })
     expect(twice).toHaveLength(1)
+  })
+
+  it('媒体卡片使用校验和路由并保留嵌套路径作为快速定位提示', () => {
+    const artifact: MediaArtifact = {
+      asset_id: 'asset_output_2',
+      type: 'image',
+      name: 'generated.png',
+      scope: 'download',
+      path: 'projects/report/generated.png',
+      mime_type: 'image/png',
+      size: 1137,
+      checksum_sha256: 'b'.repeat(64),
+    }
+
+    expect(mediaArtifactUrl('test user', artifact)).toBe(
+      `/api/users/test%20user/artifacts/${'b'.repeat(64)}?path=projects%2Freport%2Fgenerated.png&size=1137`,
+    )
   })
 })

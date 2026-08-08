@@ -9,8 +9,8 @@ const sourcePolicy = {
   },
   plugins: { mode: 'all', names: [] },
   skills: { shared: { mode: 'all', names: [] }, user: { mode: 'all', names: [] } },
-  expand: { global: { mode: 'all', names: [] }, shared: { mode: 'all', names: [] } },
-  perception: { global: { mode: 'all', names: [] } },
+  expand: { global: { mode: 'all', names: [] }, shared: { mode: 'all', names: [] }, prompt_injection: true, realtime_injection: false, injection_mode: 'round' },
+  perception: { global: { mode: 'all', names: [] }, prompt_injection: true, realtime_injection: false, injection_mode: 'round' },
 }
 
 const userFileEntries = [
@@ -169,6 +169,7 @@ export const handlers = [
       knowledge: { enabled: 9, disabled: 2 },
       messages: { connected: 1 },
       integrations: { expands: 2, senses: 1 },
+      injection_policy: { expand: 'round', perception: 'round' },
     },
     context_snapshot: { available: true, source: 'runtime_recalculated', measurement: 'estimated', captured_at: '2026-07-22T00:00:00Z', system_prompt_tokens: 18200, tool_schema_tokens: 2400, conversation_tokens: 1800, summary_tokens: 0, other_tokens: 0, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67, foreground_rounds: 8 },
     session_context_stats: { selected: false, foreground_rounds: 8, background_archived_rounds: 36, session_total_rounds: 44, session_tool_calls: 19 },
@@ -262,7 +263,7 @@ export const handlers = [
     return HttpResponse.json({ enabled: body.enabled })
   }),
   http.delete('/api/users/kesepain/sense/:module', ({ params }) => HttpResponse.json({ module: params.module, deleted: true })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, history_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, history_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true, perception_prompt_injection: true, perception_realtime_injection: false, expand_prompt_injection: true, expand_realtime_injection: false }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, tool_argument_retries: 2, memory_items: 600, memory_chars: 2000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
     user: 'kesepain',
     config: {
@@ -273,8 +274,8 @@ export const handlers = [
       task_plan: { auto_accept: false },
       knowledge: { use_shared: true, use_global: true },
       skills: { shared_whitelist: [] },
-      expand: { shared_whitelist: [], global_whitelist: [] },
-      perception: { global_whitelist: [] },
+      expand: { shared_whitelist: [], global_whitelist: [], prompt_injection: true, realtime_injection: false },
+      perception: { global_whitelist: [], prompt_injection: true, realtime_injection: false },
       plugins: { whitelist: [] },
     },
     redacted_paths: ['provider.api_key'],
@@ -339,7 +340,7 @@ export const handlers = [
       schema_version: 1,
       agents: { token_limit: 1000000, token_compression_ratio: 0.3, max_rounds: 80, rounds_after_compression: 20 },
       memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
-      tools: { timeout: 240, max_iterations: 80, consecutive_identical_call_limit: 8 },
+      tools: { timeout: 240, max_iterations: 80, consecutive_identical_call_limit: 8, invalid_tool_arguments_retries: 2 },
       history: { consecutive_tool_fail_limit: 5 },
       task_plan: { max_steps: 20 },
       provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },

@@ -6,6 +6,7 @@ import {
   commandPlan,
   getLogoUrl,
   getRuntimeStatus,
+  getUserArtifactUrl,
   getUserAvatarUrl,
   getUserFileDownloadUrl,
   parseSseFrames,
@@ -103,6 +104,7 @@ describe('parseSseFrames', () => {
     expect(getLogoUrl()).toBe('/api/logo')
     expect(getUserAvatarUrl('a b', 7)).toBe('/api/users/a%20b/avatar?v=7')
     expect(getUserFileDownloadUrl('a b', 'download', 'dir/a b.txt')).toBe('/api/users/a%20b/files/download/download?path=dir%2Fa%20b.txt')
+    expect(getUserArtifactUrl('a b', 'f'.repeat(64), 'nested/generated image.png', 2048)).toBe(`/api/users/a%20b/artifacts/${'f'.repeat(64)}?path=nested%2Fgenerated+image.png&size=2048`)
   })
 
   it('使用 multipart 上传头像并广播刷新事件', async () => {

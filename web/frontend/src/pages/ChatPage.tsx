@@ -24,7 +24,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
@@ -104,8 +104,14 @@ function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
   )
 }
 
+export function mediaArtifactUrl(user: string, artifact: MediaArtifact) {
+  return /^[a-f0-9]{64}$/i.test(artifact.checksum_sha256) && artifact.size > 0
+    ? getUserArtifactUrl(user, artifact.checksum_sha256.toLowerCase(), artifact.path, artifact.size)
+    : getUserFileDownloadUrl(user, 'download', artifact.path)
+}
+
 function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaArtifact }) {
-  const url = getUserFileDownloadUrl(user, 'download', artifact.path)
+  const url = mediaArtifactUrl(user, artifact)
   return (
     <article className={`media-artifact media-artifact-${artifact.type}`}>
       {artifact.type === 'image' ? <img src={url} alt={artifact.name} loading="lazy" /> : null}

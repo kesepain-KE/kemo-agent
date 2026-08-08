@@ -41,6 +41,8 @@ export interface UserSummary {
 }
 
 export interface SessionSummary {
+  source?: string
+  bound_platform?: string
   session_id: string
   conversation_id?: string
   window: string
@@ -62,6 +64,12 @@ export interface SessionSummary {
   state?: 'open' | 'closed' | string
   run_state?: 'idle' | 'running' | 'failed' | string
   chain?: 'interactive' | 'message' | 'background' | string
+  memory_status?: 'unknown' | 'disabled' | 'deferred' | 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | string
+  memory_processed_round?: number
+  memory_target_round?: number
+  memory_queue_reason?: string
+  memory_queued_at?: string
+  memory_last_error?: { message?: string; exception_type?: string; [key: string]: unknown } | null
   rounds: number
   updated_at: string
 }
@@ -154,7 +162,7 @@ export interface AuthenticationSummary {
 
 export interface SessionsResponse {
   user: string
-  source: 'web'
+  source: string
   sessions: SessionSummary[]
   query?: string
   has_more?: boolean
@@ -228,7 +236,7 @@ export interface SessionDeleteAllResponse {
 
 export interface HistoryResponse {
   user: string
-  source: 'web'
+  source: string
   session_id: string
   messages: HistoryMessage[]
   round_metrics: Array<{
@@ -617,6 +625,10 @@ export interface SettingsResponse {
     task_plan_auto_accept: boolean
     cron: boolean
     background_scheduler: boolean
+    perception_realtime_injection: boolean
+    perception_prompt_injection?: boolean
+    expand_realtime_injection: boolean
+    expand_prompt_injection?: boolean
   }
   limits: {
     context_rounds: number
@@ -625,6 +637,7 @@ export interface SettingsResponse {
     task_plan_steps: number
     tool_iterations: number
     tool_timeout: number
+    tool_argument_retries: number
     memory_items: number
     memory_chars: number
   }
@@ -835,6 +848,10 @@ export interface OverviewResponse {
     integrations: {
       expands: number
       senses: number
+    }
+    injection_policy?: {
+      expand: 'round' | 'realtime' | 'disabled'
+      perception: 'round' | 'realtime' | 'disabled'
     }
   }
   context_snapshot: {
