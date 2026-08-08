@@ -13,7 +13,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → 加载配置（global_config.json + user_config.json 深合并）
   → 构建本轮静态 prompt bundle（人格 + 知识索引 + 记忆等）
   → 上下文选择（轮次预算 + token 预算 + 压缩）
-  → 每次逻辑 Provider 请求前重读最新拓展与感知快照
+  → 拓展与感知按各自用户总注入闸门与实时开关决定省略、按轮固定或请求级重读
   → Provider 调用循环（流式/非流式）
   → 工具调用循环（注册/发现/执行/超时/去重/取消）
   → 事务提交 SQLite 历史窗口（text + think + tool + items + data 五个逻辑分区）
@@ -150,6 +150,10 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
 | 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
 | 外部消息幂等 | `users/<name>/history/history.sqlite3` | `message_processed_messages` 表；领取、终态与启动恢复 |
+
+Web 历史列表按当前用户统一读取 `web`、`cli` 与 `message:<platform>` 来源。非 Web 会话在网页中
+只读展示，不能由网页接管或续写；其归档正文、摘要、记忆状态和失败信息仍必须完整可见。所有
+来源绑定到同一内部用户后共享同一个 `memory.sqlite3`，记忆页不得按渠道过滤。
 | 外部路由状态 | `runtime/logs.sqlite3` | `message_route_state` 表；模块健康、计数与输入线程状态 |
 | Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
 | Web 服务 | `web/` | 前端（React + Vite）+ 后端（FastAPI），开发服务器默认 `:5173` |
@@ -284,7 +288,11 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | `skills.shared_whitelist` | 共享 Prompt 技能白名单 |
 | `expand.global_whitelist` | 全局 Expand 白名单 |
 | `expand.shared_whitelist` | 共享 Expand 白名单；用户 Expand 始终按当前用户目录动态解析 |
+| `expand.prompt_injection` | 是否允许全部拓展数据进入系统提示词；缺失时默认 `true` |
+| `expand.realtime_injection` | 是否在同一轮对话的每次逻辑 Provider 请求前重读拓展快照；缺失或 `false` 时只在本轮开始读取一次 |
 | `perception.global_whitelist` | `global_sense/` 直接子目录模块白名单 |
+| `perception.prompt_injection` | 是否允许全部感知数据进入系统提示词；缺失时默认 `true` |
+| `perception.realtime_injection` | 是否在同一轮对话的每次逻辑 Provider 请求前重读感知快照；缺失或 `false` 时只在本轮开始读取一次 |
 
 主智能体白名单 `[]` 表示全量允许；非空数组按资源 ID 精确匹配。技能 ID 支持相对路径（如 `development/python`）。`"*"` 不属于主配置协议。
 
@@ -619,9 +627,11 @@ system prompt 按以下固定顺序拼接：
 15. **拓展数据** — 三层模块均由 `expand.json` 控制；健康输入数据与操控手册 `## 注入层` 可进入 Prompt，`## 操作层` 和 Python 入口只按需读取/执行。Kemo Graph 若激活，只在这里以普通 `[expand_data][global:kemo_graph]` 目录摘要出现
 16. **感知文件** — `global_sense/<module>/sense.json` 声明 `data_md` 唯一文件，按模块白名单过滤；无效模块进入诊断但不注入
 
-人格、运行手册、子代理/插件/技能注册、知识索引、记忆和任务计划等静态段在一轮用户对话开始时构建一次；
-`[expand_data]` 与 `[perception]` 属于动态段，在每一次逻辑 Provider 请求前从当前磁盘快照重新读取并替换。
-因此首个模型请求、工具续轮、运行中引导续轮以及上下文超限压缩后的重试都会使用当时最新已采集数据。
+人格、运行手册、子代理/插件/技能注册、知识索引、记忆和任务计划等静态段在一轮用户对话开始时构建一次。
+`[expand_data]` 与 `[perception]` 各自采用三级策略。`prompt_injection=false` 时对应段完全不进入
+系统提示词；总闸门开启且 `realtime_injection=false` 时只在本轮开始读取一次，以稳定提示词前缀
+并提高 Prompt Cache 命中率；两个开关都开启时，工具续轮、运行中引导续轮以及上下文超限压缩
+后的重试会重读该数据段。拓展与感知的两组开关彼此独立。
 刷新只读取后台采集器已经发布的文件，不同步执行 `data_update.py`，不会把采集耗时叠加到每次模型请求。
 Provider 适配器对同一网络请求执行传输重试或 SSE 续传时继续复用同一请求正文，不在传输层中途改变 Prompt。
 
@@ -666,6 +676,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
 - Chat Bridge 同时解析现代 `tool_calls` 和旧式单个 `function_call`。标准 `[DONE]` 仍受支持；兼容服务在已经给出明确 `finish_reason` 后干净关闭 HTTP 流也视为正常结束，但无终态标记的 EOF 仍是传输中断。
 - Chat 的输出截断或工具参数解析失败映射为统一 `incomplete`，保留最多 500 字符原始参数用于诊断而不发布可执行调用。Kemo 原生响应若携带 `ToolCallItem.parse_error`，统一运行事件层同样在工具执行前转为明确错误；这是运行时防御，不改变 Kemo 线路 Schema。
+- `tools.invalid_tool_arguments_retries` 控制工具参数生成恢复次数，默认 2。仅当统一终态为 `invalid_tool_arguments` 且失败尝试尚未发布文本、思考、媒体或完整工具调用时，主运行时才使用新的 `request_id` 和临时纠错指令重新请求；工具没有执行，因而不会重复外部副作用。已有可见输出、完整调用或超过上限时保持失败终态。
 - Kemo 传输重试只处理网络层和可重试 HTTP 状态；网关显式返回的 `retryable=true/false` 优先于状态码默认值。它不重新执行鉴权/校验/幂等冲突、完整协议损坏或模型统一终态业务失败；同一 ID 的已持久化失败终态只会重放，重新执行必须由上层建立新的逻辑请求。上下文超限继续走独立压缩链路。退避等待与流式/非流式阻塞读取均可被 Run 取消，已知远端 `response_id` 时取消会尽力传给网关。
 - Web 保存 Provider 配置后，只有重新读取到已落盘的 `provider.type=kemo` 才允许通过
   `GET /model/models?task=llm` 拉取当前密钥可用模型；`chat`、未保存配置、缺少凭据、鉴权失败或

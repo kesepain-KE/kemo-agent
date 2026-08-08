@@ -137,6 +137,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `timeout` | int | 240 | 工具未显式提供 `timeout` 时的默认秒数；显式有效参数会覆盖此值，并同时作用于插件内部期限和框架看门狗 |
 | `max_iterations` | int | 80 | 单轮对话允许处理的最大工具调用次数；并行工具调用分别计数 |
 | `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
+| `invalid_tool_arguments_retries` | int | 2 | Provider 工具参数 JSON 不完整且尚无可见输出或工具副作用时，自动重新生成参数的次数；`0` 表示禁用 |
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
@@ -194,6 +195,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 |------|------|--------|------|
 | `shared_whitelist` | array | `[]` | 共享拓展白名单。空 = 全部启用 |
 | `global_whitelist` | array | `[]` | 全局拓展白名单。空 = 全部启用 |
+| `prompt_injection` | bool | `true` | 总注入闸门。`false` 时整个 `[expand_data]` 段不进入系统提示词，但不影响后台更新或主动调用拓展 |
+| `realtime_injection` | bool | `false` | `false` 时每轮对话开始读取一次拓展快照；`true` 时每次逻辑 Provider 请求前重读最新快照。开启会降低 Prompt Cache 命中率 |
 
 > 用户拓展（`users/<name>/expand/`）始终按当前用户目录动态解析，不受白名单控制。
 
@@ -204,6 +207,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `global_whitelist` | array | `[]` | 全局感知模块白名单。空 = 全部启用 |
+| `prompt_injection` | bool | `true` | 总注入闸门。`false` 时整个 `[perception]` 段不进入系统提示词，但后台采集仍可继续 |
+| `realtime_injection` | bool | `false` | `false` 时每轮对话开始读取一次感知快照，工具续轮保持不变；`true` 时每次逻辑 Provider 请求前重读后台已发布的最新快照。开启会降低 Prompt Cache 命中率 |
 
 > 感知模块位于 `global_sense/`，只采集系统数据，通过 `sense.md` 单向注入 system prompt，不提供操控接口。
 
@@ -325,8 +330,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `multimodal_routing` | vision |
 | `knowledge` | use_shared, use_global |
 | `skills` | shared_whitelist |
-| `expand` | global_whitelist, shared_whitelist |
-| `perception` | global_whitelist |
+| `expand` | global_whitelist, shared_whitelist, prompt_injection, realtime_injection |
+| `perception` | global_whitelist, prompt_injection, realtime_injection |
 | `plugins` | whitelist |
 | `task_plan` | auto_accept |
 

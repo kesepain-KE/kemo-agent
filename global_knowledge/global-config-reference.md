@@ -37,6 +37,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `timeout` | int | `240` | 单次工具调用未提供 `timeout` 参数时的默认秒数；工具 Schema 声明且调用方显式提供有效 `timeout` 时，以显式值为准，插件内部期限与框架看门狗使用同一有效值 |
 | `max_iterations` | int | `80` | 单轮对话允许处理的最大工具调用次数。每个调用分别计数，同一 Provider 响应中的并行调用也计入总数；达到上限后停止本轮，超出部分不执行 |
 | `consecutive_identical_call_limit` | int | `8` | 同一工具使用完全相同参数连续请求的允许次数；工具或参数变化后重新计数。超过后阻止继续执行 |
+| `invalid_tool_arguments_retries` | int | `2` | Provider 返回 `invalid_tool_arguments`、且该次尝试尚未发布文本、思考、媒体或完整工具调用时，使用新 `request_id` 重新请求完整 JSON object 的次数。`0` 表示禁用恢复 |
 
 > 用户配置 `tools` 为对象深合并，可覆盖其中任意字段。
 

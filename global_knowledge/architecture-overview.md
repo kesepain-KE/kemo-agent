@@ -75,6 +75,10 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 更早消息按需从 `history_messages` 分页读取，不在 Web 启动或每轮请求时扫描全部历史。
 
+Web 历史浏览读取当前用户的全部来源。Web 会话可以继续切换和管理；CLI 与
+`message:<platform>` 会话作为只读归档打开，并显示来源、生命周期以及完整记忆处理状态。
+渠道只表示入口，不建立独立记忆区；同一内部用户的所有入口共享 `memory.sqlite3`。
+
 ### 4. 合并配置并建立资源策略
 
 `run/config.py` 读取 `config/global_config.json` 和用户 `user_config.json`。框架级运行参数按对象
@@ -106,11 +110,12 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 知识库只自动注入索引文件，普通正文按需读取。Kemo Graph 是手动调用的侧载文档站，不替换
 本地知识和记忆 Prompt。
 
-PromptBundle 分为两类生命周期：人格、手册、注册信息、知识索引、记忆和任务计划等静态段在
-一轮用户对话开始时构建一次；`[expand_data]` 与 `[perception]` 在每一次逻辑 Provider 请求前
-从当前磁盘重新读取并替换。工具续轮、运行中引导续轮和上下文恢复重试因此都能看到后台采集器
-最近一次已经发布的数据。请求前刷新不运行采集脚本；采集频率和超时仍由 RuntimeHost/Cron
-统一管理。同一网络请求内部的重试或 SSE 续传复用已经生成的请求正文，不中途改变 Prompt。
+PromptBundle 分为不同生命周期：人格、手册、注册信息、知识索引、记忆和任务计划等静态段在
+一轮用户对话开始时构建一次。`[expand_data]` 与 `[perception]` 分别由用户侧总闸门和实时开关
+形成三态：`prompt_injection=false` 时整个段从系统提示词中省略；总闸门开启而
+`realtime_injection=false` 时使用本轮固定快照；两者都开启时在工具续轮、运行中引导续轮和
+上下文恢复请求前重读最新快照。请求前刷新不运行采集脚本；采集频率和超时仍由
+RuntimeHost/Cron 统一管理。同一网络请求内部的重试或 SSE 续传复用已经生成的请求正文。
 
 ### 6. 估算上下文并按需压缩
 
@@ -146,6 +151,10 @@ Provider 返回可执行工具调用后，运行时：
 
 `tools.max_iterations` 当前表示一轮允许执行的工具调用数，默认 80。工具正文序列化后超过
 100,000 字符时不会进入上下文，而是返回范围读取提示。完整机制见 `plugin-development.md`。
+
+Provider 偶发生成不完整工具 JSON 时，运行时不会进入插件。若该次尝试尚无可见输出或完整工具
+调用，会按 `tools.invalid_tool_arguments_retries` 使用新请求 ID 请求模型重新生成；默认最多 2 次，
+且不会重复执行工具。已有可见输出或工具副作用时不做静默重试。
 
 ### 9. 处理运行中引导
 
