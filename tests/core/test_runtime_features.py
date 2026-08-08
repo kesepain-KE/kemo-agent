@@ -687,7 +687,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
 
-    def test_each_provider_request_refreshes_expand_and_perception_snapshots(
+    def test_provider_request_refresh_gates_expand_and_perception_by_user_switches(
         self,
     ) -> None:
         _, root = self.make_root()
@@ -791,10 +791,54 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn("EXPAND_REQUEST_ONE", first_system)
         self.assertIn("SENSE_REQUEST_ONE", first_system)
         self.assertNotIn("EXPAND_REQUEST_TWO", first_system)
-        self.assertIn("EXPAND_REQUEST_TWO", second_system)
-        self.assertIn("SENSE_REQUEST_TWO", second_system)
-        self.assertNotIn("EXPAND_REQUEST_ONE", second_system)
-        self.assertNotIn("SENSE_REQUEST_ONE", second_system)
+        self.assertIn("EXPAND_REQUEST_ONE", second_system)
+        self.assertIn("SENSE_REQUEST_ONE", second_system)
+        self.assertNotIn("EXPAND_REQUEST_TWO", second_system)
+        self.assertNotIn("SENSE_REQUEST_TWO", second_system)
+
+        user_config_path = root / "users" / "alice" / "user_config.json"
+        user_config = json.loads(user_config_path.read_text("utf-8"))
+        user_config["expand"] = {
+            "global_whitelist": [],
+            "shared_whitelist": [],
+            "realtime_injection": True,
+        }
+        user_config["perception"] = {
+            "global_whitelist": [],
+            "realtime_injection": True,
+        }
+        user_config_path.write_text(json.dumps(user_config), "utf-8")
+        expand_data.write_text("EXPAND_REQUEST_ONE", "utf-8")
+        sense_data.write_text("SENSE_REQUEST_ONE", "utf-8")
+        realtime_provider = UpdatingProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("refresh-live", "lookup", {"value": "x"})],
+                    finish_reason="tool_calls",
+                    usage=Usage(),
+                ),
+                ChatResponse(text="done", finish_reason="stop", usage=Usage()),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "dynamic-sources-realtime",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: realtime_provider,
+            )
+
+        realtime_first = realtime_provider.requests[0].messages[0]["content"]
+        realtime_second = realtime_provider.requests[1].messages[0]["content"]
+        self.assertIn("SENSE_REQUEST_ONE", realtime_first)
+        self.assertIn("EXPAND_REQUEST_TWO", realtime_second)
+        self.assertIn("SENSE_REQUEST_TWO", realtime_second)
+        self.assertNotIn("SENSE_REQUEST_ONE", realtime_second)
 
     def test_oversized_tool_result_is_omitted_before_provider_and_history(self) -> None:
         _, root = self.make_root()
@@ -1687,6 +1731,245 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(events[0].metadata["status"], "failed")
         self.assertEqual(events[0].metadata["stop_reason"], "provider_congestion")
         window = load_window(find_window(root, "alice", "cli", "provider-busy"))
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_native_kemo_invalid_tool_arguments_retry_before_tool_execution(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+
+        class NativeProvider:
+            def __init__(self) -> None:
+                self.requests = []
+                self.responses = [
+                    KemoResponse(
+                        request_id="placeholder",
+                        status=ResponseStatus.REQUIRES_ACTION,
+                        model="mock",
+                        output=[
+                            ToolCallItem(
+                                id="invalid-item",
+                                call_id="invalid-call",
+                                name="lookup",
+                                arguments={},
+                                arguments_raw='{"value":"unfinished',
+                                parse_error={"message": "Unterminated string"},
+                            )
+                        ],
+                    ),
+                    KemoResponse(
+                        request_id="placeholder",
+                        status=ResponseStatus.REQUIRES_ACTION,
+                        model="mock",
+                        output=[
+                            ToolCallItem(
+                                id="valid-item",
+                                call_id="valid-call",
+                                name="lookup",
+                                arguments={"value": "safe"},
+                            )
+                        ],
+                    ),
+                    KemoResponse(
+                        request_id="placeholder",
+                        status=ResponseStatus.COMPLETED,
+                        model="mock",
+                        output=[
+                            MessageItem.text(MessageRole.ASSISTANT, "completed")
+                        ],
+                    ),
+                ]
+
+            def create(self, request):
+                self.requests.append(request)
+                return self.responses.pop(0).model_copy(
+                    update={"request_id": request.request_id}
+                )
+
+        provider = NativeProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "native-tool-argument-retry",
+                        "prompt": "lookup",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "done")
+        self.assertFalse(any(event.type == "error" for event in events))
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(len({request.request_id for request in provider.requests}), 3)
+        retry_messages = kemo_request_to_chat(provider.requests[1]).messages
+        self.assertIn("provider_tool_argument_repair", retry_messages[0]["content"])
+        self.assertEqual(provider.requests[1].metadata["tool_argument_retry"], 1)
+        self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
+        window = load_window(
+            find_window(root, "alice", "cli", "native-tool-argument-retry")
+        )
+        self.assertEqual(len(window["tool"]["rounds"][0]["calls"]), 1)
+        self.assertEqual(
+            window["data"]["round_metrics"][0]["tool_argument_retries"], 1
+        )
+
+    def test_chat_stream_invalid_tool_arguments_retry_without_duplicate_card(
+        self,
+    ) -> None:
+        _, root = self.make_root(stream=True)
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="invalid-call",
+                        tool_name="lookup",
+                        arguments={},
+                        metadata={
+                            "raw_arguments": '{"value":"unfinished',
+                            "parse_error": {"message": "Unterminated string"},
+                            "finish_reason": "tool_calls",
+                        },
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ],
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="valid-call",
+                        tool_name="lookup",
+                        arguments={"value": "safe"},
+                        metadata={"finish_reason": "tool_calls"},
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ],
+                [
+                    RunEvent(type="text_delta", content="completed"),
+                    RunEvent(type="done", metadata={"finish_reason": "stop"}),
+                ],
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "chat-tool-argument-retry",
+                        "prompt": "lookup",
+                        "stream": True,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "done")
+        self.assertFalse(any(event.type == "error" for event in events))
+        self.assertEqual(
+            len([event for event in events if event.type == "tool_call_start"]), 1
+        )
+        self.assertEqual(len(provider.requests), 3)
+        self.assertIn(
+            "provider_tool_argument_repair",
+            provider.requests[1].messages[0]["content"],
+        )
+
+    def test_invalid_tool_arguments_with_visible_output_is_not_retried(self) -> None:
+        _, root = self.make_root(stream=True)
+        provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(type="text_delta", content="visible"),
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="invalid-call",
+                        tool_name="lookup",
+                        arguments={},
+                        metadata={
+                            "raw_arguments": "{",
+                            "parse_error": {"message": "invalid"},
+                            "finish_reason": "tool_calls",
+                        },
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ]
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "visible-invalid-tool-arguments",
+                        "prompt": "lookup",
+                        "stream": True,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["text_delta", "error"])
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(events[-1].error["retry_count"], 0)
+        self.assertEqual(events[-1].error["retry_limit"], 2)
+
+    def test_invalid_tool_arguments_retry_limit_commits_one_failed_round(self) -> None:
+        _, root = self.make_root()
+
+        def invalid_response(number: int) -> ChatResponse:
+            return ChatResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id=f"invalid-{number}",
+                        name="expand_call",
+                        arguments={},
+                        arguments_raw="{",
+                        parse_error={"message": "invalid"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+
+        provider = ScriptedProvider(
+            responses=[invalid_response(1), invalid_response(2), invalid_response(3)]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "invalid-tool-argument-limit",
+                        "prompt": "call expand",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "error")
+        self.assertFalse(any(event.type == "text_delta" for event in events))
+        self.assertFalse(any(event.type == "tool_call_start" for event in events))
+        self.assertEqual(len([event for event in events if event.type == "error"]), 1)
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(events[-1].error["retry_count"], 2)
+        self.assertEqual(events[-1].error["retry_limit"], 2)
+        window = load_window(
+            find_window(root, "alice", "cli", "invalid-tool-argument-limit")
+        )
+        self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
     def test_unrecoverable_context_error_commits_failed_round(self) -> None:

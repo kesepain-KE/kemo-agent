@@ -129,6 +129,61 @@ _EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
 _FILE_LIVE_READ_ACTIONS = frozenset(
     {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
 )
+_INVALID_TOOL_ARGUMENTS_STOP_REASON = "invalid_tool_arguments"
+
+
+def _is_invalid_tool_arguments_error(error: Any) -> bool:
+    if not isinstance(error, dict):
+        return False
+    return (
+        str(error.get("stop_reason") or "").strip().casefold()
+        == _INVALID_TOOL_ARGUMENTS_STOP_REASON
+        or str(error.get("exception_type") or "").strip()
+        == "ProviderToolArgumentsError"
+    )
+
+
+def _invalid_tool_name(error: dict[str, Any]) -> str:
+    direct = str(error.get("tool_name") or "").strip()
+    if direct:
+        return direct
+    details = error.get("incomplete_details")
+    if not isinstance(details, dict):
+        return ""
+    invalid_calls = details.get("invalid_tool_calls")
+    if not isinstance(invalid_calls, list):
+        return ""
+    for item in invalid_calls:
+        if isinstance(item, dict) and str(item.get("name") or "").strip():
+            return str(item["name"]).strip()
+    return ""
+
+
+def _messages_with_tool_argument_repair(
+    messages: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    retry_number: int,
+) -> list[dict[str, Any]]:
+    """Add a transient correction without changing durable conversation messages."""
+
+    repaired = copy.deepcopy(messages)
+    target = f"工具 {tool_name!r}" if tool_name else "刚才的工具"
+    correction = (
+        "[provider_tool_argument_repair]\n"
+        f"上一次生成{target}时，arguments 不是完整 JSON 对象。"
+        f"这是第 {retry_number} 次恢复请求。请只重新生成原计划中的完整工具调用，"
+        "确保 arguments 的根节点是完整 JSON object；不要重复已经输出的解释文字，"
+        "也不要把 JSON 放进普通文本。\n"
+        "[/provider_tool_argument_repair]"
+    )
+    if repaired and repaired[0].get("role") == "system":
+        content = repaired[0].get("content")
+        if isinstance(content, str):
+            repaired[0]["content"] = f"{content.rstrip()}\n\n{correction}"
+            return repaired
+    repaired.insert(0, {"role": "system", "content": correction})
+    return repaired
 
 
 def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
@@ -696,6 +751,18 @@ def _iter_request_events_impl(
                     "tools.consecutive_identical_call_limit 必须是正整数"
                 )
             identical_call_limit = raw_identical_call_limit
+            raw_invalid_tool_arguments_retries = tool_config.get(
+                "invalid_tool_arguments_retries", 2
+            )
+            if (
+                isinstance(raw_invalid_tool_arguments_retries, bool)
+                or not isinstance(raw_invalid_tool_arguments_retries, int)
+                or raw_invalid_tool_arguments_retries < 0
+            ):
+                raise EngineError(
+                    "tools.invalid_tool_arguments_retries 必须是大于等于 0 的整数"
+                )
+            invalid_tool_arguments_retry_limit = raw_invalid_tool_arguments_retries
             raw_failure_limit = (config.get("history") or {}).get(
                 "consecutive_tool_fail_limit", 5
             )
@@ -1064,6 +1131,7 @@ def _iter_request_events_impl(
             final_metadata: dict[str, Any] = {}
             completed = False
             context_retry_count = 0
+            tool_argument_retry_count = 0
             last_provider_input_tokens: int | None = None
             last_sent_local_tokens: int | None = None
 
@@ -1186,16 +1254,27 @@ def _iter_request_events_impl(
                     else None
                 )
                 provider_attempt = 0
+                invalid_tool_arguments_retries = 0
+                repair_tool_name = ""
                 while True:
                     if provider_attempt > 0:
                         refresh_dynamic_system_message()
                     provider_attempt += 1
+                    request_messages = (
+                        _messages_with_tool_argument_repair(
+                            messages,
+                            tool_name=repair_tool_name,
+                            retry_number=invalid_tool_arguments_retries,
+                        )
+                        if invalid_tool_arguments_retries
+                        else messages
+                    )
                     request_local_tokens = estimate_messages_tokens(
-                        messages
+                        request_messages
                     ) + estimate_tools_tokens(active_tool_schemas)
                     chat_request = ChatRequest(
                         model=runtime_provider["model"],
-                        messages=messages,
+                        messages=request_messages,
                         stream=stream,
                         tools=active_tool_schemas,
                         max_tokens=request_max_tokens,
@@ -1205,7 +1284,11 @@ def _iter_request_events_impl(
                         update={
                             "request_id": f"req_{uuid.uuid4().hex}",
                             "parent_request_id": protocol_parent_request_id,
-                            "attempt": context_retry_count + 1,
+                            "attempt": (
+                                context_retry_count
+                                + invalid_tool_arguments_retries
+                                + 1
+                            ),
                             "metadata": {
                                 "capability": "conversation",
                                 "user": user,
@@ -1213,6 +1296,7 @@ def _iter_request_events_impl(
                                 "session_id": session_id,
                                 "run_id": run_id,
                                 "iteration": iteration,
+                                "tool_argument_retry": invalid_tool_arguments_retries,
                                 "window": window_path.name,
                                 "prompt_hash": prompt_bundle.diagnostics.get("hash"),
                             },
@@ -1223,6 +1307,8 @@ def _iter_request_events_impl(
                     calls: list[ToolCall] = []
                     iteration_done: RunEvent | None = None
                     iteration_usage: Usage | None = None
+                    retry_invalid_tool_arguments = False
+                    attempt_published_media = False
                     try:
                         with provider_request_slot(config, cancel_event=cancel_event):
                             for event in _provider_events(
@@ -1285,24 +1371,51 @@ def _iter_request_events_impl(
                                         metadata={"iteration": iteration},
                                     )
                                 elif event.type == "media_output":
+                                    attempt_published_media = True
                                     yield event
                                 elif event.type == "error":
                                     _raise_if_context_length_exceeded(event.error)
+                                    can_retry_invalid_arguments = (
+                                        _is_invalid_tool_arguments_error(event.error)
+                                        and invalid_tool_arguments_retries
+                                        < invalid_tool_arguments_retry_limit
+                                        and not iteration_text
+                                        and not iteration_reasoning
+                                        and not calls
+                                        and not attempt_published_media
+                                    )
                                     if iteration_usage is not None:
                                         _record_provider_request(
                                             usage_total, iteration_usage
                                         )
                                         iteration_usage = None
+                                    if can_retry_invalid_arguments:
+                                        invalid_tool_arguments_retries += 1
+                                        tool_argument_retry_count += 1
+                                        repair_tool_name = _invalid_tool_name(event.error)
+                                        retry_invalid_tool_arguments = True
+                                        break
+                                    failure = copy.deepcopy(event.error)
+                                    if _is_invalid_tool_arguments_error(failure):
+                                        failure["retry_count"] = (
+                                            invalid_tool_arguments_retries
+                                        )
+                                        failure["retry_limit"] = (
+                                            invalid_tool_arguments_retry_limit
+                                        )
                                     terminal_event = commit_failed_round(
-                                        event.error,
+                                        failure,
                                         reason="provider_error_event",
                                     )
+                                    event.error = failure
                                     yield _committed_failure_event(
                                         event, terminal_event
                                     )
                                     return
                                 elif event.type == "done":
                                     iteration_done = event
+                        if retry_invalid_tool_arguments:
+                            continue
                         break
                     except ProviderCongestionError as exc:
                         if cancel_event is not None and cancel_event.is_set():
@@ -1780,6 +1893,7 @@ def _iter_request_events_impl(
                     "usage": dict(usage_total),
                     "elapsed_ms": round_elapsed_ms,
                     "tool_calls": len(tool_records),
+                    "tool_argument_retries": tool_argument_retry_count,
                     "guidance": list(consumed_guidance),
                     "guidance_details": copy.deepcopy(consumed_guidance_details),
                     "provider_responses": copy.deepcopy(provider_responses),
@@ -2065,6 +2179,7 @@ def _iter_request_events_impl(
                     "session_id": session_id,
                     "window": window_path.name,
                     "tool_calls": len(tool_records),
+                    "tool_argument_retries": tool_argument_retry_count,
                     "elapsed_ms": round_elapsed_ms,
                     "run_id": run_id,
                     "guidance_count": len(consumed_guidance),

@@ -8,7 +8,8 @@
     "enabled": true,
     "timeout": 240,
     "max_iterations": 80,
-    "consecutive_identical_call_limit": 8
+    "consecutive_identical_call_limit": 8,
+    "invalid_tool_arguments_retries": 2
   },
   "history": {
     "schema_version": 1,
