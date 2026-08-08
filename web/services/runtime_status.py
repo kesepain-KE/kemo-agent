@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 from typing import Any
 
 from provider.protocol.models import normalize_reasoning_effort
@@ -534,13 +533,16 @@ class RuntimeStatusServiceMixin:
         if "prompt" in requested_sections and bundle is not None:
             prompt_components = []
             for section in bundle.sections:
+                disabled = section.mode == "disabled"
                 empty = section.content.strip() in {"", "（无）"}
                 prompt_components.append(
                     {
                         "id": section.name,
                         "name": section.name,
                         "state": (
-                            "empty"
+                            "disabled"
+                            if disabled
+                            else "empty"
                             if empty
                             else "truncated"
                             if section.truncated

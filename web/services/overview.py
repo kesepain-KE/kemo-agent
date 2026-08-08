@@ -351,6 +351,20 @@ class OverviewServiceMixin:
                         (sense_data.get("summary") or {}).get("enabled")
                     ),
                 },
+                "injection_policy": {
+                    "expand": str(
+                        ((settings_data.get("source_policy") or {}).get("expand") or {}).get(
+                            "injection_mode"
+                        )
+                        or "round"
+                    ),
+                    "perception": str(
+                        ((settings_data.get("source_policy") or {}).get("perception") or {}).get(
+                            "injection_mode"
+                        )
+                        or "round"
+                    ),
+                },
             },
             "context_snapshot": context_snapshot,
             "session_context_stats": {

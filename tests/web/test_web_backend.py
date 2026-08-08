@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import os
@@ -45,7 +46,9 @@ from run.model_capabilities import clear_model_capability_cache
 from run.task_plan_store import PlanStore, normalize_plan
 from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError, resolve_client_ip
+from web.errors import NotFoundError, WebServiceError
 from web.service import ActiveRun, WebRunService, _usage_cache_tokens
+from web.services.artifact_resolver import DownloadArtifactResolver
 
 
 class FakeService:
@@ -416,6 +419,162 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["pagination"]["page"], 2)
         self.assertEqual(len(response.json()["entries"]), 2)
+
+    def test_generated_artifact_resolves_nested_move_by_checksum(self) -> None:
+        _, root = self.make_root()
+        download_root = root / "users" / "alice" / "download"
+        original = download_root / "generated.png"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        payload = b"generated-media-payload"
+        original.write_bytes(payload)
+        checksum = hashlib.sha256(payload).hexdigest()
+
+        moved = download_root / "reports" / "figures" / "framework.png"
+        moved.parent.mkdir(parents=True)
+        original.replace(moved)
+        service = WebRunService(root)
+
+        resolved, media_type = service.download_artifact(
+            "alice",
+            checksum,
+            path="generated.png",
+            size=len(payload),
+        )
+        self.assertEqual(resolved, moved)
+        self.assertEqual(media_type, "image/png")
+        resolver = service._download_artifact_resolver
+        with patch.object(
+            resolver,
+            "_file_sha256",
+            side_effect=AssertionError("缓存命中时不应重新读取完整文件"),
+        ):
+            cached, _ = service.download_artifact(
+                "alice",
+                checksum,
+                path="generated.png",
+                size=len(payload),
+            )
+        self.assertEqual(cached, moved)
+
+        response = self.request(
+            create_app(service=service),
+            "GET",
+            f"/api/users/alice/artifacts/{checksum}?path=generated.png&size={len(payload)}",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, payload)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertIn("inline", response.headers["content-disposition"])
+
+        missing = self.request(
+            create_app(service=service),
+            "GET",
+            f"/api/users/alice/artifacts/{'0' * 64}?path=generated.png&size={len(payload)}",
+        )
+        self.assertEqual(missing.status_code, 404)
+
+    def test_generated_artifact_lookup_is_bounded_and_negative_cached(self) -> None:
+        _, root = self.make_root()
+        download_root = root / "users" / "alice" / "download"
+        download_root.mkdir(parents=True, exist_ok=True)
+        (download_root / "one.bin").write_bytes(b"a")
+        (download_root / "two.bin").write_bytes(b"b")
+
+        resolver = DownloadArtifactResolver(
+            max_cache_entries=2,
+            negative_ttl_seconds=30,
+            max_scanned_files=10,
+            max_hash_candidates=1,
+        )
+        with self.assertRaisesRegex(WebServiceError, "检索范围过大"):
+            resolver.resolve(
+                download_root,
+                hashlib.sha256(b"missing").hexdigest(),
+                path="missing.bin",
+                expected_size=1,
+            )
+
+        with patch(
+            "web.services.artifact_resolver.os.walk",
+            side_effect=AssertionError("短期失败缓存命中时不应再次扫盘"),
+        ):
+            with self.assertRaisesRegex(WebServiceError, "检索范围过大"):
+                resolver.resolve(
+                    download_root,
+                    hashlib.sha256(b"missing").hexdigest(),
+                    path="missing.bin",
+                    expected_size=1,
+                )
+
+        empty_root = root / "users" / "alice" / "download-empty"
+        empty_root.mkdir(parents=True)
+        missing_checksum = hashlib.sha256(b"not-created").hexdigest()
+        with self.assertRaises(NotFoundError):
+            resolver.resolve(
+                empty_root,
+                missing_checksum,
+                path="missing.bin",
+                expected_size=11,
+            )
+        with patch(
+            "web.services.artifact_resolver.os.walk",
+            side_effect=AssertionError("负缓存命中时不应再次扫盘"),
+        ):
+            with self.assertRaises(NotFoundError):
+                resolver.resolve(
+                    empty_root,
+                    missing_checksum,
+                    path="missing.bin",
+                    expected_size=11,
+                )
+        self.assertLessEqual(len(resolver._cache), resolver.max_cache_entries)
+
+    def test_disabled_prompt_sections_are_reported_as_disabled(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "expand": {
+                        "prompt_injection": False,
+                        "realtime_injection": True,
+                    },
+                    "perception": {
+                        "prompt_injection": False,
+                        "realtime_injection": True,
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        app = create_app(service=WebRunService(root))
+
+        prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
+        self.assertEqual(prompt.status_code, 200, prompt.text)
+        prompt_states = {
+            item["name"]: item["status"] for item in prompt.json()["sections"]
+        }
+        self.assertEqual(prompt_states["expand_data"], "disabled")
+        self.assertEqual(prompt_states["perception"], "disabled")
+
+        runtime = self.request(
+            app,
+            "GET",
+            "/api/users/alice/runtime/status?sections=prompt",
+        )
+        self.assertEqual(runtime.status_code, 200, runtime.text)
+        runtime_states = {
+            item["id"]: item["state"]
+            for item in runtime.json()["prompt"]["components"]
+        }
+        self.assertEqual(runtime_states["expand_data"], "disabled")
+        self.assertEqual(runtime_states["perception"], "disabled")
+        self.assertNotIn("[expand_data]", runtime.json()["prompt"]["content"])
+        self.assertNotIn("[perception]", runtime.json()["prompt"]["content"])
 
     def test_media_preview_is_inline_range_capable_and_enforces_limits(self) -> None:
         _, root = self.make_root()
@@ -2532,12 +2691,88 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(missing_user.status_code, 404)
         self.assertEqual(missing_user.json()["error"]["code"], "not_found")
         invalid_source = self.request(
-            app, "GET", "/api/users/alice/sessions?source=cli"
+            app, "GET", "/api/users/alice/sessions?source=message%3A..%2Fescape"
         )
         self.assertEqual(invalid_source.status_code, 400)
         cross_user = self.request(app, "GET", "/api/users/bob/sessions/private/history")
         self.assertEqual(cross_user.status_code, 404)
         self.assertNotIn("secret", cross_user.text)
+
+    def test_history_read_api_treats_web_cli_and_message_archives_equally(self) -> None:
+        _, root = self.make_root()
+        for source, session_id, content in (
+            ("web", "web-session", "web content"),
+            ("cli", "cli-session", "cli content"),
+            ("message:telegram", "telegram-session", "telegram content"),
+        ):
+            window = empty_window("alice", source, session_id)
+            window["text"]["messages"] = [
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": f"reply {content}"},
+            ]
+            window["data"].update(
+                {
+                    "rounds": 1,
+                    "memory_status": "queued" if source.startswith("message:") else "completed",
+                    "memory_processed_round": 0 if source.startswith("message:") else 1,
+                    "memory_target_round": 1,
+                    "memory_queue_reason": "session_closed",
+                }
+            )
+            commit_window(
+                root / "users" / "alice" / "history" / f"window-{session_id}",
+                window,
+            )
+            if source != "web":
+                close_session(root, "alice", source, session_id)
+
+        app = create_app(service=WebRunService(root))
+        all_sessions = self.request(
+            app, "GET", "/api/users/alice/sessions?source=all"
+        )
+        self.assertEqual(all_sessions.status_code, 200, all_sessions.text)
+        payload = all_sessions.json()
+        self.assertEqual(payload["source"], "all")
+        self.assertEqual(
+            {item["source"] for item in payload["sessions"]},
+            {"web", "cli", "message:telegram"},
+        )
+        telegram = next(
+            item
+            for item in payload["sessions"]
+            if item["source"] == "message:telegram"
+        )
+        self.assertEqual(telegram["chain"], "message")
+        self.assertEqual(telegram["bound_platform"], "telegram")
+        self.assertEqual(telegram["memory_status"], "queued")
+        self.assertEqual(telegram["memory_processed_round"], 0)
+        self.assertEqual(telegram["memory_target_round"], 1)
+        self.assertEqual(telegram["memory_queue_reason"], "session_closed")
+
+        cli_history = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/cli-session/history?source=cli",
+        )
+        self.assertEqual(cli_history.status_code, 200, cli_history.text)
+        self.assertEqual(cli_history.json()["messages"][0]["content"], "cli content")
+        telegram_history = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/telegram-session/history?source=message%3Atelegram",
+        )
+        self.assertEqual(telegram_history.status_code, 200, telegram_history.text)
+        self.assertEqual(
+            telegram_history.json()["messages"][0]["content"],
+            "telegram content",
+        )
+
+        read_only_boundary = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/sessions/telegram-session?source=message%3Atelegram",
+        )
+        self.assertEqual(read_only_boundary.status_code, 400)
 
     def test_validation_and_internal_error_are_sanitized(self) -> None:
         invalid = self.request(
@@ -3637,6 +3872,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("connected", context_window["messages"])
         self.assertIn("expands", context_window["integrations"])
         self.assertIn("senses", context_window["integrations"])
+        self.assertEqual(
+            context_window["injection_policy"],
+            {"expand": "round", "perception": "round"},
+        )
 
         runtime_status = self.request(
             app,
@@ -3952,6 +4191,16 @@ class WebBackendTests(unittest.TestCase):
             },
         )
         self.assertFalse(settings.json()["authentication"]["enabled"])
+        self.assertTrue(settings.json()["features"]["expand_prompt_injection"])
+        self.assertTrue(settings.json()["features"]["perception_prompt_injection"])
+        self.assertEqual(
+            settings.json()["source_policy"]["expand"]["injection_mode"],
+            "round",
+        )
+        self.assertEqual(
+            settings.json()["source_policy"]["perception"]["injection_mode"],
+            "round",
+        )
         self.assertNotIn("kemo_graph", settings.json()["source_policy"])
         self.assertNotIn("super-secret", settings.text)
         self.assertNotIn("api_key", settings.text)

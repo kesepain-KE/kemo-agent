@@ -124,6 +124,7 @@ _CONFIG_SOURCE_PATHS = (
     "tools.enabled",
     "tools.max_iterations",
     "tools.consecutive_identical_call_limit",
+    "tools.invalid_tool_arguments_retries",
     "tools.timeout",
     "memory.extraction_mode",
     "memory.history_read_enabled",
@@ -151,7 +152,11 @@ _CONFIG_SOURCE_PATHS = (
     "plugins.whitelist",
     "expand.global_whitelist",
     "expand.shared_whitelist",
+    "expand.prompt_injection",
+    "expand.realtime_injection",
     "perception.global_whitelist",
+    "perception.prompt_injection",
+    "perception.realtime_injection",
 )
 
 
@@ -572,6 +577,18 @@ class SettingsServiceMixin:
                 "background_scheduler": bool(
                     runtime_host.get("enable_background_scheduler", True)
                 ),
+                "perception_realtime_injection": (
+                    source_policy.perception_realtime_injection
+                ),
+                "perception_prompt_injection": (
+                    source_policy.perception_prompt_injection
+                ),
+                "expand_realtime_injection": (
+                    source_policy.expand_realtime_injection
+                ),
+                "expand_prompt_injection": (
+                    source_policy.expand_prompt_injection
+                ),
             },
             "limits": {
                 "context_rounds": int(agents.get("max_rounds") or 30),
@@ -582,6 +599,9 @@ class SettingsServiceMixin:
                 "task_plan_steps": int(task_plan.get("max_steps") or 10),
                 "tool_iterations": int(tools.get("max_iterations") or 80),
                 "tool_timeout": float(tools.get("timeout") or 60),
+                "tool_argument_retries": int(
+                    tools.get("invalid_tool_arguments_retries", 2)
+                ),
                 "memory_items": sum(
                     int(temporary_memory_limits.get(tier, default))
                     for tier, default in (
@@ -773,10 +793,17 @@ class SettingsServiceMixin:
         sections = []
         for section_name in PROMPT_SECTION_ORDER:
             detail = selected.get(section_name)
+            status = (
+                "disabled"
+                if isinstance(detail, dict) and detail.get("mode") == "disabled"
+                else "injected"
+                if isinstance(detail, dict)
+                else "omitted"
+            )
             sections.append(
                 {
                     "name": section_name,
-                    "status": "injected" if isinstance(detail, dict) else "omitted",
+                    "status": status,
                     "original_items": int((detail or {}).get("original_items") or 0),
                     "injected_items": int((detail or {}).get("injected_items") or 0),
                     "original_chars": int((detail or {}).get("original_chars") or 0),
