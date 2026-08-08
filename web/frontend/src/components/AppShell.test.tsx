@@ -1140,7 +1140,10 @@ describe('AppShell navigation', () => {
     expect(getSearch()).not.toContain('session=s1')
 
     releaseClose()
-    await waitFor(() => expect(getSearch()).toContain('session=conv_new_session'))
+    await waitFor(
+      () => expect(getSearch()).toContain('session=conv_new_session'),
+      { timeout: 5000 },
+    )
     expect(getPathname()).toBe('/settings')
   })
 

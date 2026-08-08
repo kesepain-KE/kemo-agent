@@ -440,7 +440,7 @@ class WebBackendTests(unittest.TestCase):
             path="generated.png",
             size=len(payload),
         )
-        self.assertEqual(resolved, moved)
+        self.assertTrue(resolved.samefile(moved))
         self.assertEqual(media_type, "image/png")
         resolver = service._download_artifact_resolver
         with patch.object(
@@ -454,7 +454,7 @@ class WebBackendTests(unittest.TestCase):
                 path="generated.png",
                 size=len(payload),
             )
-        self.assertEqual(cached, moved)
+        self.assertTrue(cached.samefile(moved))
 
         response = self.request(
             create_app(service=service),

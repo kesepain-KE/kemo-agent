@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
 import * as api from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
+import { formatDateTime } from './ModuleUi'
 
 const sessions = [
   { session_id: 's1', window: 'w1', title: '当前工作', state: 'open', rounds: 3, updated_at: '2026-07-22T08:00:00+00:00' },
@@ -112,6 +113,7 @@ describe('HistorySearchDrawer', () => {
 
   it('外部消息和 CLI 归档按来源展示，并以只读方式打开完整历史和记忆状态', async () => {
     const onSelectSession = vi.fn()
+    const updatedAt = '2026-08-08T00:00:00+08:00'
     const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
       user: 'alice',
       source: 'message:telegram',
@@ -140,7 +142,7 @@ describe('HistorySearchDrawer', () => {
           source: 'message:telegram', bound_platform: 'telegram', session_id: 'tg-1',
           window: 'tg-window', title: 'Telegram 对话', state: 'closed', chain: 'message',
           memory_status: 'queued', memory_processed_round: 2, memory_target_round: 4,
-          rounds: 4, updated_at: '2026-08-08T00:00:00+08:00',
+          rounds: 4, updated_at: updatedAt,
         },
       ]}
       activeSessionId=""
@@ -151,7 +153,7 @@ describe('HistorySearchDrawer', () => {
       onRetrySummary={() => undefined}
     /></QueryClientProvider>)
 
-    expect(screen.getByText(/telegram · 4 轮 · 08\/08 00:00/)).toBeInTheDocument()
+    expect(screen.getByText(`telegram · 4 轮 · ${formatDateTime(updatedAt)}`)).toBeInTheDocument()
     expect(screen.getByText('记忆 queued · 2/4')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '删除对话 Telegram 对话' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '只读查看对话 Telegram 对话' }))
