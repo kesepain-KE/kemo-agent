@@ -43,7 +43,7 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 - 项目根目录；
 - `user`；
-- `source`（Web、CLI 或消息平台）；
+- `source`（Web、Android App、CLI 或消息平台）；
 - `session_id`；
 - 用户文本、上传文件和可选运行中引导通道；
 - 取消事件及任务计划上下文。
@@ -75,8 +75,10 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 更早消息按需从 `history_messages` 分页读取，不在 Web 启动或每轮请求时扫描全部历史。
 
-Web 历史浏览读取当前用户的全部来源。Web 会话可以继续切换和管理；CLI 与
-`message:<platform>` 会话作为只读归档打开，并显示来源、生命周期以及完整记忆处理状态。
+Web 历史浏览读取当前用户的全部来源。Web 会话可以继续切换和管理；Android App 的
+`app`、CLI 与 `message:<platform>` 会话作为只读归档打开，并显示来源、生命周期以及完整记忆处理状态。
+App 桥接请求固定使用 `source=app`，不能由设备端改写为其他渠道；其活动会话租约、关闭、
+压缩、删除和历史窗口均与 `source=web` 分区隔离。
 渠道只表示入口，不建立独立记忆区；同一内部用户的所有入口共享 `memory.sqlite3`。
 
 ### 4. 合并配置并建立资源策略

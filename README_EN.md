@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,9 +204,9 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.1.0`
+Current version: `1.1.1`
 
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, and `1.0.4` improves tool-call continuity and multi-entry history. `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. Each source can now be disabled, fixed for one conversation round, or refreshed before every logical Provider request, while the context drawer shows the effective policy as read-only status bubbles. `1.1.0` completes the mobile loop of the ecosystem: a new `kemo_app` global expand provides an independent HTTP/SSE/WebSocket bridge for the Android client (two-level authentication, streaming chat with guidance, tasks and schedules, file transfer up to 80 MiB, online device stats), extending the kemo-agent ecosystem to mobile. Its published source is uninitialized and inactive by default, so cloning or updating the repository never starts a listener. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
+`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, and `1.0.4` improves tool-call continuity and multi-entry history. `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. Each source can now be disabled, fixed for one conversation round, or refreshed before every logical Provider request, while the context drawer shows the effective policy as read-only status bubbles. `1.1.0` completes the mobile loop of the ecosystem: a new `kemo_app` global expand provides an independent HTTP/SSE/WebSocket bridge for the Android client (two-level authentication, streaming chat with guidance, tasks and schedules, file transfer up to 80 MiB, online device stats), extending the kemo-agent ecosystem to mobile. `1.1.1` separates Android App conversations from the Web history partition: the bridge, core session leases, history operations, and read-only Web history view now consistently use `source=app`, and App cards are labeled explicitly. The core updater can also refresh the published `kemo_app` code while preserving deployment credentials, activation state, and runtime data. Its published source remains uninitialized and inactive by default, so cloning or updating the repository never starts a listener. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
 
 Available today:
 
@@ -225,7 +225,7 @@ Available today:
 - pre-execution tool-argument integrity checks for both Kemo and Chat providers; truncated, content-filtered, or malformed Chat tool calls terminate explicitly as incomplete instead of executing partial arguments;
 - separate contract-test baselines for skills, extensions, perception modules, external message routes, subagents, and user templates, covering their basic framework inputs and outputs;
 - ZIP upload for user-created skills, with recursive `SKILL.md` discovery and transactional installation;
-- shared identity and memory across the web interface, CLI, and messaging platforms;
+- shared identity and memory across the web interface, Android App, CLI, and messaging platforms, with conversation histories isolated by their real `source` and non-Web histories available as read-only Web archives;
 - isolated workspaces and configuration for multiple users;
 - separate management of uploaded files and agent-generated content, with bounded image, audio, and video previews;
 - explainable scored memory search across all four lifecycle tiers, with batch queries loading each tier once and returning matched fields, terms, coverage, and scores; plus a ten-item moving conversation navigator that centers the active round at 180° and can continue loading earlier history;
