@@ -151,7 +151,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
 | 外部消息幂等 | `users/<name>/history/history.sqlite3` | `message_processed_messages` 表；领取、终态与启动恢复 |
 
-Web 历史列表按当前用户统一读取 `web`、`cli` 与 `message:<platform>` 来源。非 Web 会话在网页中
+Web 历史列表按当前用户统一读取 `web`、`app`、`cli` 与 `message:<platform>` 来源。非 Web 会话在网页中
 只读展示，不能由网页接管或续写；其归档正文、摘要、记忆状态和失败信息仍必须完整可见。所有
 来源绑定到同一内部用户后共享同一个 `memory.sqlite3`，记忆页不得按渠道过滤。
 | 外部路由状态 | `runtime/logs.sqlite3` | `message_route_state` 表；模块健康、计数与输入线程状态 |
@@ -649,7 +649,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 
 ## 11. 会话隔离
 
-- 每个请求属于明确的 `user`、`source` 和 `session_id`。
+- 每个请求属于明确的 `user`、`source` 和 `session_id`；Android App 桥接固定使用 `source=app`，不得映射成 `web`。
 - 同一用户可共享记忆和知识库，但不同来源与会话的对话历史互相隔离。
 - 不假设拥有未注入的其他会话内容；`memory.history_read_enabled=true` 时可使用历史搜索工具。
 - 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。

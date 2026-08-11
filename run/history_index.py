@@ -70,7 +70,7 @@ def new_conversation_id() -> str:
 
 def chain_for_source(source: str) -> str:
     value = str(source or "")
-    if value in {"web", "cli", "interactive", "direct_api"}:
+    if value in {"web", "app", "cli", "interactive", "direct_api"}:
         return "interactive"
     if value.startswith("message:") or value in {"telegram", "onebot"}:
         return "message"

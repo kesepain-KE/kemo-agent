@@ -323,6 +323,7 @@ def create_app(
                         body.plan_id,
                         cancel_event=cancel_event,
                         run_id=body.run_id,
+                        source=body.source,
                         client_id=body.client_id,
                     )
                 )
@@ -335,6 +336,7 @@ def create_app(
                         body.prompt,
                         cancel_event=cancel_event,
                         run_id=body.run_id,
+                        source=body.source,
                         client_id=body.client_id,
                         **content_options,
                     )

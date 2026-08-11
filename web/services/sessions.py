@@ -88,8 +88,14 @@ class SessionServiceMixin:
         }
 
     @staticmethod
-    def _interactive_active_key(user: str, client_id: str = "") -> str:
-        return f"interactive:{user}:{client_id}" if client_id else f"interactive:{user}"
+    def _interactive_active_key(
+        user: str,
+        client_id: str = "",
+        *,
+        source: str = "web",
+    ) -> str:
+        prefix = "interactive" if source == "web" else source
+        return f"{prefix}:{user}:{client_id}" if client_id else f"{prefix}:{user}"
 
     @staticmethod
     def _index_session_payload(record: dict[str, Any]) -> dict[str, Any]:
@@ -293,7 +299,9 @@ class SessionServiceMixin:
                     f"该对话正在其他 {len(other_clients)} 个页面中使用，暂时不能删除"
                 )
             if any(
-                active.user == name and active.session_id == normalized_session
+                active.user == name
+                and active.source == normalized_source
+                and active.session_id == normalized_session
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再删除")
@@ -335,7 +343,9 @@ class SessionServiceMixin:
             raise InvalidRequestError("prompt 不能为空")
         with self._active_runs_lock:
             if any(
-                active.user == name and active.session_id == normalized_session
+                active.user == name
+                and active.source == normalized_source
+                and active.session_id == normalized_session
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话仍在运行，确认上一轮结束后再重新发送")
@@ -366,7 +376,10 @@ class SessionServiceMixin:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         with self._active_runs_lock:
-            if any(active.user == name for active in self._active_runs.values()):
+            if any(
+                active.user == name and active.source == normalized_source
+                for active in self._active_runs.values()
+            ):
                 raise ConflictError("存在正在运行的会话，结束当前响应后再全部删除")
             deleted_sessions, deleted_windows = delete_all_history_sessions(
                 self.root,

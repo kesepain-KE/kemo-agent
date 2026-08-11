@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class ChatBody(BaseModel):
     user: str
+    source: str = Field(default="web", pattern="^(web|app)$")
     session_id: str
     prompt: str = ""
     content: list[dict[str, Any]] = Field(default_factory=list)

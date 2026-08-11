@@ -111,6 +111,7 @@ class ActiveRun:
     run_id: str
     user: str
     session_id: str
+    source: str = "web"
     cancel_event: threading.Event = field(default_factory=threading.Event)
     guidance: GuidanceMailbox = field(default_factory=lambda: GuidanceMailbox(maxsize=8))
     started_at: float = field(default_factory=time.monotonic)
@@ -312,9 +313,9 @@ class WebRunService(
         return name
 
     def require_source(self, source: Any = "web") -> str:
-        if source != "web":
-            raise InvalidRequestError("Web API 当前仅允许 source=web")
-        return "web"
+        if source not in {"web", "app"}:
+            raise InvalidRequestError("交互 API 当前仅允许 source=web 或 source=app")
+        return str(source)
 
     def require_history_source(
         self,
@@ -329,7 +330,7 @@ class WebRunService(
         value = source.strip()
         if allow_all and value in {"", "all"}:
             return None
-        if value in {"web", "cli", "interactive", "direct_api", "telegram", "onebot"}:
+        if value in {"web", "app", "cli", "interactive", "direct_api", "telegram", "onebot"}:
             return value
         if value.startswith("message:"):
             platform = value.split(":", 1)[1]
@@ -602,7 +603,9 @@ class WebRunService(
                     "session": self._index_session_payload(record),
                 }
             if any(
-                active.user == name and active.session_id == normalized_session
+                active.user == name
+                and active.source == normalized_source
+                and active.session_id == normalized_session
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再关闭")
@@ -663,7 +666,9 @@ class WebRunService(
             raise NotFoundError(f"会话不存在：{normalized_session}")
         with self._active_runs_lock:
             if any(
-                active.user == name and active.session_id == normalized_session
+                active.user == name
+                and active.source == normalized_source
+                and active.session_id == normalized_session
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再压缩")
@@ -760,7 +765,9 @@ class WebRunService(
             raise NotFoundError(f"会话不存在：{normalized_session}")
         with self._active_runs_lock:
             if any(
-                active.user == name and active.session_id == normalized_session
+                active.user == name
+                and active.source == normalized_source
+                and active.session_id == normalized_session
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("会话正在运行，结束当前响应后再提取记忆")
@@ -805,9 +812,11 @@ class WebRunService(
         uploaded_files: Any = None,
         task_plan_id: str = "",
         task_plan_mode: str = "",
+        source: Any = "web",
         client_id: Any = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
+        normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id)
         normalized_client = self.require_client_id(client_id)
         if not isinstance(prompt, str):
@@ -832,6 +841,7 @@ class WebRunService(
             normalized_run_id,
             name,
             normalized_session,
+            source=normalized_source,
             cancel_event=cancel_event,
         )
         with self._active_runs_lock:
@@ -840,11 +850,11 @@ class WebRunService(
                 raise ConflictError(f"run_id 已在使用：{normalized_run_id}")
             self._active_runs[normalized_run_id] = active
             self._touch_session_lease_locked(
-                name, "web", normalized_session, normalized_client
+                name, normalized_source, normalized_session, normalized_client
             )
         request = {
             "user": name,
-            "source": "web",
+            "source": normalized_source,
             "session_id": normalized_session,
             "prompt": normalized_prompt,
             "content": normalized_content,
@@ -853,7 +863,7 @@ class WebRunService(
             "run_id": normalized_run_id,
             "_guidance_queue": active.guidance,
             "_history_active_key": self._interactive_active_key(
-                name, normalized_client
+                name, normalized_client, source=normalized_source
             ),
         }
         if task_plan_id:
@@ -951,6 +961,7 @@ class WebRunService(
         *,
         cancel_event: threading.Event,
         run_id: Any = "",
+        source: Any = "web",
         client_id: Any = "",
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
@@ -1016,6 +1027,7 @@ class WebRunService(
                 run_id=run_id,
                 task_plan_id=normalized_plan_id,
                 task_plan_mode="agent_managed",
+                source=source,
                 client_id=client_id,
             )
         except BaseException:
