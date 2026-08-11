@@ -243,16 +243,26 @@ If you are trying an early release, reports about problems, usability feedback, 
 
 ---
 
-## Related projects
+## The Kemo ecosystem
 
-- [votx-agent](https://github.com/kesepain-KE/votx-agent)  
-  An independently maintained Agent project with no inheritance relationship to kemo-agent.
+kemo-agent is not an island. Around it, several independently maintained projects cooperate through stable protocols to form the Kemo ecosystem:
 
-- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)  
-  A model-service adapter designed to work with kemo-agent.
+- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
+  Kemo Provider Gateway: unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
 
-- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)  
+- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.
+
+- [kemo-agent-app](https://github.com/kesepain-KE/kemo-agent-app)
+  The Android client of the kemo ecosystem: after connecting to a deployed kemo-agent and Kemo gateway, conversations, tasks, files, extension perception, runtime status, and agent configuration can all continue on your phone. It communicates through the `kemo_app` bridge inside kemo-agent (HTTP/SSE/WebSocket) with two-level authentication and transport.
+
+- [kemo-agent-doc](https://github.com/kesepain-KE/kemo-agent-doc)
+  The VitePress documentation site for kemo-agent: installation, configuration, usage, and extension development guides, deployed as [online documentation](https://kesepain-ke.github.io/kemo-agent-doc/).
+
+### Other projects
+
+- [votx-agent](https://github.com/kesepain-KE/votx-agent)
+  An independently maintained Agent project with no inheritance relationship to kemo-agent.
 
 ---
 

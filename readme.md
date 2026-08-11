@@ -243,16 +243,26 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ---
 
-## 相关项目
+## Kemo 生态
 
-- [votx-agent](https://github.com/kesepain-KE/votx-agent)  
-  独立维护的 Agent 项目，与 kemo-agent 不存在继承关系。
+kemo-agent 不是一座孤岛。围绕它，还有几个独立维护、通过稳定协议协作的项目，共同构成 Kemo 生态：
 
-- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)  
-  与 kemo-agent 配合使用的模型服务适配项目。
+- [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
+  Kemo Provider Gateway：统一多厂商模型的发现、流式响应、工具调用、能力声明、多模态 Asset 与 Token 计量，为 kemo-agent 提供一致的模型服务边界。
 
-- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)  
+- [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   知识图谱与 RAG 检索项目，可外挂为 kemo-agent 的超级文档站：注册文档库后，通过 `expand_call` 按需查询、同步与维护，不替换框架内置的知识库与记忆。
+
+- [kemo-agent-app](https://github.com/kesepain-KE/kemo-agent-app)
+  kemo-agent 的 Android 生态客户端：连接已部署的 kemo-agent 与 Kemo 网关后，对话、任务、文件、拓展感知、运行状态与智能体配置都可以在手机上继续。通过 kemo-agent 内的 `kemo_app` 桥接服务（HTTP/SSE/WebSocket）完成两级认证与传输。
+
+- [kemo-agent-doc](https://github.com/kesepain-KE/kemo-agent-doc)
+  kemo-agent 的 VitePress 文档站：安装、配置、使用与扩展开发指南，已部署为 [在线文档](https://kesepain-ke.github.io/kemo-agent-doc/)。
+
+### 其他项目
+
+- [votx-agent](https://github.com/kesepain-KE/votx-agent)
+  独立维护的 Agent 项目，与 kemo-agent 不存在继承关系。
 
 ---
 
