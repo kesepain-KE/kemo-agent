@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ._utils import (
     ask_choice,
@@ -97,6 +98,27 @@ KEMO_GRAPH_OBSOLETE_FILES = (
     "artifacts/kemo_graph_status.png",
 )
 
+KEMO_APP_EXPAND = "global_expand/kemo_app"
+KEMO_APP_EXPAND_FILES = (
+    ".gitignore",
+    "README.md",
+    "app.py",
+    "auth.py",
+    "config.example.json",
+    "credential_registry.py",
+    "daemon.py",
+    "data_update.py",
+    "events.py",
+    "initialize_config.py",
+    "lifecycle.py",
+    "manage_device_token.py",
+    "manage_user.py",
+    "server.py",
+    "start_expand.py",
+    "expand_control.md",
+    "upstream.py",
+)
+
 BUILTIN_GLOBAL_EXPANDS = (
     (GATEWAY_STATUS_EXPAND, GATEWAY_STATUS_EXPAND_FILES, "gateway_config.json", ()),
     (
@@ -105,7 +127,38 @@ BUILTIN_GLOBAL_EXPANDS = (
         "graph_config.json",
         KEMO_GRAPH_OBSOLETE_FILES,
     ),
+    (KEMO_APP_EXPAND, KEMO_APP_EXPAND_FILES, "config.json", ()),
 )
+
+
+def _kemo_app_configured(module_root: Path) -> bool:
+    """Validate the local bridge prerequisites without exposing credentials."""
+
+    try:
+        config = read_json(module_root / "config.json")
+        users_path = module_root / str(config.get("users_path") or "users.json")
+        users = read_json(users_path)
+    except Exception:
+        return False
+    if not isinstance(config, dict) or not isinstance(users, dict):
+        return False
+    token_hash = str(config.get("token_sha256") or "").strip().lower()
+    token_ready = len(token_hash) == 64 and all(char in "0123456789abcdef" for char in token_hash)
+    session_ready = len(str(config.get("session_secret") or "")) >= 32
+    upstream = urlsplit(str(config.get("upstream") or "").strip())
+    upstream_ready = upstream.scheme in {"http", "https"} and bool(upstream.hostname)
+    try:
+        port_ready = 1 <= int(config.get("port", 8742)) <= 65535
+    except (TypeError, ValueError):
+        port_ready = False
+    enabled_user = any(
+        isinstance(record, dict)
+        and bool(record.get("enabled", True))
+        and bool(str(record.get("salt") or ""))
+        and bool(str(record.get("hash") or ""))
+        for record in users.values()
+    )
+    return token_ready and session_ready and upstream_ready and port_ready and enabled_user
 
 
 def _preserved_directory_differs(
@@ -283,6 +336,10 @@ def _update_builtin_global_expand(
         manifest = read_json(source_manifest)
         config_path = target / config_file
         active = config_path.is_file()
+        try:
+            current = read_json(target_manifest) if target_manifest.is_file() else {}
+        except Exception:
+            current = {}
         if relative == KEMO_GRAPH_EXPAND:
             try:
                 local_config = read_json(config_path)
@@ -298,12 +355,10 @@ def _update_builtin_global_expand(
                 and isinstance(libraries, list)
                 and any(isinstance(item, dict) and item.get("enabled", True) for item in libraries)
             )
+        elif relative == KEMO_APP_EXPAND:
+            active = bool(current.get("open_input")) and _kemo_app_configured(target)
         manifest["open_input"] = active
-        if target_manifest.is_file():
-            try:
-                current = read_json(target_manifest)
-            except Exception:
-                current = {}
+        if current:
             if current.get("input_health") in {"正常", "异常"}:
                 manifest["input_health"] = current["input_health"]
             recent_update = current.get("recent_update")

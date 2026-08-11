@@ -367,6 +367,80 @@ class UpdateModuleTests(unittest.TestCase):
             manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
             self.assertTrue(manifest["open_input"])
 
+    def test_core_updates_kemo_app_expand_and_preserves_local_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_APP_EXPAND)
+            for name in core_update.KEMO_APP_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {
+                "name": "kemo app 桥接服务",
+                "open_input": False,
+                "input_health": "异常",
+            })
+            write(source / module / "input_data.md", "source inactive")
+            write_json(target / module / "config.json", {
+                "token_sha256": "a" * 64,
+                "session_secret": "s" * 32,
+                "upstream": "http://127.0.0.1:1457",
+                "users_path": "users.json",
+            })
+            write_json(target / module / "users.json", {
+                "alice": {"enabled": True, "salt": "salt", "hash": "hash"},
+            })
+            write_json(target / module / "credential_registry.json", {"local": True})
+            write_json(target / module / "_runtime.json", {"running": True})
+            write_json(target / module / "expand.json", {
+                "name": "old",
+                "open_input": True,
+                "input_health": "正常",
+                "recent_update": "2026-08-11 20:00:00",
+            })
+            write(target / module / "input_data.md", "local bridge status")
+            write(target / module / "logs" / "server.log", "local log")
+
+            result = core_update.update(source, target, assume_yes=True)
+
+            self.assertIn(str(module).replace("\\", "/"), "\n".join(result["details"]))
+            self.assertEqual((target / module / "app.py").read_text("utf-8"), "new app.py")
+            self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "local bridge status")
+            self.assertTrue(json.loads((target / module / "credential_registry.json").read_text("utf-8"))["local"])
+            self.assertTrue(json.loads((target / module / "_runtime.json").read_text("utf-8"))["running"])
+            self.assertEqual((target / module / "logs" / "server.log").read_text("utf-8"), "local log")
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertTrue(manifest["open_input"])
+            self.assertEqual(manifest["input_health"], "正常")
+            self.assertEqual(manifest["recent_update"], "2026-08-11 20:00:00")
+
+    def test_core_does_not_activate_configured_but_stopped_kemo_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_APP_EXPAND)
+            for name in core_update.KEMO_APP_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {"open_input": False})
+            write(source / module / "input_data.md", "source inactive")
+            write_json(target / module / "config.json", {
+                "token_sha256": "a" * 64,
+                "session_secret": "s" * 32,
+                "upstream": "http://127.0.0.1:1457",
+                "users_path": "users.json",
+                "port": 8742,
+            })
+            write_json(target / module / "users.json", {
+                "alice": {"enabled": True, "salt": "salt", "hash": "hash"},
+            })
+            write_json(target / module / "expand.json", {"open_input": False})
+
+            core_update.update(source, target, assume_yes=True)
+
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertFalse(manifest["open_input"])
+
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
