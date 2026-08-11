@@ -111,6 +111,58 @@ describe('HistorySearchDrawer', () => {
     expect(screen.getByText('正在生成摘要 · 1/3…')).toBeInTheDocument()
   })
 
+  it('APP 会话显示 APP版并以只读方式打开', async () => {
+    const onSelectSession = vi.fn()
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+      user: 'alice',
+      source: 'app',
+      session_id: 'app-session',
+      messages: [
+        { role: 'user', content: '来自 APP 的问题' },
+        { role: 'assistant', content: '来自智能体的回答' },
+      ],
+      round_metrics: [],
+      round_traces: [],
+      pagination: {
+        limit: 40,
+        total_rounds: 1,
+        first_round: 1,
+        last_round: 1,
+        has_more_before: false,
+        next_before: null,
+      },
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
+      user="alice"
+      open
+      sessions={[
+        {
+          source: 'app', session_id: 'app-session', window: 'app-window',
+          title: '手机端对话', state: 'open', chain: 'interactive',
+          memory_status: 'completed', memory_processed_round: 2,
+          memory_target_round: 2, rounds: 2,
+          updated_at: '2026-08-11T12:00:00+08:00',
+        },
+      ]}
+      activeSessionId=""
+      onClose={() => undefined}
+      onSelectSession={onSelectSession}
+      onDeleteSession={() => undefined}
+      onDeleteAllSessions={() => undefined}
+      onRetrySummary={() => undefined}
+    /></QueryClientProvider>)
+
+    expect(screen.getByText(/1 条 APP/)).toBeInTheDocument()
+    expect(screen.getByText(/APP版 · 2 轮/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '删除对话 手机端对话' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '只读查看对话 手机端对话' }))
+    expect(await screen.findByText('来自 APP 的问题')).toBeInTheDocument()
+    expect(api.getHistory).toHaveBeenCalledWith('alice', 'app-session', expect.objectContaining({ source: 'app' }))
+    expect(onSelectSession).not.toHaveBeenCalled()
+    history.mockRestore()
+  })
+
   it('外部消息和 CLI 归档按来源展示，并以只读方式打开完整历史和记忆状态', async () => {
     const onSelectSession = vi.fn()
     const updatedAt = '2026-08-08T00:00:00+08:00'

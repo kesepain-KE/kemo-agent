@@ -12,6 +12,7 @@ const PAGE_SIZE = 40
 function sourceLabel(session: SessionSummary) {
   const source = session.source || 'web'
   if (source === 'web') return '网页版'
+  if (source === 'app') return 'APP版'
   if (source === 'cli') return 'CLI'
   if (source.startsWith('message:')) return session.bound_platform || source.slice(8) || '外部消息'
   return source
@@ -115,7 +116,7 @@ function ReadOnlySessionHistoryDialogContent({
           </article>)}
           {!history.isLoading && !history.isError && messages.length === 0 && <div className={styles.empty}>这条归档没有可显示的消息正文。</div>}
         </div>
-        <footer>只读查看：网页不会接管、续写或修改来自 CLI 与外部消息渠道的会话。</footer>
+        <footer>只读查看：网页不会接管、续写或修改来自 APP、CLI 与外部消息渠道的会话。</footer>
       </section>
     </div>,
     document.body,

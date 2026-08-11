@@ -162,6 +162,7 @@ class FakeService:
         *,
         cancel_event,
         run_id="",
+        source="web",
         client_id="",
         **kwargs,
     ):
@@ -174,11 +175,13 @@ class FakeService:
         }
         if client_id:
             self.seen["client_id"] = client_id
+        if source != "web":
+            self.seen["source"] = source
         self.seen.update(kwargs)
         return iter(self.events)
 
     def stream_plan(
-        self, user, session_id, plan_id, *, cancel_event, run_id="", client_id=""
+        self, user, session_id, plan_id, *, cancel_event, run_id="", source="web", client_id=""
     ):
         self.cancel_event = cancel_event
         self.seen = {
@@ -189,6 +192,8 @@ class FakeService:
         }
         if client_id:
             self.seen["client_id"] = client_id
+        if source != "web":
+            self.seen["source"] = source
         return iter(self.events)
 
 
@@ -2038,6 +2043,36 @@ class WebBackendTests(unittest.TestCase):
             service._session_leases[("alice", "web", "client-session")],
         )
 
+    def test_stream_chat_keeps_app_source_and_device_scoped_history_key(self) -> None:
+        _, root = self.make_root()
+        requests: list[dict[str, Any]] = []
+
+        def source(request, **_kwargs):
+            requests.append(request)
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_chat(
+                "alice",
+                "app-session",
+                "hello",
+                cancel_event=threading.Event(),
+                source="app",
+                client_id="app_android-device-a",
+            )
+        )
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(requests[0]["source"], "app")
+        self.assertEqual(
+            requests[0]["_history_active_key"],
+            "app:alice:app_android-device-a",
+        )
+        self.assertIn(
+            "app_android-device-a",
+            service._session_leases[("alice", "app", "app-session")],
+        )
+
     def test_delete_all_sessions_includes_uncommitted_reservations(self) -> None:
         _, root = self.make_root()
         app = create_app(service=WebRunService(root))
@@ -2702,6 +2737,7 @@ class WebBackendTests(unittest.TestCase):
         _, root = self.make_root()
         for source, session_id, content in (
             ("web", "web-session", "web content"),
+            ("app", "app-session", "app content"),
             ("cli", "cli-session", "cli content"),
             ("message:telegram", "telegram-session", "telegram content"),
         ):
@@ -2735,8 +2771,12 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(payload["source"], "all")
         self.assertEqual(
             {item["source"] for item in payload["sessions"]},
-            {"web", "cli", "message:telegram"},
+            {"web", "app", "cli", "message:telegram"},
         )
+        app_session = next(
+            item for item in payload["sessions"] if item["source"] == "app"
+        )
+        self.assertEqual(app_session["chain"], "interactive")
         telegram = next(
             item
             for item in payload["sessions"]
@@ -2756,6 +2796,13 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(cli_history.status_code, 200, cli_history.text)
         self.assertEqual(cli_history.json()["messages"][0]["content"], "cli content")
+        app_history = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/app-session/history?source=app",
+        )
+        self.assertEqual(app_history.status_code, 200, app_history.text)
+        self.assertEqual(app_history.json()["messages"][0]["content"], "app content")
         telegram_history = self.request(
             app,
             "GET",
@@ -2773,6 +2820,12 @@ class WebBackendTests(unittest.TestCase):
             "/api/users/alice/sessions/telegram-session?source=message%3Atelegram",
         )
         self.assertEqual(read_only_boundary.status_code, 400)
+        app_delete = self.request(
+            app,
+            "DELETE",
+            "/api/users/alice/sessions/app-session?source=app",
+        )
+        self.assertEqual(app_delete.status_code, 200, app_delete.text)
 
     def test_validation_and_internal_error_are_sanitized(self) -> None:
         invalid = self.request(
@@ -3006,6 +3059,24 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(fake.seen["prompt"], "")
         self.assertEqual(fake.seen["uploaded_files"], ["screenshot.png"])
+
+    def test_chat_route_forwards_app_source(self) -> None:
+        fake = FakeService(events=[RunEvent(type="done")])
+        response = self.request(
+            create_app(service=fake),
+            "POST",
+            "/api/chat",
+            json={
+                "user": "alice",
+                "source": "app",
+                "session_id": "app-session",
+                "prompt": "hello from app",
+                "client_id": "app_android-device-a",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(fake.seen["source"], "app")
+        self.assertEqual(fake.seen["client_id"], "app_android-device-a")
 
     def test_plan_chat_route_starts_plan_stream_without_a_prompt(self) -> None:
         fake = FakeService(

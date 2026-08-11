@@ -101,6 +101,7 @@ export function HistorySearchDrawer({
   const pendingSession = sessions.find((session) => (session.source || 'web') === 'web' && session.session_id === pendingSessionId)
   const deleteTarget = sessions.find((session) => (session.source || 'web') === 'web' && session.session_id === deleteSessionId)
   const webSessions = sessions.filter((session) => (session.source || 'web') === 'web')
+  const appSessions = sessions.filter((session) => session.source === 'app')
   const closeDrawer = () => {
     setSummaryPreview(null)
     setPendingSessionId('')
@@ -202,7 +203,7 @@ export function HistorySearchDrawer({
         </label>
 
         <div className={styles.actionBar}>
-          <span>{sessions.length} 条历史对话 · {webSessions.length} 条 Web</span>
+          <span>{sessions.length} 条历史对话 · {webSessions.length} 条 Web{appSessions.length ? ` · ${appSessions.length} 条 APP` : ''}</span>
           <button
             type="button"
             disabled={loading || error || webSessions.length === 0 || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
@@ -241,11 +242,13 @@ export function HistorySearchDrawer({
             const retryAt = session.summary_retry_at ? formatDateTime(session.summary_retry_at) : ''
             const sourceLabel = source === 'web'
               ? '网页版'
-              : source === 'cli'
-                ? 'CLI'
-                : source.startsWith('message:')
-                  ? session.bound_platform || source.slice(8) || '外部消息'
-                  : source
+              : source === 'app'
+                ? 'APP版'
+                : source === 'cli'
+                  ? 'CLI'
+                  : source.startsWith('message:')
+                    ? session.bound_platform || source.slice(8) || '外部消息'
+                    : source
             const memoryStatus = session.memory_status || 'unknown'
             const memoryProcessed = Math.max(0, session.memory_processed_round || 0)
             const memoryTarget = Math.max(0, session.memory_target_round || session.rounds || 0)
