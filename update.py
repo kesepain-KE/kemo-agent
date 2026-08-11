@@ -59,6 +59,10 @@ BACKUP_EXCLUDES = (
     "web/frontend/dist/",
     "tmp/",
     "__pycache__/",
+    # Runtime module workers keep this coordination file byte-range locked on
+    # Windows. It is transient process state, not restorable user data, so a
+    # live service must never make the update backup fail while copying it.
+    ".module.execution.lock",
 )
 
 MODULES = {
@@ -77,7 +81,13 @@ def make_backup(dry_run: bool) -> Path | None:
         print(f"[dry-run] 将创建备份: {backup_dir}")
         return None
     backup_dir.mkdir(parents=True, exist_ok=False)
-    sync_directory(ROOT, backup_dir, delete=False, excludes=BACKUP_EXCLUDES)
+    try:
+        sync_directory(ROOT, backup_dir, delete=False, excludes=BACKUP_EXCLUDES)
+    except Exception:
+        # Never let an interrupted/failed copy masquerade as a restorable
+        # backup or displace one of the last known-good backups during pruning.
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
     print(green(f"备份已创建: {backup_dir}"))
     prune_backups()
     return backup_dir

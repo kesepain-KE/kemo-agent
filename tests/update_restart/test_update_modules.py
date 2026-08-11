@@ -48,6 +48,52 @@ class UpdateModuleTests(unittest.TestCase):
 
             self.assertFalse(target.exists())
 
+    def test_sync_directory_file_basename_exclusion_applies_at_any_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            write(source / "shared_expand" / "demo" / ".module.execution.lock", "locked")
+            write(source / "shared_expand" / "demo" / "config.json", "{}")
+
+            sync_directory(
+                source,
+                target,
+                excludes=(".module.execution.lock",),
+            )
+
+            self.assertFalse(
+                (target / "shared_expand" / "demo" / ".module.execution.lock").exists()
+            )
+            self.assertTrue(
+                (target / "shared_expand" / "demo" / "config.json").is_file()
+            )
+
+    def test_backup_excludes_live_module_execution_locks(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_backup_runtime_locks")
+        self.assertIn(".module.execution.lock", dispatcher.BACKUP_EXCLUDES)
+
+    def test_failed_backup_does_not_leave_partial_backup_directory(self) -> None:
+        dispatcher = self.load_dispatcher("kemo_update_failed_backup_cleanup")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                mock.patch.object(dispatcher, "ROOT", root),
+                mock.patch.object(
+                    dispatcher,
+                    "sync_directory",
+                    side_effect=PermissionError("locked runtime file"),
+                ),
+                self.assertRaises(PermissionError),
+            ):
+                dispatcher.make_backup(dry_run=False)
+
+            backups_root = root / ".backups"
+            self.assertEqual(
+                list(backups_root.glob("update-*")) if backups_root.exists() else [],
+                [],
+            )
+
     def test_write_json_atomic_replaces_manifest_without_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "version.json"

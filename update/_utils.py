@@ -212,6 +212,10 @@ def _is_excluded(rel: str, dir_patterns: set[str], file_patterns: set[str]) -> b
     if normalized in file_patterns:
         return True
     parts = normalized.split("/")
+    # A file exclusion without a directory component is a basename rule. This
+    # lets callers ignore transient files which can appear under any module.
+    if any("/" not in pattern and parts[-1] == pattern for pattern in file_patterns):
+        return True
     for pattern in dir_patterns:
         if "/" in pattern:
             if normalized == pattern or normalized.startswith(pattern + "/"):
