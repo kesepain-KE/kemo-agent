@@ -564,6 +564,7 @@ def get_or_reserve_active(
     active_key: str,
     *,
     preferred_session_id: str | None = None,
+    new_session_id: str | None = None,
     reuse_latest: bool = False,
     title: str = "",
 ) -> tuple[dict[str, Any], bool]:
@@ -614,7 +615,7 @@ def get_or_reserve_active(
                 )
                 return written, False
 
-        session_id = new_conversation_id()
+        session_id = str(new_session_id or "").strip() or new_conversation_id()
         record = _reserved_record(
             None,
             source=source,

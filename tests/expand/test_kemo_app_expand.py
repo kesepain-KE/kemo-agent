@@ -48,6 +48,8 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('APP_SOURCE = "app"', source)
         self.assertIn('"source": APP_SOURCE', source)
         self.assertIn('params={"source": APP_SOURCE}', source)
+        self.assertIn('@app.get("/v1/conversations/active")', source)
+        self.assertIn('params={"source": APP_SOURCE, "client_id": client_id}', source)
         self.assertNotIn('"web" if source == "app" else source', source)
 
     def test_manifest_is_discoverable_but_published_inactive(self) -> None:

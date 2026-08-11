@@ -270,6 +270,18 @@ async def conversations(
     return await UPSTREAM.request_json("GET", f"/api/users/{quote(session.username, safe='')}/sessions", params=params)
 
 
+@app.get("/v1/conversations/active")
+async def conversation_active(
+    client_id: str = Query("", max_length=128),
+    session: Session = Depends(require_session),
+) -> Any:
+    return await UPSTREAM.request_json(
+        "GET",
+        f"/api/users/{quote(session.username, safe='')}/sessions/active",
+        params={"source": APP_SOURCE, "client_id": client_id},
+    )
+
+
 @app.delete("/v1/conversations")
 async def conversations_delete_all(session: Session = Depends(require_session)) -> Any:
     return await UPSTREAM.request_json(

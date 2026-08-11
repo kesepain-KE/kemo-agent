@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from run.history import (
     HistoryError,
@@ -155,23 +156,46 @@ class SessionServiceMixin:
             "updated_at": str(record.get("updated_at") or ""),
         }
 
-    def active_session(self, user: Any, client_id: Any = "") -> dict[str, Any]:
+    def active_session(
+        self,
+        user: Any,
+        client_id: Any = "",
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
         """Return or reserve the user's durable interactive session."""
 
         name = self.require_user(user)
         normalized_client = self.require_client_id(client_id)
-        active_key = self._interactive_active_key(name, normalized_client)
+        normalized_source = self.require_source(source)
+        active_key = self._interactive_active_key(
+            name,
+            normalized_client,
+            source=normalized_source,
+        )
+        app_session_id = f"app-{uuid4()}" if normalized_source == "app" else None
         record, created = get_or_reserve_index_session(
             self.root,
             name,
-            "web",
+            normalized_source,
             active_key,
+            preferred_session_id=app_session_id,
+            new_session_id=app_session_id,
             reuse_latest=True,
         )
-        with self._active_runs_lock:
-            active_clients = self._touch_session_lease_locked(
-                name, "web", str(record.get("session_id") or ""), normalized_client
-            )
+        if normalized_source == "web":
+            with self._active_runs_lock:
+                active_clients = self._touch_session_lease_locked(
+                    name,
+                    normalized_source,
+                    str(record.get("session_id") or ""),
+                    normalized_client,
+                )
+        else:
+            # APP callers only need the durable active binding. Mobile screens
+            # do not own browser-style leases, otherwise a restore request
+            # would prevent the same device from closing its conversation.
+            active_clients = 0
         return {
             "user": name,
             "active_key": active_key,

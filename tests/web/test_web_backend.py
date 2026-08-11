@@ -1977,6 +1977,45 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(closed.json()["closed"])
         self.assertFalse(closed.json()["deferred"])
 
+    def test_active_session_supports_app_source_without_sharing_web_binding(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        client_id = "app_android-device"
+
+        app_active = self.request(
+            app,
+            "GET",
+            f"/api/users/alice/sessions/active?source=app&client_id={client_id}",
+        )
+        self.assertEqual(app_active.status_code, 200, app_active.text)
+        app_payload = app_active.json()
+        self.assertEqual(app_payload["active_key"], f"app:alice:{client_id}")
+        self.assertEqual(app_payload["session"]["source"], "app")
+        self.assertTrue(app_payload["session"]["session_id"].startswith("app-"))
+
+        restored = self.request(
+            app,
+            "GET",
+            f"/api/users/alice/sessions/active?source=app&client_id={client_id}",
+        ).json()
+        self.assertFalse(restored["created"])
+        self.assertEqual(
+            restored["session"]["session_id"],
+            app_payload["session"]["session_id"],
+        )
+
+        web_active = self.request(
+            app,
+            "GET",
+            f"/api/users/alice/sessions/active?client_id={client_id}",
+        ).json()
+        self.assertEqual(web_active["active_key"], f"interactive:alice:{client_id}")
+        self.assertEqual(web_active["session"]["source"], "web")
+        self.assertNotEqual(
+            web_active["session"]["session_id"],
+            app_payload["session"]["session_id"],
+        )
+
     def test_session_delete_rejects_other_page_lease_and_allows_expired_lease(
         self,
     ) -> None:

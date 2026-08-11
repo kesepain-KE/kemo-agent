@@ -43,8 +43,14 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     async def active_session(
         user: str,
         client_id: str = Query(default=""),
+        source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(backend.active_session, user, client_id)
+        return await asyncio.to_thread(
+            backend.active_session,
+            user,
+            client_id,
+            source=source,
+        )
 
     @app.post("/api/users/{user}/sessions")
     async def create_session(
