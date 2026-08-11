@@ -9,6 +9,10 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 当前桥接协议实现版本：**1.1.0**。
 
+源码与首次部署默认为**未初始化、未激活**：`open_input=false`、没有最近成功采集时间、
+不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
+自动启动服务。`open_control=true` 只用于查询初始化状态和执行管理员明确要求的激活操作。
+
 显示名称为“kemo app 桥接服务”；稳定模块标识仍为 `kemo_app`。
 调用入口：`expand_call(scope="global", module="kemo_app", ...)`。
 
@@ -23,20 +27,33 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 查询桥接服务运行状态（进程、端口、日志路径）。只读，无副作用。
 
-无参数。返回 `running` / `pid` / `port` / `log`。
+无参数。返回 `initialized` / `configured` / `active` / `running` / `pid` / `port` / `log`，
+以及仍缺少的配置项名称；不返回任何凭据值。
+
+## `configuration_status`
+
+查询初始化、凭据配置和激活状态，是 `status` 的安全别名。只读，无副作用。
+
+无参数。未初始化时不会探测 `8742` 端口，因此不会把同一台机器上的其他部署实例误认为
+当前源码副本已经激活。
 
 ## `start`
 
-启动桥接服务（守护进程模式：detached 子进程，主调用立即返回）。若已在运行则返回
-`already running`。
+显式激活并启动桥接服务（守护进程模式：detached 子进程，主调用立即返回）。若已在运行则
+返回 `already running`。初始化、设备 Token、会话密钥或 App 用户任一未配置时拒绝启动，
+不会创建一个立即崩溃的空配置进程。
 
 无参数。返回 `pid` / `port` / `log`。启动后可用 `status` 或 `curl http://127.0.0.1:8742/v1/health` 验证。
+
+`activate` 是 `start` 的别名。
 
 ## `stop`
 
 停止桥接服务（终止守护进程并清理 pid 文件）。
 
 无参数。返回停止后的状态。
+
+`deactivate` 是 `stop` 的别名；停止服务不会删除本地凭据，后续仍可再次显式激活。
 
 ## `restart`
 
@@ -48,19 +65,23 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 在本拓展目录执行以下命令：
 
-1. `python manage_device_token.py`
+1. `python initialize_config.py`
+   - 从无凭据的 `config.example.json` 创建被 Git 忽略的本地 `config.json` 与 `users.json`。
+   - 自动生成随机 `session_secret`，但不会生成或保存设备 Token、用户密码。
+   - 只完成本地文件初始化，不启动服务、不开放端口。
+2. `python manage_device_token.py`
    - 按隐藏输入提示输入并确认设备 Token；长度至少 32 字符。
    - 明文只存在于本次终端输入中；磁盘上的 `config.json` 只保存 SHA-256。
    - 修改后必须执行 `python start_expand.py restart`。
-2. `python manage_user.py <username>`
+3. `python manage_user.py <username>`
    - 将 `<username>` 替换为指定 App 用户，例如 `python manage_user.py kesepain`。
    - 按隐藏输入提示输入并确认密码；密码至少 10 字符。
    - `users.json` 只保存随机盐与 PBKDF2-HMAC-SHA256 校验值。
    - 禁用指定用户可执行 `python manage_user.py <username> --disable`。
-3. `python credential_registry.py`
+4. `python credential_registry.py`
    - 重新生成 `credential_registry.json` 核对摘要。
    - 两个管理脚本成功后也会自动刷新该文件。
-4. `python credential_registry.py --check`
+5. `python credential_registry.py --check`
    - 核对摘要是否与当前 `config.json`、`users.json` 一致；一致时返回 `ok=true`。
 
 `credential_registry.json` 只记录设备 Token 是否已配置、截断后的哈希指纹、已配置用户名、
@@ -68,14 +89,17 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 # 配置与验证指引
 
-1. 在本地 `config.json` 配置实际 Web 上游地址与上游认证；真实凭据不得提交。
-2. `restart` 启动服务。
-3. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.0 健康状态，并包含
+1. 运行 `initialize_config.py`，再在本地 `config.json` 配置实际 Web 上游地址与上游认证；
+   真实凭据不得提交。
+2. 配置设备 Token 和至少一个 App 用户后，运行 `configuration_status`；仅当
+   `configured=true` 时才允许激活。
+3. `start` 或 `activate` 显式启动服务。
+4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.0 健康状态，并包含
    `websocket_connections` 与 `connected_devices`。
-4. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
-5. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
+5. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
+6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
    与连接数，但不会显示设备 Token 或会话 Token。
-6. 错误 Token 应返回 401；连续失败达到限流阈值返回 429；`stop` 后端口应释放。
+7. 错误 Token 应返回 401；连续失败达到限流阈值返回 429；`stop` 后端口应释放。
 
 # 模型列表协议边界
 

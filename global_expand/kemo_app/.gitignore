@@ -13,4 +13,4 @@ _last_run.json
 logs/
 __pycache__/
 *.pyc
-
+*.tmp

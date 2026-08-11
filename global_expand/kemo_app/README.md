@@ -6,6 +6,18 @@ port while forwarding authorized operations to the framework Web API.
 
 Current bridge version: **1.1.0**.
 
+## Default lifecycle
+
+The source tree is deliberately published in an **uninitialized and inactive**
+state. `open_input` is false, no successful update timestamp is committed, and
+the status document contains no host, upstream, user, device or connection
+information. Merely cloning or updating kemo-agent never starts this service.
+
+`open_control` remains available only so an administrator can inspect the
+initialization state and explicitly activate the bridge. The `start`/`activate`
+commands refuse to launch a process until local configuration, a device-token
+hash, a generated session secret and at least one enabled App user are present.
+
 ## Version 1.1.0 contract
 
 - Streaming chat uses an SSE-specific transport with no response-body read
@@ -41,12 +53,18 @@ the runtime credential files back into source is forbidden.
 ## Initial setup
 
 ```powershell
-Copy-Item config.example.json config.json
+python initialize_config.py
 python manage_device_token.py
 python manage_user.py <username>
 python credential_registry.py --check
+python start_expand.py configuration_status
 python start_expand.py start
 ```
+
+`initialize_config.py` creates ignored local `config.json` and `users.json`
+files and generates a random session secret. It does not activate or start the
+bridge and does not create a device Token or user password on the operator's
+behalf. Activation is therefore always explicit.
 
 Verify the service with:
 

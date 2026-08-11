@@ -14,5 +14,5 @@
   "upstream_password": "",
   "poll_interval": 5,
   "request_timeout": 30,
-  "note": "Copy this file to config.json, then configure credentials locally. Never commit config.json or users.json."
+  "note": "Run initialize_config.py, then configure credentials locally. The source module is inactive by default. Never commit config.json or users.json."
 }

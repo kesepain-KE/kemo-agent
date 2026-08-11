@@ -14,19 +14,19 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+from lifecycle import load_ready_config
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+BASE_PATH = Path(BASE_DIR)
 SERVER_PATH = os.path.join(BASE_DIR, "daemon.py")
 PID_PATH = os.path.join(BASE_DIR, "_server.pid")
 LOG_PATH = os.path.join(BASE_DIR, "logs", "server.log")
 
 
-def _load_config() -> dict:
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"host": "127.0.0.1", "port": 8742, "token_sha256": ""}
+def _load_config() -> tuple[dict | None, dict]:
+    return load_ready_config(BASE_PATH)
 
 
 def _port_open(port: int) -> bool:
@@ -57,26 +57,36 @@ def _pid_alive(pid) -> bool:
 
 
 def status() -> dict:
-    cfg = _load_config()
+    cfg, initialization = _load_config()
     pid = _read_pid()
     running = _pid_alive(pid)
-    if not running:
+    if not running and cfg is not None:
         running = _port_open(int(cfg.get("port", 8742)))
     return {
         "ok": True,
+        **initialization,
+        "active": bool(initialization["configured"] and running),
         "running": running,
         "pid": pid if running else None,
-        "port": int(cfg.get("port", 8742)),
-        "host": cfg.get("host", "127.0.0.1"),
+        "orphaned_process": bool(running and not initialization["configured"]),
         "log": LOG_PATH,
     }
 
 
 def start() -> dict:
     st = status()
+    if not st["configured"]:
+        return {
+            **st,
+            "ok": False,
+            "active": False,
+            "error": "bridge_not_initialized",
+            "message": "桥接服务尚未完成初始化和凭据配置，拒绝启动。",
+        }
     if st["running"]:
         return {"ok": True, "message": "already running", **st}
-    cfg = _load_config()
+    cfg, _ = _load_config()
+    assert cfg is not None
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     flags = 0
     for name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
@@ -99,18 +109,20 @@ def start() -> dict:
             ready = True
             break
         time.sleep(0.3)
+    if ready:
+        return {**status(), "ok": True, "message": "started"}
     return {
-        "ok": True,
-        "message": "started" if ready else "started but port not ready (check log)",
+        **status(),
+        "ok": False,
+        "active": False,
+        "error": "bridge_port_not_ready",
+        "message": "进程已创建，但桥接端口未就绪；请检查日志。",
         "pid": proc.pid,
-        "port": int(cfg.get("port", 8742)),
-        "log": LOG_PATH,
     }
 
 
 def stop() -> dict:
-    st = status()
-    pid = st.get("pid")
+    pid = _read_pid()
     if pid:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -123,7 +135,7 @@ def stop() -> dict:
         except OSError:
             pass
     after = status()
-    return {"ok": True, "message": "stopped" if not after["running"] else "still running", **after}
+    return {**after, "ok": True, "message": "stopped" if not after["running"] else "still running"}
 
 
 def restart() -> dict:
@@ -132,7 +144,15 @@ def restart() -> dict:
     return start()
 
 
-_COMMANDS = {"start": start, "stop": stop, "status": status, "restart": restart}
+_COMMANDS = {
+    "activate": start,
+    "start": start,
+    "deactivate": stop,
+    "stop": stop,
+    "status": status,
+    "configuration_status": status,
+    "restart": restart,
+}
 
 
 def execute(command: str, params: dict | None = None) -> dict:
