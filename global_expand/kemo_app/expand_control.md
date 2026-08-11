@@ -7,7 +7,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 模型、脱敏配置、WebSocket 推送与在线设备统计。公网访问由 frp/nginx 反代 + TLS 终止，本服务
 不直接暴露公网。
 
-当前桥接协议实现版本：**1.1.0**。
+当前桥接协议实现版本：**1.1.1**。
 
 源码与首次部署默认为**未初始化、未激活**：`open_input=false`、没有最近成功采集时间、
 不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
@@ -94,7 +94,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 2. 配置设备 Token 和至少一个 App 用户后，运行 `configuration_status`；仅当
    `configured=true` 时才允许激活。
 3. `start` 或 `activate` 显式启动服务。
-4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.0 健康状态，并包含
+4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.1 健康状态，并包含
    `websocket_connections` 与 `connected_devices`。
 5. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
 6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
@@ -117,6 +117,15 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
   `file_upload` 数据域保存。空目录表示上传到根目录。
 - 单文件最大 80 MB；同名文件由框架文件服务自动生成不冲突的新名称，不直接覆盖。
 - App 上传成功后会刷新当前目录，嵌套目录中的上传文件可立即查看和预览。
+
+# 1.1.1 APP 会话来源隔离
+
+- `/v1/chat` 固定向框架提交 `source=app`；设备请求体不能指定、覆盖或冒充其他来源。
+- 会话列表、历史读取、关闭、压缩、删除、全部删除和撤销上一轮均固定访问 `source=app`。
+- APP 与 Web 即使使用相同 `session_id`，其活动运行、客户端租约和历史窗口仍互相隔离。
+- Web 历史页只读展示 APP 归档并标记“APP版”，不会把 APP 会话接管为网页当前对话。
+- 核心更新器只覆盖本模块的公开代码和说明，部署端的 `config.json`、`users.json`、
+  `credential_registry.json`、激活状态、采集摘要、PID、连接状态与日志均保留。
 
 # 1.1.0 传输与运行控制
 

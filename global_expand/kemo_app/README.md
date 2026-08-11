@@ -4,7 +4,7 @@
 kemo-agent. It exposes the App-facing HTTP, SSE and WebSocket API on a separate
 port while forwarding authorized operations to the framework Web API.
 
-Current bridge version: **1.1.0**.
+Current bridge version: **1.1.1**.
 
 ## Default lifecycle
 
@@ -18,7 +18,19 @@ initialization state and explicitly activate the bridge. The `start`/`activate`
 commands refuse to launch a process until local configuration, a device-token
 hash, a generated session secret and at least one enabled App user are present.
 
-## Version 1.1.0 contract
+## Version 1.1.1 contract
+
+- Android App chat and conversation operations always use the dedicated
+  `source=app` history partition; the device cannot select or impersonate
+  another source.
+- App runs, client leases, history windows, close/compress/delete operations,
+  and memory processing are isolated from `source=web` even when a session ID
+  is reused.
+- The Web history drawer labels App archives as `APP版` and opens them read-only.
+- Core updates refresh the tracked bridge code while retaining deployment-only
+  configuration, credential records, activation state, logs and runtime data.
+
+## Version 1.1.0 transport contract
 
 - Streaming chat uses an SSE-specific transport with no response-body read
   deadline and emits a heartbeat every 15 seconds. Ordinary REST requests keep

@@ -24,9 +24,10 @@ from upstream import UpstreamClient, UpstreamError
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 CONNECTION_STATE_PATH = BASE_DIR / "_connections.json"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 SERVICE_ID = "kemo_app"
 SERVICE_NAME = "kemo app 桥接服务"
+APP_SOURCE = "app"
 
 
 def load_config() -> dict[str, Any]:
@@ -191,7 +192,11 @@ async def auth_logout(x_kemo_session: str = Header(default=""), _: None = Depend
 
 @app.post("/v1/chat")
 async def chat(body: ChatRequest, session: Session = Depends(require_session)) -> StreamingResponse:
-    payload = {**body.model_dump(), "user": session.username}
+    payload = {
+        **body.model_dump(),
+        "user": session.username,
+        "source": APP_SOURCE,
+    }
     # Chat is an SSE stream.  The upstream may legitimately stay quiet while
     # a tool (for example image generation) runs, so opt into the stream-only
     # read timeout policy.  Other REST and file-download calls retain the
@@ -259,8 +264,7 @@ async def conversations(
     source: str = Query("app"), query: str = Query(""), limit: int = Query(50, ge=1, le=100), before: str = Query(""),
     session: Session = Depends(require_session),
 ) -> Any:
-    upstream_source = "web" if source == "app" else source
-    params = {"source": upstream_source, "query": query, "limit": limit}
+    params = {"source": APP_SOURCE, "query": query, "limit": limit}
     if before:
         params["before"] = before
     return await UPSTREAM.request_json("GET", f"/api/users/{quote(session.username, safe='')}/sessions", params=params)
@@ -271,13 +275,13 @@ async def conversations_delete_all(session: Session = Depends(require_session)) 
     return await UPSTREAM.request_json(
         "DELETE",
         f"/api/users/{quote(session.username, safe='')}/sessions",
-        params={"source": "web"},
+        params={"source": APP_SOURCE},
     )
 
 
 @app.get("/v1/conversations/{session_id}/messages")
 async def conversation_messages(session_id: str, source: str = Query("app"), limit: int = Query(100, ge=1, le=100), before: int | None = Query(None), session: Session = Depends(require_session)) -> Any:
-    params: dict[str, Any] = {"source": "web" if source == "app" else source, "limit": limit}
+    params: dict[str, Any] = {"source": APP_SOURCE, "limit": limit}
     if before is not None:
         params["before"] = before
     return await UPSTREAM.request_json("GET", f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/history", params=params)
@@ -288,7 +292,7 @@ async def conversation_delete(session_id: str, session: Session = Depends(requir
     return await UPSTREAM.request_json(
         "DELETE",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}",
-        params={"source": "web"},
+        params={"source": APP_SOURCE},
     )
 
 
@@ -297,7 +301,7 @@ async def conversation_close(session_id: str, session: Session = Depends(require
     return await UPSTREAM.request_json(
         "POST",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/close",
-        params={"source": "web"},
+        params={"source": APP_SOURCE},
     )
 
 
@@ -306,7 +310,7 @@ async def conversation_compress(session_id: str, session: Session = Depends(requ
     return await UPSTREAM.request_json(
         "POST",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/compress",
-        params={"source": "web"},
+        params={"source": APP_SOURCE},
     )
 
 
@@ -319,7 +323,7 @@ async def conversation_undo_last_round(
     return await UPSTREAM.request_json(
         "POST",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/undo-last-round",
-        params={"source": "web"},
+        params={"source": APP_SOURCE},
         json_body=body.model_dump(),
     )
 

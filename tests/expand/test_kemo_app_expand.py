@@ -39,9 +39,16 @@ class KemoAppExpandTests(unittest.TestCase):
     def test_bridge_declares_current_version(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
         manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
-        self.assertIn('VERSION = "1.1.0"', source)
-        self.assertIn("v1.1.0", manifest["explain"])
-        self.assertIn("**1.1.0**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn('VERSION = "1.1.1"', source)
+        self.assertIn("v1.1.1", manifest["explain"])
+        self.assertIn("**1.1.1**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
+
+    def test_bridge_keeps_android_conversations_in_app_partition(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('APP_SOURCE = "app"', source)
+        self.assertIn('"source": APP_SOURCE', source)
+        self.assertIn('params={"source": APP_SOURCE}', source)
+        self.assertNotIn('"web" if source == "app" else source', source)
 
     def test_manifest_is_discoverable_but_published_inactive(self) -> None:
         meta = read_expand_meta(MODULE_ROOT)
