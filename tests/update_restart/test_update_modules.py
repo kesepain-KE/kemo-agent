@@ -406,6 +406,14 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertIn(str(module).replace("\\", "/"), "\n".join(result["details"]))
             self.assertEqual((target / module / "app.py").read_text("utf-8"), "new app.py")
             self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "local bridge status")
+            self.assertEqual(
+                json.loads((target / module / "config.json").read_text("utf-8"))["upstream"],
+                "http://127.0.0.1:1457",
+            )
+            self.assertIn(
+                "alice",
+                json.loads((target / module / "users.json").read_text("utf-8")),
+            )
             self.assertTrue(json.loads((target / module / "credential_registry.json").read_text("utf-8"))["local"])
             self.assertTrue(json.loads((target / module / "_runtime.json").read_text("utf-8"))["running"])
             self.assertEqual((target / module / "logs" / "server.log").read_text("utf-8"), "local log")
@@ -413,6 +421,46 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertTrue(manifest["open_input"])
             self.assertEqual(manifest["input_health"], "正常")
             self.assertEqual(manifest["recent_update"], "2026-08-11 20:00:00")
+
+    def test_core_preserves_active_kemo_app_when_readiness_is_temporarily_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_APP_EXPAND)
+            for name in core_update.KEMO_APP_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {
+                "name": "kemo app 桥接服务",
+                "open_input": False,
+                "input_health": "异常",
+            })
+            write(source / module / "input_data.md", "source inactive")
+            write_json(target / module / "config.json", {
+                "token_sha256": "a" * 64,
+                "session_secret": "",
+                "upstream": "http://127.0.0.1:1457",
+                "users_path": "users.json",
+            })
+            write_json(target / module / "users.json", {})
+            write_json(target / module / "expand.json", {
+                "name": "old",
+                "open_input": True,
+                "input_health": "异常",
+            })
+
+            core_update.update(source, target, assume_yes=True)
+
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertTrue(manifest["open_input"])
+            self.assertEqual(
+                json.loads((target / module / "config.json").read_text("utf-8"))["session_secret"],
+                "",
+            )
+            self.assertEqual(
+                json.loads((target / module / "users.json").read_text("utf-8")),
+                {},
+            )
 
     def test_core_does_not_activate_configured_but_stopped_kemo_app(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -435,6 +483,26 @@ class UpdateModuleTests(unittest.TestCase):
                 "alice": {"enabled": True, "salt": "salt", "hash": "hash"},
             })
             write_json(target / module / "expand.json", {"open_input": False})
+
+            core_update.update(source, target, assume_yes=True)
+
+            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
+            self.assertFalse(manifest["open_input"])
+
+    def test_core_keeps_new_kemo_app_install_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            module = Path(core_update.KEMO_APP_EXPAND)
+            for name in core_update.KEMO_APP_EXPAND_FILES:
+                write(source / module / name, f"new {name}")
+            write_json(source / module / "expand.json", {
+                "name": "kemo app 桥接服务",
+                "open_input": False,
+                "input_health": "异常",
+            })
+            write(source / module / "input_data.md", "source inactive")
 
             core_update.update(source, target, assume_yes=True)
 
