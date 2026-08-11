@@ -75,6 +75,8 @@ global_expand/*
 !global_expand/kemo_gateway_status/**
 !global_expand/kemo_graph/
 !global_expand/kemo_graph/**
+!global_expand/kemo_app/
+!global_expand/kemo_app/**
 **/kemo-graph-storage/
 global_sense/*
 !global_sense/register.py
