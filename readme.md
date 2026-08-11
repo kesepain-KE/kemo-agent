@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.5-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,9 +204,9 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.0.5`
+当前版本：`1.1.0`
 
-`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路，`1.0.3` 建立可配置的请求级动态快照，`1.0.4` 增强工具调用连续性与多入口体验。`1.0.5` 为拓展和感知分别增加用户级总注入闸门，使两类数据都可选择不注入、按轮注入或实时注入；上下文窗口顶部会只读展示当前策略，帮助用户在实时感知能力与 Prompt Cache 命中率之间明确取舍。后续版本将继续聚焦边缘生态、性能与长期可靠性。
+`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路，`1.0.3` 建立可配置的请求级动态快照，`1.0.4` 增强工具调用连续性与多入口体验。`1.0.5` 为拓展和感知分别增加用户级总注入闸门，使两类数据都可选择不注入、按轮注入或实时注入；上下文窗口顶部会只读展示当前策略，帮助用户在实时感知能力与 Prompt Cache 命中率之间明确取舍。`1.1.0` 完成主生态的移动端闭环：新增 `kemo_app` 全局拓展，为 Android 客户端提供独立的 HTTP/SSE/WebSocket 桥接服务（两级认证、流式对话与运行中引导、任务与定时、文件传输上限 80 MiB、在线设备统计），使 kemo-agent 生态正式延伸至手机端。后续版本将继续聚焦边缘生态、性能与长期可靠性。
 
 目前可以体验的内容包括：
 

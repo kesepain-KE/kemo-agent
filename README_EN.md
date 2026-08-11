@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.0.5-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,9 +204,9 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.0.5`
+Current version: `1.1.0`
 
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, and `1.0.4` improves tool-call continuity and multi-entry history. `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. Each source can now be disabled, fixed for one conversation round, or refreshed before every logical Provider request, while the context drawer shows the effective policy as read-only status bubbles. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
+`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, and `1.0.4` improves tool-call continuity and multi-entry history. `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. Each source can now be disabled, fixed for one conversation round, or refreshed before every logical Provider request, while the context drawer shows the effective policy as read-only status bubbles. `1.1.0` completes the mobile loop of the ecosystem: a new `kemo_app` global expand provides an independent HTTP/SSE/WebSocket bridge for the Android client (two-level authentication, streaming chat with guidance, tasks and schedules, file transfer up to 80 MiB, online device stats), extending the kemo-agent ecosystem to mobile. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
 
 Available today:
 
