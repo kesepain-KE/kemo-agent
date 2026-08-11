@@ -13,6 +13,12 @@ state. `open_input` is false, no successful update timestamp is committed, and
 the status document contains no host, upstream, user, device or connection
 information. Merely cloning or updating kemo-agent never starts this service.
 
+After an installation has been explicitly activated, ordinary framework
+updates preserve that local activation choice even if credential readiness
+cannot be validated while update files are being copied. A fresh installation
+remains inactive, and an explicit `stop`/`deactivate` choice remains inactive.
+Local configuration and credential files are never replaced by the updater.
+
 `open_control` remains available only so an administrator can inspect the
 initialization state and explicitly activate the bridge. The `start`/`activate`
 commands refuse to launch a process until local configuration, a device-token

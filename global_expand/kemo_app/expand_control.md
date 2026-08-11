@@ -13,6 +13,10 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
 自动启动服务。`open_control=true` 只用于查询初始化状态和执行管理员明确要求的激活操作。
 
+部署端一旦被管理员显式激活，常规框架更新会保留该 APP 拓展的本地激活状态；更新期间即使
+凭据暂时无法校验，也不会把 `open_input=true` 重置为 `false`。首次安装仍保持未激活，管理员
+显式执行 `stop` / `deactivate` 后也仍保持未激活，本地配置与凭据文件不会被更新器覆盖。
+
 显示名称为“kemo app 桥接服务”；稳定模块标识仍为 `kemo_app`。
 调用入口：`expand_call(scope="global", module="kemo_app", ...)`。
 
