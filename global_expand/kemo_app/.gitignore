@@ -1,0 +1,16 @@
+# Local bridge configuration and authentication material
+config.json
+users.json
+credential_registry.json
+
+# Runtime state
+_connections.json
+_runtime.json
+_server.pid
+_last_run.json
+.module.execution.lock
+.runtime.lock
+logs/
+__pycache__/
+*.pyc
+

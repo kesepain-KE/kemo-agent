@@ -1,0 +1,59 @@
+# kemo app bridge expand
+
+`kemo_app` is the global expand module that runs the Android App bridge for
+kemo-agent. It exposes the App-facing HTTP, SSE and WebSocket API on a separate
+port while forwarding authorized operations to the framework Web API.
+
+Current bridge version: **1.1.0**.
+
+## Version 1.1.0 contract
+
+- Streaming chat uses an SSE-specific transport with no response-body read
+  deadline and emits a heartbeat every 15 seconds. Ordinary REST requests keep
+  their configured bounded timeout.
+- A running response can receive guidance or be cancelled without tying its
+  lifetime to an individual Android screen.
+- Conversation history supports listing, loading, deletion, closing,
+  compression and undoing the last round.
+- App uploads and framework-generated image, audio, video and ordinary file
+  artifacts can be transferred through the bridge. A single App upload is
+  limited to 80 MiB.
+- WebSocket events expose online connection/device counts without exposing
+  device tokens, session tokens or upstream credentials.
+- Model discovery remains limited to the Kemo protocol; Chat-compatible model
+  names are configured manually.
+
+## Source and runtime boundary
+
+The Python modules, expand manifest and control documentation are tracked here.
+The following files are deliberately local runtime data and must not be copied
+between installations or committed:
+
+- `config.json` (device-token hash and optional upstream credentials)
+- `users.json` (salted App-user password verifiers)
+- `credential_registry.json` (generated credential audit snapshot)
+- PID, lock, connection, runtime and log files
+
+The deployed instance under `D:\kemo-agent\global_expand\kemo_app` remains a
+runtime copy. Changes should be developed here and deployed explicitly; copying
+the runtime credential files back into source is forbidden.
+
+## Initial setup
+
+```powershell
+Copy-Item config.example.json config.json
+python manage_device_token.py
+python manage_user.py <username>
+python credential_registry.py --check
+python start_expand.py start
+```
+
+Verify the service with:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8742/v1/health
+python start_expand.py status
+```
+
+The App-facing protocol and operational commands are documented in
+`expand_control.md`.

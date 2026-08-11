@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8742,
+  "token_sha256": "",
+  "session_secret": "",
+  "session_ttl_seconds": 7200,
+  "users_path": "users.json",
+  "pbkdf2_iterations": 310000,
+  "auth_rate_limit_per_minute": 20,
+  "business_rate_limit_per_minute": 60,
+  "upstream": "http://127.0.0.1:1457",
+  "upstream_token": "",
+  "upstream_username": "",
+  "upstream_password": "",
+  "poll_interval": 5,
+  "request_timeout": 30,
+  "note": "Copy this file to config.json, then configure credentials locally. Never commit config.json or users.json."
+}
