@@ -5,7 +5,6 @@ from __future__ import annotations
 import difflib
 import json
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from ._utils import (
     ask_choice,
@@ -129,36 +128,6 @@ BUILTIN_GLOBAL_EXPANDS = (
     ),
     (KEMO_APP_EXPAND, KEMO_APP_EXPAND_FILES, "config.json", ()),
 )
-
-
-def _kemo_app_configured(module_root: Path) -> bool:
-    """Validate the local bridge prerequisites without exposing credentials."""
-
-    try:
-        config = read_json(module_root / "config.json")
-        users_path = module_root / str(config.get("users_path") or "users.json")
-        users = read_json(users_path)
-    except Exception:
-        return False
-    if not isinstance(config, dict) or not isinstance(users, dict):
-        return False
-    token_hash = str(config.get("token_sha256") or "").strip().lower()
-    token_ready = len(token_hash) == 64 and all(char in "0123456789abcdef" for char in token_hash)
-    session_ready = len(str(config.get("session_secret") or "")) >= 32
-    upstream = urlsplit(str(config.get("upstream") or "").strip())
-    upstream_ready = upstream.scheme in {"http", "https"} and bool(upstream.hostname)
-    try:
-        port_ready = 1 <= int(config.get("port", 8742)) <= 65535
-    except (TypeError, ValueError):
-        port_ready = False
-    enabled_user = any(
-        isinstance(record, dict)
-        and bool(record.get("enabled", True))
-        and bool(str(record.get("salt") or ""))
-        and bool(str(record.get("hash") or ""))
-        for record in users.values()
-    )
-    return token_ready and session_ready and upstream_ready and port_ready and enabled_user
 
 
 def _preserved_directory_differs(
@@ -356,7 +325,15 @@ def _update_builtin_global_expand(
                 and any(isinstance(item, dict) and item.get("enabled", True) for item in libraries)
             )
         elif relative == KEMO_APP_EXPAND:
-            active = bool(current.get("open_input")) and _kemo_app_configured(target)
+            # App activation is an explicit, durable operator choice.  An
+            # update must not erase it merely because credentials are being
+            # migrated, temporarily incomplete, or unavailable for validation
+            # while files are copied.  Runtime readiness is still enforced by
+            # kemo_app/start_expand.py when the bridge is actually started.
+            # A fresh install and an explicitly deactivated installation both
+            # remain inactive because neither has an explicit boolean true in
+            # its existing local manifest.
+            active = current.get("open_input") is True
         manifest["open_input"] = active
         if current:
             if current.get("input_health") in {"正常", "异常"}:
