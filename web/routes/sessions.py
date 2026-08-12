@@ -198,18 +198,21 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     async def overview(
         user: str,
         session_id: str = Query(default=""),
+        source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return backend.overview(user, session_id=session_id)
+        return backend.overview(user, session_id=session_id, source=source)
 
     @app.get("/api/users/{user}/runtime/status")
     async def runtime_status(
         user: str,
         session_id: str = Query(default=""),
+        source: str = Query(default="web"),
         sections: str = Query(default=""),
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             backend.runtime_status,
             user,
             session_id=session_id,
+            source=source,
             sections=sections,
         )

@@ -243,7 +243,9 @@ class WebRunService(
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
         self._overview_cache_lock = threading.RLock()
-        self._overview_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+        self._overview_cache: dict[
+            tuple[str, str, str], tuple[float, dict[str, Any]]
+        ] = {}
         self._kemo_catalog_lock = threading.RLock()
         self._kemo_catalog_cache: dict[
             tuple[str, str, str], tuple[float, Any]
@@ -966,10 +968,18 @@ class WebRunService(
     ) -> Iterator[RunEvent]:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
+        normalized_source = self.require_source(source)
         normalized_plan_id = str(plan_id or "").strip()
         store = PlanStore(self.root, name)
 
         def claim(current: dict[str, Any]) -> dict[str, Any]:
+            if (
+                str(current.get("source") or "") != normalized_source
+                or str(current.get("session_id") or "") != normalized_session
+            ):
+                raise ConflictError(
+                    f"计划 {normalized_plan_id} 不属于当前对话空间"
+                )
             status = str(current.get("status") or "")
             if status not in {"pending", "approved", "paused"}:
                 raise ConflictError(
@@ -1027,7 +1037,7 @@ class WebRunService(
                 run_id=run_id,
                 task_plan_id=normalized_plan_id,
                 task_plan_mode="agent_managed",
-                source=source,
+                source=normalized_source,
                 client_id=client_id,
             )
         except BaseException:

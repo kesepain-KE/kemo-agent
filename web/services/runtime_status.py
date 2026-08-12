@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from provider.protocol.models import normalize_reasoning_effort
+from provider.protocol.models import (
+    normalize_kemo_reasoning_effort,
+    normalize_reasoning_effort,
+)
 from run.config import load_config
 from run.context import (
     ContextPolicy,
@@ -117,6 +120,7 @@ class RuntimeStatusServiceMixin:
         token_limit: int,
         round_limit: int,
         configured_ratio: float,
+        source: str = "web",
         prompt_bundle: Any | None = None,
     ) -> dict[str, Any]:
         unavailable = {
@@ -132,14 +136,14 @@ class RuntimeStatusServiceMixin:
         }
         selected = bool(session_id)
         directory = (
-            find_window(self.root, user, "web", session_id) if selected else None
+            find_window(self.root, user, source, session_id) if selected else None
         )
         archive: dict[str, Any]
         if directory is None:
             if selected:
                 return unavailable
             directory = self.root / "users" / user / "history" / "__new_session__"
-            archive = empty_window(user, "web", "__new_session__")
+            archive = empty_window(user, source, "__new_session__")
         else:
             try:
                 archive = load_window(directory)
@@ -366,9 +370,11 @@ class RuntimeStatusServiceMixin:
         user: Any,
         *,
         session_id: Any = "",
+        source: Any = "web",
         sections: Any = None,
     ) -> dict[str, Any]:
         name = self.require_user(user)
+        normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id) if session_id else ""
         now = datetime.now(_BEIJING)
         available_sections = {
@@ -509,8 +515,14 @@ class RuntimeStatusServiceMixin:
                 "type": provider["type"],
                 "base_url": provider["base_url"],
                 "model": provider["model"],
-                "thinking_effort": normalize_reasoning_effort(
-                    provider_config.get("reasoning_effort")
+                "thinking_effort": (
+                    normalize_kemo_reasoning_effort(
+                        provider_config.get("reasoning_effort")
+                    )
+                    if str(provider.get("type") or "").strip().casefold() == "kemo"
+                    else normalize_reasoning_effort(
+                        provider_config.get("reasoning_effort")
+                    )
                 ),
                 "configured": bool(
                     provider.get("configured")
@@ -527,6 +539,7 @@ class RuntimeStatusServiceMixin:
                 token_limit=token_limit,
                 round_limit=round_limit,
                 configured_ratio=compression_ratio,
+                source=normalized_source,
                 prompt_bundle=bundle,
             )
 

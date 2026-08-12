@@ -15,16 +15,27 @@ from web.services.runtime_status import _nonnegative_int
 
 
 class OverviewServiceMixin:
-    def overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
+    def overview(
+        self,
+        user: Any,
+        *,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
+        normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id) if session_id else ""
-        key = (name, normalized_session)
+        key = (name, normalized_source, normalized_session)
         now = time.monotonic()
         with self._overview_cache_lock:
             cached = self._overview_cache.get(key)
             if cached is not None and now - cached[0] < 0.5:
                 return copy.deepcopy(cached[1])
-        result = self._build_overview(name, session_id=normalized_session)
+        result = self._build_overview(
+            name,
+            session_id=normalized_session,
+            source=normalized_source,
+        )
         with self._overview_cache_lock:
             self._overview_cache[key] = (time.monotonic(), copy.deepcopy(result))
             if len(self._overview_cache) > 32:
@@ -35,7 +46,13 @@ class OverviewServiceMixin:
                 self._overview_cache.pop(oldest, None)
         return result
 
-    def _summary_cache_status(self, user: str, session_id: str) -> dict[str, Any]:
+    def _summary_cache_status(
+        self,
+        user: str,
+        session_id: str,
+        *,
+        source: str = "web",
+    ) -> dict[str, Any]:
         empty = {
             "exists": False,
             "covered_rounds": [],
@@ -44,7 +61,7 @@ class OverviewServiceMixin:
         }
         if not session_id:
             return empty
-        directory = find_window(self.root, user, "web", session_id)
+        directory = find_window(self.root, user, source, session_id)
         if directory is None:
             return empty
         runtime_path = runtime_window_path(directory)
@@ -83,8 +100,15 @@ class OverviewServiceMixin:
             "components": dict(components) if isinstance(components, dict) else {},
         }
 
-    def _build_overview(self, user: Any, *, session_id: Any = "") -> dict[str, Any]:
+    def _build_overview(
+        self,
+        user: Any,
+        *,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
+        normalized_source = self.require_source(source)
         normalized_session = ""
         if session_id:
             normalized_session = self.require_session_id(session_id)
@@ -92,7 +116,7 @@ class OverviewServiceMixin:
         knowledge_data = self.knowledge(name)
         skill_data = self.skills(name)
         settings_data = self.settings(name)
-        sessions = list_sessions(self.root, name, "web")
+        sessions = list_sessions(self.root, name, normalized_source)
         config = load_config(name, self.root)
 
         usage = {
@@ -105,7 +129,7 @@ class OverviewServiceMixin:
         selected_directory: Path | None = None
         if normalized_session:
             selected_directory = find_window(
-                self.root, name, "web", normalized_session
+                self.root, name, normalized_source, normalized_session
             )
             if selected_directory is not None:
                 data = load_window(selected_directory).get("data") or {}
@@ -136,6 +160,7 @@ class OverviewServiceMixin:
             token_limit=token_limit,
             round_limit=round_limit,
             configured_ratio=compression_ratio,
+            source=normalized_source,
         )
         active_context_rounds = (
             max(0, int(current_context.get("rounds") or 0))
@@ -375,7 +400,11 @@ class OverviewServiceMixin:
                 "session_tool_calls": session_tool_calls,
             },
             "agents": agents,
-            "summary_cache": self._summary_cache_status(name, normalized_session),
+            "summary_cache": self._summary_cache_status(
+                name,
+                normalized_session,
+                source=normalized_source,
+            ),
             "runtime_host": self._runtime_status(),
             "active_plan": active_plan,
             "activities": activities[:6],

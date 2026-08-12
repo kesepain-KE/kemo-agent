@@ -3230,6 +3230,40 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(stored["status"], "completed")
         self.assertTrue(all(step["status"] == "completed" for step in stored["steps"]))
 
+    def test_stream_plan_rejects_cross_conversation_execution_without_mutation(self) -> None:
+        _, root = self.make_root()
+        store = PlanStore(root, "alice")
+        plan = store.create(
+            normalize_plan(
+                title="A 对话计划",
+                description="不能挂到 B 对话执行",
+                user="alice",
+                source="web",
+                session_id="conversation-a",
+                steps=[{
+                    "step_id": "step_1",
+                    "title": "执行",
+                    "description": "执行",
+                    "critical": True,
+                }],
+            )
+        )
+        service = WebRunService(root, event_source=lambda *_args, **_kwargs: iter(()))
+
+        with self.assertRaisesRegex(WebServiceError, "不属于当前对话空间"):
+            service.stream_plan(
+                "alice",
+                "conversation-b",
+                plan["plan_id"],
+                cancel_event=threading.Event(),
+                run_id="run_cross_space",
+                source="web",
+            )
+
+        stored = store.read(plan["plan_id"])
+        self.assertEqual(stored["status"], "pending")
+        self.assertEqual(stored["session_id"], "conversation-a")
+
     def test_plan_pause_command_uses_latest_disk_state_without_revision(self) -> None:
         _, root = self.make_root()
         store = PlanStore(root, "alice")
@@ -3347,11 +3381,50 @@ class WebBackendTests(unittest.TestCase):
                 },
             )
             self.assertEqual(move_out.status_code, 400, move_out.text)
+
             self.assertTrue((base / f"{scope}.md").is_file())
             self.assertEqual(
                 (base / "kemo-graph-storage" / "manifest.json").read_text("utf-8"),
                 '{"runtime": true}',
             )
+
+    def test_important_memory_write_uses_output_limit_not_prompt_budget(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "memory": {
+                        "important_memory_max_chars": 4,
+                        "important_memory_output_max_chars": 8,
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}),
+            "utf-8",
+        )
+        app = create_app(service=WebRunService(root))
+
+        accepted = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/memory/important",
+            json={"content": "12345678"},
+        )
+        rejected = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/memory/important",
+            json={"content": "123456789"},
+        )
+
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["content"], "12345678")
+        self.assertEqual(rejected.status_code, 400, rejected.text)
 
     def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
         _, root = self.make_root()
@@ -3872,6 +3945,17 @@ class WebBackendTests(unittest.TestCase):
             "estimated": False,
         }
         commit_window(root / "users" / "alice" / "history" / "observer-window", window)
+        app_window = empty_window("alice", "app", "observer-app-session")
+        app_window["text"]["messages"] = [
+            {"role": "user", "content": "app observer prompt"},
+            {"role": "assistant", "content": "app observer response"},
+        ]
+        app_window["data"]["rounds"] = 1
+        app_window["data"]["token_usage"] = {}
+        commit_window(
+            root / "users" / "alice" / "history" / "observer-app-window",
+            app_window,
+        )
         other_window = empty_window("alice", "web", "other-session")
         other_window["text"]["messages"] = [
             {"role": "user", "content": "old prompt"},
@@ -3987,6 +4071,16 @@ class WebBackendTests(unittest.TestCase):
             {"expand": "round", "perception": "round"},
         )
 
+        app_overview = self.request(
+            app,
+            "GET",
+            "/api/users/alice/overview?source=app&session_id=observer-app-session",
+        )
+        self.assertEqual(app_overview.status_code, 200, app_overview.text)
+        self.assertEqual(app_overview.json()["session_id"], "observer-app-session")
+        self.assertEqual(app_overview.json()["context_window"]["conversation"]["foreground_rounds"], 1)
+        self.assertTrue(app_overview.json()["context_snapshot"]["available"])
+
         runtime_status = self.request(
             app,
             "GET",
@@ -3999,6 +4093,15 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_payload["tokens"]["total_tokens"], 1500)
         self.assertEqual(runtime_payload["tokens"]["request_count"], 1)
         self.assertTrue(runtime_payload["prompt"]["content"])
+
+        app_runtime_status = self.request(
+            app,
+            "GET",
+            "/api/users/alice/runtime/status?source=app&session_id=observer-app-session",
+        )
+        self.assertEqual(app_runtime_status.status_code, 200, app_runtime_status.text)
+        self.assertEqual(app_runtime_status.json()["context"]["rounds"], 1)
+        self.assertTrue(app_runtime_status.json()["context"]["context_snapshot"]["available"])
         self.assertEqual(
             [item["id"] for item in runtime_payload["prompt"]["components"]],
             list(PROMPT_SECTION_ORDER),
