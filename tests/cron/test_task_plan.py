@@ -284,6 +284,80 @@ class PlanExecutionTests(unittest.TestCase):
         ))
         self.assertTrue(any(e.type == "error" for e in events))
 
+    def test_running_plan_cannot_be_adopted_by_second_executor(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+        first = execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        )
+        first_event = next(first)
+        self.assertEqual(first_event.type, "tool_call_start")
+
+        second_events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        ))
+
+        self.assertTrue(any(event.type == "error" for event in second_events))
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["steps"][0]["status"], "running")
+
+    def test_atomic_transition_does_not_revive_cancelled_plan(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        cancel_plan(self.root, "alice", plan["plan_id"])
+
+        with self.assertRaises(PlanExecutionError):
+            approve_plan(self.root, "alice", plan["plan_id"])
+
+        self.assertEqual(
+            get_plan(self.root, "alice", plan["plan_id"])["status"],
+            "cancelled",
+        )
+
+    def test_inflight_step_can_persist_after_plan_is_paused(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": "get_current_time", "tool_arguments": {}, "critical": True},
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+
+        def event_source(request):
+            del request
+            pause_plan(self.root, "alice", plan["plan_id"])
+            yield RunEvent(
+                type="tool_call_result",
+                tool_name="get_current_time",
+                result={"ok": True, "result": "done"},
+                metadata={"status": "completed"},
+            )
+            yield RunEvent(type="text_delta", content="done")
+            yield RunEvent(type="done", metadata={"status": "completed"})
+
+        events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+            agent_event_source=event_source,
+        ))
+
+        self.assertFalse(any(event.type == "error" for event in events))
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(stored["status"], "paused")
+        self.assertEqual(stored["steps"][0]["status"], "completed")
+
     def test_auto_accept_off_still_creates_pending(self) -> None:
         plan = self._plan_with_steps([
             {"step_id": "step_1", "title": "A", "description": "A",
@@ -492,7 +566,7 @@ class PlanExecutionTests(unittest.TestCase):
         self.assertEqual(plan["status"], "paused")
         resume_plan(self.root, "alice", plan["plan_id"])
         plan = get_plan(self.root, "alice", plan["plan_id"])
-        self.assertEqual(plan["status"], "running")
+        self.assertEqual(plan["status"], "approved")
 
     def test_completed_step_not_replayed(self) -> None:
         plan = self._plan_with_steps([
@@ -975,6 +1049,8 @@ class PlanGenerationTests(unittest.TestCase):
         ):
             plan = generate_plan(root=root, user="alice", goal="goal", config=config)
         self.assertEqual(plan["reminder"], "")
+        self.assertTrue(plan["auto_accept"])
+        self.assertEqual(plan["status"], "approved")
 
     def test_task_plan_executor_normalizes_reminder(self) -> None:
         class Context:

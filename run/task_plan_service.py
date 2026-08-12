@@ -322,7 +322,11 @@ def _normalize_result(
             steps=steps,
             auto_accept=auto_accept,
             reminder=_reminder(auto_accept, expected_action),
-            status=(existing_plan or {}).get("status", "pending"),
+            status=(
+                (existing_plan or {}).get("status", "pending")
+                if existing_plan is not None
+                else "approved" if auto_accept else "pending"
+            ),
             revision=int((existing_plan or {}).get("revision", 1)),
             created_at=(existing_plan or {}).get("created_at"),
             current_step=(existing_plan or {}).get("current_step"),

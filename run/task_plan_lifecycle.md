@@ -119,14 +119,24 @@ pending → approved → running → completed
 
 **计划状态**:
 - `pending → approved`（用户批准）
+- 新建计划在 `auto_accept=true` 时直接以 `approved` 状态持久化
 - `pending → cancelled`
 - `approved → running`（RuntimeHost 的 TaskPlanScheduler 原子领取）
 - `running → paused`（用户暂停或步骤失败）
 - `running → completed`（全部步骤完成）
-- `paused → running`（用户恢复）
+- `paused → approved`（用户恢复；随后由唯一执行器原子领取为 `running`）
 - `paused → cancelled`
 - `running → cancelled`（协作式取消）
 - `approved → cancelled`
+
+## 创建计划后的运行边界
+
+- `auto_accept=false`：新计划保存为 `pending`，等待用户明确批准。
+- `auto_accept=true`：新计划保存为 `approved`，等待 TaskPlanScheduler 或明确的计划执行入口领取。
+- 两种模式下，负责创建计划的主智能体 Run 都在工具结果发布后立即成功收束；不得继续发起 Provider 请求或执行同批后续工具。
+- 同批后续工具以 `TaskPlanCreationBoundary` 记录为 `not_executed`，保留完整历史协议但不产生副作用。
+- 收束状态只存在于当前 Run，不把计划写成 `paused`，也不设置用户级暂停标志。
+- Prompt 中的活跃计划按 `source + session_id` 过滤；同一用户的其他会话不会看到或继承当前会话计划。
 
 **步骤状态**:
 - `pending → running`

@@ -629,8 +629,15 @@ def _prompt_step(step: dict[str, Any]) -> str:
     return f"- [ ] {description}（{status}）"
 
 
-def select_prompt_plans(root: Path, user: str, *, max_chars: int) -> TaskPlanSelection:
-    """Read unfinished plans without changing the persisted plan state machine."""
+def select_prompt_plans(
+    root: Path,
+    user: str,
+    *,
+    max_chars: int,
+    source: str | None = None,
+    session_id: str | None = None,
+) -> TaskPlanSelection:
+    """Read unfinished plans, optionally limited to one conversation space."""
 
     if max_chars == 0:
         return TaskPlanSelection("", (), 0, 0, 0, 0, False)
@@ -652,6 +659,10 @@ def select_prompt_plans(root: Path, user: str, *, max_chars: int) -> TaskPlanSel
     offsets: list[int] = []
     used = 0
     for data in plans:
+        if source is not None and str(data.get("source") or "") != source:
+            continue
+        if session_id is not None and str(data.get("session_id") or "") != session_id:
+            continue
         plan_id = str(data.get("plan_id") or "")
         mapped = status_map.get(str(data.get("status") or ""))
         if mapped is None:

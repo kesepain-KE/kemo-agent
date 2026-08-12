@@ -39,10 +39,21 @@ def _result(ok: bool, **fields: Any) -> dict[str, Any]:
     return {"ok": ok, **fields}
 
 
-def _find_active_plan(store: PlanStore) -> dict[str, Any] | None:
+def _find_active_plan(
+    store: PlanStore,
+    *,
+    source: str = "",
+    session_id: str = "",
+) -> dict[str, Any] | None:
+    isolate_conversation = bool(source and session_id)
     for plan in store.list_plans():
-        if str(plan.get("status") or "") in _ACTIVE_STATUSES:
-            return plan
+        if str(plan.get("status") or "") not in _ACTIVE_STATUSES:
+            continue
+        if isolate_conversation and str(plan.get("source") or "") != source:
+            continue
+        if isolate_conversation and str(plan.get("session_id") or "") != session_id:
+            continue
+        return plan
     return None
 
 
@@ -88,6 +99,17 @@ def _progress_payload(plan: dict[str, Any], *, completed_step_id: str = "") -> d
         "remaining_steps": remaining_steps,
         "plan_status": str(plan.get("status") or ""),
     }
+
+
+def _belongs_to_conversation(plan: dict[str, Any], context: dict[str, Any]) -> bool:
+    source = str(context.get("source") or "")
+    session_id = str(context.get("session_id") or "")
+    if not source or not session_id:
+        return True
+    return (
+        str(plan.get("source") or "") == source
+        and str(plan.get("session_id") or "") == session_id
+    )
 
 
 def _auto_complete_check(store: PlanStore, plan_id: str) -> dict[str, Any]:
@@ -212,12 +234,24 @@ def run(
         )
 
     if selected_action == "list":
-        plans = store.list_plans()
+        source = str(context.get("source") or "")
+        session_id = str(context.get("session_id") or "")
+        if not source or not session_id:
+            return _result(False, error="任务计划列表缺少 source 或 session_id 对话身份")
+        plans = [
+            plan
+            for plan in store.list_plans()
+            if _belongs_to_conversation(plan, context)
+        ]
         return _result(True, plans=plans, total=len(plans))
 
     selected_plan_id = str(plan_id or "").strip()
     if not selected_plan_id and selected_action in {"view", "abort"}:
-        active = _find_active_plan(store)
+        active = _find_active_plan(
+            store,
+            source=str(context.get("source") or ""),
+            session_id=str(context.get("session_id") or ""),
+        )
         if active is None:
             return _result(False, error="没有活跃计划，请指定 plan_id")
         selected_plan_id = str(active["plan_id"])
@@ -226,13 +260,17 @@ def run(
     if PLAN_ID_RE.fullmatch(selected_plan_id) is None:
         return _result(False, error=f"plan_id 无效: {selected_plan_id}")
 
+    try:
+        selected_plan = store.read(selected_plan_id)
+    except PlanNotFoundError:
+        return _result(False, error=f"计划不存在: {selected_plan_id}")
+    except PlanError as exc:
+        return _result(False, error=str(exc))
+    if not _belongs_to_conversation(selected_plan, context):
+        return _result(False, error="当前对话空间不能访问其他对话空间的任务计划")
+
     if selected_action == "view":
-        try:
-            return _result(True, plan=store.read(selected_plan_id))
-        except PlanNotFoundError:
-            return _result(False, error=f"计划不存在: {selected_plan_id}")
-        except PlanError as exc:
-            return _result(False, error=str(exc))
+        return _result(True, plan=selected_plan)
 
     if selected_action == "step_done":
         selected_step_id = str(step_id or "").strip()

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 DEFAULT_SOURCE = "cli"
 DEFAULT_SESSION = "default"
 
@@ -515,9 +515,12 @@ def _interactive_command(
                 f"  {step['step_id']} | {step.get('tool_name', '无工具')} | "
                 f"deps={deps} | {step['title']}",
                 file=stdout,
-            )
+        )
         if created.get("auto_accept"):
-            print("auto_accept 已开启，可使用 /plan-approve 立即执行。", file=stdout)
+            print(
+                "auto_accept 已开启，计划已批准；使用 /plan-approve 进入正式计划执行器。",
+                file=stdout,
+            )
         else:
             if created.get("reminder"):
                 print(created["reminder"], file=stdout)
@@ -553,14 +556,22 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-approve <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import approve_plan, execute_plan
+        from run.task_plan_executor import approve_plan, execute_plan, get_plan
         from run.config import load_config
         try:
-            plan = approve_plan(root, user, argument)
+            current = get_plan(root, user, argument)
+            plan = (
+                current
+                if current.get("status") == "approved"
+                else approve_plan(root, user, argument)
+            )
         except Exception as exc:
             print(f"批准失败：{exc}", file=stdout)
             return True, session_id
-        print(f"已批准计划 {argument}，开始执行...", file=stdout)
+        print(
+            f"计划 {argument} 已批准，进入正式计划执行器...",
+            file=stdout,
+        )
         config = load_config(user, root)
         for event in execute_plan(
             root=root, user=user, plan_id=argument, config=config,

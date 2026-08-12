@@ -104,6 +104,10 @@ from run.session_runtime import (
     session_lock as _session_lock,
 )
 from run.source_policy import MainAgentSourcePolicy
+from run.task_plan_boundary import (
+    TaskPlanCreationBoundary,
+    detect_task_plan_creation_boundary,
+)
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
@@ -785,6 +789,8 @@ def _iter_request_events_impl(
                 config,
                 plugin_manifests=registry.plugin_manifests,
                 memory_store=memory_store,
+                source=source,
+                session_id=session_id,
             )
             system_message = (
                 {"role": "system", "content": prompt_bundle.text}
@@ -1132,6 +1138,7 @@ def _iter_request_events_impl(
             completed = False
             context_retry_count = 0
             tool_argument_retry_count = 0
+            task_plan_boundary: TaskPlanCreationBoundary | None = None
             last_provider_input_tokens: int | None = None
             last_sent_local_tokens: int | None = None
 
@@ -1627,7 +1634,7 @@ def _iter_request_events_impl(
                         ),
                     )
                 )
-                for call in calls:
+                for call_index, call in enumerate(calls):
                     if len(tool_records) >= max_tool_calls:
                         _close_guidance(guidance_channel)
                         yield commit_terminal_round(
@@ -1828,6 +1835,71 @@ def _iter_request_events_impl(
                             "content": _json_result(result_payload),
                         }
                     )
+                    if request.get("_task_plan_mode") is None:
+                        task_plan_boundary = detect_task_plan_creation_boundary(
+                            tool_name=call.name,
+                            arguments=call.arguments,
+                            result_payload=result_payload,
+                        )
+                    if task_plan_boundary is not None:
+                        for pending_call in calls[call_index + 1 :]:
+                            pending_payload = {
+                                "ok": False,
+                                "error": {
+                                    "message": (
+                                        "任务计划已创建，后续工具必须等待批准或由任务计划执行器处理"
+                                    ),
+                                    "exception_type": "TaskPlanCreationBoundary",
+                                    "plan_id": task_plan_boundary.plan_id,
+                                },
+                            }
+                            pending_record = {
+                                "id": pending_call.id,
+                                "name": pending_call.name,
+                                "arguments": pending_call.arguments,
+                                "status": "not_executed",
+                                "duplicate": False,
+                                "consecutive_identical_calls": 0,
+                                "result": pending_payload,
+                                "iteration": iteration,
+                                "elapsed_ms": 0,
+                            }
+                            tool_records.append(pending_record)
+                            pending_tool_calls.pop(pending_call.id, None)
+                            yield RunEvent(
+                                type="tool_call_result",
+                                tool_call_id=pending_call.id,
+                                tool_name=pending_call.name,
+                                arguments=pending_call.arguments,
+                                result=pending_payload,
+                                metadata={
+                                    "status": "not_executed",
+                                    "duplicate": False,
+                                    "consecutive_identical_calls": 0,
+                                    "iteration": iteration,
+                                    "elapsed_ms": 0,
+                                    "plan_id": task_plan_boundary.plan_id,
+                                },
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": pending_call.id,
+                                    "name": pending_call.name,
+                                    "content": _json_result(pending_payload),
+                                }
+                            )
+                        boundary_text = task_plan_boundary.message
+                        prefix = "\n\n" if all_text else ""
+                        visible_boundary_text = f"{prefix}{boundary_text}"
+                        all_text.append(visible_boundary_text)
+                        observed_text.append(visible_boundary_text)
+                        yield RunEvent(type="text_delta", content=visible_boundary_text)
+                        _close_guidance(guidance_channel)
+                        completed = True
+                        break
+                if task_plan_boundary is not None:
+                    break
                 pending_guidance = _drain_guidance(guidance_channel)
                 messages.extend(prepare_pending_guidance(pending_guidance))
 
@@ -1897,6 +1969,20 @@ def _iter_request_events_impl(
                     "guidance": list(consumed_guidance),
                     "guidance_details": copy.deepcopy(consumed_guidance_details),
                     "provider_responses": copy.deepcopy(provider_responses),
+                    **(
+                        {
+                            "status": "completed",
+                            "stop_reason": task_plan_boundary.stop_reason,
+                            "plan_id": task_plan_boundary.plan_id,
+                            "task_plan_status": task_plan_boundary.status,
+                            "task_plan_auto_accept": task_plan_boundary.auto_accept,
+                            "awaiting_user_approval": (
+                                task_plan_boundary.awaiting_user_approval
+                            ),
+                        }
+                        if task_plan_boundary is not None
+                        else {}
+                    ),
                     **(
                         {"input_attachments": copy.deepcopy(history_attachments)}
                         if history_attachments
@@ -2206,6 +2292,20 @@ def _iter_request_events_impl(
                         .get("injected_chars", 0),
                     },
                     "committed": True,
+                    **(
+                        {
+                            "status": "completed",
+                            "stop_reason": task_plan_boundary.stop_reason,
+                            "plan_id": task_plan_boundary.plan_id,
+                            "task_plan_status": task_plan_boundary.status,
+                            "task_plan_auto_accept": task_plan_boundary.auto_accept,
+                            "awaiting_user_approval": (
+                                task_plan_boundary.awaiting_user_approval
+                            ),
+                        }
+                        if task_plan_boundary is not None
+                        else {}
+                    ),
                 }
             )
             yield RunEvent(type="done", usage=usage_total, metadata=final_metadata)

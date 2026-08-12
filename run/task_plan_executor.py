@@ -99,29 +99,30 @@ def execute_plan(
         yield error_event(exc, phase="plan_read")
         return
 
-    if plan["status"] not in ("approved", "running"):
+    if plan["status"] != "approved":
         yield error_event(
             PlanExecutionError(
-                f"计划 {plan_id} 当前状态为 {plan['status']!r}，无法执行"
+                f"计划 {plan_id} 当前状态为 {plan['status']!r}，无法由新的执行器领取"
             ),
             phase="plan_status",
         )
         return
 
-        # 如果仍然获得批准，则过渡到运行
-    if plan["status"] == "approved":
-        try:
-            def _claim(p: dict[str, Any]) -> dict[str, Any]:
-                if p.get("status") != "approved":
-                    raise PlanExecutionError(
-                        f"计划 {plan_id} 已被其他执行器领取或状态已变化"
-                    )
-                return {**p, "status": "running"}
+    # A new executor may only claim an approved plan.  Treating an existing
+    # ``running`` state as resumable lets the Web/App executor and background
+    # scheduler execute the same plan concurrently.
+    try:
+        def _claim(p: dict[str, Any]) -> dict[str, Any]:
+            if p.get("status") != "approved":
+                raise PlanExecutionError(
+                    f"计划 {plan_id} 已被其他执行器领取或状态已变化"
+                )
+            return {**p, "status": "running"}
 
-            plan = store.update(plan_id, _claim)
-        except (PlanError, PlanValidationError, PlanExecutionError) as exc:
-            yield error_event(exc, phase="plan_status")
-            return
+        plan = store.update(plan_id, _claim)
+    except (PlanError, PlanValidationError, PlanExecutionError) as exc:
+        yield error_event(exc, phase="plan_status")
+        return
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -190,19 +191,29 @@ def execute_plan(
         tool_name = step.get("tool_name")
         tool_arguments = step.get("tool_arguments") or {}
 
-                # 保持运行状态
+        # 保持运行状态
         def _mark_running(p: dict) -> dict:
+            if p.get("status") != "running":
+                raise PlanExecutionError(
+                    f"计划 {plan_id} 已停止，不能开始步骤 {step_id}"
+                )
             for s in p["steps"]:
                 if s["step_id"] == step_id:
+                    if s.get("status") != "pending":
+                        raise PlanExecutionError(
+                            f"步骤 {step_id} 已被其他执行器领取或状态已变化"
+                        )
                     s["status"] = "running"
                     s["started_at"] = _now()
                     break
+            else:
+                raise PlanExecutionError(f"步骤不存在: {step_id}")
             p["current_step"] = step_id
             return p
 
         try:
             plan = store.update(plan_id, _mark_running)
-        except (PlanError, PlanValidationError) as exc:
+        except (PlanError, PlanValidationError, PlanExecutionError) as exc:
             yield error_event(exc, phase="step_start")
             return
 
@@ -390,30 +401,49 @@ def execute_plan(
             },
         )
 
-                # 保留步骤结果
+        # 保留步骤结果
         def _mark_step_result(p: dict) -> dict:
+            if p.get("status") not in {"running", "paused"}:
+                raise PlanExecutionError(
+                    f"计划 {plan_id} 已停止，拒绝覆盖步骤 {step_id} 的最新状态"
+                )
             for s in p["steps"]:
                 if s["step_id"] == step_id:
+                    if s.get("status") != "running":
+                        raise PlanExecutionError(
+                            f"步骤 {step_id} 已被外部修改，拒绝写入陈旧执行结果"
+                        )
                     s["status"] = status
                     s["result"] = result_payload if status == "completed" else None
                     s["error"] = error_payload
                     s["finished_at"] = _now()
                     break
+            else:
+                raise PlanExecutionError(f"步骤不存在: {step_id}")
             return p
 
         try:
             plan = store.update(plan_id, _mark_step_result)
-        except (PlanError, PlanValidationError) as exc:
+        except (PlanError, PlanValidationError, PlanExecutionError) as exc:
             yield error_event(exc, phase="step_persist")
             return
 
         if status == "failed":
             critical = step.get("critical", True)
             if critical:
-                                # 暂停计划
+                # 暂停计划
                 try:
-                    plan = store.update(plan_id, lambda p: {**p, "status": "paused"})
-                except (PlanError, PlanValidationError) as exc:
+                    def _pause_failed(p: dict[str, Any]) -> dict[str, Any]:
+                        if p.get("status") == "paused":
+                            return p
+                        if p.get("status") != "running":
+                            raise PlanExecutionError(
+                                f"计划 {plan_id} 已停止，不能由失败步骤改为暂停"
+                            )
+                        return {**p, "status": "paused"}
+
+                    plan = store.update(plan_id, _pause_failed)
+                except (PlanError, PlanValidationError, PlanExecutionError) as exc:
                     yield error_event(exc, phase="plan_pause")
                     return
                 yield RunEvent(
@@ -443,34 +473,43 @@ def execute_plan(
 def approve_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:
     """Transition a plan from pending to approved."""
     store = PlanStore(root, user)
-    plan = store.read(plan_id)
-    if plan["status"] != "pending":
-        raise PlanExecutionError(
-            f"计划 {plan_id} 当前状态为 {plan['status']!r}，无法批准"
-        )
-    return store.update(plan_id, lambda p: {**p, "status": "approved"})
+
+    def _approve(plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("status") != "pending":
+            raise PlanExecutionError(
+                f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法批准"
+            )
+        return {**plan, "status": "approved"}
+
+    return store.update(plan_id, _approve)
 
 
 def pause_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:
     """Pause a running or approved plan."""
     store = PlanStore(root, user)
-    plan = store.read(plan_id)
-    if plan["status"] not in ("running", "approved"):
-        raise PlanExecutionError(
-            f"计划 {plan_id} 当前状态为 {plan['status']!r}，无法暂停"
-        )
-    return store.update(plan_id, lambda p: {**p, "status": "paused"})
+
+    def _pause(plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("status") not in ("running", "approved"):
+            raise PlanExecutionError(
+                f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法暂停"
+            )
+        return {**plan, "status": "paused"}
+
+    return store.update(plan_id, _pause)
 
 
 def resume_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:
-    """Resume a paused plan by transitioning to running."""
+    """Make a paused plan eligible for one executor to claim."""
     store = PlanStore(root, user)
-    plan = store.read(plan_id)
-    if plan["status"] != "paused":
-        raise PlanExecutionError(
-            f"计划 {plan_id} 当前状态为 {plan['status']!r}，无法恢复"
-        )
-    return store.update(plan_id, lambda p: {**p, "status": "running"})
+
+    def _resume(plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("status") != "paused":
+            raise PlanExecutionError(
+                f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法恢复"
+            )
+        return {**plan, "status": "approved"}
+
+    return store.update(plan_id, _resume)
 
 
 def cancel_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:

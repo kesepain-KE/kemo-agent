@@ -19,13 +19,20 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         (self.root / "users" / "alice").mkdir(parents=True)
-        self.context = {"root": str(self.root), "user": "alice", "source": "test"}
+        self.context = {
+            "root": str(self.root),
+            "user": "alice",
+            "source": "test",
+            "session_id": "session-a",
+        }
 
     def create_plan(self, *, steps: int = 2, status: str = "pending") -> dict:
         plan = normalize_plan(
             title="测试计划",
             description="验证运行态插件",
             user="alice",
+            source="test",
+            session_id="session-a",
             status=status,
             steps=[
                 {
@@ -47,7 +54,7 @@ class TaskPlanPluginTests(unittest.TestCase):
             root=PROJECT_ROOT,
         )
         self.assertEqual(manifest.tool["name"], "task_plan")
-        self.assertEqual(manifest.tool["version"], "1.0.0")
+        self.assertEqual(manifest.tool["version"], "1.1.0")
         actions = manifest.tool["input_schema"]["properties"]["action"]["enum"]
         self.assertEqual(
             set(actions),
@@ -65,6 +72,90 @@ class TaskPlanPluginTests(unittest.TestCase):
         viewed = run(action="view", context=self.context)
         self.assertTrue(viewed["ok"])
         self.assertEqual(viewed["plan"]["plan_id"], plan["plan_id"])
+
+    def test_active_plan_fallback_does_not_cross_conversation_spaces(self) -> None:
+        plan_a = self.create_plan()
+        PlanStore(self.root, "alice").update(
+            plan_a["plan_id"],
+            lambda plan: {
+                **plan,
+                "source": "web",
+                "session_id": "conversation-a",
+            },
+        )
+        context_b = {
+            **self.context,
+            "source": "web",
+            "session_id": "conversation-b",
+        }
+
+        viewed = run(action="view", context=context_b)
+        aborted = run(action="abort", context=context_b)
+        explicit_view = run(
+            action="view",
+            plan_id=plan_a["plan_id"],
+            context=context_b,
+        )
+        explicit_abort = run(
+            action="abort",
+            plan_id=plan_a["plan_id"],
+            context=context_b,
+        )
+
+        self.assertFalse(viewed["ok"])
+        self.assertIn("没有活跃计划", viewed["error"])
+        self.assertFalse(aborted["ok"])
+        self.assertIn("没有活跃计划", aborted["error"])
+        self.assertFalse(explicit_view["ok"])
+        self.assertIn("其他对话空间", explicit_view["error"])
+        self.assertFalse(explicit_abort["ok"])
+        self.assertIn("其他对话空间", explicit_abort["error"])
+        self.assertEqual(
+            PlanStore(self.root, "alice").read(plan_a["plan_id"])["status"],
+            "pending",
+        )
+
+    def test_list_only_returns_current_conversation_space(self) -> None:
+        plan_a = self.create_plan()
+        store = PlanStore(self.root, "alice")
+        store.update(
+            plan_a["plan_id"],
+            lambda plan: {
+                **plan,
+                "source": "web",
+                "session_id": "conversation-a",
+            },
+        )
+        plan_b = self.create_plan()
+        store.update(
+            plan_b["plan_id"],
+            lambda plan: {
+                **plan,
+                "source": "web",
+                "session_id": "conversation-b",
+            },
+        )
+
+        listed = run(
+            action="list",
+            context={
+                **self.context,
+                "source": "web",
+                "session_id": "conversation-a",
+            },
+        )
+
+        self.assertTrue(listed["ok"])
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["plans"][0]["plan_id"], plan_a["plan_id"])
+
+    def test_list_fails_closed_without_conversation_identity(self) -> None:
+        result = run(
+            action="list",
+            context={"root": str(self.root), "user": "alice"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("source", result["error"])
 
     def test_step_done_persists_result_is_idempotent_and_auto_completes(self) -> None:
         plan = self.create_plan(status="approved")
@@ -184,7 +275,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         paused = run(action="pause", plan_id=plan["plan_id"], context=self.context)
         self.assertEqual(paused["plan"]["status"], "paused")
         resumed = run(action="resume", plan_id=plan["plan_id"], context=self.context)
-        self.assertEqual(resumed["plan"]["status"], "running")
+        self.assertEqual(resumed["plan"]["status"], "approved")
         aborted = run(action="abort", context=self.context)
         self.assertEqual(aborted["plan"]["status"], "cancelled")
         self.assertTrue(

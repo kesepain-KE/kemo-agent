@@ -17,7 +17,7 @@
 | 场景 | action |
 |---|---|
 | 查看当前计划或某个计划的完整信息 | `view` |
-| 列出当前用户全部计划 | `list` |
+| 列出当前对话空间的计划 | `list` |
 | 刚执行完一个步骤 | `step_done` |
 | 步骤执行失败 | `step_fail` |
 | 用户批准计划 | `approve` |
@@ -29,7 +29,7 @@
 
 计划状态包括 `pending`、`approved`、`running`、`paused`、`completed`、`failed`、`cancelled`。步骤状态包括 `pending`、`running`、`completed`、`failed`、`skipped`、`cancelled`。
 
-`abort` 复用核心执行器的取消状态机：计划变为 `cancelled`，尚未执行的步骤也变为 `cancelled`。
+`resume` 将暂停计划恢复为 `approved`，再由后台调度器、CLI 或 Web/App 起跑入口中的唯一执行器原子领取为 `running`。`abort` 复用核心执行器的取消状态机：计划变为 `cancelled`，尚未执行的步骤也变为 `cancelled`。
 
 ## 参数说明
 
@@ -82,7 +82,7 @@
     "required": ["action"],
     "additionalProperties": false
   },
-  "version": "1.0.0",
+  "version": "1.1.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

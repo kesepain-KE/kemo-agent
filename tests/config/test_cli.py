@@ -6,8 +6,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cli
+from events import RunEvent
+from run.task_plan_store import PlanStore, normalize_plan
 
 
 class CLITests(unittest.TestCase):
@@ -181,6 +184,55 @@ class CLITests(unittest.TestCase):
         self.assertIn("permanent | weight=0 | 用户喜欢川菜", value)
         self.assertIn("已删除 1 条记忆", value)
         self.assertIn("暂无记忆", value)
+
+    def test_plan_approve_executes_an_already_auto_approved_plan(self) -> None:
+        root = Path(self.make_root("kesepain").name)
+        plan = PlanStore(root, "kesepain").create(
+            normalize_plan(
+                plan_id="plan_12345678",
+                title="自动批准计划",
+                description="验证 CLI 兼容",
+                user="kesepain",
+                source="cli",
+                session_id="terminal-1",
+                status="approved",
+                auto_accept=True,
+                steps=[{
+                    "step_id": "step_1",
+                    "title": "执行",
+                    "description": "执行",
+                    "critical": True,
+                }],
+            )
+        )
+        stdout = io.StringIO()
+        with (
+            patch("run.task_plan_executor.approve_plan") as approve,
+            patch(
+                "run.task_plan_executor.execute_plan",
+                return_value=iter([
+                    RunEvent(
+                        type="done",
+                        metadata={"plan_id": plan["plan_id"], "status": "completed"},
+                    )
+                ]),
+            ) as execute,
+            patch("run.config.load_config", return_value={}),
+        ):
+            handled, session_id = cli._interactive_command(
+                f"/plan-approve {plan['plan_id']}",
+                root=root,
+                user="kesepain",
+                source="cli",
+                session_id="terminal-1",
+                stdout=stdout,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(session_id, "terminal-1")
+        approve.assert_not_called()
+        execute.assert_called_once()
+        self.assertIn("进入正式计划执行器", stdout.getvalue())
 
     def test_handler_failure_returns_nonzero(self) -> None:
         root = Path(self.make_root("kesepain").name)

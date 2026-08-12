@@ -223,6 +223,8 @@ def context_status(
         config,
         plugin_manifests=registry.plugin_manifests,
         memory_store=memory_store,
+        source=source,
+        session_id=session_id,
     )
     summary_cache = read_summary_cache(runtime_path)
     selection = select_context(
