@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.1.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,22 +204,22 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.1.1`
+Current version: `1.1.2`
 
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, and `1.0.4` improves tool-call continuity and multi-entry history. `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. Each source can now be disabled, fixed for one conversation round, or refreshed before every logical Provider request, while the context drawer shows the effective policy as read-only status bubbles. `1.1.0` completes the mobile loop of the ecosystem: a new `kemo_app` global expand provides an independent HTTP/SSE/WebSocket bridge for the Android client (two-level authentication, streaming chat with guidance, tasks and schedules, file transfer up to 80 MiB, online device stats), extending the kemo-agent ecosystem to mobile. `1.1.1` separates Android App conversations from the Web history partition: the bridge, core session leases, history operations, and read-only Web history view now consistently use `source=app`, and App cards are labeled explicitly. The core updater can also refresh the published `kemo_app` code while preserving deployment credentials, activation state, and runtime data. Its published source remains uninitialized and inactive by default, so cloning or updating the repository never starts a listener. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
+`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, `1.0.4` improves tool-call continuity and multi-entry history, and `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. `1.1.0` completes the Android mobile loop, while `1.1.1` isolates App conversations under `source=app`. `1.1.2` is a runtime-continuity and interface-stability patch: plan creation now terminates the current run at its conversation boundary and plans are isolated by `source + session_id`; temporary-important-memory Prompt capacity rises to 20,000 characters; the new `wait_for_condition` tool can wait up to two hours and wake on process, path, or port conditions; an explicitly activated `kemo_app` bridge can be rate-limited and restored by background collection; and the Web UI fixes dark-theme surfaces, expanded tool cards, and long-plan overflow. The published bridge source remains uninitialized and inactive, so cloning or updating never starts a listener. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
 
 Available today:
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
 - a per-user SQLite history store with transactional commits, table-backed content search, and cursor pagination;
 - a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; archived user evidence now finds existing fragments through confidence-gated keyword coverage before applying at most one weight increase per day, reducing duplicate-fragment growth;
-- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories; 5,000 characters is an injection budget, while 20,000 characters is the separate runaway-output guard;
+- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories; both the Prompt injection budget and the independent runaway-output guard are currently 20,000 characters;
 - personal, shared, and global knowledge layers grounded in real source material;
-- task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support;
+- task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support; successful creation terminates only the current conversation run rather than letting it bypass the plan state machine or pausing another session;
 - one-time and recurring scheduled tasks that wake automatically at the agreed time;
 - background collection for extension and perception data, with every logical Provider request reloading the latest published snapshots without adding collection latency to model calls;
 - subagent collaboration for memory organization, planning, summarization, and scheduling;
-- multiple built-in tools and skills with room for further extension;
+- multiple built-in tools and skills with room for further extension, including `wait_for_condition` for bounded two-hour waits that wake early on process, path, or port conditions;
 - dynamic reasoning-effort choices derived from gateway model capabilities when using the Kemo protocol, while other Provider protocols retain their existing configuration flow;
 - non-strict parameter mode for ordinary plugin tools with open objects or optional fields, while structured-output tools retain strict validation;
 - pre-execution tool-argument integrity checks for both Kemo and Chat providers; truncated, content-filtered, or malformed Chat tool calls terminate explicitly as incomplete instead of executing partial arguments;

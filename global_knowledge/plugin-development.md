@@ -82,6 +82,7 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 | `entrypoint` | 是 | 插件目录内的 `file.py:function` |
 | `strict` | 否 | Provider 结构化参数严格模式，默认 `false` |
 | `timeout_policy` | 否 | `argument_or_default` 或 `agent_runtime` |
+| `timeout_grace_seconds` | 否 | 显式 `timeout` 的外层看门狗清理宽限，默认 0、范围 0～30 秒；只用于整理正常结果，不得增加业务等待时长 |
 
 ### strict 的边界
 
@@ -102,6 +103,14 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 `agent_runtime` 只用于 `subagent_dispatch` 这类自身管理子代理整体期限的调度工具。它使用
 子代理整体期限并增加外层看门狗宽限，避免普通工具超时先于子代理运行时。普通插件不得借该
 策略无限延长执行时间。
+
+少数工具会在内部等待期限恰好到达时返回正常的 `timeout` 业务结果。此类工具可以声明很短的
+`timeout_grace_seconds`，使框架外层看门狗采用“显式 timeout + 清理宽限”；传入插件的业务参数
+和等待上限本身不变。该字段不得超过 30 秒，也不能用于延长实际工作或轮询时间。
+
+内置 `wait_for_condition` 是这一边界的参考实现：它不启动后台任务，只在 1～7200 秒内等待
+固定时长、进程退出、路径出现/消失/变化或 TCP 端口打开/关闭。条件满足会提前返回；到达上限
+返回正常的 `status=timeout`，并利用很短的清理宽限让业务结果先于框架外层看门狗落地。
 
 ## action 参数约定
 
@@ -253,4 +262,3 @@ python -m pytest tests/test_subagent_hotplug.py -q
 
 插件清单错误应在发现阶段修复。不要在运行时捕获后静默跳过，否则用户会看到工具偶发消失，
 而无法定位目录名、Schema 或入口合同错误。
-

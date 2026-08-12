@@ -233,8 +233,8 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
 | `extraction_max_candidates_per_batch` | int | 10 | 每批候选总上限；仍受每轮最多 2 条限制 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days`。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入 |
-| `important_memory_max_chars` | int | 5000 | 临时重要热画像的 Prompt 注入字符预算；文件正文可超过该值并完整保留，注入时截断 |
-| `important_memory_output_max_chars` | int | 20000 | 临时重要热画像输出防失控硬上限；5000～20000 字符完整落盘，超过后拒绝且不覆盖旧热画像 |
+| `important_memory_max_chars` | int | 20000 | 临时重要热画像的 Prompt 注入字符预算；注入时按该值截断 |
+| `important_memory_output_max_chars` | int | 20000 | 临时重要热画像输出防失控硬上限；与注入预算语义独立，超过后拒绝且不覆盖旧热画像 |
 | `history_read_enabled` | bool | true | 是否允许智能体使用 `history_search` 工具 |
 
 ---

@@ -11,12 +11,20 @@
   → task_plan 子智能体读取真实工具/技能/知识索引
   → 生成或编辑结构化计划
   → PlanStore 校验并保存 pending/approved
+  → 创建计划的当前主智能体 Run 在本会话边界强制收束
   → 用户批准（或 auto_accept）
   → 前台连续执行或后台逐步执行
   → 每步写回结果，最终 completed/failed/paused/cancelled
 ```
 
 全局 `task_plan.max_steps` 默认限制为 20。用户配置 `task_plan.auto_accept=false` 时，计划必须等待明确批准。
+`auto_accept=true` 时，新计划直接保存为 `approved` 并由正式计划执行链路领取；无论开关状态如何，创建计划的原始主智能体 Run 都不得继续自由执行普通工具，以避免绕过计划状态机或重复执行。
+
+创建成功后的强制收束只作用于当前 `user + source + session_id + run_id`：同一 Provider 响应中位于计划创建之后的工具统一记录为 `not_executed`，不再发起下一次 Provider 请求。本机制不写入用户级暂停标志，也不会停止同一用户的其他对话空间。
+
+任务计划数据库按用户集中保存，便于任务页统一管理；系统提示词注入则按 `source + session_id` 过滤。A 对话只能看到 A 对话所属的未完成计划，B 对话不会因 A 创建计划而获得其内容或被迫停止。
+主智能体调用 `task_plan` 工具时同样执行会话归属校验；B 对话即使显式提交 A 的 `plan_id`，也不能查看、批准、暂停、恢复或取消 A 的计划。统一任务页、CLI 管理命令和后台调度器不经过这一模型工具边界，仍可在用户明确操作或系统调度下管理集中存储的计划。
+Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前原子校验请求的 `source + session_id` 与计划归属完全一致；错误客户端不能把 A 的计划挂到 B 对话执行。任务页可以统一查看计划，但执行流仍回到计划原始对话空间。
 
 ## 完整 Schema 示例
 

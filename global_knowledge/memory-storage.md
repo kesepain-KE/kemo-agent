@@ -56,9 +56,9 @@ Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为�
 
 热视图巡检不能一次性返回整个大型层级。`memory_temporary_important` 使用 `memory_manage list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 按“条目数 + 序列化字符数”双重边界分页读取三层临时记忆和永久记忆，正文随列表批量返回，不再对全部碎片逐条 `get`。沿 `next_offset` 读取到 `has_more=false` 且累计数量等于 `total` 后才能发布新热视图；否则必须保持旧视图，不得基于局部数据执行永久协调或清理。
 
-热视图文件正文尽量保持在 `important_memory_max_chars`（默认 5000）以内，但该值只是 Prompt
-注入预算，不是落盘硬限制。合理的 5000～20000 字符正文完整保存，Prompt 构建时只截取预算内
-内容；只有超过 `important_memory_output_max_chars`（默认 20000）才拒绝本次更新且保留旧视图。
+热视图文件正文尽量保持在 `important_memory_max_chars`（默认 20000）以内，该值只控制 Prompt
+注入预算。`important_memory_output_max_chars` 是语义独立的输出防失控硬上限，当前默认同为
+20000；超过输出上限时拒绝本次更新且保留旧视图。
 
 ## 模板、升级与旧格式
 

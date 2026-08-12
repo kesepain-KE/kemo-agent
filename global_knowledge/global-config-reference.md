@@ -99,8 +99,8 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
 | `extraction_max_candidates_per_batch` | int | `10` | 每批最多保留的记忆候选；同时受“每轮最多 2 条”限制，运行时硬上限为 40 |
-| `important_memory_max_chars` | int | `5000` | 临时重要热画像的 Prompt 注入字符预算。文件正文可超过该值并完整保留，注入时由 `run/prompt.py` 截断 |
-| `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限。5000～20000 字符正常完整落盘；超过后拒绝本次更新且不覆盖旧热画像 |
+| `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/prompt.py` 按该值截断 |
+| `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限；与注入预算语义独立，超过后拒绝本次更新且不覆盖旧热画像 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
 
 ### temporary_injection_limits — 临时记忆注入上限
