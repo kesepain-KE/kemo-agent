@@ -372,6 +372,55 @@ describe('reduceRunEvent', () => {
     expect(items.at(-1)).toMatchObject({ kind: 'error', content: 'failed' })
   })
 
+  it('任务计划批准边界按成功终态收束，并保留计划卡片和未执行工具结果', () => {
+    const planEvent = {
+      type: 'tool_call_result' as const,
+      tool_call_id: 'create-plan',
+      tool_name: 'subagent_dispatch',
+      result: {
+        ok: true,
+        result: {
+          status: 'completed',
+          agent: 'task_plan',
+          data: { action: 'create' },
+          plan: {
+            plan_id: 'plan_12345678', title: '等待批准', description: '', status: 'pending',
+            auto_accept: false, reminder: '', source: 'web', session_id: 'conversation-a',
+            current_step: 'step_1', revision: 1, created_at: '', updated_at: '',
+            steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true }],
+          },
+        },
+      },
+      metadata: { status: 'completed' },
+    }
+    let items = reduceRunEvent([], planEvent)
+    items = reduceRunEvent(items, {
+      type: 'tool_call_result',
+      tool_call_id: 'blocked-shell',
+      tool_name: 'shell',
+      result: { ok: false, error: { exception_type: 'TaskPlanCreationBoundary' } },
+      metadata: { status: 'not_executed' },
+    })
+    items = reduceRunEvent(items, {
+      type: 'text_delta',
+      content: '任务计划已创建并等待用户批准；当前运行已在计划边界停止。',
+    })
+    items = reduceRunEvent(items, {
+      type: 'done',
+      metadata: {
+        committed: true,
+        status: 'completed',
+        stop_reason: 'task_plan_approval_required',
+        awaiting_user_approval: true,
+        plan_id: 'plan_12345678',
+      },
+    })
+
+    expect(items.some((item) => item.kind === 'task_plan' && item.plan.plan_id === 'plan_12345678')).toBe(true)
+    expect(items.find((item) => item.kind === 'tool' && item.callId === 'blocked-shell')).toMatchObject({ status: 'error' })
+    expect(items.find((item) => item.kind === 'message' && item.role === 'assistant')).toMatchObject({ streaming: false })
+  })
+
   it('紧急停止会固化部分正文并结束仍在运行的工具卡片', () => {
     const items = reduceRunEvent([
       { id: 'u1', kind: 'message', role: 'user', content: '开始执行' },

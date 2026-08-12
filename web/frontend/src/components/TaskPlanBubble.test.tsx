@@ -45,6 +45,24 @@ describe('TaskPlanBubble', () => {
     confirm.mockRestore()
   })
 
+  it('长计划只让步骤区域滚动并保持运行提示位于卡片内', () => {
+    render(<TaskPlanBubble
+      title="长计划"
+      status="running"
+      steps={Array.from({ length: 12 }, (_, index) => ({
+        id: `step_${index + 1}`,
+        title: `步骤 ${index + 1}`,
+        status: index < 10 ? 'completed' : index === 10 ? 'running' : 'pending',
+      }))}
+    />)
+
+    const plan = screen.getByRole('region', { name: '任务计划：长计划' })
+    const stepList = screen.getByRole('list', { name: '任务计划步骤' })
+    expect(plan.contains(stepList)).toBe(true)
+    expect(screen.getAllByRole('listitem')).toHaveLength(12)
+    expect(plan.contains(screen.getByText('正在执行：步骤 11'))).toBe(true)
+  })
+
   it('暂停后允许修改并继续执行剩余步骤', () => {
     const onModify = vi.fn()
     const onRetry = vi.fn()

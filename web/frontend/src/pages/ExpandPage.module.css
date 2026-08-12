@@ -80,7 +80,7 @@
 }
 
 .summaryIcon.green { background: color-mix(in srgb, var(--green) 11%, var(--surface)); color: var(--green); }
-.summaryIcon.blue { background: #edf4ff; color: #4c82e8; }
+.summaryIcon.blue { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
 .summaryCopy { min-width: 0; }
 .summaryCopy > span { display: block; color: var(--muted); font-size: .68rem; font-weight: 650; }
 .summaryCopy strong { display: block; margin-top: .25rem; overflow: hidden; font-size: 1.35rem; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
@@ -197,7 +197,7 @@
   color: var(--brand);
 }
 
-.moduleIcon.shared { background: #edf4ff; color: #4c82e8; }
+.moduleIcon.shared { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
 .moduleIcon.user { background: color-mix(in srgb, var(--green) 11%, var(--surface)); color: var(--green); }
 .moduleCopy { min-width: 0; }
 .moduleTitle { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }

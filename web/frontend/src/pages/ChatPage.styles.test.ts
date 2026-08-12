@@ -24,3 +24,29 @@ describe('ChatPage guidance styles', () => {
     expect(rule).toContain('scrollbar-width: thin')
   })
 })
+
+describe('ChatPage tool-call theme styles', () => {
+  it('uses theme surfaces throughout the expanded tool card', () => {
+    const bodyRule = stylesheet.match(/\.tool-call-body\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const panelRule = stylesheet.match(/\.tool-call-panel pre\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const labelRule = stylesheet.match(/\.tool-call-panel label\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+
+    expect(bodyRule).toContain('background: var(--surface)')
+    expect(bodyRule).toContain('border-top-color: var(--line)')
+    expect(bodyRule).not.toMatch(/#fff|white/i)
+    expect(panelRule).toContain('background: var(--surface-2)')
+    expect(panelRule).toContain('color: var(--text-2)')
+    expect(panelRule).toContain('border-color: var(--line)')
+    expect(labelRule).toContain('color: var(--muted)')
+  })
+})
+
+describe('ChatPage active plan dock styles', () => {
+  it('leaves scrolling to the task step list instead of clipping the whole plan card', () => {
+    const dockRule = stylesheet.match(/\.composer-plan-dock\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+
+    expect(dockRule).toContain('max-height: none')
+    expect(dockRule).toContain('align-items: flex-start')
+    expect(dockRule).toContain('overflow: visible')
+  })
+})

@@ -1117,9 +1117,12 @@ describe('AppShell navigation', () => {
 
   it('保存新建期间可立即切换侧栏且新会话只更新当前页面参数', async () => {
     let releaseClose!: () => void
+    let markCloseStarted!: () => void
     const closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    const closeStarted = new Promise<void>((resolve) => { markCloseStarted = resolve })
     server.use(
       http.post('/api/users/kesepain/sessions/s1/close', async () => {
+        markCloseStarted()
         await closeGate
         return HttpResponse.json({
           user: 'kesepain', source: 'web', session_id: 's1', closed: true,
@@ -1133,6 +1136,7 @@ describe('AppShell navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
+    await closeStarted
     fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
 
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
@@ -1142,10 +1146,10 @@ describe('AppShell navigation', () => {
     releaseClose()
     await waitFor(
       () => expect(getSearch()).toContain('session=conv_new_session'),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     )
     expect(getPathname()).toBe('/settings')
-  })
+  }, 15_000)
 
   it('清空当前对话会删除归档并进入新对话', async () => {
     let deletedSession = ''

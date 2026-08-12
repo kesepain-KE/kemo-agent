@@ -75,7 +75,7 @@
 }
 
 .summaryIcon.green { background: color-mix(in srgb, var(--green) 10%, var(--surface)); color: var(--green); }
-.summaryIcon.blue { background: #edf4ff; color: #4c82e8; }
+.summaryIcon.blue { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
 .summaryCopy { min-width: 0; }
 .summaryCopy > span { display: block; color: var(--muted); font-size: .7rem; font-weight: 650; }
 .summaryCopy strong { display: inline-block; margin-top: .28rem; color: var(--text); font-size: 1.45rem; line-height: 1; }

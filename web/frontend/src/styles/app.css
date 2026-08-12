@@ -1266,6 +1266,11 @@ label > input[type="search"]::-webkit-search-results-decoration {
   padding: 14px clamp(14px, 2vw, 30px) 14px;
   background: linear-gradient(to top, var(--content-bg) 82%, transparent);
 }
+.composer-plan-dock {
+  max-height: none;
+  align-items: flex-start;
+  overflow: visible;
+}
 .composer {
   max-width: var(--conversation-width);
   padding: 9px 10px 8px;
@@ -1755,6 +1760,30 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .assistant-turn-content > .tool-call .tool-call-chevron { justify-self: center; }
 .assistant-turn-content > .tool-call .tool-call-status { justify-self: end; }
 .assistant-turn-content > .tool-call .tool-call-grid { grid-template-columns: 1fr; }
+
+/* The prototype originally hard-coded the expanded tool payload surface to
+   #fbfbfd. That leaks a white sheet into the dark theme even though the code
+   blocks themselves already follow theme tokens. Keep the whole expanded
+   card on the same semantic surface palette in both themes. */
+.tool-call-body {
+  border-top-color: var(--line);
+  background: var(--surface);
+  color: var(--text-2);
+}
+.tool-call-panel label { color: var(--muted); }
+.tool-call-panel pre {
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
+  scrollbar-color: var(--line-strong) transparent;
+}
+.tool-call-panel pre::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--line-strong);
+  background-clip: padding-box;
+}
+.tool-call-panel pre::-webkit-scrollbar-corner { background: transparent; }
 .composer-guidance-preview { width: min(100%, var(--conversation-width)); margin: 0 auto 9px; }
 .composer-guidance-preview > .guidance-message.guidance-current { width: 100%; margin: 0; border-radius: 14px; box-shadow: var(--shadow-soft); }
 .guidance-title { display: inline-flex !important; align-items: center; gap: 7px; }

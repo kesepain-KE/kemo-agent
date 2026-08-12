@@ -62,10 +62,10 @@
 .skillContent > span { margin-top: .5625rem; display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .skillContent b { color: var(--muted-2); font-size: .625rem; font-weight: 550; }
 .categoryTag { min-height: 1.375rem; padding: 0 .5rem; display: inline-flex; align-items: center; gap: .3125rem; border-radius: 999px; font-size: .625rem; font-style: normal; font-weight: 700; white-space: nowrap; }
-.categoryTag.builtin { color: #6156d8; background: #eeecff; }
-.categoryTag.shared { color: #c16824; background: #fff2e4; }
-.categoryTag.agent_generated { color: #3473c4; background: #e9f3ff; }
-.categoryTag.user_created { color: #178262; background: #e5f7ef; }
+.categoryTag.builtin { color: var(--brand); background: color-mix(in srgb, var(--brand) 12%, var(--surface)); }
+.categoryTag.shared { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--surface)); }
+.categoryTag.agent_generated { color: #5794ed; background: color-mix(in srgb, #3473c4 12%, var(--surface)); }
+.categoryTag.user_created { color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
 .chevron { color: var(--muted-2); font-size: 1.25rem; }
 .itemSwitch { position: absolute; top: 50%; right: .875rem; transform: translateY(-50%); cursor: pointer; }
 .itemSwitch input { position: absolute; opacity: 0; pointer-events: none; }

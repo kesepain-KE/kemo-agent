@@ -81,9 +81,9 @@
   white-space: nowrap;
 }
 .statusPill i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.tone_success { color: #139c69; background: #e9f8f1; }
-.tone_warning { color: #d88420; background: #fff4e4; }
-.tone_danger { color: #d84b5b; background: #fff0f2; }
+.tone_success { color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
+.tone_warning { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--surface)); }
+.tone_danger { color: var(--red); background: color-mix(in srgb, var(--red) 11%, var(--surface)); }
 .tone_muted { color: #767b87; background: var(--surface-2); }
 
 .contextValue { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }

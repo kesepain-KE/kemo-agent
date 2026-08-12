@@ -5,6 +5,18 @@
   flex: 1;
 }
 
+/* Keep long plans inside the card. The composer dock must not become a
+   second scroll container: only this step viewport scrolls, while the
+   header, progress, running notice and controls remain in normal flow. */
+.stepList {
+  min-height: 0;
+  max-height: min(26dvh, 250px);
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 .pauseButton {
   min-height: 30px;
   padding: 0 11px;
@@ -47,3 +59,56 @@
     margin-left: auto;
   }
 }
+
+/* Theme compatibility. The original task-plan prototype used an entirely
+   fixed light palette, which produced a white card and low-contrast text in
+   the dark theme. Keep semantic status colors while deriving every surface,
+   border and ordinary text color from the active application theme. */
+.taskPlanBubble {
+  background: var(--surface-elevated);
+  border-color: var(--brand-line);
+  color: var(--text);
+  box-shadow: var(--shadow-soft);
+}
+.planIcon { color: var(--brand); background: var(--brand-soft); }
+.description { color: var(--muted); }
+.statusPill,
+.stepCountPill { color: var(--text-2); background: var(--surface-2); }
+.statusPill span { color: var(--muted); }
+.statusPill_pending { color: var(--brand); background: var(--brand-soft); }
+.statusPill_running { color: #5794ed; background: color-mix(in srgb, #3979dc 13%, var(--surface)); }
+.statusPill_completed { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
+.statusPill_failed { color: var(--red); background: color-mix(in srgb, var(--red) 12%, var(--surface)); }
+.statusPill_rejected,
+.statusPill_cancelled { color: var(--muted); background: var(--surface-3); }
+.iconButton { color: var(--muted); background: var(--surface-2); }
+.iconButton:hover { color: var(--text); background: var(--surface-hover); }
+.progressSection { background: var(--surface-2); border-color: var(--line); }
+.progressHeader { color: var(--muted); }
+.progressTrack { background: var(--surface-3); }
+.stepRow { color: var(--text-2); background: var(--surface); border-color: var(--line); }
+.stepNumber { color: var(--brand); background: var(--brand-soft); }
+.stepTitle { color: var(--text-2); }
+.stepDescription { color: var(--muted); }
+.dependency,
+.stepStatusLabel { color: var(--muted); background: var(--surface-3); }
+.stepStatus_running { background: var(--brand-soft); border-color: var(--brand-line); }
+.stepStatus_completed .stepNumber { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
+.stepStatus_completed .stepTitle,
+.stepStatus_completed .stepId { color: var(--muted); }
+.stepStatus_failed { background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-color: color-mix(in srgb, var(--red) 28%, var(--line)); }
+.stepStatus_failed .stepNumber { color: var(--red); background: color-mix(in srgb, var(--red) 13%, var(--surface)); }
+.notice { color: var(--brand); background: var(--brand-soft); }
+.notice_running { color: #5794ed; background: color-mix(in srgb, #3979dc 11%, var(--surface)); }
+.notice_completed { color: var(--green); background: color-mix(in srgb, var(--green) 11%, var(--surface)); }
+.notice_failed { color: var(--red); background: color-mix(in srgb, var(--red) 10%, var(--surface)); }
+.notice_rejected,
+.notice_cancelled { color: var(--muted); background: var(--surface-3); }
+.rejectButton,
+.stopButton { color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-color: color-mix(in srgb, var(--red) 38%, var(--line)); }
+.modifyButton { color: var(--text-2); background: var(--surface); border-color: var(--line); }
+.modifyButton:hover { color: var(--brand); background: var(--surface-hover); border-color: var(--brand-line); }
+.collapsedSummary { color: var(--text-2); background: var(--surface-2); border-color: var(--line); }
+.bottomPointer { background: var(--surface-elevated); border-color: var(--brand-line); }
+.pauseButton { color: var(--red); background: var(--surface); border-color: color-mix(in srgb, var(--red) 38%, var(--line)); }
+.pauseButton:hover { color: #fff; background: var(--red); border-color: var(--red); }
