@@ -32,7 +32,11 @@ from run.model_capabilities import (
     lookup_model_capabilities,
     retain_model_capability_cache,
 )
-from run.prompt import PROMPT_SECTION_ORDER, build_prompt_bundle
+from run.prompt import (
+    DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
+    PROMPT_SECTION_ORDER,
+    build_prompt_bundle,
+)
 from run.source_policy import MainAgentSourcePolicy
 from update._utils import UpdateError, compare_versions, parse_version
 from web.constants import (
@@ -610,7 +614,12 @@ class SettingsServiceMixin:
                         ("seven_days", 100),
                     )
                 ),
-                "memory_chars": int(memory.get("important_memory_max_chars", 2000)),
+                "memory_chars": int(
+                    memory.get(
+                        "important_memory_max_chars",
+                        DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
+                    )
+                ),
                 "provider_max_concurrent": int(
                     provider_runtime.get("max_concurrent_requests", 10)
                 ),

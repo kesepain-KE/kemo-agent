@@ -47,5 +47,5 @@
 - 普通临时 Prompt 会跳过已进入热画像的来源，避免重复注入；来源仍按正常生命周期到期和晋升，但只有后续历史整理依据用户原文命中时才能加权，Prompt 注入本身不加权。
 - 完全覆盖副本的清理、部分覆盖的永久融合、热画像与来源索引写入由 executor 在同一事务中执行。
 - 不得记录敏感凭据。
-- `memory.important_memory_max_chars`（默认 5000）只控制 Prompt 注入预算；正文可以适当超出并完整落盘。`memory.important_memory_output_max_chars`（默认 20000）才是输出防失控硬上限，超过后拒绝本次更新且不覆盖旧热画像。
+- `memory.important_memory_max_chars`（默认 20000）只控制 Prompt 注入预算。`memory.important_memory_output_max_chars` 是语义独立的输出防失控硬上限，当前默认同为 20000；超过输出上限后拒绝本次更新且不覆盖旧热画像。
 - 所有来源文件名必须从 `memory_ref`/`filename` 原样复制。运行时仅修复同层唯一、高置信度的一处轻微拼写差异，不能把模糊名称当作有效来源。

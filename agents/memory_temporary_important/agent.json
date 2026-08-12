@@ -1,6 +1,6 @@
 {
   "name": "memory_temporary_important",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "维护可重建临时重要记忆热画像并协调永久重复项。",
   "trigger": "trigger.md"
 }

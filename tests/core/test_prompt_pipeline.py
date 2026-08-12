@@ -717,6 +717,7 @@ class PromptPipelineTests(unittest.TestCase):
         defaults = parse_prompt_settings({})
         self.assertEqual(defaults.temporary_memory_limits["seven_days"], 100)
         self.assertEqual(defaults.char_limits["task_plan"], 6000)
+        self.assertEqual(defaults.important_memory_max_chars, 20000)
         with self.assertRaisesRegex(PromptConfigError, "已移除"):
             parse_prompt_settings({"prompt": {"include_user_soul": False}})
         with self.assertRaises(PromptConfigError):
@@ -960,6 +961,22 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertTrue(temporary.truncated)
         self.assertEqual(important.content, "IMPO")
 
+    def test_default_important_memory_injection_budget_is_20000_chars(self) -> None:
+        _, root, config = self.make_root()
+        content = "x" * 20005
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text(
+            content,
+            "utf-8",
+        )
+
+        bundle = build_prompt_bundle(root, "alice", config)
+
+        important = next(s for s in bundle.sections if s.name == "important_memory")
+        self.assertEqual(important.original_chars, 20005)
+        self.assertEqual(important.injected_chars, 20000)
+        self.assertEqual(len(important.content), 20000)
+        self.assertTrue(important.truncated)
+
     def test_legacy_memory_file_is_ignored_without_affecting_table_prompt(self) -> None:
         _, root, config = self.make_root()
         self.write_memory(
@@ -1018,6 +1035,57 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertIn("step desc（running）", selection.text)
         self.assertNotIn("plan_00000010", selection.text)
         self.assertNotIn("plan_00000011", selection.text)
+
+    def test_task_plan_prompt_selection_is_isolated_by_conversation(self) -> None:
+        _, root, _ = self.make_root()
+        store = PlanStore(root, "alice")
+        for plan_id, title, source, session_id in (
+            ("plan_00000021", "A 对话计划", "web", "conversation-a"),
+            ("plan_00000022", "B 对话计划", "web", "conversation-b"),
+            ("plan_00000023", "App 对话计划", "app", "conversation-a"),
+        ):
+            store.create(
+                normalize_plan(
+                    plan_id=plan_id,
+                    title=title,
+                    description=title,
+                    user="alice",
+                    source=source,
+                    session_id=session_id,
+                    steps=[{
+                        "step_id": "step_1",
+                        "title": "执行",
+                        "description": "执行",
+                        "critical": True,
+                    }],
+                )
+            )
+
+        selected_a = select_prompt_plans(
+            root,
+            "alice",
+            max_chars=2000,
+            source="web",
+            session_id="conversation-a",
+        )
+        self.assertIn("A 对话计划", selected_a.text)
+        self.assertNotIn("B 对话计划", selected_a.text)
+        self.assertNotIn("App 对话计划", selected_a.text)
+
+        selected_b = select_prompt_plans(
+            root,
+            "alice",
+            max_chars=2000,
+            source="web",
+            session_id="conversation-b",
+        )
+        self.assertIn("B 对话计划", selected_b.text)
+        self.assertNotIn("A 对话计划", selected_b.text)
+
+        diagnostic_all = select_prompt_plans(root, "alice", max_chars=4000)
+        self.assertIn("A 对话计划", diagnostic_all.text)
+        self.assertIn("B 对话计划", diagnostic_all.text)
+        self.assertIn("App 对话计划", diagnostic_all.text)
 
     def test_expand_registration_module_controls_root_and_rejects_wrong_root(
         self,

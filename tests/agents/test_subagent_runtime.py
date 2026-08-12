@@ -190,6 +190,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(summary_definition.version, "1.1.0")
         self.assertEqual(summary_definition.output_schema["required"], ["title", "summary"])
         self.assertFalse(summary_definition.output_schema["additionalProperties"])
+        important_definition = registry.get("memory_temporary_important")
+        self.assertEqual(important_definition.version, "1.1.2")
 
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

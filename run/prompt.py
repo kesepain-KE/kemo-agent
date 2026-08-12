@@ -44,6 +44,7 @@ DEFAULT_TEMPORARY_MEMORY_LIMITS = {
     "one_month": 200,
     "seven_days": 100,
 }
+DEFAULT_IMPORTANT_MEMORY_MAX_CHARS = 20000
 DEFAULT_CHAR_LIMITS = {
     "task_plan": 6000,
     "perception": 20000,
@@ -169,7 +170,10 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise PromptConfigError(f"memory.temporary_injection_limits.{tier} 必须是非负整数")
         temporary_memory_limits[tier] = value
-    important_memory_max_chars = memory_raw.get("important_memory_max_chars", 2000)
+    important_memory_max_chars = memory_raw.get(
+        "important_memory_max_chars",
+        DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
+    )
     if (
         isinstance(important_memory_max_chars, bool)
         or not isinstance(important_memory_max_chars, int)
@@ -425,6 +429,8 @@ def build_prompt_bundle(
     *,
     plugin_manifests: tuple[PluginManifest, ...] | None = None,
     memory_store: MemoryStore | None = None,
+    source: str | None = None,
+    session_id: str | None = None,
 ) -> PromptBundle:
     """Build the initial prompt snapshot for one user-visible conversation run."""
 
@@ -588,7 +594,13 @@ def build_prompt_bundle(
         if name in tier_sections:
             sections.append(tier_sections[name])
 
-    plans = select_prompt_plans(root, user, max_chars=settings.char_limits["task_plan"])
+    plans = select_prompt_plans(
+        root,
+        user,
+        max_chars=settings.char_limits["task_plan"],
+        source=source,
+        session_id=session_id,
+    )
     if plans.text:
         sections.append(
             PromptSection(

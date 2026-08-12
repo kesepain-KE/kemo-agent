@@ -2,7 +2,7 @@
   "schema_version": 1,
   "provider_runtime": {
     "max_concurrent_requests": 10,
-    "request_semaphore_timeout": 300.0
+    "request_semaphore_timeout": 300
   },
   "tools": {
     "enabled": true,
@@ -36,7 +36,7 @@
       "one_month": 200,
       "seven_days": 300
     },
-    "important_memory_max_chars": 5000,
+    "important_memory_max_chars": 20000,
     "important_memory_output_max_chars": 20000,
     "history_read_enabled": true,
     "tiers": {
@@ -97,7 +97,7 @@
   "web": {
     "max_concurrent_chats": 3,
     "max_pending_chats": 5,
-    "pending_chat_timeout": 30.0
+    "pending_chat_timeout": 30
   },
   "agents": {
     "conserved_rounds": 3,

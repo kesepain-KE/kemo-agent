@@ -182,7 +182,7 @@ class MemoryServiceMixin:
         config = load_config(name, self.root)
         configured_limit = int(
             (config.get("memory") or {}).get(
-                "important_memory_max_chars", IMPORTANT_MEMORY_MAX_HARD_CHARS
+                "important_memory_output_max_chars", IMPORTANT_MEMORY_MAX_HARD_CHARS
             )
         )
         text = _validated_text(
