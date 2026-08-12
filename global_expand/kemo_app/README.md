@@ -4,7 +4,17 @@
 kemo-agent. It exposes the App-facing HTTP, SSE and WebSocket API on a separate
 port while forwarding authorized operations to the framework Web API.
 
-Current bridge version: **1.1.1**.
+Current bridge version: **1.1.2**.
+
+## Android device actions
+
+The control entry exposes one structured `device_action` command instead of separate
+server endpoints for every phone feature. The bridge validates, queues and routes only
+App-declared actions to one authenticated `user + device_id` WebSocket connection.
+The current Android client implements `alarm.create`, `timer.start`,
+`calendar.event.create` and `todo.create`; arbitrary intents and shell commands are never
+accepted. Commands carry an idempotency id and expiry time, and device acknowledgements
+are persisted in ignored local runtime state.
 
 ## Default lifecycle
 
@@ -16,13 +26,39 @@ information. Merely cloning or updating kemo-agent never starts this service.
 After an installation has been explicitly activated, ordinary framework
 updates preserve that local activation choice even if credential readiness
 cannot be validated while update files are being copied. A fresh installation
-remains inactive, and an explicit `stop`/`deactivate` choice remains inactive.
+remains inactive, and an explicit `deactivate` choice remains inactive. A
+plain `stop` only ends the current process while preserving the operator's
+activation intent.
 Local configuration and credential files are never replaced by the updater.
+
+An explicit successful `start`/`activate` also records deployment-local
+activation intent in `_activated.json`. Once that marker exists, the periodic
+collector may restore a configured bridge that is offline, including after a
+framework or computer restart and after an unexpected bridge-process crash.
+`deactivate` removes the marker, so an explicitly deactivated bridge stays
+inactive. A plain `stop` only stops the current daemon and deliberately keeps
+the marker; this is useful for maintenance and for verifying the next automatic
+recovery cycle. Automatic launch attempts are spaced by at least 60 seconds and stop
+after three consecutive failures until a manual `start` succeeds. These
+failures remain isolated from the framework process and are reported through
+the normal Expand status document.
 
 `open_control` remains available only so an administrator can inspect the
 initialization state and explicitly activate the bridge. The `start`/`activate`
 commands refuse to launch a process until local configuration, a device-token
 hash, a generated session secret and at least one enabled App user are present.
+
+## Version 1.1.2 lifecycle contract
+
+- A successful explicit `start`/`activate` stores an ignored local activation
+  marker. The periodic collector may restore an unexpectedly stopped bridge
+  after framework or host restart without putting startup in the core request
+  path.
+- `stop` ends the current daemon but preserves activation intent; `deactivate`
+  ends the daemon and removes that intent. Automatic recovery is rate-limited,
+  stops after three consecutive failures, and never blocks the main runtime.
+- The published source tree remains uninitialized and inactive, contains no
+  credentials or host status, and does not start a listener after clone/update.
 
 ## Version 1.1.1 contract
 
@@ -93,3 +129,8 @@ python start_expand.py status
 
 The App-facing protocol and operational commands are documented in
 `expand_control.md`.
+
+The authenticated App API includes `/v1/models/capabilities?model=...`, which
+forwards the current user's Kemo model capability declaration without exposing
+upstream credentials. The App uses its declared reasoning efforts instead of
+guessing a fixed Kemo effort list.

@@ -7,7 +7,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 模型、脱敏配置、WebSocket 推送与在线设备统计。公网访问由 frp/nginx 反代 + TLS 终止，本服务
 不直接暴露公网。
 
-当前桥接协议实现版本：**1.1.1**。
+当前桥接协议实现版本：**1.1.2**。
 
 源码与首次部署默认为**未初始化、未激活**：`open_input=false`、没有最近成功采集时间、
 不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
@@ -15,7 +15,14 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 部署端一旦被管理员显式激活，常规框架更新会保留该 APP 拓展的本地激活状态；更新期间即使
 凭据暂时无法校验，也不会把 `open_input=true` 重置为 `false`。首次安装仍保持未激活，管理员
-显式执行 `stop` / `deactivate` 后也仍保持未激活，本地配置与凭据文件不会被更新器覆盖。
+显式执行 `deactivate` 后仍保持未激活；`stop` 只停止本次进程并保留伴随启动意愿。本地配置与
+凭据文件不会被更新器覆盖。
+
+显式 `start` / `activate` 成功后会在部署端写入被 Git 忽略的 `_activated.json`，作为持续的
+“允许运行”意愿。框架启动后的周期采集器若发现服务离线，会在配置完整且该标志存在时自动
+拉起桥接服务；因此框架重启、电脑重启或守护进程意外退出后无需重复激活。自动拉起尝试至少
+间隔 60 秒，连续失败 3 次后暂停并在采集状态中提示手动处理。自动拉起失败只影响本拓展的
+健康状态，不阻断框架主进程、对话或其他模块。
 
 显示名称为“kemo app 桥接服务”；稳定模块标识仍为 `kemo_app`。
 调用入口：`expand_call(scope="global", module="kemo_app", ...)`。
@@ -31,8 +38,16 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 查询桥接服务运行状态（进程、端口、日志路径）。只读，无副作用。
 
-无参数。返回 `initialized` / `configured` / `active` / `running` / `pid` / `port` / `log`，
+无参数。返回 `initialized` / `configured` / `activated` / `active` / `running` / `pid` / `port` / `log`，
 以及仍缺少的配置项名称；不返回任何凭据值。
+
+守护进程身份由健康端点返回的服务标识、实际 PID 和实例令牌共同确认。升级前已经运行、尚未
+提供实例身份的旧桥接进程会显示为 `unmanaged_process=true`，框架不会仅凭陈旧 PID 文件向其
+发送终止信号。此时应先用旧部署正常停止桥接，或由操作者确认进程身份后停止一次，再启动新版；
+新版后续会自动写入带实例令牌的 PID 状态。
+
+如果同一端口属于另一份部署，即使其健康端点也声明为 `kemo_app`，当前模块仍不会把它视为
+自身已激活，不会写入 `_activated.json`，也不会自动接管或停止该进程。
 
 ## `configuration_status`
 
@@ -49,21 +64,55 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 无参数。返回 `pid` / `port` / `log`。启动后可用 `status` 或 `curl http://127.0.0.1:8742/v1/health` 验证。
 
+启动成功或服务已经在运行时，命令会原子写入 `_activated.json` 并重置自动拉起失败计数；
+这使后续框架启动周期能够在服务离线时自动恢复它。
+
 `activate` 是 `start` 的别名。
 
 ## `stop`
 
-停止桥接服务（终止守护进程并清理 pid 文件）。
+停止当前桥接服务进程并清理 pid 文件，但保留 `_activated.json`。如果框架的周期采集器仍在
+运行，服务会在后续采集周期按冷却规则自动恢复；需要持续停用时应使用 `deactivate`。
 
 无参数。返回停止后的状态。
 
-`deactivate` 是 `stop` 的别名；停止服务不会删除本地凭据，后续仍可再次显式激活。
+`deactivate` 会停止服务并删除 `_activated.json`。它不会删除本地凭据；后续周期采集不会自动
+拉起，直至再次显式执行 `start` / `activate`。
 
 ## `restart`
 
-重启桥接服务（stop + start）。
+重启桥接服务（仅停止进程 + start），全过程保持激活意愿；成功启动后重置失败计数。
 
 无参数。返回新进程状态。
+
+## `device_action`
+
+向指定 Android App 设备发送一条结构化设备操作指令。该入口是通用动作通道，
+不接受任意 Android Intent、Shell 命令或组件名；当前 App 只实现以下白名单动作：
+
+- `alarm.create`：创建系统闹钟，`arguments` 包含 `hour`、`minute`、可选 `label`、`repeat_days`、`vibrate`。
+- `timer.start`：启动系统倒计时，`arguments` 包含 `duration_seconds`、可选 `label`。
+- `calendar.event.create`：打开预填的系统日历日程页，包含 `title`、`start_at`、`end_at`，可选 `description`、`location`、`all_day`。
+- `todo.create`：打开系统待办页，包含 `title`，可选 `notes`、`due_at`、`reminder_at`。
+
+时间使用带时区的 ISO-8601。多台设备在线时必须传 `device_id`；只有一台在线设备时可省略。
+命令默认有效期为 300 秒，可用 `ttl_seconds` 调整到 30..86400 秒。
+
+```json
+{
+  "device_id": "c6e80b1d",
+  "action": "alarm.create",
+  "arguments": {"hour": 8, "minute": 0, "label": "起床"},
+  "ttl_seconds": 300
+}
+```
+
+返回 `command_id`、目标设备、是否在线以及队列状态。设备端执行后会经 WebSocket 回传
+`received` / `waiting_user` / `presented` / `completed` / `cancelled` / `failed` / `unsupported`。
+
+## `device_action_status`
+
+按 `command_id` 查询设备操作的最新状态。只读。
 
 # 设备 Token、用户密码与核对文件
 
@@ -98,7 +147,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 2. 配置设备 Token 和至少一个 App 用户后，运行 `configuration_status`；仅当
    `configured=true` 时才允许激活。
 3. `start` 或 `activate` 显式启动服务。
-4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.1 健康状态，并包含
+4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.2 健康状态，并包含
    `websocket_connections` 与 `connected_devices`。
 5. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
 6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
@@ -113,6 +162,8 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 - Chat 兼容协议不提供模型发现服务；调用 `/v1/models` 会返回 404
   `model_catalog_unavailable_for_chat_protocol`。Chat 模型名仍由用户手动配置。
 - App 在 Kemo 协议下显示可选择的模型列表，在 Chat 协议下隐藏模型列表入口并使用文本输入。
+- `/v1/models/capabilities?model=...` 按当前认证用户查询指定 Kemo 模型的能力声明；App 的思考
+  档位必须按 `capabilities.reasoning.efforts` 原顺序动态展示，永久过滤 `none`，不得猜测固定五档。
 
 # App 文件上传
 
@@ -121,6 +172,13 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
   `file_upload` 数据域保存。空目录表示上传到根目录。
 - 单文件最大 80 MB；同名文件由框架文件服务自动生成不冲突的新名称，不直接覆盖。
 - App 上传成功后会刷新当前目录，嵌套目录中的上传文件可立即查看和预览。
+
+# 1.1.2 激活意愿与自动恢复
+
+- 显式 `start` / `activate` 成功后写入被 Git 忽略的 `_activated.json`；周期采集器只在配置完整、标志存在且冷却期允许时自动恢复离线服务。
+- `stop` 只停止当前进程并保留恢复意愿；`deactivate` 同时删除恢复意愿。连续自动启动失败 3 次后暂停，等待管理员手动处理。
+- 自动恢复只属于拓展后台采集生命周期，不进入主对话请求链路；失败不会阻断框架、其他拓展或用户对话。
+- 公开源码仍保持未初始化、未激活、无 `recent_update` 和无本机连接摘要，克隆或更新不会自行监听端口。
 
 # 1.1.1 APP 会话来源隔离
 

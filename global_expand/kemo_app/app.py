@@ -19,15 +19,18 @@ from pydantic import BaseModel, Field
 
 from auth import Session, SessionManager, SlidingWindowLimiter, UserStore, token_ok
 from events import EventHub
+from device_commands import DeviceCommandStore
 from upstream import UpstreamClient, UpstreamError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 CONNECTION_STATE_PATH = BASE_DIR / "_connections.json"
-VERSION = "1.1.1"
+DEVICE_COMMAND_PATH = BASE_DIR / "_device_commands.json"
+VERSION = "1.1.2"
 SERVICE_ID = "kemo_app"
 SERVICE_NAME = "kemo app 桥接服务"
 APP_SOURCE = "app"
+INSTANCE_ID = str(os.environ.get("KEMO_APP_INSTANCE_ID") or "").strip()
 
 
 def load_config() -> dict[str, Any]:
@@ -45,6 +48,7 @@ SESSIONS = SessionManager(str(CONFIG.get("session_secret", "")), int(CONFIG.get(
 LIMITER = SlidingWindowLimiter()
 UPSTREAM = UpstreamClient(CONFIG)
 EVENTS = EventHub(UPSTREAM, float(CONFIG.get("poll_interval", 5)), CONNECTION_STATE_PATH)
+DEVICE_COMMANDS = DeviceCommandStore(DEVICE_COMMAND_PATH)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("kemo_app")
@@ -76,7 +80,11 @@ class ChatRequest(BaseModel):
     run_id: str = ""
     plan_id: str = ""
     client_id: str = ""
-    reasoning_effort: str = Field(default="medium", pattern="^(minimal|low|medium|high|max)$")
+    # This remains a compatibility input for older App builds. The framework
+    # now owns reasoning selection through provider.reasoning_effort and Kemo
+    # model capabilities, so /v1/chat must not impose the legacy fixed five
+    # levels or override the account configuration for one request.
+    reasoning_effort: str = Field(default="", max_length=64)
 
 
 class UndoLastRoundRequest(BaseModel):
@@ -100,6 +108,12 @@ class WhitelistRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     model: str = Field(min_length=1, max_length=300)
+
+
+class InternalDeviceCommand(BaseModel):
+    user: str = Field(min_length=1, max_length=128)
+    device_id: str = Field(min_length=1, max_length=128)
+    command: dict[str, Any]
 
 
 def _client_ip(request: Request) -> str:
@@ -158,6 +172,8 @@ async def health() -> dict[str, Any]:
         "service": SERVICE_ID,
         "display_name": SERVICE_NAME,
         "version": VERSION,
+        "instance_id": INSTANCE_ID,
+        "process_pid": os.getpid(),
         "upstream": "online" if upstream else "offline",
         "websocket_connections": connections["websocket_connections"],
         "connected_devices": connections["connected_devices"],
@@ -193,7 +209,7 @@ async def auth_logout(x_kemo_session: str = Header(default=""), _: None = Depend
 @app.post("/v1/chat")
 async def chat(body: ChatRequest, session: Session = Depends(require_session)) -> StreamingResponse:
     payload = {
-        **body.model_dump(),
+        **body.model_dump(exclude={"reasoning_effort"}),
         "user": session.username,
         "source": APP_SOURCE,
     }
@@ -412,15 +428,39 @@ async def delete_cron(task_id: str, session: Session = Depends(require_session))
 
 
 @app.get("/v1/status")
-async def status(session_id: str = Query("", max_length=128), session: Session = Depends(require_session)) -> Any:
+async def status(
+    session_id: str = Query("", max_length=128),
+    client_id: str = Query("", max_length=128),
+    session: Session = Depends(require_session),
+) -> Any:
     user = quote(session.username, safe="")
-    params = {"session_id": session_id} if session_id else None
+    resolved_session_id = session_id
+    if client_id:
+        active = await UPSTREAM.request_json(
+            "GET",
+            f"/api/users/{user}/sessions/active",
+            params={"source": APP_SOURCE, "client_id": client_id},
+        )
+        if isinstance(active, dict):
+            active_session = active.get("session")
+            if isinstance(active_session, dict):
+                active_id = str(active_session.get("session_id") or "").strip()
+                if active_id:
+                    resolved_session_id = active_id
+    params = {"source": APP_SOURCE}
+    if resolved_session_id:
+        params["session_id"] = resolved_session_id
     health_value, overview, runtime = await asyncio.gather(
         UPSTREAM.health(),
         UPSTREAM.request_json("GET", f"/api/users/{user}/overview", params=params),
         UPSTREAM.request_json("GET", f"/api/users/{user}/runtime/status", params=params),
     )
-    return {"health": health_value, "overview": overview, "runtime": runtime}
+    return {
+        "health": health_value,
+        "overview": overview,
+        "runtime": runtime,
+        "resolved_session_id": resolved_session_id,
+    }
 
 
 @app.get("/v1/expands")
@@ -594,6 +634,20 @@ async def models(refresh: bool = Query(False), session: Session = Depends(requir
     return {"protocol": "kemo", "data": catalog}
 
 
+@app.get("/v1/models/capabilities")
+async def model_capabilities(
+    model: str = Query(..., min_length=1, max_length=256),
+    refresh: bool = Query(False),
+    session: Session = Depends(require_session),
+) -> Any:
+    user = quote(session.username, safe="")
+    return await UPSTREAM.request_json(
+        "GET",
+        f"/api/users/{user}/provider/model-capabilities",
+        params={"model": model, "refresh": str(refresh).lower()},
+    )
+
+
 @app.put("/v1/provider/model")
 async def provider_model(body: ModelRequest, session: Session = Depends(require_session)) -> Any:
     return await UPSTREAM.request_json("PATCH", f"/api/users/{quote(session.username, safe='')}/config", json_body={"changes": {"provider": {"model": body.model}}})
@@ -617,6 +671,28 @@ async def config_patch(body: dict[str, Any], session: Session = Depends(require_
     )
 
 
+@app.post("/internal/device-command")
+async def internal_device_command(
+    body: InternalDeviceCommand,
+    request: Request,
+    x_kemo_internal: str = Header(default=""),
+) -> dict[str, Any]:
+    # This endpoint exists only so the isolated Expand control subprocess can
+    # wake the already-running bridge immediately. It is never an App API.
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(403, "internal_loopback_only")
+    if not x_kemo_internal or x_kemo_internal != str(CONFIG.get("session_secret") or ""):
+        raise HTTPException(401, "internal_unauthorized")
+    delivered = await EVENTS.publish_to_device(
+        body.user,
+        _normalized_device_id(body.device_id),
+        "device.command",
+        body.command,
+    )
+    return {"ok": True, "delivered": delivered}
+
+
 @app.websocket("/v1/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     authorization = websocket.headers.get("authorization", "")
@@ -637,6 +713,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     queue = EVENTS.subscribe(session.username, device_id)
     await websocket.send_json({"type": "connected", "ts": int(time.time()), "data": {"user": session.username, "device_id": device_id}})
+    for command in DEVICE_COMMANDS.pending_for(session.username, device_id):
+        await websocket.send_json({"type": "device.command", "ts": int(time.time()), "data": command})
     try:
         while True:
             receive_task = asyncio.create_task(websocket.receive_text())
@@ -657,6 +735,27 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     message = {}
                 if message.get("type") == "ping":
                     await websocket.send_json({"type": "pong", "ts": int(time.time()), "data": {}})
+                elif message.get("type") in {"device.command.ack", "device.command.result"}:
+                    data = message.get("data") if isinstance(message.get("data"), dict) else {}
+                    command_id = str(data.get("command_id") or "").strip()
+                    status = str(data.get("status") or "").strip()
+                    detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+                    if command_id and status:
+                        try:
+                            DEVICE_COMMANDS.update(
+                                command_id,
+                                username=session.username,
+                                device_id=device_id,
+                                status=status,
+                                detail=detail,
+                            )
+                        except (RuntimeError, TimeoutError, ValueError) as exc:
+                            LOGGER.warning(
+                                "ignored invalid device command acknowledgement: %s",
+                                type(exc).__name__,
+                            )
+                elif message.get("type") == "device.capabilities":
+                    EVENTS.update_capabilities(queue, message.get("data"))
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:

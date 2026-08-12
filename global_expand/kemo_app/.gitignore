@@ -5,7 +5,10 @@ credential_registry.json
 
 # Runtime state
 _connections.json
+_device_commands.json
+_device_commands.json.lock
 _runtime.json
+_activated.json
 _server.pid
 _last_run.json
 .module.execution.lock

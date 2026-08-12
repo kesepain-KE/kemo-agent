@@ -46,6 +46,7 @@ class EventHub:
             "user": username,
             "device_id": device_id or "unknown",
             "connected_at": int(time.time()),
+            "capabilities": {},
         }
         self._write_connection_state()
         return queue
@@ -73,16 +74,40 @@ class EventHub:
                     "device_id": device_id,
                     "connections": 1,
                     "connected_at": connected_at,
+                    "capabilities": item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {},
                 }
             else:
                 current["connections"] += 1
                 current["connected_at"] = min(int(current["connected_at"]), connected_at)
+                capabilities = item.get("capabilities")
+                if isinstance(capabilities, dict) and capabilities:
+                    current["capabilities"] = capabilities
         devices = sorted(grouped.values(), key=lambda item: (item["user"].casefold(), item["device_id"].casefold()))
         return {
             "websocket_connections": len(self._connections),
             "connected_devices": len(devices),
             "devices": devices,
         }
+
+    def update_capabilities(self, queue: asyncio.Queue[dict[str, Any]], value: Any) -> None:
+        if queue not in self._connections or not isinstance(value, dict):
+            return
+        actions = value.get("actions") if isinstance(value.get("actions"), dict) else {}
+        safe_actions = {
+            str(name): {
+                "available": bool(config.get("available")),
+                "execution_mode": str(config.get("execution_mode") or "")[:40],
+            }
+            for name, config in actions.items()
+            if isinstance(name, str) and isinstance(config, dict)
+        }
+        self._connections[queue]["capabilities"] = {
+            "protocol_version": int(value.get("protocol_version") or 1),
+            "device_name": str(value.get("device_name") or "")[:120],
+            "android_api": int(value.get("android_api") or 0),
+            "actions": safe_actions,
+        }
+        self._write_connection_state()
 
     def _write_connection_state(self) -> None:
         if self.state_path is None:
@@ -113,6 +138,22 @@ class EventHub:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(event)
+
+    async def publish_to_device(self, username: str, device_id: str, event_type: str, data: Any) -> bool:
+        event = {"type": event_type, "ts": int(time.time()), "data": data}
+        delivered = False
+        for queue in tuple(self._queues.get(username, ())):
+            connection = self._connections.get(queue, {})
+            if str(connection.get("device_id") or "") != device_id:
+                continue
+            delivered = True
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(event)
+        return delivered
 
     async def _run(self) -> None:
         while True:

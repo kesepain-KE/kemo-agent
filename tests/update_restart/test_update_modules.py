@@ -73,6 +73,18 @@ class UpdateModuleTests(unittest.TestCase):
         dispatcher = self.load_dispatcher("kemo_update_backup_runtime_locks")
         self.assertIn(".module.execution.lock", dispatcher.BACKUP_EXCLUDES)
 
+    def test_kemo_app_update_manifest_contains_all_runtime_python_modules(self) -> None:
+        module = ROOT / core_update.KEMO_APP_EXPAND
+        expected = {
+            path.name
+            for path in module.glob("*.py")
+            if path.name != "__init__.py"
+        }
+        self.assertTrue(
+            expected.issubset(set(core_update.KEMO_APP_EXPAND_FILES)),
+            expected - set(core_update.KEMO_APP_EXPAND_FILES),
+        )
+
     def test_failed_backup_does_not_leave_partial_backup_directory(self) -> None:
         dispatcher = self.load_dispatcher("kemo_update_failed_backup_cleanup")
         with tempfile.TemporaryDirectory() as temporary:
@@ -405,6 +417,10 @@ class UpdateModuleTests(unittest.TestCase):
 
             self.assertIn(str(module).replace("\\", "/"), "\n".join(result["details"]))
             self.assertEqual((target / module / "app.py").read_text("utf-8"), "new app.py")
+            self.assertEqual(
+                (target / module / "device_commands.py").read_text("utf-8"),
+                "new device_commands.py",
+            )
             self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "local bridge status")
             self.assertEqual(
                 json.loads((target / module / "config.json").read_text("utf-8"))["upstream"],

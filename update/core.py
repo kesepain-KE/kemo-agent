@@ -107,6 +107,7 @@ KEMO_APP_EXPAND_FILES = (
     "credential_registry.py",
     "daemon.py",
     "data_update.py",
+    "device_commands.py",
     "events.py",
     "initialize_config.py",
     "lifecycle.py",

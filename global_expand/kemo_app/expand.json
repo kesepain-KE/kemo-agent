@@ -1,6 +1,6 @@
 {
   "name": "kemo app 桥接服务",
-  "explain": "Android App 与 kemo-agent 之间的常驻 FastAPI 桥接服务 v1.1.1（HTTP/SSE/WebSocket，独立端口）。提供两级认证、独立 APP 会话来源、对话、任务、定时、状态、模块、文件、知识、模型、事件推送与在线设备统计。",
+  "explain": "Android App 与 kemo-agent 之间的常驻 FastAPI 桥接服务 v1.1.2（HTTP/SSE/WebSocket，独立端口）。提供两级认证、独立 APP 会话来源、显式激活后的故障自动恢复、对话、任务、定时、状态、模块、文件、知识、模型、事件推送与在线设备统计。",
   "open_input": false,
   "input_data": "input_data.md",
   "input_health": "异常",
