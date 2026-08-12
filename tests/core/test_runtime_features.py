@@ -43,13 +43,16 @@ from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
 from run.memory import MemoryStore
 from run.memory_analysis import extract_memory_backlog, extract_round_memory
+from run.task_plan_store import PlanStore, normalize_plan
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     MAX_TOOL_RESULT_CHARS,
     ToolCancelledError,
     ToolDefinition,
+    ToolRegistry,
     ToolResultTooLargeError,
     ToolTimeoutError,
+    ToolValidationError,
     apply_runtime_tool_policy,
     discover_tools,
     execute_tool,
@@ -374,6 +377,38 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(observed["tool_timeout"], 0.2)
         self.assertIsInstance(observed["cancel_event"], threading.Event)
         self.assertFalse(observed["cancel_event"].is_set())
+
+    def test_explicit_timeout_can_add_a_bounded_manifest_cleanup_grace(self) -> None:
+        tool = ToolDefinition(
+            name="timeout_tool",
+            description="timeout",
+            input_schema={
+                "type": "object",
+                "properties": {"timeout": {"type": "number"}},
+                "additionalProperties": False,
+            },
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            timeout_grace_seconds=2,
+        )
+        self.assertEqual(
+            resolve_tool_timeout(
+                tool,
+                {"timeout": 10},
+                default_timeout=1,
+            ),
+            12,
+        )
+        tool.timeout_grace_seconds = 31
+        with self.assertRaisesRegex(ToolValidationError, "0..30"):
+            resolve_tool_timeout(
+                tool,
+                {"timeout": 10},
+                default_timeout=1,
+            )
 
     def test_omitted_tool_timeout_uses_global_default_and_signals_cleanup(self) -> None:
         observed_cancel = threading.Event()
@@ -1164,6 +1199,198 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(resumed["data"]["rounds"], 2)
         self.assertEqual(resumed["text"]["messages"][-2]["content"], "继续")
         self.assertEqual(resumed["text"]["messages"][-1]["content"], "继续完成")
+
+    def test_task_plan_creation_stops_only_the_current_conversation_run(self) -> None:
+        _, root = self.make_root()
+        side_effects: list[str] = []
+
+        def create_plan(*, action, agent, input, wait, context):
+            self.assertEqual((action, agent, wait), ("call", "task_plan", True))
+            plan = PlanStore(root, "alice").create(
+                normalize_plan(
+                    plan_id="plan_12345678",
+                    title="A 对话计划",
+                    description=str(input.get("goal") or "测试计划"),
+                    user="alice",
+                    source=context["source"],
+                    session_id=context["session_id"],
+                    steps=[{
+                        "step_id": "step_1",
+                        "title": "后续执行",
+                        "description": "必须批准后执行",
+                        "critical": True,
+                    }],
+                    auto_accept=False,
+                    reminder="当前任务计划已创建，请让用户点击批准后执行",
+                )
+            )
+            return {
+                "status": "completed",
+                "agent": "task_plan",
+                "data": {"action": "create"},
+                "plan": plan,
+            }
+
+        def mutate(*, value, context):
+            side_effects.append(f"{context['session_id']}:{value}")
+            return {"value": value}
+
+        dispatch = ToolDefinition(
+            name="subagent_dispatch",
+            description="dispatch",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "agent": {"type": "string"},
+                    "input": {"type": "object"},
+                    "wait": {"type": "boolean"},
+                },
+                "required": ["action", "agent", "input", "wait"],
+                "additionalProperties": False,
+            },
+            version="1",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=root / "plugins" / "subagent_dispatch",
+            _callable=create_plan,
+        )
+        mutation = ToolDefinition(
+            name="mutation",
+            description="mutation",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            version="1",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=root / "plugins" / "mutation",
+            _callable=mutate,
+        )
+        registry = ToolRegistry({
+            "subagent_dispatch": dispatch,
+            "mutation": mutation,
+        })
+        provider_a = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="我先创建计划",
+                    tool_calls=[
+                        ToolCall(
+                            id="create-plan",
+                            name="subagent_dispatch",
+                            arguments={
+                                "action": "call",
+                                "agent": "task_plan",
+                                "input": {"action": "create", "goal": "A 任务"},
+                                "wait": True,
+                            },
+                        ),
+                        ToolCall(
+                            id="must-not-run",
+                            name="mutation",
+                            arguments={"value": "A-side-effect"},
+                        ),
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(10, 2, 12),
+                ),
+                ChatResponse(text="这一响应绝不能被请求"),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events_a = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "conversation-a",
+                        "run_id": "run-a",
+                        "prompt": "创建任务计划",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider_a,
+                    tool_registry_factory=lambda *_: registry,
+                )
+            )
+
+        self.assertEqual(len(provider_a.requests), 1)
+        self.assertEqual(side_effects, [])
+        terminal_a = events_a[-1]
+        self.assertEqual(terminal_a.type, "done")
+        self.assertEqual(terminal_a.metadata["status"], "completed")
+        self.assertEqual(
+            terminal_a.metadata["stop_reason"],
+            "task_plan_approval_required",
+        )
+        self.assertTrue(terminal_a.metadata["awaiting_user_approval"])
+        self.assertEqual(terminal_a.metadata["plan_id"], "plan_12345678")
+        blocked = next(
+            event
+            for event in events_a
+            if event.type == "tool_call_result"
+            and event.tool_call_id == "must-not-run"
+        )
+        self.assertEqual(blocked.metadata["status"], "not_executed")
+        self.assertEqual(
+            blocked.result["error"]["exception_type"],
+            "TaskPlanCreationBoundary",
+        )
+        window_a = load_window(
+            find_window(root, "alice", "web", "conversation-a")
+        )
+        self.assertEqual(window_a["data"]["rounds"], 1)
+        self.assertEqual(
+            window_a["data"]["round_metrics"][0]["stop_reason"],
+            "task_plan_approval_required",
+        )
+        self.assertTrue(
+            window_a["data"]["round_metrics"][0]["awaiting_user_approval"]
+        )
+        self.assertEqual(
+            window_a["tool"]["rounds"][0]["calls"][1]["status"],
+            "not_executed",
+        )
+
+        provider_b = ScriptedProvider(
+            responses=[ChatResponse(text="B 对话正常继续", usage=Usage(4, 2, 6))]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events_b = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "conversation-b",
+                        "run_id": "run-b",
+                        "prompt": "这是 B 对话",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider_b,
+                    tool_registry_factory=lambda *_: registry,
+                )
+            )
+
+        self.assertEqual(events_b[-1].type, "done")
+        self.assertEqual(events_b[-1].metadata.get("stop_reason"), None)
+        self.assertEqual(len(provider_b.requests), 1)
+        system_b = next(
+            (message.get("content") or "")
+            for message in provider_b.requests[0].messages
+            if message.get("role") == "system"
+        )
+        self.assertNotIn("A 对话计划", system_b)
+        self.assertNotIn("plan_12345678", system_b)
+        self.assertEqual(side_effects, [])
+        self.assertEqual(
+            load_window(find_window(root, "alice", "web", "conversation-b"))["data"]["rounds"],
+            1,
+        )
 
     def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(
         self,

@@ -89,6 +89,16 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
             "插件 timeout_policy 必须是 argument_or_default 或 agent_runtime："
             f"{path}"
         )
+    timeout_grace = raw.get("timeout_grace_seconds", 0)
+    if (
+        isinstance(timeout_grace, bool)
+        or not isinstance(timeout_grace, (int, float))
+        or timeout_grace < 0
+        or timeout_grace > 30
+    ):
+        raise PluginManifestError(
+            f"插件 timeout_grace_seconds 必须是 0..30 秒的数字：{path}"
+        )
     entrypoint = raw["entrypoint"]
     if not isinstance(entrypoint, str):
         raise PluginManifestError(f"插件 entrypoint 必须是字符串：{path}")

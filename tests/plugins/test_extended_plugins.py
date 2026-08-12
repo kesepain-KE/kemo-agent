@@ -35,7 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_seventeen_native_plugins(self) -> None:
+    def test_repository_discovers_all_eighteen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -57,6 +57,7 @@ class PluginManifestTests(unittest.TestCase):
                 "subagent_dispatch",
                 "task_plan",
                 "task_time",
+                "wait_for_condition",
                 "web_search",
             ],
         )
@@ -69,7 +70,7 @@ class PluginManifestTests(unittest.TestCase):
             )
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 17)
+        self.assertEqual(len(registry.tools), 18)
         expand_call = registry.get("expand_call")
         self.assertFalse(expand_call.strict)
         self.assertFalse(expand_call.openai_schema()["function"]["strict"])
@@ -152,6 +153,27 @@ class PluginManifestTests(unittest.TestCase):
                 "utf-8",
             )
             with self.assertRaisesRegex(PluginManifestError, "strict 必须是布尔值"):
+                discover_plugin_manifests(root)
+
+    def test_plugin_timeout_grace_must_be_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root / "plugins" / "invalid_grace"
+            plugin.mkdir(parents=True)
+            (plugin / "tool.py").write_text("def run():\n    return {}\n", "utf-8")
+            (plugin / "SKILL.md").write_text(
+                "# invalid_grace\ndescription\n\n## Tool\n```json\n"
+                '{"name":"invalid_grace","description":"x",'
+                '"input_schema":{"type":"object"},"version":"1",'
+                '"enabled":true,"entrypoint":"tool.py:run",'
+                '"timeout_grace_seconds":31}'
+                "\n```\n",
+                "utf-8",
+            )
+            with self.assertRaisesRegex(
+                PluginManifestError,
+                "timeout_grace_seconds 必须是 0..30",
+            ):
                 discover_plugin_manifests(root)
 
 

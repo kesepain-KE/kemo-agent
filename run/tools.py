@@ -212,6 +212,7 @@ class ToolDefinition:
     directory: Path
     strict: bool = False
     timeout_policy: str = "argument_or_default"
+    timeout_grace_seconds: float = 0.0
     overrides: list[str] = field(default_factory=list)
     _callable: Callable[..., Any] | None = field(default=None, repr=False)
 
@@ -303,6 +304,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
         directory=manifest.descriptor.path.parent,
         strict=bool(raw.get("strict", False)),
         timeout_policy=str(raw.get("timeout_policy") or "argument_or_default"),
+        timeout_grace_seconds=float(raw.get("timeout_grace_seconds") or 0),
     )
 
 
@@ -409,7 +411,13 @@ def resolve_tool_timeout(
     properties = tool.input_schema.get("properties") or {}
     timeout_rule = properties.get("timeout")
     if "timeout" in arguments and isinstance(timeout_rule, dict):
-        return _positive_timeout(arguments["timeout"], field="参数 timeout")
+        requested = _positive_timeout(arguments["timeout"], field="参数 timeout")
+        grace = float(tool.timeout_grace_seconds)
+        if not math.isfinite(grace) or grace < 0 or grace > 30:
+            raise ToolValidationError(
+                f"工具 {tool.name} timeout_grace_seconds 必须在 0..30 秒之间"
+            )
+        return requested + grace
     return default
 
 
