@@ -125,6 +125,20 @@ def _write_pid_state(pid: int, instance_id: str) -> None:
 def _pid_alive(pid) -> bool:
     if not pid:
         return False
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok) and exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -245,10 +259,20 @@ def _stop_process() -> dict:
         and (not instance_id or health.get("instance_id") == instance_id)
     )
     if owned:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_TERMINATE = 0x0001
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.CloseHandle(handle)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
         time.sleep(0.6)
     if os.path.exists(PID_PATH):
         try:
