@@ -33,6 +33,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | Run 状态 | `run/run_state.py` | 显式承载单次运行的身份、依赖与可变轮次状态 |
 | 轮次终态 | `run/round_finalizer.py` | 取消、工具上限和上下文上限等受控停止轮次的持久化 |
 | 会话运行态 | `run/session_runtime.py` | 会话级锁与完整归档提交辅助 |
+| 长任务运行态 | `run/long_task.py`、`run/long_task_runtime.py` | 会话级长任务授权、跨 Run 续跑、统计与控制元数据 |
 | 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
 | 上下文服务 | `run/context_service.py` | 上下文状态查询和临时工作区工具/思考压缩 |
 | 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与 SQLite 缓存 |
@@ -361,6 +362,11 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 工具执行有超时限制：未显式提供 `timeout` 时使用 `tools.timeout`（默认 240 秒）；工具 Schema 声明且调用方显式提供有效 `timeout` 时，该值覆盖插件内部期限和框架外层看门狗基准。少数需要在期限边界返回正常业务结果的插件可声明最多 30 秒的清理宽限，该宽限只延后外层看门狗，不得增加插件实际工作或等待时长。
 - 后台长任务已经由其他工具启动且有可靠完成信号时，可用 `wait_for_condition` 在前台等待；必须显式设置 1～7200 秒的最长时长并优先等待 PID、路径或端口条件，条件满足立即返回。达到上限只表示等待超时，不能据此宣称后台任务失败；不得用无人管理的线程绕过取消与超时边界。
 - 单轮对话有最大工具调用次数限制（`tools.max_iterations`，默认 80 次）；每个工具调用分别计数，同一 Provider 响应中的并行调用也计入总数。
+- 长任务模式不是全局或用户配置项，而是由用户在 Web 对话操作菜单中按会话显式开启。状态严格绑定
+  `(user, source, session_id)`，Web 与 App、同一用户的不同对话空间互不影响；新会话默认关闭。
+- 开启后，只有当前 Run 以 `status=limited`、`stop_reason=max_tool_iterations` 收束时才会自动创建下一 Run；中间通过
+  `long_task_update` 事件通知客户端，不发送中间终态 `done`。上下文保护、Provider 错误、任务计划批准边界和用户取消不会自动续跑。
+- 用户关闭开关不会打断当前 Run：当前 Run 正常结束则长任务为 `completed`，再次触及工具上限则为 `paused`。会话级取消接口会停止整个逻辑长任务并取消当前 Run。
 - 单个工具以“工具名称 + 完整参数”作为调用签名；同一签名连续请求超过
   `tools.consecutive_identical_call_limit`（默认 8 次）后阻止继续执行。工具或参数变化会将连续计数重置为 1。
 - 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
@@ -460,6 +466,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - **手动触发**：请求带 `compress=true` 时强制压缩。
 - 压缩时把当前待发送轮次计入 `rounds_after_compression`：正常提交后，Provider 临时工作区总计保留最近 N 轮，而不是额外再保留当前轮次。
 - 所有摘要场景统一由 `context_manage` 处理；正常聊天的自动压缩不在请求主线程同步提取记忆，而是在完整提交后把摘要已覆盖轮次登记到持久化后台队列。手动压缩仍可显式选择同步或队列策略。
+- 自动、手动和 Provider 超限压缩通过非终态 `context_compression` 运行事件报告 `started`、`ready` 或 `failed`；`ready` 只表示摘要可供当前请求使用。队列策略下记忆仍需等本轮提交后由后台按批处理，只有 `memory_processed_round` 推进到 `memory_target_round` 才表示裁剪轮次的记忆分析完成，分析完成也允许零新增候选。
 - 摘要缓存在 `history/history.sqlite3` 的 `history_context_summaries` 表中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。runtime 窗口裁剪与摘要版本在同一个 SQLite 事务提交。
 - `context_manage` 使用严格输出 Schema；摘要输入包含正文、reasoning/think 和工具结果，以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 20000 tokens，为模型推理和完整 JSON 正文共同预留空间。摘要只保留对后续仍有价值的精炼判断依据，不保留逐步内部推演或工具长输出。JSON 缺失、截断、空 narrative 或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
 - 手动压缩只有在摘要缓存、runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围全部落盘并重新读取校验通过后才返回成功；失败时回滚本次 runtime 裁剪与摘要缓存，用户可继续使用原运行窗口重试。
@@ -658,6 +665,12 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - 不假设拥有未注入的其他会话内容；`memory.history_read_enabled=true` 时可使用历史搜索工具。
 - 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。
 - 会话级锁（`run/session_runtime.py:session_lock`）保证同一 user/source/session_id 的请求串行执行。
+- Web 长任务 API：
+  `GET /api/users/{user}/sessions/{session_id}/long-task?source=web` 查询状态；
+  `PUT` 同一路径提交 `{ "enabled": true|false }`；
+  `POST /api/users/{user}/sessions/{session_id}/long-task/cancel?source=web` 取消整个逻辑任务。
+  响应中的 `long_task` 包含原始请求、Run/续跑次数、累计工具与 Provider 请求、Token 用量、耗时、当前 Run ID 和终态。
+- APP 等客户端必须显式传入自身真实 `source`，收到 `long_task_update.metadata.next_run_id` 后更新活动 Run ID；完整状态机、SSE 与恢复合同见 `global_knowledge/long-task-runtime.md`。
 
 ---
 

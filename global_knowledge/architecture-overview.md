@@ -21,6 +21,7 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 |-----------|----------|
 | `run/engine.py` | 对话运行时稳定公共门面 |
 | `run/conversation_runtime.py` | 一轮对话的主编排、Provider/工具循环、提交和终态 |
+| `run/long_task.py`、`run/long_task_runtime.py` | 会话级长任务授权、跨 Run 续跑、统计和 synthetic 历史语义 |
 | `run/request_input.py` | 用户文本、多模态和上传文件输入规范化 |
 | `run/provider_events.py` | Provider 响应事件与终态解释 |
 | `run/prompt.py` | 系统 Prompt 的固定顺序拼装、字符预算与拓展/感知动态段刷新 |
@@ -125,6 +126,12 @@ RuntimeHost/Cron 统一管理。同一网络请求内部的重试或 SSE 续传�
 达到轮次或 Token 条件时，`context_manage` 子代理生成摘要，摘要与 runtime 窗口裁剪在历史库
 事务中共同提交。
 
+压缩期间运行时发送非终态 `context_compression` 事件：`started` 表示正在生成或扩展摘要，
+`ready` 表示摘要已可用于本次请求，`failed` 表示本次摘要未成功。队列模式下 `ready` 不代表
+记忆已经落库；本轮提交后，后台才会按连续批次分析裁剪轮次，并以
+`memory_processed_round == memory_target_round` 作为完成判据。某批没有长期价值时允许零候选，
+不能为了可见变化而强制创建碎片。
+
 手动压缩、Token 超限压缩和 API 超限恢复使用同一上下文管理链路，不能通过删除 archive 正文
 来腾出窗口。
 
@@ -157,6 +164,18 @@ Provider 返回可执行工具调用后，运行时：
 Provider 偶发生成不完整工具 JSON 时，运行时不会进入插件。若该次尝试尚无可见输出或完整工具
 调用，会按 `tools.invalid_tool_arguments_retries` 使用新请求 ID 请求模型重新生成；默认最多 2 次，
 且不会重复执行工具。已有可见输出或工具副作用时不做静默重试。
+
+### 8.1 会话级长任务模式
+
+长任务模式由用户在 Web 对话操作菜单中显式开启，状态保存在现有历史会话登记表的
+`record_json.long_task` 中，不写入 `global_config.json` 或 `user_config.json`。状态键为
+`(user, source, session_id)`，因此同一用户的不同对话空间以及 Web/App 来源彼此隔离。
+
+当一个 Run 以 `status=limited` 且 `stop_reason=max_tool_iterations` 收束时，Web 编排器会在同一会话锁内
+提交当前 Run、创建新的内部 Run ID，并发送非终态 `long_task_update`；客户端必须更新当前 Run ID 后继续接收后续事件。
+只有最终 Run 才发送 `done`/`error`。上下文保护、Provider 错误、任务计划批准边界和用户取消不会自动续跑。
+续跑请求带有 synthetic metadata，历史展示为边界横条；记忆与摘要提取会用原始用户请求替换内部控制提示，避免污染语义。
+完整的状态机、HTTP API、SSE 事件与客户端恢复规则见 `global_knowledge/long-task-runtime.md`。
 
 ### 9. 处理运行中引导
 

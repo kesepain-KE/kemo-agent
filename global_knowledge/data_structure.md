@@ -81,6 +81,7 @@ kemo-agent/
 | `history-storage.md` | 用户级 SQLite 历史表、分页、搜索、备份与旧格式边界 |
 | `memory-storage.md` | 用户级 SQLite 记忆表、生命周期事务、每日加权约束、热视图与旧格式边界 |
 | `runtime-state-storage.md` | 任务计划、上下文摘要、消息幂等和外部路由状态的数据库分工与迁移 |
+| `long-task-runtime.md` | 会话级长任务的隔离状态机、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
 | `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
 | `env-reference.md` | `.env` 参数、优先级与安全要求 |
