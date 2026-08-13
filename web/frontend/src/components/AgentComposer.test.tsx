@@ -50,6 +50,15 @@ describe('AgentComposer', () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
+  it('运行中仍可打开对话操作菜单，以便关闭会话级长任务模式', () => {
+    const onToggleConversationMenu = vi.fn()
+    renderComposer({ running: true, onToggleConversationMenu })
+    const menu = screen.getByRole('button', { name: '展开对话操作' })
+    expect(menu).toBeEnabled()
+    fireEvent.click(menu)
+    expect(onToggleConversationMenu).toHaveBeenCalledOnce()
+  })
+
   it('停止过渡期间把新文本作为下一轮提交，不会误投给旧运行', () => {
     const onSubmit = vi.fn()
     renderComposer({ value: '停止后继续处理', running: true, stopping: true, onSubmit, onStop: vi.fn() })

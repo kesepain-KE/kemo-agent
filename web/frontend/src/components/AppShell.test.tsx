@@ -625,7 +625,7 @@ describe('AppShell navigation', () => {
     })))
   })
 
-  it('对话操作菜单提供保存新建、清空、压缩和重新生成', async () => {
+  it('对话操作菜单提供会话级长任务开关、保存新建、清空、压缩和重新生成', async () => {
     let compressionCalled = false
     let undoBody: Record<string, unknown> | null = null
     let chatBody: Record<string, unknown> | null = null
@@ -685,8 +685,13 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /清空此对话/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ })).toBeInTheDocument()
+    const longTaskToggle = screen.getByRole('menuitemcheckbox', { name: /长任务模式/ })
+    expect(longTaskToggle).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByRole('menuitem', { name: /重新发送一次消息/ })).toBeInTheDocument()
     expect(screen.getByText('再次打开网页会恢复上次活跃对话；点击“保存并创建新对话”才会关闭并切换会话。')).toBeInTheDocument()
+
+    fireEvent.click(longTaskToggle)
+    await waitFor(() => expect(screen.getByRole('menuitemcheckbox', { name: /长任务模式/ })).toHaveAttribute('aria-checked', 'true'))
 
     fireEvent.click(screen.getByRole('menuitem', { name: /手动进行一次上下文压缩/ }))
     await waitFor(() => expect(compressionCalled).toBe(true))

@@ -1,8 +1,41 @@
 import { describe, expect, it, vi } from 'vitest'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import { render, screen } from '@testing-library/react'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('上下文压缩事件更新同一运行的小气泡状态和记忆排队说明', () => {
+    let items = reduceRunEvent([], {
+      type: 'context_compression',
+      content: '正在压缩对话上下文',
+      metadata: {
+        status: 'started', run_id: 'run-1', trigger: 'round_limit',
+        rounds_before: 80, rounds_removed: 60, rounds_remaining: 20,
+        memory_mode: 'background',
+      },
+    })
+    items = reduceRunEvent(items, {
+      type: 'context_compression',
+      content: '对话上下文摘要已就绪',
+      metadata: {
+        status: 'ready', run_id: 'run-1', trigger: 'round_limit',
+        rounds_before: 80, rounds_removed: 60, rounds_remaining: 20,
+        memory_mode: 'background', memory_status: 'queued_after_commit',
+      },
+    })
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({
+      kind: 'context_compression', status: 'ready', runId: 'run-1',
+      roundsBefore: 80, roundsRemoved: 60, roundsRemaining: 20,
+      memoryStatus: 'queued_after_commit',
+    })
+    if (items[0].kind !== 'context_compression') throw new Error('压缩状态项缺失')
+    render(ContextCompressionBubble({ item: items[0] }))
+    expect(screen.getByText('对话上下文已压缩')).toBeInTheDocument()
+    expect(screen.getByText(/80 轮 → 保留 20 轮，裁剪 60 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/进入后台记忆整理/)).toBeInTheDocument()
+  })
+
   it('取消编辑后仍沿用撤销成功返回的历史轮次基线', () => {
     const undone = { sessionId: 'session-1', remainingRounds: 4 }
     expect(resolveHistoryUserMessages('session-1', 'session-1', 5, undefined, null, undone)).toBe(4)
@@ -251,6 +284,60 @@ describe('reduceRunEvent', () => {
     let items: ChatItem[] = reduceRunEvent([], { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'time', arguments: { zone: 'local' } })
     items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'time', result: { ok: false }, metadata: { status: 'failed', elapsed_ms: 12 } })
     expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'error', result: { ok: false }, elapsedMs: 12 })
+  })
+
+  it('长任务边界不是终态，并开启新的助手分组', () => {
+    let items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '执行很长的任务' },
+      { id: 'r1', kind: 'reasoning', content: '第一 Run', streaming: true },
+      { id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'running' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '阶段结果', streaming: true },
+    ]
+    items = reduceRunEvent(items, {
+      type: 'long_task_update',
+      content: '长任务自动续跑 · 第 2 轮',
+      metadata: {
+        continuation: 1,
+        next_run_id: 'run-next',
+        long_task_state: { task_id: 'long-1', continuation_count: 0 },
+      },
+    })
+    expect(items.at(-1)).toMatchObject({ kind: 'long_task_boundary', taskId: 'long-1', continuation: 1 })
+    expect(items[1]).toMatchObject({ streaming: false })
+    expect(items[2]).toMatchObject({ status: 'error', result: { error: { exception_type: 'LongTaskRunBoundary' } } })
+    expect(items[3]).toMatchObject({ streaming: false })
+
+    items = reduceRunEvent(items, { type: 'text_delta', content: '继续完成' })
+    const blocks = groupConversationItems(items)
+    expect(blocks).toHaveLength(3)
+    expect(blocks[1]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([expect.objectContaining({ id: 'a1' })]) })
+    expect(blocks[2]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([expect.objectContaining({ kind: 'long_task_boundary' }), expect.objectContaining({ content: '继续完成' })]) })
+  })
+
+  it('历史中的 synthetic 续跑提示只显示边界，不生成伪用户气泡', () => {
+    const items = buildHistoryItems({
+      user: 'kesepain', source: 'web', session_id: 'long-history',
+      messages: [
+        { role: 'user', content: '原始任务' },
+        { role: 'assistant', content: '第一阶段' },
+        {
+          role: 'user',
+          content: '【长任务自动续跑】继续',
+          metadata: {
+            synthetic: true,
+            origin: 'long_task_continuation',
+            long_task_id: 'long-1',
+            continuation: 1,
+            long_task_original_prompt: '原始任务',
+          },
+        },
+        { role: 'assistant', content: '第二阶段' },
+      ],
+      round_metrics: [], round_traces: [],
+    })
+    expect(items.filter((item) => item.kind === 'message' && item.role === 'user')).toHaveLength(1)
+    expect(items.find((item) => item.kind === 'long_task_boundary')).toMatchObject({ continuation: 1, taskId: 'long-1' })
+    expect(buildUserMessageMarkers(items)).toEqual([{ id: 'history_1_user', content: '原始任务', round: 1 }])
   })
 
   it('逐条确认运行中引导并在本轮结束时固化全部状态', () => {

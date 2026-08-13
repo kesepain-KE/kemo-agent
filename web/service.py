@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 import queue
@@ -36,6 +37,22 @@ from run.history_index import (
     close_session as close_index_session,
     queue_summary as queue_history_summary,
     find_record as find_index_record,
+)
+from run.long_task import (
+    activate_long_task,
+    finish_long_task,
+    get_long_task_state,
+    record_long_task_run,
+    request_long_task_cancel,
+    set_long_task_current_run,
+    set_long_task_enabled as update_long_task_enabled,
+)
+from run.long_task_runtime import (
+    MAX_LONG_TASK_RUNS,
+    continuation_request,
+    is_continuable_terminal,
+    long_task_event_metadata,
+    terminal_run_stats,
 )
 from run.task_plan_store import (
     PlanError,
@@ -562,6 +579,91 @@ class WebRunService(
             "status": "stopping",
         }
 
+    def long_task_state(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        if find_index_record(
+            self.root, name, normalized_source, normalized_session
+        ) is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "long_task": get_long_task_state(
+                self.root, name, normalized_source, normalized_session
+            ),
+        }
+
+    def set_long_task_enabled(
+        self,
+        user: Any,
+        session_id: Any,
+        enabled: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        if not isinstance(enabled, bool):
+            raise InvalidRequestError("enabled 必须是布尔值")
+        try:
+            state = update_long_task_enabled(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+                enabled,
+            )
+        except KeyError as exc:
+            raise NotFoundError(str(exc)) from None
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "long_task": state,
+        }
+
+    def cancel_long_task(
+        self,
+        user: Any,
+        session_id: Any,
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        try:
+            state = request_long_task_cancel(
+                self.root, name, normalized_source, normalized_session
+            )
+        except KeyError as exc:
+            raise NotFoundError(str(exc)) from None
+        with self._active_runs_lock:
+            for active in self._active_runs.values():
+                if (
+                    active.user == name
+                    and active.source == normalized_source
+                    and active.session_id == normalized_session
+                ):
+                    active.cancel_event.set()
+                    active.guidance.close()
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "long_task": state,
+        }
+
     def close_session(
         self,
         user: Any,
@@ -897,19 +999,346 @@ class WebRunService(
 
         def run_source() -> None:
             iterator: Iterator[RunEvent] | None = None
-            try:
-                iterator = iter(
-                    self.event_source(
-                        request,
-                        root=self.root,
-                        cancel_event=cancel_event,
+            current_request = request
+            current_run_id = normalized_run_id
+            run_index = 0
+
+            def state_snapshot() -> dict[str, Any]:
+                try:
+                    return get_long_task_state(
+                        self.root, name, normalized_source, normalized_session
                     )
-                )
-                for event in iterator:
-                    if event.type in {"done", "error"}:
-                        active.guidance.close()
-                    if not put(event):
-                        break
+                except Exception:
+                    return {
+                        "enabled": False,
+                        "status": "disabled",
+                        "task_id": "",
+                        "current_run_id": current_run_id,
+                    }
+
+            def enrich_terminal(
+                event: RunEvent,
+                state: dict[str, Any],
+                *,
+                status: str | None = None,
+                stop_reason: str | None = None,
+            ) -> RunEvent:
+                rendered = copy.copy(event)
+                rendered.metadata = {
+                    **dict(event.metadata or {}),
+                    **long_task_event_metadata(
+                        state,
+                        terminal=True,
+                        continuation=run_index > 0,
+                    ),
+                }
+                if status:
+                    rendered.metadata["status"] = status
+                if stop_reason:
+                    rendered.metadata["stop_reason"] = stop_reason
+                return rendered
+
+            try:
+                # Keep the complete logical task under the same session lock.
+                # The single-Run engine takes the same RLock re-entrantly;
+                # another request cannot slip between two automatic Runs.
+                with session_lock(
+                    self.root, name, normalized_source, normalized_session
+                ):
+                    while run_index < MAX_LONG_TASK_RUNS:
+                        if cancel_event.is_set():
+                            state = state_snapshot()
+                            if state.get("task_id") and state.get("status") in {
+                                "running",
+                                "pausing",
+                                "cancelling",
+                            }:
+                                state = finish_long_task(
+                                    self.root,
+                                    name,
+                                    normalized_source,
+                                    normalized_session,
+                                    status="cancelled",
+                                    stop_reason="user_emergency_stop",
+                                )
+                                put(
+                                    RunEvent(
+                                        type="done",
+                                        metadata={
+                                            "status": "cancelled",
+                                            "cancelled": True,
+                                            "stop_reason": "user_emergency_stop",
+                                            **long_task_event_metadata(
+                                                state,
+                                                terminal=True,
+                                                continuation=run_index > 0,
+                                            ),
+                                        },
+                                    )
+                                )
+                            else:
+                                put(
+                                    RunEvent(
+                                        type="done",
+                                        metadata={
+                                            "status": "cancelled",
+                                            "cancelled": True,
+                                            "committed": False,
+                                            "stop_reason": "user_emergency_stop",
+                                        },
+                                    )
+                                )
+                            return
+                        terminal_event: RunEvent | None = None
+                        iterator = iter(
+                            self.event_source(
+                                current_request,
+                                root=self.root,
+                                cancel_event=cancel_event,
+                            )
+                        )
+                        try:
+                            for event in iterator:
+                                if event.type == "done":
+                                    terminal_event = event
+                                    break
+                                if event.type == "error":
+                                    state = state_snapshot()
+                                    if state.get("task_id") and state.get("status") in {
+                                        "running",
+                                        "pausing",
+                                        "cancelling",
+                                    }:
+                                        final_status = (
+                                            "cancelled"
+                                            if cancel_event.is_set()
+                                            or state.get("status") == "cancelling"
+                                            else "failed"
+                                        )
+                                        state = finish_long_task(
+                                            self.root,
+                                            name,
+                                            normalized_source,
+                                            normalized_session,
+                                            status=final_status,
+                                            stop_reason="provider_error",
+                                            error=copy.deepcopy(event.error or {}),
+                                        )
+                                        event = copy.copy(event)
+                                        event.metadata = {
+                                            **dict(event.metadata or {}),
+                                            **long_task_event_metadata(
+                                                state,
+                                                terminal=True,
+                                                continuation=run_index > 0,
+                                            ),
+                                        }
+                                    if not put(event):
+                                        return
+                                    return
+                                if not put(event):
+                                    return
+                        finally:
+                            close = getattr(iterator, "close", None)
+                            if callable(close):
+                                try:
+                                    close()
+                                except BaseException:
+                                    pass
+                            iterator = None
+
+                        if terminal_event is None:
+                            return
+
+                        stats = terminal_run_stats(terminal_event)
+                        state = state_snapshot()
+                        limited = is_continuable_terminal(terminal_event.metadata)
+                        can_continue = (
+                            limited
+                            and not task_plan_id
+                            and not cancel_event.is_set()
+                            and bool(state.get("enabled"))
+                            and state.get("status") not in {"pausing", "cancelling"}
+                        )
+                        if can_continue:
+                            activated = activate_long_task(
+                                self.root,
+                                name,
+                                normalized_source,
+                                normalized_session,
+                                original_prompt=normalized_prompt,
+                            )
+                            if activated is not None:
+                                state = record_long_task_run(
+                                    self.root,
+                                    name,
+                                    normalized_source,
+                                    normalized_session,
+                                    run_id=current_run_id,
+                                    elapsed_ms=stats["elapsed_ms"],
+                                    tool_calls=stats["tool_calls"],
+                                    provider_requests=stats["provider_requests"],
+                                    usage=stats["usage"],
+                                    stop_reason=stats["stop_reason"],
+                                    continuation=run_index > 0,
+                                )
+                                if int(state.get("run_count") or 0) >= MAX_LONG_TASK_RUNS:
+                                    state = finish_long_task(
+                                        self.root,
+                                        name,
+                                        normalized_source,
+                                        normalized_session,
+                                        status="paused",
+                                        stop_reason="long_task_max_runs",
+                                    )
+                                    if not put(
+                                        enrich_terminal(
+                                            terminal_event,
+                                            state,
+                                            status="limited",
+                                            stop_reason="long_task_max_runs",
+                                        )
+                                    ):
+                                        return
+                                    return
+
+                                previous_run_id = current_run_id
+                                next_run_id = f"run_{uuid.uuid4().hex}"
+                                next_guidance = GuidanceMailbox(maxsize=8)
+                                active.guidance.close()
+                                with self._active_runs_lock:
+                                    for key, value in list(self._active_runs.items()):
+                                        if value is active:
+                                            self._active_runs.pop(key, None)
+                                    active.run_id = next_run_id
+                                    active.guidance = next_guidance
+                                    self._active_runs[next_run_id] = active
+                                next_request = continuation_request(
+                                    request,
+                                    run_id=next_run_id,
+                                    task_id=str(state.get("task_id") or ""),
+                                    continuation=run_index + 1,
+                                    original_prompt=str(
+                                        state.get("original_prompt") or normalized_prompt
+                                    ),
+                                )
+                                next_request["_guidance_queue"] = next_guidance
+                                current_request = next_request
+                                current_run_id = next_run_id
+                                run_index += 1
+                                state = set_long_task_current_run(
+                                    self.root,
+                                    name,
+                                    normalized_source,
+                                    normalized_session,
+                                    next_run_id,
+                                )
+                                update_metadata = long_task_event_metadata(
+                                    state,
+                                    terminal=False,
+                                    continuation=True,
+                                )
+                                update_metadata.update(
+                                    {
+                                        "continuation": run_index,
+                                        "run_id": next_run_id,
+                                        "next_run_id": next_run_id,
+                                        "previous_run_id": previous_run_id,
+                                    }
+                                )
+                                if not put(
+                                    RunEvent(
+                                        type="long_task_update",
+                                        content=f"长任务自动续跑 · 第 {run_index + 1} 轮",
+                                        metadata=update_metadata,
+                                    )
+                                ):
+                                    return
+                                continue
+
+                        # A task that was activated earlier must be closed on
+                        # every non-continuable terminal boundary.
+                        if state.get("task_id") and state.get("status") in {
+                            "running",
+                            "pausing",
+                            "cancelling",
+                        }:
+                            state = record_long_task_run(
+                                self.root,
+                                name,
+                                normalized_source,
+                                normalized_session,
+                                run_id=current_run_id,
+                                elapsed_ms=stats["elapsed_ms"],
+                                tool_calls=stats["tool_calls"],
+                                provider_requests=stats["provider_requests"],
+                                usage=stats["usage"],
+                                stop_reason=stats["stop_reason"],
+                                continuation=run_index > 0,
+                            )
+                            terminal_status = str(
+                                terminal_event.metadata.get("status") or "completed"
+                            ).casefold()
+                            final_status = (
+                                "cancelled"
+                                if cancel_event.is_set()
+                                or state.get("status") == "cancelling"
+                                or state.get("cancel_requested")
+                                or terminal_status == "cancelled"
+                                else "failed"
+                                if terminal_status in {"failed", "error"}
+                                else "paused"
+                                if limited
+                                else "completed"
+                            )
+                            state = finish_long_task(
+                                self.root,
+                                name,
+                                normalized_source,
+                                normalized_session,
+                                status=final_status,
+                                stop_reason=stats["stop_reason"],
+                            )
+                            terminal_event = enrich_terminal(
+                                terminal_event,
+                                state,
+                                status=(
+                                    "limited"
+                                    if final_status == "paused" and limited
+                                    else None
+                                ),
+                            )
+                        if not put(terminal_event):
+                            return
+                        return
+
+                    # The bounded loop is an internal safety net.  It should
+                    # only be reachable after a pathological endless stream.
+                    state = state_snapshot()
+                    if state.get("task_id") and state.get("status") in {
+                        "running",
+                        "pausing",
+                    }:
+                        state = finish_long_task(
+                            self.root,
+                            name,
+                            normalized_source,
+                            normalized_session,
+                            status="paused",
+                            stop_reason="long_task_max_runs",
+                        )
+                        put(
+                            RunEvent(
+                                type="done",
+                                metadata={
+                                    "status": "limited",
+                                    "stop_reason": "long_task_max_runs",
+                                    **long_task_event_metadata(
+                                        state, terminal=True, continuation=True
+                                    ),
+                                },
+                            )
+                        )
             except BaseException as exc:
                 put(exc)
             finally:
@@ -919,8 +1348,12 @@ class WebRunService(
                     if callable(close):
                         try:
                             close()
-                        except BaseException as exc:
-                            put(exc)
+                        except BaseException:
+                            pass
+                with self._active_runs_lock:
+                    for key, value in list(self._active_runs.items()):
+                        if value is active:
+                            self._active_runs.pop(key, None)
                 put(_WORKER_DONE)
 
         worker = threading.Thread(
@@ -950,7 +1383,9 @@ class WebRunService(
                 cancel_event.set()
                 worker.join(timeout=1.0)
                 with self._active_runs_lock:
-                    self._active_runs.pop(normalized_run_id, None)
+                    for key, value in list(self._active_runs.items()):
+                        if value is active:
+                            self._active_runs.pop(key, None)
                 gate.release()
 
         return events()

@@ -20,23 +20,25 @@ import {
   Trash2,
   UserRound,
   Video,
+  Workflow,
   X,
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { ExpandReferenceDrawer } from '../components/ExpandReferenceDrawer'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
+import { LongTaskBubble } from '../components/LongTaskBubble'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { randomUUID } from '../randomId'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
@@ -284,6 +286,17 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
   }
 
   for (const item of items) {
+    if (item.kind === 'long_task_boundary') {
+      flushAssistant()
+      currentUserId = item.id
+      assistantSequence += 1
+      activeAssistant = {
+        id: `assistant_turn_${currentUserId}_${assistantSequence}`,
+        kind: 'assistant',
+        items: [item],
+      }
+      continue
+    }
     if (item.kind === 'execution_marker') {
       flushAssistant()
       currentUserId = item.id
@@ -316,6 +329,11 @@ export function buildUserMessageMarkers(items: ChatItem[], firstRound = 1): User
     if (item.kind === 'execution_marker') {
       const executionRound = /^history_execution_(\d+)$/.exec(item.id)?.[1]
       if (executionRound) nextRound = Math.max(nextRound, Number(executionRound) + 1)
+      continue
+    }
+    if (item.kind === 'long_task_boundary') {
+      const continuationRound = /^history_long_task_(\d+)$/.exec(item.id)?.[1]
+      if (continuationRound) nextRound = Math.max(nextRound, Number(continuationRound) + 1)
       continue
     }
     if (item.kind !== 'message' || item.role !== 'user') continue
@@ -351,6 +369,28 @@ function insertCurrentRoundItem(
 }
 
 export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
+  if (event.type === 'context_compression') {
+    const runId = String(event.metadata?.run_id || '')
+    const rawStatus = String(event.metadata?.status || 'started')
+    const status = rawStatus === 'ready' || rawStatus === 'failed' ? rawStatus : 'started'
+    const item: ChatItem = {
+      id: `context_compression_${runId || 'active'}`,
+      kind: 'context_compression',
+      runId,
+      status,
+      trigger: String(event.metadata?.trigger || ''),
+      roundsBefore: Math.max(0, Number(event.metadata?.rounds_before || 0)),
+      roundsRemoved: Math.max(0, Number(event.metadata?.rounds_removed || 0)),
+      roundsRemaining: Math.max(0, Number(event.metadata?.rounds_remaining || 0)),
+      memoryMode: String(event.metadata?.memory_mode || ''),
+      memoryStatus: String(event.metadata?.memory_status || ''),
+      content: String(event.content || ''),
+    }
+    const index = items.findIndex((candidate) => candidate.kind === 'context_compression' && candidate.runId === runId)
+    return index < 0
+      ? [...items, item]
+      : items.map((candidate, position) => position === index ? item : candidate)
+  }
   if (event.type === 'text_delta') {
     const index = [...items].reverse().findIndex((item) => item.kind === 'message' && item.role === 'assistant' && item.streaming)
     if (index >= 0) {
@@ -453,6 +493,28 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       pending.splice(matched, 1)
       return { ...item, status: 'accepted' as const }
     })
+  }
+  if (event.type === 'long_task_update') {
+    const continuation = Math.max(1, Number(event.metadata?.continuation || 0) || Number(event.metadata?.long_task_state && typeof event.metadata.long_task_state === 'object'
+      ? (event.metadata.long_task_state as Record<string, unknown>).continuation_count
+      : 0))
+    const taskId = String(event.metadata?.long_task_state && typeof event.metadata.long_task_state === 'object'
+      ? (event.metadata.long_task_state as Record<string, unknown>).task_id || ''
+      : event.metadata?.long_task_id || '')
+    const completed = items.map((item) => {
+      if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
+      if (item.kind === 'tool' && item.status === 'running') {
+        return {
+          ...item,
+          status: 'error' as const,
+          result: { ok: false, error: { message: '工具调用因当前 Run 达到工具上限而未执行，将在下一 Run 继续', exception_type: 'LongTaskRunBoundary' } },
+        }
+      }
+      return item
+    })
+    const id = `long_task_boundary_${taskId || 'active'}_${continuation}`
+    if (completed.some((item) => item.id === id)) return completed
+    return [...completed, { id, kind: 'long_task_boundary', taskId, continuation }]
   }
   if (event.type === 'error') {
     return [
@@ -564,6 +626,15 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
     if (message.role === 'user') {
       round += 1
       messagePosition = 0
+      if (message.metadata?.synthetic === true && message.metadata.origin === 'long_task_continuation') {
+        result.push({
+          id: `history_long_task_${round}`,
+          kind: 'long_task_boundary',
+          taskId: String(message.metadata.long_task_id || ''),
+          continuation: Math.max(1, Number(message.metadata.continuation || 1)),
+        })
+        continue
+      }
       if (message.content.startsWith(PLAN_EXECUTION_PROMPT_PREFIX)) {
         result.push({ id: `history_execution_${round}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
         continue
@@ -713,6 +784,7 @@ export function selectDockedPlan(plans: PlanSummary[]) {
 
 function isConversationBoundary(item: ChatItem) {
   return item.kind === 'execution_marker'
+    || item.kind === 'long_task_boundary'
     || item.kind === 'message' && item.role === 'user'
 }
 
@@ -890,6 +962,25 @@ function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: s
   </article>
 }
 
+export function ContextCompressionBubble({ item }: { item: Extract<ChatItem, { kind: 'context_compression' }> }) {
+  const failed = item.status === 'failed'
+  const ready = item.status === 'ready'
+  const title = failed ? '对话压缩失败' : ready ? '对话上下文已压缩' : '正在压缩对话上下文'
+  const rounds = item.roundsRemoved > 0
+    ? `${item.roundsBefore} 轮 → 保留 ${item.roundsRemaining} 轮，裁剪 ${item.roundsRemoved} 轮`
+    : '正在整理较早的完整对话轮次'
+  const memory = ready && item.memoryStatus === 'queued_after_commit'
+    ? '；裁剪内容将在本轮提交后进入后台记忆整理'
+    : ''
+  return (
+    <article className={`context-compression-bubble ${item.status}`} role="status" aria-live="polite">
+      <span className="context-compression-icon"><BrainCircuit size={16} /></span>
+      <span><strong>{title}</strong><small>{rounds}{memory}</small></span>
+      <i aria-hidden="true" />
+    </article>
+  )
+}
+
 export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
   const supportedStatuses = new Set<ScheduledTaskItem['status']>(['enabled', 'running', 'completed', 'paused', 'failed', 'cancelled', 'disabled'])
   return [...tasks]
@@ -958,6 +1049,7 @@ export function ChatPage() {
   const [expandDrawerOpen, setExpandDrawerOpen] = useState(false)
   const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
+  const [longTaskBusy, setLongTaskBusy] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
@@ -981,6 +1073,9 @@ export function ChatPage() {
   const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
   const effectiveRunId = activeRunId || liveRun?.runId || ''
   const liveItems = liveRun?.items ?? EMPTY_CHAT_ITEMS
+  const activeCompression = [...liveItems].reverse().find(
+    (item): item is Extract<ChatItem, { kind: 'context_compression' }> => item.kind === 'context_compression' && (!item.runId || item.runId === effectiveRunId),
+  )
   const setLiveItems = (updater: ChatItemsUpdater) => {
     if (liveSessionId) updateChatRunItems(user, liveSessionId, updater)
   }
@@ -1001,6 +1096,16 @@ export function ChatPage() {
       : undefined,
     enabled: Boolean(user && sessionId && hasCommitted),
     retry: false,
+  })
+  const longTaskQuery = useQuery({
+    queryKey: ['long-task', user, sessionId],
+    queryFn: () => getSessionLongTask(user, sessionId),
+    enabled: Boolean(user && sessionId && hasCommitted),
+    retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.long_task.status
+      return ['running', 'pausing', 'cancelling'].includes(String(status || '')) ? 1000 : false
+    },
   })
   const tasksQuery = useQuery({
     queryKey: ['tasks', user],
@@ -1061,6 +1166,7 @@ export function ChatPage() {
     setExpandDrawerOpen(false)
     setConversationBusy('')
     setConversationFeedback(null)
+    setLongTaskBusy(false)
     setStopping(false)
     setPlanOverrides({})
     abortChatRun()
@@ -1161,6 +1267,20 @@ export function ChatPage() {
         runId,
         signal: controller.signal,
         onEvent: (event) => {
+          const eventState = event.metadata?.long_task_state
+          if (eventState && typeof eventState === 'object') {
+            queryClient.setQueryData<LongTaskResponse>(
+              ['long-task', user, activeSession],
+              { user, source: 'web', session_id: activeSession, long_task: eventState as LongTaskState },
+            )
+          }
+          if (event.type === 'long_task_update') {
+            const nextRunId = String(event.metadata?.next_run_id || '')
+            if (nextRunId) {
+              beginChatRun(user, activeSession, nextRunId, historyUserMessages)
+              setActiveRunId(nextRunId)
+            }
+          }
           if (event.type === 'done') {
             committed = event.metadata?.committed !== false
             successful = isSuccessfulRunCompletion(event)
@@ -1207,6 +1327,7 @@ export function ChatPage() {
       setActiveRunId('')
       setRunning(false)
       setStopping(false)
+      void queryClient.invalidateQueries({ queryKey: ['long-task', user, activeSession] })
     }
     return committed
   }
@@ -1687,8 +1808,11 @@ export function ChatPage() {
     }
     if (!user || !effectiveRunId || stopping) return
     setStopping(true)
+    const longTaskActive = ['running', 'pausing', 'cancelling'].includes(String(longTaskQuery.data?.long_task.status || ''))
     await executeStopRequest(
-      () => cancelRun(user, effectiveRunId),
+      () => longTaskActive && sessionId
+        ? cancelSessionLongTask(user, sessionId)
+        : cancelRun(user, effectiveRunId),
       (error) => {
         abortChatRun()
         setLiveItems((current) => [...current, {
@@ -1700,6 +1824,32 @@ export function ChatPage() {
         }])
       },
     )
+  }
+  const toggleLongTask = async () => {
+    if (!user || !sessionId || longTaskBusy) return
+    setLongTaskBusy(true)
+    setConversationFeedback(null)
+    try {
+      const response = await setSessionLongTask(user, sessionId, !longTaskQuery.data?.long_task.enabled)
+      queryClient.setQueryData(['long-task', user, sessionId], response)
+    } catch (error) {
+      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '长任务开关更新失败' })
+    } finally {
+      setLongTaskBusy(false)
+    }
+  }
+  const stopLongTask = async () => {
+    if (!user || !sessionId || longTaskBusy) return
+    setLongTaskBusy(true)
+    try {
+      const response = await cancelSessionLongTask(user, sessionId)
+      queryClient.setQueryData(['long-task', user, sessionId], response)
+      setStopping(true)
+    } catch (error) {
+      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '停止长任务失败' })
+    } finally {
+      setLongTaskBusy(false)
+    }
   }
   const revealPlan = (plan: PlanSummary) => {
     if (plan.plan_id !== dockedPlan?.plan_id) {
@@ -1805,7 +1955,7 @@ export function ChatPage() {
     setExpandDrawerOpen(false)
   }
   const conversationItems = archiveTerminalPlansInConversation(
-    items,
+    items.filter((item) => item.kind !== 'context_compression'),
     [
       ...persistedPlans
         .filter((plan) => plan.session_id === sessionId)
@@ -1918,6 +2068,8 @@ export function ChatPage() {
                 <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
                 <div className="assistant-turn-content">
                   {block.items.map((item) => {
+                    if (item.kind === 'context_compression') return null
+                    if (item.kind === 'long_task_boundary') return <div className="long-task-boundary" key={item.id}>长任务自动续跑 · 第 {item.continuation + 1} Run</div>
                     if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
                     if (item.kind === 'execution_marker') return null
                     if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
@@ -1971,6 +2123,10 @@ export function ChatPage() {
         />
       </div>
       <div className="composer-zone">
+        {running && activeCompression ? <ContextCompressionBubble item={activeCompression} /> : null}
+        {longTaskQuery.data?.long_task && ['running', 'pausing', 'paused', 'failed', 'interrupted', 'cancelling'].includes(longTaskQuery.data.long_task.status) ? (
+          <LongTaskBubble state={longTaskQuery.data.long_task} stopping={longTaskBusy} onCancel={() => { void stopLongTask() }} />
+        ) : null}
         {dockedPlan ? (
           <div className="composer-plan-dock" ref={composerPlanDockRef}>
             <TaskPlanBubble
@@ -2012,6 +2168,11 @@ export function ChatPage() {
               <button className="conversation-action compress" role="menuitem" disabled={running || Boolean(conversationBusy) || !sessionId || !hasCommitted} onClick={() => { void compressCurrentConversation() }}>
                 <span className="conversation-action-icon"><Zap size={16} /></span>
                 <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在压缩并提取记忆…' : '整理当前上下文并同步提取待处理记忆'}</span></span>
+              </button>
+              <button className="conversation-action long-task-action" role="menuitemcheckbox" aria-checked={Boolean(longTaskQuery.data?.long_task.enabled)} disabled={!sessionId || longTaskBusy || longTaskQuery.isLoading} onClick={() => { void toggleLongTask() }}>
+                <span className="conversation-action-icon"><Workflow size={16} /></span>
+                <span className="conversation-action-copy"><strong>长任务模式</strong><span>{longTaskQuery.data?.long_task.status === 'running' ? '正在跨 Run 执行；关闭后会在当前 Run 收束时停止续跑' : longTaskQuery.data?.long_task.enabled ? '已允许；达到单轮工具上限后自动续跑' : '允许当前对话达到单轮工具上限后自动续跑'}</span></span>
+                <span className={`conversation-switch ${longTaskQuery.data?.long_task.enabled ? 'on' : ''}`} aria-hidden="true"><i /></span>
               </button>
               <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={() => void regenerateLastResponse()}>
                 <span className="conversation-action-icon"><RotateCcw size={16} /></span>

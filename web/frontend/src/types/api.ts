@@ -7,6 +7,8 @@ export type RunEventType =
   | 'tool_call_result'
   | 'media_output'
   | 'guidance_applied'
+  | 'context_compression'
+  | 'long_task_update'
   | 'usage'
   | 'error'
   | 'done'
@@ -122,6 +124,47 @@ export interface HistoryMessage {
   role: 'user' | 'assistant' | 'system' | 'tool' | string
   content: string
   attachments?: InputAttachment[]
+  metadata?: Record<string, unknown>
+}
+
+export type LongTaskStatus =
+  | 'disabled'
+  | 'enabled'
+  | 'running'
+  | 'pausing'
+  | 'paused'
+  | 'cancelling'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | string
+
+export interface LongTaskState {
+  enabled: boolean
+  status: LongTaskStatus
+  task_id: string
+  original_prompt: string
+  started_at: string
+  updated_at: string
+  finished_at: string
+  run_count: number
+  continuation_count: number
+  total_tool_calls: number
+  total_provider_requests: number
+  active_elapsed_ms: number
+  usage: Record<string, unknown>
+  current_run_id: string
+  last_stop_reason: string
+  cancel_requested: boolean
+  last_error: Record<string, unknown> | null
+}
+
+export interface LongTaskResponse {
+  user: string
+  source: string
+  session_id: string
+  long_task: LongTaskState
 }
 
 export interface InputAttachment {
@@ -1374,6 +1417,8 @@ export interface ApiErrorPayload {
 export type ChatItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string }
+  | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; roundsBefore: number; roundsRemoved: number; roundsRemaining: number; memoryMode: string; memoryStatus: string; content: string }
+  | { id: string; kind: 'long_task_boundary'; taskId: string; continuation: number }
   | { id: string; kind: 'media'; artifact: MediaArtifact }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
   | {

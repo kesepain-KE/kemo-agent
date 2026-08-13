@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Query
 
 from web.schemas import (
+    LongTaskPreferenceBody,
     SessionClientBody,
     SessionRenameBody,
     SessionUndoLastRoundBody,
@@ -178,6 +179,36 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
             body.prompt,
             source=source,
         )
+
+    @app.get("/api/users/{user}/sessions/{session_id}/long-task")
+    async def long_task_state(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.long_task_state(user, session_id, source=source)
+
+    @app.put("/api/users/{user}/sessions/{session_id}/long-task")
+    async def set_long_task_preference(
+        user: str,
+        session_id: str,
+        body: LongTaskPreferenceBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.set_long_task_enabled(
+            user,
+            session_id,
+            body.enabled,
+            source=source,
+        )
+
+    @app.post("/api/users/{user}/sessions/{session_id}/long-task/cancel")
+    async def cancel_long_task(
+        user: str,
+        session_id: str,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return backend.cancel_long_task(user, session_id, source=source)
 
     @app.get("/api/users/{user}/sessions/{session_id}/history")
     async def history(

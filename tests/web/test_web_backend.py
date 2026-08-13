@@ -37,6 +37,7 @@ from run.history_index import (
     close_session,
     finish_summary_claim,
     queue_summary,
+    reserve_session,
 )
 from run.history_store import window_exists
 from run.memory import MemoryStore
@@ -3010,6 +3011,79 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 404, denied.text)
         self.assertFalse(active.cancel_event.is_set())
+
+    def test_long_task_session_api_is_isolated_and_cancels_matching_run(self) -> None:
+        _, root = self.make_root()
+        reserve_session(root, "alice", "web", "long-a")
+        reserve_session(root, "alice", "web", "long-b")
+        reserve_session(root, "alice", "app", "long-a")
+        service = WebRunService(root)
+        app = create_app(service=service)
+
+        initial = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/long-a/long-task?source=web",
+        )
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertFalse(initial.json()["long_task"]["enabled"])
+
+        enabled = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/sessions/long-a/long-task?source=web",
+            json={"enabled": True},
+        )
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertTrue(enabled.json()["long_task"]["enabled"])
+        self.assertFalse(
+            self.request(
+                app,
+                "GET",
+                "/api/users/alice/sessions/long-b/long-task?source=web",
+            ).json()["long_task"]["enabled"]
+        )
+        self.assertFalse(
+            self.request(
+                app,
+                "GET",
+                "/api/users/alice/sessions/long-a/long-task?source=app",
+            ).json()["long_task"]["enabled"]
+        )
+
+        from run.long_task import activate_long_task
+
+        activate_long_task(root, "alice", "web", "long-a", original_prompt="执行长任务")
+        active = ActiveRun("run_long_api", "alice", "long-a", source="web")
+        other = ActiveRun("run_other_api", "alice", "long-b", source="web")
+        service._active_runs[active.run_id] = active
+        service._active_runs[other.run_id] = other
+
+        cancelled = self.request(
+            app,
+            "POST",
+            "/api/users/alice/sessions/long-a/long-task/cancel?source=web",
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["long_task"]["status"], "cancelling")
+        self.assertTrue(active.cancel_event.is_set())
+        self.assertFalse(other.cancel_event.is_set())
+
+        missing = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/sessions/missing/long-task?source=web",
+            json={"enabled": True},
+        )
+        self.assertEqual(missing.status_code, 404, missing.text)
+
+        invalid = self.request(
+            app,
+            "PUT",
+            "/api/users/alice/sessions/long-a/long-task?source=web",
+            json={"enabled": "yes"},
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
 
     def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(
         self,

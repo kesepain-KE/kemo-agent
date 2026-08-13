@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 
 class ChatBody(BaseModel):
@@ -71,6 +71,10 @@ class SessionClientBody(BaseModel):
 class SessionUndoLastRoundBody(BaseModel):
     expected_round: int = Field(ge=1)
     prompt: str = Field(min_length=1, max_length=1_000_000)
+
+
+class LongTaskPreferenceBody(BaseModel):
+    enabled: StrictBool
 
 
 class SoulBody(BaseModel):

@@ -16,6 +16,7 @@ import type {
   KnowledgeResponse,
   KemoModelCapabilitiesResponse,
   KemoProviderModelsResponse,
+  LongTaskResponse,
   MemoryItemResponse,
   MemorySummaryResponse,
   MessageCheckResponse,
@@ -105,6 +106,8 @@ const runEventSchema = z
       'tool_call_result',
       'media_output',
       'guidance_applied',
+      'context_compression',
+      'long_task_update',
       'usage',
       'error',
       'done',
@@ -224,6 +227,46 @@ export async function getHistory(
   const suffix = query.size ? `?${query.toString()}` : ''
   return requestJson(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
+  )
+}
+
+export async function getSessionLongTask(
+  user: string,
+  sessionId: string,
+  source = 'web',
+): Promise<LongTaskResponse> {
+  const query = new URLSearchParams({ source })
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`,
+  )
+}
+
+export async function setSessionLongTask(
+  user: string,
+  sessionId: string,
+  enabled: boolean,
+  source = 'web',
+): Promise<LongTaskResponse> {
+  const query = new URLSearchParams({ source })
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  )
+}
+
+export async function cancelSessionLongTask(
+  user: string,
+  sessionId: string,
+  source = 'web',
+): Promise<LongTaskResponse> {
+  const query = new URLSearchParams({ source })
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task/cancel?${query.toString()}`,
+    { method: 'POST' },
   )
 }
 

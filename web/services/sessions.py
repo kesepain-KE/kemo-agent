@@ -522,6 +522,24 @@ class SessionServiceMixin:
 
         raw_metrics = (window.get("data") or {}).get("round_metrics") or []
         input_attachments_by_round: dict[int, list[dict[str, Any]]] = {}
+        user_metadata_by_round: dict[int, dict[str, Any]] = {}
+
+        def public_user_metadata(value: Any) -> dict[str, Any]:
+            if not isinstance(value, dict):
+                return {}
+            allowed = {
+                "synthetic",
+                "origin",
+                "long_task_id",
+                "continuation",
+                "long_task_original_prompt",
+            }
+            return {
+                key: value[key]
+                for key in allowed
+                if key in value
+                and isinstance(value[key], (str, int, float, bool, type(None)))
+            }
 
         def input_attachments(value: Any) -> list[dict[str, Any]]:
             if not isinstance(value, list):
@@ -601,6 +619,9 @@ class SessionServiceMixin:
                 values = input_attachments(metadata.get("input_attachments"))
                 if round_number > 0 and values:
                     input_attachments_by_round.setdefault(round_number, values)
+                public_metadata = public_user_metadata(metadata)
+                if round_number > 0 and public_metadata:
+                    user_metadata_by_round.setdefault(round_number, public_metadata)
 
         decorated_messages: list[dict[str, Any]] = []
         selected_round = max(0, start_round - 1)
@@ -608,6 +629,13 @@ class SessionServiceMixin:
             message = dict(raw_message)
             if message.get("role") == "user":
                 selected_round += 1
+                public_metadata = public_user_metadata(message.get("metadata"))
+                if not public_metadata:
+                    public_metadata = user_metadata_by_round.get(selected_round, {})
+                if public_metadata:
+                    message["metadata"] = public_metadata
+                else:
+                    message.pop("metadata", None)
                 values = input_attachments(message.get("attachments"))
                 if not values:
                     values = input_attachments_by_round.get(selected_round, [])

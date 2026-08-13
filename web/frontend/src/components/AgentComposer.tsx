@@ -159,7 +159,7 @@ export function AgentComposer({
             <button
               type="button"
               className={`${styles.actionButton} ${conversationMenuOpen ? styles.active : ''}`}
-              disabled={disabled || running}
+              disabled={disabled}
               aria-expanded={conversationMenuOpen}
               aria-label="展开对话操作"
               onClick={onToggleConversationMenu}

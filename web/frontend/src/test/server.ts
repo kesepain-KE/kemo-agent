@@ -123,6 +123,39 @@ export const handlers = [
       client_id: body.client_id, active_clients: 0, released: true,
     })
   }),
+  http.get('/api/users/kesepain/sessions/:sessionId/long-task', ({ params }) => HttpResponse.json({
+    user: 'kesepain', source: 'web', session_id: params.sessionId,
+    long_task: {
+      enabled: false, status: 'disabled', task_id: '', original_prompt: '',
+      started_at: '', updated_at: '', finished_at: '', run_count: 0,
+      continuation_count: 0, total_tool_calls: 0, total_provider_requests: 0,
+      active_elapsed_ms: 0, usage: {}, current_run_id: '', last_stop_reason: '',
+      cancel_requested: false, last_error: null,
+    },
+  })),
+  http.put('/api/users/kesepain/sessions/:sessionId/long-task', async ({ params, request }) => {
+    const body = await request.json() as { enabled: boolean }
+    return HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: params.sessionId,
+      long_task: {
+        enabled: body.enabled, status: body.enabled ? 'enabled' : 'disabled',
+        task_id: '', original_prompt: '', started_at: '', updated_at: 'now',
+        finished_at: '', run_count: 0, continuation_count: 0, total_tool_calls: 0,
+        total_provider_requests: 0, active_elapsed_ms: 0, usage: {}, current_run_id: '',
+        last_stop_reason: '', cancel_requested: false, last_error: null,
+      },
+    })
+  }),
+  http.post('/api/users/kesepain/sessions/:sessionId/long-task/cancel', ({ params }) => HttpResponse.json({
+    user: 'kesepain', source: 'web', session_id: params.sessionId,
+    long_task: {
+      enabled: false, status: 'cancelled', task_id: 'long_task_test', original_prompt: '测试长任务',
+      started_at: 'before', updated_at: 'now', finished_at: 'now', run_count: 1,
+      continuation_count: 0, total_tool_calls: 1, total_provider_requests: 1,
+      active_elapsed_ms: 1, usage: {}, current_run_id: '', last_stop_reason: 'cancelled',
+      cancel_requested: true, last_error: null,
+    },
+  })),
   http.post('/api/users/kesepain/sessions/:sessionId/close', ({ params }) => HttpResponse.json({
     user: 'kesepain', source: 'web', session_id: params.sessionId, closed: true,
     session: { session_id: params.sessionId, window: 'w1', title: '', rounds: 2, updated_at: 'now', state: 'closed', run_state: 'idle', chain: 'interactive' },
