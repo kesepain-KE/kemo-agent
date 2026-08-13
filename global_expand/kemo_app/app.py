@@ -316,20 +316,34 @@ async def conversation_messages(session_id: str, source: str = Query("app"), lim
 
 
 @app.delete("/v1/conversations/{session_id}")
-async def conversation_delete(session_id: str, session: Session = Depends(require_session)) -> Any:
+async def conversation_delete(
+    session_id: str,
+    client_id: str = Query("", max_length=128),
+    session: Session = Depends(require_session),
+) -> Any:
+    params = {"source": APP_SOURCE}
+    if client_id:
+        params["client_id"] = client_id
     return await UPSTREAM.request_json(
         "DELETE",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}",
-        params={"source": APP_SOURCE},
+        params=params,
     )
 
 
 @app.post("/v1/conversations/{session_id}/close")
-async def conversation_close(session_id: str, session: Session = Depends(require_session)) -> Any:
+async def conversation_close(
+    session_id: str,
+    client_id: str = Query("", max_length=128),
+    session: Session = Depends(require_session),
+) -> Any:
+    params = {"source": APP_SOURCE}
+    if client_id:
+        params["client_id"] = client_id
     return await UPSTREAM.request_json(
         "POST",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/close",
-        params={"source": APP_SOURCE},
+        params=params,
     )
 
 

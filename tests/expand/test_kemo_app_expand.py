@@ -82,6 +82,13 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('f"/api/users/{user}/overview", params=params', source)
         self.assertIn('f"/api/users/{user}/runtime/status", params=params', source)
 
+    def test_conversation_delete_and_close_forward_android_client_id(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.delete("/v1/conversations/{session_id}")', source)
+        self.assertIn('@app.post("/v1/conversations/{session_id}/close")', source)
+        self.assertGreaterEqual(source.count('client_id: str = Query("", max_length=128)'), 3)
+        self.assertGreaterEqual(source.count('params["client_id"] = client_id'), 2)
+
     def test_bridge_exposes_user_scoped_model_capabilities(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn('@app.get("/v1/models/capabilities")', source)
