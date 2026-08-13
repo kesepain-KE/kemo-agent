@@ -45,6 +45,36 @@ _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 
+_ASYNC_TEST_TIMEOUT = 15.0
+
+
+def _wait_until(
+    predicate,
+    *,
+    description: str,
+    timeout: float = _ASYNC_TEST_TIMEOUT,
+    interval: float = 0.02,
+    diagnostics=None,
+) -> None:
+    """Wait for asynchronous test state without assuming a fast CI runner."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            detail = ""
+            if diagnostics is not None:
+                try:
+                    detail = f"; diagnostics={diagnostics()!r}"
+                except Exception as exc:  # pragma: no cover - failure diagnostics only
+                    detail = f"; diagnostics_error={exc!r}"
+            raise AssertionError(
+                f"Timed out after {timeout:.1f}s waiting for {description}{detail}"
+            )
+        time.sleep(min(interval, remaining))
+
 
 def _root(*users: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     temporary = tempfile.TemporaryDirectory()
@@ -783,9 +813,9 @@ class RouterTests(unittest.TestCase):
             nonlocal active, max_active
             binding = str(request.get("_history_active_key") or "")
             if binding.endswith("parallel-1"):
-                barrier.wait(timeout=2)
+                barrier.wait(timeout=_ASYNC_TEST_TIMEOUT)
             elif binding.endswith("parallel-2"):
-                barrier.wait(timeout=2)
+                barrier.wait(timeout=_ASYNC_TEST_TIMEOUT)
             with lock:
                 active += 1
                 max_active = max(max_active, active)
@@ -803,7 +833,10 @@ class RouterTests(unittest.TestCase):
                 router.submit(_envelope("m2", chat_id="parallel-2")),
             ]
             for future in futures:
-                self.assertEqual(future.result(timeout=3).status, "completed")
+                self.assertEqual(
+                    future.result(timeout=_ASYNC_TEST_TIMEOUT).status,
+                    "completed",
+                )
             self.assertGreaterEqual(max_active, 2)
         finally:
             router.stop()
@@ -819,7 +852,10 @@ class RouterTests(unittest.TestCase):
                 same_router.submit(_envelope("m4", chat_id="same")),
             ]
             for future in futures:
-                self.assertEqual(future.result(timeout=3).status, "completed")
+                self.assertEqual(
+                    future.result(timeout=_ASYNC_TEST_TIMEOUT).status,
+                    "completed",
+                )
             self.assertEqual(max_active, 1)
         finally:
             same_router.stop()
@@ -1012,9 +1048,11 @@ class HostTests(unittest.TestCase):
         host.start()
         try:
             transport.emit(_envelope())
-            deadline = time.time() + 2
-            while not transport.sent and time.time() < deadline:
-                time.sleep(0.01)
+            _wait_until(
+                lambda: bool(transport.sent),
+                description="the mock transport round-trip response",
+                diagnostics=lambda: host.status(),
+            )
             self.assertEqual(transport.sent[0].text, "reply:hello")
         finally:
             host.stop()
@@ -1073,15 +1111,26 @@ hello plugin
 """,
                 "utf-8",
             )
-            deadline = time.time() + 4
-            while not transport._output.SENT and time.time() < deadline:
-                time.sleep(0.05)
+            _wait_until(
+                lambda: bool(transport._output.SENT),
+                description="the first file transport response",
+                interval=0.05,
+                diagnostics=lambda: {
+                    "sent": len(transport._output.SENT),
+                    "host": host.status(),
+                },
+            )
             self.assertEqual(transport._output.SENT[0]["text"], "reply:hello plugin")
-            deadline = time.time() + 2
+            _wait_until(
+                lambda: bool(LogStore(self.root).list_messages("msg_filedemo")),
+                description="the first file transport log entry",
+                interval=0.05,
+                diagnostics=lambda: {
+                    "sent": len(transport._output.SENT),
+                    "host": host.status(),
+                },
+            )
             logs = LogStore(self.root).list_messages("msg_filedemo")
-            while not logs and time.time() < deadline:
-                time.sleep(0.05)
-                logs = LogStore(self.root).list_messages("msg_filedemo")
             self.assertIn("hello plugin", {item["content"] for item in logs})
             (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
                 """---
@@ -1108,9 +1157,15 @@ fresh body
 """,
                 "utf-8",
             )
-            deadline = time.time() + 4
-            while len(transport._output.SENT) < 2 and time.time() < deadline:
-                time.sleep(0.05)
+            _wait_until(
+                lambda: len(transport._output.SENT) >= 2,
+                description="the second file transport response",
+                interval=0.05,
+                diagnostics=lambda: {
+                    "sent": len(transport._output.SENT),
+                    "host": host.status(),
+                },
+            )
             self.assertEqual(len(transport._output.SENT), 2)
             self.assertEqual(transport._output.SENT[1]["text"], "reply:fresh body")
         finally:

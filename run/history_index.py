@@ -110,11 +110,8 @@ def _file_lock(path: Path) -> Iterator[None]:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
+    locked = False
     try:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
         handle.seek(0)
         if os.name == "nt":
             import msvcrt
@@ -124,15 +121,25 @@ def _file_lock(path: Path) -> Iterator[None]:
             import fcntl
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+
+        # Initialize the lock byte only after ownership is established.  On
+        # Windows, writing or flushing byte zero while another handle has it
+        # locked raises PermissionError.  Locking an empty file is supported,
+        # so first-open races do not need an unlocked initialization write.
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
         yield
     finally:
         try:
-            if os.name == "nt":
+            if locked and os.name == "nt":
                 import msvcrt
 
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
+            elif locked:
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
