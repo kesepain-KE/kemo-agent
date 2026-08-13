@@ -8,6 +8,7 @@ from typing import Any
 
 from run.agent_runner import AgentRunResult
 from run.memory import MemoryStore
+from run.long_task_runtime import semantic_user_text
 
 
 class MemoryExtractionError(RuntimeError):
@@ -55,7 +56,7 @@ def memory_round_payload(
         )
     group = groups[round_number - 1]
     prompt = "\n".join(
-        _text_value(item.get("content"))
+        semantic_user_text(item, _text_value(item.get("content")))
         for item in group
         if item.get("role") == "user"
     ).strip()

@@ -3214,16 +3214,26 @@ class RuntimeFeatureTests(unittest.TestCase):
                     root=root,
                     provider_factory=lambda _: provider,
                 )
-            fourth = handle_request(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "automatic-compress",
-                    "prompt": "round-4",
-                },
-                root=root,
-                provider_factory=lambda _: provider,
+            fourth_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "automatic-compress",
+                        "prompt": "round-4",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
             )
+            fourth = next(
+                event.metadata
+                for event in reversed(fourth_events)
+                if event.type == "done"
+            )
+            compression_events = [
+                event for event in fourth_events if event.type == "context_compression"
+            ]
 
             archive_path = find_window(root, "alice", "web", "automatic-compress")
             archive = load_window(archive_path)
@@ -3235,6 +3245,18 @@ class RuntimeFeatureTests(unittest.TestCase):
             self.assertEqual(archive["data"]["memory_status"], "queued")
             self.assertEqual(archive["data"]["memory_target_round"], 2)
             self.assertEqual(len(provider.requests), 5)
+            self.assertEqual(
+                [event.metadata["status"] for event in compression_events],
+                ["started", "ready"],
+            )
+            self.assertEqual(compression_events[0].metadata["trigger"], "round_limit")
+            self.assertEqual(compression_events[0].metadata["rounds_removed"], 2)
+            self.assertEqual(compression_events[0].metadata["rounds_before"], 4)
+            self.assertEqual(compression_events[0].metadata["rounds_remaining"], 2)
+            self.assertEqual(
+                compression_events[1].metadata["memory_status"],
+                "queued_after_commit",
+            )
 
             fifth = handle_request(
                 {

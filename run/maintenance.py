@@ -40,6 +40,7 @@ from run.memory import (
     memory_extraction_mode,
 )
 from run.memory_pipeline import memory_round_payload
+from run.long_task_runtime import semantic_user_text
 from run.session_runtime import session_lock
 from run.tools import ToolRegistry, discover_tools
 from run.users import list_users
@@ -96,7 +97,9 @@ def _summary_rounds(window: dict[str, Any], target_round: int) -> list[dict[str,
             text
             for item in group
             if item.get("role") == "user"
-            for text in [_message_text(item.get("content"))]
+            for text in [
+                semantic_user_text(item, _message_text(item.get("content")))
+            ]
             if text
         )
         assistant_text = "\n".join(

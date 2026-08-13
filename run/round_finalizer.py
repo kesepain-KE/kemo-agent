@@ -256,6 +256,18 @@ class TerminalRoundCommitter:
         partial_text = "".join(context.state.observed_text).rstrip()
         terminal_text = f"{partial_text}\n\n{marker}" if partial_text else marker
         reasoning = "".join(context.state.observed_reasoning)
+        user_metadata = {
+            **(
+                {"input_attachments": history_attachments}
+                if history_attachments
+                else {}
+            ),
+            **(
+                copy.deepcopy(request.get("_user_metadata"))
+                if isinstance(request.get("_user_metadata"), dict)
+                else {}
+            ),
+        }
         cancelled_window["text"]["messages"].extend(
             [
                 {
@@ -266,6 +278,7 @@ class TerminalRoundCommitter:
                         if history_attachments
                         else {}
                     ),
+                    **({"metadata": copy.deepcopy(user_metadata)} if user_metadata else {}),
                 },
                 {"role": "assistant", "content": terminal_text},
             ]
@@ -290,9 +303,7 @@ class TerminalRoundCommitter:
             # complete native output item list. Synthesize every call/result
             # pair from records so the durable item protocol has no orphan.
             provider_responses=[],
-            user_metadata={"input_attachments": history_attachments}
-            if history_attachments
-            else None,
+            user_metadata=user_metadata or None,
         )
         cancelled_window["data"]["rounds"] = round_number
         metrics = cancelled_window["data"].setdefault("round_metrics", [])

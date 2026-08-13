@@ -842,6 +842,31 @@ def _iter_request_events_impl(
             summary_usage = _usage_total()
             compression_memory: dict[str, Any] | None = None
             compression_usage = _usage_total()
+            compression_notice_active = bool(context_selection.removed_rounds)
+            projected_current_rounds = 0 if compress_only else 1
+            compression_trigger = (
+                "token_limit"
+                if context_selection.token_limit_triggered
+                else ("manual" if force_compress else "round_limit")
+            )
+            if compression_notice_active:
+                yield RunEvent(
+                    type="context_compression",
+                    content="正在压缩对话上下文",
+                    metadata={
+                        "status": "started",
+                        "trigger": compression_trigger,
+                        "run_id": run_id,
+                        "rounds_before": len(context_selection.all_rounds)
+                        + projected_current_rounds,
+                        "rounds_removed": len(context_selection.removed_rounds),
+                        "rounds_remaining": len(context_selection.kept_rounds)
+                        + projected_current_rounds,
+                        "memory_mode": (
+                            "background" if queue_compression_memory else "synchronous"
+                        ),
+                    },
+                )
             if (
                 force_compress or context_selection.removed_rounds
             ) and not queue_compression_memory:
@@ -973,6 +998,34 @@ def _iter_request_events_impl(
             context_stats["summary"] = summary_diagnostics
             context_stats["summary_usage"] = summary_usage
             round_state.context_stats = context_stats
+            if compression_notice_active:
+                compression_failed = bool(summary_diagnostics.get("failed"))
+                yield RunEvent(
+                    type="context_compression",
+                    content=(
+                        "对话上下文压缩失败"
+                        if compression_failed
+                        else "对话上下文摘要已就绪"
+                    ),
+                    metadata={
+                        "status": "failed" if compression_failed else "ready",
+                        "trigger": compression_trigger,
+                        "run_id": run_id,
+                        "rounds_before": len(context_selection.all_rounds)
+                        + projected_current_rounds,
+                        "rounds_removed": len(context_selection.removed_rounds),
+                        "rounds_remaining": len(context_selection.kept_rounds)
+                        + projected_current_rounds,
+                        "memory_mode": (
+                            "background" if queue_compression_memory else "synchronous"
+                        ),
+                        "memory_status": (
+                            "queued_after_commit"
+                            if queue_compression_memory and not compression_failed
+                            else str((compression_memory or {}).get("status") or "")
+                        ),
+                    },
+                )
             for subagent_event in subagent_events:
                 yield subagent_event
             if compress_only:
@@ -1488,6 +1541,25 @@ def _iter_request_events_impl(
                             raise ContextLengthExceededError(
                                 "Provider 上下文超限，但没有可继续裁剪的历史轮次"
                             ) from exc
+                        yield RunEvent(
+                            type="context_compression",
+                            content="Provider 上下文超限，正在进一步压缩对话",
+                            metadata={
+                                "status": "started",
+                                "trigger": "api_context_length",
+                                "run_id": run_id,
+                                "rounds_before": len(retry_selection.all_rounds)
+                                + projected_current_rounds,
+                                "rounds_removed": len(retry_selection.removed_rounds),
+                                "rounds_remaining": len(retry_selection.kept_rounds)
+                                + projected_current_rounds,
+                                "memory_mode": (
+                                    "background"
+                                    if queue_compression_memory
+                                    else "synchronous"
+                                ),
+                            },
+                        )
                         if compression_memory is None and not queue_compression_memory:
                             compression_memory = _extract_memory_backlog(
                                 root=base,
@@ -1570,6 +1642,30 @@ def _iter_request_events_impl(
                         context_stats["summary"] = retry_diagnostics
                         context_stats["summary_usage"] = summary_usage
                         context_stats["api_context_retries"] = context_retry_count
+                        yield RunEvent(
+                            type="context_compression",
+                            content="对话上下文摘要已就绪，正在重试请求",
+                            metadata={
+                                "status": "ready",
+                                "trigger": "api_context_length",
+                                "run_id": run_id,
+                                "rounds_before": len(context_selection.all_rounds)
+                                + projected_current_rounds,
+                                "rounds_removed": len(context_selection.removed_rounds),
+                                "rounds_remaining": len(context_selection.kept_rounds)
+                                + projected_current_rounds,
+                                "memory_mode": (
+                                    "background"
+                                    if queue_compression_memory
+                                    else "synchronous"
+                                ),
+                                "memory_status": (
+                                    "queued_after_commit"
+                                    if queue_compression_memory
+                                    else str((compression_memory or {}).get("status") or "")
+                                ),
+                            },
+                        )
                         for retry_event in retry_events:
                             yield retry_event
 
@@ -1923,6 +2019,18 @@ def _iter_request_events_impl(
             round_elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
             text = "".join(all_text)
             reasoning = "".join(all_reasoning)
+            user_metadata = {
+                **(
+                    {"input_attachments": history_attachments}
+                    if history_attachments
+                    else {}
+                ),
+                **(
+                    copy.deepcopy(request.get("_user_metadata"))
+                    if isinstance(request.get("_user_metadata"), dict)
+                    else {}
+                ),
+            }
             window["text"]["messages"].extend(
                 [
                     {
@@ -1933,6 +2041,7 @@ def _iter_request_events_impl(
                             if history_attachments
                             else {}
                         ),
+                        **({"metadata": copy.deepcopy(user_metadata)} if user_metadata else {}),
                     },
                     {"role": "assistant", "content": text},
                 ]
@@ -1950,9 +2059,7 @@ def _iter_request_events_impl(
                 text=text,
                 tool_records=tool_records,
                 provider_responses=provider_responses,
-                user_metadata={"input_attachments": history_attachments}
-                if history_attachments
-                else None,
+                user_metadata=user_metadata or None,
             )
             window["data"]["rounds"] = round_number
             round_metrics = window["data"].setdefault("round_metrics", [])
