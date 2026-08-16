@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from run.cron_runtime_state import clear_cron_runtime, overlay_cron_runtime
+
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 TASK_ID_RE = re.compile(r"^cron_[0-9a-f]{8}$")
@@ -290,7 +292,7 @@ def _legacy_system_action(system_key: Any, task_id: Any) -> str:
 
 
 class CronStore:
-    """磁盘权威、按用户隔离的 cron 任务存储。"""
+    """按用户隔离的 cron 定义存储，读取时叠加进程内运行态。"""
 
     def __init__(self, root: Path, user: str, *, system: bool = False) -> None:
         self.root = root.resolve()
@@ -303,6 +305,14 @@ class CronStore:
     def _path(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
 
+    def _with_runtime(self, task: dict[str, Any]) -> dict[str, Any]:
+        return overlay_cron_runtime(
+            self.root,
+            self.user,
+            self._system,
+            task,
+        )
+
     def _load(self, path: Path, *, migrate: bool = True) -> dict[str, Any]:
         try:
             data = json.loads(path.read_text("utf-8"))
@@ -312,14 +322,14 @@ class CronStore:
             raise CronError(f"任务文件损坏：{path.stem}（根节点不是对象）")
         try:
             _validate_task(data, system=self._system)
-            return data
+            return self._with_runtime(data)
         except CronValidationError:
             if not migrate:
                 raise
         migrated = _migrate_task(data, fallback_user=self.user)
         _validate_task(migrated, system=self._system)
         _atomic_write(path, migrated)
-        return migrated
+        return self._with_runtime(migrated)
 
     def create(self, task: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -328,6 +338,9 @@ class CronStore:
             path = self._path(task["task_id"])
             if path.exists():
                 raise CronConflictError(f"定时任务已存在：{task['task_id']}")
+            clear_cron_runtime(
+                self.root, self.user, self._system, str(task["task_id"])
+            )
             _atomic_write(path, task)
             return dict(task)
 
@@ -349,7 +362,7 @@ class CronStore:
             with _LIST_CACHE_GUARD:
                 cached = _LIST_CACHE.get(cache_key)
                 if cached is not None and cached[0] == signature:
-                    return copy.deepcopy(list(cached[1]))
+                    return [self._with_runtime(item) for item in cached[1]]
             tasks: list[dict[str, Any]] = []
             for path in paths:
                 try:
@@ -361,12 +374,14 @@ class CronStore:
                     _task_signature(paths),
                     tuple(copy.deepcopy(tasks)),
                 )
-            return copy.deepcopy(tasks)
+            return [self._with_runtime(item) for item in tasks]
 
     def update(
         self,
         task_id: str,
         mutator: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        clear_runtime: bool = True,
     ) -> dict[str, Any]:
         with self._lock:
             path = self._path(task_id)
@@ -378,6 +393,8 @@ class CronStore:
                 raise CronError("mutator 必须返回 dict")
             _validate_task(updated, system=self._system)
             _atomic_write(path, updated)
+            if clear_runtime:
+                clear_cron_runtime(self.root, self.user, self._system, task_id)
             return updated
 
     def delete(self, task_id: str) -> bool:
@@ -386,6 +403,7 @@ class CronStore:
             if not path.exists():
                 return False
             path.unlink()
+            clear_cron_runtime(self.root, self.user, self._system, task_id)
             return True
 
     def recover_interrupted(self) -> list[str]:
@@ -406,5 +424,6 @@ class CronStore:
                 data["next_run_at"] = now_beijing()
                 _validate_task(data, system=self._system)
                 _atomic_write(path, data)
+                clear_cron_runtime(self.root, self.user, self._system, str(data["task_id"]))
                 recovered.append(str(data.get("task_id") or path.stem))
         return recovered

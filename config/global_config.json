@@ -74,7 +74,9 @@
   "task_cron_system": {
     "sense_update_rate": 5,
     "expand_update_rate": 5,
-    "module_update_timeout": 120
+    "module_update_timeout": 120,
+    "runtime_checkpoint_seconds": 300,
+    "success_log_flush_seconds": 300
   },
   "runtime_host": {
     "enable_background_scheduler": true

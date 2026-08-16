@@ -37,7 +37,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `timeout` | int | `240` | 单次工具调用未提供 `timeout` 参数时的默认秒数；工具 Schema 声明且调用方显式提供有效 `timeout` 时，以显式值为准，插件内部期限与框架看门狗使用同一有效值 |
 | `max_iterations` | int | `80` | 单轮对话允许处理的最大工具调用次数。每个调用分别计数，同一 Provider 响应中的并行调用也计入总数；达到上限后停止本轮，超出部分不执行 |
 | `consecutive_identical_call_limit` | int | `8` | 同一工具使用完全相同参数连续请求的允许次数；工具或参数变化后重新计数。超过后阻止继续执行 |
-| `invalid_tool_arguments_retries` | int | `2` | Provider 返回 `invalid_tool_arguments`、且该次尝试尚未发布文本、思考、媒体或完整工具调用时，使用新 `request_id` 重新请求完整 JSON object 的次数。`0` 表示禁用恢复 |
+| `invalid_tool_arguments_retries` | int | `2` | 主智能体或子智能体收到 Provider 的 `invalid_tool_arguments` 时，使用新 `request_id` 重新请求完整 JSON object 的次数。失败尝试的文本与思考会保留，工具调用须整批校验后才发布和执行；已经发布媒体时不重试。`0` 表示禁用恢复 |
 
 > 用户配置 `tools` 为对象深合并，可覆盖其中任意字段。
 
@@ -173,10 +173,14 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `sense_update_rate` | int | `5` | 全局感知模块数据刷新间隔（秒）。缺失或非法值回退到 5 |
 | `expand_update_rate` | int | `5` | 全局、共享和各用户拓展模块的统一刷新间隔（秒）。缺失或非法值回退到 5 |
 | `module_update_timeout` | number | `120` | 每个感知/拓展采集脚本的独立子进程超时（秒）；非法值回退到 120，最大 3600 |
+| `runtime_checkpoint_seconds` | number | `300` | 高频系统任务的 `latest_run_at/next_run_at` 内存状态写回任务 JSON 的检查点间隔（秒，1..3600）；后台调度器通过跨进程租约保证每个 root 只有一个系统任务领导者，前台单次扫描在释放租约前写回位置，异常与正常停机仍会立即落盘 |
+| `success_log_flush_seconds` | number | `300` | 高频系统任务成功日志的内存聚合窗口（秒，1..3600）；调度循环按真实截止时间冲刷，不依赖下一次成功事件，失败日志独立立即落盘，停机时强制冲刷剩余成功聚合 |
 
 > 两个刷新间隔也影响 `cron.poll_interval` 的最小轮询粒度；单模块超时不改变轮询频率。
 >
 > 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `sense.json`；用户配置中的同名字段也不作为全局调度或页面展示来源。
+>
+> 高频采集仍按 5 秒执行；两个持久化间隔只减少无变化状态和成功日志的写盘次数，不会降低采集频率，也不会延迟失败诊断。
 
 ---
 

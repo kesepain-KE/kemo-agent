@@ -137,7 +137,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `timeout` | int | 240 | 工具未显式提供 `timeout` 时的默认秒数；显式有效参数会覆盖此值，并同时作用于插件内部期限和框架看门狗 |
 | `max_iterations` | int | 80 | 单轮对话允许处理的最大工具调用次数；并行工具调用分别计数 |
 | `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
-| `invalid_tool_arguments_retries` | int | 2 | Provider 工具参数 JSON 不完整且尚无可见输出或工具副作用时，自动重新生成参数的次数；`0` 表示禁用 |
+| `invalid_tool_arguments_retries` | int | 2 | 主智能体或子智能体收到不完整工具参数时，使用新请求 ID 自动重新生成参数的次数；文本与思考保留，工具调用整批校验后才发布和执行，已经发布媒体时不重试；`0` 表示禁用 |
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 

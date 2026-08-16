@@ -801,18 +801,33 @@ class SchedulerTests(unittest.TestCase):
             exec_mode="system",
             action="memory_promotion",
         ))
+        scheduler = CronScheduler(self.root)
+        task_path = self.root / "cron" / "task_cron_system" / "memory_promotion.json"
+        persisted_before = json.loads(task_path.read_text("utf-8"))
         with patch("cron.scheduler.execute_cron_task", return_value={"status": "completed"}) as execute:
-            count = CronScheduler(self.root).scan_once()
+            count = scheduler.scan_once()
         self.assertEqual(count, 2)
         self.assertEqual({call.kwargs["user"] for call in execute.call_args_list}, {"alice", "bob"})
         self.assertTrue(all(call.kwargs["system_task"]["task_id"] == task["task_id"] for call in execute.call_args_list))
         advanced = store.read("memory_promotion")
         self.assertTrue(advanced["latest_run_at"])
         self.assertGreater(datetime.fromisoformat(advanced["next_run_at"]), datetime.now(BEIJING))
+        persisted_during_run = json.loads(task_path.read_text("utf-8"))
+        self.assertNotEqual(
+            persisted_during_run["latest_run_at"], persisted_before["latest_run_at"]
+        )
+        self.assertEqual(LogStore(self.root).list_cron("alice"), [])
+        self.assertEqual(LogStore(self.root).list_cron("bob"), [])
+
+        scheduler.flush_persistence()
         records = LogStore(self.root).list_cron("alice") + LogStore(self.root).list_cron("bob")
         self.assertEqual({record["user"] for record in records}, {"alice", "bob"})
         self.assertTrue(all(record["task_id"] == "memory_promotion" for record in records))
         self.assertTrue(all(record["status"] == "success" for record in records))
+        self.assertTrue(all(record["result"]["aggregated"] is True for record in records))
+        self.assertTrue(all(record["result"]["runs"] == 1 for record in records))
+        persisted_after_flush = json.loads(task_path.read_text("utf-8"))
+        self.assertTrue(persisted_after_flush["latest_run_at"])
 
     def test_global_system_task_runs_once_and_keeps_diagnostics(self) -> None:
         for user in ("alice", "bob"):

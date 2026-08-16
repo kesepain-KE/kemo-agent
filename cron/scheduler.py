@@ -14,6 +14,14 @@ from cron.executor import execute_cron_task
 from cron.schedule import compute_next_run, is_due
 from provider.factory import create_provider, provider_semaphore_status
 from run.config import system_update_rate
+from run.cron_log_aggregator import CronLogAggregator
+from run.cron_runtime_state import (
+    SystemCronLease,
+    mark_cron_runtime_checkpoint,
+    pending_cron_runtime,
+    runtime_checkpoint_due,
+    update_cron_runtime,
+)
 from run.cron_store import CronStore, CronValidationError, normalize_task
 from run.log_store import LogStore
 from run.tools import ToolRegistry, discover_tools
@@ -37,6 +45,13 @@ _PERCEPTION_TITLE = "全局感知模块数据采集"
 _EXPAND_TITLE = "拓展模块数据采集"
 _SINGLETON_SYSTEM_ACTIONS = frozenset({"perception_update"})
 _NO_BACKOFF_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
+_AGGREGATED_SYSTEM_ACTIONS = frozenset(
+    {"perception_update", "expand_update", "memory_promotion"}
+)
+_SUCCESS_SYSTEM_STATUSES = frozenset(
+    {"success", "completed", "enabled", "ok", "active", "inactive", "skipped"}
+)
+_DEFAULT_PERSISTENCE_INTERVAL_SECONDS = 300.0
 
 
 def _system_result_summary(result: Any) -> dict[str, Any]:
@@ -111,8 +126,7 @@ def _system_result_summary(result: Any) -> dict[str, Any]:
     return summary
 
 
-def _append_system_execution(
-    root: Path,
+def _system_execution_record(
     *,
     user: str,
     task_id: str,
@@ -120,13 +134,13 @@ def _append_system_execution(
     duration_ms: int,
     result: dict[str, Any] | None = None,
     error: BaseException | None = None,
-) -> None:
-    """Append one bounded, user-scoped system-cron execution record."""
+) -> dict[str, Any]:
+    """Build one bounded, user-scoped system-cron execution record."""
 
     status = "failed" if error is not None else str((result or {}).get("status") or "completed")
-    if status == "completed":
+    if error is None and status in _SUCCESS_SYSTEM_STATUSES:
         status = "success"
-    record = {
+    return {
         "schema_version": 1,
         "executed_at": executed_at.astimezone(BEIJING).isoformat(),
         "user": user,
@@ -140,8 +154,36 @@ def _append_system_execution(
             else None
         ),
     }
+
+
+def _append_system_execution(
+    root: Path,
+    *,
+    user: str,
+    task_id: str,
+    executed_at: datetime,
+    duration_ms: int,
+    result: dict[str, Any] | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """Append one bounded execution immediately.
+
+    The scheduler uses an in-memory aggregator for high-frequency successes;
+    this direct helper remains the durable path for errors, low-frequency
+    tasks and callers outside a running scheduler.
+    """
+
     try:
-        LogStore(root).append_cron(record)
+        LogStore(root).append_cron(
+            _system_execution_record(
+                user=user,
+                task_id=task_id,
+                executed_at=executed_at,
+                duration_ms=duration_ms,
+                result=result,
+                error=error,
+            )
+        )
     except Exception:
         # Diagnostics persistence must never stop the scheduler itself.
         return
@@ -404,6 +446,119 @@ class CronScheduler:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        task_config = self._config.get("task_cron_system") or {}
+        if not isinstance(task_config, dict):
+            task_config = {}
+        self._runtime_checkpoint_seconds = self._positive_interval(
+            task_config.get("runtime_checkpoint_seconds"),
+            _DEFAULT_PERSISTENCE_INTERVAL_SECONDS,
+        )
+        self._success_log_flush_seconds = self._positive_interval(
+            task_config.get("success_log_flush_seconds"),
+            _DEFAULT_PERSISTENCE_INTERVAL_SECONDS,
+        )
+        self._log_aggregator = CronLogAggregator(
+            self.root,
+            flush_seconds=self._success_log_flush_seconds,
+        )
+        self._system_lease = SystemCronLease(self.root)
+
+    @staticmethod
+    def _positive_interval(value: Any, default: float) -> float:
+        if isinstance(value, bool):
+            return default
+        try:
+            rendered = float(value)
+        except (TypeError, ValueError):
+            return default
+        return min(3600.0, max(1.0, rendered))
+
+    def _record_system_execution(
+        self,
+        *,
+        action: str,
+        user: str,
+        task_id: str,
+        executed_at: datetime,
+        duration_ms: int,
+        result: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        record = _system_execution_record(
+            user=user,
+            task_id=task_id,
+            executed_at=executed_at,
+            duration_ms=duration_ms,
+            result=result,
+            error=error,
+        )
+        try:
+            if action in _AGGREGATED_SYSTEM_ACTIONS and record["status"] == "success":
+                self._log_aggregator.record_success(record)
+            else:
+                self._log_aggregator.record_immediate(record)
+        except Exception:
+            # Logging remains diagnostic-only and must never stop collection.
+            return
+
+    def _persist_runtime_state(self, state: dict[str, Any]) -> None:
+        store = CronStore(
+            self.root,
+            str(state.get("user") or "__system__"),
+            system=bool(state.get("system")),
+        )
+
+        def checkpoint(current: dict[str, Any]) -> dict[str, Any]:
+            current["latest_run_at"] = str(state.get("latest_run_at") or "")
+            current["next_run_at"] = str(state.get("next_run_at") or "")
+            current["status"] = str(state.get("status") or "enabled")
+            return current
+
+        store.update(
+            str(state.get("task_id") or ""),
+            checkpoint,
+            clear_runtime=False,
+        )
+        mark_cron_runtime_checkpoint(
+            self.root,
+            str(state.get("user") or "__system__"),
+            bool(state.get("system")),
+            str(state.get("task_id") or ""),
+            expected_updated_monotonic=float(state.get("updated_monotonic") or 0.0),
+            expected_latest_run_at=str(state.get("latest_run_at") or ""),
+            expected_next_run_at=str(state.get("next_run_at") or ""),
+            expected_status=str(state.get("status") or "enabled"),
+        )
+
+    def flush_persistence(self) -> None:
+        """Persist aggregated successes and volatile system schedule state."""
+
+        try:
+            self._log_aggregator.flush()
+        except Exception:
+            pass
+        for state in pending_cron_runtime(self.root):
+            try:
+                self._persist_runtime_state(state)
+            except Exception as exc:
+                if self.on_error:
+                    self.on_error(str(state.get("user") or "__system__"), exc)
+
+    def _flush_due_success_logs(self) -> None:
+        try:
+            self._log_aggregator.flush_due()
+        except Exception:
+            # A failed aggregate remains in memory and will be retried on the
+            # next scheduler pass or during normal shutdown.
+            pass
+
+    def _flush_runtime_states(self) -> None:
+        for state in pending_cron_runtime(self.root):
+            try:
+                self._persist_runtime_state(state)
+            except Exception as exc:
+                if self.on_error:
+                    self.on_error(str(state.get("user") or "__system__"), exc)
 
     def _should_backoff(self) -> bool:
         cron_config = self._config.get("cron") or {}
@@ -445,8 +600,15 @@ class CronScheduler:
             thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
+        if thread is not None and thread.is_alive():
+            # The worker may still be inside a long-running task.  It must keep
+            # leadership until that task returns; releasing now would let a
+            # second process execute the same system task concurrently.
+            return
         with self._lock:
             self._thread = None
+        self.flush_persistence()
+        self._system_lease.release()
 
     @property
     def running(self) -> bool:
@@ -454,11 +616,29 @@ class CronScheduler:
             return self._thread is not None and self._thread.is_alive()
 
     def scan_once(self) -> int:
+        """Run one foreground scan with temporary system-task leadership.
+
+        A foreground caller cannot retain an OS lease between calls, so its
+        volatile schedule advances are checkpointed before releasing it.
+        """
+
+        acquired_here = False
+        if not self._system_lease.owned:
+            acquired_here = self._system_lease.try_acquire()
+        try:
+            return self._scan_once(include_system=self._system_lease.owned)
+        finally:
+            self._flush_due_success_logs()
+            if acquired_here and not self.running:
+                self._flush_runtime_states()
+                self._system_lease.release()
+
+    def _scan_once(self, *, include_system: bool) -> int:
         from run.users import list_users
 
         executed = 0
         now = datetime.now(BEIJING)
-        if not self._stop_event.is_set():
+        if include_system and not self._stop_event.is_set():
             executed += self._scan_system_tasks(now)
         for user in list_users(self.root):
             if self._stop_event.is_set():
@@ -494,6 +674,7 @@ class CronScheduler:
                 execution_users = ("__system__",)
             else:
                 execution_users = users
+            task_had_error = False
             for user in execution_users:
                 if self._stop_event.is_set():
                     break
@@ -515,8 +696,8 @@ class CronScheduler:
                         **execute_kwargs,
                     )
                     executed += 1
-                    _append_system_execution(
-                        self.root,
+                    self._record_system_execution(
+                        action=action,
                         user=user,
                         task_id=task_id,
                         executed_at=started_at,
@@ -526,8 +707,9 @@ class CronScheduler:
                     if self.on_task_executed:
                         self.on_task_executed(user, task_id, result)
                 except Exception as exc:
-                    _append_system_execution(
-                        self.root,
+                    task_had_error = True
+                    self._record_system_execution(
+                        action=action,
                         user=user,
                         task_id=task_id,
                         executed_at=started_at,
@@ -537,12 +719,20 @@ class CronScheduler:
                     if self.on_error:
                         self.on_error(user, exc)
             try:
-                def advance(current: dict[str, Any]) -> dict[str, Any]:
-                    current["status"] = "enabled"
-                    current["latest_run_at"] = now.astimezone(BEIJING).isoformat()
-                    current["next_run_at"] = compute_next_run(current, after=now)
-                    return current
-                store.update(task_id, advance)
+                latest_run_at = now.astimezone(BEIJING).isoformat()
+                state = update_cron_runtime(
+                    self.root,
+                    "__system__",
+                    True,
+                    task_id,
+                    latest_run_at=latest_run_at,
+                    next_run_at=compute_next_run(task, after=now),
+                    status="enabled",
+                )
+                if task_had_error or runtime_checkpoint_due(
+                    state, self._runtime_checkpoint_seconds
+                ):
+                    self._persist_runtime_state(state)
             except Exception as exc:
                 if self.on_error:
                     self.on_error("__system__", exc)
@@ -626,12 +816,21 @@ class CronScheduler:
         return executed
 
     def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.scan_once()
-            except Exception:
-                pass
-            self._stop_event.wait(self.poll_interval)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._system_lease.try_acquire()
+                    self._scan_once(include_system=self._system_lease.owned)
+                except Exception:
+                    pass
+                self._flush_due_success_logs()
+                self._stop_event.wait(self.poll_interval)
+        finally:
+            self.flush_persistence()
+            self._system_lease.release()
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
 
 
 def recover_all(root: Path) -> list[str]:
