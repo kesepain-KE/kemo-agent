@@ -52,7 +52,7 @@ Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为�
 用户对话历史 → 临时三层表行 → memory_temporary_important.md
 ```
 
-后台整理临时三层时禁止把 `memory_temporary_important.md` 作为输入证据。热视图发布时，`memory_important_sources` 记录来源行和内容摘要；来源被修改、删除或晋升后，旧热视图立即视为失效，普通临时层恢复注入，等待下次巡检重建。主动查看记忆时仍可读取该文件，但查看本身不加权。
+后台整理临时三层时禁止把 `memory_temporary_important.md` 作为输入证据。热视图发布时，`memory_important_sources` 记录来源行和内容摘要；该关系只负责热视图失效判断，不过滤普通临时记忆的 Prompt 注入。来源碎片始终在原层按数量上限正常注入，热视图只作为更高优先级的强化概括。来源被修改、删除或晋升后，旧热视图立即视为失效，普通临时层继续正常注入，等待下次巡检重建。主动查看记忆时仍可读取该文件，但查看本身不加权。
 
 热视图巡检不能一次性返回整个大型层级。`memory_temporary_important` 使用 `memory_manage list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 按“条目数 + 序列化字符数”双重边界分页读取三层临时记忆和永久记忆，正文随列表批量返回，不再对全部碎片逐条 `get`。沿 `next_offset` 读取到 `has_more=false` 且累计数量等于 `total` 后才能发布新热视图；否则必须保持旧视图，不得基于局部数据执行永久协调或清理。
 

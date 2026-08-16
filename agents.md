@@ -419,7 +419,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 用户或主智能体主动查看记忆属于白名单只读场景，可读取 `important`，但查看本身不得改变任何临时记忆权重。
 - `memory.important_memory_max_chars` 只控制热画像进入 Prompt 的字符预算；热画像文件可以更长并完整落盘。`memory.important_memory_output_max_chars` 才是模型输出防失控硬上限，超过时拒绝本次更新且不得覆盖旧热画像。
 - 后台热画像巡检必须使用 `memory_manage list(limit=500, offset, compact=true, include_content=true, page_char_limit=80000)` 分页批量读取三层临时记忆和永久记忆，并沿 `next_offset` 读取到 `has_more=false`；不得对全部条目逐条 `get`。分页同时受条目数与序列化字符预算约束；中间页的 `truncated=true` 或 `page_limited_by_chars=true` 只表示仍有下一页。未完整覆盖返回的 `total` 时必须保留旧热画像，禁止基于部分数据做永久融合或副本清理。
-- 已进入热画像且内容摘要仍匹配的源碎片不再重复注入普通临时记忆段；任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容恢复正常注入，等待下次巡检重建。
+- 热画像来源关系只用于核对派生视图是否仍然有效，不改变源碎片的 Prompt 注入资格；进入热画像的七天、月、半年碎片仍按原层上限正常注入。任一源正文变化、被删除或离开临时层后，整份旧热画像暂停注入，权威临时/永久内容始终保持正常注入，等待下次巡检重建。
 - 永久记忆完全覆盖某个临时碎片时可清理临时副本；仅部分覆盖时必须提交包含旧永久事实和新增事实的完整融合正文。热画像来源、永久融合和临时副本清理由运行时统一事务化，子代理不得直接修改数据库。
 - 普通记忆提取不得覆盖已有永久正文；只有用户本轮明确要求记住的 `explicit=true` 候选才允许更新永久记忆。
 
@@ -428,7 +428,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 永久记忆全部注入，不设置文件数量上限。
 - 临时三层按 `half_year → one_month → seven_days` 排列，层内按权重从高到低选择。
 - `memory.temporary_injection_limits` 只限制单次 Prompt，不限制磁盘存储数量。
-- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限。普通临时段跳过其有效来源引用以避免重复注入。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
+- 临时重要记忆（`memory_temporary_important.md`）独立注入，有字符上限，只负责强化高价值事实；普通临时段继续注入其权威碎片正文，不因热画像引用而过滤。**此文件由 `memory_temporary_important` 子代理自动维护，任何情况下均不可删除、不可清空、不可写入空内容。** 即使当前无可提取的碎片，也必须保留占位文本。
 - `memory.extraction_mode=compression_only` 时，普通提交只登记 `deferred` 游标，保存会话或上下文压缩时才顺序提取。
 - `background` 模式允许 Maintenance 领取普通 `pending` 轮次；`on_commit` 模式同步提取。提取失败可按租约重试，不回滚已提交历史。
 - 待提取轮次按 `memory.extraction_batch_rounds` 组成连续批次，一次交给 `self_improve` 分析；候选统一匹配、去重并通过带稳定 operation_id 的 `upsert_candidates` 批量落盘，成功后才推进到批次末尾游标。
