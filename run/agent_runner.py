@@ -43,6 +43,11 @@ from agents._runtime.resources import (
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
 from run.config import load_config, provider_runtime_config, resolve_agent_model
 from run.model_capabilities import resolve_reasoning_selection
+from run.provider_tool_recovery import (
+    invalid_tool_name,
+    response_invalid_tool_arguments_error,
+    system_prompt_with_tool_argument_repair,
+)
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     ConsecutiveToolFailureTracker,
@@ -510,6 +515,18 @@ class AgentRunner:
             raw_global_tool_calls,
             definition.capabilities.max_tool_iterations,
         )
+        raw_invalid_tool_arguments_retries = tool_config.get(
+            "invalid_tool_arguments_retries", 2
+        )
+        if (
+            isinstance(raw_invalid_tool_arguments_retries, bool)
+            or not isinstance(raw_invalid_tool_arguments_retries, int)
+            or raw_invalid_tool_arguments_retries < 0
+        ):
+            raise AgentRunError(
+                "tools.invalid_tool_arguments_retries 必须是大于等于 0 的整数"
+            )
+        invalid_tool_arguments_retry_limit = raw_invalid_tool_arguments_retries
         max_provider_iterations = max_tool_calls + 1
         processed_tool_calls = 0
         tool_timeout = float(tool_config.get("timeout", 240))
@@ -538,10 +555,10 @@ class AgentRunner:
         failure_limit = raw_failure_limit
         failures = ConsecutiveToolFailureTracker(failure_limit)
         identical_calls = ConsecutiveIdenticalToolCallTracker(identical_call_limit)
+        tool_argument_retry_count = 0
         for iteration in range(1, max_provider_iterations + 1):
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
-            request_id = f"req_{uuid.uuid4().hex}"
             tool_schemas = context.tool_registry.schemas(exclude=failures.unavailable)
             tool_definitions = self._tool_definitions(tool_schemas)
             if context.structured_output_tool:
@@ -561,61 +578,92 @@ class AgentRunner:
                         strict=True,
                     )
                 )
-            try:
-                with provider_request_slot(
-                    self.config,
-                    cancel_event=context.cancel_event,
-                ):
-                    response = provider.create(
-                        KemoRequest(
-                            request_id=request_id,
-                            parent_request_id=parent_request_id,
-                            attempt=1,
-                            model=runtime["model"],
-                            stream=False,
-                            system_prompt=system,
-                            input=list(items),
-                            tools=tool_definitions,
-                            generation={"max_output_tokens": context.max_tokens},
-                            reasoning=(
-                                ReasoningConfig(
-                                    enabled=True,
-                                    effort=reasoning_selection.effort,
-                                    return_mode="content",
-                                    context="auto",
-                                )
-                                if reasoning_selection.enabled
-                                and reasoning_selection.effort
-                                else None
-                            ),
-                            provider_options=(
-                                {"reasoning_effort": reasoning_selection.effort}
-                                if reasoning_selection.enabled
-                                and reasoning_selection.effort
-                                else {}
-                            ),
-                            metadata={
-                                "capability": "conversation",
-                                "user": self.user,
-                                "source": "subagent",
-                                "agent": definition.name,
-                                "task_id": context.task_id,
-                                "iteration": iteration,
-                            },
-                        )
+            invalid_tool_arguments_retries = 0
+            repair_tool_name = ""
+            while True:
+                request_id = f"req_{uuid.uuid4().hex}"
+                request_system = (
+                    system_prompt_with_tool_argument_repair(
+                        system,
+                        tool_name=repair_tool_name,
+                        retry_number=invalid_tool_arguments_retries,
                     )
-            except ProviderCongestionError as exc:
-                if context.cancel_event.is_set():
-                    raise AgentCancelledError(
-                        f"子代理 {definition.name} 已取消"
-                    ) from exc
-                raise
-            if not isinstance(response, KemoResponse):
-                raise AgentRunError("Provider create() 必须返回 KemoResponse")
-            response_ids.append(response.id)
-            parent_request_id = parent_request_id or request_id
-            self._merge_usage(total_usage, self._usage_dict(response.usage))
-            final_model = response.model or runtime["model"]
+                    if invalid_tool_arguments_retries
+                    else system
+                )
+                try:
+                    with provider_request_slot(
+                        self.config,
+                        cancel_event=context.cancel_event,
+                    ):
+                        response = provider.create(
+                            KemoRequest(
+                                request_id=request_id,
+                                parent_request_id=parent_request_id,
+                                attempt=invalid_tool_arguments_retries + 1,
+                                model=runtime["model"],
+                                stream=False,
+                                system_prompt=request_system,
+                                input=list(items),
+                                tools=tool_definitions,
+                                generation={"max_output_tokens": context.max_tokens},
+                                reasoning=(
+                                    ReasoningConfig(
+                                        enabled=True,
+                                        effort=reasoning_selection.effort,
+                                        return_mode="content",
+                                        context="auto",
+                                    )
+                                    if reasoning_selection.enabled
+                                    and reasoning_selection.effort
+                                    else None
+                                ),
+                                provider_options=(
+                                    {"reasoning_effort": reasoning_selection.effort}
+                                    if reasoning_selection.enabled
+                                    and reasoning_selection.effort
+                                    else {}
+                                ),
+                                metadata={
+                                    "capability": "conversation",
+                                    "user": self.user,
+                                    "source": "subagent",
+                                    "agent": definition.name,
+                                    "task_id": context.task_id,
+                                    "iteration": iteration,
+                                    "tool_argument_retry": (
+                                        invalid_tool_arguments_retries
+                                    ),
+                                },
+                            )
+                        )
+                except ProviderCongestionError as exc:
+                    if context.cancel_event.is_set():
+                        raise AgentCancelledError(
+                            f"子代理 {definition.name} 已取消"
+                        ) from exc
+                    raise
+                if not isinstance(response, KemoResponse):
+                    raise AgentRunError("Provider create() 必须返回 KemoResponse")
+                response_ids.append(response.id)
+                parent_request_id = parent_request_id or request_id
+                self._merge_usage(total_usage, self._usage_dict(response.usage))
+                final_model = response.model or runtime["model"]
+                invalid_error = response_invalid_tool_arguments_error(response)
+                if invalid_error is None:
+                    break
+                if (
+                    invalid_tool_arguments_retries
+                    >= invalid_tool_arguments_retry_limit
+                ):
+                    raise AgentRunError(
+                        f"{invalid_error['message']}；已重试 "
+                        f"{invalid_tool_arguments_retries}/"
+                        f"{invalid_tool_arguments_retry_limit} 次"
+                    )
+                invalid_tool_arguments_retries += 1
+                tool_argument_retry_count += 1
+                repair_tool_name = invalid_tool_name(invalid_error)
             if response.status not in {
                 ResponseStatus.COMPLETED,
                 ResponseStatus.REQUIRES_ACTION,
@@ -811,6 +859,7 @@ class AgentRunner:
                 "prompt": context.prompt_bundle.diagnostics,
                 "tool_calls": tool_records,
                 "response_ids": response_ids,
+                "tool_argument_retries": tool_argument_retry_count,
                 "structured_output_transport": (
                     "tool" if final_data is not None else "text"
                 ),

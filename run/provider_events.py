@@ -22,6 +22,7 @@ from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ProviderError
 from run.errors import ContextLengthExceededError, EngineError
 from run.media_outputs import persist_response_media
+from run.provider_tool_recovery import invalid_tool_call_error
 
 
 def protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
@@ -54,19 +55,6 @@ def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
         **raw,
         "exception_type": str(raw.get("type") or "ProviderProtocolError"),
         "phase": phase,
-    }
-
-
-def invalid_tool_call_error(item: ToolCallItem) -> dict[str, Any]:
-    return {
-        "message": f"Provider 返回的工具 {item.name!r} 参数不是完整 JSON 对象",
-        "exception_type": "ProviderToolArgumentsError",
-        "phase": "provider",
-        "stop_reason": "invalid_tool_arguments",
-        "call_id": item.call_id,
-        "tool_name": item.name,
-        "parse_error": copy.deepcopy(item.parse_error or {}),
-        "arguments_raw": (item.arguments_raw or "")[:500],
     }
 
 

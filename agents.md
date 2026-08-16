@@ -474,12 +474,10 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 
 ### 轮次结构
 
-每个对话轮次在 SQLite 窗口行中保留五个逻辑分区：
-- `text_json`：user + assistant 消息
-- `think_json`：思考记录
-- `tool_json`：工具调用记录
-- `items_json`：统一协议 Item
-- `data_json`：轮次、用量与持久状态元数据
+每个对话轮次在 SQLite 中保留五个逻辑分区：
+- `history_messages`：archive 的 user + assistant 消息唯一正文；`text_json` 只在 runtime 保存可裁剪工作区，archive 中是存储引用
+- `history_rounds`：archive/runtime 的逐轮思考、工具调用、统一协议 Item 与 `round_metrics`；对应窗口 JSON 列只保存引用
+- `data_json`：累计用量、记忆状态与其他小型持久元数据
 
 每轮提交后只检查一个刚越过 `conserved_rounds` 保护线的轮次：思考和工具记录由 `context_manage` 压缩到 runtime 窗口，archive 窗口中的原始逻辑分区保持不变。工具结果字符上限仍作为上下文保护。
 
@@ -596,7 +594,7 @@ users/<user>/agents/<name>/
 - `cron.enabled` 控制是否启用调度（默认 true）。
 - `cron.poll_interval` 控制常规轮询间隔（默认 30 秒）；运行时会自动取它与两个系统数据刷新间隔的最小值，保证短周期任务按时被扫描。
 - `cron.avoid_congestion=true` 时，Provider 可用槽位低于 `cron.congestion_threshold_ratio` 指定比例会推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避。
-- `task_cron_system.sense_update_rate` 控制全局感知刷新间隔，`task_cron_system.expand_update_rate` 控制三层拓展刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。`module_update_timeout` 是每个采集脚本的独立子进程超时，默认 120 秒。
+- `task_cron_system.sense_update_rate` 控制全局感知刷新间隔，`task_cron_system.expand_update_rate` 控制三层拓展刷新间隔；两者单位为秒、默认 5，缺失或非法时回退到 5。`module_update_timeout` 是每个采集脚本的独立子进程超时，默认 120 秒。后台系统任务由每个 root 的跨进程租约选出唯一领导调度器；高频任务运行时间只保存在领导进程内并按 `runtime_checkpoint_seconds`（默认 300 秒）检查点写回，前台单次扫描释放租约前必须写回。成功日志按 `success_log_flush_seconds`（默认 300 秒）聚合并由调度循环按真实截止时间冲刷；错误与停机冲刷不延迟。
 - 感知刷新频率是框架级统一调度值，不写入单个 `sense.json`。Web 感知 API 从全局配置通过调度器同源校验返回 `update_interval_seconds` 和兼容显示文本；前端不得根据模块更新时间猜测频率，也不得读取用户配置中的同名覆盖值。
 - `runtime_host.enable_background_scheduler` 控制统一后台调度器；启用时宿主
   自动管理 Cron 与上下文整理。
@@ -693,7 +691,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
 - Chat Bridge 同时解析现代 `tool_calls` 和旧式单个 `function_call`。标准 `[DONE]` 仍受支持；兼容服务在已经给出明确 `finish_reason` 后干净关闭 HTTP 流也视为正常结束，但无终态标记的 EOF 仍是传输中断。
 - Chat 的输出截断或工具参数解析失败映射为统一 `incomplete`，保留最多 500 字符原始参数用于诊断而不发布可执行调用。Kemo 原生响应若携带 `ToolCallItem.parse_error`，统一运行事件层同样在工具执行前转为明确错误；这是运行时防御，不改变 Kemo 线路 Schema。
-- `tools.invalid_tool_arguments_retries` 控制工具参数生成恢复次数，默认 2。仅当统一终态为 `invalid_tool_arguments` 且失败尝试尚未发布文本、思考、媒体或完整工具调用时，主运行时才使用新的 `request_id` 和临时纠错指令重新请求；工具没有执行，因而不会重复外部副作用。已有可见输出、完整调用或超过上限时保持失败终态。
+- `tools.invalid_tool_arguments_retries` 控制工具参数生成恢复次数，默认 2。主运行时与所有 `AgentRunner` 子智能体在统一终态为 `invalid_tool_arguments` 时，使用新的 `request_id` 和临时纠错指令重新请求。失败尝试已经流出的文本与思考会保留；同一响应中的工具调用必须整批通过参数校验后才发布卡片、登记待执行状态并进入执行，因此任一并行调用损坏时整批调用都不会执行。已经发布媒体、达到恢复上限或发生其他终态时保持明确失败，不静默重复可能产生外部副作用的工作。
 - Kemo 传输重试只处理网络层和可重试 HTTP 状态；网关显式返回的 `retryable=true/false` 优先于状态码默认值。它不重新执行鉴权/校验/幂等冲突、完整协议损坏或模型统一终态业务失败；同一 ID 的已持久化失败终态只会重放，重新执行必须由上层建立新的逻辑请求。上下文超限继续走独立压缩链路。退避等待与流式/非流式阻塞读取均可被 Run 取消，已知远端 `response_id` 时取消会尽力传给网关。
 - Web 保存 Provider 配置后，只有重新读取到已落盘的 `provider.type=kemo` 才允许通过
   `GET /model/models?task=llm` 拉取当前密钥可用模型；`chat`、未保存配置、缺少凭据、鉴权失败或

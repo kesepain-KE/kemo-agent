@@ -56,14 +56,15 @@ from run.errors import ContextLengthExceededError, EngineError
 from run.history import (
     _trim_to_max_rounds,
     append_round_items,
+    commit_terminal_windows,
     commit_window,
     load_window,
     load_runtime_window,
     prepare_window,
+    patch_archive_metadata,
     queue_memory_extraction,
 )
-from run.history_index import set_active as set_active_history_session
-from run.history_index import update_memory_state, update_run_state
+from run.history_index import update_run_state
 from run.guidance import GuidanceInput, normalize_guidance
 from run.guidance_runtime import prepare_guidance
 from run.memory import (
@@ -85,6 +86,11 @@ from run.provider_events import (
     is_context_length_exceeded as _is_context_length_exceeded,
     provider_events as _provider_events,
     raise_if_context_length_exceeded as _raise_if_context_length_exceeded,
+)
+from run.provider_tool_recovery import (
+    invalid_tool_name as _invalid_tool_name,
+    is_invalid_tool_arguments_error as _is_invalid_tool_arguments_error,
+    messages_with_tool_argument_repair as _messages_with_tool_argument_repair,
 )
 from run.request_input import (
     content_display as _content_display,
@@ -133,63 +139,6 @@ _EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
 _FILE_LIVE_READ_ACTIONS = frozenset(
     {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
 )
-_INVALID_TOOL_ARGUMENTS_STOP_REASON = "invalid_tool_arguments"
-
-
-def _is_invalid_tool_arguments_error(error: Any) -> bool:
-    if not isinstance(error, dict):
-        return False
-    return (
-        str(error.get("stop_reason") or "").strip().casefold()
-        == _INVALID_TOOL_ARGUMENTS_STOP_REASON
-        or str(error.get("exception_type") or "").strip()
-        == "ProviderToolArgumentsError"
-    )
-
-
-def _invalid_tool_name(error: dict[str, Any]) -> str:
-    direct = str(error.get("tool_name") or "").strip()
-    if direct:
-        return direct
-    details = error.get("incomplete_details")
-    if not isinstance(details, dict):
-        return ""
-    invalid_calls = details.get("invalid_tool_calls")
-    if not isinstance(invalid_calls, list):
-        return ""
-    for item in invalid_calls:
-        if isinstance(item, dict) and str(item.get("name") or "").strip():
-            return str(item["name"]).strip()
-    return ""
-
-
-def _messages_with_tool_argument_repair(
-    messages: list[dict[str, Any]],
-    *,
-    tool_name: str,
-    retry_number: int,
-) -> list[dict[str, Any]]:
-    """Add a transient correction without changing durable conversation messages."""
-
-    repaired = copy.deepcopy(messages)
-    target = f"工具 {tool_name!r}" if tool_name else "刚才的工具"
-    correction = (
-        "[provider_tool_argument_repair]\n"
-        f"上一次生成{target}时，arguments 不是完整 JSON 对象。"
-        f"这是第 {retry_number} 次恢复请求。请只重新生成原计划中的完整工具调用，"
-        "确保 arguments 的根节点是完整 JSON object；不要重复已经输出的解释文字，"
-        "也不要把 JSON 放进普通文本。\n"
-        "[/provider_tool_argument_repair]"
-    )
-    if repaired and repaired[0].get("role") == "system":
-        content = repaired[0].get("content")
-        if isinstance(content, str):
-            repaired[0]["content"] = f"{content.rstrip()}\n\n{correction}"
-            return repaired
-    repaired.insert(0, {"role": "system", "content": correction})
-    return repaired
-
-
 def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
     """Return whether a successful result is stable for the rest of this run.
 
@@ -1316,6 +1265,11 @@ def _iter_request_events_impl(
                 provider_attempt = 0
                 invalid_tool_arguments_retries = 0
                 repair_tool_name = ""
+                iteration_text: list[str] = []
+                iteration_reasoning: list[str] = []
+                calls: list[ToolCall] = []
+                iteration_done: RunEvent | None = None
+                iteration_usage: Usage | None = None
                 while True:
                     if provider_attempt > 0:
                         refresh_dynamic_system_message()
@@ -1362,13 +1316,13 @@ def _iter_request_events_impl(
                             },
                         }
                     )
-                    iteration_text: list[str] = []
-                    iteration_reasoning: list[str] = []
-                    calls: list[ToolCall] = []
-                    iteration_done: RunEvent | None = None
-                    iteration_usage: Usage | None = None
+                    iteration_done = None
+                    iteration_usage = None
                     retry_invalid_tool_arguments = False
                     attempt_published_media = False
+                    attempt_calls: list[ToolCall] = []
+                    attempt_tool_events: list[RunEvent] = []
+                    attempt_usage_events: list[RunEvent] = []
                     try:
                         with provider_request_slot(config, cancel_event=cancel_event):
                             for event in _provider_events(
@@ -1416,19 +1370,21 @@ def _iter_request_events_impl(
                                         name=event.tool_name,
                                         arguments=event.arguments or {},
                                     )
-                                    calls.append(call)
-                                    pending_tool_calls[call.id] = {
-                                        "name": call.name,
-                                        "arguments": copy.deepcopy(call.arguments),
-                                        "iteration": iteration,
-                                    }
-                                    yield event
+                                    # Tool cards and pending-call state are committed only
+                                    # after the complete Provider attempt is known to be
+                                    # valid. This lets a later malformed parallel call
+                                    # discard the whole batch without duplicate cards or
+                                    # accidental execution.
+                                    attempt_calls.append(call)
+                                    attempt_tool_events.append(event)
                                 elif event.type == "usage":
                                     iteration_usage = _usage_from_dict(event.usage)
-                                    yield RunEvent(
-                                        type="usage",
-                                        usage=event.usage,
-                                        metadata={"iteration": iteration},
+                                    attempt_usage_events.append(
+                                        RunEvent(
+                                            type="usage",
+                                            usage=event.usage,
+                                            metadata={"iteration": iteration},
+                                        )
                                     )
                                 elif event.type == "media_output":
                                     attempt_published_media = True
@@ -1439,9 +1395,6 @@ def _iter_request_events_impl(
                                         _is_invalid_tool_arguments_error(event.error)
                                         and invalid_tool_arguments_retries
                                         < invalid_tool_arguments_retry_limit
-                                        and not iteration_text
-                                        and not iteration_reasoning
-                                        and not calls
                                         and not attempt_published_media
                                     )
                                     if iteration_usage is not None:
@@ -1452,6 +1405,9 @@ def _iter_request_events_impl(
                                     if can_retry_invalid_arguments:
                                         invalid_tool_arguments_retries += 1
                                         tool_argument_retry_count += 1
+                                        round_state.tool_argument_retries = (
+                                            tool_argument_retry_count
+                                        )
                                         repair_tool_name = _invalid_tool_name(event.error)
                                         retry_invalid_tool_arguments = True
                                         break
@@ -1462,6 +1418,13 @@ def _iter_request_events_impl(
                                         )
                                         failure["retry_limit"] = (
                                             invalid_tool_arguments_retry_limit
+                                        )
+                                    provider_response = event.metadata.get(
+                                        "provider_response"
+                                    )
+                                    if isinstance(provider_response, dict):
+                                        provider_responses.append(
+                                            copy.deepcopy(provider_response)
                                         )
                                     terminal_event = commit_failed_round(
                                         failure,
@@ -1684,6 +1647,26 @@ def _iter_request_events_impl(
                     return
                 if iteration_usage is None:
                     iteration_usage = _usage_from_dict(iteration_done.usage)
+                for call, tool_event in zip(
+                    attempt_calls,
+                    attempt_tool_events,
+                    strict=True,
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        yield commit_cancelled_round()
+                        return
+                    calls.append(call)
+                    pending_tool_calls[call.id] = {
+                        "name": call.name,
+                        "arguments": copy.deepcopy(call.arguments),
+                        "iteration": iteration,
+                    }
+                    yield tool_event
+                for usage_event in attempt_usage_events:
+                    if cancel_event is not None and cancel_event.is_set():
+                        yield commit_cancelled_round()
+                        return
+                    yield usage_event
                 if (
                     not iteration_usage.estimated
                     and iteration_usage.prompt_tokens > 0
@@ -2201,13 +2184,22 @@ def _iter_request_events_impl(
                 initial_memory_status = "disabled"
             archive_data["memory_status"] = initial_memory_status
             archive_data.pop("memory_error", None)
-            commit_window(window_path, archive_window)
-            commit_window(
+            active_key = request.get("_history_active_key")
+            commit_terminal_windows(
+                window_path,
+                archive_window,
                 runtime_path,
                 runtime_window,
                 summary_cache=summary_cache,
+                run_state="idle",
+                active_key=(
+                    active_key.strip()
+                    if isinstance(active_key, str) and active_key.strip()
+                    else None
+                ),
             )
             round_state.finalized = True
+            round_state.history_run_registered = False
             if queue_compression_memory and compression_applied:
                 compression_memory = _queue_summary_memory_extraction(
                     root=base,
@@ -2219,24 +2211,6 @@ def _iter_request_events_impl(
                     reason="automatic_compression",
                 )
             history_index_error: dict[str, Any] | None = round_state.history_run_error
-            try:
-                update_memory_state(
-                    base,
-                    user,
-                    source,
-                    session_id,
-                    status=(
-                        "queued"
-                        if isinstance(compression_memory, dict)
-                        and compression_memory.get("status") == "queued"
-                        else initial_memory_status
-                    ),
-                )
-            except Exception as exc:
-                history_index_error = {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
 
             memory_extraction: dict[str, Any] = {
                 "status": "skipped",
@@ -2289,67 +2263,34 @@ def _iter_request_events_impl(
                 archive_data["memory_processed_round"] = archive_round_number
                 archive_data["memory_status"] = "completed"
                 archive_data.pop("memory_error", None)
-                commit_window(window_path, archive_window)
+                try:
+                    patch_archive_metadata(
+                        window_path,
+                        archive_window,
+                        updates={
+                            "memory_processed_round": archive_round_number,
+                            "memory_status": "completed",
+                        },
+                        removals=("memory_error",),
+                        run_state="idle",
+                    )
+                except Exception as exc:
+                    history_index_error = history_index_error or {
+                        "message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
             elif extraction_status == "failed":
                 archive_data["memory_status"] = "failed"
                 archive_data["memory_error"] = memory_error
-                commit_window(window_path, archive_window)
-
-            if extraction_status == "completed":
                 try:
-                    update_memory_state(
-                        base,
-                        user,
-                        source,
-                        session_id,
-                        processed_round=archive_round_number,
-                        status="completed",
-                    )
-                except Exception as exc:
-                    history_index_error = history_index_error or {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-            elif extraction_status == "failed":
-                try:
-                    update_memory_state(
-                        base,
-                        user,
-                        source,
-                        session_id,
-                        status="failed",
-                        error=memory_error,
-                    )
-                except Exception as exc:
-                    history_index_error = history_index_error or {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-            try:
-                update_run_state(
-                    base,
-                    user,
-                    source,
-                    session_id,
-                    run_state="idle",
-                    run_id=run_id or None,
-                    directory=window_path,
-                )
-                round_state.history_run_registered = False
-            except Exception as exc:
-                history_index_error = history_index_error or {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
-            active_key = request.get("_history_active_key")
-            if isinstance(active_key, str) and active_key.strip():
-                try:
-                    set_active_history_session(
-                        base,
-                        user,
-                        active_key.strip(),
-                        session_id,
-                        source=source,
+                    patch_archive_metadata(
+                        window_path,
+                        archive_window,
+                        updates={
+                            "memory_status": "failed",
+                            "memory_error": memory_error,
+                        },
+                        run_state="idle",
                     )
                 except Exception as exc:
                     history_index_error = history_index_error or {

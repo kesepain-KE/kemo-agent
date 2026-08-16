@@ -1862,7 +1862,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         window = load_window(find_window(root, "alice", "cli", "incremental-stream"))
         self.assertEqual(window["text"]["messages"][-1]["content"], "AB")
 
-    def test_stream_tool_call_is_forwarded_before_provider_exhausts(self) -> None:
+    def test_stream_tool_call_is_forwarded_after_provider_batch_validation(self) -> None:
         _, root = self.make_root(stream=True)
         self.write_tool(root / "plugins", "lookup", "plugin")
 
@@ -1898,7 +1898,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             first = next(iterator)
             self.assertEqual(first.type, "tool_call_start")
             self.assertEqual(first.tool_call_id, "call-live")
-            self.assertFalse(provider.resumed_after_call)
+            self.assertTrue(provider.resumed_after_call)
             iterator.close()
         self.assertIsNone(find_window(root, "alice", "cli", "incremental-tool"))
 
@@ -1930,7 +1930,12 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertEqual(events[0].metadata["status"], "failed")
         window = load_window(find_window(root, "alice", "cli", "missing-done"))
         self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        failed_metric = window["data"]["round_metrics"][0]
+        self.assertEqual(failed_metric["status"], "failed")
+        self.assertEqual(failed_metric["tool_argument_retries"], 0)
+        self.assertIn("provider_responses", failed_metric)
+        self.assertNotIn("context.state.provider_responses", failed_metric)
+        self.assertEqual(failed_metric["provider_responses"], [])
 
     def test_provider_congestion_commits_failed_round(self) -> None:
         _, root = self.make_root()
@@ -2109,12 +2114,14 @@ class RuntimeFeatureTests(unittest.TestCase):
             provider.requests[1].messages[0]["content"],
         )
 
-    def test_invalid_tool_arguments_with_visible_output_is_not_retried(self) -> None:
+    def test_invalid_tool_arguments_with_visible_output_is_retried(self) -> None:
         _, root = self.make_root(stream=True)
+        self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
             streams=[
                 [
                     RunEvent(type="text_delta", content="visible"),
+                    RunEvent(type="reasoning_delta", content="thinking"),
                     RunEvent(
                         type="tool_call_start",
                         tool_call_id="invalid-call",
@@ -2127,7 +2134,21 @@ class RuntimeFeatureTests(unittest.TestCase):
                         },
                     ),
                     RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
-                ]
+                ],
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="valid-call",
+                        tool_name="lookup",
+                        arguments={"value": "safe"},
+                        metadata={"finish_reason": "tool_calls"},
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ],
+                [
+                    RunEvent(type="text_delta", content="completed"),
+                    RunEvent(type="done", metadata={"finish_reason": "stop"}),
+                ],
             ]
         )
 
@@ -2146,10 +2167,86 @@ class RuntimeFeatureTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual([event.type for event in events], ["text_delta", "error"])
-        self.assertEqual(len(provider.requests), 1)
-        self.assertEqual(events[-1].error["retry_count"], 0)
-        self.assertEqual(events[-1].error["retry_limit"], 2)
+        self.assertEqual(events[-1].type, "done")
+        self.assertFalse(any(event.type == "error" for event in events))
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            len([event for event in events if event.type == "tool_call_start"]),
+            1,
+        )
+        self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
+        window = load_window(
+            find_window(root, "alice", "cli", "visible-invalid-tool-arguments")
+        )
+        self.assertIn("visible", window["text"]["messages"][-1]["content"])
+        self.assertIn("thinking", window["think"]["rounds"][-1]["content"])
+
+    def test_parallel_valid_and_invalid_tool_calls_retry_without_stale_card(
+        self,
+    ) -> None:
+        _, root = self.make_root(stream=True)
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="discarded-valid-call",
+                        tool_name="lookup",
+                        arguments={"value": "discarded"},
+                        metadata={"finish_reason": "tool_calls"},
+                    ),
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="invalid-call",
+                        tool_name="lookup",
+                        arguments={},
+                        metadata={
+                            "raw_arguments": "{",
+                            "parse_error": {"message": "invalid"},
+                            "finish_reason": "tool_calls",
+                        },
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ],
+                [
+                    RunEvent(
+                        type="tool_call_start",
+                        tool_call_id="replacement-call",
+                        tool_name="lookup",
+                        arguments={"value": "replacement"},
+                        metadata={"finish_reason": "tool_calls"},
+                    ),
+                    RunEvent(type="done", metadata={"finish_reason": "tool_calls"}),
+                ],
+                [
+                    RunEvent(type="text_delta", content="completed"),
+                    RunEvent(type="done", metadata={"finish_reason": "stop"}),
+                ],
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "parallel-invalid-tool-arguments",
+                        "prompt": "lookup",
+                        "stream": True,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        starts = [event for event in events if event.type == "tool_call_start"]
+        self.assertEqual([event.tool_call_id for event in starts], ["replacement-call"])
+        results = [event for event in events if event.type == "tool_call_result"]
+        self.assertEqual([event.tool_call_id for event in results], ["replacement-call"])
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
 
     def test_invalid_tool_arguments_retry_limit_commits_one_failed_round(self) -> None:
         _, root = self.make_root()
@@ -2197,7 +2294,15 @@ class RuntimeFeatureTests(unittest.TestCase):
             find_window(root, "alice", "cli", "invalid-tool-argument-limit")
         )
         self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        failed_metric = window["data"]["round_metrics"][0]
+        self.assertEqual(failed_metric["status"], "failed")
+        self.assertEqual(failed_metric["tool_argument_retries"], 2)
+        self.assertIn("provider_responses", failed_metric)
+        self.assertNotIn("context.state.provider_responses", failed_metric)
+        self.assertEqual(
+            failed_metric["provider_responses"][-1]["status"],
+            "incomplete",
+        )
 
     def test_unrecoverable_context_error_commits_failed_round(self) -> None:
         _, root = self.make_root()
@@ -2274,7 +2379,6 @@ class RuntimeFeatureTests(unittest.TestCase):
             [event.type for event in events],
             [
                 "text_delta",
-                "tool_call_start",
                 "error",
             ],
         )
@@ -2297,13 +2401,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             "sensitive upstream body",
             json.dumps(error_window, ensure_ascii=False),
         )
-        failed_call = error_window["tool"]["rounds"][0]["calls"][0]
-        self.assertEqual(failed_call["id"], "pending-error")
-        self.assertEqual(failed_call["status"], "failed")
-        self.assertEqual(
-            failed_call["result"]["error"]["exception_type"],
-            "ProviderRunInterrupted",
-        )
+        self.assertEqual(error_window["tool"]["rounds"][0]["calls"], [])
 
         cancel = threading.Event()
         cancel_provider = ScriptedProvider(
