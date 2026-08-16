@@ -248,6 +248,51 @@ class GatewayStatusExpandTests(unittest.TestCase):
         manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
         self.assertFalse(manifest["open_input"])
 
+    def test_unchanged_snapshot_does_not_rewrite_prompt_or_artifacts(self) -> None:
+        gateway._atomic_json(  # noqa: SLF001 - module-local fixture
+            self.module / "gateway_config.json",
+            {
+                "base_url": "http://127.0.0.1:7531",
+                "status_token": "secret-token",
+                "timeout_seconds": 15,
+                "ranking_limit": 20,
+                "log_limit": 20,
+            },
+        )
+        first = gateway.sanitize_snapshot(status_payload())
+        second_payload = status_payload()
+        second_payload["generated_at"] = "2026-07-28T12:00:05+00:00"
+        second = gateway.sanitize_snapshot(second_payload)
+        with patch.object(gateway, "fetch_status", side_effect=[first, second, second]):
+            self.assertTrue(gateway.update_snapshot()["changed"])
+            paths = (
+                self.module / "data" / "gateway_status.json",
+                self.module / "artifacts" / "gateway_status.png",
+                self.module / "input_data.md",
+            )
+            before = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in paths}
+            self.assertFalse(gateway.update_snapshot()["changed"])
+            self.assertFalse(gateway.update_snapshot()["changed"])
+            after = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in paths}
+        self.assertEqual(after, before)
+
+    def test_manifest_recent_update_never_moves_backwards(self) -> None:
+        gateway._atomic_json(  # noqa: SLF001 - module-local fixture
+            self.module / "expand.json",
+            {
+                "open_input": True,
+                "input_health": "正常",
+                "recent_update": "2026-08-16 12:03:00",
+            },
+        )
+        gateway._update_manifest(  # noqa: SLF001 - module-local fixture
+            active=True,
+            healthy=True,
+            update_time="2026-08-16 12:00:00",
+        )
+        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
+        self.assertEqual(manifest["recent_update"], "2026-08-16 12:03:00")
+
 
 if __name__ == "__main__":
     unittest.main()

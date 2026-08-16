@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+from io import BytesIO
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,7 @@ LAST_RUN_PATH = BASE_DIR / "_last_run.json"
 DATA_PATH = BASE_DIR / "data" / "gateway_status.json"
 CHART_PATH = BASE_DIR / "artifacts" / "gateway_status.png"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+PERSISTENCE_CHECKPOINT_SECONDS = 300
 
 
 class GatewayStatusError(RuntimeError):
@@ -50,7 +52,12 @@ class GatewayConfig:
         return f"{self.base_url.rstrip('/')}/status"
 
 
-def _atomic_text(path: Path, content: str, *, sensitive: bool = False) -> None:
+def _atomic_text(path: Path, content: str, *, sensitive: bool = False) -> bool:
+    try:
+        if path.is_file() and path.read_text("utf-8") == content:
+            return False
+    except (OSError, UnicodeError):
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -69,16 +76,69 @@ def _atomic_text(path: Path, content: str, *, sensitive: bool = False) -> None:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
+        return True
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_json(path: Path, payload: Any, *, sensitive: bool = False) -> None:
-    _atomic_text(
+def _atomic_json(path: Path, payload: Any, *, sensitive: bool = False) -> bool:
+    return _atomic_text(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
         sensitive=sensitive,
     )
+
+
+def _atomic_bytes(path: Path, content: bytes) -> bool:
+    try:
+        if path.is_file() and path.read_bytes() == content:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _checkpoint_time(now: datetime | None = None) -> str:
+    current = (now or datetime.now().astimezone()).replace(microsecond=0)
+    second = int(current.timestamp())
+    bucket = second - second % PERSISTENCE_CHECKPOINT_SECONDS
+    return datetime.fromtimestamp(bucket, tz=current.tzinfo).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _monotonic_timestamp(previous: Any, candidate: str) -> str:
+    previous_text = str(previous or "").strip()
+    if not previous_text:
+        return candidate
+    try:
+        previous_value = datetime.strptime(previous_text, "%Y-%m-%d %H:%M:%S")
+        candidate_value = datetime.strptime(candidate, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return candidate
+    return previous_text if previous_value >= candidate_value else candidate
+
+
+def _semantic_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    comparable = dict(snapshot)
+    comparable.pop("generated_at", None)
+    return comparable
+
+
+def _snapshot_changed(snapshot: dict[str, Any]) -> bool:
+    try:
+        previous = json.loads(DATA_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return True
+    return not isinstance(previous, dict) or _semantic_snapshot(previous) != _semantic_snapshot(snapshot)
 
 
 def _integer(value: Any, *, name: str, default: int, minimum: int, maximum: int) -> int:
@@ -554,16 +614,9 @@ def _render_chart(snapshot: dict[str, Any], target: Path) -> None:
         draw.text((1502, y), value, fill="#f7f8ff", font=body_font, anchor="ra")
         draw.line((1042, y + 34, 1502, y + 34), fill="#222b47", width=1)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        image.save(temporary, format="PNG", optimize=True)
-        with temporary.open("r+b") as handle:
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    _atomic_bytes(target, output.getvalue())
 
 
 def _update_manifest(*, active: bool, healthy: bool, update_time: str) -> None:
@@ -571,7 +624,7 @@ def _update_manifest(*, active: bool, healthy: bool, update_time: str) -> None:
     payload["open_input"] = active
     payload["input_health"] = "正常" if healthy else "异常"
     if healthy:
-        payload["recent_update"] = update_time
+        payload["recent_update"] = _monotonic_timestamp(payload.get("recent_update"), update_time)
     _atomic_json(MANIFEST_PATH, payload)
 
 
@@ -593,7 +646,9 @@ def _resources() -> list[dict[str, str]]:
 
 
 def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
-    update_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().astimezone()
+    update_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    checkpoint_time = _checkpoint_time(now)
     try:
         config = load_config()
         if config is None:
@@ -602,16 +657,19 @@ def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
             _atomic_json(LAST_RUN_PATH, result)
             return result
         snapshot = fetch_status(config, target_date=target_date)
-        _atomic_json(DATA_PATH, snapshot)
-        _render_chart(snapshot, CHART_PATH)
-        _atomic_text(INPUT_PATH, _markdown(snapshot, collected_at=update_time))
-        _update_manifest(active=True, healthy=True, update_time=update_time)
+        changed = _snapshot_changed(snapshot)
+        if changed:
+            _atomic_json(DATA_PATH, snapshot)
+            _render_chart(snapshot, CHART_PATH)
+            _atomic_text(INPUT_PATH, _markdown(snapshot, collected_at=update_time))
+        _update_manifest(active=True, healthy=True, update_time=checkpoint_time)
         result = {
             "ok": True,
             "status": "active",
             "time": update_time,
             "active": True,
-            "summary": public_summary(snapshot),
+            "changed": changed,
+            "summary": {**public_summary(snapshot), "generated_at": update_time},
             "resources": _resources(),
         }
     except Exception as exc:

@@ -29,6 +29,7 @@ INPUT_MD = BASE_DIR / "input_data.md"
 STATUS_PATH = BASE_DIR / "_last_run.json"
 MANIFEST_PATH = BASE_DIR / "expand.json"
 HOST_TZ = timezone(timedelta(hours=8))  # 北京时间，按需修改
+PERSISTENCE_CHECKPOINT_SECONDS = 300
 
 
 def collect() -> Any:
@@ -50,7 +51,8 @@ def render_markdown(data: Any, *, update_time: str) -> str:
         rendered = data.strip() or "暂无数据"
     else:
         rendered = f"```json\n{json.dumps(data, ensure_ascii=False, indent=2, default=str)}\n```"
-    return f"# 拓展模块名称\n\n> 自动采集时间：{update_time}\n\n## 数据\n\n{rendered}\n"
+    del update_time
+    return f"# 拓展模块名称\n\n## 数据\n\n{rendered}\n"
 
 
 def collect_resources(data: Any) -> list[dict[str, str]]:
@@ -60,7 +62,12 @@ def collect_resources(data: Any) -> list[dict[str, str]]:
     return []
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write(path: Path, content: str) -> bool:
+    try:
+        if path.is_file() and path.read_text("utf-8") == content:
+            return False
+    except (OSError, UnicodeError):
+        pass
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
@@ -68,8 +75,27 @@ def atomic_write(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        return True
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def checkpoint_time(now: datetime) -> str:
+    second = int(now.timestamp())
+    bucket = second - second % PERSISTENCE_CHECKPOINT_SECONDS
+    return datetime.fromtimestamp(bucket, tz=HOST_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def monotonic_timestamp(previous: Any, candidate: str) -> str:
+    previous_text = str(previous or "").strip()
+    if not previous_text:
+        return candidate
+    try:
+        previous_value = datetime.strptime(previous_text, "%Y-%m-%d %H:%M:%S")
+        candidate_value = datetime.strptime(candidate, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return candidate
+    return previous_text if previous_value >= candidate_value else candidate
 
 
 def write_manifest_health(*, healthy: bool, update_time: str) -> None:
@@ -78,7 +104,9 @@ def write_manifest_health(*, healthy: bool, update_time: str) -> None:
         raise ValueError("expand.json 顶层必须是 JSON 对象")
     manifest["input_health"] = "正常" if healthy else "异常"
     if healthy:
-        manifest["recent_update"] = update_time
+        manifest["recent_update"] = monotonic_timestamp(
+            manifest.get("recent_update"), update_time
+        )
     atomic_write(
         MANIFEST_PATH,
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -87,16 +115,19 @@ def write_manifest_health(*, healthy: bool, update_time: str) -> None:
 
 def update():
     """入口：采集 → 写入 → 更新健康状态 → 打印结果。"""
-    now = datetime.now(HOST_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    current = datetime.now(HOST_TZ)
+    now = current.strftime("%Y-%m-%d %H:%M:%S")
+    checkpoint = checkpoint_time(current)
     try:
         data = collect()
 
         content = render_markdown(data, update_time=now)
-        atomic_write(INPUT_MD, content)
-        write_manifest_health(healthy=True, update_time=now)
+        changed = atomic_write(INPUT_MD, content)
+        write_manifest_health(healthy=True, update_time=now if changed else checkpoint)
         result = {
             "ok": True,
             "time": now,
+            "changed": changed,
             "errors": [],
             "size": len(content),
             "resources": collect_resources(data),

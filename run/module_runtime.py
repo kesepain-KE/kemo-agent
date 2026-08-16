@@ -23,6 +23,7 @@ MODULE_UPDATE_RESULT_PREFIX = "__KEMO_MODULE_UPDATE_RESULT__="
 _MAX_CAPTURE_BYTES = 1_000_000
 _POLL_SECONDS = 0.05
 DEFAULT_MODULE_UPDATE_TIMEOUT = 120.0
+MODULE_HEALTH_CHECKPOINT_SECONDS = 300.0
 _EXECUTION_LOCK_FILE = ".module.execution.lock"
 _EXECUTION_LOCKS: dict[str, threading.RLock] = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
@@ -228,15 +229,21 @@ def _is_link(path: Path) -> bool:
         return True
 
 
-def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_json(path: Path, payload: dict[str, Any]) -> bool:
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        if path.read_text("utf-8") == rendered:
+            return False
+    except (OSError, UnicodeError):
+        pass
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+            handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        return True
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -254,13 +261,30 @@ def record_module_health(
     payload = json.loads(manifest_path.read_text("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{manifest_path.name} 顶层必须是 JSON 对象")
-    payload["health" if category == "sense" else "input_health"] = (
-        "正常" if healthy else "异常"
-    )
+    field = "health" if category == "sense" else "input_health"
+    next_health = "正常" if healthy else "异常"
+    previous_health = str(payload.get(field) or "")
+    payload[field] = next_health
     if healthy:
-        payload["recent_update"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
-            "%Y-%m-%d %H:%M:%S"
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        previous_update = str(payload.get("recent_update") or "")
+        try:
+            parsed_update = datetime.strptime(
+                previous_update, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        except ValueError:
+            parsed_update = None
+        checkpoint_due = bool(
+            parsed_update is None
+            or (now - parsed_update).total_seconds()
+            >= MODULE_HEALTH_CHECKPOINT_SECONDS
         )
+        if previous_health != next_health or checkpoint_due:
+            payload["recent_update"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return
+    elif previous_health == next_health:
+        return
     _atomic_json(manifest_path, payload)
 
 

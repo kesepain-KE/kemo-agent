@@ -321,15 +321,21 @@ def _state_lock(module_root: Path) -> Iterator[None]:
                 handle.close()
 
 
-def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_json(path: Path, payload: dict[str, Any]) -> bool:
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        if path.read_text("utf-8") == rendered:
+            return False
+    except (OSError, UnicodeError):
+        pass
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+            handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        return True
     finally:
         temporary.unlink(missing_ok=True)
 

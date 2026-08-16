@@ -87,8 +87,13 @@ class GraphConfig:
         return user is None or user in self.admin_users
 
 
-def atomic_text(path: Path, content: str) -> None:
+def atomic_text(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.read_text("utf-8") == content:
+            return False
+    except (OSError, UnicodeError):
+        pass
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
@@ -96,12 +101,16 @@ def atomic_text(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        return True
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def atomic_json(path: Path, value: Any) -> None:
-    atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n")
+def atomic_json(path: Path, value: Any) -> bool:
+    return atomic_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n",
+    )
 
 
 def integer(

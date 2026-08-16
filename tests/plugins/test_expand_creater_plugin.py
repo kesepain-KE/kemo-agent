@@ -104,7 +104,22 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             )
             self.assertEqual(update_process.returncode, 0, update_process.stderr)
             self.assertTrue(json.loads(update_process.stdout)["ok"])
-            self.assertIn("自动采集时间", (module / "input_data.md").read_text("utf-8"))
+            prompt_data = (module / "input_data.md").read_text("utf-8")
+            self.assertIn("## 数据", prompt_data)
+            self.assertNotIn("自动采集时间", prompt_data)
+            before = (module / "input_data.md").stat().st_mtime_ns
+            repeated = subprocess.run(
+                [sys.executable, str(module / "data_update.py")],
+                cwd=module,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertFalse(json.loads(repeated.stdout)["changed"])
+            self.assertEqual((module / "input_data.md").stat().st_mtime_ns, before)
             self.assertTrue(run("validate", "user", name="smart_lights", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):

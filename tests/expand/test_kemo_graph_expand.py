@@ -172,6 +172,22 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertIn("不替换、不增强、也不缩减", text)
         self.assertIn("用户明确要求", text)
 
+    def test_manifest_recent_update_never_moves_backwards(self) -> None:
+        self.paths["MANIFEST_PATH"].write_text(
+            json.dumps(
+                {
+                    "recent_update": "2099-08-16 12:03:00",
+                    "open_input": True,
+                    "input_health": "正常",
+                },
+                ensure_ascii=False,
+            ),
+            "utf-8",
+        )
+        render._update_manifest(active=True, healthy=True)  # noqa: SLF001
+        manifest = json.loads(self.paths["MANIFEST_PATH"].read_text("utf-8"))
+        self.assertEqual(manifest["recent_update"], "2099-08-16 12:03:00")
+
     def test_status_keeps_uninitialized_portable_store_distinct_from_error(self) -> None:
         config = graph.config_from_mapping(self.portable_mapping())
         store_status = {

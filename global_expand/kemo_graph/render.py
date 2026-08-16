@@ -18,6 +18,30 @@ from registry import (
 )
 
 
+_MANIFEST_CHECKPOINT_SECONDS = 300
+
+
+def _checkpoint_time() -> str:
+    now = datetime.now().astimezone()
+    checkpoint = int(now.timestamp()) // _MANIFEST_CHECKPOINT_SECONDS
+    return datetime.fromtimestamp(
+        checkpoint * _MANIFEST_CHECKPOINT_SECONDS,
+        tz=now.tzinfo,
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _monotonic_timestamp(previous: Any, candidate: str) -> str:
+    previous_text = str(previous or "").strip()
+    if not previous_text:
+        return candidate
+    try:
+        previous_value = datetime.strptime(previous_text, "%Y-%m-%d %H:%M:%S")
+        candidate_value = datetime.strptime(candidate, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return candidate
+    return previous_text if previous_value >= candidate_value else candidate
+
+
 def _status_map() -> tuple[dict[str, dict[str, Any]], str]:
     from registry import STATUS_PATH
 
@@ -94,6 +118,8 @@ def _update_manifest(*, active: bool, healthy: bool) -> None:
         manifest = json.loads(MANIFEST_PATH.read_text("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         manifest = {}
+    previous_update = manifest.get("recent_update")
+    checkpoint = _checkpoint_time()
     manifest.update({
         "name": "Kemo Graph 外挂文档站",
         "explain": "注册外部或内置知识图谱文档库，仅在用户明确要求时查询、同步或构建",
@@ -104,7 +130,7 @@ def _update_manifest(*, active: bool, healthy: bool) -> None:
         "open_control": True,
         "start_expand": "start_expand.py",
         "start_control": "expand_control.md",
-        "recent_update": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "recent_update": _monotonic_timestamp(previous_update, checkpoint),
     })
     atomic_json(MANIFEST_PATH, manifest)
 
