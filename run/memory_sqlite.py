@@ -789,9 +789,6 @@ class SqliteMemoryStore:
             or max_files < 0
         ):
             raise api.MemoryConfigError(f"{tier} 记忆文件上限必须是非负整数或 null")
-        featured = (
-            self.load_important_view_sources() if tier != "permanent" else frozenset()
-        )
         with connection(self.root, self.user) as database:
             rows = database.execute(
                 """
@@ -800,11 +797,10 @@ class SqliteMemoryStore:
                 """,
                 (tier,),
             ).fetchall()
-        eligible = [row for row in rows if str(row["filename"]) not in featured]
         selected_rows = (
-            eligible
+            rows
             if tier == "permanent" or max_files is None
-            else eligible[:max_files]
+            else rows[:max_files]
         )
         selected = [self._entry_from_row(row) for row in selected_rows]
 
@@ -819,11 +815,11 @@ class SqliteMemoryStore:
             items=tuple(selected),
             text=text,
             selected_ids=tuple(str(item["filename"]) for item in selected),
-            original_chars=sum(len(str(row["content"])) for row in eligible),
+            original_chars=sum(len(str(row["content"])) for row in rows),
             injected_chars=len(text),
-            original_items=len(eligible),
+            original_items=len(rows),
             injected_items=len(selected),
-            truncated=len(selected) < len(eligible),
+            truncated=len(selected) < len(rows),
             source_files=(self.database_path(),) if selected else (),
             integrity_warnings=(),
         )

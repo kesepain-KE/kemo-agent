@@ -977,6 +977,30 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(len(important.content), 20000)
         self.assertTrue(important.truncated)
 
+    def test_important_view_reinforces_without_replacing_month_memory(self) -> None:
+        _, root, config = self.make_root()
+        self.write_memory(
+            root,
+            "one_month",
+            [{"filename": "deployment", "content": "MONTH DETAIL", "weight": 4}],
+        )
+        important_path = root / "users" / "alice" / "memory_temporary_important.md"
+        important_path.write_text("HOT SUMMARY", "utf-8")
+        store = MemoryStore(root, "alice", config)
+        store.set_important_view_sources(["deployment.md"])
+
+        bundle = build_prompt_bundle(root, "alice", config)
+
+        important = next(s for s in bundle.sections if s.name == "important_memory")
+        monthly = next(
+            s for s in bundle.sections if s.name == "temporary_memory:one_month"
+        )
+        self.assertEqual(important.content, "HOT SUMMARY")
+        self.assertEqual(monthly.item_ids, ("deployment.md",))
+        self.assertEqual(monthly.original_items, 1)
+        self.assertEqual(monthly.injected_items, 1)
+        self.assertIn("MONTH DETAIL", monthly.content)
+
     def test_legacy_memory_file_is_ignored_without_affecting_table_prompt(self) -> None:
         _, root, config = self.make_root()
         self.write_memory(

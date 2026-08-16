@@ -125,7 +125,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
                     20000,
                 )
 
-    def test_periodic_view_keeps_source_and_excludes_it_from_regular_prompt(
+    def test_periodic_view_keeps_source_in_regular_prompt_as_reinforcement(
         self,
     ) -> None:
         store = self._store()
@@ -148,7 +148,9 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertTrue(store.important_view_is_current())
         self.assertEqual(store.get_entry("seven_days", filename)["weight"], 0)
         selection = store.select_tier_for_prompt("seven_days", max_files=10)
-        self.assertEqual(selection.selected_ids, ())
+        self.assertEqual(selection.selected_ids, (filename,))
+        self.assertEqual(selection.original_items, 1)
+        self.assertEqual(selection.injected_items, 1)
 
         store.upsert_candidates(
             [{"filename": filename, "content": "用户偏好非常简洁的回复。"}],
@@ -157,6 +159,30 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
         self.assertFalse(store.important_view_is_current())
         refreshed = store.select_tier_for_prompt("seven_days", max_files=10)
         self.assertEqual(refreshed.selected_ids, (filename,))
+
+    def test_featured_one_month_fragment_remains_in_regular_prompt(self) -> None:
+        store = self._store()
+        filename = "远程部署约束.md"
+        store.create_fragment(
+            "one_month",
+            filename,
+            "远程部署必须保留完整原始配置与更新步骤。",
+        )
+
+        execute(
+            _Context(
+                self.root,
+                "# 临时重要记忆\n\n- 远程部署需要谨慎更新。",
+                featured=[{"tier": "one_month", "filename": filename}],
+            ),
+            {"trigger": "periodic_scan"},
+        )
+
+        self.assertEqual(store.load_important_view_sources(), {filename})
+        self.assertTrue(store.important_view_is_current())
+        selection = store.select_tier_for_prompt("one_month", max_files=10)
+        self.assertEqual(selection.selected_ids, (filename,))
+        self.assertIn("完整原始配置与更新步骤", selection.text)
 
     def test_unique_high_confidence_featured_filename_typo_is_corrected(self) -> None:
         store = self._store()
@@ -206,7 +232,7 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
                 {"trigger": "periodic_scan"},
             )
 
-    def test_one_stale_source_restores_every_featured_fragment_to_regular_prompt(
+    def test_one_stale_source_invalidates_view_without_hiding_regular_fragments(
         self,
     ) -> None:
         store = self._store()
@@ -228,6 +254,8 @@ class ImportantMemoryExecutorTests(unittest.TestCase):
             {"trigger": "periodic_scan"},
         )
         self.assertEqual(store.load_important_view_sources(), set(created))
+        selected = store.select_tier_for_prompt("seven_days", max_files=10)
+        self.assertEqual(set(selected.selected_ids), set(created))
 
         store.upsert_candidates(
             [{"filename": created[1], "content": "项目必须兼容 Windows 和 Linux。"}],
