@@ -79,6 +79,7 @@ kemo-agent/
 | `skill-creation.md` | 共享技能和用户技能的结构与作用域 |
 | `knowledge-creation.md` | 三层知识库及索引维护规则 |
 | `history-storage.md` | 用户级 SQLite 历史表、分页、搜索、备份与旧格式边界 |
+| `persistence-write-path.md` | 高频任务内存态、采集按变化写入、历史增量提交与终态事务边界 |
 | `memory-storage.md` | 用户级 SQLite 记忆表、生命周期事务、每日加权约束、热视图与旧格式边界 |
 | `runtime-state-storage.md` | 任务计划、上下文摘要、消息幂等和外部路由状态的数据库分工与迁移 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |

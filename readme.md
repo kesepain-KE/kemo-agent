@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,9 +204,9 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.0`
+当前版本：`1.2.1`
 
-`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路，`1.0.3` 建立可配置的请求级动态快照，`1.0.4` 增强工具调用连续性与多入口体验。`1.0.5` 为拓展和感知分别增加用户级总注入闸门。`1.1.0` 完成 Android 移动端闭环，`1.1.1` 将 App 对话固定隔离到 `source=app`，`1.1.2` 加固任务计划、记忆、长工具等待、APP 桥接与 Web 交互。`1.2.0` 是长任务版本：用户可以为单个 `user + source + session_id` 对话空间显式开启长任务模式；当前 Run 达到单轮工具调用上限时，框架会先完整提交历史，再在同一会话锁内自动创建下一 Run，并通过非终态 `long_task_update` 持续报告原始请求、累计耗时、Run/续跑次数、工具调用、Provider 请求和 Token 用量。关闭开关不会打断正在执行的 Run，取消则终止整个逻辑长任务；不同对话空间及 Web/App 来源互不影响。上下文保护、Provider 错误、任务计划批准边界和普通用户取消不会被自动续跑绕过。自动、手动及 Provider 超限压缩也会通过输入框上方的状态气泡显示进度；压缩摘要可用与裁剪轮次的后台记忆分析是两个独立阶段。该状态保存在现有会话记录中，不写入全局或用户配置文件。后续版本将继续聚焦边缘生态、性能与长期可靠性。
+`1.0.0` 标志着 kemo-agent 主生态首次补齐并进入稳定主版本，`1.0.1` 完成了框架级系统性稳定性复核。`1.0.2` 重点修复潮汐记忆的关键链路，`1.0.3` 建立可配置的请求级动态快照，`1.0.4` 增强工具调用连续性与多入口体验。`1.0.5` 为拓展和感知分别增加用户级总注入闸门。`1.1.0` 完成 Android 移动端闭环，`1.1.1` 将 App 对话固定隔离到 `source=app`，`1.1.2` 加固任务计划、记忆、长工具等待、APP 桥接与 Web 交互。`1.2.0` 是长任务版本：用户可以为单个 `user + source + session_id` 对话空间显式开启长任务模式；当前 Run 达到单轮工具调用上限时，框架会先完整提交历史，再在同一会话锁内自动创建下一 Run，并通过非终态 `long_task_update` 持续报告原始请求、累计耗时、Run/续跑次数、工具调用、Provider 请求和 Token 用量。关闭开关不会打断正在执行的 Run，取消则终止整个逻辑长任务；不同对话空间及 Web/App 来源互不影响。上下文保护、Provider 错误、任务计划批准边界和普通用户取消不会被自动续跑绕过。自动、手动及 Provider 超限压缩也会通过输入框上方的状态气泡显示进度；压缩摘要可用与裁剪轮次的后台记忆分析是两个独立阶段。该状态保存在现有会话记录中，不写入全局或用户配置文件。`1.2.1` 是运行可靠性补丁：历史正文、轮次、索引和会话状态采用更严格的事务与跨进程写盘边界；系统 Cron 增加单领导租约、内存运行态检查点和成功日志聚合；主智能体与子代理统一使用整批工具参数校验和安全恢复；Web 能力引用抽屉统一展示拓展、技能与插件；`kemo_app` 桥接 1.1.4 则补齐脱离客户端的运行快照、生命周期锁、PID/实例对账及临时退避自愈。后续版本将继续聚焦边缘生态、性能与长期可靠性。
 
 目前可以体验的内容包括：
 

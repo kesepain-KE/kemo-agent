@@ -147,8 +147,8 @@ POST /api/users/{user}/sessions/{session_id}/long-task/cancel?source=web
 ## 客户端实现边界
 
 - Web 已提供会话操作菜单开关和输入框上方的长任务状态气泡。
-- APP 或其他客户端只需接入上述核心 API 与 SSE 合同，不需要修改或依赖 `global_expand/kemo_app`
-  的内部实现。
+- APP 通过 `global_expand/kemo_app` 的认证桥接接入上述核心 API 与 SSE 合同。桥接层可以把手机
+  SSE 降级为可断开的订阅者，并提供运行快照/游标恢复，但不得改变本节的会话状态机、重复提交
+  原始请求或把手机断线映射成 Run 取消。
 - 普通 Run ID 取消只针对当前内部 Run；长任务气泡上的“停止整个任务”应调用会话级 cancel API。
 - 开关是用户授权，不是模型判断结果。模型不得在用户关闭时替用户打开长任务模式。
-
