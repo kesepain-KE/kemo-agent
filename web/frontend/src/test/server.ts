@@ -261,7 +261,11 @@ export const handlers = [
       { id: 'user_created:user_create/manual', name: 'user_create/manual', title: '用户自建技能', description: '由用户上传', category: 'user_created', version: '', enabled: true, editable: true, toggleable: false, downloadable: false, path: 'users/kesepain/user_skills/user_create/manual' },
     ],
     prompt_summary: { registered: 3, active: 3, user: 2, shared: 1 },
-    prompt_skills: [{ name: 'example', title: '示例技能', description: '共享示例技能', scope: 'shared', category: 'shared', path: 'shared_skills/example', active_for_main_agent: true }],
+    prompt_skills: [
+      { name: 'example', title: '示例技能', description: '共享示例技能', scope: 'shared', category: 'shared', path: 'shared_skills/example', active_for_main_agent: true },
+      { name: 'agent_create/generated', title: '智能体生成技能', description: '由智能体创建', scope: 'user', category: 'agent_generated', path: 'users/kesepain/user_skills/agent_create/generated', active_for_main_agent: true },
+      { name: 'user_create/manual', title: '用户自建技能', description: '由用户上传', scope: 'user', category: 'user_created', path: 'users/kesepain/user_skills/user_create/manual', active_for_main_agent: true },
+    ],
     source_policy: sourcePolicy,
   })),
   http.get('/api/users/kesepain/skills/:category/document', ({ params, request }) => {

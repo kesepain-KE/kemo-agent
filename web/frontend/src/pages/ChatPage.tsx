@@ -25,12 +25,13 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
+import { buildCapabilityReferenceItems, capabilityReferenceLine, capabilityReferenceMarker } from '../components/capabilityReferences'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
-import { ExpandReferenceDrawer } from '../components/ExpandReferenceDrawer'
+import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
 import { LongTaskBubble } from '../components/LongTaskBubble'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
@@ -38,7 +39,7 @@ import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, ExpandModuleSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { randomUUID } from '../randomId'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
@@ -1046,7 +1047,7 @@ export function ChatPage() {
   const [copiedItem, setCopiedItem] = useState('')
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false)
-  const [expandDrawerOpen, setExpandDrawerOpen] = useState(false)
+  const [capabilityDrawerOpen, setCapabilityDrawerOpen] = useState(false)
   const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [longTaskBusy, setLongTaskBusy] = useState(false)
@@ -1130,11 +1131,16 @@ export function ChatPage() {
   const expandsQuery = useQuery({
     queryKey: ['expands', user],
     queryFn: () => getExpands(user),
-    enabled: Boolean(user && expandDrawerOpen),
+    enabled: Boolean(user && capabilityDrawerOpen),
   })
-  const expandModules = useMemo(
-    () => expandsQuery.data?.expands.flatMap((group) => group.items) ?? [],
-    [expandsQuery.data],
+  const skillsQuery = useQuery({
+    queryKey: ['skills', user],
+    queryFn: () => getSkills(user),
+    enabled: Boolean(user && capabilityDrawerOpen),
+  })
+  const capabilityItems = useMemo(
+    () => buildCapabilityReferenceItems(expandsQuery.data, skillsQuery.data),
+    [expandsQuery.data, skillsQuery.data],
   )
 
   const historyData = useMemo(
@@ -1163,7 +1169,7 @@ export function ChatPage() {
     setCopiedItem('')
     if (!running) setActiveRunId('')
     setKnowledgeDrawerOpen(false)
-    setExpandDrawerOpen(false)
+    setCapabilityDrawerOpen(false)
     setConversationBusy('')
     setConversationFeedback(null)
     setLongTaskBusy(false)
@@ -1944,15 +1950,15 @@ export function ChatPage() {
     })
     setKnowledgeDrawerOpen(false)
   }
-  const referenceExpand = (module: ExpandModuleSummary) => {
-    const referenceId = `${module.scope}:${module.name}`
-    const reference = `[拓展引用 ${referenceId}] ${module.display_name || module.name}`
+  const referenceCapability = (item: CapabilityReferenceItem) => {
+    const marker = capabilityReferenceMarker(item)
+    const reference = capabilityReferenceLine(item)
     setDraft((current) => {
-      if (current.includes(`[拓展引用 ${referenceId}]`)) return current
+      if (current.includes(marker)) return current
       const existing = current.trimEnd()
       return existing ? `${existing}\n${reference}` : reference
     })
-    setExpandDrawerOpen(false)
+    setCapabilityDrawerOpen(false)
   }
   const conversationItems = archiveTerminalPlansInConversation(
     items.filter((item) => item.kind !== 'context_compression'),
@@ -2185,12 +2191,12 @@ export function ChatPage() {
           onChange={setDraft}
           onUploadFiles={uploadFiles}
           onOpenKnowledge={() => {
-            setExpandDrawerOpen(false)
+            setCapabilityDrawerOpen(false)
             setKnowledgeDrawerOpen(true)
           }}
-          onOpenExpand={() => {
+          onOpenCapabilities={() => {
             setKnowledgeDrawerOpen(false)
-            setExpandDrawerOpen(true)
+            setCapabilityDrawerOpen(true)
           }}
           onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value) => !value)}
@@ -2206,13 +2212,21 @@ export function ChatPage() {
         onClose={() => setKnowledgeDrawerOpen(false)}
         onReference={referenceKnowledge}
       />
-      <ExpandReferenceDrawer
-        open={expandDrawerOpen}
-        modules={expandModules}
-        loading={expandsQuery.isLoading || expandsQuery.isFetching}
-        error={expandsQuery.isError}
-        onClose={() => setExpandDrawerOpen(false)}
-        onReference={referenceExpand}
+      <CapabilityReferenceDrawer
+        open={capabilityDrawerOpen}
+        items={capabilityItems}
+        loading={{
+          expand: expandsQuery.isLoading || expandsQuery.isFetching,
+          skill: skillsQuery.isLoading || skillsQuery.isFetching,
+          plugin: skillsQuery.isLoading || skillsQuery.isFetching,
+        }}
+        error={{
+          expand: expandsQuery.isError,
+          skill: skillsQuery.isError,
+          plugin: skillsQuery.isError,
+        }}
+        onClose={() => setCapabilityDrawerOpen(false)}
+        onReference={referenceCapability}
       />
     </div>
   )

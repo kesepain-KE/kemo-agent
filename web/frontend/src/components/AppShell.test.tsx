@@ -1333,20 +1333,34 @@ describe('AppShell navigation', () => {
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
 
-  it('输入框拓展按钮打开侧边卡片并把稳定引用追加到草稿', async () => {
+  it('输入框能力按钮按类型引用拓展、技能和插件并追加稳定标记', async () => {
     renderApp('/chat?user=kesepain&session=s1')
     const composer = await screen.findByRole('textbox', { name: '消息内容' })
     fireEvent.change(composer, { target: { value: '先检查当前状态' } })
-    fireEvent.click(screen.getByRole('button', { name: '打开拓展' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
 
-    const drawer = await screen.findByRole('dialog', { name: '拓展引用' })
+    let drawer = await screen.findByRole('dialog', { name: '能力引用' })
     fireEvent.click(within(drawer).getByRole('button', { name: '全局' }))
     expect(await within(drawer).findByText('智能灯光控制')).toBeInTheDocument()
     fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索拓展' }), { target: { value: '客厅' } })
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 智能灯光控制' }))
 
     await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制'))
-    expect(screen.queryByRole('dialog', { name: '拓展引用' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '能力引用' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
+    drawer = await screen.findByRole('dialog', { name: '能力引用' })
+    fireEvent.click(within(drawer).getByRole('tab', { name: '技能' }))
+    fireEvent.click(within(drawer).getByRole('button', { name: '用户' }))
+    fireEvent.click(await within(drawer).findByRole('button', { name: '引用 用户自建技能' }))
+    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制\n[技能引用 user:user_create/manual] 用户自建技能'))
+
+    fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
+    drawer = await screen.findByRole('dialog', { name: '能力引用' })
+    fireEvent.click(within(drawer).getByRole('tab', { name: '插件' }))
+    expect(within(drawer).getByRole('navigation', { name: '插件层级' })).toHaveTextContent('全局')
+    fireEvent.click(await within(drawer).findByRole('button', { name: '引用 clock' }))
+    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制\n[技能引用 user:user_create/manual] 用户自建技能\n[插件引用 global:clock] clock'))
   })
 
   it('侧边栏不再渲染历史对话区，历史统一从右上角入口查看', async () => {

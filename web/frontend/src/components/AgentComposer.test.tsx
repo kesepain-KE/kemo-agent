@@ -15,7 +15,7 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
     roundLimit: 30,
     onChange: vi.fn(),
     onOpenKnowledge: vi.fn(),
-    onOpenExpand: vi.fn(),
+    onOpenCapabilities: vi.fn(),
     onOpenCommands: vi.fn(),
     onToggleConversationMenu: vi.fn(),
     onSubmit: vi.fn(),
@@ -133,11 +133,11 @@ describe('AgentComposer', () => {
     expect(onSubmit).toHaveBeenCalledOnce()
   })
 
-  it('Boxes 按钮打开拓展面板', () => {
-    const onOpenExpand = vi.fn()
-    renderComposer({ onOpenExpand })
-    fireEvent.click(screen.getByRole('button', { name: '打开拓展' }))
-    expect(onOpenExpand).toHaveBeenCalledTimes(1)
+  it('Boxes 按钮打开统一能力引用面板', () => {
+    const onOpenCapabilities = vi.fn()
+    renderComposer({ onOpenCapabilities })
+    fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
+    expect(onOpenCapabilities).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('button', { name: '打开技能' })).not.toBeInTheDocument()
   })
 

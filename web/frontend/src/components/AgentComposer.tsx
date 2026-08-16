@@ -22,7 +22,7 @@ export interface AgentComposerProps {
   onChange: (value: string) => void
   onUploadFiles?: (files: File[]) => void
   onOpenKnowledge: () => void
-  onOpenExpand: () => void
+  onOpenCapabilities: () => void
   onOpenCommands: () => void
   onToggleConversationMenu: () => void
   onSubmit: () => void
@@ -47,7 +47,7 @@ export function AgentComposer({
   onChange,
   onUploadFiles,
   onOpenKnowledge,
-  onOpenExpand,
+  onOpenCapabilities,
   onOpenCommands,
   onToggleConversationMenu,
   onSubmit,
@@ -137,7 +137,7 @@ export function AgentComposer({
           <ComposerIconButton label="打开知识库" onClick={onOpenKnowledge} disabled={disabled}>
             <BookOpen />
           </ComposerIconButton>
-          <ComposerIconButton label="打开拓展" onClick={onOpenExpand} disabled={disabled}>
+          <ComposerIconButton label="打开能力引用" title="引用拓展、技能或插件" onClick={onOpenCapabilities} disabled={disabled}>
             <Boxes />
           </ComposerIconButton>
           <ComposerIconButton label="打开快捷指令" onClick={onOpenCommands} disabled={disabled} command>
