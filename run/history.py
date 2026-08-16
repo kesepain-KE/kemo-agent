@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from run.history_index import (
+    build_window_record,
     find_record as find_index_record,
     list_records as list_index_records,
     list_records_page as list_index_records_page,
@@ -37,8 +38,10 @@ from run.history_store import (
     find_window_name,
     list_windows as list_stored_windows,
     load_window as load_stored_window,
+    patch_window_data,
     rename_windows,
     save_window,
+    save_window_bundle,
     window_exists,
 )
 from run.users import user_dir
@@ -487,6 +490,173 @@ def commit_window(
                 pass
 
 
+def commit_terminal_windows(
+    archive_directory: Path,
+    archive_window: dict[str, Any],
+    runtime_directory: Path,
+    runtime_window: dict[str, Any],
+    *,
+    summary_cache: dict[str, Any] | None = None,
+    run_state: str = "idle",
+    active_key: str | None = None,
+) -> None:
+    """Commit both terminal windows and the session row in one transaction."""
+
+    directories = sorted(
+        (archive_directory, runtime_directory), key=lambda value: str(value.resolve())
+    )
+    first_lock = _lock(directories[0])
+    second_lock = _lock(directories[1])
+    with first_lock:
+        with second_lock:
+            timestamp = _now()
+
+            archive_data = {
+                key: value
+                for key, value in dict(archive_window["data"]).items()
+                if key in _ARCHIVE_DATA_FIELDS
+            }
+            archive_data["updated_at"] = timestamp
+            archive_data["complete"] = True
+            archive_items = archive_window.get("items")
+            if not isinstance(archive_items, dict) or not isinstance(
+                archive_items.get("items"), list
+            ):
+                archive_items = synthesize_items(archive_window)
+                archive_window["items"] = archive_items
+            stored_archive = {
+                "text": archive_window["text"],
+                "think": archive_window["think"],
+                "tool": archive_window["tool"],
+                "items": archive_items,
+                "data": archive_data,
+            }
+
+            runtime_data = dict(runtime_window["data"])
+            runtime_data["updated_at"] = timestamp
+            runtime_data["complete"] = True
+            runtime_items = runtime_window.get("items")
+            if not isinstance(runtime_items, dict) or not isinstance(
+                runtime_items.get("items"), list
+            ):
+                runtime_items = synthesize_items(runtime_window)
+                runtime_window["items"] = runtime_items
+            stored_runtime = {
+                "text": runtime_window["text"],
+                "think": runtime_window["think"],
+                "tool": runtime_window["tool"],
+                "items": runtime_items,
+                "data": runtime_data,
+            }
+
+            source = str(archive_data.get("source") or "")
+            session_id = str(archive_data.get("session_id") or "")
+            user = str(archive_data.get("user") or archive_directory.parent.parent.name)
+            root = archive_directory.parents[3]
+            previous = find_index_record(root, user, source, session_id)
+            record = build_window_record(
+                source=source,
+                session_id=session_id,
+                directory=archive_directory,
+                data=archive_data,
+                previous=previous,
+                run_state=run_state,
+            )
+            active_updates = (
+                {active_key: {"source": source, "session_id": session_id}}
+                if isinstance(active_key, str) and active_key.strip()
+                else None
+            )
+            stored_data = save_window_bundle(
+                [
+                    (archive_directory, stored_archive, _SUMMARY_UNCHANGED),
+                    (runtime_directory, stored_runtime, summary_cache),
+                ],
+                session_record=record,
+                active_updates=active_updates,
+                updated_at=timestamp,
+            )
+            for target, data in (
+                (archive_window, stored_data[0]),
+                (runtime_window, stored_data[1]),
+            ):
+                current = target.get("data")
+                if isinstance(current, dict):
+                    current.clear()
+                    current.update(data)
+                else:
+                    target["data"] = data
+
+
+def patch_archive_metadata(
+    directory: Path,
+    window: dict[str, Any],
+    *,
+    updates: dict[str, Any],
+    removals: tuple[str, ...] = (),
+    run_state: str | None = None,
+) -> dict[str, Any]:
+    """Persist a small archive metadata transition without rewriting messages."""
+
+    with _lock(directory):
+        current = window.setdefault("data", {})
+        if not isinstance(current, dict):
+            raise HistoryError("历史窗口 data 分区无效")
+        data = {
+            key: copy.deepcopy(value)
+            for key, value in current.items()
+            if key in _ARCHIVE_DATA_FIELDS
+        }
+        for key, value in updates.items():
+            if key in _ARCHIVE_DATA_FIELDS:
+                data[key] = copy.deepcopy(value)
+        for key in removals:
+            data.pop(key, None)
+        updated_at = _now()
+        metadata_updates = {
+            key: copy.deepcopy(value)
+            for key, value in updates.items()
+            if key in _ARCHIVE_DATA_FIELDS
+        }
+        metadata_updates.update({"updated_at": updated_at, "complete": True})
+        metadata_removals = tuple(
+            key for key in removals if key in _ARCHIVE_DATA_FIELDS
+        )
+
+        def build_record(
+            merged: dict[str, Any], previous: dict[str, Any] | None
+        ) -> dict[str, Any]:
+            source = str(merged.get("source") or "")
+            session_id = str(merged.get("session_id") or "")
+            return build_window_record(
+                source=source,
+                session_id=session_id,
+                directory=directory,
+                data=merged,
+                previous=previous,
+                run_state=run_state,
+            )
+
+        stored = patch_window_data(
+            directory,
+            data,
+            merge_updates=metadata_updates,
+            merge_removals=metadata_removals,
+            session_record_factory=build_record,
+            updated_at=updated_at,
+        )
+
+        # The metadata transaction intentionally does not rebuild transcript
+        # partitions.  Reload the current data so callers do not replace a
+        # newer in-memory round with the stale snapshot they passed in.
+        fresh = load_stored_window(directory)
+        if isinstance(fresh, dict) and isinstance(fresh.get("data"), dict):
+            stored = fresh["data"]
+        current.clear()
+        current.update(stored)
+        return stored
+
+
 def load_window(directory: Path) -> dict[str, Any]:
     with _lock(directory):
         window = load_stored_window(directory)
@@ -500,7 +670,12 @@ def load_window(directory: Path) -> dict[str, Any]:
         ):
             raise HistoryError(f"历史 text 分区 schema 无效：{directory}")
         items = window.get("items")
-        if not isinstance(items, dict) or not isinstance(items.get("items"), list):
+        messages = (window.get("text") or {}).get("messages")
+        if (
+            not isinstance(items, dict)
+            or not isinstance(items.get("items"), list)
+            or (not items.get("items") and isinstance(messages, list) and messages)
+        ):
             window["items"] = synthesize_items(window)
         return window
 
@@ -935,7 +1110,17 @@ def queue_memory_extraction(
     data["memory_target_round"] = bounded_target
     data["memory_queued_at"] = _now()
     data.pop("memory_error", None)
-    commit_window(directory, window)
+    patch_archive_metadata(
+        directory,
+        window,
+        updates={
+            "memory_status": "queued",
+            "memory_queue_reason": data["memory_queue_reason"],
+            "memory_target_round": bounded_target,
+            "memory_queued_at": data["memory_queued_at"],
+        },
+        removals=("memory_error",),
+    )
     indexed = find_index_record(root, user, source, session_id)
     if (
         not isinstance(indexed, dict)

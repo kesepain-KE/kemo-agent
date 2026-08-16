@@ -282,6 +282,29 @@ def _record_from_data(
     return record
 
 
+def build_window_record(
+    *,
+    source: str,
+    session_id: str,
+    directory: Path,
+    data: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+    run_state: str | None = None,
+) -> dict[str, Any]:
+    """Build the registry row used by a window/registry transaction bundle."""
+
+    record = _record_from_data(
+        source=source,
+        session_id=session_id,
+        directory=directory,
+        data=data,
+        previous=previous,
+    )
+    if run_state is not None:
+        record["run_state"] = run_state
+    return record
+
+
 def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for stored in list_stored_windows(root, user):
@@ -301,7 +324,7 @@ def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
             current_updated = str(data.get("updated_at") or "")
             if current_updated <= previous_updated:
                 continue
-        record = _record_from_data(
+        record = build_window_record(
             source=source,
             session_id=session_id,
             directory=child,
@@ -483,15 +506,14 @@ def upsert_window(
 
     with index_lock(root, user):
         previous = read_registry_record(root, user, source, session_id)
-        record = _record_from_data(
+        record = build_window_record(
             source=source,
             session_id=session_id,
             directory=directory,
             data=data,
             previous=previous,
+            run_state=run_state,
         )
-        if run_state is not None:
-            record["run_state"] = run_state
         return upsert_registry_record(root, user, record, updated_at=_now())
 
 

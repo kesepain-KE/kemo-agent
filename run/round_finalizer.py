@@ -21,11 +21,9 @@ from run.context_summary import SUMMARY_STORE_REF, build_summary_message
 from run.history import (
     _trim_to_max_rounds,
     append_round_items,
-    commit_window,
+    commit_terminal_windows,
     queue_memory_extraction,
 )
-from run.history_index import set_active as set_active_history_session
-from run.history_index import update_run_state
 from run.prompt import PromptBundle
 from run.run_state import RoundState, RunDependencies, RunIdentity
 from run.session_runtime import copy_committed_round_to_archive
@@ -315,9 +313,10 @@ class TerminalRoundCommitter:
             "usage": dict(context.state.usage_total),
             "elapsed_ms": elapsed_ms,
             "tool_calls": len(cancelled_records),
+            "tool_argument_retries": context.state.tool_argument_retries,
             "guidance": list(context.state.consumed_guidance),
             "guidance_details": copy.deepcopy(context.state.consumed_guidance_details),
-            "context.state.provider_responses": copy.deepcopy(context.state.provider_responses),
+            "provider_responses": copy.deepcopy(context.state.provider_responses),
             "status": status,
             "stop_reason": reason,
             **(
@@ -390,13 +389,22 @@ class TerminalRoundCommitter:
                 },
             }
     
-        commit_window(window_path, cancelled_archive)
-        commit_window(
+        active_key = request.get("_history_active_key")
+        commit_terminal_windows(
+            window_path,
+            cancelled_archive,
             runtime_path,
             runtime_window,
             summary_cache=summary_cache,
+            run_state="idle",
+            active_key=(
+                active_key.strip()
+                if isinstance(active_key, str) and active_key.strip()
+                else None
+            ),
         )
         context.state.finalized = True
+        context.state.history_run_registered = False
         if (
             queue_compression_memory
             and summary_cache is not None
@@ -411,31 +419,6 @@ class TerminalRoundCommitter:
                 archive_round_number=archive_round_number,
                 reason=f"automatic_compression_{status}_round",
             )
-        try:
-            update_run_state(
-                base,
-                user,
-                source,
-                session_id,
-                run_state="idle",
-                run_id=run_id or None,
-                directory=window_path,
-            )
-            context.state.history_run_registered = False
-        except Exception:
-            pass
-        active_key = request.get("_history_active_key")
-        if isinstance(active_key, str) and active_key.strip():
-            try:
-                set_active_history_session(
-                    base,
-                    user,
-                    active_key.strip(),
-                    session_id,
-                    source=source,
-                )
-            except Exception:
-                pass
         terminal_metadata = {
             "text": terminal_text,
             "reasoning": reasoning,

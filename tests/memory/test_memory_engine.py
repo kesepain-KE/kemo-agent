@@ -249,23 +249,24 @@ class MemoryEngineTests(unittest.TestCase):
         )
         self.assertTrue(window_exists(runtime))
 
-    def test_index_memory_error_does_not_fail_commit_or_leave_run_running(self) -> None:
+    def test_terminal_bundle_does_not_need_redundant_memory_index_update(self) -> None:
         root = self.root()
         request = self.request()
         request["session_id"] = "index-error"
         with (
             patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False),
             patch(
-                "run.conversation_runtime.update_memory_state",
+                "run.conversation_runtime.patch_archive_metadata",
                 side_effect=RuntimeError("index failed"),
-            ),
+            ) as metadata_patch,
         ):
             result = handle_request(
                 request, root=root, provider_factory=lambda _: Provider()
             )
 
         self.assertTrue(result["committed"])
-        self.assertEqual(result["history_index_error"]["message"], "index failed")
+        self.assertIsNone(result["history_index_error"])
+        metadata_patch.assert_not_called()
         indexed = find_history_record(root, "alice", "cli", "index-error")
         self.assertEqual(indexed["run_state"], "idle")
 

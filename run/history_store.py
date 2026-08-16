@@ -19,7 +19,7 @@ from run.users import user_dir
 
 
 HISTORY_DB_FILENAME = "history.sqlite3"
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 3
 _SUMMARY_UNSET = object()
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
@@ -50,6 +50,90 @@ def _configure(connection: sqlite3.Connection, *, initialize: bool = False) -> N
         connection.execute("PRAGMA synchronous=NORMAL")
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=5000")
+
+
+def _migrate_archive_text_to_messages(connection: sqlite3.Connection) -> None:
+    """Make archive message rows authoritative and remove the duplicate text blob."""
+
+    rows = connection.execute(
+        "SELECT window_name, source, session_id, created_at, updated_at, text_json "
+        "FROM history_windows WHERE window_kind='archive'"
+    ).fetchall()
+    for row in rows:
+        text = _object(row["text_json"], {"schema_version": 1, "messages": []})
+        messages = text.get("messages") if isinstance(text, dict) else []
+        candidates = _message_rows(
+            str(row["window_name"]),
+            str(row["source"]),
+            str(row["session_id"]),
+            str(row["created_at"]),
+            str(row["updated_at"]),
+            messages if isinstance(messages, list) else [],
+        )
+        existing = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM history_messages WHERE window_name=?",
+                (str(row["window_name"]),),
+            ).fetchone()[0]
+        )
+        if existing != len(candidates):
+            connection.execute(
+                "DELETE FROM history_messages WHERE window_name=?",
+                (str(row["window_name"]),),
+            )
+            connection.executemany(
+                _MESSAGE_INSERT_SQL,
+                candidates,
+            )
+        compact_text = {
+            "schema_version": max(1, int(text.get("schema_version") or 1))
+            if isinstance(text, dict)
+            else 1,
+            "storage": "history_messages",
+        }
+        connection.execute(
+            "UPDATE history_windows SET text_json=? "
+            "WHERE window_kind='archive' AND window_name=?",
+            (_json(compact_text), str(row["window_name"])),
+        )
+
+
+def _migrate_window_partitions_to_rounds(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT window_name, window_kind, data_json, think_json, tool_json, items_json "
+        "FROM history_windows"
+    ).fetchall()
+    for row in rows:
+        data = _object(row["data_json"], {})
+        think = _object(row["think_json"], {"schema_version": 1, "rounds": []})
+        tool = _object(row["tool_json"], {"schema_version": 1, "rounds": []})
+        items = _object(row["items_json"], {"schema_version": 2, "items": []})
+        _sync_window_rounds(
+            connection,
+            window_kind=str(row["window_kind"]),
+            window_name=str(row["window_name"]),
+            think=think if isinstance(think, dict) else {},
+            tool=tool if isinstance(tool, dict) else {},
+            items=items if isinstance(items, dict) else {},
+            metrics=data.get("round_metrics") if isinstance(data, dict) else [],
+        )
+        if isinstance(data, dict):
+            data.pop("round_metrics", None)
+            data["round_metrics_storage"] = "history_rounds"
+        connection.execute(
+            """
+            UPDATE history_windows SET data_json=?, think_json=?, tool_json=?, items_json=?
+            WHERE window_kind=? AND window_name=?
+            """,
+            (
+                _json(data),
+                _json(_partition_reference(think, default_schema=1)),
+                _json(_partition_reference(tool, default_schema=1)),
+                _json(_partition_reference(items, default_schema=2)),
+                str(row["window_kind"]),
+                str(row["window_name"]),
+            ),
+        )
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
@@ -126,6 +210,19 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_history_messages_role
             ON history_messages(role, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS history_rounds (
+            window_kind TEXT NOT NULL CHECK (window_kind IN ('archive', 'runtime')),
+            window_name TEXT NOT NULL,
+            round_number INTEGER NOT NULL,
+            think_json TEXT NOT NULL DEFAULT '',
+            tool_json TEXT NOT NULL DEFAULT '',
+            items_json TEXT NOT NULL DEFAULT '[]',
+            metric_json TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (window_kind, window_name, round_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_rounds_window
+            ON history_rounds(window_kind, window_name, round_number);
+
         CREATE TABLE IF NOT EXISTS history_context_summaries (
             window_name TEXT PRIMARY KEY,
             source TEXT NOT NULL DEFAULT '',
@@ -158,6 +255,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             ON message_processed_messages(status, updated_at);
         """
     )
+    current_row = connection.execute(
+        "SELECT value FROM history_meta WHERE key='schema_version'"
+    ).fetchone()
+    try:
+        current_version = int(current_row[0]) if current_row is not None else 0
+    except (TypeError, ValueError):
+        current_version = 0
+    if current_version < 2:
+        _migrate_archive_text_to_messages(connection)
+    if current_version < 3:
+        _migrate_window_partitions_to_rounds(connection)
     connection.execute(
         "INSERT OR REPLACE INTO history_meta(key, value) VALUES('schema_version', ?)",
         (str(HISTORY_SCHEMA_VERSION),),
@@ -256,6 +364,227 @@ def _round_number(message: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
+_MESSAGE_INSERT_SQL = """
+    INSERT INTO history_messages(
+        window_name, message_index, source, session_id,
+        round_number, role, content_text, message_json,
+        created_at, updated_at
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _message_rows(
+    window_name: str,
+    source: str,
+    session_id: str,
+    created_at: str,
+    updated_at: str,
+    messages: list[Any],
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    fallback_round = 0
+    for index, raw in enumerate(messages):
+        if not isinstance(raw, dict):
+            continue
+        role = str(raw.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        if role == "user":
+            fallback_round += 1
+        rows.append(
+            (
+                window_name,
+                index,
+                source,
+                session_id,
+                _round_number(raw, fallback_round),
+                role,
+                _content_text(raw.get("content")),
+                _json(raw),
+                created_at,
+                updated_at,
+            )
+        )
+    return rows
+
+
+def _sync_archive_messages(
+    database: sqlite3.Connection,
+    *,
+    window_name: str,
+    source: str,
+    session_id: str,
+    created_at: str,
+    updated_at: str,
+    messages: list[Any],
+) -> None:
+    candidates = _message_rows(
+        window_name,
+        source,
+        session_id,
+        created_at,
+        updated_at,
+        messages,
+    )
+    existing = database.execute(
+        "SELECT message_index, source, session_id, message_json "
+        "FROM history_messages WHERE window_name=? ORDER BY message_index",
+        (window_name,),
+    ).fetchall()
+    prefix_matches = len(existing) <= len(candidates)
+    if prefix_matches:
+        for row, candidate in zip(existing, candidates):
+            if (
+                int(row["message_index"]) != int(candidate[1])
+                or str(row["source"]) != source
+                or str(row["session_id"]) != session_id
+                or str(row["message_json"]) != str(candidate[7])
+            ):
+                prefix_matches = False
+                break
+    if not prefix_matches:
+        database.execute(
+            "DELETE FROM history_messages WHERE window_name=?", (window_name,)
+        )
+        database.executemany(_MESSAGE_INSERT_SQL, candidates)
+        return
+    if len(existing) < len(candidates):
+        database.executemany(_MESSAGE_INSERT_SQL, candidates[len(existing) :])
+
+
+_ROUND_INSERT_SQL = """
+    INSERT INTO history_rounds(
+        window_kind, window_name, round_number,
+        think_json, tool_json, items_json, metric_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _safe_round_number(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    metadata = value.get("metadata")
+    raw = metadata.get("round") if isinstance(metadata, dict) else value.get("round")
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _partition_reference(value: Any, *, default_schema: int) -> dict[str, Any]:
+    schema = value.get("schema_version") if isinstance(value, dict) else default_schema
+    try:
+        rendered_schema = max(1, int(schema or default_schema))
+    except (TypeError, ValueError):
+        rendered_schema = default_schema
+    return {"schema_version": rendered_schema, "storage": "history_rounds"}
+
+
+def _partition_schema(value: Any, default_schema: int) -> int:
+    raw = value.get("schema_version") if isinstance(value, dict) else default_schema
+    try:
+        return max(1, int(raw or default_schema))
+    except (TypeError, ValueError):
+        return default_schema
+
+
+def _window_round_rows(
+    window_kind: str,
+    window_name: str,
+    *,
+    think: dict[str, Any],
+    tool: dict[str, Any],
+    items: dict[str, Any],
+    metrics: Any,
+) -> list[tuple[Any, ...]]:
+    thinks = {
+        number: value
+        for value in think.get("rounds", [])
+        if isinstance(value, dict) and (number := _safe_round_number(value)) > 0
+    }
+    tools = {
+        number: value
+        for value in tool.get("rounds", [])
+        if isinstance(value, dict) and (number := _safe_round_number(value)) > 0
+    }
+    metrics_by_round = {
+        number: value
+        for value in (metrics if isinstance(metrics, list) else [])
+        if isinstance(value, dict)
+        if (number := _safe_round_number(value)) > 0
+    }
+    items_by_round: dict[int, list[dict[str, Any]]] = {}
+    for value in items.get("items", []) if isinstance(items.get("items"), list) else []:
+        if not isinstance(value, dict):
+            continue
+        number = _safe_round_number(value)
+        items_by_round.setdefault(number, []).append(value)
+    round_numbers = sorted(
+        set(thinks) | set(tools) | set(metrics_by_round) | set(items_by_round)
+    )
+    return [
+        (
+            window_kind,
+            window_name,
+            number,
+            _json(thinks[number]) if number in thinks else "",
+            _json(tools[number]) if number in tools else "",
+            _json(items_by_round.get(number, [])),
+            _json(metrics_by_round[number]) if number in metrics_by_round else "",
+        )
+        for number in round_numbers
+    ]
+
+
+def _sync_window_rounds(
+    database: sqlite3.Connection,
+    *,
+    window_kind: str,
+    window_name: str,
+    think: dict[str, Any],
+    tool: dict[str, Any],
+    items: dict[str, Any],
+    metrics: Any,
+) -> None:
+    candidates = _window_round_rows(
+        window_kind,
+        window_name,
+        think=think,
+        tool=tool,
+        items=items,
+        metrics=metrics,
+    )
+    existing = database.execute(
+        """
+        SELECT round_number, think_json, tool_json, items_json, metric_json
+        FROM history_rounds WHERE window_kind=? AND window_name=?
+        ORDER BY round_number
+        """,
+        (window_kind, window_name),
+    ).fetchall()
+    prefix_matches = len(existing) <= len(candidates)
+    if prefix_matches:
+        for row, candidate in zip(existing, candidates):
+            if (
+                int(row["round_number"]) != int(candidate[2])
+                or str(row["think_json"]) != str(candidate[3])
+                or str(row["tool_json"]) != str(candidate[4])
+                or str(row["items_json"]) != str(candidate[5])
+                or str(row["metric_json"]) != str(candidate[6])
+            ):
+                prefix_matches = False
+                break
+    if not prefix_matches:
+        database.execute(
+            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
+            (window_kind, window_name),
+        )
+        database.executemany(_ROUND_INSERT_SQL, candidates)
+        return
+    if len(existing) < len(candidates):
+        database.executemany(_ROUND_INSERT_SQL, candidates[len(existing) :])
+
+
 def _store_context_summary(
     database: sqlite3.Connection,
     *,
@@ -308,107 +637,286 @@ def _store_context_summary(
     )
 
 
+def _save_window_on_connection(
+    database: sqlite3.Connection,
+    *,
+    kind: str,
+    name: str,
+    window: dict[str, Any],
+    summary_cache: dict[str, Any] | None | object = _SUMMARY_UNSET,
+) -> dict[str, Any]:
+    data = copy.deepcopy(window.get("data") or {})
+    text = copy.deepcopy(window.get("text") or {})
+    think = copy.deepcopy(window.get("think") or {})
+    tool = copy.deepcopy(window.get("tool") or {})
+    items = copy.deepcopy(window.get("items") or {})
+    existing = database.execute(
+        "SELECT title FROM history_windows WHERE window_kind=? AND window_name=?",
+        (kind, name),
+    ).fetchone()
+    if existing is not None:
+        data["title"] = str(existing["title"] or "")
+    data["complete"] = True
+    source = str(data.get("source") or "")
+    session_id = str(data.get("session_id") or "")
+    created_at = str(data.get("created_at") or data.get("updated_at") or "")
+    updated_at = str(data.get("updated_at") or "")
+    messages = text.get("messages", []) if isinstance(text, dict) else []
+    if kind == "archive":
+        _sync_archive_messages(
+            database,
+            window_name=name,
+            source=source,
+            session_id=session_id,
+            created_at=created_at,
+            updated_at=updated_at,
+            messages=messages if isinstance(messages, list) else [],
+        )
+        stored_text = {
+            "schema_version": max(1, int(text.get("schema_version") or 1)),
+            "storage": "history_messages",
+        }
+    else:
+        stored_text = text
+    _sync_window_rounds(
+        database,
+        window_kind=kind,
+        window_name=name,
+        think=think if isinstance(think, dict) else {},
+        tool=tool if isinstance(tool, dict) else {},
+        items=items if isinstance(items, dict) else {},
+        metrics=data.get("round_metrics"),
+    )
+    stored_data = copy.deepcopy(data)
+    stored_data.pop("round_metrics", None)
+    stored_data["round_metrics_storage"] = "history_rounds"
+    stored_think = _partition_reference(think, default_schema=1)
+    stored_tool = _partition_reference(tool, default_schema=1)
+    stored_items = _partition_reference(items, default_schema=2)
+    database.execute(
+        """
+        INSERT INTO history_windows(
+            window_name, window_kind, source, session_id, title,
+            created_at, updated_at, rounds, data_json, text_json,
+            think_json, tool_json, items_json
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(window_kind, window_name) DO UPDATE SET
+            source=excluded.source,
+            session_id=excluded.session_id,
+            title=excluded.title,
+            created_at=excluded.created_at,
+            updated_at=excluded.updated_at,
+            rounds=excluded.rounds,
+            data_json=excluded.data_json,
+            text_json=excluded.text_json,
+            think_json=excluded.think_json,
+            tool_json=excluded.tool_json,
+            items_json=excluded.items_json
+        """,
+        (
+            name,
+            kind,
+            source,
+            session_id,
+            str(data.get("title") or ""),
+            created_at,
+            updated_at,
+            max(0, int(data.get("rounds") or 0)),
+            _json(stored_data),
+            _json(stored_text),
+            _json(stored_think),
+            _json(stored_tool),
+            _json(stored_items),
+        ),
+    )
+    if kind == "runtime" and summary_cache is not _SUMMARY_UNSET:
+        _store_context_summary(
+            database,
+            window_name=name,
+            source=source,
+            session_id=session_id,
+            cache=summary_cache if isinstance(summary_cache, dict) else None,
+        )
+    return data
+
+
+def _write_registry_state(
+    database: sqlite3.Connection,
+    *,
+    record: dict[str, Any] | None,
+    active_updates: dict[str, dict[str, str] | None] | None,
+    updated_at: str,
+) -> None:
+    if record is not None:
+        _upsert_session_row(database, record)
+    for active_key, binding in (active_updates or {}).items():
+        if binding is None:
+            database.execute(
+                "DELETE FROM history_active_sessions WHERE active_key=?",
+                (str(active_key),),
+            )
+        else:
+            source = str(binding.get("source") or "")
+            session_id = str(binding.get("session_id") or "")
+            if source and session_id:
+                database.execute(
+                    """
+                    INSERT INTO history_active_sessions(active_key, source, session_id)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(active_key) DO UPDATE SET
+                        source=excluded.source, session_id=excluded.session_id
+                    """,
+                    (str(active_key), source, session_id),
+                )
+    if record is not None or active_updates:
+        database.execute(
+            """
+            INSERT INTO history_meta(key, value) VALUES('registry_revision', '1')
+            ON CONFLICT(key) DO UPDATE SET
+                value=CAST(COALESCE(NULLIF(history_meta.value, ''), '0') AS INTEGER) + 1
+            """
+        )
+        database.execute(
+            "INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_updated_at', ?)",
+            (updated_at,),
+        )
+
+
+def save_window_bundle(
+    entries: list[tuple[Path, dict[str, Any], dict[str, Any] | None | object]],
+    *,
+    session_record: dict[str, Any] | None = None,
+    active_updates: dict[str, dict[str, str] | None] | None = None,
+    updated_at: str = "",
+) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+    locations = [window_location(directory) for directory, _, _ in entries]
+    root, user = locations[0][0], locations[0][1]
+    if any(location[0] != root or location[1] != user for location in locations[1:]):
+        raise ValueError("同一历史事务只能写入一个用户的窗口")
+    stored: list[dict[str, Any]] = []
+    with connection(root, user, write=True) as database:
+        for (_, window, summary_cache), (_, _, kind, name) in zip(entries, locations):
+            stored.append(
+                _save_window_on_connection(
+                    database,
+                    kind=kind,
+                    name=name,
+                    window=window,
+                    summary_cache=summary_cache,
+                )
+            )
+        _write_registry_state(
+            database,
+            record=copy.deepcopy(session_record) if session_record is not None else None,
+            active_updates=active_updates,
+            updated_at=str(updated_at or (session_record or {}).get("updated_at") or ""),
+        )
+    return stored
+
+
 def save_window(
     directory: Path,
     window: dict[str, Any],
     *,
     summary_cache: dict[str, Any] | None | object = _SUMMARY_UNSET,
 ) -> dict[str, Any]:
+    return save_window_bundle([(directory, window, summary_cache)])[0]
+
+
+def patch_window_data(
+    directory: Path,
+    data: dict[str, Any],
+    *,
+    session_record: dict[str, Any] | None = None,
+    updated_at: str = "",
+    merge_updates: dict[str, Any] | None = None,
+    merge_removals: Iterable[str] = (),
+    session_record_factory: Callable[
+        [dict[str, Any], dict[str, Any] | None], dict[str, Any] | None
+    ] | None = None,
+) -> dict[str, Any]:
+    """Update window/session metadata without rewriting transcript partitions.
+
+    ``merge_updates`` is used by small asynchronous metadata transitions.  It
+    reads the current ``data_json`` while holding the SQLite write transaction
+    and overlays only the requested keys, so a caller's stale in-memory window
+    cannot roll back a newer conversation round.  A record factory receives
+    that merged data and the current registry row, allowing the registry to be
+    updated from the same transaction as the window row.
+    """
+
     root, user, kind, name = window_location(directory)
-    data = copy.deepcopy(window.get("data") or {})
-    text = copy.deepcopy(window.get("text") or {})
-    think = copy.deepcopy(window.get("think") or {})
-    tool = copy.deepcopy(window.get("tool") or {})
-    items = copy.deepcopy(window.get("items") or {})
     with connection(root, user, write=True) as database:
         existing = database.execute(
-            "SELECT title FROM history_windows WHERE window_kind=? AND window_name=?",
+            "SELECT source, session_id, title, data_json "
+            "FROM history_windows WHERE window_kind=? AND window_name=?",
             (kind, name),
         ).fetchone()
-        if existing is not None:
-            data["title"] = str(existing["title"] or "")
-        data["complete"] = True
+        if existing is None:
+            raise FileNotFoundError(f"历史窗口不存在：{directory}")
+
+        if merge_updates is None:
+            rendered = copy.deepcopy(data)
+        else:
+            current_data = _object(existing["data_json"], {})
+            rendered = copy.deepcopy(current_data) if isinstance(current_data, dict) else {}
+            for key, value in merge_updates.items():
+                rendered[str(key)] = copy.deepcopy(value)
+            for key in merge_removals:
+                rendered.pop(str(key), None)
+        rendered["complete"] = True
+        rendered.setdefault("source", str(existing["source"] or ""))
+        rendered.setdefault("session_id", str(existing["session_id"] or ""))
+        rendered["title"] = str(existing["title"] or rendered.get("title") or "")
+        stored_rendered = copy.deepcopy(rendered)
+        stored_rendered.pop("round_metrics", None)
+        stored_rendered["round_metrics_storage"] = "history_rounds"
         database.execute(
             """
-            INSERT INTO history_windows(
-                window_name, window_kind, source, session_id, title,
-                created_at, updated_at, rounds, data_json, text_json,
-                think_json, tool_json, items_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(window_kind, window_name) DO UPDATE SET
-                source=excluded.source,
-                session_id=excluded.session_id,
-                title=excluded.title,
-                created_at=excluded.created_at,
-                updated_at=excluded.updated_at,
-                rounds=excluded.rounds,
-                data_json=excluded.data_json,
-                text_json=excluded.text_json,
-                think_json=excluded.think_json,
-                tool_json=excluded.tool_json,
-                items_json=excluded.items_json
+            UPDATE history_windows SET
+                source=?, session_id=?, title=?, created_at=?, updated_at=?,
+                rounds=?, data_json=?
+            WHERE window_kind=? AND window_name=?
             """,
             (
-                name,
+                str(rendered.get("source") or ""),
+                str(rendered.get("session_id") or ""),
+                str(rendered.get("title") or ""),
+                str(rendered.get("created_at") or rendered.get("updated_at") or ""),
+                str(rendered.get("updated_at") or ""),
+                max(0, int(rendered.get("rounds") or 0)),
+                _json(stored_rendered),
                 kind,
-                str(data.get("source") or ""),
-                str(data.get("session_id") or ""),
-                str(data.get("title") or ""),
-                str(data.get("created_at") or data.get("updated_at") or ""),
-                str(data.get("updated_at") or ""),
-                max(0, int(data.get("rounds") or 0)),
-                _json(data),
-                _json(text),
-                _json(think),
-                _json(tool),
-                _json(items),
+                name,
             ),
         )
-        if kind == "archive":
-            database.execute(
-                "DELETE FROM history_messages WHERE window_name=?", (name,)
+
+        resolved_record = session_record
+        if session_record_factory is not None:
+            record_row = database.execute(
+                "SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
+                (
+                    str(rendered.get("source") or ""),
+                    str(rendered.get("session_id") or ""),
+                ),
+            ).fetchone()
+            previous_record = (
+                _object(record_row["record_json"], {})
+                if record_row is not None
+                else None
             )
-            fallback_round = 0
-            for index, raw in enumerate(
-                text.get("messages", []) if isinstance(text, dict) else []
-            ):
-                if not isinstance(raw, dict):
-                    continue
-                role = str(raw.get("role") or "")
-                if role not in {"user", "assistant"}:
-                    continue
-                if role == "user":
-                    fallback_round += 1
-                database.execute(
-                    """
-                    INSERT INTO history_messages(
-                        window_name, message_index, source, session_id,
-                        round_number, role, content_text, message_json,
-                        created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        name,
-                        index,
-                        str(data.get("source") or ""),
-                        str(data.get("session_id") or ""),
-                        _round_number(raw, fallback_round),
-                        role,
-                        _content_text(raw.get("content")),
-                        _json(raw),
-                        str(data.get("created_at") or ""),
-                        str(data.get("updated_at") or ""),
-                    ),
-                )
-        if kind == "runtime" and summary_cache is not _SUMMARY_UNSET:
-            _store_context_summary(
-                database,
-                window_name=name,
-                source=str(data.get("source") or ""),
-                session_id=str(data.get("session_id") or ""),
-                cache=summary_cache if isinstance(summary_cache, dict) else None,
-            )
-    return data
+            if not isinstance(previous_record, dict):
+                previous_record = None
+            resolved_record = session_record_factory(rendered, previous_record)
+        _write_registry_state(
+            database,
+            record=copy.deepcopy(resolved_record) if resolved_record is not None else None,
+            active_updates=None,
+            updated_at=str(updated_at or rendered.get("updated_at") or ""),
+        )
+    return rendered
 
 
 def _summary_window(runtime_path: Path) -> tuple[Path, str, str]:
@@ -487,14 +995,96 @@ def load_window(directory: Path) -> dict[str, Any] | None:
             """,
             (kind, name),
         ).fetchone()
+        message_rows = (
+            database.execute(
+                "SELECT message_json FROM history_messages "
+                "WHERE window_name=? ORDER BY message_index",
+                (name,),
+            ).fetchall()
+            if row is not None and kind == "archive"
+            else []
+        )
+        round_rows = (
+            database.execute(
+                """
+                SELECT round_number, think_json, tool_json, items_json, metric_json
+                FROM history_rounds WHERE window_kind=? AND window_name=?
+                ORDER BY round_number
+                """,
+                (kind, name),
+            ).fetchall()
+            if row is not None
+            else []
+        )
     if row is None:
         return None
+    text = _object(row["text_json"], {"schema_version": 1, "messages": []})
+    if kind == "archive":
+        text = {
+            "schema_version": max(
+                1, int(text.get("schema_version") or 1)
+            )
+            if isinstance(text, dict)
+            else 1,
+            "messages": [
+                message
+                for value in message_rows
+                if isinstance((message := _object(value["message_json"], {})), dict)
+            ],
+        }
+    data = _object(row["data_json"], {})
+    think = _object(row["think_json"], {"schema_version": 1, "rounds": []})
+    tool = _object(row["tool_json"], {"schema_version": 1, "rounds": []})
+    items = _object(row["items_json"], {"schema_version": 2, "items": []})
+    round_storage = bool(
+        round_rows
+        or (isinstance(data, dict) and data.get("round_metrics_storage") == "history_rounds")
+        or (isinstance(think, dict) and think.get("storage") == "history_rounds")
+    )
+    if round_storage:
+        think = {
+            "schema_version": _partition_schema(think, 1),
+            "rounds": [
+                value
+                for round_row in round_rows
+                if round_row["think_json"]
+                and isinstance((value := _object(round_row["think_json"], {})), dict)
+            ],
+        }
+        tool = {
+            "schema_version": _partition_schema(tool, 1),
+            "rounds": [
+                value
+                for round_row in round_rows
+                if round_row["tool_json"]
+                and isinstance((value := _object(round_row["tool_json"], {})), dict)
+            ],
+        }
+        restored_items: list[dict[str, Any]] = []
+        metrics: list[dict[str, Any]] = []
+        for round_row in round_rows:
+            item_values = _object(round_row["items_json"], [])
+            if isinstance(item_values, list):
+                restored_items.extend(
+                    value for value in item_values if isinstance(value, dict)
+                )
+            if round_row["metric_json"]:
+                metric = _object(round_row["metric_json"], {})
+                if isinstance(metric, dict):
+                    metrics.append(metric)
+        items = {
+            "schema_version": _partition_schema(items, 2),
+            "items": restored_items,
+        }
+        if isinstance(data, dict):
+            data.pop("round_metrics_storage", None)
+            data["round_metrics"] = metrics
     return {
-        "data": _object(row["data_json"], {}),
-        "text": _object(row["text_json"], {"schema_version": 1, "messages": []}),
-        "think": _object(row["think_json"], {"schema_version": 1, "rounds": []}),
-        "tool": _object(row["tool_json"], {"schema_version": 1, "rounds": []}),
-        "items": _object(row["items_json"], {"schema_version": 2, "items": []}),
+        "data": data,
+        "text": text,
+        "think": think,
+        "tool": tool,
+        "items": items,
     }
 
 
@@ -511,6 +1101,10 @@ def window_exists(directory: Path) -> bool:
 def delete_window(directory: Path) -> bool:
     root, user, kind, name = window_location(directory)
     with connection(root, user, write=True) as database:
+        database.execute(
+            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
+            (kind, name),
+        )
         if kind == "archive":
             database.execute(
                 "DELETE FROM history_messages WHERE window_name=?", (name,)
@@ -585,6 +1179,15 @@ def rename_windows(
 
 def delete_session_windows(root: Path, user: str, source: str, session_id: str) -> int:
     with connection(root, user, write=True) as database:
+        windows = database.execute(
+            "SELECT window_kind, window_name FROM history_windows "
+            "WHERE source=? AND session_id=?",
+            (source, session_id),
+        ).fetchall()
+        database.executemany(
+            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
+            [(row["window_kind"], row["window_name"]) for row in windows],
+        )
         database.execute(
             "DELETE FROM history_context_summaries WHERE source=? AND session_id=?",
             (source, session_id),
@@ -607,6 +1210,14 @@ def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]
                 "SELECT COUNT(DISTINCT session_id) FROM history_windows WHERE source=?",
                 (source,),
             ).fetchone()[0]
+        )
+        windows = database.execute(
+            "SELECT window_kind, window_name FROM history_windows WHERE source=?",
+            (source,),
+        ).fetchall()
+        database.executemany(
+            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
+            [(row["window_kind"], row["window_name"]) for row in windows],
         )
         database.execute(
             "DELETE FROM history_context_summaries WHERE source=?", (source,)

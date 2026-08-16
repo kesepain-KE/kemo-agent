@@ -22,7 +22,7 @@ from run.memory_analysis import (
     memory_round_data,
     persist_round_memory_analysis,
 )
-from run.history import commit_window, load_window
+from run.history import commit_window, load_window, patch_archive_metadata
 from run.history_index import (
     claim_pending_memory,
     claim_pending_summary,
@@ -860,7 +860,28 @@ class MaintenanceScheduler:
                             data[field] = finished[field]
                         else:
                             data.pop(field, None)
-                    commit_window(archive_path, window)
+                    updates = {
+                        "memory_processed_round": data["memory_processed_round"],
+                        "memory_status": data["memory_status"],
+                    }
+                    removals = ["memory_error"]
+                    if "memory_last_error" in data:
+                        updates["memory_last_error"] = data["memory_last_error"]
+                    for field in (
+                        "memory_queue_reason",
+                        "memory_target_round",
+                        "memory_queued_at",
+                    ):
+                        if field in data:
+                            updates[field] = data[field]
+                        else:
+                            removals.append(field)
+                    patch_archive_metadata(
+                        archive_path,
+                        window,
+                        updates=updates,
+                        removals=tuple(removals),
+                    )
                     archive_committed = True
                 processed.append(
                     {
@@ -909,7 +930,15 @@ class MaintenanceScheduler:
                         data["memory_status"] = "failed"
                         data["memory_error"] = dict(diagnostic)
                         data["memory_last_error"] = dict(diagnostic)
-                        commit_window(archive_path, window)
+                        patch_archive_metadata(
+                            archive_path,
+                            window,
+                            updates={
+                                "memory_status": "failed",
+                                "memory_error": dict(diagnostic),
+                                "memory_last_error": dict(diagnostic),
+                            },
+                        )
                 except Exception as archive_exc:
                     error["archive_error"] = {
                         "message": str(archive_exc),
