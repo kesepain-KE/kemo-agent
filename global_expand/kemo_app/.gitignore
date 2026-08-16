@@ -7,9 +7,13 @@ credential_registry.json
 _connections.json
 _device_commands.json
 _device_commands.json.lock
+_app_runs.sqlite3
+_app_runs.sqlite3-shm
+_app_runs.sqlite3-wal
 _runtime.json
 _activated.json
 _server.pid
+_lifecycle.lock
 _last_run.json
 .module.execution.lock
 .runtime.lock

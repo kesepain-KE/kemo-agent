@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -20,13 +21,15 @@ from pydantic import BaseModel, Field
 from auth import Session, SessionManager, SlidingWindowLimiter, UserStore, token_ok
 from events import EventHub
 from device_commands import DeviceCommandStore
+from run_broker import RunBroker, RunStore, StoredEvent
 from upstream import UpstreamClient, UpstreamError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 CONNECTION_STATE_PATH = BASE_DIR / "_connections.json"
 DEVICE_COMMAND_PATH = BASE_DIR / "_device_commands.json"
-VERSION = "1.1.2"
+RUN_STORE_PATH = BASE_DIR / "_app_runs.sqlite3"
+VERSION = "1.1.4"
 SERVICE_ID = "kemo_app"
 SERVICE_NAME = "kemo app 桥接服务"
 APP_SOURCE = "app"
@@ -43,12 +46,43 @@ def load_config() -> dict[str, Any]:
 
 
 CONFIG = load_config()
+
+
+def _config_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    value = CONFIG.get(name, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        rendered = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(maximum, max(minimum, rendered))
+
+
 USERS = UserStore(BASE_DIR / str(CONFIG.get("users_path", "users.json")), int(CONFIG.get("pbkdf2_iterations", 310000)))
 SESSIONS = SessionManager(str(CONFIG.get("session_secret", "")), int(CONFIG.get("session_ttl_seconds", 7200)))
 LIMITER = SlidingWindowLimiter()
 UPSTREAM = UpstreamClient(CONFIG)
 EVENTS = EventHub(UPSTREAM, float(CONFIG.get("poll_interval", 5)), CONNECTION_STATE_PATH)
 DEVICE_COMMANDS = DeviceCommandStore(DEVICE_COMMAND_PATH)
+RUNS = RunBroker(
+    UPSTREAM,
+    RunStore(
+        RUN_STORE_PATH,
+        retention_seconds=_config_int(
+            "run_replay_retention_seconds",
+            7 * 24 * 60 * 60,
+            minimum=60,
+            maximum=365 * 24 * 60 * 60,
+        ),
+        max_terminal_runs_per_user=_config_int(
+            "run_replay_max_terminal_per_user",
+            500,
+            minimum=1,
+            maximum=100_000,
+        ),
+    ),
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("kemo_app")
@@ -60,6 +94,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        await RUNS.stop()
         await EVENTS.stop()
         await UPSTREAM.close()
 
@@ -123,6 +158,10 @@ def _client_ip(request: Request) -> str:
 def _normalized_device_id(value: str) -> str:
     normalized = "".join(character if character.isalnum() or character in "-_.:" else "-" for character in str(value or "").strip())
     return normalized[:128] or "unknown"
+
+
+def _run_sse(event: StoredEvent) -> bytes:
+    return f"id: {event.event_id}\ndata: {event.data}\n\n".encode("utf-8")
 
 
 def _rate_limit(key: str, maximum: int) -> None:
@@ -208,57 +247,88 @@ async def auth_logout(x_kemo_session: str = Header(default=""), _: None = Depend
 
 @app.post("/v1/chat")
 async def chat(body: ChatRequest, session: Session = Depends(require_session)) -> StreamingResponse:
+    # Older App clients did not send a run id.  Keep that compatibility
+    # contract while ensuring the broker and the SSE subscriber use the same
+    # durable identifier.
+    run_id = str(body.run_id or "").strip() or f"run_{uuid.uuid4().hex}"
     payload = {
         **body.model_dump(exclude={"reasoning_effort"}),
         "user": session.username,
         "source": APP_SOURCE,
+        "run_id": run_id,
     }
-    # Chat is an SSE stream.  The upstream may legitimately stay quiet while
-    # a tool (for example image generation) runs, so opt into the stream-only
-    # read timeout policy.  Other REST and file-download calls retain the
-    # regular bounded timeout.
-    response = await UPSTREAM.open_stream("POST", "/api/chat", json_body=payload, sse=True)
+    try:
+        record = await RUNS.start(session.username, payload)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     async def generate() -> AsyncIterator[bytes]:
-        # Keep one upstream read pending while periodically sending an SSE
-        # comment to the phone.  Multimodal/provider calls can legitimately be
-        # silent for tens of seconds; heartbeats prevent mobile NATs and HTTP
-        # intermediaries from treating that silence as a dead connection.
-        iterator = response.aiter_bytes().__aiter__()
-        read_task: asyncio.Task[bytes] | None = None
-        try:
-            while True:
-                if read_task is None:
-                    read_task = asyncio.create_task(iterator.__anext__())
-                done, _ = await asyncio.wait({read_task}, timeout=15.0)
-                if not done:
-                    yield b": kemo-keep-alive\n\n"
-                    continue
-                try:
-                    chunk = read_task.result()
-                except StopAsyncIteration:
-                    break
-                read_task = None
-                yield chunk
-        except httpx.HTTPError:
-            # Once StreamingResponse has started, raising would only tear down
-            # the socket and surface as a vague transport failure.  Finish the
-            # SSE protocol with a readable error event instead.
-            logging.exception("upstream chat stream failed")
-            payload = json.dumps(
-                {"type": "error", "error": {"message": "上游对话流中断，请重试"}},
-                ensure_ascii=False,
-            ).encode("utf-8")
-            yield b"data: " + payload + b"\n\n"
-        finally:
-            if read_task is not None and not read_task.done():
-                read_task.cancel()
-            await response.aclose()
+        # The subscriber may disappear at any point.  RUNS owns the upstream
+        # stream independently, so generator cancellation only detaches this
+        # phone and never cancels the framework run.
+        async for event in RUNS.stream(session.username, str(record["run_id"]), after=0):
+            if event is None:
+                yield b": kemo-keep-alive\n\n"
+            else:
+                yield _run_sse(event)
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    if response.headers.get("x-kemo-run-id"):
-        headers["X-Kemo-Run-Id"] = response.headers["x-kemo-run-id"]
+    headers["X-Kemo-Run-Id"] = str(record["run_id"])
     return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
+
+
+@app.get("/v1/runs/active")
+async def active_runs(
+    client_id: str = Query("", max_length=128),
+    session_id: str = Query("", max_length=256),
+    session: Session = Depends(require_session),
+) -> dict[str, Any]:
+    return {
+        "runs": RUNS.active(session.username, client_id=client_id, session_id=session_id),
+    }
+
+
+@app.get("/v1/runs/{run_id}/snapshot")
+async def run_snapshot(
+    run_id: str,
+    after: int = Query(0, ge=0),
+    session: Session = Depends(require_session),
+) -> dict[str, Any]:
+    try:
+        return RUNS.snapshot(session.username, run_id, after)
+    except KeyError as exc:
+        raise HTTPException(404, "run_not_found") from exc
+
+
+@app.get("/v1/runs/{run_id}/stream")
+async def resume_run_stream(
+    run_id: str,
+    after: int = Query(0, ge=0),
+    session: Session = Depends(require_session),
+) -> StreamingResponse:
+    try:
+        RUNS.snapshot(session.username, run_id, after)
+    except KeyError as exc:
+        raise HTTPException(404, "run_not_found") from exc
+
+    async def generate() -> AsyncIterator[bytes]:
+        async for event in RUNS.stream(session.username, run_id, after=after):
+            if event is None:
+                yield b": kemo-keep-alive\n\n"
+            else:
+                yield _run_sse(event)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Kemo-Run-Id": run_id,
+        },
+    )
 
 
 @app.post("/v1/guidance")
@@ -268,11 +338,16 @@ async def guidance(body: GuidanceRequest, session: Session = Depends(require_ses
 
 @app.post("/v1/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, session: Session = Depends(require_session)) -> Any:
-    return await UPSTREAM.request_json(
+    result = await UPSTREAM.request_json(
         "POST",
         f"/api/runs/{quote(run_id, safe='')}/cancel",
         json_body={"user": session.username},
     )
+    try:
+        RUNS.mark_cancelling(session.username, run_id)
+    except KeyError:
+        pass
+    return result
 
 
 @app.get("/v1/conversations")
@@ -300,11 +375,13 @@ async def conversation_active(
 
 @app.delete("/v1/conversations")
 async def conversations_delete_all(session: Session = Depends(require_session)) -> Any:
-    return await UPSTREAM.request_json(
+    result = await UPSTREAM.request_json(
         "DELETE",
         f"/api/users/{quote(session.username, safe='')}/sessions",
         params={"source": APP_SOURCE},
     )
+    RUNS.delete_user(session.username)
+    return result
 
 
 @app.get("/v1/conversations/{session_id}/messages")
@@ -324,11 +401,13 @@ async def conversation_delete(
     params = {"source": APP_SOURCE}
     if client_id:
         params["client_id"] = client_id
-    return await UPSTREAM.request_json(
+    result = await UPSTREAM.request_json(
         "DELETE",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}",
         params=params,
     )
+    RUNS.delete_session(session.username, session_id)
+    return result
 
 
 @app.post("/v1/conversations/{session_id}/close")

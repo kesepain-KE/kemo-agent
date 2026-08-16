@@ -40,10 +40,11 @@ STATUS_TRANSITIONS = {
     }),
 }
 LOCK_ACQUIRE_TIMEOUT_SECONDS = 5.0
+_PROCESS_FILE_LOCK = threading.RLock()
 
 
 @contextmanager
-def _exclusive_file_lock(path: Path):
+def _exclusive_os_file_lock(path: Path):
     """Serialize read-modify-write cycles across bridge/control processes."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +92,21 @@ def _exclusive_file_lock(path: Path):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    """Serialize both same-process store instances and external processes.
+
+    Windows ``msvcrt.locking`` is process-scoped, so two threads in the same
+    bridge process can otherwise both acquire the byte-range lock through
+    different file handles. The in-process lock closes that gap while the OS
+    lock continues to protect control subprocesses.
+    """
+
+    with _PROCESS_FILE_LOCK:
+        with _exclusive_os_file_lock(path):
+            yield
 
 
 def _non_empty(value: Any, name: str, maximum: int) -> str:

@@ -7,7 +7,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 模型、脱敏配置、WebSocket 推送与在线设备统计。公网访问由 frp/nginx 反代 + TLS 终止，本服务
 不直接暴露公网。
 
-当前桥接协议实现版本：**1.1.2**。
+当前桥接协议实现版本：**1.1.4**。
 
 源码与首次部署默认为**未初始化、未激活**：`open_input=false`、没有最近成功采集时间、
 不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
@@ -147,7 +147,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 2. 配置设备 Token 和至少一个 App 用户后，运行 `configuration_status`；仅当
    `configured=true` 时才允许激活。
 3. `start` 或 `activate` 显式启动服务。
-4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.2 健康状态，并包含
+4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.4 健康状态，并包含
    `websocket_connections` 与 `connected_devices`。
 5. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
 6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
@@ -173,6 +173,15 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 - 单文件最大 80 MB；同名文件由框架文件服务自动生成不冲突的新名称，不直接覆盖。
 - App 上传成功后会刷新当前目录，嵌套目录中的上传文件可立即查看和预览。
 
+# 1.1.4 生命周期锁与安全自愈
+
+- `status`、`start`、`stop`、`restart` 与 `deactivate` 通过 `_lifecycle.lock` 跨进程串行化；多个采集器、控制请求或框架实例同时触发时，只允许一个生命周期操作进入。
+- 每次启动生成唯一 `instance_id`。Windows 启动器把服务交接给子进程导致 PID 变化时，仅在实例标识一致时自动修正 `_server.pid`；实例不同或无法验证时拒绝接管和终止。
+- 启动阶段分别报告非 kemo 端口占用、未受管 kemo_app、启动器崩溃、健康超时和仍在交接等状态；最近的交接标记会阻止立即重复启动覆盖 PID。
+- 自动恢复采用 1 分钟、5 分钟、15 分钟、30 分钟的临时退避，到期后重新允许尝试，不再因三次失败永久锁死。端口占用、未受管实例和交接等待不会累计为桥接崩溃。
+- 离线摘要包含稳定错误代码、可读原因、连续失败次数和下次重试时间；成功启动会清空错误与退避字段，但保留最初的显式激活时间。
+- 设备命令队列同时使用进程内锁和操作系统文件锁，避免 Windows 中多个桥接线程与外部控制进程竞争同一次 JSON 原子替换。
+
 # 1.1.2 激活意愿与自动恢复
 
 - 显式 `start` / `activate` 成功后写入被 Git 忽略的 `_activated.json`；周期采集器只在配置完整、标志存在且冷却期允许时自动恢复离线服务。
@@ -197,6 +206,24 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 - 正在运行的对话可通过 `/v1/guidance` 追加引导，也可通过
   `/v1/runs/{run_id}/cancel` 请求中断；运行任务不依赖某个 Android 页面是否仍在前台。
 - 上游已经开始返回 SSE 后发生的错误会转换为可读的流事件，而不是向客户端暴露异常堆栈。
+
+# 1.1.3 APP 后台运行与快照恢复
+
+- Android 的 `/v1/chat` 连接只是运行订阅者。桥接层在独立任务中持有框架 `/api/chat` 流，
+  手机切后台、锁屏、断网、从最近任务划掉或本地 SSE 关闭时，只解除该设备订阅，不向框架发送取消。
+- 只有用户显式调用 `/v1/runs/{run_id}/cancel` 才请求终止当前 Run；相同 `run_id` 再次提交不会
+  重复创建运行、重复调用工具或重复产生外部副作用。
+- `_app_runs.sqlite3` 按 `user + run_id` 持久记录状态、事件序号和恢复游标，并被 Git 与更新发布
+  排除；不同用户无法读取、订阅或复用彼此的运行快照。
+- 终态快照默认保留 7 天且每用户最多保留最新 500 条，可通过
+  `run_replay_retention_seconds` 与 `run_replay_max_terminal_per_user` 调整；删除 APP 会话或全部
+  APP 会话时会同步删除对应的终态桥接副本；仍在运行的记录会持久标记为“终态后删除”，到达终态
+  后立即清除，即使桥接进程中途重启也不会遗留已删除会话的副本。
+- APP 重启后先调用 `/v1/runs/active?client_id=...` 发现当前设备的运行；随后通过
+  `/v1/runs/{run_id}/snapshot?after=...` 补齐缺失事件，再用
+  `/v1/runs/{run_id}/stream?after=...` 接续实时流。恢复操作不得重新提交原始用户请求。
+- 桥接进程或框架进程重启仍是实际运行边界。遗留的未完成日志标记为 `interrupted`，APP 应读取
+  已提交历史与最后快照，不得以相同请求重新执行有副作用的工具。
 
 # 多模态与文件预览边界
 

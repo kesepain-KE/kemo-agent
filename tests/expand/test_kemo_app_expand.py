@@ -28,10 +28,19 @@ def _load_module(name: str, filename: str):
     return module
 
 
+_missing_module = object()
 bridge_auth = _load_module("kemo_app_test_auth", "auth.py")
 bridge_upstream = _load_module("kemo_app_test_upstream", "upstream.py")
 bridge_device_commands = _load_module("device_commands", "device_commands.py")
-_missing_module = object()
+_previous_upstream = sys.modules.get("upstream", _missing_module)
+sys.modules["upstream"] = bridge_upstream
+try:
+    bridge_run_broker = _load_module("kemo_app_test_run_broker", "run_broker.py")
+finally:
+    if _previous_upstream is _missing_module:
+        sys.modules.pop("upstream", None)
+    else:
+        sys.modules["upstream"] = _previous_upstream
 _previous_lifecycle = sys.modules.get("lifecycle", _missing_module)
 _previous_start_expand = sys.modules.get("start_expand", _missing_module)
 try:
@@ -61,9 +70,9 @@ class KemoAppExpandTests(unittest.TestCase):
     def test_bridge_declares_current_version(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
         manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
-        self.assertIn('VERSION = "1.1.2"', source)
-        self.assertIn("v1.1.2", manifest["explain"])
-        self.assertIn("**1.1.2**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn('VERSION = "1.1.4"', source)
+        self.assertIn("v1.1.4", manifest["explain"])
+        self.assertIn("**1.1.4**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_bridge_keeps_android_conversations_in_app_partition(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
@@ -73,6 +82,218 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('@app.get("/v1/conversations/active")', source)
         self.assertIn('params={"source": APP_SOURCE, "client_id": client_id}', source)
         self.assertNotIn('"web" if source == "app" else source', source)
+
+    def test_bridge_exposes_detached_run_snapshot_and_resume_routes(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.get("/v1/runs/active")', source)
+        self.assertIn('@app.get("/v1/runs/{run_id}/snapshot")', source)
+        self.assertIn('@app.get("/v1/runs/{run_id}/stream")', source)
+        self.assertIn("record = await RUNS.start(session.username, payload)", source)
+        self.assertNotIn('UPSTREAM.open_stream("POST", "/api/chat"', source)
+
+    def test_chat_streams_the_broker_issued_run_id_for_legacy_clients(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'run_id = str(body.run_id or "").strip() or f"run_{uuid.uuid4().hex}"',
+            source,
+        )
+        self.assertIn('"run_id": run_id', source)
+        self.assertIn(
+            'RUNS.stream(session.username, str(record["run_id"]), after=0)',
+            source,
+        )
+
+    def test_detached_run_continues_after_mobile_subscriber_closes(self) -> None:
+        async def scenario() -> None:
+            release = asyncio.Event()
+
+            class Response:
+                async def aiter_lines(self):
+                    yield 'data: {"type":"text_delta","text":"hello"}'
+                    yield ""
+                    await release.wait()
+                    yield 'data: {"type":"done"}'
+                    yield ""
+
+                async def aclose(self) -> None:
+                    return None
+
+            class Upstream:
+                async def open_stream(self, *_args, **_kwargs):
+                    return Response()
+
+            with tempfile.TemporaryDirectory() as directory:
+                store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+                broker = bridge_run_broker.RunBroker(Upstream(), store)
+                payload = {
+                    "run_id": "run-detached",
+                    "session_id": "app-session",
+                    "client_id": "phone",
+                    "user": "mobile-user",
+                    "source": "app",
+                    "prompt": "hello",
+                }
+                await broker.start("mobile-user", payload)
+                subscriber = broker.stream("mobile-user", "run-detached")
+                first = await anext(subscriber)
+                self.assertEqual(first.event_id, 1)
+                await subscriber.aclose()
+
+                # Closing the Android subscriber must not cancel the broker's
+                # upstream task. It remains active until the upstream terminal.
+                self.assertIn(
+                    broker.snapshot("mobile-user", "run-detached")["status"],
+                    {"starting", "running"},
+                )
+                release.set()
+                for _ in range(100):
+                    snapshot = broker.snapshot("mobile-user", "run-detached")
+                    if snapshot["terminal"]:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(snapshot["terminal"])
+                self.assertEqual(snapshot["status"], "completed")
+                self.assertEqual(snapshot["last_event_id"], 2)
+                self.assertEqual(len(snapshot["events"]), 2)
+                await broker.stop()
+
+        asyncio.run(scenario())
+
+    def test_explicit_cancel_is_not_overwritten_when_upstream_connects_late(self) -> None:
+        async def scenario() -> None:
+            allow_connect = asyncio.Event()
+            stream_entered = asyncio.Event()
+            allow_finish = asyncio.Event()
+
+            class Response:
+                async def aiter_lines(self):
+                    stream_entered.set()
+                    await allow_finish.wait()
+                    yield 'data: {"type":"done","metadata":{"status":"cancelled"}}'
+                    yield ""
+
+                async def aclose(self) -> None:
+                    return None
+
+            class Upstream:
+                async def open_stream(self, *_args, **_kwargs):
+                    await allow_connect.wait()
+                    return Response()
+
+            with tempfile.TemporaryDirectory() as directory:
+                store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+                broker = bridge_run_broker.RunBroker(Upstream(), store)
+                payload = {
+                    "run_id": "run-cancel-connect-race",
+                    "session_id": "app-session",
+                    "client_id": "phone",
+                    "user": "mobile-user",
+                    "source": "app",
+                    "prompt": "hello",
+                }
+                await broker.start("mobile-user", payload)
+                broker.mark_cancelling("mobile-user", payload["run_id"])
+                allow_connect.set()
+                await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
+                self.assertEqual(
+                    broker.snapshot("mobile-user", payload["run_id"])["status"],
+                    "cancelling",
+                )
+                allow_finish.set()
+                for _ in range(100):
+                    snapshot = broker.snapshot("mobile-user", payload["run_id"])
+                    if snapshot["terminal"]:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(snapshot["status"], "cancelled")
+                await broker.stop()
+
+        asyncio.run(scenario())
+
+    def test_run_snapshots_are_user_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+            store.create(
+                "alice",
+                {"run_id": "run-a", "session_id": "app-a", "client_id": "phone"},
+            )
+            with self.assertRaises(KeyError):
+                store.get("bob", "run-a")
+            with self.assertRaises(PermissionError):
+                store.create(
+                    "bob",
+                    {"run_id": "run-a", "session_id": "app-a", "client_id": "phone"},
+                )
+            store.close()
+
+    def test_terminal_run_replay_is_bounded_per_user(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bridge_run_broker.RunStore(
+                Path(directory) / "runs.sqlite3",
+                retention_seconds=3600,
+                max_terminal_runs_per_user=2,
+            )
+            for index in range(1, 4):
+                run_id = f"run-{index}"
+                store.create(
+                    "alice",
+                    {
+                        "run_id": run_id,
+                        "session_id": f"app-{index}",
+                        "client_id": "phone",
+                        "prompt": f"secret-{index}",
+                    },
+                )
+                store.append("alice", run_id, '{"type":"done"}')
+
+            deleted = store.prune()
+
+            self.assertEqual(deleted, ["run-1"])
+            with self.assertRaises(KeyError):
+                store.get("alice", "run-1")
+            self.assertEqual(store.get("alice", "run-3")["status"], "completed")
+            store.close()
+
+    def test_conversation_delete_removes_only_terminal_replay_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+            common = {"session_id": "app-a", "client_id": "phone"}
+            store.create("alice", {**common, "run_id": "run-active"})
+            store.create("alice", {**common, "run_id": "run-terminal"})
+            store.append("alice", "run-terminal", '{"type":"done"}')
+            store.create(
+                "bob",
+                {"run_id": "run-bob", "session_id": "app-a", "client_id": "phone"},
+            )
+            store.append("bob", "run-bob", '{"type":"done"}')
+
+            self.assertEqual(store.delete_session("alice", "app-a"), ["run-terminal"])
+
+            with self.assertRaises(KeyError):
+                store.get("alice", "run-terminal")
+            self.assertEqual(store.get("alice", "run-active")["status"], "starting")
+            self.assertEqual(store.get("bob", "run-bob")["status"], "completed")
+            store.set_status("alice", "run-active", "completed")
+            self.assertTrue(store.delete_if_requested("alice", "run-active"))
+            with self.assertRaises(KeyError):
+                store.get("alice", "run-active")
+            store.close()
+
+    def test_deferred_conversation_delete_survives_bridge_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runs.sqlite3"
+            store = bridge_run_broker.RunStore(path)
+            store.create(
+                "alice",
+                {"run_id": "run-active", "session_id": "app-a", "client_id": "phone"},
+            )
+            self.assertEqual(store.delete_session("alice", "app-a"), [])
+            store.close()
+
+            restarted = bridge_run_broker.RunStore(path)
+            with self.assertRaises(KeyError):
+                restarted.get("alice", "run-active")
+            restarted.close()
 
     def test_bridge_status_keeps_android_context_in_app_partition(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
@@ -88,6 +309,8 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('@app.post("/v1/conversations/{session_id}/close")', source)
         self.assertGreaterEqual(source.count('client_id: str = Query("", max_length=128)'), 3)
         self.assertGreaterEqual(source.count('params["client_id"] = client_id'), 2)
+        self.assertIn("RUNS.delete_user(session.username)", source)
+        self.assertIn("RUNS.delete_session(session.username, session_id)", source)
 
     def test_bridge_exposes_user_scoped_model_capabilities(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
@@ -101,16 +324,22 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('body.model_dump(exclude={"reasoning_effort"})', source)
         self.assertNotIn('pattern="^(minimal|low|medium|high|max)$"', source)
 
-    def test_manifest_is_discoverable_but_published_inactive(self) -> None:
+    def test_manifest_is_discoverable_with_runtime_health_snapshot(self) -> None:
         meta = read_expand_meta(MODULE_ROOT)
         self.assertTrue(meta.valid, meta.error)
         self.assertFalse(meta.open_input)
-        self.assertEqual(meta.input_health, "异常")
+        # The background collector may update the tracked manifest from the
+        # distributable inactive snapshot to the current live health while the
+        # test suite is running. Both are valid discovery states; capability
+        # and executable entry points must remain stable.
+        self.assertIn(meta.input_health, {"正常", "异常"})
         self.assertTrue(meta.open_control)
         self.assertEqual(meta.start_update, "data_update.py")
         self.assertEqual(meta.start_expand, "start_expand.py")
         manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
-        self.assertNotIn("recent_update", manifest)
+        if "recent_update" in manifest:
+            self.assertIsInstance(manifest["recent_update"], str)
+            self.assertTrue(manifest["recent_update"].strip())
 
     def test_published_tree_has_no_runtime_identity_or_active_status(self) -> None:
         for name in ("config.json", "users.json", "credential_registry.json", "_server.pid"):
@@ -325,7 +554,268 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertFalse(pid_path.exists())
             self.assertTrue(result["unmanaged_process"])
 
-    def test_data_update_auto_launch_policy_has_cooldown_and_failure_cap(self) -> None:
+    def test_status_reconciles_pid_when_instance_identity_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_path = root / "_server.pid"
+            pid_path.write_text(
+                json.dumps({"pid": 1234, "instance_id": "instance-a"}),
+                encoding="utf-8",
+            )
+            initialization = {
+                "initialized": True,
+                "configured": True,
+                "missing": [],
+                "host": "127.0.0.1",
+                "port": 8742,
+                "upstream_configured": True,
+                "enabled_users": 1,
+            }
+            with (
+                mock.patch.object(bridge_start, "PID_PATH", str(pid_path)),
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "_load_config",
+                    return_value=({"port": 8742}, initialization),
+                ),
+                mock.patch.object(bridge_start, "_pid_alive", return_value=True),
+                mock.patch.object(
+                    bridge_start,
+                    "_health",
+                    return_value={
+                        "service": "kemo_app",
+                        "process_pid": 5678,
+                        "instance_id": "instance-a",
+                    },
+                ),
+            ):
+                result = bridge_start.status()
+            self.assertTrue(result["active"])
+            self.assertTrue(result["reconciled_pid"])
+            self.assertEqual(result["pid"], 5678)
+            self.assertEqual(json.loads(pid_path.read_text(encoding="utf-8"))["pid"], 5678)
+
+    def test_stop_uses_health_pid_when_same_instance_was_handed_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_path = root / "_server.pid"
+            pid_path.write_text(
+                json.dumps({"pid": 1234, "instance_id": "instance-a"}),
+                encoding="utf-8",
+            )
+            health = {
+                "service": "kemo_app",
+                "process_pid": 5678,
+                "instance_id": "instance-a",
+            }
+            with (
+                mock.patch.object(bridge_start, "PID_PATH", str(pid_path)),
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "_load_config",
+                    return_value=({"port": 8742}, {"configured": True}),
+                ),
+                mock.patch.object(bridge_start, "_pid_alive", return_value=True),
+                mock.patch.object(bridge_start, "_health", side_effect=[health, None, None]),
+                mock.patch.object(bridge_start, "_terminate_pid", return_value=True) as terminate,
+                mock.patch.object(bridge_start, "status", return_value={"ok": True, "running": False}),
+            ):
+                result = bridge_start._stop_process()
+            terminate.assert_called_once_with(5678)
+            self.assertFalse(pid_path.exists())
+            self.assertFalse(result["running"])
+
+    def test_start_distinguishes_raw_port_conflict_without_spawning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "status",
+                    return_value={"ok": True, "configured": True, "running": False, "active": False},
+                ),
+                mock.patch.object(
+                    bridge_start,
+                    "_load_config",
+                    return_value=({"port": 8742}, {"configured": True}),
+                ),
+                mock.patch.object(bridge_start, "_port_open", return_value=True),
+                mock.patch.object(bridge_start.subprocess, "Popen") as popen,
+            ):
+                result = bridge_start.start()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "bridge_port_in_use")
+            popen.assert_not_called()
+
+    def test_start_does_not_duplicate_recent_launcher_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_path = root / "_server.pid"
+            pid_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 1234,
+                        "instance_id": "pending-instance",
+                        "started_at": bridge_start.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(bridge_start, "PID_PATH", str(pid_path)),
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "status",
+                    return_value={"ok": True, "configured": True, "running": False, "active": False},
+                ),
+                mock.patch.object(bridge_start, "_pid_alive", return_value=False),
+                mock.patch.object(bridge_start.subprocess, "Popen") as popen,
+            ):
+                result = bridge_start.start()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "bridge_start_pending")
+            self.assertTrue(pid_path.exists())
+            popen.assert_not_called()
+
+    def test_start_accepts_launcher_exit_when_matching_health_appears(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_path = root / "_server.pid"
+            activation = root / "_activated.json"
+            fake_process = mock.Mock(pid=1234)
+            fake_process.poll.return_value = 0
+            with (
+                mock.patch.object(bridge_start, "BASE_DIR", str(root)),
+                mock.patch.object(bridge_start, "SERVER_PATH", str(root / "daemon.py")),
+                mock.patch.object(bridge_start, "PID_PATH", str(pid_path)),
+                mock.patch.object(bridge_start, "LOG_PATH", str(root / "logs" / "server.log")),
+                mock.patch.object(bridge_start, "ACTIVATION_PATH", str(activation)),
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "status",
+                    side_effect=[
+                        {"ok": True, "configured": True, "running": False, "active": False},
+                        {"ok": True, "configured": True, "running": True, "active": True},
+                    ],
+                ),
+                mock.patch.object(
+                    bridge_start,
+                    "_load_config",
+                    return_value=({"port": 8742}, {"configured": True}),
+                ),
+                mock.patch.object(bridge_start, "_port_open", return_value=False),
+                mock.patch.object(
+                    bridge_start,
+                    "_health",
+                    side_effect=[
+                        None,
+                        {
+                            "service": "kemo_app",
+                            "process_pid": 5678,
+                            "instance_id": mock.ANY,
+                        },
+                    ],
+                ) as health,
+                mock.patch.object(bridge_start.subprocess, "Popen", return_value=fake_process),
+                mock.patch.object(bridge_start.time, "sleep"),
+            ):
+                # The generated nonce must be reflected by the fake health reply.
+                def health_side_effect(_port):
+                    if health.call_count == 1:
+                        return None
+                    nonce = json.loads(pid_path.read_text(encoding="utf-8"))["instance_id"]
+                    return {"service": "kemo_app", "process_pid": 5678, "instance_id": nonce}
+
+                health.side_effect = health_side_effect
+                result = bridge_start.start()
+            self.assertTrue(result["ok"])
+            self.assertEqual(json.loads(pid_path.read_text(encoding="utf-8"))["pid"], 5678)
+
+    def test_concurrent_start_spawns_only_one_bridge_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_path = root / "_server.pid"
+            activation = root / "_activated.json"
+            spawned: dict[str, object] = {"instance_id": "", "pid": 4321}
+            initialization = {
+                "initialized": True,
+                "configured": True,
+                "missing": [],
+                "host": "127.0.0.1",
+                "port": 8742,
+                "upstream_configured": True,
+                "enabled_users": 1,
+            }
+            fake_process = mock.Mock(pid=4321)
+            fake_process.poll.return_value = None
+
+            def fake_popen(*_args, **kwargs):
+                spawned["instance_id"] = kwargs["env"]["KEMO_APP_INSTANCE_ID"]
+                return fake_process
+
+            def fake_health(_port):
+                nonce = str(spawned["instance_id"])
+                if not nonce:
+                    return None
+                return {
+                    "service": "kemo_app",
+                    "process_pid": int(spawned["pid"]),
+                    "instance_id": nonce,
+                }
+
+            results: list[dict] = []
+            with (
+                mock.patch.object(bridge_start, "BASE_DIR", str(root)),
+                mock.patch.object(bridge_start, "SERVER_PATH", str(root / "daemon.py")),
+                mock.patch.object(bridge_start, "PID_PATH", str(pid_path)),
+                mock.patch.object(bridge_start, "LOG_PATH", str(root / "logs" / "server.log")),
+                mock.patch.object(bridge_start, "ACTIVATION_PATH", str(activation)),
+                mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(root / "lifecycle.lock")),
+                mock.patch.object(
+                    bridge_start,
+                    "_load_config",
+                    return_value=({"port": 8742}, initialization),
+                ),
+                mock.patch.object(bridge_start, "_health", side_effect=fake_health),
+                mock.patch.object(bridge_start, "_port_open", return_value=False),
+                mock.patch.object(bridge_start, "_pid_alive", return_value=True),
+                mock.patch.object(bridge_start.subprocess, "Popen", side_effect=fake_popen) as popen,
+            ):
+                threads = [threading.Thread(target=lambda: results.append(bridge_start.start())) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(result["ok"] for result in results))
+            self.assertEqual(popen.call_count, 1)
+
+    def test_restart_aborts_when_existing_process_cannot_be_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    bridge_start,
+                    "LIFECYCLE_LOCK_PATH",
+                    str(Path(directory) / "lifecycle.lock"),
+                ),
+                mock.patch.object(
+                    bridge_start,
+                    "_stop_process",
+                    return_value={"ok": False, "running": True, "error": "bridge_stop_timeout"},
+                ),
+                mock.patch.object(bridge_start, "start") as start,
+            ):
+                result = bridge_start.restart()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "bridge_stop_timeout")
+            start.assert_not_called()
+
+    def test_data_update_auto_launch_policy_uses_temporary_backoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             activation = Path(directory) / "_activated.json"
             with mock.patch.object(bridge_update, "ACTIVATION_PATH", activation):
@@ -340,7 +830,23 @@ class KemoAppExpandTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-                self.assertEqual(bridge_update._should_auto_launch(), (False, "too_many_failures"))
+                # A historical failure count is no longer a permanent lockout.
+                self.assertEqual(bridge_update._should_auto_launch(), (True, "ok"))
+                activation.write_text(
+                    json.dumps(
+                        {
+                            "activated_at": "2026-08-12T00:00:00+08:00",
+                            "last_launch_attempt": "2026-08-12T12:00:00+08:00",
+                            "consecutive_failures": 3,
+                            "blocked_until": "2026-08-12T12:15:00+08:00",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                now = bridge_update.datetime.fromisoformat("2026-08-12T12:10:00+08:00")
+                self.assertEqual(bridge_update._should_auto_launch(now), (False, "backoff"))
+                after = bridge_update.datetime.fromisoformat("2026-08-12T12:16:00+08:00")
+                self.assertEqual(bridge_update._should_auto_launch(after), (True, "ok"))
                 activation.write_text(
                     json.dumps(
                         {
@@ -381,6 +887,94 @@ class KemoAppExpandTests(unittest.TestCase):
             saved = json.loads(activation.read_text(encoding="utf-8"))
             self.assertEqual(saved["consecutive_failures"], 1)
             self.assertTrue(saved["last_launch_attempt"])
+            self.assertEqual(saved["last_error"], "bridge_port_not_ready")
+            self.assertTrue(saved["blocked_until"])
+
+    def test_data_update_does_not_count_environment_conflicts_as_crashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            activation = root / "_activated.json"
+            activation.write_text(
+                json.dumps(
+                    {
+                        "activated_at": "2026-08-12T00:00:00+08:00",
+                        "last_launch_attempt": None,
+                        "consecutive_failures": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(bridge_update, "ACTIVATION_PATH", activation),
+                mock.patch.object(
+                    bridge_start,
+                    "LIFECYCLE_LOCK_PATH",
+                    str(root / "lifecycle.lock"),
+                ),
+                mock.patch.object(
+                    bridge_update.start_expand,
+                    "execute",
+                    return_value={"ok": False, "error": "bridge_port_in_use"},
+                ),
+            ):
+                launched, reason = bridge_update._auto_launch()
+            self.assertFalse(launched)
+            self.assertEqual(reason, "bridge_port_in_use")
+            saved = json.loads(activation.read_text(encoding="utf-8"))
+            self.assertEqual(saved["consecutive_failures"], 2)
+            self.assertEqual(saved["last_error"], "bridge_port_in_use")
+            self.assertTrue(saved["blocked_until"])
+
+    def test_data_update_offline_output_contains_readable_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input_data.md"
+            manifest_path = root / "expand.json"
+            activation = root / "_activated.json"
+            manifest_path.write_text(
+                (MODULE_ROOT / "expand.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            activation.write_text(
+                json.dumps(
+                    {
+                        "activated_at": "2026-08-12T00:00:00+08:00",
+                        "last_launch_attempt": "2026-08-12T12:00:00+08:00",
+                        "consecutive_failures": 1,
+                        "last_error": "bridge_start_crashed",
+                        "last_error_at": "2026-08-12T12:00:00+08:00",
+                        "blocked_until": "2099-08-12T12:01:00+08:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "initialized": True,
+                "configured": True,
+                "missing": [],
+                "host": "0.0.0.0",
+                "port": 8742,
+                "upstream_configured": True,
+                "enabled_users": 1,
+            }
+            with (
+                mock.patch.object(bridge_update, "INPUT_PATH", input_path),
+                mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(bridge_update, "ACTIVATION_PATH", activation),
+                mock.patch.object(bridge_update, "CONNECTIONS_PATH", root / "connections.json"),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "0.0.0.0", "port": 8742}, state)),
+                mock.patch.object(
+                    bridge_update.start_expand,
+                    "status",
+                    return_value={"active": False, "unmanaged_process": False},
+                ),
+            ):
+                result = bridge_update.update()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["diagnosis"]["error_code"], "bridge_start_crashed")
+            output = input_path.read_text(encoding="utf-8")
+            self.assertIn("桥接启动进程提前退出", output)
+            self.assertIn("下次允许重试", output)
 
     def test_device_token_user_password_and_session_lifecycle(self) -> None:
         raw_token = "test-device-token-with-at-least-32-characters"

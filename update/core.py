@@ -113,6 +113,7 @@ KEMO_APP_EXPAND_FILES = (
     "lifecycle.py",
     "manage_device_token.py",
     "manage_user.py",
+    "run_broker.py",
     "server.py",
     "start_expand.py",
     "expand_control.md",

@@ -4,7 +4,52 @@
 kemo-agent. It exposes the App-facing HTTP, SSE and WebSocket API on a separate
 port while forwarding authorized operations to the framework Web API.
 
-Current bridge version: **1.1.2**.
+Current bridge version: **1.1.4**.
+
+## Detached Android runs and recovery snapshots
+
+An Android SSE connection is now only a subscriber to a bridge-owned run. The
+bridge keeps the upstream framework stream open after the App is backgrounded,
+swiped away, loses its network, or closes its local response body. Only the
+explicit authenticated cancel endpoint requests framework cancellation.
+
+Every App run is journaled in an ignored local SQLite store. Reopening the App
+can discover the current account's active run, replay its event snapshot, and
+resume after the last event id without submitting the user prompt or tool calls
+again. The authenticated recovery contract consists of:
+
+- `GET /v1/runs/active?client_id=...&session_id=...`
+- `GET /v1/runs/{run_id}/snapshot?after=...`
+- `GET /v1/runs/{run_id}/stream?after=...`
+- `POST /v1/runs/{run_id}/cancel`
+
+A bridge/framework process restart is still a real execution boundary: an
+unfinished journal is marked `interrupted` instead of being replayed as a new
+request. Completed and failed snapshots remain available to the same
+authenticated user so the App can reconcile its local conversation state.
+
+## Version 1.1.4 lifecycle self-healing contract
+
+- Start, stop, restart and status reconciliation are serialized by a cross-process lifecycle lock, preventing concurrent collectors or control calls from spawning duplicate bridge processes.
+- A per-launch instance nonce proves process ownership. Windows launcher-to-child PID handoff is reconciled only when the nonce matches; a different or unverified instance is never killed or silently adopted.
+- Startup distinguishes raw port conflicts, unmanaged bridge instances, launcher crashes, health timeouts and in-progress Windows handoff. A recent handoff marker prevents an immediate retry from overwriting the PID state before the child becomes healthy.
+- Automatic recovery uses temporary 1-minute, 5-minute, 15-minute and 30-minute backoff windows instead of a permanent three-failure lockout. Port conflicts and unmanaged processes do not count as bridge crashes, and successful startup clears the diagnostic state.
+- Offline status output includes a stable error code, readable reason, failure count and next retry time without exposing credentials or exception stacks.
+- Device-command persistence now combines an in-process lock with the existing OS file lock, so multiple bridge threads and external control processes cannot race the same atomic JSON replacement on Windows.
+
+## Version 1.1.3 detached-run contract
+
+- The bridge, rather than an Android socket or Compose screen, owns the
+  upstream framework chat stream until a terminal event.
+- Run state and ordered SSE payloads are journaled per authenticated user and
+  can be discovered, replayed and resumed after App process removal.
+- Reusing a run id attaches to the existing journal instead of resubmitting the
+  prompt; cancellation remains an explicit user operation.
+- Terminal replay journals are retained for at most
+  `run_replay_retention_seconds` (seven days by default) and the newest
+  `run_replay_max_terminal_per_user` runs (500 by default). Deleting an App
+  conversation also deletes its terminal bridge replay copies; active runs are
+  marked for deferred deletion and removed as soon as they reach a terminal event.
 
 ## Android device actions
 
@@ -38,10 +83,11 @@ framework or computer restart and after an unexpected bridge-process crash.
 `deactivate` removes the marker, so an explicitly deactivated bridge stays
 inactive. A plain `stop` only stops the current daemon and deliberately keeps
 the marker; this is useful for maintenance and for verifying the next automatic
-recovery cycle. Automatic launch attempts are spaced by at least 60 seconds and stop
-after three consecutive failures until a manual `start` succeeds. These
-failures remain isolated from the framework process and are reported through
-the normal Expand status document.
+recovery cycle. Automatic launch failures use bounded temporary backoff and become eligible for
+automatic retry again after the recorded deadline. Environmental conflicts such as
+a foreign port listener or an unmanaged bridge instance are diagnosed without being
+counted as process crashes. Failures remain isolated from the framework process and
+are reported through the normal Expand status document.
 
 `open_control` remains available only so an administrator can inspect the
 initialization state and explicitly activate the bridge. The `start`/`activate`
@@ -99,6 +145,7 @@ between installations or committed:
 - `users.json` (salted App-user password verifiers)
 - `credential_registry.json` (generated credential audit snapshot)
 - PID, lock, connection, runtime and log files
+- `_app_runs.sqlite3` and its WAL/SHM files (detached App run journal)
 
 The deployed instance under `D:\kemo-agent\global_expand\kemo_app` remains a
 runtime copy. Changes should be developed here and deployed explicitly; copying

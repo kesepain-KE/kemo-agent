@@ -14,5 +14,7 @@
   "upstream_password": "",
   "poll_interval": 5,
   "request_timeout": 30,
+  "run_replay_retention_seconds": 604800,
+  "run_replay_max_terminal_per_user": 500,
   "note": "Run initialize_config.py, then configure credentials locally. The source module is inactive by default. Never commit config.json or users.json."
 }
