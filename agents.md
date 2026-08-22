@@ -20,51 +20,32 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
   → 记忆引用加权；按 extraction_mode 提交、延期或游标提取
 ```
 
-关键模块：
+`run/` 按领域拆分，外部代码只从 `run.<领域>` 的 `__init__.py` 导入公开符号；不得深入导入
+其他领域的私有实现文件。`run/engine.py` 是跨入口总门面，`run/__init__.py` 仅懒加载最小公共 API。
 
-| 模块 | 路径 | 职责 |
-|------|------|------|
-| 对话公共门面 | `run/engine.py` | 对 Web、CLI、Cron、外部消息稳定公开对话、上下文与压缩 API |
-| 对话运行时 | `run/conversation_runtime.py` | 主循环编排：prompt → provider → 工具循环 → 终态提交 |
-| Provider 事件 | `run/provider_events.py` | Provider 协议响应、流事件、媒体产物到统一 RunEvent 的转换 |
-| 请求输入 | `run/request_input.py` | 请求字段、Content Block 与上传资产说明的验证和规范化 |
-| 运行中引导邮箱 | `run/guidance.py` | 接收文本或附件引导，并在当前 Run 与下一轮之间原子交接 |
-| 引导媒体准备 | `run/guidance_runtime.py` | 二次验证运行中附件，按模型能力路由图片、音频、视频和普通文件 |
-| Run 状态 | `run/run_state.py` | 显式承载单次运行的身份、依赖与可变轮次状态 |
-| 轮次终态 | `run/round_finalizer.py` | 取消、工具上限和上下文上限等受控停止轮次的持久化 |
-| 会话运行态 | `run/session_runtime.py` | 会话级锁与完整归档提交辅助 |
-| 长任务运行态 | `run/long_task.py`、`run/long_task_runtime.py` | 会话级长任务授权、跨 Run 续跑、统计与控制元数据 |
-| 上下文管理 | `run/context.py` | 轮次/token 预算选择、压缩触发 |
-| 上下文服务 | `run/context_service.py` | 上下文状态查询和临时工作区工具/思考压缩 |
-| 上下文摘要 | `run/context_summary.py` | 移除轮次的摘要生成与 SQLite 缓存 |
-| 历史管理 | `run/history.py`、`run/history_store.py` | SQLite archive/runtime 窗口的创建、裁剪、恢复、事务提交和正文索引 |
-| 记忆系统 | `run/memory.py` | 4 挡位存储、权重、晋升、过期、注入 |
-| 记忆分析 | `run/memory_analysis.py` | 批量分析、韧性重试、持久化与 `memory_processed_round` 游标推进 |
-| 记忆管道 | `run/conversation_runtime.py`、`run/memory_pipeline.py` | 按模式登记状态，并在提交、保存或压缩边界顺序提取 |
-| Usage 聚合 | `run/usage.py` | 多次 Provider 请求计量合并与缓存命中统计 |
-| 工具系统 | `run/tools.py` | 工具发现、schema 验证、执行、超时、取消 |
-| Prompt 来源 | `run/prompt_sources.py` | 静态注册模块加载、用户资源可信解析、技能/拓展/感知选择 |
-| 拓展运行时 | `run/expand_runtime.py` | 三层拓展授权、隔离操控、采集/操控诊断与文件产物发布 |
-| 模块子进程 | `run/module_runtime.py` | 感知/拓展采集与拓展操控共用的有界、可取消跨平台子进程协议 |
-| 插件清单 | `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
-| Prompt 组装 | `run/prompt.py` | 所有 prompt 段的确定性拼接 |
-| 配置加载 | `run/config.py` | .env 加载 + 双层 JSON 合并 + provider 运行时配置 |
-| 子代理 | `run/agent_runner.py` | 子代理独立调用、输入输出校验、超时取消 |
-| 子代理发现 | `agents/_runtime/schema.py` | schema v2 校验、内置/当前用户代理实时发现 |
-| 子代理授权 | `agents/_runtime/resources.py` | 按 `agent-config.json` 构建独立 Prompt 和工具白名单 |
-| 用户代理创建 | `agents/_runtime/user_packages.py` | 原子创建数据型用户代理包并立即校验 |
-| 兼容入口 | `run/agents.py` | 转发子代理 schema 公共 API |
-| 任务计划 | `run/task_plan_store.py` | 计划创建、状态机、SQLite 事务持久化 |
-| 定时任务 | `run/cron_store.py` | cron 任务 CRUD、校验 |
-| 运行时宿主 | `run/runtime_host.py` | Web、cron、消息路由与任务计划调度的统一宿主 |
-| Web 应用装配 | `web/app.py` | 创建 FastAPI、安装认证与异常处理、组合领域路由，并保留聊天流和前端托管边界 |
-| Web 路由层 | `web/routes/` | 按文件、用户身份、模块、会话、配置和任务领域注册稳定 HTTP API |
-| Web 业务门面 | `web/service.py` | 保留 `WebRunService` 兼容入口，承载会话与聊天核心并组合领域服务 |
-| Web 领域服务 | `web/services/` | 文件、知识、技能、感知、拓展、消息、任务、记忆、设置和运行概览等高内聚实现 |
-| Web API 合同 | `web/schemas.py`、`web/errors.py`、`web/constants.py` | 请求模型、稳定业务异常和跨层常量的单一来源 |
-| Provider | `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
-| Provider 传输可靠性 | `provider/adapters/reliability.py` | Kemo 有界网络重试、Retry-After、取消观察与读取错误归一化 |
-| 事件系统 | `events.py` | 统一事件类型定义（`text_delta`、`reasoning_delta`、`tool_call_start`、`tool_call_result`、`usage`、`error`、`done`），供所有入口复用 |
+| 入口 | 职责 |
+|------|------|
+| `run/engine.py` | 对 Web、CLI、Cron、外部消息稳定公开对话、上下文与压缩 API |
+| `run/conversation/` | 主循环、输入、Provider 事件、引导、Run 状态、终态提交和 Usage 聚合 |
+| `run/context/` | 轮次/Token 预算、上下文状态、压缩服务和摘要缓存 |
+| `run/history/` | SQLite archive/runtime 窗口、会话索引和历史摘要调度 |
+| `run/memory/` | 四档记忆、分析管道、权重、晋升、过期和 SQLite 存储 |
+| `run/tools/` | 工具发现、Schema 验证、执行、超时、取消、看门狗和参数恢复 |
+| `run/agents/` | 子代理运行、队列、服务和调用合同；底层包发现仍位于 `agents/_runtime/` |
+| `run/tasks/` | 任务计划存储、修订、执行、边界、服务和调度 |
+| `run/long_task/` | 会话级长任务授权、跨 Run 续跑、统计与控制元数据 |
+| `run/scheduler/` | Cron、维护、历史摘要、运行时状态和 RuntimeHost 生命周期 |
+| `run/config/` | `.env`、双层 JSON、Prompt 来源/组装、知识索引和用户路径 |
+| `run/extensions/` | 拓展、感知模块子进程、多模态、附件、媒体产物和模型能力 |
+| `run/infra/` | 原子写入、进程执行、公共错误、日志存储和 CLI 桥 |
+| `provider/` | 内部统一 Kemo 契约；`chat` 标准兼容与 `kemo` 原生网关双模式 |
+| `web/` | FastAPI 装配、领域路由/服务和 React 前端 |
+| `plugins/manifest.py` | 解析插件 `SKILL.md` 和 Provider 工具定义 |
+| `events.py` | 所有入口复用的统一运行事件合同 |
+
+旧的 `run.<旧模块>` 文件在本发布周期保留为 deprecated 模块别名 shim，并与 canonical 模块共享
+同一个模块对象；这是部署、插件和测试的兼容边界，不得改成 `import *`。是否删除 shim 只能在
+下一个稳定周期基于引用审计决定。
 
 ---
 
@@ -664,7 +645,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - 主智能体的 `task_plan` 工具只能查看或操作当前 `source + session_id` 所属计划；即使显式提供其他会话的 `plan_id` 也必须拒绝。用户级任务页、CLI 管理命令和后台调度器继续通过受控服务直接管理集中存储中的计划。
 - 不假设拥有未注入的其他会话内容；`memory.history_read_enabled=true` 时可使用历史搜索工具。
 - 工具上下文只包含运行所需的 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout` 及授权策略字段，不包含主对话历史。
-- 会话级锁（`run/session_runtime.py:session_lock`）保证同一 user/source/session_id 的请求串行执行。
+- 会话级锁（`run/conversation/session_runtime.py:session_lock`）保证同一 user/source/session_id 的请求串行执行。
 - Web 长任务 API：
   `GET /api/users/{user}/sessions/{session_id}/long-task?source=web` 查询状态；
   `PUT` 同一路径提交 `{ "enabled": true|false }`；

@@ -15,7 +15,7 @@ import sqlite3
 import threading
 from typing import Any, Callable, Iterable, Iterator
 
-from run.config.users import user_dir
+from run.config import user_dir
 
 
 HISTORY_DB_FILENAME = "history.sqlite3"

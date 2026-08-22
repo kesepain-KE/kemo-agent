@@ -244,7 +244,7 @@ python update.py
 
 | 路径 | 内容 |
 |------|------|
-| `run/` | 对话、历史、Prompt、记忆、工具和运行时宿主 |
+| `run/` | 12 个领域子包；`engine.py` 为总门面，`__init__.py` 保持懒加载 |
 | `provider/` | Kemo 与 Chat Provider 实现 |
 | `web/` | FastAPI 后端和 React 前端 |
 | `agents/` | 内置子代理 |
@@ -255,9 +255,13 @@ python update.py
 | `global_knowledge/` | 框架级知识库和主索引 |
 | `users/<name>/` | 用户私有工作空间 |
 | `template/` | 模块和用户创建骨架 |
+| `tests/` | 会上传的正式发布红线，按领域及 contracts/runtime/storage 职责组织 |
 | `tests/template_tests/` | 六类模块创建后合同验收 |
+| `开发临时目录/test_kemo/` | `.gitignore` 排除的本机系统/集成补强，不与正式测试重复断言 |
 
-完整导航见 `data_structure.md`。
+`run/` 的公开调用只允许从 `run.<领域>` 入口导入；旧 `run.<旧模块>` 仍作为 deprecated 模块别名
+shim 保留一个稳定周期，确保部署代码、插件和 monkeypatch 继续共享 canonical 模块对象。完整导航见
+`data_structure.md`。
 
 ## 关键入口
 

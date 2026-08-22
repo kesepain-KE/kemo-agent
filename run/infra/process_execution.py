@@ -11,7 +11,6 @@ import pickle
 import signal
 import subprocess
 import sys
-import time
 import uuid
 from dataclasses import dataclass
 from multiprocessing.connection import Connection

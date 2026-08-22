@@ -17,24 +17,30 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 ## 顶层运行组件
 
+`run/` 以 12 个领域包作为单入口。外部生产代码只使用 `from run.<领域> import ...`；领域之间也
+只通过对方入口协作，不直接依赖私有实现文件。
+
 | 目录/模块 | 主要职责 |
 |-----------|----------|
-| `run/engine.py` | 对话运行时稳定公共门面 |
-| `run/conversation_runtime.py` | 一轮对话的主编排、Provider/工具循环、提交和终态 |
-| `run/long_task.py`、`run/long_task_runtime.py` | 会话级长任务授权、跨 Run 续跑、统计和 synthetic 历史语义 |
-| `run/request_input.py` | 用户文本、多模态和上传文件输入规范化 |
-| `run/provider_events.py` | Provider 响应事件与终态解释 |
-| `run/prompt.py` | 系统 Prompt 的固定顺序拼装、字符预算与拓展/感知动态段刷新 |
-| `run/prompt_sources.py` | 插件、技能、知识索引、拓展和感知来源发现 |
-| `run/history.py` / `run/history_store.py` | archive/runtime 双窗口和历史数据库事务 |
-| `run/memory.py` / `run/memory_store.py` | 记忆生命周期、提取模式和 SQLite 门面 |
-| `run/tools.py` | 插件发现、参数校验、超时、取消和结果限制 |
-| `run/agent_runner.py` | 子代理独立 Prompt、Provider、工具循环和超时存活期 |
-| `run/agent_queue.py` | 用户级后台子代理有界队列 |
-| `run/module_runtime.py` | 感知/拓展等模块的子进程协议、锁、取消和健康状态 |
-| `run/runtime_host.py` | Cron、维护、历史摘要、任务计划和消息路由生命周期 |
+| `run/engine.py` | 对话、上下文与压缩的稳定总门面 |
+| `run/conversation/` | 一轮对话主编排、输入、Provider 事件、引导、终态和 Usage |
+| `run/context/` | 上下文选择、Token/轮次预算、压缩服务和摘要缓存 |
+| `run/history/` | archive/runtime 双窗口、会话索引和历史摘要调度 |
+| `run/memory/` | 记忆生命周期、批量分析、提取管道和 SQLite 存储 |
+| `run/tools/` | 插件发现、参数校验、执行、超时、取消和参数恢复 |
+| `run/agents/` | 子代理运行、队列、服务与调用合同 |
+| `run/tasks/` | 任务计划存储、修订、执行、服务和调度 |
+| `run/long_task/` | 会话级长任务授权、跨 Run 续跑、统计和 synthetic 历史语义 |
+| `run/scheduler/` | Cron、维护、运行状态和 RuntimeHost 生命周期 |
+| `run/config/` | 配置合并、用户路径、Prompt 来源/组装和知识索引 |
+| `run/extensions/` | 感知/拓展子进程、多模态、附件、媒体产物和模型能力 |
+| `run/infra/` | 原子 I/O、进程执行、公共错误、日志和 CLI 桥 |
 | `provider/` | Kemo 原生协议、Chat 兼容桥和统一内部模型 |
 | `web/` | FastAPI API、认证、领域路由/服务和 React 前端 |
+
+`run/__init__.py` 保持懒加载，避免插件或子代理发现时初始化完整对话运行时。旧
+`run.<旧模块>` 路径在本发布周期全部保留为模块对象别名 shim，以维持 monkeypatch、缓存、锁和
+部署代码的身份语义；它们已弃用，但只在下一个稳定周期完成引用审计后才评估删除。
 
 ## 一次请求的完整生命周期
 
@@ -62,11 +68,11 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 - `compress_context()`；
 - `context_status()`。
 
-复杂逻辑留在领域模块，入口不应直接导入 `conversation_runtime` 的内部函数。
+复杂逻辑留在领域模块，入口不应直接导入 `run/conversation/runtime.py` 的私有函数。
 
 ### 3. 获取会话锁并准备历史窗口
 
-`conversation_runtime` 使用项目根目录、用户、来源和会话 ID 组成会话身份，并取得会话级锁。
+`run/conversation/` 使用项目根目录、用户、来源和会话 ID 组成会话身份，并取得会话级锁。
 同一会话的提交串行执行，避免两个请求同时覆盖 runtime 窗口；不同用户和不同会话可并行。
 
 历史数据库同时维护：
@@ -84,7 +90,7 @@ App 桥接请求固定使用 `source=app`，不能由设备端改写为其他渠
 
 ### 4. 合并配置并建立资源策略
 
-`run/config.py` 读取 `config/global_config.json` 和用户 `user_config.json`。框架级运行参数按对象
+`run/config/` 读取 `config/global_config.json` 和用户 `user_config.json`。框架级运行参数按对象
 深合并，Provider、模型和用户资源选择保持用户所有权。
 
 资源策略决定当前主智能体可见的插件、技能、知识层、拓展和感知。子代理不继承该策略，而是
@@ -92,7 +98,7 @@ App 桥接请求固定使用 `source=app`，不能由设备端改写为其他渠
 
 ### 5. 构建 PromptBundle
 
-`run/prompt.py` 按稳定顺序构建 Prompt：
+`run/config/` 的 Prompt 门面按稳定顺序构建 Prompt：
 
 ```text
 用户人格
@@ -258,7 +264,7 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 
 ### 模块子进程
 
-感知和拓展等模块使用 `run/module_runtime.py` 的 stdin/stdout JSON 协议在独立 Python 子进程中
+感知和拓展等模块使用 `run/extensions/` 的 stdin/stdout JSON 协议在独立 Python 子进程中
 执行。运行时限制路径、重定向、输出捕获、超时和取消，并使用模块锁避免同一模块并发写状态。
 
 这不是操作系统级安全沙箱。模块仍必须是可信本地代码。

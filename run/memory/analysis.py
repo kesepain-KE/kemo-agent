@@ -12,7 +12,7 @@ from typing import Any
 from run.agents import AgentRunner
 from run.infra import EngineError
 from run.history import commit_window
-from run.history.index import find_record, update_memory_state
+from run.history import find_record, update_memory_state
 from run.memory import (
     MemoryStore,
     memory_extraction_batch_rounds,

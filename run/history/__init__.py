@@ -44,7 +44,7 @@ from run.history.store import (
     save_window_bundle,
     window_exists,
 )
-from run.config.users import user_dir
+from run.config import user_dir
 
 
 SCHEMA_VERSION = 1

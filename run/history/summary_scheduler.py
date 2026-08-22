@@ -6,7 +6,7 @@ import copy
 import threading
 from typing import Any, Callable
 
-from run.config.users import list_users
+from run.config import list_users
 
 
 class HistorySummaryScheduler:

@@ -12,7 +12,7 @@ import sqlite3
 import threading
 from typing import Iterator
 
-from run.config.users import user_dir
+from run.config import user_dir
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"

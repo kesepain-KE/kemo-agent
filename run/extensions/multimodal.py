@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from run.config import ConfigError
 from run.extensions.model_capabilities import (
-    _capability_cache,
     lookup_model_capabilities,
 )
 

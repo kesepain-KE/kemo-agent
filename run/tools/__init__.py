@@ -56,16 +56,16 @@ class ToolProcessError(ToolError):
         self.remote_exception_type = str(
             detail.get("exception_type") or "ToolProcessError"
         )
-        for field in (
+        for detail_field in (
             "category",
             "status_code",
             "retryable",
             "retry_after_ms",
             "attempt_count",
         ):
-            value = detail.get(field)
+            value = detail.get(detail_field)
             if value is not None:
-                setattr(self, field, value)
+                setattr(self, detail_field, value)
 
 
 class ToolCancelledError(ToolError):

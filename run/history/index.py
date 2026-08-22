@@ -30,7 +30,7 @@ from run.history.store import (
     upsert_registry_record,
     write_registry,
 )
-from run.config.users import user_dir
+from run.config import user_dir
 
 
 INDEX_SCHEMA_VERSION = 3

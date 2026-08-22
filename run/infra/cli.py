@@ -10,7 +10,7 @@ from typing import Any
 
 from run.config import project_root
 from run.engine import handle_request
-from run.history.index import (
+from run.history import (
     get_or_reserve_active as get_or_reserve_history_session,
 )
 

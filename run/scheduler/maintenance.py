@@ -22,7 +22,7 @@ from run.memory import (
     memory_round_data,
     persist_round_memory_analysis,
 )
-from run.history import commit_window, load_window, patch_archive_metadata
+from run.history import load_window, patch_archive_metadata
 from run.history import (
     claim_pending_memory,
     claim_pending_summary,
