@@ -6,7 +6,7 @@
 
 记忆与历史采用两个数据库：`improve/memory.sqlite3` 和 `history/history.sqlite3`。二者的写入频率、保留周期和维护任务不同，分库可避免记忆加权与聊天归档争用同一写锁，也便于单独备份、诊断和重建。
 
-数据库启用 WAL、`synchronous=NORMAL`、外键、5 秒 busy timeout 和显式写事务。连接与 schema 集中在 `run/memory_store.py`，业务规则集中在 `run/memory_sqlite.py`。生产代码只通过条目级接口读取或修改记忆，不再提供模拟旧 `data.json` 的 `load_index`、`write_index`、层级目录或正文文件路径接口，外部代码不得直接拼 SQL 修改生命周期状态。
+数据库启用 WAL、`synchronous=NORMAL`、外键、5 秒 busy timeout 和显式写事务。连接、Schema 与业务规则统一归入 `run/memory/` 领域，生产代码只通过该领域入口的条目级接口读取或修改记忆，不再提供模拟旧 `data.json` 的 `load_index`、`write_index`、层级目录或正文文件路径接口，外部代码不得直接拼 SQL 修改生命周期状态。
 
 ## 表结构
 

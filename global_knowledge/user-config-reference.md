@@ -2,7 +2,7 @@
 
 > 文档版本：v2.4
 > 最后核对：2026-08-07
-> 事实来源：`template/user/user_config.json`、`run/config.py`、`run/source_policy.py`、`run/prompt.py`、`provider/protocol/models.py`
+> 事实来源：`template/user/user_config.json`、`run/config/`、`provider/protocol/models.py`
 
 kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
 

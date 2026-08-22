@@ -1,10 +1,10 @@
 # Provider 工具调用完整性与终态边界
 
-本文说明 `provider.type=chat` 与 `provider.type=kemo` 的工具调用何时可执行，以及输出截断、参数损坏和任务计划暂停时应如何诊断。实现入口主要位于 `provider/openai_chat.py`、`provider/adapters/compat.py`、`run/provider_events.py` 和 `run/task_plan_executor.py`。
+本文说明 `provider.type=chat` 与 `provider.type=kemo` 的工具调用何时可执行，以及输出截断、参数损坏和任务计划暂停时应如何诊断。实现入口主要位于 `provider/openai_chat.py`、`provider/adapters/compat.py`、`run/conversation/` 和 `run/tasks/`。
 
 ## 共同原则
 
-工具名称出现不等于工具调用已经完整。一次调用进入 `run/conversation_runtime.py` 的执行循环前必须同时满足：
+工具名称出现不等于工具调用已经完整。一次调用进入 `run/conversation/` 的执行循环前必须同时满足：
 
 1. Provider 已给出允许继续工具循环的终态；
 2. 参数已经完整解析为 JSON 对象；

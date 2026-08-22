@@ -114,7 +114,7 @@ def discover_user(explicit_user: str | None, root: Path | None = None, *, intera
     raise CLIError("未找到可用用户，请使用 --user 指定用户。")
 def resolve_stream_handler() -> Callable[[dict[str, str]], Any] | None:
     try:
-        module = importlib.import_module("run.cli")
+        module = importlib.import_module("run.infra")
     except ModuleNotFoundError:
         return None
     handler = getattr(module, "stream_cli_request", None)
@@ -123,7 +123,7 @@ def resolve_stream_handler() -> Callable[[dict[str, str]], Any] | None:
 
 def resolve_interactive_context(user: str, root: Path) -> dict[str, str]:
     try:
-        module = importlib.import_module("run.cli")
+        module = importlib.import_module("run.infra")
     except ModuleNotFoundError as exc:
         raise CLIError("运行核心尚未提供共享会话解析器") from exc
     resolver = getattr(module, "resolve_interactive_context", None)
@@ -145,7 +145,7 @@ def resolve_handler() -> Callable[[dict[str, str]], Any]:
     """Resolve the run-core bridge without coupling the CLI to its internals."""
 
     candidates = (
-        ("run.cli", "handle_cli_request"),
+        ("run.infra", "handle_cli_request"),
         ("run", "handle_cli_request"),
     )
     errors: list[str] = []

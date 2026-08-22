@@ -14,8 +14,13 @@ __all__ = [
     "ContextLengthExceededError",
     "EngineError",
     "cancellable_subprocess_kwargs",
+    "handle_cli_request",
+    "handle_cli_compress",
+    "handle_cli_status",
     "hidden_subprocess_kwargs",
+    "resolve_interactive_context",
     "replace_with_retry",
+    "stream_cli_request",
     "terminate_process_tree",
 ]
 

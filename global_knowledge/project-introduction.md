@@ -259,9 +259,8 @@ python update.py
 | `tests/template_tests/` | 六类模块创建后合同验收 |
 | `开发临时目录/test_kemo/` | `.gitignore` 排除的本机系统/集成补强，不与正式测试重复断言 |
 
-`run/` 的公开调用只允许从 `run.<领域>` 入口导入；旧 `run.<旧模块>` 仍作为 deprecated 模块别名
-shim 保留一个稳定周期，确保部署代码、插件和 monkeypatch 继续共享 canonical 模块对象。完整导航见
-`data_structure.md`。
+`run/` 的公开调用只允许从 `run.<领域>` 入口导入；顶层只保留懒加载的 `run/__init__.py` 和
+`run/engine.py` 总门面，不再维护旧平铺模块或平行兼容层。完整导航见 `data_structure.md`。
 
 ## 关键入口
 

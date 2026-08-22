@@ -2,7 +2,7 @@
 
 > 文档版本：v2.4
 > 最后核对：2026-08-07
-> 事实来源：`config/global_config.json`、`run/config.py`、`run/engine.py`、`run/conversation_runtime.py`、`run/context_service.py`、`run/source_policy.py`、`run/prompt.py`、`run/runtime_host.py`
+> 事实来源：`config/global_config.json`、`run/config/`、`run/engine.py`、`run/conversation/`、`run/context/`、`run/scheduler/`
 
 kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用户共享这些默认值，用户级 `user_config.json` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
 
@@ -99,7 +99,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
 | `extraction_max_candidates_per_batch` | int | `10` | 每批最多保留的记忆候选；同时受“每轮最多 2 条”限制，运行时硬上限为 40 |
-| `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/prompt.py` 按该值截断 |
+| `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/config/` 的 Prompt 门面按该值截断 |
 | `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限；与注入预算语义独立，超过后拒绝本次更新且不覆盖旧热画像 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
 
