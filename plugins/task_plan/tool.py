@@ -6,11 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run.config import load_config
 from run.task_plan_executor import (
     approve_plan,
     cancel_plan,
     pause_plan,
     resume_plan,
+)
+from run.task_plan_mutations import (
+    edit_plan_fields,
+    plan_fix_activation_result,
+    reset_plan_step,
 )
 from run.task_plan_store import (
     PLAN_ID_RE,
@@ -27,7 +33,10 @@ _STEP_TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "skipped", "cancelled"}
 )
 _ACTIONS = frozenset(
-    {"view", "list", "step_done", "step_fail", "abort", "approve", "pause", "resume"}
+    {
+        "view", "list", "edit", "retry_step", "reset_step",
+        "step_done", "step_fail", "abort", "approve", "pause", "resume",
+    }
 )
 
 
@@ -165,7 +174,7 @@ def _step_done(
             plan["status"] = "running"
         return plan
 
-    store.update(plan_id, mark)
+    store.update(plan_id, mark, note=f"完成步骤 {step_id}")
     return _auto_complete_check(store, plan_id)
 
 
@@ -201,7 +210,7 @@ def _step_fail(
         plan["current_step"] = step_id
         return plan
 
-    return store.update(plan_id, mark)
+    return store.update(plan_id, mark, note=f"步骤失败 {step_id}")
 
 
 def run(
@@ -211,6 +220,10 @@ def run(
     step_id: str = "",
     result: str = "",
     error: str = "",
+    revision: int | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     if not isinstance(context, dict) or not context.get("root") or not context.get("user"):
@@ -271,6 +284,81 @@ def run(
 
     if selected_action == "view":
         return _result(True, plan=selected_plan)
+
+    if selected_action == "edit":
+        changes: dict[str, Any] = {}
+        if title is not None:
+            changes["title"] = title
+        if description is not None:
+            changes["description"] = description
+        if steps is not None:
+            changes["steps"] = steps
+        try:
+            config = load_config(user, root)
+            auto_retry_on_fix = (
+                (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
+                is True
+            )
+            plan = edit_plan_fields(
+                store,
+                selected_plan_id,
+                expected_revision=revision,
+                changes=changes,
+                auto_retry_on_fix=auto_retry_on_fix,
+            )
+            activated, activation_reason = plan_fix_activation_result(
+                selected_plan,
+                plan,
+                auto_retry_on_fix=auto_retry_on_fix,
+            )
+            return _result(
+                True,
+                plan=plan,
+                activated=activated,
+                reason=activation_reason,
+            )
+        except (PlanError, ValueError) as exc:
+            return _result(False, error=str(exc))
+
+    if selected_action in {"retry_step", "reset_step"}:
+        selected_step_id = str(step_id or "").strip()
+        if not selected_step_id:
+            return _result(False, error=f"{selected_action} 需要 step_id")
+        if STEP_ID_RE.fullmatch(selected_step_id) is None:
+            return _result(False, error=f"step_id 无效: {selected_step_id}")
+        try:
+            config = load_config(user, root)
+            auto_retry_on_fix = (
+                (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
+                is True
+            )
+            activation_reason = "reset_only"
+            plan = reset_plan_step(
+                store,
+                selected_plan_id,
+                selected_step_id,
+                expected_revision=revision,
+                activate_paused=selected_action == "retry_step",
+                auto_retry_on_fix=auto_retry_on_fix,
+            )
+            if selected_action == "retry_step":
+                activated, activation_reason = plan_fix_activation_result(
+                    selected_plan,
+                    plan,
+                    auto_retry_on_fix=auto_retry_on_fix,
+                )
+            else:
+                activated = False
+            return _result(
+                True,
+                plan=plan,
+                reset_step=_step_by_id(plan, selected_step_id),
+                activated=activated,
+                reason=activation_reason,
+                **_progress_payload(plan),
+            )
+        except (PlanError, ValueError) as exc:
+            return _result(False, error=str(exc))
 
     if selected_action == "step_done":
         selected_step_id = str(step_id or "").strip()

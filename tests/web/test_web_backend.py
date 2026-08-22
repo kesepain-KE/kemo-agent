@@ -6,8 +6,10 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -49,6 +51,7 @@ from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError, resolve_client_ip
 from web.errors import NotFoundError, WebServiceError
 from web.service import ActiveRun, WebRunService, _usage_cache_tokens
+from web.services import _paths as path_helpers
 from web.services.artifact_resolver import DownloadArtifactResolver
 
 
@@ -425,6 +428,79 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["pagination"]["page"], 2)
         self.assertEqual(len(response.json()["entries"]), 2)
+
+    def test_normal_file_browsing_keeps_global_summary_but_has_a_hard_scan_budget(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        current = upload_root / "deep"
+        for index in range(12):
+            current.mkdir(parents=True, exist_ok=True)
+            (current / f"level-{index}.txt").write_text("x", "utf-8")
+            current = current / f"nested-{index}"
+        service = WebRunService(root)
+
+        with (
+            patch("web.services._paths._DIRECTORY_SCAN_MAX_ENTRIES", 5),
+            patch(
+                "web.services._paths._visible_children",
+                wraps=path_helpers._visible_children,
+            ) as visible_children,
+        ):
+            page = service.files("alice", "file_upload", page=1, page_size=6)
+
+        self.assertEqual([entry["relative_path"] for entry in page["entries"]], ["deep"])
+        self.assertLessEqual(visible_children.call_count, 8)
+        self.assertEqual(page["summary"]["scanned_entries"], 5)
+        self.assertTrue(page["summary"]["truncated"])
+
+    def test_recursive_file_search_has_a_hard_scan_budget(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        for index in range(20):
+            (upload_root / f"target-{index}.txt").write_text("x", "utf-8")
+        service = WebRunService(root)
+
+        with patch("web.services._paths._DIRECTORY_SCAN_MAX_ENTRIES", 5):
+            page = service.files(
+                "alice",
+                "file_upload",
+                search="target",
+                page=1,
+                page_size=100,
+            )
+
+        self.assertEqual(page["summary"]["scanned_entries"], 5)
+        self.assertTrue(page["summary"]["truncated"])
+        self.assertEqual(page["pagination"]["total_items"], 5)
+
+    def test_file_summary_cache_is_reused_and_web_mutations_invalidate_it(self) -> None:
+        _, root = self.make_root()
+        upload_root = root / "users" / "alice" / "file_upload"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        (upload_root / "first.txt").write_text("first", "utf-8")
+        service = WebRunService(root)
+
+        with patch(
+            "web.services._paths._scan_directory_summary",
+            wraps=path_helpers._scan_directory_summary,
+        ) as scan_summary:
+            first = service.files("alice", "file_upload")
+            second = service.files("alice", "file_upload")
+            self.assertEqual(scan_summary.call_count, 1)
+            self.assertEqual(first["summary"], second["summary"])
+
+            service.save_file(
+                "alice",
+                "file_upload",
+                "nested/second.txt",
+                b"second",
+            )
+            refreshed = service.files("alice", "file_upload")
+
+        self.assertEqual(scan_summary.call_count, 2)
+        self.assertEqual(refreshed["summary"]["total_files"], 2)
+        self.assertEqual(refreshed["summary"]["total_dirs"], 1)
 
     def test_generated_artifact_resolves_nested_move_by_checksum(self) -> None:
         _, root = self.make_root()
@@ -1382,8 +1458,12 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(limited.ip_max_failures, 5)
         self.assertTrue(limited.public_summary()["ip_rate_limit_enabled"])
+        self.assertTrue(WebAuthConfig.from_env({"WEB_SESSION_COOKIE_SECURE": "true"}).cookie_secure)
+        self.assertFalse(WebAuthConfig.from_env({"WEB_SESSION_COOKIE_SECURE": "false"}).cookie_secure)
         with self.assertRaisesRegex(WebAuthConfigError, "必须是整数"):
             WebAuthConfig.from_env({"WEB_AUTH_IP_MAX_FAILURES": "five"})
+        with self.assertRaisesRegex(WebAuthConfigError, "true/false"):
+            WebAuthConfig.from_env({"WEB_SESSION_COOKIE_SECURE": "sometimes"})
         with self.assertRaisesRegex(WebAuthConfigError, "无效 IP"):
             WebAuthConfig.from_env({"WEB_AUTH_TRUSTED_PROXIES": "not-an-ip"})
 
@@ -1396,6 +1476,25 @@ class WebBackendTests(unittest.TestCase):
             resolve_client_ip("127.0.0.1", "198.51.100.8", ("127.0.0.1",)),
             "198.51.100.8",
         )
+
+    def test_secure_cookie_flag_is_applied_only_when_explicitly_enabled(self) -> None:
+        app = create_app(
+            service=FakeService(),
+            auth_config=WebAuthConfig(
+                access_token="token-secret",
+                session_secret="session-secret",
+                cookie_secure=True,
+            ),
+        )
+
+        async def invoke():
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+                return await client.post("/api/auth/token", json={"token": "token-secret"})
+
+        response = asyncio.run(invoke())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("secure", response.headers["set-cookie"].casefold())
         self.assertEqual(
             resolve_client_ip(
                 "127.0.0.1",
@@ -2907,6 +3006,46 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(len(set(thread_ids)), 1)
         self.assertNotEqual(thread_ids[0], threading.get_ident())
 
+    def test_closing_stream_consumer_releases_worker_when_output_queue_is_full(self) -> None:
+        _, root = self.make_root()
+        producer_reached_full_queue = threading.Event()
+        session_id = "consumer-disconnect-full-queue"
+
+        def source(*_args, **_kwargs):
+            for index in range(1_000):
+                if index == 33:
+                    producer_reached_full_queue.set()
+                yield RunEvent(type="text_delta", content=str(index))
+
+        service = WebRunService(root, event_source=source)
+        iterator = service.stream_chat(
+            "alice",
+            session_id,
+            "start",
+            cancel_event=threading.Event(),
+        )
+        self.assertEqual(next(iterator).type, "text_delta")
+        self.assertTrue(producer_reached_full_queue.wait(timeout=2))
+
+        iterator.close()
+
+        worker_name = f"web-run-alice-{session_id}"
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and any(
+            thread.name == worker_name and thread.is_alive()
+            for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+        self.assertFalse(any(
+            thread.name == worker_name and thread.is_alive()
+            for thread in threading.enumerate()
+        ))
+        with service._active_runs_lock:
+            self.assertFalse(any(
+                active.session_id == session_id
+                for active in service._active_runs.values()
+            ))
+
     def test_web_guidance_queue_is_user_scoped_and_removed_after_run(self) -> None:
         _, root = self.make_root()
         seen: list[str] = []
@@ -3372,6 +3511,332 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.json()["plan"]["status"], "paused")
         self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
 
+    def test_plan_edit_and_retry_endpoints_use_revision_and_preserve_completed(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
+            "utf-8",
+        )
+        store = PlanStore(root, "alice")
+        plan = store.create(
+            normalize_plan(
+                title="待修正计划",
+                description="旧描述",
+                user="alice",
+                source="web",
+                session_id="s1",
+                status="paused",
+                steps=[
+                    {
+                        "step_id": "step_1",
+                        "title": "已完成",
+                        "description": "不能修改",
+                        "status": "completed",
+                        "result": {"ok": True},
+                        "critical": True,
+                    },
+                    {
+                        "step_id": "step_2",
+                        "title": "失败步骤",
+                        "description": "等待重试",
+                        "status": "failed",
+                        "depends_on": ["step_1"],
+                        "error": {"message": "旧错误"},
+                        "finished_at": "2026-08-22T01:00:00+00:00",
+                        "critical": True,
+                    },
+                ],
+            )
+        )
+        wake_count = 0
+
+        def wake() -> None:
+            nonlocal wake_count
+            wake_count += 1
+
+        app = create_app(service=WebRunService(root, plan_waker=wake))
+        edited = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            json={
+                "revision": plan["revision"],
+                "title": "已修正计划",
+                "steps": [{
+                    "step_id": "step_2",
+                    "tool_name": "shell",
+                    "tool_arguments": {"command": "pwd"},
+                    "critical": False,
+                }],
+            },
+        )
+        self.assertEqual(edited.status_code, 200, edited.text)
+        edited_plan = edited.json()["plan"]
+        self.assertEqual(edited_plan["title"], "已修正计划")
+        self.assertEqual(edited_plan["steps"][0]["result"], {"ok": True})
+        self.assertEqual(edited_plan["steps"][1]["tool_arguments"], {"command": "pwd"})
+        self.assertFalse(edited.json()["activated"])
+        self.assertEqual(edited.json()["reason"], "activation_disabled")
+
+        stale = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            json={"revision": plan["revision"], "description": "陈旧修改"},
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+
+        protected = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            json={
+                "revision": edited_plan["revision"],
+                "steps": [{"step_id": "step_1", "critical": False}],
+            },
+        )
+        self.assertEqual(protected.status_code, 400, protected.text)
+
+        retried = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_2/retry",
+            json={"revision": edited_plan["revision"]},
+        )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        retried_plan = retried.json()["plan"]
+        self.assertEqual(retried_plan["status"], "paused")
+        self.assertEqual(retried_plan["steps"][1]["status"], "pending")
+        self.assertIsNone(retried_plan["steps"][1]["error"])
+        self.assertEqual(retried_plan["steps"][1]["finished_at"], "")
+        self.assertFalse(retried.json()["activated"])
+        self.assertEqual(retried.json()["reason"], "activation_disabled")
+        self.assertEqual(wake_count, 0)
+
+    def test_plan_fix_auto_activation_wakes_only_after_approved_transition(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
+            "utf-8",
+        )
+        store = PlanStore(root, "alice")
+        plan = store.create(normalize_plan(
+            title="失败计划",
+            description="等待修正",
+            user="alice",
+            source="web",
+            session_id="s1",
+            status="failed",
+            steps=[{
+                "step_id": "step_1",
+                "title": "失败步骤",
+                "description": "等待重试",
+                "status": "failed",
+                "error": {"message": "旧错误"},
+                "critical": True,
+            }],
+        ))
+        wake_count = 0
+
+        def wake() -> None:
+            nonlocal wake_count
+            wake_count += 1
+
+        app = create_app(service=WebRunService(root, plan_waker=wake))
+        response = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_1/retry",
+            json={"revision": plan["revision"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["activated"])
+        self.assertEqual(response.json()["reason"], "auto_retry_on_fix")
+        self.assertEqual(response.json()["plan"]["status"], "approved")
+        self.assertEqual(wake_count, 1)
+
+        edit_plan = store.create(normalize_plan(
+            title="暂停计划",
+            description="等待编辑",
+            user="alice",
+            source="web",
+            session_id="s1",
+            status="paused",
+            auto_accept=True,
+            steps=[{
+                "step_id": "step_1",
+                "title": "待修正步骤",
+                "description": "等待编辑",
+                "critical": True,
+            }],
+        ))
+        edited = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{edit_plan['plan_id']}/edit",
+            json={"revision": edit_plan["revision"], "description": "已修正"},
+        )
+        self.assertEqual(edited.status_code, 200, edited.text)
+        self.assertTrue(edited.json()["activated"])
+        self.assertEqual(edited.json()["reason"], "auto_accept")
+        self.assertEqual(edited.json()["plan"]["status"], "approved")
+        self.assertEqual(wake_count, 2)
+
+    def test_plan_revision_endpoints_are_session_scoped_and_rollback_is_append_only(self) -> None:
+        _, root = self.make_root()
+        store = PlanStore(root, "alice")
+        plan = store.create(
+            normalize_plan(
+                title="第一版",
+                description="初始计划",
+                user="alice",
+                source="web",
+                session_id="conversation-a",
+                steps=[{
+                    "step_id": "step_1",
+                    "title": "初始步骤",
+                    "description": "执行第一版",
+                    "critical": True,
+                }],
+            )
+        )
+        second = store.update(
+            plan["plan_id"],
+            lambda current: {**current, "title": "第二版", "status": "paused"},
+            note="修改为第二版",
+        )
+        app = create_app(service=WebRunService(root))
+        base = f"/api/users/alice/tasks/plans/{plan['plan_id']}"
+
+        denied = self.request(
+            app,
+            "GET",
+            f"{base}/revisions?session_id=conversation-b",
+        )
+        self.assertEqual(denied.status_code, 400, denied.text)
+
+        listed = self.request(
+            app,
+            "GET",
+            f"{base}/revisions?session_id=conversation-a",
+        )
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(
+            [item["revision"] for item in listed.json()["revisions"]],
+            [2, 1],
+        )
+
+        viewed = self.request(
+            app,
+            "GET",
+            f"{base}/revisions/1?session_id=conversation-a",
+        )
+        self.assertEqual(viewed.status_code, 200, viewed.text)
+        self.assertEqual(viewed.json()["plan"]["title"], "第一版")
+
+        secret_revision = copy.deepcopy(second)
+        secret_revision["revision"] = 3
+        secret_revision["steps"][0]["tool_arguments"] = {
+            "authorization": "Bearer example-sensitive-value",
+            "command": "safe-command",
+        }
+        secret_revision["steps"][0]["result"] = "token: example-sensitive-value"
+        database = sqlite3.connect(store.path)
+        try:
+            database.execute(
+                "UPDATE task_plans SET revision=3 WHERE plan_id=?",
+                (plan["plan_id"],),
+            )
+            database.execute(
+                """
+                UPDATE task_plan_steps
+                SET tool_arguments_json=?, result_json=?
+                WHERE plan_id=? AND step_id='step_1'
+                """,
+                (
+                    json.dumps(secret_revision["steps"][0]["tool_arguments"]),
+                    json.dumps(secret_revision["steps"][0]["result"]),
+                    plan["plan_id"],
+                ),
+            )
+            database.execute(
+                """
+                INSERT INTO task_plan_revisions(
+                    plan_id, revision, plan_json, note, created_at
+                ) VALUES(?, 3, ?, '旧版敏感快照', ?)
+                """,
+                (
+                    plan["plan_id"],
+                    json.dumps(secret_revision, ensure_ascii=False),
+                    secret_revision["updated_at"],
+                ),
+            )
+            database.commit()
+        finally:
+            database.close()
+        secret_view = self.request(
+            app,
+            "GET",
+            f"{base}/revisions/3?session_id=conversation-a",
+        )
+        self.assertEqual(secret_view.status_code, 200, secret_view.text)
+        secret_step = secret_view.json()["plan"]["steps"][0]
+        self.assertEqual(secret_step["tool_arguments"]["authorization"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["command"], "safe-command")
+        self.assertEqual(secret_step["result"], "***")
+
+        rolled_back = self.request(
+            app,
+            "POST",
+            f"{base}/rollback?session_id=conversation-a",
+            json={"revision": 1, "current_revision": 3},
+        )
+        self.assertEqual(rolled_back.status_code, 200, rolled_back.text)
+        rolled_plan = rolled_back.json()["plan"]
+        self.assertEqual(rolled_plan["revision"], 4)
+        self.assertEqual(rolled_plan["title"], "第一版")
+        self.assertEqual(rolled_plan["status"], second["status"])
+        self.assertEqual(store.get_revision(plan["plan_id"], 2)["title"], "第二版")
+        self.assertEqual(
+            [item["revision"] for item in store.list_revisions(plan["plan_id"])],
+            [4, 3, 2, 1],
+        )
+
+        stale_rollback = self.request(
+            app,
+            "POST",
+            f"{base}/rollback?session_id=conversation-a",
+            json={"revision": 2, "current_revision": 3},
+        )
+        self.assertEqual(stale_rollback.status_code, 409, stale_rollback.text)
+
+        running = store.update(
+            plan["plan_id"],
+            lambda current: {**current, "status": "running"},
+        )
+        running_rollback = self.request(
+            app,
+            "POST",
+            f"{base}/rollback?session_id=conversation-a",
+            json={"revision": 1, "current_revision": running["revision"]},
+        )
+        self.assertEqual(running_rollback.status_code, 400, running_rollback.text)
+        self.assertIn("只能在 pending/paused/failed 状态回滚", running_rollback.text)
+        self.assertEqual(store.read(plan["plan_id"])["status"], "running")
+
+        missing = self.request(
+            app,
+            "GET",
+            f"{base}/revisions/99?session_id=conversation-a",
+        )
+        self.assertEqual(missing.status_code, 404, missing.text)
+
     def test_knowledge_api_hides_and_protects_kemo_graph_storage(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -3705,6 +4170,142 @@ class WebBackendTests(unittest.TestCase):
             json={"theme": "dark", "font_size": "large"},
         )
         self.assertEqual(preferences.json()["appearance"]["theme"], "dark")
+
+    def test_completion_sound_is_user_scoped_validated_and_deletable(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        endpoint = "/api/users/alice/completion-sound"
+
+        missing_status = self.request(app, "GET", f"{endpoint}/status")
+        self.assertEqual(missing_status.status_code, 200, missing_status.text)
+        self.assertFalse(missing_status.json()["available"])
+        self.assertEqual(self.request(app, "GET", endpoint).status_code, 204)
+
+        mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x08testdata"
+        uploaded = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("done.mp3", mp3, "audio/mpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        status = uploaded.json()["status"]
+        self.assertTrue(status["available"])
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["filename"], "completion_sound.mp3")
+        self.assertEqual(status["mime_type"], "audio/mpeg")
+        target = root / "users" / "alice" / "completion_sound.mp3"
+        self.assertEqual(target.read_bytes(), mp3)
+        self.assertFalse((root / "users" / "alice" / "download" / target.name).exists())
+        self.assertFalse((root / "users" / "alice" / "file_upload" / target.name).exists())
+
+        audio = self.request(app, "GET", endpoint)
+        self.assertEqual(audio.status_code, 200, audio.text)
+        self.assertEqual(audio.headers["content-type"], "audio/mpeg")
+        self.assertEqual(audio.content, mp3)
+        self.assertEqual(audio.headers["cache-control"], "private, no-cache")
+        self.assertTrue(audio.headers["etag"].startswith('W/"'))
+        cached_audio = self.request(
+            app,
+            "GET",
+            endpoint,
+            headers={"If-None-Match": audio.headers["etag"]},
+        )
+        self.assertEqual(cached_audio.status_code, 304, cached_audio.text)
+        self.assertEqual(cached_audio.content, b"")
+
+        with patch(
+            "web.services.files._play_windows_completion_sound",
+            return_value="user_mp3_mci",
+        ):
+            mp3_fallback = self.request(app, "POST", f"{endpoint}/fallback")
+        self.assertTrue(mp3_fallback.json()["played"])
+        self.assertEqual(mp3_fallback.json()["mode"], "user_mp3_mci")
+
+        wav = b"RIFF" + (4).to_bytes(4, "little") + b"WAVEdata"
+        replaced = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("done.wav", wav, "audio/wav")},
+        )
+        self.assertEqual(replaced.status_code, 200, replaced.text)
+        self.assertFalse(target.exists())
+        self.assertEqual(
+            (root / "users" / "alice" / "completion_sound.wav").read_bytes(),
+            wav,
+        )
+
+        invalid_type = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("done.txt", b"not audio", "text/plain")},
+        )
+        self.assertEqual(invalid_type.status_code, 400, invalid_type.text)
+        mismatched = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("fake.mp3", b"OggSnot-mp3", "audio/mpeg")},
+        )
+        self.assertEqual(mismatched.status_code, 400, mismatched.text)
+        oversized = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("large.mp3", b"ID3" + b"x" * (5 * 1024 * 1024), "audio/mpeg")},
+        )
+        self.assertEqual(oversized.status_code, 400, oversized.text)
+        self.assertTrue((root / "users" / "alice" / "completion_sound.wav").exists())
+
+        with patch(
+            "web.services.files._play_windows_completion_sound",
+            return_value="user_wav",
+        ) as playback:
+            fallback = self.request(app, "POST", f"{endpoint}/fallback")
+        self.assertEqual(fallback.status_code, 200, fallback.text)
+        self.assertTrue(fallback.json()["played"])
+        self.assertEqual(fallback.json()["mode"], "user_wav")
+        playback.assert_called_once_with(
+            root / "users" / "alice" / "completion_sound.wav"
+        )
+
+        with patch(
+            "web.services.files._play_windows_completion_sound",
+            return_value="",
+        ):
+            unsupported = self.request(app, "POST", f"{endpoint}/fallback")
+        self.assertFalse(unsupported.json()["played"])
+        self.assertEqual(unsupported.json()["reason"], "unsupported_host")
+
+        deleted = self.request(app, "DELETE", endpoint)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["deleted"])
+        self.assertEqual(self.request(app, "GET", endpoint).status_code, 204)
+        self.assertFalse(self.request(app, "GET", f"{endpoint}/status").json()["available"])
+        missing_fallback = self.request(app, "POST", f"{endpoint}/fallback")
+        self.assertFalse(missing_fallback.json()["played"])
+        self.assertEqual(missing_fallback.json()["reason"], "not_configured")
+
+    def test_completion_sound_rejects_fixed_path_symlink(self) -> None:
+        _, root = self.make_root()
+        outside = root / "outside.mp3"
+        outside.write_bytes(b"outside")
+        link = root / "users" / "alice" / "completion_sound.mp3"
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"当前环境不能创建符号链接：{exc}")
+        app = create_app(service=WebRunService(root))
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/completion-sound",
+            files={"file": ("done.mp3", b"ID3valid", "audio/mpeg")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(outside.read_bytes(), b"outside")
 
     def test_startup_options_without_provider(self) -> None:
         _, root = self.make_root()

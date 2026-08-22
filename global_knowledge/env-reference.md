@@ -53,6 +53,7 @@ Provider 和使用标准网络栈的模块可继承代理。TLS 证书验证使�
 | `WEB_PASSWORD` | 空 | Web 页面登录密码，必须与 `WEB_USERNAME` 同时设置或同时留空 |
 | `WEB_SESSION_SECRET` | 启动时随机生成 | 签名会话密钥；多进程或需要重启后保持登录时应显式设置强随机值 |
 | `WEB_SESSION_COOKIE_NAME` | `kemo_agent_session` | Session Cookie 名称；同域多实例应使用不同名称 |
+| `WEB_SESSION_COOKIE_SECURE` | `false` | 公网 HTTPS 部署应设为 `true`，为 Session Cookie 添加 `Secure`；本机纯 HTTP 保持 `false` |
 | `WEB_AUTH_IP_MAX_FAILURES` | `0` | 单个 IP 在同一认证阶段允许的失败次数；留空或 `0` 表示不限次数 |
 | `WEB_AUTH_IP_WINDOW_SECONDS` | `600` | 失败次数统计窗口，单位秒，必须大于 `0` |
 | `WEB_AUTH_IP_LOCK_SECONDS` | `900` | 达到失败上限后的锁定时间，单位秒，必须大于 `0` |
@@ -78,6 +79,7 @@ WEB_USERNAME=
 WEB_PASSWORD=
 WEB_SESSION_SECRET=
 WEB_SESSION_COOKIE_NAME=kemo_agent_session
+WEB_SESSION_COOKIE_SECURE=false
 WEB_AUTH_IP_MAX_FAILURES=
 WEB_AUTH_IP_WINDOW_SECONDS=600
 WEB_AUTH_IP_LOCK_SECONDS=900
@@ -93,5 +95,5 @@ TAVILY_API_KEY=
 1. `.env` 不提交版本库；只提交不含真实值的 `.env.example`。
 2. 不把 `.env` 内容复制到知识库、记忆、截图、日志或错误报告。
 3. 怀疑泄露时立即轮换密钥，不能只删除文件记录。
-4. 对外监听 Web 时必须同时考虑认证、防火墙、反向代理和 HTTPS。
+4. 对外监听 Web 时必须同时考虑认证、防火墙、反向代理和 HTTPS；HTTPS 部署必须设置 `WEB_SESSION_COOKIE_SECURE=true`。
 5. 自动化部署优先使用操作系统或平台的 Secret 管理，而不是把生产密钥写入镜像。

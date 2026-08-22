@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -25,11 +25,10 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { buildCapabilityReferenceItems, capabilityReferenceLine, capabilityReferenceMarker } from '../components/capabilityReferences'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
-import { MarkdownMessage } from '../components/Chat/MarkdownMessage'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
@@ -41,10 +40,15 @@ import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubbl
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
 import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
+import { playUserCompletionSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 
 export type { PendingUploadedFile } from '../store/chatDrafts'
+
+const MarkdownMessage = lazy(async () => ({
+  default: (await import('../components/Chat/MarkdownMessage')).MarkdownMessage,
+}))
 
 function createSessionId() {
   return `web_${randomUUID()}`
@@ -90,7 +94,7 @@ function pendingInputAttachment(file: PendingUploadedFile): InputAttachment {
 export function isSuccessfulRunCompletion(event: RunEvent) {
   if (event.type !== 'done' || event.metadata?.committed === false) return false
   const status = String(event.metadata?.status || 'completed').toLowerCase()
-  return !['cancelled', 'failed', 'error'].includes(status)
+  return !['cancelled', 'failed', 'error', 'limited'].includes(status)
 }
 
 function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
@@ -350,20 +354,75 @@ export function buildUserMessageMarkers(items: ChatItem[], firstRound = 1): User
   return markers
 }
 
+function currentRoundStartIndex(items: ChatItem[]) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (isConversationBoundary(items[index])) return index + 1
+  }
+  return 0
+}
+
+function findLastCurrentRoundItemIndex(
+  items: ChatItem[],
+  predicate: (candidate: ChatItem) => boolean,
+) {
+  const roundStart = currentRoundStartIndex(items)
+  for (let index = items.length - 1; index >= roundStart; index -= 1) {
+    if (predicate(items[index])) return index
+  }
+  return -1
+}
+
+export function finalizeCurrentRoundItems(
+  items: ChatItem[],
+  toolError: Record<string, unknown>,
+) {
+  const roundStart = currentRoundStartIndex(items)
+  return items.map((item, index) => {
+    if (index < roundStart) return item
+    if (item.kind === 'message' && item.role === 'assistant' && item.streaming) {
+      return { ...item, streaming: false }
+    }
+    if (item.kind === 'reasoning' && item.streaming) {
+      return { ...item, streaming: false }
+    }
+    if (item.kind === 'tool' && item.status === 'running') {
+      return { ...item, status: 'error' as const, result: { ok: false, error: toolError } }
+    }
+    if (item.kind === 'guidance') {
+      return {
+        ...item,
+        status: item.status === 'queued'
+          ? 'not_applied' as const
+          : item.status === 'accepted'
+            ? 'completed' as const
+            : item.status,
+        finalized: true,
+      }
+    }
+    return item
+  })
+}
+
+export function prepareRunUserMessage(
+  items: ChatItem[],
+  userItem: Extract<ChatItem, { kind: 'message' }>,
+  replaceExistingRound = false,
+) {
+  const existingIndex = items.findIndex((item) => item.id === userItem.id)
+  if (existingIndex < 0) return [...items, userItem]
+  if (!replaceExistingRound) return items
+  const hasLaterBoundary = items
+    .slice(existingIndex + 1)
+    .some(isConversationBoundary)
+  return hasLaterBoundary ? items : items.slice(0, existingIndex + 1)
+}
+
 function insertCurrentRoundItem(
   items: ChatItem[],
   item: ChatItem,
   insertBefore: (candidate: ChatItem) => boolean,
 ) {
-  let lastUserIndex = -1
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const candidate = items[index]
-    if (candidate.kind === 'message' && candidate.role === 'user') {
-      lastUserIndex = index
-      break
-    }
-  }
-  const roundStart = lastUserIndex + 1
+  const roundStart = currentRoundStartIndex(items)
   const relativeIndex = items.slice(roundStart).findIndex(insertBefore)
   const insertionIndex = relativeIndex < 0 ? items.length : roundStart + relativeIndex
   return [...items.slice(0, insertionIndex), item, ...items.slice(insertionIndex)]
@@ -393,18 +452,22 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       : items.map((candidate, position) => position === index ? item : candidate)
   }
   if (event.type === 'text_delta') {
-    const index = [...items].reverse().findIndex((item) => item.kind === 'message' && item.role === 'assistant' && item.streaming)
+    const index = findLastCurrentRoundItemIndex(
+      items,
+      (item) => item.kind === 'message' && item.role === 'assistant' && Boolean(item.streaming),
+    )
     if (index >= 0) {
-      const actual = items.length - 1 - index
-      return items.map((item, position) => position === actual && item.kind === 'message' ? { ...item, content: item.content + (event.content || '') } : item)
+      return items.map((item, position) => position === index && item.kind === 'message' ? { ...item, content: item.content + (event.content || '') } : item)
     }
     return [...items, { id: eventId('assistant'), kind: 'message', role: 'assistant', content: event.content || '', streaming: true }]
   }
   if (event.type === 'reasoning_delta') {
-    const index = [...items].reverse().findIndex((item) => item.kind === 'reasoning' && item.streaming)
+    const index = findLastCurrentRoundItemIndex(
+      items,
+      (item) => item.kind === 'reasoning' && Boolean(item.streaming),
+    )
     if (index >= 0) {
-      const actual = items.length - 1 - index
-      return items.map((item, position) => position === actual && item.kind === 'reasoning' ? { ...item, content: item.content + (event.content || '') } : item)
+      return items.map((item, position) => position === index && item.kind === 'reasoning' ? { ...item, content: item.content + (event.content || '') } : item)
     }
     return insertCurrentRoundItem(
       items,
@@ -430,8 +493,11 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     const failed = Boolean(event.error) || backendStatus === 'failed' || result?.ok === false
     const toolStatus: 'error' | 'success' = failed ? 'error' : 'success'
     const elapsedMs = event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms)
-    const found = items.some((item) => item.kind === 'tool' && item.callId === event.tool_call_id)
-    const withTool = found ? items.map((item) => item.kind === 'tool' && item.callId === event.tool_call_id
+    const toolIndex = findLastCurrentRoundItemIndex(
+      items,
+      (item) => item.kind === 'tool' && item.callId === event.tool_call_id,
+    )
+    const withTool = toolIndex >= 0 ? items.map((item, index) => index === toolIndex && item.kind === 'tool'
       ? { ...item, name: event.tool_name || item.name, result: event.result, status: toolStatus, elapsedMs }
       : item) : insertCurrentRoundItem(
         items,
@@ -518,19 +584,11 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     return [...completed, { id, kind: 'long_task_boundary', taskId, continuation }]
   }
   if (event.type === 'error') {
+    const message = String(event.error?.message || '聊天执行失败')
+    const exceptionType = String(event.error?.exception_type || 'ProviderRunInterrupted')
     return [
-      ...items.map((item) => {
-        if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
-        if (item.kind === 'guidance') {
-          return {
-            ...item,
-            status: item.status === 'queued' ? 'not_applied' as const : item.status === 'accepted' ? 'completed' as const : item.status,
-            finalized: true,
-          }
-        }
-        return item
-      }),
-      { id: eventId('error'), kind: 'error', content: String(event.error?.message || '聊天执行失败') },
+      ...finalizeCurrentRoundItems(items, { message, exception_type: exceptionType }),
+      { id: eventId('error'), kind: 'error', content: message },
     ]
   }
   if (event.type === 'done') {
@@ -748,6 +806,32 @@ export function dropLastLiveRound(items: ChatItem[]) {
     if (item.kind === 'message' && item.role === 'user') return items.slice(0, index)
   }
   return items
+}
+
+export function createDeltaEventBatcher(
+  apply: (events: RunEvent[]) => void,
+  delayMs = 80,
+) {
+  let pending: RunEvent[] = []
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const flush = () => {
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (!pending.length) return
+    const events = pending
+    pending = []
+    apply(events)
+  }
+  const push = (event: RunEvent) => {
+    pending.push(event)
+    if (timer === null) timer = setTimeout(flush, Math.max(0, delayMs))
+  }
+  const dispose = () => {
+    flush()
+  }
+  return { push, flush, dispose }
 }
 
 export function resolveHistoryUserMessages(
@@ -1054,6 +1138,7 @@ export function ChatPage() {
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
+  const [planMutationNotices, setPlanMutationNotices] = useState<Record<string, string>>({})
   const [showFollowOutput, setShowFollowOutput] = useState(false)
   const [stopping, setStopping] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -1062,6 +1147,7 @@ export function ChatPage() {
   const loadingEarlierRef = useRef(false)
   const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const submittedUploadsRef = useRef(new Map<string, PendingUploadedFile[]>())
+  const completionSoundRunIdsRef = useRef(new Set<string>())
   const consumingNextTurnRef = useRef(false)
   const locallyCommittedSessionRef = useRef('')
   const undoneRoundBaselineRef = useRef<{
@@ -1074,6 +1160,15 @@ export function ChatPage() {
   const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
   const effectiveRunId = activeRunId || liveRun?.runId || ''
   const liveItems = liveRun?.items ?? EMPTY_CHAT_ITEMS
+
+  const playCompletionSoundOnce = (completedRunId: string, event: RunEvent) => {
+    if (!isSuccessfulRunCompletion(event)) return
+    const played = completionSoundRunIdsRef.current
+    if (played.has(completedRunId)) return
+    if (played.size >= 100) played.clear()
+    played.add(completedRunId)
+    void playUserCompletionSound(user)
+  }
   const activeCompression = [...liveItems].reverse().find(
     (item): item is Extract<ChatItem, { kind: 'context_compression' }> => item.kind === 'context_compression' && (!item.runId || item.runId === effectiveRunId),
   )
@@ -1175,6 +1270,7 @@ export function ChatPage() {
     setLongTaskBusy(false)
     setStopping(false)
     setPlanOverrides({})
+    setPlanMutationNotices({})
     abortChatRun()
   }, [abortChatRun, user, sessionId])
 
@@ -1241,6 +1337,9 @@ export function ChatPage() {
     )
     beginChatRun(user, activeSession, runId, historyUserMessages)
     setDraft('')
+    if (uploadedFiles.length) {
+      setPendingUploads((current) => removeSubmittedUploads(current, uploadedFiles))
+    }
     setRunning(true)
     setActiveRunId(runId)
     setConversationMenuOpen(false)
@@ -1249,19 +1348,32 @@ export function ChatPage() {
     if (editingSource) setEditedSources((current) => new Set(current).add(editingSource.id))
     const displayedPrompt = prompt
     const userMessageId = options.userMessageId || eventId('user')
-    updateChatRunItems(user, activeSession, (current) => current.some((item) => item.id === userMessageId)
-      ? current
-      : [...current, {
-        id: userMessageId, kind: 'message', role: 'user', content: displayedPrompt,
-        attachments: uploadedFiles.map(pendingInputAttachment),
-        edited: Boolean(editingSource), originalContent: editingSource?.content,
-      }])
+    const userItem: Extract<ChatItem, { kind: 'message' }> = {
+      id: userMessageId,
+      kind: 'message',
+      role: 'user',
+      content: displayedPrompt,
+      attachments: uploadedFiles.map(pendingInputAttachment),
+      edited: Boolean(editingSource),
+      originalContent: editingSource?.content,
+    }
+    updateChatRunItems(
+      user,
+      activeSession,
+      (current) => prepareRunUserMessage(current, userItem, Boolean(options.internalNextTurn)),
+    )
     setEditingSource(null)
     const controller = new AbortController()
     setChatAbortController(controller)
     let committed = false
     let successful = false
     let restoreDraftAfterFailure = false
+    let terminalReceived = false
+    const deltaBatcher = createDeltaEventBatcher((events) => {
+      updateChatRunItems(user, activeSession, (current) => (
+        events.reduce((next, event) => reduceRunEvent(next, event), current)
+      ))
+    })
     try {
       await streamChat({
         user,
@@ -1287,9 +1399,16 @@ export function ChatPage() {
               setActiveRunId(nextRunId)
             }
           }
+          if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+            deltaBatcher.push(event)
+            return
+          }
+          deltaBatcher.flush()
           if (event.type === 'done') {
+            terminalReceived = true
             committed = event.metadata?.committed !== false
             successful = isSuccessfulRunCompletion(event)
+            playCompletionSoundOnce(runId, event)
             const terminalStatus = String(event.metadata?.status || 'completed').toLowerCase()
             restoreDraftAfterFailure = ['failed', 'error'].includes(terminalStatus)
             const submitted = submittedUploadsRef.current.get(runId) ?? []
@@ -1298,12 +1417,25 @@ export function ChatPage() {
               setDraftUploads(submissionDraftKey, (current) => removeSubmittedUploads(current, submitted))
             }
           } else if (event.type === 'error') {
+            terminalReceived = true
             restoreDraftAfterFailure = true
             submittedUploadsRef.current.delete(runId)
           }
           updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
         },
       })
+      deltaBatcher.flush()
+      if (!terminalReceived) {
+        terminalReceived = true
+        restoreDraftAfterFailure = true
+        updateChatRunItems(user, activeSession, (current) => [
+          ...finalizeCurrentRoundItems(current, {
+            message: '响应流在终态事件到达前结束',
+            exception_type: 'MissingTerminalEvent',
+          }),
+          { id: eventId('error'), kind: 'error', content: '响应流意外结束，请重新发送' },
+        ])
+      }
       await refreshSessions()
       if (!sessionId) {
         locallyCommittedSessionRef.current = activeSession
@@ -1319,11 +1451,33 @@ export function ChatPage() {
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
       refreshOverview()
     } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
+      deltaBatcher.flush()
+      const aborted = (error as Error).name === 'AbortError'
+      const missingTerminal = error instanceof ApiError && error.code === 'missing_terminal'
+      const message = missingTerminal
+        ? '响应流意外结束，请重新发送'
+        : error instanceof Error ? error.message : '聊天失败'
+      if (!terminalReceived) {
+        updateChatRunItems(user, activeSession, (current) => {
+          const finalized = finalizeCurrentRoundItems(current, {
+            message: aborted
+              ? '当前响应连接已中断'
+              : missingTerminal ? '响应流在终态事件到达前结束' : message,
+            exception_type: aborted
+              ? 'ClientStreamAborted'
+              : missingTerminal ? 'MissingTerminalEvent' : 'ClientStreamError',
+            ...(aborted ? { cancelled: true } : {}),
+          })
+          return aborted
+            ? finalized
+            : [...finalized, { id: eventId('error'), kind: 'error', content: message }]
+        })
+      }
+      if (!terminalReceived && !aborted) {
         restoreDraftAfterFailure = true
-        updateChatRunItems(user, activeSession, (current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '聊天失败' }])
       }
     } finally {
+      deltaBatcher.dispose()
       submittedUploadsRef.current.delete(runId)
       if (restoreDraftAfterFailure && promptOverride === undefined && prompt) {
         setDraftText(finalDraftKey, (current) => current || prompt)
@@ -1628,6 +1782,7 @@ export function ChatPage() {
       attachments,
       status: 'queued',
     }])
+    clearSubmittedInput()
     try {
       const result = await submitGuidance(user, effectiveRunId, guidance, {
         guidanceId: id,
@@ -1723,6 +1878,25 @@ export function ChatPage() {
     }
   }
 
+  const retryFailedPlanStep = async (plan: PlanSummary, stepId: string) => {
+    try {
+      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision)
+      const updated = extractPlanSummary(response.plan)
+      if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
+      setPlanMutationNotices((current) => ({
+        ...current,
+        [plan.plan_id]: response.activated
+          ? '失败步骤已重置，计划已自动恢复执行。'
+          : response.reason === 'fix_incomplete'
+            ? '当前步骤已重置，仍有其他失败步骤需要修正。'
+            : '失败步骤已重置，计划等待继续。',
+      }))
+      await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
+    } catch (error) {
+      setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '任务计划步骤重试失败' }])
+    }
+  }
+
   const executePlan = async (plan: PlanSummary) => {
     if (!user || running) return
     const activeSession = plan.session_id || sessionId || createSessionId()
@@ -1746,6 +1920,12 @@ export function ChatPage() {
     setChatAbortController(controller)
     let committed = false
     let refreshedRunningPlan = false
+    let terminalReceived = false
+    const deltaBatcher = createDeltaEventBatcher((events) => {
+      updateChatRunItems(user, activeSession, (current) => (
+        events.reduce((next, event) => reduceRunEvent(next, event), current)
+      ))
+    })
     try {
       await streamChat({
         user,
@@ -1760,12 +1940,34 @@ export function ChatPage() {
             refreshedRunningPlan = true
             void queryClient.invalidateQueries({ queryKey: ['tasks', user] })
           }
-          if (event.type === 'done') committed = true
+          if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+            deltaBatcher.push(event)
+            return
+          }
+          deltaBatcher.flush()
+          if (event.type === 'done') {
+            terminalReceived = true
+            committed = event.metadata?.committed !== false
+            playCompletionSoundOnce(runId, event)
+          } else if (event.type === 'error') {
+            terminalReceived = true
+          }
           const updated = event.type === 'tool_call_result' ? extractPlanSummary(event.result) : null
           if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
           updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
         },
       })
+      deltaBatcher.flush()
+      if (!terminalReceived) {
+        terminalReceived = true
+        updateChatRunItems(user, activeSession, (current) => [
+          ...finalizeCurrentRoundItems(current, {
+            message: '任务计划响应流在终态事件到达前结束',
+            exception_type: 'MissingTerminalEvent',
+          }),
+          { id: eventId('error'), kind: 'error', content: '任务计划响应流意外结束，请重试' },
+        ])
+      }
       await refreshSessions()
       if (!sessionId) {
         locallyCommittedSessionRef.current = activeSession
@@ -1775,11 +1977,31 @@ export function ChatPage() {
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
       refreshOverview()
     } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        updateChatRunItems(user, activeSession, (current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '任务计划执行失败' }])
+      deltaBatcher.flush()
+      const aborted = (error as Error).name === 'AbortError'
+      const missingTerminal = error instanceof ApiError && error.code === 'missing_terminal'
+      const message = missingTerminal
+        ? '任务计划响应流意外结束，请重试'
+        : error instanceof Error ? error.message : '任务计划执行失败'
+      if (!terminalReceived) {
+        updateChatRunItems(user, activeSession, (current) => {
+          const finalized = finalizeCurrentRoundItems(current, {
+            message: aborted
+              ? '任务计划响应连接已中断'
+              : missingTerminal ? '任务计划响应流在终态事件到达前结束' : message,
+            exception_type: aborted
+              ? 'ClientStreamAborted'
+              : missingTerminal ? 'MissingTerminalEvent' : 'PlanStreamError',
+            ...(aborted ? { cancelled: true } : {}),
+          })
+          return aborted
+            ? finalized
+            : [...finalized, { id: eventId('error'), kind: 'error', content: message }]
+        })
       }
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
     } finally {
+      deltaBatcher.dispose()
       finishChatRun(user, activeSession, committed)
       setChatAbortController(null)
       setActiveRunId('')
@@ -1795,6 +2017,8 @@ export function ChatPage() {
     onApprove: () => void executePlan(plan),
     onPause: () => void commandPlanStatus(plan, 'pause'),
     onRetry: () => void executePlan(plan),
+    onRetryStep: (stepId: string) => void retryFailedPlanStep(plan, stepId),
+    activationNotice: planMutationNotices[plan.plan_id],
   })
   const persistedPlans = tasksQuery.data?.plans || []
   const persistedPlanById = new Map(persistedPlans.map((plan) => [plan.plan_id, plan]))
@@ -1821,13 +2045,17 @@ export function ChatPage() {
         : cancelRun(user, effectiveRunId),
       (error) => {
         abortChatRun()
-        setLiveItems((current) => [...current, {
-          id: eventId('error'),
-          kind: 'error',
-          content: error instanceof Error
-            ? `紧急停止请求失败：${error.message}`
-            : '紧急停止请求失败，已断开当前响应',
-        }])
+        const message = error instanceof Error
+          ? `紧急停止请求失败：${error.message}`
+          : '紧急停止请求失败，已断开当前响应'
+        setLiveItems((current) => [
+          ...finalizeCurrentRoundItems(current, {
+            message: '紧急停止请求失败，当前响应已在前端断开',
+            exception_type: 'StopRequestFailed',
+            cancelled: true,
+          }),
+          { id: eventId('error'), kind: 'error', content: message },
+        ])
       },
     )
   }
@@ -2088,10 +2316,12 @@ export function ChatPage() {
                     return (
                       <div key={item.id} className="assistant-response">
                         <div className="bubble">
-                          <MarkdownMessage
-                            content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
-                            streaming={Boolean(item.streaming)}
-                          />
+                          <Suspense fallback={<PlainTextMessage content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)} />}>
+                            <MarkdownMessage
+                              content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
+                              streaming={Boolean(item.streaming)}
+                            />
+                          </Suspense>
                         </div>
                       </div>
                     )

@@ -372,6 +372,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 同一工具连续失败达到 `history.consecutive_tool_fail_limit` 后，本轮会从
   Provider 工具 schema 中临时移除；其他工具穿插执行会重置连续失败计数。
 - 用户取消时立即向当前工具发送独立取消信号，不继续执行后续工具调用；工具超时也会发送取消信号并留出短暂清理窗口，但不会误取消整个对话。
+- 插件默认以 `execution_mode=process` 在独立子进程运行；超时或取消后框架终止其进程树，避免无视取消的插件继续写盘、占用线程或重复产生副作用。只有必须共享主进程对象的可信插件才可显式声明 `execution_mode=thread`；线程模式继续使用协作取消，并由遗留执行看门狗阻止同一执行重复启动及无限堆积。
 - 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout`，不注入主对话历史。
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
 - 插件工具清单的可选 `strict` 默认为 `false`。只有整个参数 Schema（包括所有嵌套 object）满足目标 Provider 的严格结构化输出子集时才能设为 `true`；包含开放参数对象或可选字段的普通工具必须保持非严格，不能由网关静默改写。
@@ -557,6 +558,7 @@ users/<user>/agents/<name>/
 
 - `task_plan.auto_accept` 控制是否自动执行（默认 false，需手动批准）。
 - 计划存储在 `users/<name>/task_plan/task_plans.sqlite3`；`task_plans`、`task_plan_steps` 和 `task_plan_dependencies` 分表维护，运行时没有文件式计划旁路。
+- 每次创建或修改会在同一事务写入 append-only revision。大型 `tool_arguments/result/error` 按计划内 SHA-256 内容寻址去重，旧明文 JSON 与 `zlib-base64` 快照继续兼容读取；新计划或修改不得新增密码、Token、Cookie、API Key、私钥等凭据参数，必须改用环境变量名或其他安全引用。旧快照中的敏感字段不会继续复制到新 revision，含脱敏占位的 revision 不允许回滚。
 - 计划状态机：pending → approved → running → completed/failed/paused/cancelled。
 - 主智能体手动执行计划步骤后，必须立即调用 `task_plan step_done` 或 `task_plan step_fail` 写回结果；创建和编辑仍走 `task_plan` 子代理。
 - `task_plan` 是运行态管理工具，不能作为计划中的执行步骤。
@@ -729,6 +731,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
 - Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、消息插件状态、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
 - Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。
+- 文件页全局摘要使用短期进程内缓存；Web 写入、移动、建目录和删除会显式失效，插件或外部程序直接写盘则最多在短 TTL 后重新扫描。搜索仍按有界深度和条目预算实时扫描，不使用可能过期的摘要缓存。
 - 用户人格和全局人格可通过受保护 Web API 原子更新；全局人格影响所有用户，当前唯一 Web 认证主体视为管理员。`user_config.json` 仍保持只读。
 - Web 前端的 `/files` 页面落地用户文件与 `tmp` 浏览、下载和二次确认删除；`/runtime` 页面落地子代理、外部消息状态与三层 Expand 库存；`/profile` 页面落地头像上传和用户/全局人格编辑。
 - 侧边栏品牌图使用公开 `/api/logo`，用户卡片头像使用受保护 `/api/users/{user}/avatar`；头像不存在或加载失败时回退首字母占位，不阻塞页面使用。

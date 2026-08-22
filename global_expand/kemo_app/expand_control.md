@@ -153,6 +153,11 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
    与连接数，但不会显示设备 Token 或会话 Token。
 7. 错误 Token 应返回 401；连续失败达到限流阈值返回 429；`stop` 后端口应释放。
+8. WebSocket 凭据只能通过 `Authorization`、`X-Kemo-Session`、`X-Kemo-Device-Id`
+   请求头传递，禁止放进 URL 查询参数，避免被 nginx、frp 或链路日志记录。
+9. 经反向代理部署时，仅把桥接服务直连的可信代理 IP/CIDR 写入本地
+   `config.json` 的 `trusted_proxies`。未显式信任的来源即使伪造
+   `X-Forwarded-For` 也不会改变认证限流身份。
 
 # 模型列表协议边界
 

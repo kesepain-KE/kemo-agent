@@ -39,6 +39,7 @@ from run.engine import (
     handle_request,
     iter_request_events,
 )
+from run.execution_watchdog import execution_watchdog_snapshot
 from run.history import find_window, load_runtime_window, load_window
 from run.history_index import find_record as find_history_record
 from run.memory import MemoryStore
@@ -49,6 +50,7 @@ from run.tools import (
     MAX_TOOL_RESULT_CHARS,
     ToolCancelledError,
     ToolDefinition,
+    ToolExecutionCapacityError,
     ToolRegistry,
     ToolResultTooLargeError,
     ToolTimeoutError,
@@ -440,6 +442,140 @@ class RuntimeFeatureTests(unittest.TestCase):
                 timeout=0.03,
             )
         self.assertTrue(observed_cancel.wait(0.2))
+
+    def test_non_cooperative_tool_timeout_is_marked_still_running(self) -> None:
+        release = threading.Event()
+
+        def ignore_cancel(*, context: dict[str, Any]) -> None:
+            del context
+            release.wait(1)
+
+        tool = ToolDefinition(
+            name="non_cooperative_tool",
+            description="timeout",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=ignore_cancel,
+        )
+        try:
+            with patch("run.tools._TOOL_TIMEOUT_CLEANUP_GRACE", 0.01):
+                with self.assertRaises(ToolTimeoutError) as raised:
+                    execute_tool(
+                        tool,
+                        {},
+                        context={"root": str(Path.cwd()), "user": "alice"},
+                        timeout=0.01,
+                    )
+            self.assertTrue(raised.exception.still_running)
+            self.assertFalse(raised.exception.retryable)
+            with self.assertRaisesRegex(ToolExecutionCapacityError, "拒绝重复启动"):
+                execute_tool(
+                    tool,
+                    {},
+                    context={"root": str(Path.cwd()), "user": "alice"},
+                    timeout=0.01,
+                )
+        finally:
+            release.set()
+            deadline = time.monotonic() + 1
+            while execution_watchdog_snapshot()["abandoned"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+    def test_manifest_tool_process_is_terminated_after_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = Path(directory)
+            marker = plugin / "marker.txt"
+            (plugin / "tool.py").write_text(
+                """
+from pathlib import Path
+import os
+import time
+
+def run(path, *, context):
+    marker = Path(path)
+    while True:
+        with marker.open("a", encoding="utf-8") as stream:
+            stream.write("x")
+        time.sleep(0.01)
+""".strip()
+                + "\n",
+                "utf-8",
+            )
+            tool = ToolDefinition(
+                name="isolated_timeout_tool",
+                description="timeout",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                version="1.0.0",
+                enabled=True,
+                entrypoint="tool.py:run",
+                source="test",
+                directory=plugin,
+                execution_mode="process",
+            )
+
+            with self.assertRaises(ToolTimeoutError) as raised:
+                execute_tool(
+                    tool,
+                    {"path": str(marker)},
+                    context={"root": str(Path.cwd()), "user": "alice"},
+                    timeout=0.4,
+                )
+
+            self.assertFalse(raised.exception.still_running)
+            size_after_timeout = marker.stat().st_size if marker.exists() else 0
+            time.sleep(0.15)
+            self.assertEqual(
+                marker.stat().st_size if marker.exists() else 0,
+                size_after_timeout,
+            )
+
+    def test_manifest_tool_process_returns_result_from_different_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = Path(directory)
+            (plugin / "tool.py").write_text(
+                """
+import os
+
+def run(*, context):
+    return {"pid": os.getpid(), "cancelled": context["cancel_event"].is_set()}
+""".strip()
+                + "\n",
+                "utf-8",
+            )
+            tool = ToolDefinition(
+                name="isolated_result_tool",
+                description="result",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                version="1.0.0",
+                enabled=True,
+                entrypoint="tool.py:run",
+                source="test",
+                directory=plugin,
+                execution_mode="process",
+            )
+
+            result = execute_tool(
+                tool,
+                {},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=5,
+            )
+
+            self.assertNotEqual(result["pid"], os.getpid())
+            self.assertFalse(result["cancelled"])
 
     def test_subagent_tool_uses_agent_runtime_watchdog(self) -> None:
         tool = ToolDefinition(

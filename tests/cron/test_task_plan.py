@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,7 @@ from events import RunEvent
 from plugins.subagent_dispatch.tool import run as dispatch_subagent
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
+import run.task_plan_store as task_plan_store_module
 from run.agent_runner import AgentRunResult
 from agents.task_plan.executor import execute as execute_task_plan_agent
 from run.task_plan_store import (
@@ -116,6 +118,9 @@ def _make_plan(steps: list[dict], **kwargs) -> dict:
 
 
 class PlanStoreTests(unittest.TestCase):
+    def test_schema_version_remains_one(self) -> None:
+        self.assertEqual(task_plan_store_module.SCHEMA_VERSION, 1)
+
     def test_create_read_list_update_delete(self) -> None:
         _, root = _make_root(["alice"])
         store = PlanStore(root, "alice")
@@ -127,6 +132,11 @@ class PlanStoreTests(unittest.TestCase):
         self.assertEqual(created["status"], "pending")
         self.assertEqual(created["revision"], 1)
         self.assertTrue(store.path.is_file())
+        revisions = store.list_revisions(created["plan_id"])
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["plan_id"], created["plan_id"])
+        self.assertEqual(revisions[0]["revision"], 1)
+        self.assertEqual(revisions[0]["note"], "创建计划")
 
         read = store.read(created["plan_id"])
         self.assertEqual(read["plan_id"], created["plan_id"])
@@ -141,6 +151,311 @@ class PlanStoreTests(unittest.TestCase):
         self.assertTrue(store.delete(created["plan_id"]))
         with self.assertRaises(PlanNotFoundError):
             store.read(created["plan_id"])
+
+    def test_revision_history_and_rollback_create_new_revision(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "初始步骤",
+            "description": "第一版",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }], title="第一版计划", description="第一版描述"))
+        second = store.update(
+            created["plan_id"],
+            lambda plan: {**plan, "title": "第二版计划", "status": "paused"},
+            note="修改标题并暂停",
+        )
+
+        revisions = store.list_revisions(created["plan_id"])
+        self.assertEqual([item["revision"] for item in revisions], [2, 1])
+        self.assertEqual(revisions[0]["note"], "修改标题并暂停")
+        first_snapshot = store.get_revision(created["plan_id"], 1)
+        second_snapshot = store.get_revision(created["plan_id"], 2)
+        self.assertEqual(first_snapshot["title"], "第一版计划")
+        self.assertEqual(second_snapshot["title"], "第二版计划")
+
+        rolled_back = store.rollback(created["plan_id"], 1)
+        self.assertEqual(rolled_back["revision"], 3)
+        self.assertEqual(rolled_back["title"], "第一版计划")
+        self.assertEqual(rolled_back["description"], "第一版描述")
+        self.assertEqual(rolled_back["status"], second["status"])
+        self.assertEqual(
+            [item["revision"] for item in store.list_revisions(created["plan_id"])],
+            [3, 2, 1],
+        )
+        self.assertEqual(store.get_revision(created["plan_id"], 2), second_snapshot)
+        self.assertEqual(store.get_revision(created["plan_id"], 3)["title"], "第一版计划")
+
+        self.assertTrue(store.delete(created["plan_id"]))
+        database = sqlite3.connect(store.path)
+        try:
+            remaining = database.execute(
+                "SELECT COUNT(*) FROM task_plan_revisions WHERE plan_id=?",
+                (created["plan_id"],),
+            ).fetchone()[0]
+        finally:
+            database.close()
+        self.assertEqual(remaining, 0)
+
+    def test_rollback_normalizes_running_step_and_preserves_completed_work(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(normalize_plan(
+            title="运行中的快照",
+            description="验证恢复状态",
+            user="alice",
+            status="running",
+            current_step="step_2",
+            steps=[
+                {
+                    "step_id": "step_1",
+                    "title": "第一步",
+                    "description": "稍后完成",
+                    "status": "pending",
+                    "critical": True,
+                },
+                {
+                    "step_id": "step_2",
+                    "title": "第二步",
+                    "description": "运行中",
+                    "status": "running",
+                    "result": {"partial": True},
+                    "error": {"message": "处理中"},
+                    "started_at": "2026-08-22T01:00:00+00:00",
+                    "finished_at": "2026-08-22T01:01:00+00:00",
+                    "critical": True,
+                },
+            ],
+        ))
+        paused = store.update(
+            created["plan_id"],
+            lambda plan: {
+                **plan,
+                "status": "paused",
+                "current_step": "step_2",
+                "steps": [
+                    {
+                        **plan["steps"][0],
+                        "status": "completed",
+                        "result": {"durable": True},
+                        "started_at": "2026-08-22T01:02:00+00:00",
+                        "finished_at": "2026-08-22T01:03:00+00:00",
+                    },
+                    {**plan["steps"][1], "status": "failed"},
+                ],
+            },
+        )
+
+        rolled_back = store.rollback(
+            created["plan_id"],
+            created["revision"],
+            expected_revision=paused["revision"],
+        )
+
+        self.assertEqual(rolled_back["status"], "paused")
+        self.assertEqual(rolled_back["current_step"], "step_2")
+        self.assertEqual(rolled_back["steps"][0]["status"], "completed")
+        self.assertEqual(rolled_back["steps"][0]["result"], {"durable": True})
+        restored_running = rolled_back["steps"][1]
+        self.assertEqual(restored_running["status"], "pending")
+        self.assertIsNone(restored_running["result"])
+        self.assertIsNone(restored_running["error"])
+        self.assertEqual(restored_running["started_at"], "")
+        self.assertEqual(restored_running["finished_at"], "")
+
+    def test_rollback_rejects_snapshot_missing_completed_step(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "第一步",
+            "description": "初始步骤",
+            "critical": True,
+        }]))
+        expanded = store.update(
+            created["plan_id"],
+            lambda plan: {
+                **plan,
+                "status": "paused",
+                "steps": [
+                    *plan["steps"],
+                    {
+                        "step_id": "step_2",
+                        "title": "已完成的新步骤",
+                        "description": "不能被历史回滚删除",
+                        "status": "completed",
+                        "depends_on": ["step_1"],
+                        "tool_name": None,
+                        "tool_arguments": {},
+                        "critical": True,
+                        "result": {"ok": True},
+                        "error": None,
+                        "started_at": "",
+                        "finished_at": "2026-08-22T01:00:00+00:00",
+                    },
+                ],
+            },
+        )
+
+        with self.assertRaisesRegex(PlanValidationError, "缺少已完成步骤"):
+            store.rollback(
+                created["plan_id"],
+                created["revision"],
+                expected_revision=expanded["revision"],
+            )
+        self.assertEqual(store.read(created["plan_id"])["revision"], expanded["revision"])
+
+    def test_large_revision_values_are_deduplicated_and_transparently_restored(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(normalize_plan(
+            title="大结果计划",
+            description="验证修订快照不会重复放大",
+            user="alice",
+            status="paused",
+            steps=[{
+                "step_id": "step_1",
+                "title": "大结果",
+                "description": "压缩内容",
+                "status": "completed",
+                "result": {"output": "A" * 100_000},
+                "critical": True,
+            }],
+        ))
+
+        database = sqlite3.connect(store.path)
+        try:
+            stored = database.execute(
+                "SELECT plan_json FROM task_plan_revisions WHERE plan_id=? AND revision=1",
+                (created["plan_id"],),
+            ).fetchone()[0]
+            blob_count = database.execute(
+                "SELECT COUNT(*) FROM task_plan_revision_blobs WHERE plan_id=?",
+                (created["plan_id"],),
+            ).fetchone()[0]
+        finally:
+            database.close()
+
+        self.assertLess(len(stored), 5_000)
+        self.assertEqual(blob_count, 1)
+        self.assertEqual(
+            store.get_revision(created["plan_id"], 1)["steps"][0]["result"]["output"],
+            "A" * 100_000,
+        )
+
+        updated = store.update(
+            created["plan_id"],
+            lambda plan: {**plan, "title": "仅修改标题"},
+        )
+        database = sqlite3.connect(store.path)
+        try:
+            blob_count = database.execute(
+                "SELECT COUNT(*) FROM task_plan_revision_blobs WHERE plan_id=?",
+                (created["plan_id"],),
+            ).fetchone()[0]
+        finally:
+            database.close()
+        self.assertEqual(updated["revision"], 2)
+        self.assertEqual(blob_count, 1)
+
+    def test_plan_rejects_new_sensitive_tool_arguments(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        plan = _make_plan([{
+            "step_id": "step_1",
+            "title": "敏感参数",
+            "description": "不得进入计划数据库",
+            "tool_name": None,
+            "tool_arguments": {"api_key": "example-sensitive-value"},
+            "critical": True,
+        }])
+
+        with self.assertRaisesRegex(PlanValidationError, "不得持久化"):
+            store.create(plan)
+
+        safe = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "安全参数",
+            "description": "普通参数允许保存",
+            "tool_name": None,
+            "tool_arguments": {"token_limit": 1000},
+            "critical": True,
+        }]))
+        with self.assertRaisesRegex(PlanValidationError, "不得持久化"):
+            store.update(
+                safe["plan_id"],
+                lambda current: {
+                    **current,
+                    "steps": [{
+                        **current["steps"][0],
+                        "tool_arguments": {"session_token": "secret-value"},
+                    }],
+                },
+            )
+
+    def test_revision_snapshot_failure_rolls_back_plan_update(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "原步骤",
+            "description": "原内容",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }]))
+        database = sqlite3.connect(store.path)
+        try:
+            database.execute("PRAGMA foreign_keys=ON")
+            database.execute(
+                """
+                INSERT INTO task_plan_revisions(
+                    plan_id, revision, plan_json, note, created_at
+                ) VALUES(?, 2, '{}', '冲突占位', 'now')
+                """,
+                (created["plan_id"],),
+            )
+            database.commit()
+        finally:
+            database.close()
+
+        with self.assertRaises(PlanError):
+            store.update(
+                created["plan_id"],
+                lambda plan: {**plan, "title": "不得落盘"},
+            )
+        current = store.read(created["plan_id"])
+        self.assertEqual(current["revision"], 1)
+        self.assertEqual(current["title"], "Test Plan")
+
+    def test_existing_database_adds_revision_table_and_backfills_current_plan(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "旧库步骤",
+            "description": "旧库内容",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }]))
+        database = sqlite3.connect(store.path)
+        try:
+            database.execute("DROP TABLE task_plan_revisions")
+            database.commit()
+        finally:
+            database.close()
+        key = str(store.path.resolve()).casefold()
+        with task_plan_store_module._READY_DATABASES_GUARD:
+            task_plan_store_module._READY_DATABASES.discard(key)
+
+        revisions = PlanStore(root, "alice").list_revisions(created["plan_id"])
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["revision"], created["revision"])
+        self.assertEqual(revisions[0]["note"], "迁移现有计划")
 
     def test_duplicate_plan_id_conflict(self) -> None:
         _, root = _make_root(["alice"])
@@ -511,6 +826,77 @@ class PlanExecutionTests(unittest.TestCase):
         self.assertEqual(plan["status"], "paused")
         self.assertEqual(plan["steps"][0]["status"], "failed")
 
+    def test_failed_critical_dependency_requires_fix_instead_of_deadlocking(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "Broken", "description": "B",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+            {"step_id": "step_2", "title": "Blocked", "description": "B",
+             "depends_on": ["step_1"], "tool_name": None,
+             "tool_arguments": {}, "critical": True},
+        ])
+        store = PlanStore(self.root, "alice")
+        store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "status": "approved",
+                "steps": [
+                    {**current["steps"][0], "status": "failed", "error": {"message": "fix me"}},
+                    current["steps"][1],
+                ],
+            },
+        )
+
+        events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        ))
+
+        done = next(event for event in events if event.type == "done")
+        self.assertEqual(done.metadata["status"], "paused")
+        self.assertEqual(done.metadata["reason"], "failed_step_needs_fix")
+        self.assertEqual(done.metadata["failed_step_ids"], ["step_1"])
+        self.assertIn("修正失败步骤", done.metadata["message"])
+        self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+
+    def test_failed_critical_leaf_step_requires_fix_after_resume(self) -> None:
+        plan = self._plan_with_steps([{
+            "step_id": "step_1",
+            "title": "Final broken step",
+            "description": "No downstream dependency",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }])
+        store = PlanStore(self.root, "alice")
+        store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "status": "approved",
+                "steps": [{
+                    **current["steps"][0],
+                    "status": "failed",
+                    "error": {"message": "fix final step"},
+                }],
+            },
+        )
+
+        events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        ))
+
+        done = next(event for event in events if event.type == "done")
+        self.assertEqual(done.metadata["status"], "paused")
+        self.assertEqual(done.metadata["reason"], "failed_step_needs_fix")
+        self.assertEqual(done.metadata["failed_step_ids"], ["step_1"])
+        self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+
     def test_non_critical_failure_continues(self) -> None:
         plan = self._plan_with_steps([
             {"step_id": "step_1", "title": "Fail", "description": "F",
@@ -537,8 +923,10 @@ class PlanExecutionTests(unittest.TestCase):
             config=CONFIG, tool_registry=registry,
         ))
         done = next(e for e in events if e.type == "done")
-        self.assertEqual(done.metadata["status"], "completed")
+        self.assertEqual(done.metadata["status"], "failed")
+        self.assertEqual(done.metadata["reason"], "no_runnable_step")
         plan = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(plan["status"], "failed")
         self.assertEqual(plan["steps"][0]["status"], "failed")
         self.assertEqual(plan["steps"][1]["status"], "completed")
 
@@ -890,7 +1278,7 @@ class PlanGenerationTests(unittest.TestCase):
                     context=context,
                 )
 
-    def test_edit_rejects_terminal_and_running_statuses_before_model_call(self) -> None:
+    def test_edit_allows_failed_but_rejects_running_completed_and_cancelled(self) -> None:
         _, root = _make_root(["alice"])
         base = _make_plan([{
             "step_id": "step_1",
@@ -900,7 +1288,7 @@ class PlanGenerationTests(unittest.TestCase):
             "tool_arguments": {},
             "critical": True,
         }])
-        for status in ("running", "completed", "failed", "cancelled"):
+        for status in ("running", "completed", "cancelled"):
             with self.subTest(status=status):
                 plan = {**base, "status": status}
                 with self.assertRaisesRegex(PlanGenerationError, "只能编辑"):
@@ -911,6 +1299,27 @@ class PlanGenerationTests(unittest.TestCase):
                         edit_request="change",
                         config=CONFIG,
                     )
+
+        failed = {**base, "status": "failed"}
+        response = {
+            "action": "edit",
+            "title": "修正后的失败计划",
+            "description": "修正执行参数",
+            "steps": failed["steps"],
+        }
+        with patch(
+            "run.task_plan_service.AgentRunner",
+            self._capturing_runner(response, []),
+        ):
+            edited = edit_plan(
+                root=root,
+                user="alice",
+                plan=failed,
+                edit_request="修正失败原因",
+                config=CONFIG,
+            )
+        self.assertEqual(edited["status"], "failed")
+        self.assertEqual(edited["title"], "修正后的失败计划")
 
     def test_edit_preserves_completed_steps_and_passes_protection_summary(self) -> None:
         _, root = _make_root(["alice"])

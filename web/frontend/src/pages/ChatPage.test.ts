@@ -1,9 +1,34 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, executeStopRequest, extractPlanSummary, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
-import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, SenseSourceSummary } from '../types/api'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 
 describe('reduceRunEvent', () => {
+  it('批量合并高频流式增量，并允许非增量事件到达前同步冲刷', () => {
+    vi.useFakeTimers()
+    try {
+      const batches: RunEvent[][] = []
+      const batcher = createDeltaEventBatcher((events) => batches.push(events), 80)
+      for (let index = 0; index < 100; index += 1) {
+        batcher.push({ type: 'text_delta', content: String(index) })
+      }
+      expect(batches).toHaveLength(0)
+      vi.advanceTimersByTime(79)
+      expect(batches).toHaveLength(0)
+      vi.advanceTimersByTime(1)
+      expect(batches).toHaveLength(1)
+      expect(batches[0]).toHaveLength(100)
+
+      batcher.push({ type: 'reasoning_delta', content: '等待工具前冲刷' })
+      batcher.flush()
+      expect(batches).toHaveLength(2)
+      expect(batches[1][0].type).toBe('reasoning_delta')
+      batcher.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('上下文压缩事件更新同一运行的小气泡状态和记忆排队说明', () => {
     let items = reduceRunEvent([], {
       type: 'context_compression',
@@ -60,7 +85,7 @@ describe('reduceRunEvent', () => {
     const uploadedDuringRun = { path: 'next.zip', name: 'next.zip', size: 24 }
     expect(removeSubmittedUploads([sent, uploadedDuringRun], [sent])).toEqual([uploadedDuringRun])
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed' } })).toBe(true)
-    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'limited' } })).toBe(true)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'limited' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'cancelled' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
   })
@@ -286,6 +311,95 @@ describe('reduceRunEvent', () => {
     expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'error', result: { ok: false }, elapsedMs: 12 })
   })
 
+  it('新 Run 的正文、思考和同名工具结果不会写回旧边界', () => {
+    let items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '第一次请求' },
+      { id: 'r1', kind: 'reasoning', content: '旧思考', streaming: true },
+      { id: 't1', kind: 'tool', callId: 'shared-call', name: 'file', status: 'running' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '旧正文', streaming: true },
+      { id: 'e1', kind: 'error', content: '连接中断' },
+      { id: 'u2', kind: 'message', role: 'user', content: '重新发送' },
+    ]
+
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '新思考' })
+    items = reduceRunEvent(items, { type: 'text_delta', content: '新正文' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'shared-call', tool_name: 'shell' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'shared-call', tool_name: 'shell', result: { ok: true } })
+
+    expect(items.find((item) => item.id === 'r1')).toMatchObject({ content: '旧思考', streaming: true })
+    expect(items.find((item) => item.id === 'a1')).toMatchObject({ content: '旧正文', streaming: true })
+    expect(items.find((item) => item.id === 't1')).toMatchObject({ status: 'running', name: 'file' })
+    const currentItems = items.slice(items.findIndex((item) => item.id === 'u2') + 1)
+    expect(currentItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reasoning', content: '新思考' }),
+      expect.objectContaining({ kind: 'tool', callId: 'shared-call', name: 'shell', status: 'success' }),
+      expect.objectContaining({ kind: 'message', role: 'assistant', content: '新正文' }),
+    ]))
+  })
+
+  it('异常终态只固化当前边界并结束当前运行中工具', () => {
+    const items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '旧请求' },
+      { id: 'r1', kind: 'reasoning', content: '旧残留', streaming: true },
+      { id: 'u2', kind: 'message', role: 'user', content: '当前请求' },
+      { id: 'r2', kind: 'reasoning', content: '当前思考', streaming: true },
+      { id: 't2', kind: 'tool', callId: 'call-2', name: 'shell', status: 'running' },
+      { id: 'a2', kind: 'message', role: 'assistant', content: '当前正文', streaming: true },
+    ]
+
+    const finalized = finalizeCurrentRoundItems(items, {
+      message: '响应中断',
+      exception_type: 'ClientStreamError',
+    })
+
+    expect(finalized.find((item) => item.id === 'r1')).toMatchObject({ streaming: true })
+    expect(finalized.find((item) => item.id === 'r2')).toMatchObject({ streaming: false })
+    expect(finalized.find((item) => item.id === 'a2')).toMatchObject({ streaming: false })
+    expect(finalized.find((item) => item.id === 't2')).toMatchObject({
+      status: 'error',
+      result: { ok: false, error: { exception_type: 'ClientStreamError' } },
+    })
+  })
+
+  it('Provider error 事件统一收束当前思考、正文和工具', () => {
+    const items = reduceRunEvent([
+      { id: 'u1', kind: 'message', role: 'user', content: '执行任务' },
+      { id: 'r1', kind: 'reasoning', content: '正在分析', streaming: true },
+      { id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'running' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '部分正文', streaming: true },
+    ], {
+      type: 'error',
+      error: { message: 'Provider 连接失败', exception_type: 'ProviderConnectionError' },
+    })
+
+    expect(items.find((item) => item.id === 'r1')).toMatchObject({ streaming: false })
+    expect(items.find((item) => item.id === 'a1')).toMatchObject({ streaming: false })
+    expect(items.find((item) => item.id === 't1')).toMatchObject({
+      status: 'error',
+      result: { ok: false, error: { exception_type: 'ProviderConnectionError' } },
+    })
+    expect(items.at(-1)).toMatchObject({ kind: 'error', content: 'Provider 连接失败' })
+  })
+
+  it('同一排队消息重试时清除该边界后的失败尝试', () => {
+    const userItem: Extract<ChatItem, { kind: 'message' }> = {
+      id: 'next_turn_1',
+      kind: 'message',
+      role: 'user',
+      content: '停止后继续',
+    }
+    const failedAttempt: ChatItem[] = [
+      userItem,
+      { id: 'r1', kind: 'reasoning', content: '失败思考', streaming: false },
+      { id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'error' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '失败正文', streaming: false },
+      { id: 'e1', kind: 'error', content: '发送失败' },
+    ]
+
+    expect(prepareRunUserMessage(failedAttempt, userItem, true)).toEqual([userItem])
+    expect(prepareRunUserMessage(failedAttempt, userItem, false)).toEqual(failedAttempt)
+  })
+
   it('长任务边界不是终态，并开启新的助手分组', () => {
     let items: ChatItem[] = [
       { id: 'u1', kind: 'message', role: 'user', content: '执行很长的任务' },
@@ -307,11 +421,19 @@ describe('reduceRunEvent', () => {
     expect(items[2]).toMatchObject({ status: 'error', result: { error: { exception_type: 'LongTaskRunBoundary' } } })
     expect(items[3]).toMatchObject({ streaming: false })
 
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '继续思考' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'call-2', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'call-2', tool_name: 'file', result: { ok: true } })
     items = reduceRunEvent(items, { type: 'text_delta', content: '继续完成' })
     const blocks = groupConversationItems(items)
     expect(blocks).toHaveLength(3)
     expect(blocks[1]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([expect.objectContaining({ id: 'a1' })]) })
-    expect(blocks[2]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([expect.objectContaining({ kind: 'long_task_boundary' }), expect.objectContaining({ content: '继续完成' })]) })
+    expect(blocks[2]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([
+      expect.objectContaining({ kind: 'long_task_boundary' }),
+      expect.objectContaining({ kind: 'reasoning', content: '继续思考' }),
+      expect.objectContaining({ kind: 'tool', callId: 'call-2', status: 'success' }),
+      expect.objectContaining({ content: '继续完成' }),
+    ]) })
   })
 
   it('历史中的 synthetic 续跑提示只显示边界，不生成伪用户气泡', () => {

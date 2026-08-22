@@ -14,7 +14,7 @@ from run.task_plan_store import PlanStore, PlanValidationError, normalize_plan
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 
-EDITABLE_PLAN_STATUSES = frozenset({"pending", "approved", "paused"})
+EDITABLE_PLAN_STATUSES = frozenset({"pending", "approved", "paused", "failed"})
 _PROTECTED_COMPLETED_FIELDS = (
     "step_id",
     "title",
@@ -156,7 +156,7 @@ def _editable_plan(plan: dict[str, Any]) -> None:
     if status not in EDITABLE_PLAN_STATUSES:
         raise PlanGenerationError(
             f"计划 {plan.get('plan_id')} 当前状态为 {status!r}，"
-            "只能编辑 pending/approved/paused 状态的计划"
+            "只能编辑 pending/approved/paused/failed 状态的计划"
         )
 
 

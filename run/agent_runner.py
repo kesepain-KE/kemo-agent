@@ -42,6 +42,13 @@ from agents._runtime.resources import (
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
 from run.config import load_config, provider_runtime_config, resolve_agent_model
+from run.execution_watchdog import (
+    ExecutionCapacityError,
+    abandon_execution,
+    attach_execution,
+    release_execution,
+    reserve_execution,
+)
 from run.model_capabilities import resolve_reasoning_selection
 from run.provider_tool_recovery import (
     invalid_tool_name,
@@ -58,6 +65,7 @@ from run.tools import (
 
 
 _AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
+_AGENT_CANCEL_CLEANUP_GRACE = 0.1
 _STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
 _SERIAL_EXECUTION_LOCKS_GUARD = threading.RLock()
 _SERIAL_EXECUTION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
@@ -790,14 +798,28 @@ class AgentRunner:
                         payload = {"ok": False, "error": exc.error_payload()}
                         status = "result_too_large"
                     except Exception as exc:
+                        error = {
+                            "message": str(exc),
+                            "exception_type": str(
+                                getattr(exc, "remote_exception_type", "")
+                                or type(exc).__name__
+                            ),
+                        }
+                        for field in ("category", "retryable", "still_running"):
+                            value = getattr(exc, field, None)
+                            if isinstance(value, (bool, int, float)):
+                                error[field] = value
+                            elif isinstance(value, str) and value.strip():
+                                error[field] = value.strip()[:160]
                         payload = {
                             "ok": False,
-                            "error": {
-                                "message": str(exc),
-                                "exception_type": type(exc).__name__,
-                            },
+                            "error": error,
                         }
-                        status = "failed"
+                        if bool(getattr(exc, "still_running", False)):
+                            failures.unavailable.add(call.name)
+                            status = "timed_out_running"
+                        else:
+                            status = "failed"
                     failure_count = failures.record(
                         call.name,
                         succeeded=(
@@ -932,6 +954,12 @@ class AgentRunner:
         )
         function = _load_executor(definition)
         _event(event_callback, agent=name, status="started", task_id=task_id)
+        try:
+            execution_id = reserve_execution(
+                f"agent:{self.root}:{self.user}:{name}"
+            )
+        except ExecutionCapacityError as exc:
+            raise AgentRunError(str(exc)) from exc
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"agent-{name}")
         serial_key = (
             _serial_execution_key(self.root, self.user)
@@ -943,20 +971,30 @@ class AgentRunner:
             if serial_key is None or serial_key in _owned_serial_execution_keys()
             else _serial_execution_lock(serial_key)
         )
-        future = executor.submit(
-            _execute_agent,
-            function,
-            context,
-            input_data,
-            serial_lock=serial_lock,
-            serial_key=serial_key,
-        )
+        try:
+            future = executor.submit(
+                _execute_agent,
+                function,
+                context,
+                input_data,
+                serial_lock=serial_lock,
+                serial_key=serial_key,
+            )
+            attach_execution(execution_id, future, executor)
+        except BaseException:
+            release_execution(execution_id)
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
         deadline = time.monotonic() + effective_timeout
         try:
             while True:
                 if caller_cancel_event is not None and caller_cancel_event.is_set():
                     stopped.set()
                     future.cancel()
+                    cleanup_deadline = time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
+                    while not future.done() and time.monotonic() < cleanup_deadline:
+                        time.sleep(0.05)
+                    abandon_execution(execution_id)
                     raise AgentCancelledError(f"子代理 {name} 已取消")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -969,6 +1007,15 @@ class AgentRunner:
                             ):
                                 stopped.set()
                                 future.cancel()
+                                cleanup_deadline = (
+                                    time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
+                                )
+                                while (
+                                    not future.done()
+                                    and time.monotonic() < cleanup_deadline
+                                ):
+                                    time.sleep(0.05)
+                                abandon_execution(execution_id)
                                 raise AgentCancelledError(f"子代理 {name} 已取消")
                             survival_remaining = survival_deadline - time.monotonic()
                             if survival_remaining <= 0:
@@ -1007,7 +1054,7 @@ class AgentRunner:
                         if cleanup_remaining <= 0:
                             break
                         time.sleep(min(0.05, cleanup_remaining))
-                    process_terminated = future.done()
+                    process_terminated = not abandon_execution(execution_id)
                     state = (
                         "执行线程已退出"
                         if process_terminated
@@ -1061,4 +1108,5 @@ class AgentRunner:
             )
             raise
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            if future.done():
+                release_execution(execution_id)

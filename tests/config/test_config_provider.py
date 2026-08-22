@@ -264,6 +264,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
                 {
                     "provider": {"type": "kemo", "model": "global-model"},
                     "nested": {"a": 1, "b": 2},
+                    "task_plan": {"max_steps": 20, "auto_retry_on_fix": False},
                 }
             ),
             "utf-8",
@@ -273,6 +274,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
                 {
                     "provider": {"type": "chat", "model": "user-model"},
                     "nested": {"b": 9},
+                    "task_plan": {"auto_retry_on_fix": True},
                 }
             ),
             "utf-8",
@@ -288,6 +290,13 @@ class ConfigAndHistoryTests(unittest.TestCase):
             {"type": "chat", "model": "user-model"},
         )
         self.assertEqual(config["nested"], {"a": 1, "b": 9})
+        self.assertEqual(
+            config["task_plan"],
+            {"max_steps": 20, "auto_retry_on_fix": True},
+        )
+
+        default_config = load_config("bob", root)
+        self.assertFalse(default_config["task_plan"]["auto_retry_on_fix"])
 
     def test_global_provider_is_not_a_user_fallback(self) -> None:
         _, root = self.make_root()

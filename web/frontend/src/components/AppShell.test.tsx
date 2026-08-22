@@ -43,6 +43,79 @@ describe('AppShell user persistence', () => {
   })
 })
 
+describe('Windows completion sound', () => {
+  it('只在成功 done 后播放一次', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const play = vi.fn().mockResolvedValue(undefined)
+    const AudioMock = vi.fn(function AudioMock(this: { play: typeof play }, _url: string) {
+      this.play = play
+    })
+    vi.stubGlobal('Audio', AudioMock)
+    let chatRequests = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      return new Response(
+        'event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '音效测试已就绪' }], round_metrics: [], round_traces: [],
+      })),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('音效测试已就绪')
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(input, { target: { value: '完成后播放音效' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => expect(chatRequests).toBe(1))
+    await waitFor(() => expect(AudioMock).toHaveBeenCalledOnce())
+    expect(String(AudioMock.mock.calls[0][0])).toContain('/api/users/kesepain/completion-sound')
+    expect(String(AudioMock.mock.calls[0][0])).not.toContain('?v=')
+    expect(play).toHaveBeenCalledOnce()
+  })
+
+  it('取消、失败和受限终态不播放', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const AudioMock = vi.fn()
+    vi.stubGlobal('Audio', AudioMock)
+    let chatRequests = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      return new Response(
+        'event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"limited"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '受限测试已就绪' }], round_metrics: [], round_traces: [],
+      })),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('受限测试已就绪')
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(input, { target: { value: '受限运行' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatRequests).toBe(1))
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+    expect(AudioMock).not.toHaveBeenCalled()
+  })
+})
+
 function renderApp(path = '/chat') {
   let currentSearch = new URL(path, 'http://test').search
   let currentPathname = new URL(path, 'http://test').pathname
@@ -453,12 +526,15 @@ describe('AppShell navigation', () => {
 
   it('上传文件随下一条消息发送并在本轮完成后清除提示', async () => {
     let chatBody: { uploaded_files?: string[] } | undefined
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
       chatBody = JSON.parse(String(init?.body)) as { uploaded_files?: string[] }
-      return new Response('event: done\ndata: {"type":"done"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller },
+      }), { headers: { 'Content-Type': 'text/event-stream' } })
     }))
     renderApp('/chat?user=kesepain&session=s1')
     const uploadButton = await screen.findByRole('button', { name: '上传文件' })
@@ -471,9 +547,45 @@ describe('AppShell navigation', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '请读取这个文件' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(chatBody?.uploaded_files).toEqual(['note.md']))
-    await waitFor(() => expect(screen.queryByText(/已上传 note\.md/)).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByLabelText('待发送附件：note.md')).not.toBeInTheDocument())
     expect(screen.getByLabelText('附件：note.md')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+
+    streamController.enqueue(new TextEncoder().encode('event: done\ndata: {"type":"done"}\n\n'))
+    streamController.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+  })
+
+  it('非成功 done 仍立即清除本次提交的图片附件引用', async () => {
+    let chatBody: { uploaded_files?: string[] } | undefined
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatBody = JSON.parse(String(init?.body)) as { uploaded_files?: string[] }
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller },
+      }), { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')
+    fireEvent.change(fileInput!, { target: { files: [new File(['image'], 'limited.png', { type: 'image/png' })] } })
+    expect(await screen.findByLabelText('待发送附件：limited.png')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '处理这张图片' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => expect(chatBody?.uploaded_files).toEqual(['limited.png']))
+    await waitFor(() => expect(screen.queryByLabelText('待发送附件：limited.png')).not.toBeInTheDocument())
+    expect(screen.getByLabelText('附件：limited.png')).toBeInTheDocument()
+
+    streamController.enqueue(new TextEncoder().encode('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"limited"}}\n\n'))
+    streamController.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+    expect(screen.queryByLabelText('待发送附件：limited.png')).not.toBeInTheDocument()
   })
 
   it('历史图片附件显示缩略图和下载入口', async () => {
@@ -532,6 +644,7 @@ describe('AppShell navigation', () => {
     expect(fileInput).not.toBeNull()
     fireEvent.change(fileInput!, { target: { files: [new File(['draft'], 'draft-note.md', { type: 'text/markdown' })] } })
     expect(await screen.findByText(/已上传 draft-note\.md/)).toBeInTheDocument()
+    expect(screen.getByLabelText('待发送附件：draft-note.md')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
@@ -569,7 +682,7 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('button', { name: '上传文件' })).toBeEnabled()
   })
 
-  it('聊天请求失败时恢复本次文本并保留待发送附件', async () => {
+  it('聊天请求失败时恢复本次文本但不恢复已提交附件', async () => {
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -585,7 +698,51 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('失败后需要恢复'))
-    expect(screen.getByText(/已上传 retry\.txt/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('待发送附件：retry.txt')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('附件：retry.txt')).toBeInTheDocument()
+  })
+
+  it('响应流缺少终态后重发不会把新正文和思考累加到旧尝试', async () => {
+    let attempt = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      attempt += 1
+      if (attempt === 1) {
+        return new Response(
+          'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"旧思考"}\n\n'
+          + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"shared-call","tool_name":"file","arguments":{}}\n\n'
+          + 'event: text_delta\ndata: {"type":"text_delta","content":"旧正文"}\n\n',
+          { headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      }
+      return new Response(
+        'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"新思考"}\n\n'
+        + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"shared-call","tool_name":"shell","arguments":{}}\n\n'
+        + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"shared-call","tool_name":"shell","result":{"ok":true}}\n\n'
+        + 'event: text_delta\ndata: {"type":"text_delta","content":"新正文"}\n\n'
+        + 'event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '请重试这项任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('响应流意外结束，请重新发送')).toBeInTheDocument()
+    await waitFor(() => expect(composer).toHaveValue('请重试这项任务'))
+    expect(screen.getByText('旧正文')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('新正文')).toBeInTheDocument()
+    expect(screen.getByText('旧正文')).toBeInTheDocument()
+    expect(screen.queryByText('旧正文新正文')).not.toBeInTheDocument()
+    expect(screen.queryByText('旧思考新思考')).not.toBeInTheDocument()
+    expect(attempt).toBe(2)
   })
 
   it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {
@@ -879,10 +1036,13 @@ describe('AppShell navigation', () => {
   it('运行中支持只发送音频视频附件作为多模态引导', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let guidanceBody: Record<string, unknown> | undefined
+    let releaseGuidance!: () => void
+    const guidanceGate = new Promise<void>((resolve) => { releaseGuidance = resolve })
     const encoder = new TextEncoder()
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     server.use(http.post('/api/runs/:runId/guidance', async ({ params, request }) => {
       guidanceBody = await request.json() as Record<string, unknown>
+      await guidanceGate
       return HttpResponse.json({
         run_id: params.runId,
         status: 'accepted_current_run',
@@ -918,6 +1078,9 @@ describe('AppShell navigation', () => {
       guidance: '',
       uploaded_files: ['voice.mp3', 'clip.mp4'],
     }))
+    expect(screen.queryByLabelText('待发送附件：voice.mp3')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('待发送附件：clip.mp4')).not.toBeInTheDocument()
+    releaseGuidance()
     expect(await screen.findByText('voice.mp3')).toBeInTheDocument()
     expect(screen.getByText('clip.mp4')).toBeInTheDocument()
     expect(screen.getByRole('img', { name: '音频缩略图' })).toBeInTheDocument()

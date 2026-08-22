@@ -4,6 +4,15 @@
 kemo-agent. It exposes the App-facing HTTP, SSE and WebSocket API on a separate
 port while forwarding authorized operations to the framework Web API.
 
+WebSocket authentication uses headers only: `Authorization: Bearer ...`,
+`X-Kemo-Session`, and `X-Kemo-Device-Id`. Device and session credentials are
+never accepted in URL query parameters, where reverse proxies may record them.
+
+When the bridge is behind nginx, frp, or another proxy, add only the direct
+proxy IP/CIDR values to `trusted_proxies` in the ignored local `config.json`.
+`X-Forwarded-For` is ignored for untrusted peers, so clients cannot spoof a new
+rate-limit identity. Leave the list empty for direct connections.
+
 Current bridge version: **1.1.4**.
 
 ## Detached Android runs and recovery snapshots

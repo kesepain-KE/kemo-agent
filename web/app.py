@@ -174,7 +174,7 @@ def create_app(
             session_cookie=configured_auth.cookie_name,
             max_age=WEB_SESSION_MAX_AGE_SECONDS,
             same_site="lax",
-            https_only=False,
+            https_only=configured_auth.cookie_secure,
         )
 
     @app.exception_handler(WebServiceError)

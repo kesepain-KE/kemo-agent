@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AppShell } from '../components/AppShell'
 import { FilesPage } from './FilesPage'
 import { AgentsPage } from './AgentsPage'
@@ -42,6 +42,60 @@ function renderPage(path: string) {
 }
 
 describe('V16 module pages', () => {
+  it('结束音效设置只在 Windows 桌面端显示且支持上传和清除', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    let uploaded = false
+    let deleted = false
+    let uploadRequests = 0
+    server.use(
+      http.get('/api/users/kesepain/completion-sound/status', () => HttpResponse.json({
+        user: 'kesepain', enabled: uploaded && !deleted, available: uploaded && !deleted,
+        filename: uploaded && !deleted ? 'completion_sound.mp3' : '', mime_type: uploaded && !deleted ? 'audio/mpeg' : '',
+        size: uploaded && !deleted ? 16 : 0, updated_at: uploaded && !deleted ? '2026-08-22T08:00:00Z' : '',
+      })),
+      http.post('/api/users/kesepain/completion-sound', () => {
+        uploadRequests += 1
+        uploaded = true
+        deleted = false
+        return HttpResponse.json({
+          ok: true,
+          status: { user: 'kesepain', enabled: true, available: true, filename: 'completion_sound.mp3', mime_type: 'audio/mpeg', size: 16, updated_at: '2026-08-22T08:00:00Z' },
+        })
+      }),
+      http.delete('/api/users/kesepain/completion-sound', () => {
+        deleted = true
+        return HttpResponse.json({ ok: true, deleted: true })
+      }),
+    )
+
+    renderPage('settings')
+    expect(await screen.findByText('运行结束音效')).toBeInTheDocument()
+    expect(screen.getByText('未设置')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('选择结束音效文件'), {
+      target: { files: [new File(['ID3audio'], 'done.mp3', { type: 'audio/mpeg' })] },
+    })
+    expect(await screen.findByText('结束音效已保存。')).toBeInTheDocument()
+    expect(uploadRequests).toBe(1)
+    expect(screen.getByText(/completion_sound\.mp3/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '清除' }))
+    expect(await screen.findByText('结束音效已清除。')).toBeInTheDocument()
+    userAgent.mockRestore()
+  })
+
+  it('手机端隐藏结束音效入口且不请求状态 API', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 15; Mobile)')
+    let statusRequests = 0
+    server.use(http.get('/api/users/kesepain/completion-sound/status', () => {
+      statusRequests += 1
+      return HttpResponse.json({ user: 'kesepain', enabled: false, available: false, filename: '', mime_type: '', size: 0, updated_at: '' })
+    }))
+    renderPage('settings')
+    expect(await screen.findByText('界面主题')).toBeInTheDocument()
+    expect(screen.queryByText('运行结束音效')).not.toBeInTheDocument()
+    expect(statusRequests).toBe(0)
+    userAgent.mockRestore()
+  })
+
   it('任务页展示真实空态与任务分类', async () => {
     renderPage('tasks')
     expect(await screen.findByRole('heading', { name: '任务中枢' })).toBeInTheDocument()
@@ -49,6 +103,119 @@ describe('V16 module pages', () => {
     expect(screen.getAllByText('定时任务').length).toBeGreaterThan(0)
     expect(screen.getByText('选择一个计划')).toBeInTheDocument()
     expect(screen.queryByText('提示：选择未运行或已完成的计划查看详情')).not.toBeInTheDocument()
+  })
+
+  it('任务页直接修改计划并重试失败步骤', async () => {
+    let editBody: Record<string, unknown> | undefined
+    let retryBody: Record<string, unknown> | undefined
+    server.use(
+      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+        user: 'kesepain',
+        summary: { active_plans: 1, waiting_plans: 1, enabled_crons: 0, completed_plans: 0 },
+        plans: [{
+          plan_id: 'plan_12345678', title: '待修正计划', description: '旧描述', status: 'paused', auto_accept: false,
+          reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', revision: 4,
+          created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T02:00:00Z',
+          progress: { completed: 0, total: 1, percent: 0 },
+          steps: [{ step_id: 'step_1', title: '失败步骤', description: '等待修正', status: 'failed', depends_on: [], critical: true, tool_name: 'shell', tool_arguments: {}, started_at: '', finished_at: '' }],
+        }],
+        cron_tasks: [], executions: [],
+      })),
+      http.patch('/api/users/kesepain/tasks/plans/plan_12345678/edit', async ({ request }) => {
+        editBody = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ updated: true, activated: false, reason: 'activation_disabled', plan: { plan_id: 'plan_12345678', revision: 5 } })
+      }),
+      http.post('/api/users/kesepain/tasks/plans/plan_12345678/steps/step_1/retry', async ({ request }) => {
+        retryBody = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ updated: true, activated: true, reason: 'auto_retry_on_fix', plan: { plan_id: 'plan_12345678', revision: 5, status: 'approved' } })
+      }),
+    )
+    const prompt = vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('修正后的标题')
+      .mockReturnValueOnce('修正后的描述')
+      .mockReturnValueOnce('[{"step_id":"step_1","tool_arguments":{"command":"pwd"},"critical":false}]')
+
+    renderPage('tasks')
+    const card = (await screen.findByText('待修正计划')).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: '修改' }))
+    await waitFor(() => expect(editBody).toEqual({
+      revision: 4,
+      title: '修正后的标题',
+      description: '修正后的描述',
+      steps: [{ step_id: 'step_1', tool_arguments: { command: 'pwd' }, critical: false }],
+    }))
+    expect(await screen.findByText('计划已修正；当前未自动激活，等待用户继续。')).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: '重试步骤' }))
+    await waitFor(() => expect(retryBody).toEqual({ revision: 4 }))
+    expect(await screen.findByText('失败步骤已重置，计划已自动恢复执行。')).toBeInTheDocument()
+    prompt.mockRestore()
+  })
+
+  it('任务页查看历史版本并回滚时生成新 revision', async () => {
+    let rollbackBody: Record<string, unknown> | undefined
+    let rollbackSession = ''
+    server.use(
+      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+        user: 'kesepain',
+        summary: { active_plans: 1, waiting_plans: 1, enabled_crons: 0, completed_plans: 0 },
+        plans: [{
+          plan_id: 'plan_12345678', title: '当前第三版', description: '当前描述', status: 'paused', auto_accept: false,
+          reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', revision: 3,
+          created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T03:00:00Z',
+          progress: { completed: 0, total: 1, percent: 0 },
+          steps: [{ step_id: 'step_1', title: '当前步骤', description: '当前步骤', status: 'pending', depends_on: [], critical: true, tool_name: '', tool_arguments: {}, started_at: '', finished_at: '' }],
+        }],
+        cron_tasks: [], executions: [],
+      })),
+      http.get('/api/users/kesepain/tasks/plans/plan_12345678/revisions', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('session_id')).toBe('s1')
+        return HttpResponse.json({
+          user: 'kesepain', plan_id: 'plan_12345678', total: 2,
+          revisions: [
+            { plan_id: 'plan_12345678', revision: 3, note: 'revision 3 更新', created_at: '2026-08-22T03:00:00Z' },
+            { plan_id: 'plan_12345678', revision: 1, note: '创建计划', created_at: '2026-08-22T01:00:00Z' },
+          ],
+        })
+      }),
+      http.get('/api/users/kesepain/tasks/plans/plan_12345678/revisions/:revision', ({ params }) => HttpResponse.json({
+        user: 'kesepain', plan_id: 'plan_12345678', revision: Number(params.revision),
+        plan: {
+          schema_version: 1, plan_id: 'plan_12345678', title: Number(params.revision) === 1 ? '最初版本' : '当前第三版', description: '版本描述',
+          user: 'kesepain', source: 'web', session_id: 's1', status: 'paused', auto_accept: false, reminder: '', revision: Number(params.revision),
+          created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T01:00:00Z', current_step: 'step_1',
+          steps: [{ step_id: 'step_1', title: '历史步骤', description: '历史步骤', status: 'pending', depends_on: [], critical: true, tool_name: null, tool_arguments: {}, result: null, error: null, started_at: '', finished_at: '' }],
+        },
+      })),
+      http.post('/api/users/kesepain/tasks/plans/plan_12345678/rollback', async ({ request }) => {
+        rollbackBody = await request.json() as Record<string, unknown>
+        rollbackSession = new URL(request.url).searchParams.get('session_id') || ''
+        return HttpResponse.json({
+          user: 'kesepain', plan_id: 'plan_12345678', target_revision: 1, updated: true,
+          plan: {
+            plan_id: 'plan_12345678', title: '最初版本', description: '版本描述', status: 'paused', auto_accept: false,
+            reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', revision: 4,
+            created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T04:00:00Z',
+            progress: { completed: 0, total: 1, percent: 0 },
+            steps: [{ step_id: 'step_1', title: '历史步骤', description: '历史步骤', status: 'pending', depends_on: [], critical: true, tool_name: '', tool_arguments: {}, started_at: '', finished_at: '' }],
+          },
+        })
+      }),
+    )
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByText('当前第三版'))
+    fireEvent.click(screen.getByRole('button', { name: '历史版本' }))
+    expect(await screen.findByText('创建计划')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('v1'))
+    expect(await screen.findByText('最初版本')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '回滚到 v1' }))
+
+    await waitFor(() => expect(rollbackBody).toEqual({ revision: 1, current_revision: 3 }))
+    expect(rollbackSession).toBe('s1')
+    expect(await screen.findByText('已回滚到 revision 1，并生成 revision 4')).toBeInTheDocument()
+    expect(confirm).toHaveBeenCalledWith('确定回滚到 revision 1？回滚会生成一个新版本，现有历史不会被覆盖。')
+    confirm.mockRestore()
   })
 
   it('定时任务和执行记录使用统一双栏卡片并按状态限制操作', async () => {

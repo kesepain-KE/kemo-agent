@@ -79,4 +79,31 @@ describe('TaskPlanBubble', () => {
     expect(onModify).toHaveBeenCalledOnce()
     expect(onRetry).toHaveBeenCalledOnce()
   })
+
+  it('暂停或失败计划优先重试具体失败步骤', () => {
+    const onRetry = vi.fn()
+    const onRetryStep = vi.fn()
+    render(<TaskPlanBubble
+      title="失败计划"
+      status="paused"
+      steps={[{ id: 'step_1', title: '失败项', status: 'failed' }, { id: 'step_2', title: '待执行项', status: 'pending' }]}
+      onRetry={onRetry}
+      onRetryStep={onRetryStep}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '重试步骤' }))
+    expect(onRetryStep).toHaveBeenCalledWith('step_1')
+    expect(onRetry).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '继续执行' })).not.toBeInTheDocument()
+    expect(screen.getByText('任务计划已暂停。重试会先重置失败步骤；是否自动继续由“修正后自动激活”配置决定。')).toBeInTheDocument()
+  })
+
+  it('重试完成后显示后端返回的激活结果', () => {
+    render(<TaskPlanBubble
+      title="失败计划"
+      status="approved"
+      activationNotice="失败步骤已重置，计划已自动恢复执行。"
+      steps={[{ id: 'step_1', title: '待重试项', status: 'pending' }]}
+    />)
+    expect(screen.getByText('失败步骤已重置，计划已自动恢复执行。')).toBeInTheDocument()
+  })
 })

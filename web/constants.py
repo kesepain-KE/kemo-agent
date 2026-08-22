@@ -19,6 +19,7 @@ _WORKER_DONE = object()
 _REDACTED = "***"
 _TOOL_TEXT_LIMIT = 5000
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
+COMPLETION_SOUND_MAX_BYTES = 5 * 1024 * 1024
 FILE_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
 IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
@@ -85,8 +86,14 @@ _AVATAR_FORMATS = {
     "image/webp": ".webp",
 }
 _AVATAR_SEARCH_ORDER = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+_COMPLETION_SOUND_FORMATS = {
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
+}
+_COMPLETION_SOUND_SEARCH_ORDER = (".mp3", ".wav", ".ogg", ".webm")
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {"api_key", "access_token", "password", "session_secret", "authorization"}
 )
-
 

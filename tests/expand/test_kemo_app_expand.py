@@ -995,6 +995,44 @@ class KemoAppExpandTests(unittest.TestCase):
         sessions.revoke(token)
         self.assertIsNone(sessions.verify(token))
 
+    def test_bridge_client_ip_resolution_trusts_only_configured_proxies(self) -> None:
+        trusted = bridge_auth.trusted_proxy_networks(["127.0.0.1", "10.0.0.0/8"])
+        self.assertEqual(
+            bridge_auth.resolve_client_ip(
+                "127.0.0.1",
+                "198.51.100.7, 10.1.2.3",
+                trusted,
+            ),
+            "198.51.100.7",
+        )
+        self.assertEqual(
+            bridge_auth.resolve_client_ip(
+                "203.0.113.9",
+                "198.51.100.7",
+                trusted,
+            ),
+            "203.0.113.9",
+        )
+        self.assertEqual(
+            bridge_auth.resolve_client_ip(
+                "127.0.0.1",
+                "not-an-ip",
+                trusted,
+            ),
+            "127.0.0.1",
+        )
+        with self.assertRaisesRegex(ValueError, "无效 IP"):
+            bridge_auth.trusted_proxy_networks(["invalid-network"])
+
+    def test_websocket_credentials_are_header_only(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        websocket_source = source[source.index('@app.websocket("/v1/ws")'):]
+        self.assertIn('websocket.headers.get("authorization", "")', websocket_source)
+        self.assertIn('websocket.headers.get("x-kemo-session", "")', websocket_source)
+        self.assertIn('websocket.headers.get("x-kemo-device-id", "")', websocket_source)
+        self.assertNotIn('query_params.get("device_token"', websocket_source)
+        self.assertNotIn('query_params.get("session_token"', websocket_source)
+
     def test_sse_stream_has_unbounded_read_timeout_but_rest_stays_bounded(self) -> None:
         client = bridge_upstream.UpstreamClient(
             {"upstream": "http://127.0.0.1:1457", "request_timeout": 30}

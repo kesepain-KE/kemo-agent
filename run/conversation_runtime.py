@@ -294,7 +294,9 @@ def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
         return exc.error_payload()
     detail: dict[str, Any] = {
         "message": str(exc),
-        "exception_type": type(exc).__name__,
+        "exception_type": str(
+            getattr(exc, "remote_exception_type", "") or type(exc).__name__
+        ),
     }
     for field in (
         "category",
@@ -302,6 +304,7 @@ def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
         "retryable",
         "retry_after_ms",
         "attempt_count",
+        "still_running",
     ):
         value = getattr(exc, field, None)
         if isinstance(value, bool) or isinstance(value, (int, float)):
@@ -1835,6 +1838,9 @@ def _iter_request_events_impl(
                                         else "failed"
                                     )
                                 )
+                                if bool(getattr(exc, "still_running", False)):
+                                    failures.unavailable.add(call.name)
+                                    status = "timed_out_running"
                             if result_payload.get("ok") is True:
                                 if reuse_allowed:
                                     seen_calls[signature] = copy.deepcopy(result_payload)

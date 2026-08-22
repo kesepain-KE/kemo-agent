@@ -125,6 +125,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `auto_accept` | bool | `false` | 是否自动批准任务计划。`true` 时计划创建即执行，`false` 时需手动批准 |
+| `auto_retry_on_fix` | bool | `false` | 修正 paused/failed 计划或重试 failed/cancelled 步骤后，是否自动恢复为 `approved` 并等待执行器原子领取；计划自身 `auto_accept=true` 时同样会自动恢复 |
 
 ---
 
@@ -333,7 +334,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `expand` | global_whitelist, shared_whitelist, prompt_injection, realtime_injection |
 | `perception` | global_whitelist, prompt_injection, realtime_injection |
 | `plugins` | whitelist |
-| `task_plan` | auto_accept |
+| `task_plan` | auto_accept, auto_retry_on_fix |
 
 ### 框架覆盖段（按对象深合并）
 
@@ -348,6 +349,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `web` | web | 覆盖 |
 | `message` | message | 覆盖 |
 | `cron` | cron | 覆盖 |
+| `task_plan` | task_plan | 覆盖；`auto_retry_on_fix` 默认关闭，按对象深合并 |
 | `task_cron_system` | task_cron_system | 覆盖 |
 | `agents` | agents | 覆盖 |
 

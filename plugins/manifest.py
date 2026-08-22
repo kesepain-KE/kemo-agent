@@ -89,6 +89,11 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
             "插件 timeout_policy 必须是 argument_or_default 或 agent_runtime："
             f"{path}"
         )
+    execution_mode = raw.get("execution_mode", "process")
+    if execution_mode not in {"process", "thread"}:
+        raise PluginManifestError(
+            f"插件 execution_mode 必须是 process 或 thread：{path}"
+        )
     timeout_grace = raw.get("timeout_grace_seconds", 0)
     if (
         isinstance(timeout_grace, bool)

@@ -68,6 +68,7 @@
   },
   "version": "1.0.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "execution_mode": "thread"
 }
 ```

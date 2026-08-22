@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 import sqlite3
 import threading
 import uuid
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +19,26 @@ from typing import Any, Callable
 from run.prompt_sources import truncate_chars
 
 SCHEMA_VERSION = 1
+ROLLBACK_SAFE_PLAN_STATUSES = frozenset({"pending", "paused", "failed"})
 TASK_PLAN_DB_FILENAME = "task_plans.sqlite3"
+_COMPRESSED_SNAPSHOT_PREFIX = "zlib-base64:"
+_SNAPSHOT_COMPRESSION_THRESHOLD = 4096
+_REVISION_BLOB_THRESHOLD = 4096
+_REVISION_BLOB_KEY = "$task_plan_blob"
+_REVISION_BLOB_VERSION_KEY = "$task_plan_blob_version"
+_REVISION_REDACTED_KEY = "$task_plan_redacted"
+_MAX_SNAPSHOT_DECOMPRESSED_BYTES = 16 * 1024 * 1024
+_SENSITIVE_ARGUMENT_KEYS = frozenset({
+    "authorization",
+    "cookie",
+    "api_key",
+    "access_token",
+    "refresh_token",
+    "password",
+    "secret",
+    "private_key",
+    "token",
+})
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{8}$")
 STEP_ID_RE = re.compile(r"^step_\d+$")
 PLAN_STATUSes = frozenset({
@@ -91,6 +113,222 @@ def _json_value(value: Any, default: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def _snapshot_text(plan: Any) -> str:
+    """Serialize a revision snapshot without changing the SQLite schema.
+
+    Existing databases contain plain JSON. Larger new snapshots use an explicit,
+    self-describing compressed representation so revision history remains append-only
+    without multiplying large tool results for every state transition.
+    """
+
+    raw = _json_text(plan)
+    if len(raw) < _SNAPSHOT_COMPRESSION_THRESHOLD:
+        return raw
+    compressed = zlib.compress(raw.encode("utf-8"), level=6)
+    encoded = base64.b64encode(compressed).decode("ascii")
+    rendered = f"{_COMPRESSED_SNAPSHOT_PREFIX}{encoded}"
+    return rendered if len(rendered) < len(raw) else raw
+
+
+def _snapshot_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return None
+    if not value.startswith(_COMPRESSED_SNAPSHOT_PREFIX):
+        return _json_value(value, None)
+    encoded = value[len(_COMPRESSED_SNAPSHOT_PREFIX):]
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        decompressor = zlib.decompressobj()
+        raw_bytes = decompressor.decompress(
+            compressed,
+            _MAX_SNAPSHOT_DECOMPRESSED_BYTES + 1,
+        )
+        if (
+            len(raw_bytes) > _MAX_SNAPSHOT_DECOMPRESSED_BYTES
+            or decompressor.unconsumed_tail
+        ):
+            return None
+        raw_bytes += decompressor.flush()
+        if len(raw_bytes) > _MAX_SNAPSHOT_DECOMPRESSED_BYTES:
+            return None
+        raw = raw_bytes.decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError):
+        return None
+    return _json_value(raw, None)
+
+
+def _normalized_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+
+
+def _is_sensitive_key(value: Any) -> bool:
+    key = _normalized_key(value)
+    return (
+        key in _SENSITIVE_ARGUMENT_KEYS
+        or key.endswith("_token")
+        or key.endswith("_secret")
+    )
+
+
+def _sensitive_argument_values(plan: dict[str, Any]) -> dict[str, str]:
+    found: dict[str, str] = {}
+
+    def visit(value: Any, path: tuple[str, ...]) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = (*path, str(key))
+                if _is_sensitive_key(key):
+                    found[".".join(child_path)] = _json_text(child)
+                else:
+                    visit(child, child_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, (*path, str(index)))
+
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        arguments = step.get("tool_arguments")
+        if isinstance(arguments, dict):
+            visit(arguments, (str(step.get("step_id") or "step"), "tool_arguments"))
+    return found
+
+
+def _validate_sensitive_argument_change(
+    updated: dict[str, Any],
+    *,
+    current: dict[str, Any] | None = None,
+) -> None:
+    updated_values = _sensitive_argument_values(updated)
+    if not updated_values:
+        return
+    current_values = _sensitive_argument_values(current or {})
+    changed = sorted(
+        path
+        for path, serialized in updated_values.items()
+        if current_values.get(path) != serialized
+    )
+    if changed:
+        preview = ", ".join(changed[:3])
+        if len(changed) > 3:
+            preview += f" 等 {len(changed)} 项"
+        raise PlanValidationError(
+            "任务计划不得持久化密码、Token、Cookie、API Key 或私钥；"
+            f"请改用环境变量名或安全引用：{preview}"
+        )
+
+
+def _redact_revision_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                {_REVISION_REDACTED_KEY: True}
+                if _is_sensitive_key(key)
+                else _redact_revision_secrets(child)
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_revision_secrets(item) for item in value]
+    return value
+
+
+def _blob_reference(digest: str) -> dict[str, Any]:
+    return {
+        _REVISION_BLOB_KEY: digest,
+        _REVISION_BLOB_VERSION_KEY: 1,
+    }
+
+
+def _is_blob_reference(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {_REVISION_BLOB_KEY, _REVISION_BLOB_VERSION_KEY}
+        and value.get(_REVISION_BLOB_VERSION_KEY) == 1
+        and isinstance(value.get(_REVISION_BLOB_KEY), str)
+        and re.fullmatch(r"[0-9a-f]{64}", value[_REVISION_BLOB_KEY]) is not None
+    )
+
+
+def _externalize_revision_values(
+    database: sqlite3.Connection,
+    plan_id: str,
+    value: Any,
+) -> Any:
+    if isinstance(value, dict):
+        rendered: dict[str, Any] = {}
+        for key, child in value.items():
+            if key in {"tool_arguments", "result", "error"} and child is not None:
+                raw = _json_text(child).encode("utf-8")
+                if len(raw) >= _REVISION_BLOB_THRESHOLD:
+                    digest = hashlib.sha256(raw).hexdigest()
+                    database.execute(
+                        """
+                        INSERT OR IGNORE INTO task_plan_revision_blobs(
+                            plan_id, digest, payload
+                        ) VALUES(?, ?, ?)
+                        """,
+                        (plan_id, digest, _snapshot_text(child)),
+                    )
+                    rendered[str(key)] = _blob_reference(digest)
+                    continue
+            rendered[str(key)] = _externalize_revision_values(
+                database,
+                plan_id,
+                child,
+            )
+        return rendered
+    if isinstance(value, list):
+        return [
+            _externalize_revision_values(database, plan_id, item)
+            for item in value
+        ]
+    return value
+
+
+def _restore_revision_values(
+    database: sqlite3.Connection,
+    plan_id: str,
+    value: Any,
+) -> Any:
+    if _is_blob_reference(value):
+        digest = str(value[_REVISION_BLOB_KEY])
+        row = database.execute(
+            """
+            SELECT payload FROM task_plan_revision_blobs
+            WHERE plan_id=? AND digest=?
+            """,
+            (plan_id, digest),
+        ).fetchone()
+        if row is None:
+            raise PlanError(f"计划 {plan_id} 的 revision 大字段 {digest[:12]} 缺失")
+        restored = _snapshot_value(row["payload"])
+        if restored is None:
+            raise PlanError(f"计划 {plan_id} 的 revision 大字段 {digest[:12]} 损坏")
+        return restored
+    if isinstance(value, dict):
+        return {
+            str(key): _restore_revision_values(database, plan_id, child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _restore_revision_values(database, plan_id, item)
+            for item in value
+        ]
+    return value
+
+
+def _contains_revision_redaction(value: Any) -> bool:
+    if isinstance(value, dict):
+        if set(value) == {_REVISION_REDACTED_KEY} and value.get(_REVISION_REDACTED_KEY) is True:
+            return True
+        return any(_contains_revision_redaction(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_revision_redaction(item) for item in value)
+    return False
 
 
 def _validate_step(step: dict[str, Any], index: int, tool_names: set[str] | None) -> None:
@@ -337,12 +575,41 @@ class PlanStore:
                     FOREIGN KEY(plan_id, depends_on_step_id)
                         REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS task_plan_revisions (
+                    plan_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, revision),
+                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS task_plan_revision_blobs (
+                    plan_id TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, digest),
+                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                );
                 """
                 )
                 database.execute(
                     "INSERT INTO task_plan_meta(key, value) VALUES('schema_version', '1') "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
                 )
+                for row in database.execute(
+                    """
+                    SELECT plan_id FROM task_plans AS plans
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM task_plan_revisions AS revisions
+                        WHERE revisions.plan_id=plans.plan_id
+                    )
+                    ORDER BY plan_id
+                    """
+                ).fetchall():
+                    plan = self._load(database, str(row["plan_id"]))
+                    if plan is not None:
+                        self._save_revision(database, plan, note="迁移现有计划")
                 database.commit()
             finally:
                 database.close()
@@ -440,6 +707,34 @@ class PlanStore:
                 )
 
     @staticmethod
+    def _save_revision(
+        database: sqlite3.Connection,
+        plan: dict[str, Any],
+        *,
+        note: str = "",
+    ) -> None:
+        plan_id = str(plan["plan_id"])
+        snapshot = _externalize_revision_values(
+            database,
+            plan_id,
+            _redact_revision_secrets(plan),
+        )
+        database.execute(
+            """
+            INSERT INTO task_plan_revisions(
+                plan_id, revision, plan_json, note, created_at
+            ) VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                plan_id,
+                int(plan["revision"]),
+                _snapshot_text(snapshot),
+                str(note or ""),
+                _now(),
+            ),
+        )
+
+    @staticmethod
     def _load(database: sqlite3.Connection, plan_id: str) -> dict[str, Any] | None:
         row = database.execute(
             "SELECT * FROM task_plans WHERE plan_id=?", (plan_id,)
@@ -498,6 +793,7 @@ class PlanStore:
     def create(self, plan: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             _validate_plan(plan)
+            _validate_sensitive_argument_change(plan)
             if plan.get("user") != self.user:
                 raise PlanValidationError(
                     f"计划用户与存储用户不一致：{plan.get('user')!r} != {self.user!r}"
@@ -507,6 +803,7 @@ class PlanStore:
                     if self._load(database, plan["plan_id"]) is not None:
                         raise PlanConflictError(f"计划已存在：{plan['plan_id']}")
                     self._save(database, plan)
+                    self._save_revision(database, plan, note="创建计划")
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
             return dict(plan)
@@ -551,7 +848,13 @@ class PlanStore:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
         return str(row["plan_id"]) if row is not None else None
 
-    def update(self, plan_id: str, mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+    def update(
+        self,
+        plan_id: str,
+        mutator: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        note: str = "",
+    ) -> dict[str, Any]:
         """Atomically read, mutate, validate and persist a plan."""
         with self._lock:
             try:
@@ -570,12 +873,18 @@ class PlanStore:
                     updated["revision"] = expected_revision + 1
                     updated["updated_at"] = _now()
                     _validate_plan(updated)
+                    _validate_sensitive_argument_change(updated, current=current)
                     actual = database.execute(
                         "SELECT revision FROM task_plans WHERE plan_id=?", (plan_id,)
                     ).fetchone()
                     if actual is None or int(actual["revision"]) != expected_revision:
                         raise PlanConflictError(f"计划版本冲突：{plan_id}")
                     self._save(database, updated)
+                    self._save_revision(
+                        database,
+                        updated,
+                        note=note or f"revision {updated['revision']} 更新",
+                    )
                     return updated
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
@@ -590,6 +899,139 @@ class PlanStore:
                     return result.rowcount > 0
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+
+    def list_revisions(self, plan_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            try:
+                with self._connection() as database:
+                    if self._load(database, plan_id) is None:
+                        raise PlanNotFoundError(f"计划不存在：{plan_id}")
+                    return [
+                        {
+                            "plan_id": str(row["plan_id"]),
+                            "revision": int(row["revision"]),
+                            "note": str(row["note"] or ""),
+                            "created_at": str(row["created_at"]),
+                        }
+                        for row in database.execute(
+                            """
+                            SELECT plan_id, revision, note, created_at
+                            FROM task_plan_revisions
+                            WHERE plan_id=?
+                            ORDER BY revision DESC
+                            """,
+                            (plan_id,),
+                        ).fetchall()
+                    ]
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+
+    def get_revision(self, plan_id: str, revision: int) -> dict[str, Any]:
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise PlanValidationError("revision 必须是正整数")
+        with self._lock:
+            try:
+                with self._connection() as database:
+                    if self._load(database, plan_id) is None:
+                        raise PlanNotFoundError(f"计划不存在：{plan_id}")
+                    row = database.execute(
+                        """
+                        SELECT plan_json FROM task_plan_revisions
+                        WHERE plan_id=? AND revision=?
+                        """,
+                        (plan_id, revision),
+                    ).fetchone()
+                    if row is None:
+                        raise PlanNotFoundError(
+                            f"计划 {plan_id} 的 revision {revision} 不存在"
+                        )
+                    plan = _snapshot_value(row["plan_json"])
+                    if not isinstance(plan, dict):
+                        raise PlanError(
+                            f"计划 {plan_id} 的 revision {revision} 快照损坏"
+                        )
+                    plan = _restore_revision_values(database, plan_id, plan)
+            except sqlite3.Error as exc:
+                raise PlanError(f"任务计划数据库不可用：{exc}") from exc
+            _validate_plan(plan)
+            if plan.get("plan_id") != plan_id or plan.get("user") != self.user:
+                raise PlanError(f"计划 {plan_id} 的 revision {revision} 身份不一致")
+            return plan
+
+    def rollback(
+        self,
+        plan_id: str,
+        plan_revision: int,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        snapshot = self.get_revision(plan_id, plan_revision)
+        if _contains_revision_redaction(snapshot):
+            raise PlanValidationError(
+                "该历史 revision 含已脱敏的旧凭据，不能安全回滚；"
+                "请编辑当前计划并改用环境变量名或安全引用"
+            )
+
+        def restore(current: dict[str, Any]) -> dict[str, Any]:
+            current_status = str(current.get("status") or "")
+            if current_status not in ROLLBACK_SAFE_PLAN_STATUSES:
+                raise PlanValidationError(
+                    f"计划 {plan_id} 当前状态为 {current_status!r}，"
+                    "只能在 pending/paused/failed 状态回滚"
+                )
+            if expected_revision is not None:
+                if (
+                    isinstance(expected_revision, bool)
+                    or not isinstance(expected_revision, int)
+                    or expected_revision < 1
+                ):
+                    raise PlanValidationError("current_revision 必须是正整数")
+                if int(current.get("revision", 0)) != expected_revision:
+                    raise PlanConflictError("计划版本已变化，请重新读取后再回滚")
+            restored = json.loads(_json_text(snapshot))
+            restored["plan_id"] = current["plan_id"]
+            restored["user"] = current["user"]
+            restored["status"] = current_status
+
+            restored_steps = {
+                str(step.get("step_id") or ""): step
+                for step in restored.get("steps") or []
+                if isinstance(step, dict)
+            }
+            for current_step in current.get("steps") or []:
+                if not isinstance(current_step, dict) or current_step.get("status") != "completed":
+                    continue
+                step_id = str(current_step.get("step_id") or "")
+                if step_id not in restored_steps:
+                    raise PlanValidationError(
+                        f"不能回滚到缺少已完成步骤 {step_id!r} 的 revision"
+                    )
+                restored_steps[step_id].clear()
+                restored_steps[step_id].update(json.loads(_json_text(current_step)))
+
+            for step in restored.get("steps") or []:
+                if not isinstance(step, dict) or step.get("status") != "running":
+                    continue
+                step["status"] = "pending"
+                step["result"] = None
+                step["error"] = None
+                step["started_at"] = ""
+                step["finished_at"] = ""
+
+            runnable_step_ids = [
+                str(step.get("step_id") or "")
+                for step in restored.get("steps") or []
+                if isinstance(step, dict) and step.get("status") == "pending"
+            ]
+            if str(restored.get("current_step") or "") not in runnable_step_ids:
+                restored["current_step"] = runnable_step_ids[0] if runnable_step_ids else ""
+            return restored
+
+        return self.update(
+            plan_id,
+            restore,
+            note=f"回滚到 revision {plan_revision}",
+        )
 
     def recover_interrupted(self) -> list[str]:
         """On startup, find plans with running steps and pause them."""
@@ -615,6 +1057,11 @@ class PlanStore:
                             data["updated_at"] = _now()
                             _validate_plan(data)
                             self._save(database, data)
+                            self._save_revision(
+                                database,
+                                data,
+                                note="启动恢复中断计划",
+                            )
                             recovered.append(plan_id)
                 return recovered
             except sqlite3.Error as exc:

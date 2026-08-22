@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.task_plan.tool import run
+from run.task_plan_executor import execute_plan
 from run.task_plan_store import PlanStore, normalize_plan
 from run.tools import discover_tools, validate_arguments
 
@@ -19,6 +21,11 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         (self.root / "users" / "alice").mkdir(parents=True)
+        (self.root / "config").mkdir()
+        (self.root / "config" / "global_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
+            "utf-8",
+        )
         self.context = {
             "root": str(self.root),
             "user": "alice",
@@ -26,7 +33,13 @@ class TaskPlanPluginTests(unittest.TestCase):
             "session_id": "session-a",
         }
 
-    def create_plan(self, *, steps: int = 2, status: str = "pending") -> dict:
+    def create_plan(
+        self,
+        *,
+        steps: int = 2,
+        status: str = "pending",
+        auto_accept: bool = False,
+    ) -> dict:
         plan = normalize_plan(
             title="测试计划",
             description="验证运行态插件",
@@ -34,6 +47,7 @@ class TaskPlanPluginTests(unittest.TestCase):
             source="test",
             session_id="session-a",
             status=status,
+            auto_accept=auto_accept,
             steps=[
                 {
                     "step_id": f"step_{index}",
@@ -48,17 +62,20 @@ class TaskPlanPluginTests(unittest.TestCase):
         )
         return PlanStore(self.root, "alice").create(plan)
 
-    def test_manifest_is_discovered_with_eight_actions(self) -> None:
+    def test_manifest_is_discovered_with_correction_actions(self) -> None:
         manifest = parse_plugin_manifest(
             PROJECT_ROOT / "plugins" / "task_plan" / "SKILL.md",
             root=PROJECT_ROOT,
         )
         self.assertEqual(manifest.tool["name"], "task_plan")
-        self.assertEqual(manifest.tool["version"], "1.1.0")
+        self.assertEqual(manifest.tool["version"], "1.2.0")
         actions = manifest.tool["input_schema"]["properties"]["action"]["enum"]
         self.assertEqual(
             set(actions),
-            {"view", "list", "step_done", "step_fail", "abort", "approve", "pause", "resume"},
+            {
+                "view", "list", "edit", "retry_step", "reset_step",
+                "step_done", "step_fail", "abort", "approve", "pause", "resume",
+            },
         )
         definition = discover_tools(PROJECT_ROOT, "kesepain").get("task_plan")
         validate_arguments(definition.input_schema, {"action": "list"})
@@ -267,6 +284,245 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(step["status"], "failed")
         self.assertEqual(step["error"]["message"], "外部服务不可用")
         self.assertEqual(step["error"]["exception_type"], "ManualStepFailure")
+
+    def test_edit_uses_revision_and_preserves_completed_steps(self) -> None:
+        plan = self.create_plan(status="paused")
+        store = PlanStore(self.root, "alice")
+        plan = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "steps": [
+                    {**current["steps"][0], "status": "completed", "result": "done"},
+                    current["steps"][1],
+                ],
+            },
+        )
+        edited = run(
+            action="edit",
+            plan_id=plan["plan_id"],
+            revision=plan["revision"],
+            title="修正后的计划",
+            steps=[{
+                "step_id": "step_2",
+                "tool_name": "shell",
+                "tool_arguments": {"command": "pwd"},
+                "depends_on": ["step_1"],
+                "critical": False,
+            }],
+            context=self.context,
+        )
+        self.assertTrue(edited["ok"])
+        self.assertFalse(edited["activated"])
+        self.assertEqual(edited["reason"], "activation_disabled")
+        self.assertEqual(edited["plan"]["status"], "paused")
+        self.assertEqual(edited["plan"]["revision"], plan["revision"] + 1)
+        self.assertEqual(edited["plan"]["title"], "修正后的计划")
+        self.assertEqual(edited["plan"]["steps"][0]["result"], "done")
+        self.assertEqual(edited["plan"]["steps"][1]["tool_name"], "shell")
+        stale = run(
+            action="edit",
+            plan_id=plan["plan_id"],
+            revision=plan["revision"],
+            description="陈旧修改",
+            context=self.context,
+        )
+        self.assertFalse(stale["ok"])
+        self.assertIn("版本已变化", stale["error"])
+        completed = run(
+            action="edit",
+            plan_id=plan["plan_id"],
+            revision=edited["plan"]["revision"],
+            steps=[{"step_id": "step_1", "critical": False}],
+            context=self.context,
+        )
+        self.assertFalse(completed["ok"])
+        self.assertIn("已完成步骤", completed["error"])
+
+    def test_edit_reactivates_failed_plan_when_policy_is_enabled(self) -> None:
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
+            "utf-8",
+        )
+        plan = self.create_plan(status="failed")
+        edited = run(
+            action="edit",
+            plan_id=plan["plan_id"],
+            revision=plan["revision"],
+            description="已经修正失败原因",
+            context=self.context,
+        )
+        self.assertTrue(edited["ok"])
+        self.assertTrue(edited["activated"])
+        self.assertEqual(edited["reason"], "auto_retry_on_fix")
+        self.assertEqual(edited["plan"]["status"], "approved")
+
+    def test_retry_step_defaults_to_reset_only_and_reset_step_never_activates(self) -> None:
+        plan = self.create_plan(status="running")
+        failed = run(
+            action="step_fail",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            error="需要修正",
+            context=self.context,
+        )["plan"]
+        retried = run(
+            action="retry_step",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            revision=failed["revision"],
+            context=self.context,
+        )
+        self.assertTrue(retried["ok"])
+        self.assertFalse(retried["activated"])
+        self.assertEqual(retried["reason"], "activation_disabled")
+        self.assertEqual(retried["plan"]["status"], "paused")
+        reset_step = retried["plan"]["steps"][0]
+        self.assertEqual(reset_step["status"], "pending")
+        self.assertIsNone(reset_step["error"])
+        self.assertIsNone(reset_step["result"])
+        self.assertEqual(reset_step["started_at"], "")
+        self.assertEqual(reset_step["finished_at"], "")
+
+    def test_retry_step_does_not_activate_while_another_failed_step_remains(self) -> None:
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
+            "utf-8",
+        )
+        plan = self.create_plan(status="paused")
+        store = PlanStore(self.root, "alice")
+        failed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "steps": [
+                    {
+                        **current["steps"][0],
+                        "status": "failed",
+                        "error": {"message": "first"},
+                    },
+                    {
+                        "step_id": "step_2",
+                        "title": "Second",
+                        "description": "Second failed step",
+                        "status": "failed",
+                        "depends_on": [],
+                        "tool_name": None,
+                        "tool_arguments": {},
+                        "critical": True,
+                        "result": None,
+                        "error": {"message": "second"},
+                        "started_at": "",
+                        "finished_at": "",
+                    },
+                ],
+            },
+        )
+
+        retried = run(
+            action="retry_step",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            revision=failed["revision"],
+            context=self.context,
+        )
+
+        self.assertTrue(retried["ok"])
+        self.assertFalse(retried["activated"])
+        self.assertEqual(retried["reason"], "fix_incomplete")
+        self.assertEqual(retried["plan"]["status"], "paused")
+        self.assertEqual(retried["plan"]["steps"][0]["status"], "pending")
+        self.assertEqual(retried["plan"]["steps"][1]["status"], "failed")
+
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
+            "utf-8",
+        )
+        reset_plan = self.create_plan(status="paused")
+        failed_again = PlanStore(self.root, "alice").update(
+            reset_plan["plan_id"],
+            lambda current: {
+                **current,
+                "status": "paused",
+                "steps": [
+                    {**current["steps"][0], "status": "failed", "error": {"message": "again"}},
+                    current["steps"][1],
+                ],
+            },
+        )
+        reset = run(
+            action="reset_step",
+            plan_id=reset_plan["plan_id"],
+            step_id="step_1",
+            revision=failed_again["revision"],
+            context=self.context,
+        )
+        self.assertTrue(reset["ok"])
+        self.assertFalse(reset["activated"])
+        self.assertEqual(reset["reason"], "reset_only")
+        self.assertEqual(reset["plan"]["status"], "paused")
+        self.assertEqual(reset["plan"]["steps"][0]["status"], "pending")
+
+    def test_retry_step_reactivates_for_config_auto_accept_and_failed_plan(self) -> None:
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
+            "utf-8",
+        )
+        plan = self.create_plan(status="running")
+        failed = run(
+            action="step_fail",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            error="需要修正",
+            context=self.context,
+        )["plan"]
+        failed = PlanStore(self.root, "alice").update(
+            plan["plan_id"],
+            lambda current: {**current, "status": "failed"},
+        )
+        retried = run(
+            action="retry_step",
+            plan_id=plan["plan_id"],
+            step_id="step_1",
+            revision=failed["revision"],
+            context=self.context,
+        )
+        self.assertTrue(retried["activated"])
+        self.assertEqual(retried["reason"], "auto_retry_on_fix")
+        self.assertEqual(retried["plan"]["status"], "approved")
+
+        events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config={"tools": {"enabled": False}},
+        ))
+        terminal = next(event for event in events if event.type == "done")
+        self.assertEqual(terminal.metadata["status"], "completed")
+        self.assertNotEqual(terminal.metadata.get("reason"), "no_runnable_step")
+
+        (self.root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
+            "utf-8",
+        )
+        auto_plan = self.create_plan(status="running", auto_accept=True)
+        auto_failed = run(
+            action="step_fail",
+            plan_id=auto_plan["plan_id"],
+            step_id="step_1",
+            error="需要修正",
+            context=self.context,
+        )["plan"]
+        auto_retried = run(
+            action="retry_step",
+            plan_id=auto_plan["plan_id"],
+            step_id="step_1",
+            revision=auto_failed["revision"],
+            context=self.context,
+        )
+        self.assertTrue(auto_retried["activated"])
+        self.assertEqual(auto_retried["reason"], "auto_accept")
+        self.assertEqual(auto_retried["plan"]["status"], "approved")
 
     def test_executor_state_actions_and_abort_fallback(self) -> None:
         plan = self.create_plan()

@@ -32,7 +32,7 @@ describe('MarkdownMessage', () => {
 
   it('renders static GFM, math, emoji and highlighted code', () => {
     const { container } = render(
-      <MarkdownMessage content={'first\nsecond\n\n$E=mc^2$ :rocket:\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n- [x] done\n\n![preview](https://example.com/a.png)\n\n```json\n{"ok": true}\n```'} />,
+      <MarkdownMessage content={'first\nsecond\n\n$E=mc^2$ :rocket:\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n- [x] done\n\n![preview](/api/users/alice/files/download?path=a.png)\n\n```json\n{"ok": true}\n```'} />,
     )
 
     expect(container.querySelector('br')).toBeInTheDocument()
@@ -41,6 +41,7 @@ describe('MarkdownMessage', () => {
     expect(container.querySelector('table')).toBeInTheDocument()
     expect(container.querySelector('input[type="checkbox"]')).toBeDisabled()
     expect(screen.getByRole('img', { name: 'preview' })).toHaveAttribute('loading', 'lazy')
+    expect(screen.getByRole('img', { name: 'preview' })).toHaveAttribute('referrerpolicy', 'no-referrer')
     expect(container.querySelector('code.hljs')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '复制' })).toBeInTheDocument()
   })
@@ -144,6 +145,15 @@ describe('MarkdownMessage', () => {
     expect(safe).toHaveAttribute('target', '_blank')
     expect(safe).toHaveAttribute('rel', 'noopener noreferrer')
     expect(container.querySelector('a[href^="javascript:"]')).not.toBeInTheDocument()
+  })
+
+  it('does not automatically load external markdown images', () => {
+    render(<MarkdownMessage content={'![tracking pixel](https://example.com/track.png)'} />)
+
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    const link = screen.getByRole('link', { name: '外部图片：tracking pixel' })
+    expect(link).toHaveAttribute('href', 'https://example.com/track.png')
+    expect(link).toHaveAttribute('referrerpolicy', 'no-referrer')
   })
 
   it('renders mermaid code blocks asynchronously', async () => {

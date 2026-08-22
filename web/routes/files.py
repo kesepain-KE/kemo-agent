@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, File, Query, UploadFile
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from web.schemas import DeleteManyBody, TextBody
-from web.service import AVATAR_MAX_BYTES, FILE_UPLOAD_MAX_BYTES, WebRunService
+from web.service import (
+    AVATAR_MAX_BYTES,
+    COMPLETION_SOUND_MAX_BYTES,
+    FILE_UPLOAD_MAX_BYTES,
+    WebRunService,
+)
 
 
 def _preview_response(target: Any, media_type: str) -> FileResponse:
@@ -201,6 +206,59 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         if target is None:
             return Response(status_code=204)
         return FileResponse(target)
+
+    @app.post("/api/users/{user}/completion-sound")
+    async def upload_completion_sound(
+        user: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        content_type = file.content_type
+        try:
+            data = await file.read(COMPLETION_SOUND_MAX_BYTES + 1)
+        finally:
+            await file.close()
+        status = backend.save_completion_sound(user, data, content_type)
+        return {"ok": True, "status": status}
+
+    @app.get("/api/users/{user}/completion-sound/status")
+    async def completion_sound_status(user: str) -> dict[str, Any]:
+        return backend.completion_sound_status(user)
+
+    @app.post("/api/users/{user}/completion-sound/fallback")
+    async def completion_sound_fallback(user: str) -> dict[str, Any]:
+        return backend.play_completion_sound_fallback(user)
+
+    @app.get("/api/users/{user}/completion-sound")
+    async def completion_sound(user: str, request: Request) -> Response:
+        target = backend.completion_sound_path(user)
+        if target is None:
+            return Response(status_code=204)
+        status = backend.completion_sound_status(user)
+        try:
+            stat = target.stat()
+        except OSError:
+            return Response(status_code=204)
+        etag = f'W/"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+        cache_headers = {
+            "Cache-Control": "private, no-cache",
+            "ETag": etag,
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; media-src 'self'",
+        }
+        if request.headers.get("if-none-match", "").strip() == etag:
+            return Response(status_code=304, headers=cache_headers)
+        data = backend.load_completion_sound(user)
+        if data is None:
+            return Response(status_code=204)
+        return Response(
+            content=data,
+            media_type=status["mime_type"],
+            headers=cache_headers,
+        )
+
+    @app.delete("/api/users/{user}/completion-sound")
+    async def delete_completion_sound(user: str) -> dict[str, Any]:
+        return {"ok": True, "deleted": backend.delete_completion_sound(user)}
 
     @app.get("/api/tmp")
     async def tmp_files(

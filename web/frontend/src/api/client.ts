@@ -5,6 +5,10 @@ import type {
   ApiErrorPayload,
   AuthStatusResponse,
   AvatarUploadResponse,
+  CompletionSoundDeleteResponse,
+  CompletionSoundFallbackResponse,
+  CompletionSoundStatus,
+  CompletionSoundUploadResponse,
   ConfigFullResponse,
   ExpandsResponse,
   ExpandScope,
@@ -26,6 +30,10 @@ import type {
   ActiveSessionResponse,
   PreferencesResponse,
   PromptDiagnosticsResponse,
+  PlanMutationResponse,
+  PlanRevisionResponse,
+  PlanRevisionsResponse,
+  PlanRollbackResponse,
   RuntimeStatusResponse,
   RunEvent,
   SenseResponse,
@@ -397,6 +405,59 @@ export async function createPlan(user: string, plan: Record<string, unknown>): P
 export async function updatePlan(user: string, planId: string, plan: Record<string, unknown>): Promise<Record<string, unknown>> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(plan),
+  })
+}
+
+export async function editPlan(
+  user: string,
+  planId: string,
+  changes: Record<string, unknown>,
+): Promise<PlanMutationResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/edit`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
+  })
+}
+
+export async function retryPlanStep(
+  user: string,
+  planId: string,
+  stepId: string,
+  revision: number,
+): Promise<PlanMutationResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}/retry`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
+  })
+}
+
+export async function getPlanRevisions(
+  user: string,
+  planId: string,
+  sessionId: string,
+): Promise<PlanRevisionsResponse> {
+  const query = new URLSearchParams({ session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions?${query.toString()}`)
+}
+
+export async function getPlanRevision(
+  user: string,
+  planId: string,
+  revision: number,
+  sessionId: string,
+): Promise<PlanRevisionResponse> {
+  const query = new URLSearchParams({ session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions/${revision}?${query.toString()}`)
+}
+
+export async function rollbackPlan(
+  user: string,
+  planId: string,
+  revision: number,
+  currentRevision: number,
+  sessionId: string,
+): Promise<PlanRollbackResponse> {
+  const query = new URLSearchParams({ session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/rollback?${query.toString()}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, current_revision: currentRevision }),
   })
 }
 
@@ -780,6 +841,36 @@ export async function uploadUserAvatar(user: string, file: File): Promise<Avatar
     window.dispatchEvent(new CustomEvent(AVATAR_UPDATED_EVENT, { detail: { user } }))
   }
   return result
+}
+
+export function getCompletionSoundUrl(user: string, revision?: string | number): string {
+  const suffix = revision === undefined ? '' : `?v=${encodeURIComponent(String(revision))}`
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/completion-sound${suffix}`
+}
+
+export async function getCompletionSoundStatus(user: string): Promise<CompletionSoundStatus> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound/status`)
+}
+
+export async function uploadCompletionSound(user: string, file: File): Promise<CompletionSoundUploadResponse> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound`, {
+    method: 'POST',
+    body,
+  })
+}
+
+export async function deleteCompletionSound(user: string): Promise<CompletionSoundDeleteResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound`, {
+    method: 'DELETE',
+  })
+}
+
+export async function playCompletionSoundFallback(user: string): Promise<CompletionSoundFallbackResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound/fallback`, {
+    method: 'POST',
+  })
 }
 
 export async function getAgents(user: string): Promise<AgentsResponse> {

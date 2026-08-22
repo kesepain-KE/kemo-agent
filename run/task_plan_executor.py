@@ -55,6 +55,19 @@ def _next_step(plan: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _failed_steps_needing_fix(plan: dict[str, Any]) -> list[str]:
+    """Return every critical failed step that must be explicitly repaired."""
+
+    return [
+        str(step.get("step_id") or "")
+        for step in (plan.get("steps") or [])
+        if isinstance(step, dict)
+        and str(step.get("step_id") or "")
+        and step.get("status") == "failed"
+        and bool(step.get("critical", True))
+    ]
+
+
 def _is_plan_active(status: str) -> bool:
     return status in ("approved", "running")
 
@@ -149,12 +162,40 @@ def execute_plan(
 
         step = _next_step(plan)
         if step is None:
-                        # 检查所有步骤是否处于终止状态
-            terminal = {"completed", "failed", "skipped", "cancelled"}
-            all_done = all(s["status"] in terminal for s in plan["steps"])
-            if all_done:
+            failed_step_ids = _failed_steps_needing_fix(plan)
+            if failed_step_ids:
                 try:
-                    plan = store.update(plan_id, lambda p: {**p, "status": "completed"})
+                    plan = store.update(
+                        plan_id,
+                        lambda p: {**p, "status": "paused"},
+                        note="等待修正失败步骤",
+                    )
+                except (PlanError, PlanValidationError) as exc:
+                    yield error_event(exc, phase="plan_pause")
+                    return
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "plan_id": plan_id,
+                        "status": "paused",
+                        "reason": "failed_step_needs_fix",
+                        "failed_step_ids": failed_step_ids,
+                        "message": "请先修正失败步骤后重试",
+                    },
+                )
+                return
+
+            all_succeeded = all(
+                s.get("status") in {"completed", "skipped"}
+                for s in plan["steps"]
+            )
+            if all_succeeded:
+                try:
+                    plan = store.update(
+                        plan_id,
+                        lambda p: {**p, "status": "completed"},
+                        note="计划执行完成",
+                    )
                 except (PlanError, PlanValidationError) as exc:
                     yield error_event(exc, phase="plan_complete")
                     return
@@ -170,10 +211,12 @@ def execute_plan(
                     },
                 )
                 return
-                        # 仍有待处理的步骤，但没有一个可运行（全部被阻止
-                        # failed deps) — 将计划标记为失败
             try:
-                plan = store.update(plan_id, lambda p: {**p, "status": "failed"})
+                plan = store.update(
+                    plan_id,
+                    lambda p: {**p, "status": "failed"},
+                    note="无可运行步骤",
+                )
             except (PlanError, PlanValidationError) as exc:
                 yield error_event(exc, phase="plan_fail")
                 return

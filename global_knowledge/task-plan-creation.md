@@ -86,6 +86,7 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 - `critical` 必须是布尔值。
 - `tool_name` 可为空；非空时必须是实际可用工具，且不能是 `task_plan` 或 `task_plan_*` 管理工具。
 - `tool_arguments` 必须是对象。
+- `tool_arguments` 不得包含密码、Cookie、Authorization、API Key、访问/刷新 Token、私钥或其他 `_token`/`_secret` 字段；计划是持久化、可回溯数据，凭据必须改为环境变量名或受控安全引用。`token_limit` 等非凭据配置不会被误判。
 - `revision`、`updated_at` 和运行时间由存储层维护，不应由 UI 用旧副本覆盖。
 - 已完成步骤在编辑时受保护，不能通过重写计划抹掉结果。
 
@@ -114,4 +115,4 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 
 只允许编辑 `pending`、`approved` 或 `paused` 计划。每次更新都会增加 `revision`；界面保存前必须基于最新版本，收到“计划版本已变化”时重新读取并合并，而不是强制覆盖。运行结束或启动恢复时，未完成的运行步骤会回收到安全状态。
 
-数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`。创建、修改、步骤结果和启动恢复均为事务；启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。
+数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`，并用 `task_plan_revisions` 保存不可改写的修订历史。大型参数、结果和错误通过 `task_plan_revision_blobs` 按计划内 SHA-256 去重，读取时透明还原；旧版明文 JSON 和压缩快照继续兼容。创建、修改、revision 与大型字段引用在同一事务提交，任一步失败都会整体回滚。启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。

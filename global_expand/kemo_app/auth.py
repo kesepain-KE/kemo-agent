@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -14,6 +15,47 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+def trusted_proxy_networks(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        entries = tuple(item.strip() for item in value.split(",") if item.strip())
+    elif isinstance(value, (list, tuple)):
+        entries = tuple(str(item).strip() for item in value if str(item).strip())
+    elif value in (None, ""):
+        entries = ()
+    else:
+        raise ValueError("trusted_proxies 必须是字符串或字符串列表")
+    normalized: list[str] = []
+    for entry in entries:
+        try:
+            normalized.append(str(ipaddress.ip_network(entry, strict=False)))
+        except ValueError as exc:
+            raise ValueError(f"trusted_proxies 包含无效 IP 或网段：{entry}") from exc
+    return tuple(normalized)
+
+
+def resolve_client_ip(peer: str, forwarded_for: str, trusted_proxies: tuple[str, ...]) -> str:
+    """Honor X-Forwarded-For only when the direct peer is explicitly trusted."""
+
+    fallback = str(peer or "unknown").strip() or "unknown"
+    try:
+        peer_address = ipaddress.ip_address(fallback)
+    except ValueError:
+        return fallback
+    networks = tuple(ipaddress.ip_network(item, strict=False) for item in trusted_proxies)
+    if not networks or not any(peer_address in network for network in networks):
+        return str(peer_address)
+    forwarded = [item.strip() for item in str(forwarded_for).split(",") if item.strip()]
+    try:
+        chain = [ipaddress.ip_address(item) for item in forwarded]
+    except ValueError:
+        return str(peer_address)
+    for address in reversed(chain):
+        if any(address in network for network in networks):
+            continue
+        return str(address)
+    return str(peer_address)
 
 
 def _b64encode(value: bytes) -> str:

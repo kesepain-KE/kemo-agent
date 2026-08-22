@@ -176,6 +176,10 @@ button[aria-busy="true"] { cursor: progress; }
 .model-effort-state { min-width: 82px; padding: 7px 9px; border-radius: var(--radius-control); background: var(--surface-3); color: var(--muted); font-size: .6875rem; font-weight: 700; text-align: center; }
 .model-menu > button { width: 100%; margin-top: 5px; padding: 10px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); display: flex; align-items: center; justify-content: space-between; font-size: .75rem; }
 .model-menu > button:hover { background: var(--surface-hover); color: var(--text); }
+.settings-inline-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.settings-inline-actions .module-btn { min-height: 34px; padding: 0 10px; }
+.settings-inline-feedback { margin: 0 16px 14px; padding: 9px 11px; border: 1px solid var(--brand-line); border-radius: var(--radius-control); background: var(--brand-soft); color: var(--brand); font-size: .75rem; }
+.setting-copy strong:has(svg) { display: inline-flex; align-items: center; gap: 6px; }
 .role-menu-foot { margin: 5px 5px 0; padding: 9px 5px 4px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: .6875rem; line-height: 1.5; }
 
 /* The centered React shell must not leak a translated, closed drawer on wide screens. */

@@ -100,8 +100,9 @@
 - `pending`（待批准）
 - `approved`（已批准未开始）
 - `paused`（暂停中）
+- `failed`（执行失败，等待修正）
 
-不能编辑已完成（`completed`）、已取消（`cancelled`）、已失败（`failed`）的计划。
+不能编辑已完成（`completed`）、已取消（`cancelled`）或正在执行（`running`）的计划。
 
 ### 流程
 
@@ -111,17 +112,21 @@
 4. 不创建新计划，返回修改后的完整计划
 5. 已完成的步骤（`status=completed`）不可修改
 6. `completed_steps` 中列出的步骤不得删除、改名、修改执行内容或重置状态
+7. failed/cancelled 步骤在修正失败原因后可以重置为 `pending`
+8. 重置失败步骤时必须清空旧的 `error`、`result`、`started_at` 和 `finished_at`，不得伪造已完成结果
 
 ---
 
 ## 六、auto_accept 提醒
 
-根据 `user_config.json → task_plan.auto_accept`：
+根据合并后的 `task_plan.auto_accept` 与 `task_plan.auto_retry_on_fix`：
 
 | auto_accept | 行为 |
 |-------------|------|
 | `true` | 计划生成/修改后自动执行，无额外提示 |
 | `false` | 在主智能体返回给用户的文本末尾追加提示 |
+
+修正 paused/failed 计划时，`auto_retry_on_fix=true` 也会让修正后的计划恢复为 `approved`；失败步骤仍应通过 `retry_step` 显式重置为 `pending`。`reset_step` 永远不自动激活计划。
 
 - 创建时追加：`当前任务计划已创建，请让用户点击批准后执行`
 - 编辑时追加：`当前任务计划已修改，请让用户点击批准后执行`

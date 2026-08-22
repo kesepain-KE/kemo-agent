@@ -7,11 +7,102 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import threading
+import time
 from typing import Any
 import zipfile
 
 from web.constants import _WINDOWS_INVALID_PATH_CHARS, _WINDOWS_RESERVED_NAMES
 from web.errors import InvalidRequestError
+
+
+_DIRECTORY_SCAN_MAX_ENTRIES = 10_000
+_DIRECTORY_SCAN_MAX_DEPTH = 32
+_DIRECTORY_SUMMARY_CACHE_TTL_SECONDS = 10.0
+_DIRECTORY_SUMMARY_CACHE_MAX_ENTRIES = 256
+_DIRECTORY_SUMMARY_CACHE: dict[str, tuple[float, int, dict[str, Any]]] = {}
+_DIRECTORY_SUMMARY_GENERATIONS: dict[str, int] = {}
+_DIRECTORY_SUMMARY_CACHE_LOCK = threading.Lock()
+
+
+def _directory_cache_key(directory: Path) -> str:
+    return os.path.normcase(str(directory.resolve()))
+
+
+def _invalidate_directory_summary(directory: Path) -> None:
+    """Invalidate one scope summary without relying on directory mtimes.
+
+    All Web mutations call this explicitly.  The short TTL remains a bounded
+    fallback for files written directly by plugins, agents, or external tools.
+    A generation counter prevents a scan racing with a mutation from restoring
+    stale data after the invalidation.
+    """
+
+    key = _directory_cache_key(directory)
+    with _DIRECTORY_SUMMARY_CACHE_LOCK:
+        _DIRECTORY_SUMMARY_CACHE.pop(key, None)
+        _DIRECTORY_SUMMARY_GENERATIONS[key] = (
+            _DIRECTORY_SUMMARY_GENERATIONS.get(key, 0) + 1
+        )
+
+
+def _scan_directory_summary(directory: Path) -> dict[str, Any]:
+    summary = {
+        "total_files": 0,
+        "total_dirs": 0,
+        "total_size": 0,
+        "scanned_entries": 0,
+        "truncated": False,
+    }
+
+    def scan(current: Path, depth: int) -> None:
+        if depth > _DIRECTORY_SCAN_MAX_DEPTH:
+            summary["truncated"] = True
+            return
+        for child in _visible_children(current):
+            if summary["scanned_entries"] >= _DIRECTORY_SCAN_MAX_ENTRIES:
+                summary["truncated"] = True
+                return
+            summary["scanned_entries"] += 1
+            try:
+                if child.is_dir():
+                    summary["total_dirs"] += 1
+                    scan(child, depth + 1)
+                elif child.is_file():
+                    child_stat = child.stat()
+                    summary["total_files"] += 1
+                    summary["total_size"] += child_stat.st_size
+            except OSError:
+                continue
+
+    scan(directory, 0)
+    return summary
+
+
+def _cached_directory_summary(directory: Path) -> dict[str, Any]:
+    key = _directory_cache_key(directory)
+    now = time.monotonic()
+    with _DIRECTORY_SUMMARY_CACHE_LOCK:
+        cached = _DIRECTORY_SUMMARY_CACHE.get(key)
+        generation = _DIRECTORY_SUMMARY_GENERATIONS.get(key, 0)
+        if cached is not None and cached[0] > now and cached[1] == generation:
+            return dict(cached[2])
+
+    summary = _scan_directory_summary(directory)
+    with _DIRECTORY_SUMMARY_CACHE_LOCK:
+        if _DIRECTORY_SUMMARY_GENERATIONS.get(key, 0) == generation:
+            _DIRECTORY_SUMMARY_CACHE[key] = (
+                now + _DIRECTORY_SUMMARY_CACHE_TTL_SECONDS,
+                generation,
+                dict(summary),
+            )
+            if len(_DIRECTORY_SUMMARY_CACHE) > _DIRECTORY_SUMMARY_CACHE_MAX_ENTRIES:
+                oldest_key = min(
+                    _DIRECTORY_SUMMARY_CACHE,
+                    key=lambda candidate: _DIRECTORY_SUMMARY_CACHE[candidate][0],
+                )
+                _DIRECTORY_SUMMARY_CACHE.pop(oldest_key, None)
+    return summary
 
 
 def _visible_children(directory: Path) -> list[Path]:
@@ -44,22 +135,37 @@ def _directory_listing(
     page: int = 1,
     page_size: int = 6,
 ) -> dict[str, Any]:
-    summary = {"total_files": 0, "total_dirs": 0, "total_size": 0}
+    summary = {
+        "total_files": 0,
+        "total_dirs": 0,
+        "total_size": 0,
+        "scanned_entries": 0,
+        "truncated": False,
+    }
     entries: list[dict[str, Any]] = []
     normalized_path = path.strip().replace("\\", "/") if isinstance(path, str) else ""
     normalized_search = search.strip().casefold() if isinstance(search, str) else ""
+    current_directory = directory
 
     if normalized_path:
         normalized_path, current_directory = _safe_relative_target(directory, normalized_path)
         _reject_link_path(directory.resolve(), current_directory)
         if not current_directory.is_dir():
             normalized_path = ""
+            current_directory = directory
 
-    def visit(current: Path) -> tuple[int, float, int]:
+    def visit_search(current: Path, depth: int) -> tuple[int, float, int]:
+        if depth > _DIRECTORY_SCAN_MAX_DEPTH:
+            summary["truncated"] = True
+            return 0, 0.0, 0
         total_size = 0
         updated_at = 0.0
         children = _visible_children(current)
         for item in children:
+            if summary["scanned_entries"] >= _DIRECTORY_SCAN_MAX_ENTRIES:
+                summary["truncated"] = True
+                break
+            summary["scanned_entries"] += 1
             relative = item.relative_to(directory).as_posix()
             parent_path = item.parent.relative_to(directory).as_posix()
             if parent_path == ".":
@@ -67,7 +173,7 @@ def _directory_listing(
             try:
                 if item.is_dir():
                     summary["total_dirs"] += 1
-                    child_size, child_updated_at, child_count = visit(item)
+                    child_size, child_updated_at, child_count = visit_search(item, depth + 1)
                     entry = {
                         "type": "directory",
                         "name": item.name,
@@ -101,15 +207,44 @@ def _directory_listing(
             except OSError:
                 continue
 
-            if normalized_search:
-                haystack = f"{entry['name']} {entry['relative_path']}".casefold()
-                if normalized_search in haystack:
-                    entries.append(entry)
-            elif parent_path == normalized_path:
+            haystack = f"{entry['name']} {entry['relative_path']}".casefold()
+            if normalized_search in haystack:
                 entries.append(entry)
         return total_size, updated_at, len(children)
 
-    visit(directory)
+    if normalized_search:
+        visit_search(directory, 0)
+    else:
+        summary = _cached_directory_summary(directory)
+        for item in _visible_children(current_directory):
+            relative = item.relative_to(directory).as_posix()
+            parent_path = item.parent.relative_to(directory).as_posix()
+            if parent_path == ".":
+                parent_path = ""
+            try:
+                item_stat = item.stat()
+                if item.is_dir():
+                    entry_type = "directory"
+                    size = 0
+                    extension = ""
+                elif item.is_file():
+                    entry_type = "file"
+                    size = item_stat.st_size
+                    extension = item.suffix.lower()
+                else:
+                    continue
+            except OSError:
+                continue
+            entries.append({
+                "type": entry_type,
+                "name": item.name,
+                "relative_path": relative,
+                "parent_path": parent_path,
+                "size": size,
+                "updated_at": item_stat.st_mtime,
+                "extension": extension,
+                "child_count": 0,
+            })
     entries.sort(
         key=lambda item: (
             0 if item["type"] == "directory" else 1,
@@ -125,6 +260,25 @@ def _directory_listing(
     current_page = min(requested_page, total_pages)
     start = (current_page - 1) * normalized_page_size
     paged_entries = entries[start : start + normalized_page_size]
+    if not normalized_search:
+        for entry in paged_entries:
+            if entry["type"] != "directory":
+                continue
+            target = directory.joinpath(*PurePosixPath(entry["relative_path"]).parts)
+            children = _visible_children(target)
+            entry["child_count"] = len(children)
+            direct_size = 0
+            updated_at = float(entry["updated_at"])
+            for child in children:
+                try:
+                    child_stat = child.stat()
+                except OSError:
+                    continue
+                updated_at = max(updated_at, child_stat.st_mtime)
+                if child.is_file():
+                    direct_size += child_stat.st_size
+            entry["size"] = direct_size
+            entry["updated_at"] = updated_at
     return {
         "summary": summary,
         "entries": paged_entries,
@@ -259,4 +413,3 @@ def _image_media_type(data: bytes) -> str | None:
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
-

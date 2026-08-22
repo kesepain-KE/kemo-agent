@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from cron.schedule import compute_next_run
+from run.config import load_config
 from run.cron_store import (
     CronConflictError,
     CronError,
@@ -13,6 +14,13 @@ from run.cron_store import (
     normalize_task,
 )
 from run.task_plan_executor import cancel_plan, pause_plan
+from run.memory import contains_sensitive_credential
+from run.task_plan_mutations import (
+    edit_plan_fields,
+    ensure_completed_steps_preserved,
+    plan_fix_activation_result,
+    reset_plan_step,
+)
 from run.task_plan_store import (
     PlanConflictError,
     PlanError,
@@ -21,6 +29,44 @@ from run.task_plan_store import (
     normalize_plan,
 )
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
+
+
+_REDACTED_TASK_PLAN_VALUE = "***"
+_SENSITIVE_TASK_PLAN_KEYS = frozenset({
+    "access_token",
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "session_secret",
+    "set-cookie",
+    "token",
+})
+
+
+def _redact_plan_revision(value: Any) -> Any:
+    """Return a browser-safe revision view without mutating rollback snapshots."""
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            rendered = str(key)
+            lowered = rendered.casefold()
+            if lowered in _SENSITIVE_TASK_PLAN_KEYS or lowered.endswith(("_secret", "_token")):
+                result[rendered] = _REDACTED_TASK_PLAN_VALUE
+            else:
+                result[rendered] = _redact_plan_revision(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_plan_revision(item) for item in value]
+    if isinstance(value, str) and contains_sensitive_credential(value):
+        return _REDACTED_TASK_PLAN_VALUE
+    return value
 
 
 class TaskServiceMixin:
@@ -41,6 +87,9 @@ class TaskServiceMixin:
                     "depends_on": [str(value) for value in (item.get("depends_on") or [])],
                     "critical": bool(item.get("critical", True)),
                     "tool_name": str(item.get("tool_name") or ""),
+                    "tool_arguments": dict(item.get("tool_arguments") or {}),
+                    "result": item.get("result"),
+                    "error": item.get("error"),
                     "started_at": str(item.get("started_at") or ""),
                     "finished_at": str(item.get("finished_at") or ""),
                 }
@@ -142,6 +191,20 @@ class TaskServiceMixin:
             "executions": executions[:100],
         }
 
+    @staticmethod
+    def _require_plan_session(
+        store: PlanStore,
+        plan_id: str,
+        session_id: Any,
+    ) -> dict[str, Any]:
+        expected_session = str(session_id or "").strip()
+        if not expected_session:
+            raise InvalidRequestError("任务计划操作缺少 session_id 对话身份")
+        plan = store.read(plan_id)
+        if str(plan.get("session_id") or "") != expected_session:
+            raise InvalidRequestError("当前对话空间不能访问其他对话空间的任务计划")
+        return plan
+
     def create_plan(self, user: Any, payload: Any) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
@@ -187,6 +250,8 @@ class TaskServiceMixin:
                 "steps",
             ):
                 if key in payload:
+                    if key == "steps":
+                        ensure_completed_steps_preserved(current, payload[key])
                     updated[key] = payload[key]
             updated["user"] = name
             return updated
@@ -202,6 +267,190 @@ class TaskServiceMixin:
         if stored.get("status") == "approved" and self.plan_waker is not None:
             self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
+
+    def edit_plan(self, user: Any, plan_id: Any, payload: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("计划修改必须是对象")
+        changes = {
+            key: payload[key]
+            for key in ("title", "description", "steps")
+            if key in payload
+        }
+        store = PlanStore(self.root, name)
+        try:
+            current = store.read(str(plan_id))
+            config = load_config(name, self.root)
+            auto_retry_on_fix = (
+                (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
+                is True
+            )
+            stored = edit_plan_fields(
+                store,
+                str(plan_id),
+                expected_revision=payload.get("revision"),
+                changes=changes,
+                auto_retry_on_fix=auto_retry_on_fix,
+            )
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except PlanConflictError as exc:
+            raise ConflictError(str(exc)) from None
+        except (PlanError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划修改失败：{exc}") from None
+        if stored.get("status") == "approved" and self.plan_waker is not None:
+            self.plan_waker()
+        activated, activation_reason = plan_fix_activation_result(
+            current,
+            stored,
+            auto_retry_on_fix=auto_retry_on_fix,
+        )
+        return {
+            "user": name,
+            "plan": self._plan_summary(stored),
+            "updated": True,
+            "activated": activated,
+            "reason": activation_reason,
+        }
+
+    def retry_plan_step(
+        self,
+        user: Any,
+        plan_id: Any,
+        step_id: Any,
+        payload: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("步骤重试参数必须是对象")
+        store = PlanStore(self.root, name)
+        try:
+            current = store.read(str(plan_id))
+            config = load_config(name, self.root)
+            auto_retry_on_fix = (
+                (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
+                is True
+            )
+            stored = reset_plan_step(
+                store,
+                str(plan_id),
+                str(step_id),
+                expected_revision=payload.get("revision"),
+                activate_paused=True,
+                auto_retry_on_fix=auto_retry_on_fix,
+            )
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except PlanConflictError as exc:
+            raise ConflictError(str(exc)) from None
+        except (PlanError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"步骤重试失败：{exc}") from None
+        if stored.get("status") == "approved" and self.plan_waker is not None:
+            self.plan_waker()
+        activated, activation_reason = plan_fix_activation_result(
+            current,
+            stored,
+            auto_retry_on_fix=auto_retry_on_fix,
+        )
+        return {
+            "user": name,
+            "plan": self._plan_summary(stored),
+            "step_id": str(step_id),
+            "action": "retry_step",
+            "updated": True,
+            "activated": activated,
+            "reason": activation_reason,
+        }
+
+    def list_plan_revisions(
+        self,
+        user: Any,
+        plan_id: Any,
+        session_id: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        store = PlanStore(self.root, name)
+        normalized_plan_id = str(plan_id)
+        try:
+            self._require_plan_session(store, normalized_plan_id, session_id)
+            revisions = store.list_revisions(normalized_plan_id)
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except InvalidRequestError:
+            raise
+        except (PlanError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划修订读取失败：{exc}") from None
+        return {
+            "user": name,
+            "plan_id": normalized_plan_id,
+            "revisions": revisions,
+            "total": len(revisions),
+        }
+
+    def get_plan_revision(
+        self,
+        user: Any,
+        plan_id: Any,
+        revision: Any,
+        session_id: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        store = PlanStore(self.root, name)
+        normalized_plan_id = str(plan_id)
+        try:
+            normalized_revision = int(revision)
+            self._require_plan_session(store, normalized_plan_id, session_id)
+            plan = store.get_revision(normalized_plan_id, normalized_revision)
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except InvalidRequestError:
+            raise
+        except (PlanError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划修订读取失败：{exc}") from None
+        return {
+            "user": name,
+            "plan_id": normalized_plan_id,
+            "revision": normalized_revision,
+            "plan": _redact_plan_revision(plan),
+        }
+
+    def rollback_plan(
+        self,
+        user: Any,
+        plan_id: Any,
+        revision: Any,
+        current_revision: Any,
+        session_id: Any,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        store = PlanStore(self.root, name)
+        normalized_plan_id = str(plan_id)
+        try:
+            normalized_revision = int(revision)
+            normalized_current_revision = int(current_revision)
+            self._require_plan_session(store, normalized_plan_id, session_id)
+            stored = store.rollback(
+                normalized_plan_id,
+                normalized_revision,
+                expected_revision=normalized_current_revision,
+            )
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        except PlanConflictError as exc:
+            raise ConflictError(str(exc)) from None
+        except InvalidRequestError:
+            raise
+        except (PlanError, TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"计划回滚失败：{exc}") from None
+        if stored.get("status") == "approved" and self.plan_waker is not None:
+            self.plan_waker()
+        return {
+            "user": name,
+            "plan_id": normalized_plan_id,
+            "target_revision": normalized_revision,
+            "plan": self._plan_summary(stored),
+            "updated": True,
+        }
 
     def command_plan(self, user: Any, plan_id: Any, action: Any) -> dict[str, Any]:
         name = self.require_user(user)

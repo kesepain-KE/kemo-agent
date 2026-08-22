@@ -68,6 +68,17 @@ def _env_positive_int(
     return value
 
 
+def _env_bool(source: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = str(source.get(name, "")).strip().casefold()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise WebAuthConfigError(f"{name} 必须是 true/false")
+
+
 def _trusted_proxies(value: str) -> tuple[str, ...]:
     entries = tuple(item.strip() for item in str(value).split(",") if item.strip())
     for entry in entries:
@@ -87,6 +98,7 @@ class WebAuthConfig:
     password: str = ""
     session_secret: str = ""
     cookie_name: str = "kemo_agent_session"
+    cookie_secure: bool = False
     ip_max_failures: int = 0
     ip_window_seconds: int = 600
     ip_lock_seconds: int = 900
@@ -121,6 +133,7 @@ class WebAuthConfig:
             password=source.get("WEB_PASSWORD", ""),
             session_secret=source.get("WEB_SESSION_SECRET", ""),
             cookie_name=source.get("WEB_SESSION_COOKIE_NAME", "kemo_agent_session"),
+            cookie_secure=_env_bool(source, "WEB_SESSION_COOKIE_SECURE", False),
             ip_max_failures=_env_nonnegative_int(
                 source, "WEB_AUTH_IP_MAX_FAILURES", 0
             ),

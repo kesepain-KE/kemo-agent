@@ -53,6 +53,16 @@ const markdownSchema: Schema = {
 
 const EXTERNAL_URL_RE = /^(https?:|mailto:|\/\/)/i
 
+function sameOriginImageUrl(src: string): boolean {
+  if (typeof window === 'undefined') return !EXTERNAL_URL_RE.test(src)
+  try {
+    const resolved = new URL(src, window.location.href)
+    return ['http:', 'https:'].includes(resolved.protocol) && resolved.origin === window.location.origin
+  } catch {
+    return false
+  }
+}
+
 export const safeUrlTransform: UrlTransform = (url) => {
   const value = url.trim()
   if (!value) return ''
@@ -237,7 +247,14 @@ const markdownComponents: Components = {
   },
   img({ node: _node, src, alt, ...props }) {
     if (!src) return null
-    return <img {...props} src={src} alt={alt || ''} loading="lazy" />
+    if (!sameOriginImageUrl(src)) {
+      return (
+        <a href={src} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
+          {alt ? `外部图片：${alt}` : '查看外部图片'}
+        </a>
+      )
+    }
+    return <img {...props} src={src} alt={alt || ''} loading="lazy" referrerPolicy="no-referrer" />
   },
   input({ node: _node, type, checked, ...props }) {
     if (type === 'checkbox') {

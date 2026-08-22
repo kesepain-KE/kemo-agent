@@ -153,7 +153,7 @@ def prepare_guidance(
                             metadata={
                                 "user": user,
                                 "session_id": session_id,
-                                "purpose": "guidance",
+                                "purpose": "input",
                                 "capability": "conversation",
                             },
                             idempotency_key=asset_id,

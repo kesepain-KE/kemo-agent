@@ -63,7 +63,8 @@
     "timeout_survival_seconds": 120
   },
   "task_plan": {
-    "max_steps": 20
+    "max_steps": 20,
+    "auto_retry_on_fix": false
   },
   "cron": {
     "enabled": true,

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from plugins.subagent_dispatch.tool import run as dispatch_subagent
 from run.agent_queue import AgentScheduler
+from run.execution_watchdog import execution_watchdog_snapshot
 from run.agent_runner import (
     AgentCancelledError,
     AgentRunResult,
@@ -117,6 +118,36 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
 
         self.assertEqual(events[-1].metadata["status"], "timed_out")
 
+    def test_non_cooperative_timeout_is_reported_as_still_running(self) -> None:
+        events = []
+        release = threading.Event()
+
+        def execute(_context, _input):
+            release.wait(1)
+            return _result()
+
+        try:
+            with (
+                patch("run.agent_runner._load_executor", return_value=execute),
+                patch("run.agent_runner._AGENT_TIMEOUT_CLEANUP_GRACE", 0.01),
+            ):
+                with self.assertRaises(AgentTimeoutError) as raised:
+                    self.runner().run(
+                        "context_manage",
+                        _INPUT,
+                        timeout=0.01,
+                        timeout_survival_seconds=0,
+                        event_callback=events.append,
+                    )
+            self.assertFalse(raised.exception.process_terminated)
+            self.assertEqual(events[-1].metadata["status"], "timed_out_running")
+            self.assertFalse(events[-1].metadata["process_terminated"])
+        finally:
+            release.set()
+            deadline = time.monotonic() + 1
+            while execution_watchdog_snapshot()["abandoned"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
     def test_timeout_survival_cancel_during_window(self) -> None:
         started = threading.Event()
         cancel_event = threading.Event()
@@ -150,6 +181,9 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(raised), 1)
         self.assertIsInstance(raised[0], AgentCancelledError)
+        deadline = time.monotonic() + 1
+        while execution_watchdog_snapshot()["abandoned"] and time.monotonic() < deadline:
+            time.sleep(0.01)
 
     def test_scheduler_passes_survival_and_exposes_completion_marker(self) -> None:
         registry = discover_agents(self.root)

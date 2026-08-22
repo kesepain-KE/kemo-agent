@@ -83,6 +83,9 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 | `strict` | 否 | Provider 结构化参数严格模式，默认 `false` |
 | `timeout_policy` | 否 | `argument_or_default` 或 `agent_runtime` |
 | `timeout_grace_seconds` | 否 | 显式 `timeout` 的外层看门狗清理宽限，默认 0、范围 0～30 秒；只用于整理正常结果，不得增加业务等待时长 |
+| `execution_mode` | 否 | `process`（默认）在独立子进程执行并可在超时后终止；只有必须访问进程内对象的插件才声明 `thread` |
+
+`process` 模式只向子进程传递可序列化的运行上下文，并重新加载清单声明的入口；超时或用户取消会终止整个隔离进程树。插件若依赖 Transport 注册表、进程内连接池或其他不可序列化对象，必须显式声明 `thread`，并实现对 `context.cancel_event` 的协作取消。不要仅为减少启动开销改成 `thread`：线程无法被 Python 安全强杀，超时后只能由看门狗限制残留数量和同调用重入。
 
 ### strict 的边界
 

@@ -18,7 +18,15 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Reques
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from auth import Session, SessionManager, SlidingWindowLimiter, UserStore, token_ok
+from auth import (
+    Session,
+    SessionManager,
+    SlidingWindowLimiter,
+    UserStore,
+    resolve_client_ip,
+    token_ok,
+    trusted_proxy_networks,
+)
 from events import EventHub
 from device_commands import DeviceCommandStore
 from run_broker import RunBroker, RunStore, StoredEvent
@@ -46,6 +54,7 @@ def load_config() -> dict[str, Any]:
 
 
 CONFIG = load_config()
+TRUSTED_PROXIES = trusted_proxy_networks(CONFIG.get("trusted_proxies", []))
 
 
 def _config_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -152,7 +161,8 @@ class InternalDeviceCommand(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    peer = request.client.host if request.client else "unknown"
+    return resolve_client_ip(peer, request.headers.get("x-forwarded-for", ""), TRUSTED_PROXIES)
 
 
 def _normalized_device_id(value: str) -> str:
@@ -789,10 +799,7 @@ async def internal_device_command(
 @app.websocket("/v1/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     authorization = websocket.headers.get("authorization", "")
-    device_query = websocket.query_params.get("device_token", "")
-    if not authorization and device_query:
-        authorization = f"Bearer {device_query}"
-    session_token = websocket.headers.get("x-kemo-session", "") or websocket.query_params.get("session_token", "")
+    session_token = websocket.headers.get("x-kemo-session", "")
     if not token_ok(authorization, CONFIG):
         await websocket.close(code=4401)
         return
@@ -801,7 +808,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=4403)
         return
     device_id = _normalized_device_id(
-        websocket.headers.get("x-kemo-device-id", "") or websocket.query_params.get("device_id", "")
+        websocket.headers.get("x-kemo-device-id", "")
     )
     await websocket.accept()
     queue = EVENTS.subscribe(session.username, device_id)

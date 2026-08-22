@@ -17,6 +17,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
+from run.execution_watchdog import (
+    ExecutionCapacityError,
+    abandon_execution,
+    attach_execution,
+    release_execution,
+    reserve_execution,
+)
+from run.process_execution import start_isolated_tool
 from run.source_policy import MainAgentSourcePolicy
 
 
@@ -29,7 +37,35 @@ class ToolValidationError(ToolError):
 
 
 class ToolTimeoutError(ToolError):
-    pass
+    category = "timeout"
+    retryable = False
+
+    def __init__(self, message: str, *, still_running: bool = False) -> None:
+        super().__init__(message)
+        self.still_running = bool(still_running)
+
+
+class ToolExecutionCapacityError(ToolError):
+    category = "execution_capacity"
+    retryable = False
+
+
+class ToolProcessError(ToolError):
+    def __init__(self, detail: dict[str, Any]) -> None:
+        super().__init__(str(detail.get("message") or "隔离工具执行失败"))
+        self.remote_exception_type = str(
+            detail.get("exception_type") or "ToolProcessError"
+        )
+        for field in (
+            "category",
+            "status_code",
+            "retryable",
+            "retry_after_ms",
+            "attempt_count",
+        ):
+            value = detail.get(field)
+            if value is not None:
+                setattr(self, field, value)
 
 
 class ToolCancelledError(ToolError):
@@ -85,6 +121,7 @@ class ToolResultTooLargeError(ToolError):
 
 _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
+_TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
 MAX_TOOL_RESULT_CHARS = 100_000
 
@@ -213,6 +250,7 @@ class ToolDefinition:
     strict: bool = False
     timeout_policy: str = "argument_or_default"
     timeout_grace_seconds: float = 0.0
+    execution_mode: str = "thread"
     overrides: list[str] = field(default_factory=list)
     _callable: Callable[..., Any] | None = field(default=None, repr=False)
 
@@ -305,6 +343,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
         strict=bool(raw.get("strict", False)),
         timeout_policy=str(raw.get("timeout_policy") or "argument_or_default"),
         timeout_grace_seconds=float(raw.get("timeout_grace_seconds") or 0),
+        execution_mode=str(raw.get("execution_mode") or "process"),
     )
 
 
@@ -432,6 +471,67 @@ def _invoke(function: Callable[..., Any], arguments: dict[str, Any], context: di
     return result
 
 
+def _execute_tool_process(
+    tool: ToolDefinition,
+    arguments: dict[str, Any],
+    *,
+    context: dict[str, Any],
+    effective_timeout: float,
+    cancel_event: threading.Event | None,
+) -> Any:
+    file_name, separator, function_name = tool.entrypoint.partition(":")
+    if not separator or not file_name or not function_name:
+        raise ToolError(f"工具 {tool.name} entrypoint 无效：{tool.entrypoint}")
+    try:
+        call = start_isolated_tool(
+            module_path=tool.directory / file_name,
+            function_name=function_name,
+            arguments=arguments,
+            context={**context, "tool_timeout": effective_timeout},
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ToolError(f"工具 {tool.name} 隔离进程启动失败：{exc}") from exc
+    deadline = time.monotonic() + effective_timeout
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                call.request_cancel()
+                if not call.wait(_TOOL_CANCEL_CLEANUP_GRACE):
+                    call.terminate()
+                raise ToolCancelledError("工具调用因用户紧急停止而取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                call.request_cancel()
+                if not call.wait(_TOOL_TIMEOUT_CLEANUP_GRACE):
+                    call.terminate()
+                raise ToolTimeoutError(
+                    f"工具 {tool.name} 执行超时（{effective_timeout:g}s）；隔离进程已终止",
+                    still_running=False,
+                )
+            payload = call.receive(min(0.05, remaining))
+            if payload is None:
+                if not call.process.is_alive():
+                    payload = call.receive(0)
+                    if payload is None:
+                        raise ToolProcessError({
+                            "message": f"工具 {tool.name} 隔离进程异常退出",
+                            "exception_type": "ToolProcessExited",
+                        })
+                else:
+                    continue
+            call.wait(1)
+            if payload.get("ok") is True:
+                return _enforce_tool_result_limit(
+                    tool.name, arguments, payload.get("value")
+                )
+            detail = payload.get("error")
+            raise ToolProcessError(detail if isinstance(detail, dict) else {})
+    finally:
+        if call.process.is_alive():
+            call.terminate()
+        call.close()
+
+
 def execute_tool(
     tool: ToolDefinition,
     arguments: dict[str, Any],
@@ -449,20 +549,44 @@ def execute_tool(
         default_timeout=timeout,
         context=context,
     )
+    if tool.execution_mode == "process" and tool._callable is None:
+        return _execute_tool_process(
+            tool,
+            arguments,
+            context=context,
+            effective_timeout=effective_timeout,
+            cancel_event=cancel_event,
+        )
     tool_cancel_event = threading.Event()
     invocation_context = dict(context)
     invocation_context["tool_timeout"] = effective_timeout
     invocation_context["cancel_event"] = tool_cancel_event
+    try:
+        execution_id = reserve_execution(
+            f"tool:{context.get('root', '')}:{context.get('user', '')}:{tool.name}"
+        )
+    except ExecutionCapacityError as exc:
+        raise ToolExecutionCapacityError(str(exc)) from exc
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{tool.name}")
-    future = executor.submit(
-        _invoke, tool.load_callable(), arguments, invocation_context
-    )
+    try:
+        future = executor.submit(
+            _invoke, tool.load_callable(), arguments, invocation_context
+        )
+        attach_execution(execution_id, future, executor)
+    except BaseException:
+        release_execution(execution_id)
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
     deadline = time.monotonic() + effective_timeout
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 tool_cancel_event.set()
                 future.cancel()
+                cleanup_deadline = time.monotonic() + _TOOL_CANCEL_CLEANUP_GRACE
+                while not future.done() and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.05)
+                abandon_execution(execution_id)
                 raise ToolCancelledError("工具调用因用户紧急停止而取消")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -479,8 +603,11 @@ def execute_tool(
                         continue
                     except BaseException:
                         break
+                still_running = abandon_execution(execution_id)
+                state = "；执行线程仍在后台退出中，禁止立即重试" if still_running else ""
                 raise ToolTimeoutError(
-                    f"工具 {tool.name} 执行超时（{effective_timeout:g}s）"
+                    f"工具 {tool.name} 执行超时（{effective_timeout:g}s）{state}",
+                    still_running=still_running,
                 )
             try:
                 value = future.result(timeout=min(0.1, remaining))
@@ -488,4 +615,5 @@ def execute_tool(
             except FutureTimeout:
                 continue
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if future.done():
+            release_execution(execution_id)

@@ -66,6 +66,7 @@ from run.users import list_users
 from web.constants import (
     AUDIO_PREVIEW_MAX_BYTES,
     AVATAR_MAX_BYTES,
+    COMPLETION_SOUND_MAX_BYTES,
     FILE_UPLOAD_MAX_BYTES,
     IMAGE_PREVIEW_MAX_BYTES,
     IMPORTANT_MEMORY_MAX_HARD_CHARS,
@@ -105,6 +106,7 @@ from web.services.tasks import TaskServiceMixin
 __all__ = [
     "AUDIO_PREVIEW_MAX_BYTES",
     "AVATAR_MAX_BYTES",
+    "COMPLETION_SOUND_MAX_BYTES",
     "ActiveRun",
     "ConflictError",
     "FILE_UPLOAD_MAX_BYTES",
@@ -981,6 +983,7 @@ class WebRunService(
                 # 因此，调用必须保留在一个专用工作线程上
                 # 在 asyncio.to_thread 工作线程之间跳转。
         output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
+        consumer_closed = threading.Event()
 
         def put(value: RunEvent | BaseException | object) -> bool:
             terminal_value = (
@@ -989,6 +992,8 @@ class WebRunService(
                 or (isinstance(value, RunEvent) and value.type in {"done", "error"})
             )
             while True:
+                if consumer_closed.is_set():
+                    return False
                 if cancel_event.is_set() and not terminal_value:
                     return False
                 try:
@@ -1380,6 +1385,7 @@ class WebRunService(
                     if isinstance(value, RunEvent):
                         yield value
             finally:
+                consumer_closed.set()
                 cancel_event.set()
                 worker.join(timeout=1.0)
                 with self._active_runs_lock:

@@ -35,3 +35,7 @@
 .readonlyBadge { color: var(--brand); border-color: var(--brand-line); background: var(--brand-soft); }
 .executionCard .planActions button { color: var(--red); }
 .executionCard .planActions button:hover { color: var(--red); border-color: color-mix(in srgb, var(--red) 38%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); }
+.mutationFeedback { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--brand-line); border-radius: 12px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 650; }
+.historyButton { min-height: 31px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text-2); background: var(--surface-2); font: inherit; font-size: .6875rem; font-weight: 700; cursor: pointer; }
+.historyButton:hover,
+.historyButton[aria-pressed='true'] { border-color: var(--brand-line); color: var(--brand); background: var(--brand-soft); }

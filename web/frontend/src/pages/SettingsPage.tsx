@@ -1,10 +1,12 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Power, RefreshCw, Save } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Music2, Play, Power, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
+  deleteCompletionSound,
+  getCompletionSoundStatus,
   getGlobalConfig,
   getKemoModelCapabilities,
   getKemoProviderModels,
@@ -16,6 +18,7 @@ import {
   patchPreferences,
   patchUserConfig,
   restartSystem,
+  uploadCompletionSound,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
@@ -27,9 +30,11 @@ import {
   selectReasoningEffort,
   type ReasoningEffort,
 } from '../reasoningEffort'
-import { ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
+import { formatBytes, formatDateTime, ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 import { copyText } from '../utils/clipboard'
+import { playUserCompletionSound } from '../utils/completionSound'
+import { isWindowsDesktop } from '../utils/platform'
 
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'version'
 type ProviderType = 'chat' | 'kemo'
@@ -548,6 +553,7 @@ export function SettingsPage() {
   const client = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const ui = useUiStore()
+  const windowsDesktop = isWindowsDesktop()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
   const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
@@ -568,6 +574,12 @@ export function SettingsPage() {
     enabled: tab === 'version',
     staleTime: 180_000,
   })
+  const completionSoundQuery = useQuery({
+    queryKey: ['completion-sound', user],
+    queryFn: () => getCompletionSoundStatus(user),
+    enabled: Boolean(user) && windowsDesktop && tab === 'appearance',
+    retry: false,
+  })
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
   const [initialApiKey, setInitialApiKey] = useState('')
@@ -579,7 +591,9 @@ export function SettingsPage() {
   const [restartMessage, setRestartMessage] = useState('')
   const [restartCanForce, setRestartCanForce] = useState(false)
   const [versionCopyState, setVersionCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [completionSoundFeedback, setCompletionSoundFeedback] = useState('')
   const restartTimerRef = useRef<number | null>(null)
+  const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
   const selectedProviderModel = userDraft?.provider.model.trim() || ''
   const selectedCatalogModel = providerModels.find((item) => item.id === selectedProviderModel)
   const providerCapabilitiesEnabled = Boolean(
@@ -601,6 +615,22 @@ export function SettingsPage() {
   const versionCheckMutation = useMutation({
     mutationFn: () => getVersionCheck(true),
     onSuccess: (data) => client.setQueryData(['version-check'], data),
+  })
+  const completionSoundUploadMutation = useMutation({
+    mutationFn: (file: File) => uploadCompletionSound(user, file),
+    onSuccess: (response) => {
+      client.setQueryData(['completion-sound', user], response.status)
+      setCompletionSoundFeedback('结束音效已保存。')
+    },
+    onError: (error) => setCompletionSoundFeedback(error instanceof Error ? error.message : '结束音效上传失败'),
+  })
+  const completionSoundDeleteMutation = useMutation({
+    mutationFn: () => deleteCompletionSound(user),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['completion-sound', user] })
+      setCompletionSoundFeedback('结束音效已清除。')
+    },
+    onError: (error) => setCompletionSoundFeedback(error instanceof Error ? error.message : '结束音效清除失败'),
   })
 
   useEffect(() => () => {
@@ -746,6 +776,18 @@ export function SettingsPage() {
 
   const saveAppearance = (changes: { theme?: 'light' | 'dark'; font_size?: 'small' | 'medium' | 'large' }) => {
     void patchPreferences(user, changes)
+  }
+
+  const chooseCompletionSound = (file: File | undefined) => {
+    if (!file) return
+    setCompletionSoundFeedback('')
+    completionSoundUploadMutation.mutate(file)
+  }
+
+  const previewCompletionSound = async () => {
+    setCompletionSoundFeedback('')
+    const played = await playUserCompletionSound(user)
+    setCompletionSoundFeedback(played ? '正在试听结束音效。' : '无法播放结束音效；请检查文件或浏览器自动播放权限。')
   }
 
   const refreshAll = () => {
@@ -961,6 +1003,30 @@ export function SettingsPage() {
             <div className="setting-section-head"><strong>界面字号</strong><span>文字与顶部栏关键控件同步缩放。</span></div>
             <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div></div>
           </article>
+          {windowsDesktop ? <article className="setting-section">
+            <div className="setting-section-head"><strong>运行结束音效</strong><span>仅 Windows 桌面网页端在智能体成功完成运行后播放；取消、失败或受限停止不会播放。</span></div>
+            <div className="setting-row">
+              <span className="setting-copy"><strong>{completionSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{completionSoundQuery.data?.available ? `${completionSoundQuery.data.filename} · ${formatBytes(completionSoundQuery.data.size)} · ${formatDateTime(completionSoundQuery.data.updated_at)}` : '上传不超过 5 MB 的 MP3、WAV、Ogg 或 WebM 音频。'}</span></span>
+              <div className="settings-inline-actions">
+                <input
+                  ref={completionSoundInputRef}
+                  type="file"
+                  accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm"
+                  aria-label="选择结束音效文件"
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    chooseCompletionSound(event.target.files?.[0])
+                    event.target.value = ''
+                  }}
+                />
+                <button type="button" className="module-btn" disabled={completionSoundUploadMutation.isPending} onClick={() => completionSoundInputRef.current?.click()}><Upload size={15} />{completionSoundUploadMutation.isPending ? '上传中…' : '上传音效'}</button>
+                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available} onClick={() => { void previewCompletionSound() }}><Play size={15} />试听</button>
+                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundDeleteMutation.isPending} onClick={() => completionSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
+              </div>
+            </div>
+            <div className="setting-row"><span className="setting-copy"><strong><Music2 size={16} /> 播放规则</strong><span>音效保存在用户根目录的专用路径。浏览器播放失败时，Windows 终端可降级播放 WAV，并在系统 MCI 可用时播放 MP3；Ogg/WebM 仅由浏览器播放。</span></span>{completionSoundQuery.isFetching ? <StatusChip status="running" /> : <StatusChip status={completionSoundQuery.data?.available ? 'enabled' : 'disabled'} />}</div>
+            {completionSoundFeedback ? <div className="settings-inline-feedback" role="status">{completionSoundFeedback}</div> : null}
+          </article> : null}
         </> : null}
 
         {tab === 'provider' && userDraft ? <>

@@ -20,6 +20,8 @@ export interface TaskPlanBubbleProps {
   onApprove?: () => void
   onPause?: () => void
   onRetry?: () => void
+  onRetryStep?: (stepId: string) => void
+  activationNotice?: string
 }
 
 const planLabels: Record<TaskPlanStatus, string> = { pending: '等待批准', approved: '已批准', paused: '已暂停', running: '执行中', completed: '已完成', failed: '执行失败', rejected: '已拒绝', cancelled: '已取消' }
@@ -32,19 +34,28 @@ function icon(status: TaskStepStatus) {
   if (status === 'skipped') return <Circle size={9} />
   return null
 }
-function notice(status: TaskPlanStatus, autoAccept: boolean, current?: TaskPlanStep) {
+function notice(status: TaskPlanStatus, autoAccept: boolean, current?: TaskPlanStep, retryable?: TaskPlanStep) {
   if (status === 'pending') return autoAccept ? '当前 auto_accept 为 true，任务计划确认后将自动开始执行。' : '当前 auto_accept 为 false，需要手动批准后才会执行。'
   if (status === 'running') return current ? `正在执行：${current.title}` : '任务计划正在执行。'
-  if (status === 'paused') return '任务计划已暂停。修改计划后可继续执行剩余步骤。'
+  if (status === 'paused') return retryable
+    ? autoAccept
+      ? '任务计划已暂停。重试失败步骤后将按 auto_accept 自动恢复执行。'
+      : '任务计划已暂停。重试会先重置失败步骤；是否自动继续由“修正后自动激活”配置决定。'
+    : '任务计划已暂停。修改计划后可继续执行剩余步骤。'
   if (status === 'completed') return '任务计划中的全部步骤均已执行完成。'
-  if (status === 'failed') return current ? `步骤“${current.title}”执行失败，请检查执行结果。` : '任务执行失败，请检查任务日志。'
+  if (status === 'failed') return retryable
+    ? autoAccept
+      ? `步骤“${retryable.title}”执行失败；重试后将按 auto_accept 自动恢复执行。`
+      : `步骤“${retryable.title}”执行失败；重试后是否自动继续由“修正后自动激活”配置决定。`
+    : current ? `步骤“${current.title}”执行失败，请检查执行结果。` : '任务执行失败，请检查任务日志。'
   if (status === 'rejected' || status === 'cancelled') return '该任务计划已停止，不会继续执行。'
   return '任务计划已批准，等待运行时执行。'
 }
 
-export function TaskPlanBubble({ title, description = '已创建任务计划，请确认后执行以下步骤', status, steps, autoAccept = false, collapsed = false, className, onToggleCollapse, onReject, onModify, onApprove, onPause, onRetry }: TaskPlanBubbleProps) {
+export function TaskPlanBubble({ title, description = '已创建任务计划，请确认后执行以下步骤', status, steps, autoAccept = false, collapsed = false, className, onToggleCollapse, onReject, onModify, onApprove, onPause, onRetry, onRetryStep, activationNotice }: TaskPlanBubbleProps) {
   const completed = steps.filter((step) => step.status === 'completed').length
   const current = steps.find((step) => step.status === 'running' || step.status === 'failed')
+  const retryableStep = steps.find((step) => step.status === 'failed' || step.status === 'cancelled')
   const progress = steps.length ? Math.round(completed * 100 / steps.length) : 0
   const normalizedStatus: TaskPlanStatus = status === 'approved' ? 'pending' : status
   return <section className={cx(styles.taskPlanBubble, styles[`planStatus_${normalizedStatus}`], collapsed && styles.collapsed, className)} aria-label={`任务计划：${title}`}>
@@ -57,7 +68,7 @@ export function TaskPlanBubble({ title, description = '已创建任务计划，�
       <div className={styles.stepList} role="list" aria-label="任务计划步骤">{steps.map((step, index) => { const stepStatus = step.status ?? 'pending'; return <div key={step.id} role="listitem" className={cx(styles.stepRow, styles[`stepStatus_${stepStatus}`])}><div className={styles.stepNumber}>{stepStatus === 'pending' ? index + 1 : icon(stepStatus)}</div><div className={styles.stepId}>{step.id}</div><div className={styles.stepContent}><div className={styles.stepTitle}>{step.title}</div>{step.description && <div className={styles.stepDescription}>{step.description}</div>}</div><div className={styles.stepMeta}>{step.dependency && <span className={styles.dependency}>依赖 {step.dependency}</span>}{stepStatus !== 'pending' && <span className={styles.stepStatusLabel}>{stepLabels[stepStatus]}</span>}</div></div> })}</div>
       <div className={cx(styles.notice, styles[`notice_${normalizedStatus}`])}>
         <Info size={17} />
-        <span className={styles.noticeCopy}>{notice(status, autoAccept, current)}</span>
+        <span className={styles.noticeCopy}>{activationNotice || notice(status, autoAccept, current, retryableStep)}</span>
         {status === 'running' && <button
           type="button"
           className={styles.pauseButton}
@@ -67,8 +78,8 @@ export function TaskPlanBubble({ title, description = '已创建任务计划，�
         ><Pause size={15} />暂停任务</button>}
       </div>
       {status === 'pending' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.rejectButton)} onClick={onReject}><X size={17} />拒绝</button><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onApprove}><Play size={17} fill="currentColor" />批准执行</button></div>}
-      {status === 'paused' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onRetry}><Play size={17} fill="currentColor" />继续执行</button></div>}
-      {status === 'failed' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button><button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onRetry}><RotateCcw size={17} />重新执行</button></div>}
+      {status === 'paused' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button>{retryableStep && onRetryStep ? <button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={() => onRetryStep(retryableStep.id)}><RotateCcw size={17} />重试步骤</button> : <button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={onRetry}><Play size={17} fill="currentColor" />继续执行</button>}</div>}
+      {status === 'failed' && <div className={styles.actionBar}><button type="button" className={cx(styles.actionButton, styles.modifyButton)} onClick={onModify}><Pencil size={16} />修改计划</button>{retryableStep && onRetryStep && <button type="button" className={cx(styles.actionButton, styles.approveButton)} onClick={() => onRetryStep(retryableStep.id)}><RotateCcw size={17} />重试步骤</button>}</div>}
     </>}
     <div className={styles.bottomPointer} aria-hidden="true" />
   </section>
