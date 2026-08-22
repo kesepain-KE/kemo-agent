@@ -6,7 +6,7 @@ from pathlib import Path
 
 from plugins.history_search.tool import run
 from plugins.manifest import discover_plugin_manifests
-from run.history_store import save_window
+from run.history import save_window
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

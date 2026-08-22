@@ -27,17 +27,17 @@ from run.config import (
     provider_runtime_config,
     read_json_object,
 )
-from run.model_capabilities import (
+from run.extensions import (
     clear_model_capability_cache,
     lookup_model_capabilities,
     retain_model_capability_cache,
 )
-from run.prompt import (
+from run.config import (
     DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
     PROMPT_SECTION_ORDER,
     build_prompt_bundle,
 )
-from run.source_policy import MainAgentSourcePolicy
+from run.config import MainAgentSourcePolicy
 from update._utils import UpdateError, compare_versions, parse_version
 from web.constants import (
     VERSION_CHECK_CACHE_SECONDS,

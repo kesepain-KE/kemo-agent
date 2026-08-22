@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from run.prompt_sources import PromptSourceRegistry, _read_sense_meta
+from run.config import PromptSourceRegistry, _read_sense_meta
 
 
 class PerceptionCompatibilityTests(unittest.TestCase):

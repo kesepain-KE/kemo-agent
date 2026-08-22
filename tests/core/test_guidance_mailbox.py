@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from run.guidance import GuidanceInput, GuidanceMailbox
+from run.conversation import GuidanceInput, GuidanceMailbox
 
 
 class GuidanceMailboxTests(unittest.TestCase):

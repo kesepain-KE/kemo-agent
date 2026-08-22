@@ -8,7 +8,7 @@ from typing import Any
 
 from message.schema import MessageEnvelope
 from run.tools import ToolRegistry
-from run.users import user_dir
+from run.config import user_dir
 
 
 class IdentityError(RuntimeError):

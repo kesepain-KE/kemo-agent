@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.user_packages import create_user_agent_package
-from run.agent_runner import AgentRunner
-from run.agent_service import get_agent_scheduler
+from run.agents import AgentRunner
+from run.agents import get_agent_scheduler
 from run.agents import AgentError, discover_agents
 from run.config import load_config
-from run.subagent_invocation import (
+from run.agents import (
     persist_main_agent_result,
     prepare_main_agent_invocation,
 )

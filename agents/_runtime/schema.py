@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from run.prompt_sources import natural_path_key
+from run.config import natural_path_key
 
 
 AGENT_SCHEMA_VERSION = 2

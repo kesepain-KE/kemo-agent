@@ -133,7 +133,7 @@ def migrate_user_skeletons(*, dry_run: bool) -> None:
         return
     try:
         sys.path.insert(0, str(ROOT))
-        from run.users import ensure_user
+        from run.config import ensure_user
 
         for user_dir in candidates:
             ensure_user(user_dir.name, ROOT)
@@ -162,7 +162,7 @@ def initialize_user_memory_databases(*, dry_run: bool) -> None:
         return
     try:
         sys.path.insert(0, str(ROOT))
-        from run.memory_store import connection
+        from run.memory import connection
 
         for path in candidates:
             with connection(ROOT, path.name):
@@ -187,9 +187,9 @@ def initialize_runtime_state_databases(*, dry_run: bool) -> None:
     try:
         sys.path.insert(0, str(ROOT))
         from message.state import ProcessedMessageStore
-        from run.history_store import connection
-        from run.log_store import LogStore
-        from run.task_plan_store import PlanStore
+        from run.history import connection
+        from run.infra import LogStore
+        from run.tasks import PlanStore
 
         for user_path in users:
             with connection(ROOT, user_path.name):

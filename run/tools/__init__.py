@@ -17,15 +17,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
-from run.execution_watchdog import (
+from run.tools.execution_watchdog import (
     ExecutionCapacityError,
     abandon_execution,
     attach_execution,
     release_execution,
     reserve_execution,
 )
-from run.process_execution import start_isolated_tool
-from run.source_policy import MainAgentSourcePolicy
+from run.infra import start_isolated_tool
+from run.config import MainAgentSourcePolicy
 
 
 class ToolError(RuntimeError):
@@ -617,3 +617,16 @@ def execute_tool(
     finally:
         if future.done():
             release_execution(execution_id)
+
+
+_DOMAIN_MODULES = ("execution_watchdog", "provider_tool_recovery")
+
+
+def __getattr__(name: str):
+    from importlib import import_module
+
+    for module_name in _DOMAIN_MODULES:
+        module = import_module(f"run.tools.{module_name}")
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

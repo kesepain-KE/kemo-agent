@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import cli
 from events import RunEvent
-from run.task_plan_store import PlanStore, normalize_plan
+from run.tasks import PlanStore, normalize_plan
 
 
 class CLITests(unittest.TestCase):
@@ -207,9 +207,9 @@ class CLITests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with (
-            patch("run.task_plan_executor.approve_plan") as approve,
+            patch("run.tasks.executor.approve_plan") as approve,
             patch(
-                "run.task_plan_executor.execute_plan",
+                "run.tasks.executor.execute_plan",
                 return_value=iter([
                     RunEvent(
                         type="done",

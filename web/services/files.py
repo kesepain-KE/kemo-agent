@@ -17,7 +17,7 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from run.attachments import AttachmentError, describe_uploaded_asset
+from run.extensions import AttachmentError, describe_uploaded_asset
 from web.constants import (
     AVATAR_MAX_BYTES,
     COMPLETION_SOUND_MAX_BYTES,

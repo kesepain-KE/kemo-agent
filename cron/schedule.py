@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from run.cron_store import CronValidationError
+from run.scheduler import CronValidationError
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")

@@ -16,12 +16,12 @@ from message.transport import TransportRegistry
 from provider.factory import create_provider
 from run.engine import iter_request_events
 from run.history import clear_session, queue_memory_extraction
-from run.history_index import (
+from run.history import (
     close_session as close_history_session,
     get_or_reserve_active as get_or_reserve_history_session,
 )
 from run.tools import ToolRegistry, discover_tools
-from run.users import user_dir
+from run.config import user_dir
 
 
 class MessageRouteError(RuntimeError):

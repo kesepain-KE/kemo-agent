@@ -12,12 +12,12 @@ from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
 from run.history import find_window, load_window
-from run.memory_analysis import (
+from run.memory import (
     analyze_memory_batch_resilient,
     memory_batch_operation_id,
 )
-from run.history_index import find_record as find_history_record
-from run.history_store import list_windows, window_exists, window_path
+from run.history import find_record as find_history_record
+from run.history import list_windows, window_exists, window_path
 from run.memory import MemoryStore
 
 
@@ -111,7 +111,7 @@ class MemoryEngineTests(unittest.TestCase):
 
         analyze.calls = 0
         with patch(
-            "run.memory_analysis.analyze_memory_batch", side_effect=analyze
+            "run.memory.analysis.analyze_memory_batch", side_effect=analyze
         ) as mocked:
             result = analyze_memory_batch_resilient(
                 rounds=rounds,
@@ -256,7 +256,7 @@ class MemoryEngineTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False),
             patch(
-                "run.conversation_runtime.patch_archive_metadata",
+                "run.conversation.runtime.patch_archive_metadata",
                 side_effect=RuntimeError("index failed"),
             ) as metadata_patch,
         ):

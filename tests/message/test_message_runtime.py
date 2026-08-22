@@ -32,12 +32,12 @@ from message.transport import (
     TransportRegistry,
 )
 from run.history import commit_window, empty_window, session_messages
-from run.history_index import find_record, get_active, get_or_reserve_active
-from run.history_store import connection as history_connection
-from run.attachments import RunAssetResolver
-from run.log_store import LogStore
-from run.runtime_host import RuntimeHost
-from run.cron_store import CronStore
+from run.history import find_record, get_active, get_or_reserve_active
+from run.history import connection as history_connection
+from run.extensions import RunAssetResolver
+from run.infra import LogStore
+from run.scheduler import RuntimeHost
+from run.scheduler import CronStore
 from run.tools import ToolDefinition, ToolRegistry
 
 

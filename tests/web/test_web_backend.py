@@ -23,9 +23,9 @@ from events import RunEvent
 from agents._runtime.user_packages import create_user_agent_package
 from provider.protocol.models import ModelCapabilities, ModelCatalogResponse
 from provider.schema import ProviderError
-from run.attachments import history_attachment_descriptors
-from run.guidance import GuidanceInput
-from run.cron_store import CronStore, normalize_task
+from run.extensions import history_attachment_descriptors
+from run.conversation import GuidanceInput
+from run.scheduler import CronStore, normalize_task
 from run.config import load_config
 from run.history import (
     commit_window,
@@ -34,19 +34,19 @@ from run.history import (
     runtime_window_path,
     synthesize_items,
 )
-from run.history_index import (
+from run.history import (
     claim_pending_summary,
     close_session,
     finish_summary_claim,
     queue_summary,
     reserve_session,
 )
-from run.history_store import window_exists
+from run.history import window_exists
 from run.memory import MemoryStore
 from tests.memory_db import update_fragment_metadata
-from run.prompt import PROMPT_SECTION_ORDER
-from run.model_capabilities import clear_model_capability_cache
-from run.task_plan_store import PlanStore, normalize_plan
+from run.config import PROMPT_SECTION_ORDER
+from run.extensions import clear_model_capability_cache
+from run.tasks import PlanStore, normalize_plan
 from web.app import create_app
 from web.auth import WebAuthConfig, WebAuthConfigError, resolve_client_ip
 from web.errors import NotFoundError, WebServiceError
@@ -2418,7 +2418,7 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch("web.service.AgentRunner", return_value=object()),
             patch(
-                "run.conversation_runtime._extract_round_memory",
+                "run.conversation.runtime._extract_round_memory",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -2560,10 +2560,10 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch("web.service.AgentRunner", return_value=object()),
             patch(
-                "run.memory_analysis.analyze_memory_batch", side_effect=extract
+                "run.memory.analysis.analyze_memory_batch", side_effect=extract
             ) as extracted,
             patch(
-                "run.memory_analysis.persist_round_memory_analysis", side_effect=persist
+                "run.memory.analysis.persist_round_memory_analysis", side_effect=persist
             ),
         ):
             app = create_app(service=WebRunService(root))

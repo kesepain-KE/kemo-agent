@@ -13,14 +13,14 @@ from unittest.mock import patch
 import pytest
 
 from cron.scheduler import BEIJING, CronScheduler
-from run.cron_log_aggregator import CronLogAggregator
-from run.cron_runtime_state import (
+from run.scheduler import CronLogAggregator
+from run.scheduler import (
     SystemCronLease,
     pending_cron_runtime,
     update_cron_runtime,
 )
-from run.cron_store import CronStore, normalize_task
-from run.log_store import LogStore
+from run.scheduler import CronStore, normalize_task
+from run.infra import LogStore
 
 
 def _system_task(root: Path, task_id: str = "expand_update") -> tuple[CronStore, Path]:
@@ -307,7 +307,7 @@ def test_system_scheduler_lease_is_exclusive_across_processes() -> None:
         assert lease.try_acquire() is True
         command = (
             "from pathlib import Path; "
-            "from run.cron_runtime_state import SystemCronLease; "
+            "from run.scheduler import SystemCronLease; "
             f"lease=SystemCronLease(Path({str(root)!r})); "
             "print('owned' if lease.try_acquire() else 'blocked'); "
             "lease.release()"

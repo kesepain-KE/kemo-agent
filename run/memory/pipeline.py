@@ -6,9 +6,9 @@ import copy
 from pathlib import Path
 from typing import Any
 
-from run.agent_runner import AgentRunResult
+from run.agents import AgentRunResult
 from run.memory import MemoryStore
-from run.long_task_runtime import semantic_user_text
+from run.long_task import semantic_user_text
 
 
 class MemoryExtractionError(RuntimeError):

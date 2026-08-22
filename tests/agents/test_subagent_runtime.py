@@ -21,8 +21,8 @@ from provider.protocol.models import (
     Usage,
     text_from_content,
 )
-from run.agent_queue import AgentQueueError, AgentScheduler
-from run.agent_runner import (
+from run.agents import AgentQueueError, AgentScheduler
+from run.agents import (
     AgentCancelledError,
     AgentOutputError,
     AgentRunResult,
@@ -30,7 +30,7 @@ from run.agent_runner import (
     AgentTimeoutError,
 )
 from run.agents import AgentDisabledError, AgentManifestError, discover_agents
-from run.model_capabilities import clear_model_capability_cache
+from run.extensions import clear_model_capability_cache
 
 
 SUMMARY = {
@@ -385,7 +385,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         provider = ReusedResponseIdProvider()
         with (
             patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
-            patch("run.agent_runner.execute_tool", return_value={"matches": []}),
+            patch("run.agents.runner.execute_tool", return_value={"matches": []}),
         ):
             result = self.runner(provider).run(
                 "self_improve",
@@ -771,7 +771,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             except BaseException as exc:
                 errors.append(exc)
 
-        with patch("run.agent_runner._load_executor", return_value=executor):
+        with patch("run.agents.runner._load_executor", return_value=executor):
             first = threading.Thread(target=invoke, args=(1,))
             second = threading.Thread(target=invoke, args=(2,))
             first.start()
@@ -818,7 +818,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "mock",
             )
 
-        with patch("run.agent_runner._load_executor", return_value=executor):
+        with patch("run.agents.runner._load_executor", return_value=executor):
             self.runner(MockProvider()).run(
                 "history_summary",
                 {

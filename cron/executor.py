@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from provider.factory import create_provider
-from run.agent_runner import AgentRunner
+from run.agents import AgentRunner
 from run.config import load_config
-from run.cron_store import CronError, CronStore, CronValidationError, now_beijing
+from run.scheduler import CronError, CronStore, CronValidationError, now_beijing
 from run.engine import handle_request
-from run.history_index import new_conversation_id
-from run.expand_runtime import record_expand_runtime
-from run.module_runtime import (
+from run.history import new_conversation_id
+from run.extensions import record_expand_runtime
+from run.extensions import (
     module_update_timeout as _module_update_timeout,
     record_module_health as _record_module_health,
     run_module_updater,
@@ -533,7 +533,7 @@ def _execute_expand_update(
         result["scope"] = "global_shared"
         return result
 
-    from run.users import user_dir
+    from run.config import user_dir
 
     users_root = root / "users"
     resolved_users_root = users_root.resolve()

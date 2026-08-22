@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from run.process_utils import (
+from run.infra import (
     cancellable_subprocess_kwargs,
     hidden_subprocess_kwargs,
     terminate_process_tree,

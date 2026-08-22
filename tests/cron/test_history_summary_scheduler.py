@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 
-from run.history_summary_scheduler import HistorySummaryScheduler
+from run.history import HistorySummaryScheduler
 
 
 class HistorySummarySchedulerTests(unittest.TestCase):

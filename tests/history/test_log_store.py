@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from run.log_store import LogStore
+from run.infra import LogStore
 
 
 class LogStoreTests(unittest.TestCase):

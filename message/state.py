@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from run.history_store import connection
+from run.history import connection
 
 
 class MessageStateError(RuntimeError):

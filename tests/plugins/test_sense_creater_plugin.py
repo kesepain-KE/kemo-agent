@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.sense_creater.tool import run
-from run.prompt_sources import load_prompt_source_registry
+from run.config import load_prompt_source_registry
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

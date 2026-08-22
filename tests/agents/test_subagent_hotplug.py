@@ -9,8 +9,8 @@ from agents._runtime.user_packages import UserAgentPackageError
 from plugins.subagent_dispatch.tool import run as dispatch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, ToolCall, Usage
-from run.agent_queue import AgentScheduler
-from run.agent_runner import AgentRunError, AgentRunner
+from run.agents import AgentScheduler
+from run.agents import AgentRunError, AgentRunner
 from run.agents import (
     AgentDisabledError,
     AgentError,
@@ -209,7 +209,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         package = root / "users" / "alice" / "agents" / "custom_executor"
         (package / "executor.py").write_text(
-            "from run.agent_runner import AgentRunResult\n\n"
+            "from run.agents import AgentRunResult\n\n"
             "def execute(context, input_data):\n"
             "    value = input_data.get('value', '')\n"
             "    return AgentRunResult(\n"
@@ -244,7 +244,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         manifest["executor"] = "executor.py:execute"
         manifest_path.write_text(json.dumps(manifest), "utf-8")
         (package / "executor.py").write_text(
-            "from run.agent_runner import AgentRunResult\n\n"
+            "from run.agents import AgentRunResult\n\n"
             "def execute(context, input_data):\n"
             "    return AgentRunResult(\n"
             "        context.definition.name,\n"

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agents.memory_temporary_important.executor import _important_output_limit, execute
-from run.agent_runner import AgentOutputError, AgentRunResult
+from run.agents import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore
 
 

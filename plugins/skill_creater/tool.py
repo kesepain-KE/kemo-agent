@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from run.memory import contains_sensitive_credential
-from run.users import validate_user_name
+from run.config import validate_user_name
 
 
 _INVALID_NAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')

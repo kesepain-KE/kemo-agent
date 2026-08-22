@@ -18,9 +18,9 @@ from provider.protocol.models import (
     text_from_content,
 )
 from run.engine import handle_request
-from run.attachments import describe_uploaded_asset
+from run.extensions import describe_uploaded_asset
 from run.history import find_window, load_window, runtime_window_path
-from run.history_store import delete_window
+from run.history import delete_window
 
 
 class MockProvider:

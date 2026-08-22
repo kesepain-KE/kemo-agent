@@ -15,7 +15,7 @@ MODULE_ROOT = ROOT / "global_expand" / "kemo_gateway_status"
 sys.path.insert(0, str(MODULE_ROOT))
 import gateway_status as gateway  # noqa: E402
 
-from run.prompt_sources import read_expand_meta  # noqa: E402
+from run.config import read_expand_meta  # noqa: E402
 
 
 def status_payload() -> dict[str, object]:

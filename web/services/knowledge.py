@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from run.config import load_config
-from run.prompt_sources import IGNORED_RUNTIME_DIRECTORY_NAMES, iter_files
-from run.source_policy import MainAgentSourcePolicy
+from run.config import IGNORED_RUNTIME_DIRECTORY_NAMES, iter_files
+from run.config import MainAgentSourcePolicy
 from web.constants import _KNOWLEDGE_SCOPES, _KNOWLEDGE_SUFFIXES
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
 from web.services._io import (

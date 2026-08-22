@@ -10,8 +10,8 @@ from unittest.mock import patch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request
-from run.knowledge import select_knowledge_index
-from run.prompt import build_system_prompt
+from run.config import select_knowledge_index
+from run.config import build_system_prompt
 
 
 class MockProvider:

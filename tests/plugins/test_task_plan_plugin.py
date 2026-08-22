@@ -7,8 +7,8 @@ from pathlib import Path
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.task_plan.tool import run
-from run.task_plan_executor import execute_plan
-from run.task_plan_store import PlanStore, normalize_plan
+from run.tasks import execute_plan
+from run.tasks import PlanStore, normalize_plan
 from run.tools import discover_tools, validate_arguments
 
 

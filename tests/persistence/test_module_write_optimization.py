@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from run.module_runtime import record_module_health
+from run.extensions import record_module_health
 
 
 def test_healthy_module_manifest_is_not_rewritten_before_checkpoint(
@@ -25,7 +25,7 @@ def test_healthy_module_manifest_is_not_rewritten_before_checkpoint(
         "utf-8",
     )
     before = (manifest.stat().st_mtime_ns, manifest.read_bytes())
-    with patch("run.module_runtime.datetime") as clock:
+    with patch("run.extensions.module_runtime.datetime") as clock:
         clock.now.return_value = __import__("datetime").datetime(
             2026,
             8,

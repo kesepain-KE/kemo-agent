@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from run.prompt_sources import load_prompt_source_registry, parse_skill_descriptor
+from run.config import load_prompt_source_registry, parse_skill_descriptor
 
 from tests.template_tests.base import begin_report
 from tests.template_tests.common import (

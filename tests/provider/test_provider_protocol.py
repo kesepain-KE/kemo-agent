@@ -69,8 +69,8 @@ from provider.schema import (
 )
 from run.engine import handle_request, iter_request_events
 from run.history import commit_window, empty_window, find_window, load_window
-from run.history_store import connection
-from run.provider_events import (
+from run.history import connection
+from run.conversation import (
     events_for_protocol_response,
     run_events_for_protocol_event,
 )

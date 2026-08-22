@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from run.expand_runtime import invoke_expand
+from run.extensions import invoke_expand
 
 
 def run(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from run.task_plan_boundary import detect_task_plan_creation_boundary
+from run.tasks import detect_task_plan_creation_boundary
 
 
 def _payload(*, status: str, auto_accept: bool, action: str = "create") -> dict:

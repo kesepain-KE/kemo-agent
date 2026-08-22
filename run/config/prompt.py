@@ -18,7 +18,7 @@ from run.config.prompt_sources import (
     truncate_chars,
 )
 from run.config.source_policy import MainAgentSourcePolicy
-from run.task_plan_store import select_prompt_plans
+from run.tasks import select_prompt_plans
 
 
 PROMPT_SECTION_ORDER = (

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from run.memory_store import connection
+from run.memory import connection
 
 
 _ALLOWED_METADATA = frozenset(

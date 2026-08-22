@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from run.memory import contains_sensitive_credential
-from run.prompt_sources import read_expand_meta
-from run.users import validate_user_name
+from run.config import read_expand_meta
+from run.config import validate_user_name
 
 
 _ACTIONS = frozenset({"list", "create", "validate"})

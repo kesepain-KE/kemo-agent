@@ -11,7 +11,7 @@ from message.plugin import (
     discover_message_plugins,
     parse_message_buffer,
 )
-from run.users import validate_user_name
+from run.config import validate_user_name
 
 from tests.template_tests.base import begin_report, record_exception, run_check
 from tests.template_tests.common import (

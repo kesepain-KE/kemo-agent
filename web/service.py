@@ -21,8 +21,8 @@ from provider.protocol.models import (
     ImageContent,
     VideoContent,
 )
-from run.agent_runner import AgentRunner
-from run.attachments import history_attachment_descriptors
+from run.agents import AgentRunner
+from run.extensions import history_attachment_descriptors
 from run.config import (
     ConfigError,
     load_config,
@@ -33,7 +33,7 @@ from run.history import (
     load_window,
     queue_memory_extraction,
 )
-from run.history_index import (
+from run.history import (
     close_session as close_index_session,
     queue_summary as queue_history_summary,
     find_record as find_index_record,
@@ -47,22 +47,22 @@ from run.long_task import (
     set_long_task_current_run,
     set_long_task_enabled as update_long_task_enabled,
 )
-from run.long_task_runtime import (
+from run.long_task import (
     MAX_LONG_TASK_RUNS,
     continuation_request,
     is_continuable_terminal,
     long_task_event_metadata,
     terminal_run_stats,
 )
-from run.task_plan_store import (
+from run.tasks import (
     PlanError,
     PlanNotFoundError,
     PlanStore,
 )
-from run.memory_analysis import extract_memory_backlog
-from run.session_runtime import session_lock
-from run.guidance import GuidanceInput, GuidanceMailbox
-from run.users import list_users
+from run.memory import extract_memory_backlog
+from run.conversation import session_lock
+from run.conversation import GuidanceInput, GuidanceMailbox
+from run.config import list_users
 from web.constants import (
     AUDIO_PREVIEW_MAX_BYTES,
     AVATAR_MAX_BYTES,

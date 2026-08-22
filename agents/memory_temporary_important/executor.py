@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from plugins.memory_manage.memory_ops import apply_important_memory_view
-from run.agent_runner import AgentOutputError, AgentRunResult
+from run.agents import AgentOutputError, AgentRunResult
 from run.memory import contains_sensitive_credential
 
 

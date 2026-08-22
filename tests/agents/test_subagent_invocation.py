@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from run.subagent_invocation import (
+from run.agents import (
     SubagentInvocationError,
     prepare_main_agent_invocation,
 )

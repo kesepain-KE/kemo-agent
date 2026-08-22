@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from run.task_plan_store import PlanStore, normalize_plan
+from run.tasks import PlanStore, normalize_plan
 
 
 class StoragePollingTests(unittest.TestCase):

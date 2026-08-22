@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from run.prompt_sources import _read_sense_meta, load_prompt_source_registry
+from run.config import _read_sense_meta, load_prompt_source_registry
 
 from tests.template_tests.base import begin_report, check_module_update, run_check
 from tests.template_tests.common import (

@@ -6,16 +6,16 @@ import unittest
 from pathlib import Path
 
 from events import RunEvent
-from run.history_index import reserve_session
+from run.history import reserve_session
 from run.long_task import (
     activate_long_task,
     finish_long_task,
     get_long_task_state,
     set_long_task_enabled,
 )
-from run.long_task_runtime import semantic_user_text
-from run.maintenance import _summary_rounds
-from run.memory_pipeline import memory_round_payload
+from run.long_task import semantic_user_text
+from run.scheduler import _summary_rounds
+from run.memory import memory_round_payload
 from web.service import WebRunService
 
 

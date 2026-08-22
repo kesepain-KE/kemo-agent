@@ -13,10 +13,10 @@ import uuid
 
 from run.config import load_config, read_json_object, system_update_rate
 from run.context import estimate_text_tokens
-from run.process_utils import hidden_subprocess_kwargs
-from run.prompt import INJECTION_MODE, parse_prompt_settings
-from run.prompt_sources import load_prompt_source_registry
-from run.source_policy import MainAgentSourcePolicy
+from run.infra import hidden_subprocess_kwargs
+from run.config import INJECTION_MODE, parse_prompt_settings
+from run.config import load_prompt_source_registry
+from run.config import MainAgentSourcePolicy
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _reject_tree_links
 

@@ -6,9 +6,9 @@ import json
 import sys
 from pathlib import Path
 
-from run.expand_runtime import EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER
-from run.module_runtime import run_protocol_process
-from run.prompt_sources import load_prompt_source_registry, read_expand_meta
+from run.extensions import EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER
+from run.extensions import run_protocol_process
+from run.config import load_prompt_source_registry, read_expand_meta
 
 from tests.template_tests.base import (
     begin_report,

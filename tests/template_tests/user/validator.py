@@ -6,8 +6,8 @@ from pathlib import Path
 
 from run.config import load_config
 from run.memory import MemoryStore
-from run.prompt import build_prompt_bundle
-from run.users import list_users
+from run.config import build_prompt_bundle
+from run.config import list_users
 
 from tests.template_tests.base import begin_report
 from tests.template_tests.common import (

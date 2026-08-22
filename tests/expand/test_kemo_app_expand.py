@@ -59,7 +59,7 @@ finally:
     else:
         sys.modules["lifecycle"] = _previous_lifecycle
 
-from run.prompt_sources import read_expand_meta  # noqa: E402
+from run.config import read_expand_meta  # noqa: E402
 
 
 class KemoAppExpandTests(unittest.TestCase):

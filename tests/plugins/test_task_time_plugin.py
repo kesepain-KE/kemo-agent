@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.task_time.tool import run
-from run.cron_store import CronStore
+from run.scheduler import CronStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

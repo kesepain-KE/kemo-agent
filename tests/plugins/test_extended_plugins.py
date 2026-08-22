@@ -27,7 +27,7 @@ from plugins.shell.tool import run as run_shell
 from plugins.shell.tool import _decode_output
 from plugins.task_time.tool import run as run_task_time
 from plugins.web_search.tool import run as run_web_search
-from run.cron_store import CronStore
+from run.scheduler import CronStore
 from run.tools import discover_tools, validate_arguments
 
 

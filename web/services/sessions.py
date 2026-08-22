@@ -18,14 +18,14 @@ from run.history import (
     rename_session as rename_history_session,
     undo_last_round as undo_history_last_round,
 )
-from run.history_index import (
+from run.history import (
     retry_summary as retry_history_summary,
     find_record as find_index_record,
     get_or_reserve_active as get_or_reserve_index_session,
     new_conversation_id,
     reserve_session,
 )
-from run.history_store import session_page_cursor
+from run.history import session_page_cursor
 from web.constants import _TOOL_TEXT_LIMIT
 from web.errors import (
     ConflictError,

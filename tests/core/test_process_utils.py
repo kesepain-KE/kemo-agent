@@ -4,7 +4,7 @@ import subprocess
 import sys
 import unittest
 
-from run.process_utils import hidden_subprocess_kwargs
+from run.infra import hidden_subprocess_kwargs
 
 
 class HiddenSubprocessKwargsTests(unittest.TestCase):

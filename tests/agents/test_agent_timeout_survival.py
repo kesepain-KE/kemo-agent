@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.subagent_dispatch.tool import run as dispatch_subagent
-from run.agent_queue import AgentScheduler
-from run.execution_watchdog import execution_watchdog_snapshot
-from run.agent_runner import (
+from run.agents import AgentScheduler
+from run.tools import execution_watchdog_snapshot
+from run.agents import (
     AgentCancelledError,
     AgentRunResult,
     AgentRunner,
@@ -62,7 +62,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             time.sleep(0.06)
             return _result()
 
-        with patch("run.agent_runner._load_executor", return_value=execute):
+        with patch("run.agents.runner._load_executor", return_value=execute):
             result = self.runner().run(
                 "context_manage",
                 _INPUT,
@@ -85,7 +85,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             time.sleep(0.15)
             return _result()
 
-        with patch("run.agent_runner._load_executor", return_value=execute):
+        with patch("run.agents.runner._load_executor", return_value=execute):
             with self.assertRaises(AgentTimeoutError) as raised:
                 self.runner().run(
                     "context_manage",
@@ -106,7 +106,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             time.sleep(0.05)
             return _result()
 
-        with patch("run.agent_runner._load_executor", return_value=execute):
+        with patch("run.agents.runner._load_executor", return_value=execute):
             with self.assertRaises(AgentTimeoutError):
                 self.runner().run(
                     "context_manage",
@@ -128,8 +128,8 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
 
         try:
             with (
-                patch("run.agent_runner._load_executor", return_value=execute),
-                patch("run.agent_runner._AGENT_TIMEOUT_CLEANUP_GRACE", 0.01),
+                patch("run.agents.runner._load_executor", return_value=execute),
+                patch("run.agents.runner._AGENT_TIMEOUT_CLEANUP_GRACE", 0.01),
             ):
                 with self.assertRaises(AgentTimeoutError) as raised:
                     self.runner().run(
@@ -170,7 +170,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             except BaseException as exc:
                 raised.append(exc)
 
-        with patch("run.agent_runner._load_executor", return_value=execute):
+        with patch("run.agents.runner._load_executor", return_value=execute):
             thread = threading.Thread(target=invoke)
             thread.start()
             self.assertTrue(started.wait(1))

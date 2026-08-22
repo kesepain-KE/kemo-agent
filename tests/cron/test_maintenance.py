@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from run.agent_runner import AgentOutputError
+from run.agents import AgentOutputError
 from provider.factory import ProviderCongestionError
 from run.history import (
     commit_window,
@@ -16,15 +16,15 @@ from run.history import (
     load_window,
     queue_memory_extraction,
 )
-from run.history_index import (
+from run.history import (
     close_session,
     find_record,
     queue_summary,
     session_key,
 )
-from run.history_store import read_registry, write_registry
+from run.history import read_registry, write_registry
 from run.context import estimate_text_tokens
-from run.maintenance import (
+from run.scheduler import (
     HISTORY_SUMMARY_CHUNK_TOKENS,
     MaintenanceScheduler,
     _summary_chunks,
@@ -82,7 +82,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         close_session(root, "alice", "web", "conv_summary")
         queue_summary(root, "alice", "web", "conv_summary")
 
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.return_value = SimpleNamespace(
                 data={
                     "title": "历史会话后台摘要功能",
@@ -128,7 +128,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         close_session(root, "alice", "web", "conv_failed")
         queue_summary(root, "alice", "web", "conv_failed")
 
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.side_effect = AgentOutputError(
                 "子代理响应中没有 JSON 对象",
                 raw_text="第一行普通文本\n第二行仍不是 JSON",
@@ -176,7 +176,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         close_session(root, "alice", "web", "conv_sensitive")
         queue_summary(root, "alice", "web", "conv_sensitive")
 
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.side_effect = AgentOutputError(
                 "子代理响应格式错误",
                 raw_text="api_key: test-secret-value",
@@ -211,7 +211,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         queue_summary(root, "alice", "web", "conv_chunked")
         scheduler = MaintenanceScheduler(root, summary_retry_delays=(1,))
 
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.side_effect = [
                 SimpleNamespace(
                     data={
@@ -232,7 +232,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "2000-01-01T00:00:00+00:00"
         )
         write_registry(root, "alice", sessions, active)
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.return_value = SimpleNamespace(
                 data={
                     "title": "分块摘要断点恢复完成",
@@ -268,7 +268,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         close_session(root, "alice", "web", "conv_congested")
         queue_summary(root, "alice", "web", "conv_congested")
 
-        with patch("run.maintenance.AgentRunner") as runner_type:
+        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
             runner_type.return_value.run.side_effect = ProviderCongestionError(
                 "Provider 繁忙"
             )
@@ -330,9 +330,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             }
 
         with (
-            patch("run.maintenance.analyze_round_memory", side_effect=analyze),
+            patch("run.scheduler.maintenance.analyze_round_memory", side_effect=analyze),
             patch(
-                "run.maintenance.persist_round_memory_analysis",
+                "run.scheduler.maintenance.persist_round_memory_analysis",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -381,7 +381,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         )
         commit_window(archive, window)
 
-        with patch("run.maintenance.analyze_round_memory") as extract:
+        with patch("run.scheduler.maintenance.analyze_round_memory") as extract:
             result = MaintenanceScheduler(root).scan_once()
 
         recovery = result["alice"]["memory_recovery"]
@@ -435,7 +435,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         with (
             patch(
-                "run.maintenance.analyze_round_memory",
+                "run.scheduler.maintenance.analyze_round_memory",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -445,7 +445,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 },
             ) as extract,
             patch(
-                "run.maintenance.persist_round_memory_analysis",
+                "run.scheduler.maintenance.persist_round_memory_analysis",
                 return_value={
                     "status": "completed",
                     "candidate_count": 1,
@@ -524,13 +524,13 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
             patch(
-                "run.maintenance.analyze_memory_batch_resilient", return_value=analysis
+                "run.scheduler.maintenance.analyze_memory_batch_resilient", return_value=analysis
             ) as analyze_batch,
             patch(
-                "run.maintenance.analyze_round_memory", return_value=analysis
+                "run.scheduler.maintenance.analyze_round_memory", return_value=analysis
             ) as analyze_round,
             patch(
-                "run.maintenance.persist_round_memory_analysis",
+                "run.scheduler.maintenance.persist_round_memory_analysis",
                 return_value=persisted,
             ),
         ):
@@ -617,11 +617,11 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         persisted = {"status": "completed", "candidate_count": 0, "error": None}
         with (
             patch(
-                "run.maintenance.analyze_memory_batch_resilient",
+                "run.scheduler.maintenance.analyze_memory_batch_resilient",
                 return_value=analysis,
             ) as analyze,
             patch(
-                "run.maintenance.persist_round_memory_analysis",
+                "run.scheduler.maintenance.persist_round_memory_analysis",
                 return_value=persisted,
             ),
         ):
@@ -688,7 +688,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 "exception_type": "AgentOutputError",
             },
         }
-        with patch("run.maintenance.analyze_round_memory", return_value=failure):
+        with patch("run.scheduler.maintenance.analyze_round_memory", return_value=failure):
             first = MaintenanceScheduler(root).scan_once()
 
         self.assertEqual(first["alice"]["memory_recovery"]["claimed"], 1)
@@ -724,11 +724,11 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         }
         with (
             patch(
-                "run.maintenance.analyze_round_memory",
+                "run.scheduler.maintenance.analyze_round_memory",
                 return_value=success_analysis,
             ),
             patch(
-                "run.maintenance.persist_round_memory_analysis",
+                "run.scheduler.maintenance.persist_round_memory_analysis",
                 return_value=success_persisted,
             ),
         ):
@@ -786,15 +786,15 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "error": None,
         }
         with (
-            patch("run.maintenance.analyze_round_memory", return_value=analysis),
+            patch("run.scheduler.maintenance.analyze_round_memory", return_value=analysis),
             patch(
-                "run.maintenance.find_record",
+                "run.scheduler.maintenance.find_record",
                 return_value={
                     "memory_claim_id": "newer-worker",
                     "memory_claim_round": 1,
                 },
             ),
-            patch("run.maintenance.persist_round_memory_analysis") as persist,
+            patch("run.scheduler.maintenance.persist_round_memory_analysis") as persist,
         ):
             result = MaintenanceScheduler(root).scan_once()
 

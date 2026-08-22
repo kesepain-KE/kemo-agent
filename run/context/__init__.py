@@ -626,3 +626,16 @@ def select_context(
         fixed_content_over_budget=fixed_tokens > policy.input_budget,
         recent_content_over_budget=recent_content_over_budget,
     )
+
+
+_DOMAIN_MODULES = ("summary", "service")
+
+
+def __getattr__(name: str):
+    from importlib import import_module
+
+    for module_name in _DOMAIN_MODULES:
+        module = import_module(f"run.context.{module_name}")
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

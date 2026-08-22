@@ -27,9 +27,9 @@ from message.transport import (
     TransportError,
     TransportPolicy,
 )
-from run.attachments import describe_message_asset
-from run.log_store import LogStore
-from run.users import user_dir
+from run.extensions import describe_message_asset
+from run.infra import LogStore
+from run.config import user_dir
 
 if TYPE_CHECKING:
     from message.router import RouteResult

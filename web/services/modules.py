@@ -14,16 +14,16 @@ from message.identity import IdentityResolver
 from message.plugin import FileMessageTransport, MessagePluginConfig, MessagePluginError
 from run.config import load_config, read_json_object
 from run.context import estimate_text_tokens
-from run.expand_runtime import read_expand_runtime, record_expand_runtime
-from run.log_store import LogStore
-from run.module_runtime import (
+from run.extensions import read_expand_runtime, record_expand_runtime
+from run.infra import LogStore
+from run.extensions import (
     module_update_timeout,
     record_module_health,
     run_module_updater,
 )
-from run.prompt import INJECTION_MODE, parse_prompt_settings
-from run.prompt_sources import load_prompt_source_registry
-from run.source_policy import MainAgentSourcePolicy
+from run.config import INJECTION_MODE, parse_prompt_settings
+from run.config import load_prompt_source_registry
+from run.config import MainAgentSourcePolicy
 from web.constants import (
     _BEIJING,
     _EXPAND_INJECTION_HEADING,

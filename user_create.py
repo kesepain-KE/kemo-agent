@@ -145,9 +145,9 @@ def _post_process_knowledge(root: Path, name: str) -> None:
 def _post_process_memory(root: Path, name: str) -> None:
     """初始化每用户独立的 SQLite 记忆、历史与任务计划库。"""
 
-    from run.history_store import connection as history_connection
-    from run.memory_store import connection
-    from run.task_plan_store import PlanStore
+    from run.history import connection as history_connection
+    from run.memory import connection
+    from run.tasks import PlanStore
 
     with connection(root, name):
         pass

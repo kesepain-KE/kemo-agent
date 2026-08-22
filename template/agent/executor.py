@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from run.agent_runner import AgentOutputError, AgentRunResult
+from run.agents import AgentOutputError, AgentRunResult
 
 
 # 可选样例校验；允许删除并采用其他内部路由方式。

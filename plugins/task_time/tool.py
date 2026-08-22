@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from cron.schedule import compute_next_run
-from run.cron_store import CronConflictError, CronNotFoundError, CronStore, normalize_task
-from run.users import validate_user_name
+from run.scheduler import CronConflictError, CronNotFoundError, CronStore, normalize_task
+from run.config import validate_user_name
 
 
 def _result(ok: bool, **fields: Any) -> dict[str, Any]:

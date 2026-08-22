@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentManifestError, discover_agents
-from run.users import validate_user_name
+from run.config import validate_user_name
 
 
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")

@@ -6,10 +6,10 @@ from pathlib import Path
 
 from provider.protocol.assets import AssetDescriptor
 from provider.protocol.models import ModelCapabilities
-from run.attachments import describe_uploaded_asset
-from run.guidance import GuidanceInput
-from run.guidance_runtime import prepare_guidance
-from run.model_capabilities import clear_model_capability_cache
+from run.extensions import describe_uploaded_asset
+from run.conversation import GuidanceInput
+from run.conversation import prepare_guidance
+from run.extensions import clear_model_capability_cache
 
 
 class _KemoMediaProvider:

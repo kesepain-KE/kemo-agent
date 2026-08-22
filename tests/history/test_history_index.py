@@ -10,7 +10,7 @@ from run.history import (
     list_sessions,
     load_window,
 )
-from run.history_index import (
+from run.history import (
     claim_pending_memory,
     claim_pending_summary,
     close_session,
@@ -28,7 +28,7 @@ from run.history_index import (
     update_run_state,
     update_title,
 )
-from run.history_store import (
+from run.history import (
     connection,
     database_path,
     delete_window,

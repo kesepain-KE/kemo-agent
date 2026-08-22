@@ -30,21 +30,21 @@ from provider.protocol.models import (
     ToolCallItem,
 )
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
-from run.agent_runner import AgentRunResult
-from run.attachments import describe_uploaded_asset
-from run.guidance import GuidanceInput
+from run.agents import AgentRunResult
+from run.extensions import describe_uploaded_asset
+from run.conversation import GuidanceInput
 from run.engine import (
     compress_context,
     context_status,
     handle_request,
     iter_request_events,
 )
-from run.execution_watchdog import execution_watchdog_snapshot
+from run.tools import execution_watchdog_snapshot
 from run.history import find_window, load_runtime_window, load_window
-from run.history_index import find_record as find_history_record
+from run.history import find_record as find_history_record
 from run.memory import MemoryStore
-from run.memory_analysis import extract_memory_backlog, extract_round_memory
-from run.task_plan_store import PlanStore, normalize_plan
+from run.memory import extract_memory_backlog, extract_round_memory
+from run.tasks import PlanStore, normalize_plan
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
     MAX_TOOL_RESULT_CHARS,
@@ -1558,10 +1558,10 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.estimate_messages_tokens",
+                "run.conversation.runtime.estimate_messages_tokens",
                 side_effect=inflated_messages,
             ),
-            patch("run.conversation_runtime.estimate_tools_tokens", return_value=0),
+            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
         ):
             events = list(
                 iter_request_events(
@@ -1618,10 +1618,10 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.estimate_messages_tokens",
+                "run.conversation.runtime.estimate_messages_tokens",
                 side_effect=growing_messages,
             ),
-            patch("run.conversation_runtime.estimate_tools_tokens", return_value=0),
+            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
         ):
             events = list(
                 iter_request_events(
@@ -1690,7 +1690,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime._extract_round_memory",
+                "run.conversation.runtime._extract_round_memory",
                 side_effect=extract_after_commit,
             ),
         ):
@@ -2078,7 +2078,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.provider_request_slot",
+                "run.conversation.runtime.provider_request_slot",
                 side_effect=ProviderCongestionError("provider busy"),
             ),
         ):
@@ -2652,7 +2652,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.execute_tool",
+                "run.conversation.runtime.execute_tool",
                 side_effect=[
                     {"ok": True, "entries": [{"name": "old"}]},
                     {"ok": True, "entries": [{"name": "new"}]},
@@ -2715,7 +2715,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.execute_tool",
+                "run.conversation.runtime.execute_tool",
                 side_effect=[
                     {"status": "inactive", "active": False},
                     {"status": "active", "active": True},
@@ -2782,7 +2782,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.execute_tool",
+                "run.conversation.runtime.execute_tool",
                 side_effect=[
                     {"ok": True, "operation": "sync"},
                     {"ok": True, "operation": "ingest"},
@@ -2838,7 +2838,7 @@ def run(*, context):
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation_runtime.execute_tool",
+                "run.conversation.runtime.execute_tool",
                 side_effect=[failure, {"value": "x"}],
             ) as mocked_execute,
         ):

@@ -21,7 +21,7 @@ import render  # noqa: E402
 import start_expand  # noqa: E402
 
 from plugins.kemo_graph.tool import run as graph_guide  # noqa: E402
-from run.prompt_sources import read_expand_meta  # noqa: E402
+from run.config import read_expand_meta  # noqa: E402
 
 
 class KemoGraphExpandTests(unittest.TestCase):

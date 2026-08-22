@@ -1339,3 +1339,16 @@ def session_messages(
         for message in window["text"].get("messages", [])
         if isinstance(message, dict)
     ]
+
+
+_DOMAIN_MODULES = ("index", "store", "summary_scheduler")
+
+
+def __getattr__(name: str):
+    from importlib import import_module
+
+    for module_name in _DOMAIN_MODULES:
+        module = import_module(f"run.history.{module_name}")
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

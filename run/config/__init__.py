@@ -138,7 +138,7 @@ def merge_user_config(
 def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     base = root or project_root()
     load_dotenv(base / ".env")
-    from run.users import user_dir
+    from run.config import user_dir
 
     global_config = read_json_object(base / "config" / "global_config.json")
     user_config = read_json_object(
@@ -146,7 +146,7 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     )
     merged = merge_user_config(global_config, user_config)
     merged["user"] = user
-    from run.multimodal import validate_multimodal_config
+    from run.extensions import validate_multimodal_config
 
     validate_multimodal_config(merged)
     return merged
@@ -272,3 +272,22 @@ def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
     if not default_model:
         raise ConfigError(f"{name} 未配置专用模型，且 provider.model 为空")
     return default_model
+
+
+_DOMAIN_MODULES = (
+    "source_policy",
+    "users",
+    "prompt_sources",
+    "knowledge",
+    "prompt",
+)
+
+
+def __getattr__(name: str) -> Any:
+    from importlib import import_module
+
+    for module_name in _DOMAIN_MODULES:
+        module = import_module(f"run.config.{module_name}")
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

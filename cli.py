@@ -469,7 +469,7 @@ def _interactive_command(
 
         # --- 任务计划命令 ---
     if command == "/plans":
-        from run.task_plan_executor import list_plans
+        from run.tasks import list_plans
         plans = list_plans(root, user)
         if not plans:
             print("暂无任务计划。", file=stdout)
@@ -486,8 +486,8 @@ def _interactive_command(
         if not argument:
             print("用法：/plan <目标描述>", file=stdout)
             return True, session_id
-        from run.task_plan_service import generate_plan, PlanGenerationError, PlanSkipped
-        from run.task_plan_store import PlanStore
+        from run.tasks import generate_plan, PlanGenerationError, PlanSkipped
+        from run.tasks import PlanStore
         try:
             plan = generate_plan(
                 root=root,
@@ -530,7 +530,7 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-show <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import get_plan
+        from run.tasks import get_plan
         try:
             plan = get_plan(root, user, argument)
         except Exception as exc:
@@ -556,7 +556,7 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-approve <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import approve_plan, execute_plan, get_plan
+        from run.tasks import approve_plan, execute_plan, get_plan
         from run.config import load_config
         try:
             current = get_plan(root, user, argument)
@@ -593,7 +593,7 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-pause <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import pause_plan
+        from run.tasks import pause_plan
         try:
             pause_plan(root, user, argument)
             print(f"已暂停计划 {argument}。", file=stdout)
@@ -604,7 +604,7 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-resume <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import resume_plan, execute_plan
+        from run.tasks import resume_plan, execute_plan
         from run.config import load_config
         try:
             resume_plan(root, user, argument)
@@ -633,7 +633,7 @@ def _interactive_command(
         if not argument:
             print("用法：/plan-cancel <计划ID>", file=stdout)
             return True, session_id
-        from run.task_plan_executor import cancel_plan
+        from run.tasks import cancel_plan
         try:
             cancel_plan(root, user, argument)
             print(f"已取消计划 {argument}。", file=stdout)
@@ -643,7 +643,7 @@ def _interactive_command(
 
         # --- cron 命令 ---
     if command == "/crons":
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         store = CronStore(root, user)
         tasks = store.list_tasks()
         if not tasks:
@@ -661,7 +661,7 @@ def _interactive_command(
             print("用法：/cron <自然语言定时要求>", file=stdout)
             return True, session_id
         from cron.service import generate_cron_task, CronGenerationError, CronSkipped
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         try:
             task = generate_cron_task(
                 root=root, user=user, user_request=argument,
@@ -685,7 +685,7 @@ def _interactive_command(
         if not argument:
             print("用法：/cron-show <任务ID>", file=stdout)
             return True, session_id
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         store = CronStore(root, user)
         try:
             task = store.read(argument)
@@ -705,7 +705,7 @@ def _interactive_command(
         if not argument:
             print("用法：/cron-pause <任务ID>", file=stdout)
             return True, session_id
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         store = CronStore(root, user)
         try:
             store.update(argument, lambda t: {**t, "status": "paused"})
@@ -717,7 +717,7 @@ def _interactive_command(
         if not argument:
             print("用法：/cron-resume <任务ID>", file=stdout)
             return True, session_id
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         from cron.schedule import compute_next_run
         store = CronStore(root, user)
         def _resume(t):
@@ -734,7 +734,7 @@ def _interactive_command(
         if not argument:
             print("用法：/cron-cancel <任务ID>", file=stdout)
             return True, session_id
-        from run.cron_store import CronStore
+        from run.scheduler import CronStore
         store = CronStore(root, user)
         try:
             store.update(argument, lambda t: {**t, "status": "cancelled"})

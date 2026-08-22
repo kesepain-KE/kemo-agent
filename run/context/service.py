@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from run.agent_runner import AgentRunner
+from run.agents import AgentRunner
 from run.config import load_config, project_root
 from run.context import ContextPolicy, select_context
 from run.context.summary import (
@@ -20,7 +20,7 @@ from run.history.store import context_summary_exists
 from run.history import load_runtime_window, prepare_window, runtime_window_path
 from run.memory import MemoryStore
 from run.config.prompt import build_prompt_bundle
-from run.request_input import required_text
+from run.conversation import required_text
 from run.tools import (
     ToolRegistry,
     apply_runtime_tool_policy,

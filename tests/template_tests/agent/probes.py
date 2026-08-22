@@ -100,7 +100,7 @@ sys.path.insert(0, str(project_root))
 
 try:
     from agents._runtime.schema import discover_agents
-    from run.agent_runner import AgentRunResult, _load_executor, validate_json_schema
+    from run.agents import AgentRunResult, _load_executor, validate_json_schema
 
     definition = discover_agents(sandbox_root, user).get(name)
     validate_json_schema(input_data, definition.input_schema)

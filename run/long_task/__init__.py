@@ -13,12 +13,12 @@ from pathlib import Path
 import uuid
 from typing import Any
 
-from run.history_index import (
+from run.history import (
     index_lock,
     read_registry_record,
     upsert_registry_record,
 )
-from run.usage import merge_usage, usage_from_dict
+from run.conversation import merge_usage, usage_from_dict
 
 
 LONG_TASK_TERMINAL_STATUSES = frozenset(
@@ -331,3 +331,15 @@ __all__ = [
     "finish_long_task",
     "request_long_task_cancel",
 ]
+
+_DOMAIN_MODULES = ("runtime",)
+
+
+def __getattr__(name: str):
+    from importlib import import_module
+
+    for module_name in _DOMAIN_MODULES:
+        module = import_module(f"run.long_task.{module_name}")
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

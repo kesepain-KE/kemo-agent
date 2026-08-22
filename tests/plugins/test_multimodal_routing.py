@@ -22,7 +22,7 @@ from provider.protocol.models import (
     text_from_content,
 )
 from provider.schema import ChatResponse, ProviderError
-from run.attachments import (
+from run.extensions import (
     AttachmentError,
     UploadedAssetResolver,
     describe_message_asset,
@@ -31,7 +31,7 @@ from run.attachments import (
 from run.engine import handle_request
 from run.context import estimate_messages_tokens
 from run.history import find_window, load_window
-from run.multimodal import (
+from run.extensions import (
     _capability_cache,
     configured_input_modalities,
     select_vision_route,

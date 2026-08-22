@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from run.prompt_sources import (
+from run.config import (
     PromptRegistrationError,
     SkillDescriptor,
     natural_path_key,

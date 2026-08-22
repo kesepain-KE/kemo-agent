@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from run.config import load_dotenv, project_root
-from run.runtime_host import build_host
-from run.users import ensure_user, list_users
+from run.scheduler import build_host
+from run.config import ensure_user, list_users
 from web.auth import WebAuthConfig, WebAuthConfigError
 
 

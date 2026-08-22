@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from run.config import ConfigError
-from run.source_policy import MainAgentSourcePolicy, NameFilter
+from run.config import MainAgentSourcePolicy, NameFilter
 
 
 class SourcePolicyTests(unittest.TestCase):

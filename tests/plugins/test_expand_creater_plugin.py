@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from plugins.expand_creater.tool import run
-from run.prompt_sources import read_expand_meta
+from run.config import read_expand_meta
 
 
 class ExpandCreaterPluginTests(unittest.TestCase):

@@ -12,7 +12,7 @@ import httpx
 
 from web.app import create_app
 from web.service import WebRunService
-from run.log_store import LogStore
+from run.infra import LogStore
 
 
 INPUT_SOURCE = '''import threading

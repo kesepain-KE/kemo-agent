@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentDefinition
-from run.knowledge import select_knowledge_index
-from run.prompt_sources import SkillDescriptor, load_prompt_source_registry, truncate_chars
+from run.config import select_knowledge_index
+from run.config import SkillDescriptor, load_prompt_source_registry, truncate_chars
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 

@@ -14,10 +14,10 @@ from events import RunEvent
 from plugins.subagent_dispatch.tool import run as dispatch_subagent
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
-import run.task_plan_store as task_plan_store_module
-from run.agent_runner import AgentRunResult
+import run.tasks as task_plan_store_module
+from run.agents import AgentRunResult
 from agents.task_plan.executor import execute as execute_task_plan_agent
-from run.task_plan_store import (
+from run.tasks import (
     PlanConflictError,
     PlanError,
     PlanNotFoundError,
@@ -25,7 +25,7 @@ from run.task_plan_store import (
     PlanValidationError,
     normalize_plan,
 )
-from run.task_plan_executor import (
+from run.tasks import (
     approve_plan,
     cancel_plan,
     execute_plan,
@@ -35,7 +35,7 @@ from run.task_plan_executor import (
     resume_plan,
     PlanExecutionError,
 )
-from run.task_plan_service import (
+from run.tasks import (
     PlanGenerationError,
     PlanSkipped,
     edit_plan,
@@ -43,7 +43,7 @@ from run.task_plan_service import (
     persist_agent_result,
     prepare_task_plan_input,
 )
-from run.task_plan_scheduler import TaskPlanScheduler
+from run.tasks import TaskPlanScheduler
 from run.tools import ToolDefinition, ToolRegistry
 
 
@@ -1147,7 +1147,7 @@ class PlanGenerationTests(unittest.TestCase):
             }],
         }
         with patch(
-            "run.task_plan_service.AgentRunner",
+            "run.tasks.service.AgentRunner",
             self._capturing_runner(response, calls),
         ):
             plan = generate_plan(
@@ -1308,7 +1308,7 @@ class PlanGenerationTests(unittest.TestCase):
             "steps": failed["steps"],
         }
         with patch(
-            "run.task_plan_service.AgentRunner",
+            "run.tasks.service.AgentRunner",
             self._capturing_runner(response, []),
         ):
             edited = edit_plan(
@@ -1369,7 +1369,7 @@ class PlanGenerationTests(unittest.TestCase):
             ],
         }
         with patch(
-            "run.task_plan_service.AgentRunner",
+            "run.tasks.service.AgentRunner",
             self._capturing_runner(response, calls),
         ):
             edited = edit_plan(
@@ -1424,7 +1424,7 @@ class PlanGenerationTests(unittest.TestCase):
             }],
         }
         with patch(
-            "run.task_plan_service.AgentRunner",
+            "run.tasks.service.AgentRunner",
             self._capturing_runner(response, []),
         ):
             with self.assertRaisesRegex(PlanGenerationError, "不得修改"):
@@ -1453,7 +1453,7 @@ class PlanGenerationTests(unittest.TestCase):
         }
         config = {**CONFIG, "task_plan": {"auto_accept": True, "max_steps": 10}}
         with patch(
-            "run.task_plan_service.AgentRunner",
+            "run.tasks.service.AgentRunner",
             self._capturing_runner(response, []),
         ):
             plan = generate_plan(root=root, user="alice", goal="goal", config=config)

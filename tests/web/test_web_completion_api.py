@@ -393,7 +393,7 @@ class WebCompletionApiTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        from run.log_store import LogStore
+        from run.infra import LogStore
         LogStore(root).write_message_route_state(
             "example_01",
             user="alice",

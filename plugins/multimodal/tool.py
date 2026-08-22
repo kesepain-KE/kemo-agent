@@ -25,9 +25,9 @@ from provider.protocol.models import (
 )
 from provider.protocol.assets import AssetDescriptor
 from provider.schema import ProviderError
-from run.attachments import RunAssetResolver, describe_local_asset
+from run.extensions import RunAssetResolver, describe_local_asset
 from run.config import load_config, provider_runtime_config
-from run.media_outputs import persist_response_media
+from run.extensions import persist_response_media
 
 
 _ACTION_CAPABILITY = {

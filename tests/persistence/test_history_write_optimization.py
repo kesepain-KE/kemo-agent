@@ -14,7 +14,7 @@ from run.history import (
     patch_archive_metadata,
     runtime_window_path,
 )
-from run.history_store import (
+from run.history import (
     _configure,
     _ensure_schema,
     database_path,

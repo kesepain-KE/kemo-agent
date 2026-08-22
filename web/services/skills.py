@@ -12,8 +12,8 @@ import uuid
 import zipfile
 
 from run.config import load_config
-from run.prompt_sources import load_prompt_source_registry, parse_skill_descriptor
-from run.source_policy import MainAgentSourcePolicy
+from run.config import load_prompt_source_registry, parse_skill_descriptor
+from run.config import MainAgentSourcePolicy
 from run.tools import discover_tools
 from web.constants import (
     SKILL_ARCHIVE_MAX_BYTES,

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Pattern
 from zoneinfo import ZoneInfo
 
-from run.history_store import message_windows
+from run.history import message_windows
 
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
