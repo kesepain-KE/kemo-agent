@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from run.history_index import (
+from run.history.index import (
     build_window_record,
     find_record as find_index_record,
     list_records as list_index_records,
@@ -31,7 +31,7 @@ from run.history_index import (
     update_title as update_index_title,
     upsert_window as upsert_index_window,
 )
-from run.history_store import (
+from run.history.store import (
     delete_session_windows,
     delete_source_windows,
     delete_window as delete_stored_window,
@@ -44,7 +44,7 @@ from run.history_store import (
     save_window_bundle,
     window_exists,
 )
-from run.users import user_dir
+from run.config.users import user_dir
 
 
 SCHEMA_VERSION = 1

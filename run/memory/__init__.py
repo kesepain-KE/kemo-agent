@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from run.memory_sqlite import SqliteMemoryStore
-from run.memory_store import MEMORY_DB_SCHEMA_VERSION
+from run.memory.sqlite import SqliteMemoryStore
+from run.memory.store import MEMORY_DB_SCHEMA_VERSION
 
 
 MEMORY_SCHEMA_VERSION = MEMORY_DB_SCHEMA_VERSION

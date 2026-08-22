@@ -1,11 +1,6 @@
-"""Public runtime errors shared by the conversation execution modules."""
+"""Compatibility alias for :mod:`run.infra.errors`."""
 
-from __future__ import annotations
+from importlib import import_module as _import_module
+import sys as _sys
 
-
-class EngineError(RuntimeError):
-    """The run core rejected or failed a conversation request."""
-
-
-class ContextLengthExceededError(EngineError):
-    """The Provider rejected the request because its context is too large."""
+_sys.modules[__name__] = _import_module("run.infra.errors")
