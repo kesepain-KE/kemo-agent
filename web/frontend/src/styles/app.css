@@ -179,6 +179,8 @@ button[aria-busy="true"] { cursor: progress; }
 .settings-inline-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
 .settings-inline-actions .module-btn { min-height: 34px; padding: 0 10px; }
 .settings-inline-feedback { margin: 0 16px 14px; padding: 9px 11px; border: 1px solid var(--brand-line); border-radius: var(--radius-control); background: var(--brand-soft); color: var(--brand); font-size: .75rem; }
+.completion-sound-row { row-gap: 9px; border-bottom: 0; }
+.completion-sound-feedback { grid-column: 1 / -1; display: flex; width: 100%; max-width: none; box-sizing: border-box; min-height: 38px; margin: 0; align-items: center; padding: 8px 14px; border-radius: var(--radius-control-lg) !important; white-space: normal; }
 .setting-copy strong:has(svg) { display: inline-flex; align-items: center; gap: 6px; }
 .role-menu-foot { margin: 5px 5px 0; padding: 9px 5px 4px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: .6875rem; line-height: 1.5; }
 

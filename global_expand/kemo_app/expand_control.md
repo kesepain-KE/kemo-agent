@@ -7,7 +7,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 模型、脱敏配置、WebSocket 推送与在线设备统计。公网访问由 frp/nginx 反代 + TLS 终止，本服务
 不直接暴露公网。
 
-当前桥接协议实现版本：**1.1.4**。
+当前桥接协议实现版本：**1.1.5**。
 
 源码与首次部署默认为**未初始化、未激活**：`open_input=false`、没有最近成功采集时间、
 不包含 `config.json`、`users.json`、设备 Token、用户密码或运行状态。克隆或更新源码不会
@@ -147,7 +147,7 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 2. 配置设备 Token 和至少一个 App 用户后，运行 `configuration_status`；仅当
    `configured=true` 时才允许激活。
 3. `start` 或 `activate` 显式启动服务。
-4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.4 健康状态，并包含
+4. `curl http://127.0.0.1:8742/v1/health` 应返回 `kemo_app` v1.1.5 健康状态，并包含
    `websocket_connections` 与 `connected_devices`。
 5. 设备认证成功后调用 `/v1/auth/user` 获取短期会话，并通过 `X-Kemo-Session` 访问业务端点。
 6. App 的 WebSocket 请求应携带 `X-Kemo-Device-Id`；拓展状态会显示在线用户、设备 ID
@@ -158,6 +158,10 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 9. 经反向代理部署时，仅把桥接服务直连的可信代理 IP/CIDR 写入本地
    `config.json` 的 `trusted_proxies`。未显式信任的来源即使伪造
    `X-Forwarded-For` 也不会改变认证限流身份。
+10. 桥接服务访问本机 kemo-agent Web API 时，若由 `start_web.py` 启动，
+    会继承 `KEMO_AGENT_WEB_BASE_URL` 以跟随实际监听端口（包括备用端口）；
+    独立手动启动或 Web 端口发生变化后，应重启桥接服务，或在本地
+    `config.json` 中更新 `upstream`。非本机网关地址保持显式配置，不会被覆盖。
 
 # 模型列表协议边界
 
@@ -177,6 +181,12 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
   `file_upload` 数据域保存。空目录表示上传到根目录。
 - 单文件最大 80 MB；同名文件由框架文件服务自动生成不冲突的新名称，不直接覆盖。
 - App 上传成功后会刷新当前目录，嵌套目录中的上传文件可立即查看和预览。
+
+# 1.1.5 本机 Web 端口跟随
+
+- `start_web.py` 启动桥接时会通过进程环境变量传递实际 Web 地址；默认端口被占用时，桥接也会跟随备用端口。
+- 只有空的或本机 loopback 的 `upstream` 会被这个运行时地址覆盖；远程网关地址保持原样。
+- 桥接独立启动时必须在 `config.json` 中填写正确的 `upstream`，Web 端口变化后需要重启桥接。
 
 # 1.1.4 生命周期锁与安全自愈
 

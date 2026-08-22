@@ -127,6 +127,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
+| 运行结束音效 | `users/<name>/completion_sound.*` | 可选固定根文件；仅 Windows 桌面网页端启用，不进入文件列表，未设置时不存在 |
 | 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
 | 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
 | 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
@@ -698,7 +699,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 
 ### Web 启动与认证
 
-- Web 监听参数优先级为：显式 CLI 参数 > `WEB_HOST` / `WEB_PORT` > `127.0.0.1:1357`。
+- Web 监听参数优先级为：显式 CLI 参数 > `WEB_HOST` / `WEB_PORT` > `127.0.0.1:1357`；默认端口段被系统排除时自动尝试 `24680–24689`。启动器会在进程内发布实际地址 `KEMO_AGENT_WEB_BASE_URL`，本机 `kemo_app` 桥接子进程据此访问实际 Web API 端口；显式配置的非本机网关地址不被覆盖。
 - `WEB_ACCESS_TOKEN` 启用 Token 认证；登录页通过 `POST /api/auth/token` 请求体验证，Token 不进入 URL、Cookie 或浏览器存储，Web 不读取 `Authorization: Bearer`。
 - `WEB_USERNAME` 与 `WEB_PASSWORD` 必须同时配置；它们表示 Web 页面使用者，与内部多用户目录无关。
 - 只启用 Token 或账号密码时，完成对应验证即可进入；两者同时启用时必须先 Token、再账号密码，不能用任一单因素会话绕过。第一阶段状态有效 5 分钟。
@@ -710,7 +711,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - Settings 和 Health 只返回认证状态，不返回 Token、用户名、密码、Session Secret 或 Cookie 内容。
 - Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
 - Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、消息插件状态、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
-- Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。
+- Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。运行结束音效使用独立的 `completion_sound.*` API，不纳入文件列表，上传后校验音频 MIME/签名与大小；仅 Windows 桌面网页端显示设置并播放，浏览器播放失败时允许受保护的终端降级。
 - 文件页全局摘要使用短期进程内缓存；Web 写入、移动、建目录和删除会显式失效，插件或外部程序直接写盘则最多在短 TTL 后重新扫描。搜索仍按有界深度和条目预算实时扫描，不使用可能过期的摘要缓存。
 - 用户人格和全局人格可通过受保护 Web API 原子更新；全局人格影响所有用户，当前唯一 Web 认证主体视为管理员。`user_config.json` 仍保持只读。
 - Web 前端的 `/files` 页面落地用户文件与 `tmp` 浏览、下载和二次确认删除；`/runtime` 页面落地子代理、外部消息状态与三层 Expand 库存；`/profile` 页面落地头像上传和用户/全局人格编辑。

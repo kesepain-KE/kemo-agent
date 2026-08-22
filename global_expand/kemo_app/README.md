@@ -13,7 +13,7 @@ proxy IP/CIDR values to `trusted_proxies` in the ignored local `config.json`.
 `X-Forwarded-For` is ignored for untrusted peers, so clients cannot spoof a new
 rate-limit identity. Leave the list empty for direct connections.
 
-Current bridge version: **1.1.4**.
+Current bridge version: **1.1.5**.
 
 ## Detached Android runs and recovery snapshots
 
@@ -36,6 +36,15 @@ A bridge/framework process restart is still a real execution boundary: an
 unfinished journal is marked `interrupted` instead of being replayed as a new
 request. Completed and failed snapshots remain available to the same
 authenticated user so the App can reconcile its local conversation state.
+
+## Version 1.1.5 local Web endpoint contract
+
+- When started by `start_web.py`, the bridge reads the process-only
+  `KEMO_AGENT_WEB_BASE_URL` value and follows the actual local Web port,
+  including fallback ports.
+- An explicitly configured non-loopback gateway remains authoritative.
+- A bridge started independently must use an explicit local `upstream` and be
+  restarted when the Web port changes.
 
 ## Version 1.1.4 lifecycle self-healing contract
 
@@ -175,6 +184,15 @@ python start_expand.py start
 files and generates a random session secret. It does not activate or start the
 bridge and does not create a device Token or user password on the operator's
 behalf. Activation is therefore always explicit.
+
+When the bridge is launched by `start_web.py`, the launcher publishes the
+selected local Web API endpoint through the process-only
+`KEMO_AGENT_WEB_BASE_URL` environment variable. `UpstreamClient` uses that
+endpoint whenever `config.json` has an empty or loopback `upstream`, so a
+fallback Web port such as `24680` cannot leave the bridge pointing at the old
+`1357` port. A deliberately configured non-loopback gateway remains
+authoritative. If the bridge is started independently, configure its local
+`upstream` explicitly or restart it after the Web port changes.
 
 Verify the service with:
 

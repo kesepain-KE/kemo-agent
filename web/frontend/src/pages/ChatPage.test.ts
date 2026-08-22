@@ -87,6 +87,8 @@ describe('reduceRunEvent', () => {
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed' } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'limited' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'cancelled' } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: false } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: true } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
   })
 

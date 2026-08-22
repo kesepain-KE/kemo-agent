@@ -470,6 +470,10 @@ def _menu_create(root: Path) -> None:
     print(f"  人格文件:  users/{name}/user_soul.md")
     print(f"  知识库:    users/{name}/knowledge/")
     print(f"  记忆目录:  users/{name}/improve/")
+    print(
+        "  结束音效:  未设置；Windows 桌面网页端上传后生成 "
+        f"users/{name}/completion_sound.*"
+    )
 
 
 # ── CLI 入口 ──

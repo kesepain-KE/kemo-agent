@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Music2, Play, Power, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Play, Power, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
@@ -592,6 +592,7 @@ export function SettingsPage() {
   const [restartCanForce, setRestartCanForce] = useState(false)
   const [versionCopyState, setVersionCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [completionSoundFeedback, setCompletionSoundFeedback] = useState('')
+  const [completionSoundPreviewing, setCompletionSoundPreviewing] = useState(false)
   const restartTimerRef = useRef<number | null>(null)
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
   const selectedProviderModel = userDraft?.provider.model.trim() || ''
@@ -648,6 +649,11 @@ export function SettingsPage() {
     setProviderModels([])
     setProviderDiscovery({ status: 'idle', message: '' })
   }, [user])
+
+  useEffect(() => {
+    setCompletionSoundFeedback('')
+    setCompletionSoundPreviewing(false)
+  }, [user, tab])
 
   useEffect(() => {
     if (storedProviderType !== 'kemo') {
@@ -785,9 +791,15 @@ export function SettingsPage() {
   }
 
   const previewCompletionSound = async () => {
+    if (completionSoundPreviewing || !completionSoundQuery.data?.available) return
     setCompletionSoundFeedback('')
-    const played = await playUserCompletionSound(user)
-    setCompletionSoundFeedback(played ? '正在试听结束音效。' : '无法播放结束音效；请检查文件或浏览器自动播放权限。')
+    setCompletionSoundPreviewing(true)
+    try {
+      const played = await playUserCompletionSound(user)
+      setCompletionSoundFeedback(played ? '正在试听结束音效。' : '无法播放结束音效；请检查浏览器播放权限。')
+    } finally {
+      setCompletionSoundPreviewing(false)
+    }
   }
 
   const refreshAll = () => {
@@ -1004,9 +1016,9 @@ export function SettingsPage() {
             <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div></div>
           </article>
           {windowsDesktop ? <article className="setting-section">
-            <div className="setting-section-head"><strong>运行结束音效</strong><span>仅 Windows 桌面网页端在智能体成功完成运行后播放；取消、失败或受限停止不会播放。</span></div>
-            <div className="setting-row">
-              <span className="setting-copy"><strong>{completionSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{completionSoundQuery.data?.available ? `${completionSoundQuery.data.filename} · ${formatBytes(completionSoundQuery.data.size)} · ${formatDateTime(completionSoundQuery.data.updated_at)}` : '上传不超过 5 MB 的 MP3、WAV、Ogg 或 WebM 音频。'}</span></span>
+            <div className="setting-section-head"><strong>运行结束音效</strong><span>支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。</span></div>
+            <div className="setting-row completion-sound-row">
+              <span className="setting-copy"><strong>{completionSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{completionSoundQuery.data?.available ? `${completionSoundQuery.data.filename} · ${formatBytes(completionSoundQuery.data.size)} · ${formatDateTime(completionSoundQuery.data.updated_at)}` : '支持 MP3、WAV、Ogg 和 WebM 音频。'}</span></span>
               <div className="settings-inline-actions">
                 <input
                   ref={completionSoundInputRef}
@@ -1020,12 +1032,11 @@ export function SettingsPage() {
                   }}
                 />
                 <button type="button" className="module-btn" disabled={completionSoundUploadMutation.isPending} onClick={() => completionSoundInputRef.current?.click()}><Upload size={15} />{completionSoundUploadMutation.isPending ? '上传中…' : '上传音效'}</button>
-                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available} onClick={() => { void previewCompletionSound() }}><Play size={15} />试听</button>
+                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundPreviewing} onClick={() => { void previewCompletionSound() }}><Play size={15} />{completionSoundPreviewing ? '试听中…' : '试听'}</button>
                 <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundDeleteMutation.isPending} onClick={() => completionSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
               </div>
+              {completionSoundFeedback ? <div className="settings-inline-feedback completion-sound-feedback" role="status">{completionSoundFeedback}</div> : null}
             </div>
-            <div className="setting-row"><span className="setting-copy"><strong><Music2 size={16} /> 播放规则</strong><span>音效保存在用户根目录的专用路径。浏览器播放失败时，Windows 终端可降级播放 WAV，并在系统 MCI 可用时播放 MP3；Ogg/WebM 仅由浏览器播放。</span></span>{completionSoundQuery.isFetching ? <StatusChip status="running" /> : <StatusChip status={completionSoundQuery.data?.available ? 'enabled' : 'disabled'} />}</div>
-            {completionSoundFeedback ? <div className="settings-inline-feedback" role="status">{completionSoundFeedback}</div> : null}
           </article> : null}
         </> : null}
 

@@ -21,7 +21,7 @@ plugins/
 发现入口为：
 
 - `plugins/manifest.py::discover_plugin_manifests()`；
-- `run/tools.py::discover_tools()`。
+- `run/tools/__init__.py::discover_tools()`。
 
 运行时只扫描 `plugins/*/SKILL.md`。共享技能、用户技能、拓展、感知和子代理即使包含
 Python 文件，也不能借此注册 Provider function call。
@@ -148,7 +148,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 ```
 
 运行时按函数签名决定是否注入 `context`。插件无需自行解析 Tool JSON，也不能信任模型已经
-正确校验参数；`run/tools.py` 会先检查必填字段、顶层额外字段、基础类型和数值上下限，入口
+正确校验参数；`run/tools/__init__.py` 会先检查必填字段、顶层额外字段、基础类型和数值上下限，入口
 仍应校验业务关系、路径、安全确认和外部资源状态。
 
 同步函数和 async 函数都可作为入口。async 返回值由运行时在独立工具线程中执行。
@@ -163,7 +163,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
   → Tool Schema 发送给 Provider
   → Provider 返回完整工具调用
   → 协议层确认终态和参数 JSON 完整
-  → run/tools.py 校验参数
+  → run/tools/__init__.py 校验参数
   → 独立工具线程执行入口
   → 结果大小检查
   → 工具结果回填 Provider 历史
@@ -211,7 +211,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 
 ## 工具结果大小
 
-`run/tools.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000。结果先序列化为 JSON 字符串再计算字符数。
+`run/tools/__init__.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000。结果先序列化为 JSON 字符串再计算字符数。
 超过上限时正文完全不回填上下文，而是返回 `ToolResultTooLargeError` 和缩小范围的提示。
 
 常见处理方式：
@@ -252,15 +252,15 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 3. 让标题、目录名和 Tool `name` 保持一致。
 4. 用最小、封闭的 Schema 表达输入，不把权限判断交给自然语言。
 5. 在入口内实现业务校验、取消响应和安全返回。
-6. 使用 `plugins/manifest.py` 和 `run/tools.py` 完成发现测试。
+6. 使用 `plugins/manifest.py` 和 `run/tools/__init__.py` 完成发现测试。
 7. 在 `tests/` 中覆盖成功、参数错误、权限拒绝、取消、超时和结果过大。
 
 常用验证：
 
 ```powershell
-python -m pytest tests/test_extended_plugins.py -q
-python -m pytest tests/test_runtime_features.py -q
-python -m pytest tests/test_subagent_hotplug.py -q
+python -m pytest tests/plugins/test_extended_plugins.py -q
+python -m pytest tests/core/test_runtime_features.py -q
+python -m pytest tests/agents/test_subagent_hotplug.py -q
 ```
 
 插件清单错误应在发现阶段修复。不要在运行时捕获后静默跳过，否则用户会看到工具偶发消失，

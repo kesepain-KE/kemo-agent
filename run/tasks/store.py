@@ -27,6 +27,7 @@ _REVISION_BLOB_THRESHOLD = 4096
 _REVISION_BLOB_KEY = "$task_plan_blob"
 _REVISION_BLOB_VERSION_KEY = "$task_plan_blob_version"
 _REVISION_REDACTED_KEY = "$task_plan_redacted"
+_REVISION_REDACTED_TEXT = "[task-plan-secret-redacted]"
 _MAX_SNAPSHOT_DECOMPRESSED_BYTES = 16 * 1024 * 1024
 _SENSITIVE_ARGUMENT_KEYS = frozenset({
     "authorization",
@@ -39,6 +40,17 @@ _SENSITIVE_ARGUMENT_KEYS = frozenset({
     "private_key",
     "token",
 })
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?ix)\b(?:authorization|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
+    r"password|secret|cookie|private[_ -]?key|token)\b"
+    r"\s*(?:=|:|：|是)\s*[^\s,;\]}]{8,}"
+)
+_BEARER_SECRET_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_OPENAI_SECRET_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}")
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{8}$")
 STEP_ID_RE = re.compile(r"^step_\d+$")
 PLAN_STATUSes = frozenset({
@@ -220,6 +232,22 @@ def _validate_sensitive_argument_change(
         )
 
 
+def _redact_secret_text(value: str) -> str:
+    """Remove obvious credential-shaped text before it reaches plan storage.
+
+    This intentionally requires a label/assignment or a recognizable token
+    prefix.  Ordinary prose such as "说明 token 的使用方式" is kept intact.
+    """
+    if (
+        _SECRET_ASSIGNMENT_RE.search(value)
+        or _BEARER_SECRET_RE.search(value)
+        or _OPENAI_SECRET_RE.search(value)
+        or _PRIVATE_KEY_RE.search(value)
+    ):
+        return _REVISION_REDACTED_TEXT
+    return value
+
+
 def _redact_revision_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -232,6 +260,8 @@ def _redact_revision_secrets(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_redact_revision_secrets(item) for item in value]
+    if isinstance(value, str):
+        return _redact_secret_text(value)
     return value
 
 
@@ -328,6 +358,8 @@ def _contains_revision_redaction(value: Any) -> bool:
         return any(_contains_revision_redaction(child) for child in value.values())
     if isinstance(value, list):
         return any(_contains_revision_redaction(item) for item in value)
+    if isinstance(value, str):
+        return value == _REVISION_REDACTED_TEXT
     return False
 
 
@@ -662,10 +694,13 @@ class PlanStore:
                 current_step=excluded.current_step
             """,
             (
-                plan["plan_id"], int(plan["schema_version"]), plan["title"],
-                plan["description"], plan["user"], str(plan.get("source") or "cli"),
+                plan["plan_id"], int(plan["schema_version"]),
+                _redact_secret_text(str(plan["title"])),
+                _redact_secret_text(str(plan["description"])),
+                str(plan["user"]), str(plan.get("source") or "cli"),
                 str(plan.get("session_id") or "default"), plan["status"],
-                1 if plan["auto_accept"] else 0, str(plan.get("reminder") or ""),
+                1 if plan["auto_accept"] else 0,
+                _redact_secret_text(str(plan.get("reminder") or "")),
                 int(plan["revision"]), str(plan.get("created_at") or ""),
                 str(plan.get("updated_at") or ""), str(plan.get("current_step") or ""),
             ),
@@ -686,12 +721,17 @@ class PlanStore:
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    plan["plan_id"], position, step["step_id"], step["title"],
-                    step["description"], step.get("status", "pending"),
-                    step.get("tool_name"), _json_text(step.get("tool_arguments") or {}),
+                    plan["plan_id"], position, step["step_id"],
+                    _redact_secret_text(str(step["title"])),
+                    _redact_secret_text(str(step["description"])),
+                    step.get("status", "pending"),
+                    step.get("tool_name"),
+                    _json_text(_redact_revision_secrets(step.get("tool_arguments") or {})),
                     1 if step.get("critical", True) else 0,
-                    _json_text(step.get("result")) if step.get("result") is not None else None,
-                    _json_text(step.get("error")) if step.get("error") is not None else None,
+                    _json_text(_redact_revision_secrets(step.get("result")))
+                    if step.get("result") is not None else None,
+                    _json_text(_redact_revision_secrets(step.get("error")))
+                    if step.get("error") is not None else None,
                     str(step.get("started_at") or ""), str(step.get("finished_at") or ""),
                 ),
             )
@@ -729,7 +769,7 @@ class PlanStore:
                 plan_id,
                 int(plan["revision"]),
                 _snapshot_text(snapshot),
-                str(note or ""),
+                _redact_secret_text(str(note or "")),
                 _now(),
             ),
         )
@@ -804,9 +844,12 @@ class PlanStore:
                         raise PlanConflictError(f"计划已存在：{plan['plan_id']}")
                     self._save(database, plan)
                     self._save_revision(database, plan, note="创建计划")
+                    stored = self._load(database, plan["plan_id"])
+                    if stored is None:
+                        raise PlanError(f"计划保存后无法读取：{plan['plan_id']}")
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
-            return dict(plan)
+            return stored
 
     def read(self, plan_id: str) -> dict[str, Any]:
         with self._lock:
@@ -885,7 +928,10 @@ class PlanStore:
                         updated,
                         note=note or f"revision {updated['revision']} 更新",
                     )
-                    return updated
+                    stored = self._load(database, plan_id)
+                    if stored is None:
+                        raise PlanError(f"计划保存后无法读取：{plan_id}")
+                    return stored
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 

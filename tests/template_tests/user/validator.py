@@ -100,6 +100,28 @@ def _validate(
                     "user.history_template",
                     "history 仅保留目录标记，SQLite 将由运行时按 schema 创建",
                 )
+            completion_sound_files = sorted(
+                item.name
+                for item in destination.iterdir()
+                if item.is_file()
+                and item.name.casefold().startswith("completion_sound.")
+            )
+            completion_sound_dir = destination / "completion_sound"
+            if completion_sound_dir.is_dir():
+                report.failed(
+                    "user.completion_sound_directory",
+                    "用户模板不得创建单独的结束音效目录",
+                )
+            elif completion_sound_files:
+                report.failed(
+                    "user.completion_sound_template",
+                    "用户模板不得预置结束音效文件：" + ", ".join(completion_sound_files),
+                )
+            else:
+                report.passed(
+                    "user.completion_sound_template",
+                    "结束音效按需上传，模板不预置文件",
+                )
         prepare_user(root, user)
 
         try:

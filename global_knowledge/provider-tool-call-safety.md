@@ -95,7 +95,7 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 
 相关测试位于：
 
-- `tests/test_config_provider.py`：真实 Chat HTTP/SSE 拼接、截断参数、干净 EOF；
-- `tests/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播；
-- `tests/test_task_plan.py`：非成功主运行终态与暂停原因；
-- `tests/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。
+- `tests/config/test_config_provider.py`：真实 Chat HTTP/SSE 拼接、截断参数、干净 EOF；
+- `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播；
+- `tests/cron/test_task_plan.py`：非成功主运行终态与暂停原因；
+- `tests/core/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。

@@ -29,6 +29,12 @@ from run.config import ensure_user, list_users, user_template_dir
 from web.auth import WebAuthConfig, WebAuthConfigError
 
 
+# 默认端口段被 Windows/Hyper-V/WSL 等系统组件排除时，使用独立备用段。
+_WEB_PORT_SCAN_COUNT = 10
+_WEB_FALLBACK_PORT = 24680
+_RUNTIME_WEB_ENDPOINT_ENV = "KEMO_AGENT_WEB_BASE_URL"
+
+
 # ── 版本信息 ──────────────────────────────────────────────────────
 
 def _read_version_json(root: Path) -> dict | None:
@@ -240,6 +246,49 @@ def _resolve_web_port(cli_value: int | None) -> int:
     return port
 
 
+def _web_port_candidates(base_port: int):
+    """Yield primary and fallback Web port candidates without duplicates."""
+
+    seen: set[int] = set()
+    ranges = (
+        (base_port, False),
+        (_WEB_FALLBACK_PORT, True),
+    )
+    for start, is_fallback in ranges:
+        for offset in range(_WEB_PORT_SCAN_COUNT):
+            port = start + offset
+            if not 1 <= port <= 65535 or port in seen:
+                continue
+            seen.add(port)
+            yield port, is_fallback
+
+
+def _runtime_web_base_url(host: str, port: int) -> str:
+    """Return the loopback-reachable Web URL inherited by local bridge children."""
+
+    normalized_host = str(host or "").strip()
+    if normalized_host.casefold() in {"", "localhost", "0.0.0.0"}:
+        normalized_host = "127.0.0.1"
+    elif normalized_host in {"::", "[::]"}:
+        normalized_host = "[::1]"
+    elif ":" in normalized_host and not normalized_host.startswith("["):
+        normalized_host = f"[{normalized_host}]"
+    return f"http://{normalized_host}:{int(port)}"
+
+
+def _publish_runtime_web_endpoint(host: str, port: int) -> str:
+    """Publish the selected local Web endpoint to child Expand processes.
+
+    The value is process-local environment state, not user configuration.  It
+    lets the kemo_app bridge follow an automatically selected fallback port
+    while preserving an explicitly configured non-local upstream gateway.
+    """
+
+    endpoint = _runtime_web_base_url(host, port)
+    os.environ[_RUNTIME_WEB_ENDPOINT_ENV] = endpoint
+    return endpoint
+
+
 def _check_users(root: Path) -> bool:
     """Ensure at least one user exists.  Try _template bootstrap first,
     then prompt interactively.  Returns True when ready."""
@@ -351,24 +400,38 @@ def main(argv: list[str] | None = None) -> int:
     if not _check_users(root):
         return 1
 
-        # 4. 端口轮询：1357 + 0..9（最多 10 次尝试）
-    max_tries = 10
+        # 4. 端口轮询：先扫主端口段，再扫备用端口段。
     chosen_port: int | None = None
-    for offset in range(max_tries):
-        try_port = base_port + offset
+    fallback_announced = False
+    primary_end = min(65535, base_port + _WEB_PORT_SCAN_COUNT - 1)
+    fallback_end = min(65535, _WEB_FALLBACK_PORT + _WEB_PORT_SCAN_COUNT - 1)
+    for try_port, is_fallback in _web_port_candidates(base_port):
+        if is_fallback and not fallback_announced:
+            print(
+                f"端口 {base_port}~{primary_end} 不可用，"
+                f"正在尝试备用端口段 {_WEB_FALLBACK_PORT}~{fallback_end}..."
+            )
+            fallback_announced = True
         ok, err = _can_bind(web_host, try_port)
         if ok:
             chosen_port = try_port
-            if offset > 0:
-                print(f"端口 {base_port} 不可用，已切换到 {try_port}")
+            if try_port != base_port:
+                label = "备用端口" if is_fallback else "端口"
+                print(f"端口 {base_port} 不可用，已切换到{label} {try_port}")
             break
-        if offset == 0:
+        if try_port == base_port:
             print(f"端口 {try_port} 不可用，正在轮询... ({err})")
     if chosen_port is None:
         print(
-            f"ERROR: 端口 {base_port}~{base_port + max_tries - 1} 全部被占用，无法启动"
+            f"ERROR: 主端口段 {base_port}~{primary_end} 和备用端口段 "
+            f"{_WEB_FALLBACK_PORT}~{fallback_end} 均不可用，无法启动"
         )
         return 1
+
+    # Publish the actual endpoint before RuntimeHost can launch any isolated
+    # Expand child.  kemo_app inherits this value when it starts and can use it
+    # for a local upstream instead of assuming the legacy 1357 port.
+    _publish_runtime_web_endpoint(web_host, chosen_port)
 
         # 5.启动RuntimeHost（除非--no-host）
     host = None

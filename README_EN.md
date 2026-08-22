@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,22 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.1`
+Current version: `1.2.2`
+
+### 1.2.2 update
+
+This is a stability and maintenance release.
+
+- `run/` is split into domain packages. Old flat import paths are no longer supported.
+- Project-root detection, fallback Web ports, and local bridge port tracking are fixed.
+- Task plans can be edited, retried, reset, inspected by revision, and safely rolled back.
+- Obvious Token, API Key, Bearer credential, and private-key text is redacted before task-plan persistence.
+- Each user can set a separate completion sound. It is used only by the Windows desktop Web client.
+- Submitted attachment references are removed immediately to avoid reusing the same `asset_id`.
+- Mid-run guidance uploads use `purpose=input`.
+- Package-layout, project-path, fallback-port, and user-template tests were added.
+
+The `kemo_app` bridge version is `1.1.5`. External plugins that still import paths such as `run.agent_runner` or `run.task_plan_store` must move to the new `run.<domain>` entry points.
 
 `1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, `1.0.4` improves tool-call continuity and multi-entry history, and `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. `1.1.0` completes the Android mobile loop, `1.1.1` isolates App conversations under `source=app`, and `1.1.2` hardens task plans, memory, long waits, the App bridge, and Web interaction. `1.2.0` is the long-task release: a user can explicitly enable long-task mode for one `user + source + session_id` conversation space; when a run reaches its per-run tool-call ceiling, kemo-agent commits that run and continues in a new run under the same session lock while non-terminal `long_task_update` events report the original request, cumulative elapsed time, run and continuation counts, tool calls, Provider requests, and token usage. Disabling the preference lets the current run settle without starting another continuation, while cancellation stops the entire logical task. Conversation spaces and Web/App sources remain isolated, and automatic continuation never bypasses context protection, Provider failures, plan-approval boundaries, or ordinary cancellation. Automatic, manual, and Provider-limit compression now reports progress above the composer; summary readiness and background memory analysis of trimmed rounds remain distinct stages. The preference lives in the existing session record rather than global or user configuration. `1.2.1` is a runtime-reliability patch: history content, rounds, indexes, and session state now use stricter transactional and cross-process write boundaries; system Cron adds a single-leader lease, in-memory runtime checkpoints, and aggregated success logs; the main agent and subagents share batch tool-argument validation and safe recovery; the Web capability-reference drawer now covers extensions, skills, and plugins; and the `kemo_app` 1.1.4 bridge adds detached-run snapshots, lifecycle locking, PID/instance reconciliation, and temporary-backoff self-healing. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
 

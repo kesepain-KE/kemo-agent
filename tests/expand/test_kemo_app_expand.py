@@ -63,6 +63,43 @@ from run.config import read_expand_meta  # noqa: E402
 
 
 class KemoAppExpandTests(unittest.TestCase):
+    def test_bridge_follows_runtime_local_web_endpoint(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"KEMO_AGENT_WEB_BASE_URL": "http://127.0.0.1:24680"},
+        ):
+            self.assertEqual(
+                bridge_upstream.resolve_upstream_base_url({}),
+                "http://127.0.0.1:24680",
+            )
+            self.assertEqual(
+                bridge_upstream.resolve_upstream_base_url(
+                    {"upstream": "http://127.0.0.1:1357"}
+                ),
+                "http://127.0.0.1:24680",
+            )
+
+    def test_bridge_preserves_explicit_non_local_upstream(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"KEMO_AGENT_WEB_BASE_URL": "http://127.0.0.1:24680"},
+        ):
+            configured = "https://gateway.example.invalid:1457"
+            self.assertEqual(
+                bridge_upstream.resolve_upstream_base_url({"upstream": configured}),
+                configured,
+            )
+
+    def test_bridge_rejects_non_local_runtime_endpoint(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"KEMO_AGENT_WEB_BASE_URL": "https://remote.example.invalid:24680"},
+        ):
+            self.assertEqual(
+                bridge_upstream.resolve_upstream_base_url({}),
+                "http://127.0.0.1:1357",
+            )
+
     def test_test_loader_does_not_leak_generic_expand_module_aliases(self) -> None:
         self.assertIsNot(sys.modules.get("start_expand"), bridge_start)
         self.assertIsNot(sys.modules.get("lifecycle"), bridge_lifecycle)
@@ -70,9 +107,9 @@ class KemoAppExpandTests(unittest.TestCase):
     def test_bridge_declares_current_version(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
         manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
-        self.assertIn('VERSION = "1.1.4"', source)
-        self.assertIn("v1.1.4", manifest["explain"])
-        self.assertIn("**1.1.4**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn('VERSION = "1.1.5"', source)
+        self.assertIn("v1.1.5", manifest["explain"])
+        self.assertIn("**1.1.5**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_bridge_keeps_android_conversations_in_app_partition(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")

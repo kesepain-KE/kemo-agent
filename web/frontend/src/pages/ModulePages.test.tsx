@@ -70,6 +70,8 @@ describe('V16 module pages', () => {
 
     renderPage('settings')
     expect(await screen.findByText('运行结束音效')).toBeInTheDocument()
+    expect(screen.getByText('支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。')).toBeInTheDocument()
+    expect(screen.queryByText('播放规则')).not.toBeInTheDocument()
     expect(screen.getByText('未设置')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('选择结束音效文件'), {
       target: { files: [new File(['ID3audio'], 'done.mp3', { type: 'audio/mpeg' })] },
@@ -77,6 +79,7 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('结束音效已保存。')).toBeInTheDocument()
     expect(uploadRequests).toBe(1)
     expect(screen.getByText(/completion_sound\.mp3/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '试听' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '清除' }))
     expect(await screen.findByText('结束音效已清除。')).toBeInTheDocument()
     userAgent.mockRestore()

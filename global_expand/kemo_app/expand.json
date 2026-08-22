@@ -1,6 +1,6 @@
 {
   "name": "kemo app 桥接服务",
-  "explain": "Android App 与 kemo-agent 之间的常驻 FastAPI 桥接服务 v1.1.4（HTTP/SSE/WebSocket，独立端口）。提供脱离手机连接的后台运行与快照恢复、两级认证、独立 APP 会话来源、显式激活后的故障自动恢复、对话、任务、定时、状态、模块、文件、知识、模型、事件推送与在线设备统计。",
+  "explain": "Android App 与 kemo-agent 之间的常驻 FastAPI 桥接服务 v1.1.5（HTTP/SSE/WebSocket，独立端口）。提供脱离手机连接的后台运行与快照恢复、两级认证、独立 APP 会话来源、显式激活后的故障自动恢复、对话、任务、定时、状态、模块、文件、知识、模型、事件推送与在线设备统计，并能在本机 Web 使用备用端口时跟随实际地址。",
   "open_input": false,
   "input_data": "input_data.md",
   "input_health": "正常",
@@ -8,5 +8,5 @@
   "open_control": true,
   "start_expand": "start_expand.py",
   "start_control": "expand_control.md",
-  "recent_update": "2026-08-16 18:45:39"
+  "recent_update": "2026-08-23 01:56:32"
 }

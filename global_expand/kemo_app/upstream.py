@@ -3,10 +3,67 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 import httpx
+
+
+_DEFAULT_UPSTREAM = "http://127.0.0.1:1357"
+_RUNTIME_WEB_ENDPOINT_ENV = "KEMO_AGENT_WEB_BASE_URL"
+_LOCAL_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _valid_runtime_endpoint(value: object) -> str:
+    """Accept only a plain HTTP(S) endpoint published by the local launcher."""
+
+    candidate = str(value or "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    try:
+        parsed = urlsplit(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+        if parsed.username or parsed.password:
+            return ""
+        if parsed.hostname.casefold() not in _LOCAL_UPSTREAM_HOSTS:
+            return ""
+        port = parsed.port
+    except ValueError:
+        return ""
+    if port is not None and not 1 <= port <= 65535:
+        return ""
+    return candidate
+
+
+def _is_local_upstream(value: object) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return True
+    try:
+        parsed = urlsplit(candidate)
+        return parsed.hostname.casefold() in _LOCAL_UPSTREAM_HOSTS if parsed.hostname else False
+    except (AttributeError, ValueError):
+        return False
+
+
+def resolve_upstream_base_url(config: dict[str, Any]) -> str:
+    """Resolve the bridge's framework URL without overriding external gateways.
+
+    ``start_web.py`` publishes the endpoint selected for this process through
+    ``KEMO_AGENT_WEB_BASE_URL``.  It is authoritative for an empty or local
+    configured upstream, which keeps the bridge aligned with fallback ports.
+    A configured non-loopback URL remains authoritative for deployment
+    topologies that intentionally use a separate gateway.
+    """
+
+    configured = str(config.get("upstream") or "").strip().rstrip("/")
+    runtime = _valid_runtime_endpoint(os.getenv(_RUNTIME_WEB_ENDPOINT_ENV))
+    if runtime and _is_local_upstream(configured):
+        return runtime
+    return configured or _DEFAULT_UPSTREAM
 
 
 class UpstreamError(RuntimeError):
@@ -18,7 +75,7 @@ class UpstreamError(RuntimeError):
 
 class UpstreamClient:
     def __init__(self, config: dict[str, Any]) -> None:
-        self.base_url = str(config.get("upstream", "http://127.0.0.1:1357")).rstrip("/")
+        self.base_url = resolve_upstream_base_url(config)
         self.token = str(config.get("upstream_token", ""))
         self.username = str(config.get("upstream_username", ""))
         self.password = str(config.get("upstream_password", ""))

@@ -9,7 +9,7 @@
   "auth_rate_limit_per_minute": 20,
   "business_rate_limit_per_minute": 60,
   "trusted_proxies": [],
-  "upstream": "http://127.0.0.1:1457",
+  "upstream": "http://127.0.0.1:1357",
   "upstream_token": "",
   "upstream_username": "",
   "upstream_password": "",

@@ -67,7 +67,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ## 验证
 
-客户端故障测试位于 `tests/test_kemo_transport_reliability.py`，覆盖：
+客户端故障测试位于 `tests/provider/test_provider_protocol.py` 和 `tests/core/test_runtime_features.py`，覆盖：
 
 - 同一请求的 SSE 断线续传；
 - 恢复游标与幂等键；

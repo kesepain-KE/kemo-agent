@@ -7,13 +7,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "schema_version": 1,
   "components": {
-    "core": {"version": "1.2.1"},
-    "agents": {"version": "1.1.2"},
-    "plugins": {"version": "1.1.2"},
-    "web": {"version": "1.2.1"}
+    "core": {"version": "1.2.2"},
+    "agents": {"version": "1.2.2"},
+    "plugins": {"version": "1.2.2"},
+    "web": {"version": "1.2.2"}
   }
 }
 ```
@@ -43,6 +43,21 @@
 `1.2.0` 引入由用户显式授权的会话级长任务模式。开关和运行统计保存于 `history_sessions.record_json.long_task`，严格按 `(user, source, session_id)` 隔离，新会话默认关闭。当且仅当底层 Run 以 `status=limited`、`stop_reason=max_tool_iterations` 收束时，Web 编排层才完整提交当前 Run、生成下一 Run ID 并发送非终态 `long_task_update`；最终只发送一次 `done` 或 `error`。关闭开关不打断当前 Run，取消接口会取消整个逻辑长任务。续跑控制轮次使用 synthetic metadata，历史界面渲染为边界横条，记忆与历史摘要继续使用原始用户请求。Web 对话操作菜单提供独立开关，输入框上方状态气泡展示原始任务、累计耗时、Run/续跑次数、工具调用、Provider 请求和 Token 用量。自动、手动及 Provider 超限压缩通过非终态 `context_compression` 事件显示开始、摘要就绪或失败；队列模式下摘要就绪不等于裁剪轮次的记忆分析已经完成，后台游标追平才是完成判据，零新增候选允许正常提交。任务计划执行、上下文保护、Provider 失败及其他受控终态不会被自动续跑。完整客户端合同见 `global_knowledge/long-task-runtime.md`。
 
 `1.2.1` 加固高频运行和持久化边界。历史 archive/runtime、轮次分区、上下文摘要、会话索引与活跃绑定统一在 SQLite 事务中提交，并用跨进程锁保护仍需兼容 JSON 的写路径；系统 Cron 通过操作系统文件锁选出单一领导实例，正常状态使用内存检查点并周期写回，成功执行按窗口聚合，错误与部分失败仍立即持久化。主智能体与 `AgentRunner` 子代理统一采用整批工具参数校验，损坏的并行调用不会先执行其中有效部分；没有媒体等不可安全重放副作用时，可以保留已流出的文本和思考并发起有界纠错。Web 能力引用抽屉统一覆盖拓展、技能和插件。`kemo_app` 1.1.4 在后台 Run 日志与恢复快照上增加跨进程生命周期锁、Windows 启动器交接宽限、同实例 PID 对账、未受管实例保护、端口冲突分类与可自动解锁的临时退避。持久化细节见 `global_knowledge/persistence-write-path.md`，工具恢复边界见 `global_knowledge/provider-tool-call-safety.md`。
+
+## 1.2.2
+
+`1.2.2` 是稳定性和维护更新，审计范围为 **2026 年 8 月 22 日**的 7 个 Git 提交，以及本次确认纳入的未提交修复。**2026 年 8 月 23 日目前没有 Git 提交**，不能把未来日期写成已发布历史。
+
+本版做了这些事情：
+
+- 将 `run/` 按职责拆成领域包，删除旧的 `run.*` 平铺导入路径；外部插件必须迁移到新的入口。
+- 修复启动器的项目根目录判断和备用 Web 端口；本机 `kemo_app` 桥接跟随实际 Web 地址，桥接修复版本为 `1.1.5`。
+- 任务计划支持 edit、retry、reset、revision 和安全 rollback；保存任务计划前对明显凭据形态做脱敏。
+- Windows 桌面网页端支持每用户独立的运行结束音效；移动端不显示也不播放。
+- 发送附件后立即清除引用；运行中引导上传使用 `purpose=input`。
+- 增加包结构、项目路径、备用端口和用户模板合同测试。
+
+发布前要区分两类检查：`tests/`、`tests/template_tests/` 和前端测试会进入 GitHub CI；`开发临时目录/test_kemo` 与 `开发临时目录/release_check.py` 被 `.gitignore` 排除，只是本机发布前补强检查。任务计划 revision 目前没有自动保留上限，长期高频修改会增加 SQLite 大小；运行态 JSON、`runtime/` 和用户目录不属于版本文件。
 
 ## 命令
 

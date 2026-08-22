@@ -359,6 +359,86 @@ class PlanStoreTests(unittest.TestCase):
         self.assertEqual(updated["revision"], 2)
         self.assertEqual(blob_count, 1)
 
+    def test_plan_storage_redacts_embedded_secrets_in_text_and_large_values(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        secret = "Authorization: Bearer abcdefghijklmnop"
+        plan = _make_plan([{
+            "step_id": "step_1",
+            "title": "说明 token 的使用方式",
+            "description": "普通说明，不应因为出现 token 一词而被删除",
+            "tool_name": None,
+            "tool_arguments": {"value": "token: abcdefgh"},
+            "result": {"output": secret + "\n" + ("x" * 10_000)},
+            "error": {"message": "sk-1234567890abcdef"},
+            "critical": True,
+        }])
+        created = store.create(plan)
+        self.assertNotIn("abcdefghijklmnop", json.dumps(created, ensure_ascii=False))
+        self.assertNotIn("1234567890abcdef", json.dumps(created, ensure_ascii=False))
+
+        database = sqlite3.connect(store.path)
+        try:
+            step_row = database.execute(
+                "SELECT tool_arguments_json, result_json, error_json "
+                "FROM task_plan_steps WHERE plan_id=?",
+                (created["plan_id"],),
+            ).fetchone()
+            revision_row = database.execute(
+                "SELECT plan_json, note FROM task_plan_revisions "
+                "WHERE plan_id=? AND revision=1",
+                (created["plan_id"],),
+            ).fetchone()
+            blob_rows = database.execute(
+                "SELECT payload FROM task_plan_revision_blobs WHERE plan_id=?",
+                (created["plan_id"],),
+            ).fetchall()
+        finally:
+            database.close()
+
+        persisted_text = " ".join(str(value) for value in step_row)
+        persisted_text += " " + str(revision_row[0]) + " " + " ".join(
+            str(row[0]) for row in blob_rows
+        )
+        self.assertNotIn("abcdefghijklmnop", persisted_text)
+        self.assertNotIn("1234567890abcdef", persisted_text)
+        self.assertIn("task-plan-secret-redacted", persisted_text)
+        self.assertEqual(
+            store.read(created["plan_id"])["steps"][0]["title"],
+            "说明 token 的使用方式",
+        )
+
+    def test_revision_with_text_redaction_cannot_be_rolled_back(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "安全步骤",
+            "description": "普通描述",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }]))
+        updated = store.update(
+            created["plan_id"],
+            lambda plan: {
+                **plan,
+                "status": "paused",
+                "steps": [{
+                    **plan["steps"][0],
+                    "result": "api_key=abcdefgh",
+                }],
+            },
+            note="api_key=abcdefgh",
+        )
+        self.assertEqual(updated["revision"], 2)
+        self.assertEqual(
+            store.list_revisions(created["plan_id"])[0]["note"],
+            "[task-plan-secret-redacted]",
+        )
+        with self.assertRaisesRegex(PlanValidationError, "脱敏"):
+            store.rollback(created["plan_id"], 2, expected_revision=updated["revision"])
+
     def test_plan_rejects_new_sensitive_tool_arguments(self) -> None:
         _, root = _make_root(["alice"])
         store = PlanStore(root, "alice")
