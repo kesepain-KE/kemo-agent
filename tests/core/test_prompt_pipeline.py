@@ -19,7 +19,7 @@ from provider.schema import ChatResponse, Usage
 from run.config import load_config
 from run.engine import EngineError, context_status, handle_request, iter_request_events
 from run.memory import MemoryStore
-from tests.memory_db import update_fragment_metadata
+from tests.support.memory_db import update_fragment_metadata
 from run.config import (
     PROMPT_SECTION_ORDER,
     PromptConfigError,

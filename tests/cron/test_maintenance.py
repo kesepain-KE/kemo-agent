@@ -30,7 +30,7 @@ from run.scheduler import (
     _summary_chunks,
 )
 from run.memory import MemoryStore, normalize_memory_filename
-from tests.memory_db import update_fragment_metadata
+from tests.support.memory_db import update_fragment_metadata
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""SQLite fixture helpers for memory tests."""
+"""SQLite fixture helpers shared by memory-related test domains."""
 
 from __future__ import annotations
 

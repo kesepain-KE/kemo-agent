@@ -4,7 +4,6 @@ import json
 import os
 import sqlite3
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,7 +29,6 @@ from run.tasks import (
     cancel_plan,
     execute_plan,
     get_plan,
-    list_plans,
     pause_plan,
     resume_plan,
     PlanExecutionError,

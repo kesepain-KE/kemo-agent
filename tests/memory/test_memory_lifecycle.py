@@ -17,7 +17,7 @@ from run.memory import (
     tier_rules,
 )
 from run.agents import discover_agents
-from tests.memory_db import update_fragment_metadata
+from tests.support.memory_db import update_fragment_metadata
 
 
 CONFIG = {

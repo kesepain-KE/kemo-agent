@@ -25,7 +25,7 @@ from typing import Any
 
 from run.config import load_dotenv, project_root
 from run.scheduler import build_host
-from run.config import ensure_user, list_users
+from run.config import ensure_user, list_users, user_template_dir
 from web.auth import WebAuthConfig, WebAuthConfigError
 
 
@@ -139,7 +139,7 @@ def _fetch_remote(timeout: float) -> dict | None:
             last_error = str(exc)
             continue
     if last_error:
-        print(f"  (版本检查: 所有镜像源均失败)", file=sys.stderr)
+        print("  (版本检查: 所有镜像源均失败)", file=sys.stderr)
     return None
 
 
@@ -164,8 +164,10 @@ def _check_version(root: Path, *, timeout: float = 5.0) -> str | None:
             pb = tuple(int(x) for x in str(b).strip().split("."))
         except ValueError:
             return 0
-        if pa < pb: return -1
-        if pa > pb: return 1
+        if pa < pb:
+            return -1
+        if pa > pb:
+            return 1
         return 0
 
     local_ver = str(local_data.get("version", ""))
@@ -188,7 +190,7 @@ def _check_version(root: Path, *, timeout: float = 5.0) -> str | None:
 
     lines = [f"⚠ 发现更新: {local_ver} → {remote_ver}"]
     lines.append(f"  更新板块: {', '.join(outdated)}")
-    lines.append(f"  运行 python update.py 更新")
+    lines.append("  运行 python update.py 更新")
     return "\n".join(lines)
 
 
@@ -258,7 +260,7 @@ def _check_users(root: Path) -> bool:
     print("=" * 50)
 
         # 如果 _template 存在，则请求用户名和引导程序。
-    template = root / "users" / "_template"
+    template = user_template_dir(root)
     if template.is_dir():
         try:
             name = input("请输入用户名: ").strip()
@@ -276,8 +278,8 @@ def _check_users(root: Path) -> bool:
             print(f"\n用户创建失败: {exc}")
             return False
     else:
-        print("用户模板 _template 不存在，无法自动创建用户。")
-        print(f"请先在 {root / 'users' / '_template'} 放置用户模板。")
+        print("用户模板不存在，无法自动创建用户。")
+        print(f"请先在 {template} 放置用户模板。")
         return False
 
 

@@ -78,7 +78,10 @@ def load_dotenv(path: Path, *, override: bool = False) -> None:
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    # This module lives at ``run/config/__init__.py``.  The project root is
+    # therefore two directory levels above ``run``; using ``parents[1]``
+    # would incorrectly return ``run/`` and hide version/config/user data.
+    return Path(__file__).resolve().parents[2]
 
 
 def read_json_object(path: Path, *, allow_empty: bool = False) -> dict[str, Any]:

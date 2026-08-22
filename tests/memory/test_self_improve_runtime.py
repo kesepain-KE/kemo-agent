@@ -17,7 +17,7 @@ from cron.scheduler import (
 from plugins.skill_creater.tool import run as run_skill_creater
 from run.agents import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore, normalize_memory_filename
-from tests.memory_db import update_fragment_metadata
+from tests.support.memory_db import update_fragment_metadata
 from run.memory import extract_compressed_round_memory
 
 

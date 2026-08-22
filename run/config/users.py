@@ -41,6 +41,25 @@ def list_users(root: Path) -> list[str]:
     )
 
 
+def user_template_dir(root: Path) -> Path:
+    """Return the canonical bundled user template directory.
+
+    ``template/user`` is the source-controlled template used by setup and
+    user creation.  The old ``users/_template`` location is accepted only as
+    a deployment compatibility fallback for installations created before the
+    template layout was normalized.
+    """
+
+    base = root.resolve()
+    canonical = base / "template" / "user"
+    if canonical.is_dir():
+        return canonical
+    legacy = base / "users" / "_template"
+    if legacy.is_dir():
+        return legacy
+    return canonical
+
+
 def ensure_user(user: str, root: Path) -> Path:
     name = validate_user_name(user)
     destination = root / "users" / name
@@ -48,7 +67,7 @@ def ensure_user(user: str, root: Path) -> Path:
         if not destination.is_dir():
             raise UserDataError(f"用户路径不是目录：{destination}")
         return destination
-    template = root / "users" / "_template"
+    template = user_template_dir(root)
     if not template.is_dir():
         raise UserDataError(f"用户模板不存在：{template}")
     shutil.copytree(template, destination)

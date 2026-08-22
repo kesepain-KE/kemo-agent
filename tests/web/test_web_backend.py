@@ -43,7 +43,7 @@ from run.history import (
 )
 from run.history import window_exists
 from run.memory import MemoryStore
-from tests.memory_db import update_fragment_metadata
+from tests.support.memory_db import update_fragment_metadata
 from run.config import PROMPT_SECTION_ORDER
 from run.extensions import clear_model_capability_cache
 from run.tasks import PlanStore, normalize_plan
