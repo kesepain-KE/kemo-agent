@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from cron.schedule import compute_next_run
@@ -47,6 +48,21 @@ _SENSITIVE_TASK_PLAN_KEYS = frozenset({
     "set-cookie",
     "token",
 })
+_TASK_PLAN_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?ix)\b(?:authorization|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
+    r"password|secret|cookie|private[_ -]?key|token)\b"
+    r"\s*(?:=|:|：|是)\s*[^\s,;\]}]{8,}"
+)
+_TASK_PLAN_BEARER_SECRET_RE = re.compile(
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
+)
+_TASK_PLAN_OPENAI_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}"
+)
+_TASK_PLAN_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _redact_plan_revision(value: Any) -> Any:
@@ -64,8 +80,15 @@ def _redact_plan_revision(value: Any) -> Any:
         return result
     if isinstance(value, list):
         return [_redact_plan_revision(item) for item in value]
-    if isinstance(value, str) and contains_sensitive_credential(value):
-        return _REDACTED_TASK_PLAN_VALUE
+    if isinstance(value, str):
+        if (
+            contains_sensitive_credential(value)
+            or _TASK_PLAN_SECRET_ASSIGNMENT_RE.search(value)
+            or _TASK_PLAN_BEARER_SECRET_RE.search(value)
+            or _TASK_PLAN_OPENAI_SECRET_RE.search(value)
+            or _TASK_PLAN_PRIVATE_KEY_RE.search(value)
+        ):
+            return _REDACTED_TASK_PLAN_VALUE
     return value
 
 
@@ -95,7 +118,7 @@ class TaskServiceMixin:
                 }
             )
         completed = sum(item["status"] in {"completed", "skipped"} for item in steps)
-        return {
+        summary = {
             "plan_id": str(plan.get("plan_id") or ""),
             "title": str(plan.get("title") or ""),
             "description": str(plan.get("description") or ""),
@@ -115,6 +138,10 @@ class TaskServiceMixin:
             },
             "steps": steps,
         }
+        # Plans are returned directly by the browser-facing /tasks endpoint.
+        # Redact both known credential keys and credential-like strings in
+        # legacy rows before they leave the service boundary.
+        return _redact_plan_revision(summary)
 
     @staticmethod
     def _cron_summary(task: dict[str, Any]) -> dict[str, Any]:
@@ -160,8 +187,8 @@ class TaskServiceMixin:
                         "title": step.get("title", ""),
                         "status": step.get("status", ""),
                         "updated_at": step.get("finished_at", ""),
-                        "result": step.get("result"),
-                        "error": step.get("error"),
+                        "result": _redact_plan_revision(step.get("result")),
+                        "error": _redact_plan_revision(step.get("error")),
                     }
                 )
         for task in crons:
@@ -174,7 +201,7 @@ class TaskServiceMixin:
                         "status": task.get("last_state", task.get("status", "")),
                         "updated_at": task.get("latest_run_at", ""),
                         "result": None,
-                        "error": task.get("last_error"),
+                        "error": _redact_plan_revision(task.get("last_error")),
                     }
                 )
         executions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -268,7 +295,13 @@ class TaskServiceMixin:
             self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
 
-    def edit_plan(self, user: Any, plan_id: Any, payload: Any) -> dict[str, Any]:
+    def edit_plan(
+        self,
+        user: Any,
+        plan_id: Any,
+        payload: Any,
+        session_id: Any,
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("计划修改必须是对象")
@@ -279,7 +312,7 @@ class TaskServiceMixin:
         }
         store = PlanStore(self.root, name)
         try:
-            current = store.read(str(plan_id))
+            current = self._require_plan_session(store, str(plan_id), session_id)
             config = load_config(name, self.root)
             auto_retry_on_fix = (
                 (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
@@ -319,13 +352,14 @@ class TaskServiceMixin:
         plan_id: Any,
         step_id: Any,
         payload: Any,
+        session_id: Any,
     ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("步骤重试参数必须是对象")
         store = PlanStore(self.root, name)
         try:
-            current = store.read(str(plan_id))
+            current = self._require_plan_session(store, str(plan_id), session_id)
             config = load_config(name, self.root)
             auto_retry_on_fix = (
                 (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
@@ -373,7 +407,10 @@ class TaskServiceMixin:
         normalized_plan_id = str(plan_id)
         try:
             self._require_plan_session(store, normalized_plan_id, session_id)
-            revisions = store.list_revisions(normalized_plan_id)
+            revisions = [
+                _redact_plan_revision(item)
+                for item in store.list_revisions(normalized_plan_id)
+            ]
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
         except InvalidRequestError:

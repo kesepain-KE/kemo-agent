@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 from pathlib import Path
 
 from ._utils import (
+    UpdateError,
     ask_choice,
     copy_file_safe,
     paths_differ,
+    redact_json,
     read_json,
     sync_directory,
     sync_directory_except,
@@ -23,11 +26,18 @@ MODULE_NAME = "core"
 DIRECTORIES = (
     "run",
     "provider",
-    "cron",
     "template",
     "tests",
     "update",
 )
+
+CRON_DIRECTORY = "cron"
+CRON_RUNTIME_DIRECTORY = "task_cron_system"
+CRON_RUNTIME_FIELDS = {
+    "next_run_at",
+    "latest_run_at",
+    "status",
+}
 
 RUNTIME_PRESERVING_DIRECTORIES = {
     "global_knowledge": ("kemo-graph-storage/",),
@@ -158,8 +168,18 @@ def _preserved_directory_differs(
 
 
 def _json_diff(source: Path, target: Path) -> str:
-    source_text = json.dumps(read_json(source), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
-    target_text = json.dumps(read_json(target), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+    source_text = json.dumps(
+        redact_json(read_json(source)),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ).splitlines()
+    target_text = json.dumps(
+        redact_json(read_json(target)),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ).splitlines()
     return "\n".join(
         difflib.unified_diff(
             target_text,
@@ -171,12 +191,27 @@ def _json_diff(source: Path, target: Path) -> str:
     )
 
 
+def _merge_remote_defaults(source: object, target: object) -> object:
+    """Add remote defaults recursively while preserving every local value."""
+
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return copy.deepcopy(target)
+    merged = copy.deepcopy(source)
+    for key, value in target.items():
+        if key in merged:
+            merged[key] = _merge_remote_defaults(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def _update_global_config(
     source_root: Path,
     target_root: Path,
     *,
     dry_run: bool,
     assume_yes: bool,
+    replace_global_config: bool,
 ) -> tuple[bool, str]:
     source = source_root / "config" / "global_config.json"
     target = target_root / "config" / "global_config.json"
@@ -202,25 +237,125 @@ def _update_global_config(
         print(yellow("差异字段："))
         print(f"  远程新增顶层字段: {', '.join(source_only) if source_only else '无'}")
         print(f"  本地独有顶层字段: {', '.join(target_only) if target_only else '无'}")
+        if not replace_global_config:
+            raise UpdateError(
+                "global_config.json schema 版本不同，无法安全自动合并。"
+                "本轮更新已停止；请先审查差异，或在确认可以丢弃本地全局配置后使用 "
+                "--replace-global-config。"
+            )
+
+    if replace_global_config:
+        changed = copy_file_safe(source, target, dry_run=dry_run)
+        return changed, "更新 config/global_config.json（已明确允许覆盖）"
 
     choice = ask_choice(
         "global_config.json 需要更新，请选择:",
-        {"o": "覆盖为最新版本", "k": "保留本地版本", "d": "显示完整差异"},
-        default="o",
+        {
+            "m": "合并远程新增默认值并保留本地值",
+            "o": "覆盖为最新版本",
+            "k": "完整保留本地版本",
+            "d": "显示完整差异",
+        },
+        default="m",
         assume_yes=assume_yes,
     )
     if choice == "d":
         print(_json_diff(source, target) or "文件内容无可显示差异")
         choice = ask_choice(
             "查看差异后请选择:",
-            {"o": "覆盖为最新版本", "k": "保留本地版本"},
-            default="o",
+            {
+                "m": "合并远程新增默认值并保留本地值",
+                "o": "覆盖为最新版本",
+                "k": "完整保留本地版本",
+            },
+            default="m",
             assume_yes=assume_yes,
         )
     if choice == "k":
         return False, "保留本地 config/global_config.json"
+    if choice == "m":
+        merged = _merge_remote_defaults(source_json, target_json)
+        if merged == target_json:
+            return False, "config/global_config.json 无需补充默认值"
+        if dry_run:
+            print("[dry-run]  合并  config/global_config.json")
+        else:
+            write_json_atomic(target, merged)
+        return True, "合并 config/global_config.json（保留本地值）"
     changed = copy_file_safe(source, target, dry_run=dry_run)
     return changed, "更新 config/global_config.json"
+
+
+def _sync_cron_directory(
+    source_root: Path,
+    target_root: Path,
+    *,
+    dry_run: bool,
+    details: list[str],
+    warnings: list[str],
+) -> bool:
+    """Update Cron code while preserving system task runtime state.
+
+    System task JSON files contain both a distributable definition and volatile
+    scheduler fields.  Existing files keep their local ``next_run_at``,
+    ``latest_run_at`` and ``status``; new source tasks are installed, and
+    local-only tasks are not deleted by a source release.
+    """
+
+    source = source_root / CRON_DIRECTORY
+    target = target_root / CRON_DIRECTORY
+    if not source.is_dir():
+        warnings.append("源缺少目录: cron/")
+        return False
+    changed = False
+    if not target.is_dir() or _preserved_directory_differs(
+        source, target, (f"{CRON_RUNTIME_DIRECTORY}/",)
+    ):
+        sync_directory(
+            source,
+            target,
+            delete=True,
+            excludes=(f"{CRON_RUNTIME_DIRECTORY}/",),
+            dry_run=dry_run,
+        )
+        changed = True
+
+    source_runtime = source / CRON_RUNTIME_DIRECTORY
+    target_runtime = target / CRON_RUNTIME_DIRECTORY
+    if not source_runtime.is_dir():
+        warnings.append("源缺少目录: cron/task_cron_system/")
+        return changed
+    if not dry_run:
+        target_runtime.mkdir(parents=True, exist_ok=True)
+    for source_file in sorted(source_runtime.glob("*.json")):
+        target_file = target_runtime / source_file.name
+        try:
+            source_data = read_json(source_file)
+            target_data = read_json(target_file) if target_file.is_file() else {}
+        except Exception as exc:
+            warnings.append(f"Cron 文件读取失败: {source_file}: {exc}")
+            continue
+        merged = dict(source_data)
+        for field in CRON_RUNTIME_FIELDS:
+            if field in target_data:
+                merged[field] = target_data[field]
+        if target_file.is_file():
+            try:
+                current_data = read_json(target_file)
+            except Exception:
+                current_data = None
+        else:
+            current_data = None
+        if current_data == merged:
+            continue
+        if dry_run:
+            print(f"[dry-run]  更新 Cron 定义并保留运行状态  {target_file}")
+        else:
+            write_json_atomic(target_file, merged)
+        changed = True
+    if changed:
+        details.append("更新 cron/（保留 task_cron_system 运行状态）")
+    return changed
 
 
 def _sync_directory_if_changed(
@@ -305,6 +440,10 @@ def _update_builtin_global_expand(
         warnings.append(f"源缺少文件: {relative}/expand.json")
     else:
         manifest = read_json(source_manifest)
+        # ``recent_update`` belongs to the deployment runtime, not the source
+        # release.  Ignore an accidentally committed source timestamp on a
+        # fresh install; an existing target value is copied below.
+        manifest.pop("recent_update", None)
         config_path = target / config_file
         active = config_path.is_file()
         try:
@@ -399,6 +538,7 @@ def update(
     *,
     dry_run: bool = False,
     assume_yes: bool = False,
+    replace_global_config: bool = False,
 ) -> dict:
     """Update core framework paths while preserving runtime-owned data."""
     details: list[str] = []
@@ -465,6 +605,14 @@ def update(
             warnings=warnings,
         )
 
+    changed |= _sync_cron_directory(
+        source_root,
+        target_root,
+        dry_run=dry_run,
+        details=details,
+        warnings=warnings,
+    )
+
     for relative, excludes in RUNTIME_PRESERVING_DIRECTORIES.items():
         source = source_root / relative
         if not source.is_dir():
@@ -505,6 +653,7 @@ def update(
         target_root,
         dry_run=dry_run,
         assume_yes=assume_yes,
+        replace_global_config=replace_global_config,
     )
     changed |= config_changed
     if config_detail.startswith("源缺少"):

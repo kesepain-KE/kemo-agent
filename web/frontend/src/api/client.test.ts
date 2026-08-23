@@ -4,12 +4,14 @@ import { server } from '../test/server'
 import {
   AVATAR_UPDATED_EVENT,
   commandPlan,
+  editPlan,
   getLogoUrl,
   getRuntimeStatus,
   getUserArtifactUrl,
   getUserAvatarUrl,
   getUserFileDownloadUrl,
   parseSseFrames,
+  retryPlanStep,
   submitGuidance,
   streamChat,
   uploadUserAvatar,
@@ -84,6 +86,27 @@ describe('parseSseFrames', () => {
   it('暂停计划使用无 revision 的状态指令接口', async () => {
     const result = await commandPlan('kesepain', 'plan_12345678', 'pause')
     expect(result).toMatchObject({ action: 'pause', updated: true, plan: { status: 'paused' } })
+  })
+
+  it('任务计划修正和重试请求携带对话空间身份', async () => {
+    let editQuery = ''
+    let retryQuery = ''
+    server.use(
+      http.patch('/api/users/kesepain/tasks/plans/plan_12345678/edit', ({ request }) => {
+        editQuery = new URL(request.url).search
+        return HttpResponse.json({ updated: true, plan: { plan_id: 'plan_12345678' } })
+      }),
+      http.post('/api/users/kesepain/tasks/plans/plan_12345678/steps/step_1/retry', ({ request }) => {
+        retryQuery = new URL(request.url).search
+        return HttpResponse.json({ updated: true, plan: { plan_id: 'plan_12345678' } })
+      }),
+    )
+
+    await editPlan('kesepain', 'plan_12345678', { revision: 2 }, 'conversation-a')
+    await retryPlanStep('kesepain', 'plan_12345678', 'step_1', 2, 'conversation-a')
+
+    expect(new URLSearchParams(editQuery).get('session_id')).toBe('conversation-a')
+    expect(new URLSearchParams(retryQuery).get('session_id')).toBe('conversation-a')
   })
 
   it('运行状态请求只携带当前栏目和摘要分区', async () => {

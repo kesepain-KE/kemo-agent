@@ -1,6 +1,6 @@
 # 版本号与更新模块功能分布
 
-本说明对应 `version.json`、`update.py` 和 `update/` 当前实现。更新器支持 Windows 与 Linux，按四个板块拉取远程 `main` 分支并更新本地文件。
+本说明对应 `version.json`、根目录 `update.py` 和 `update/` 包的当前实现。根目录 `update.py` 只是兼容入口；参数解析、版本检查、远程源码校验、板块调度、备份、互斥锁、恢复、依赖刷新和数据库初始化全部位于 `update/` 内。`python update.py` 与 `python -m update` 使用同一个实现。
 
 ## 版本结构
 
@@ -46,18 +46,24 @@
 
 ## 1.2.2
 
-`1.2.2` 是稳定性和维护更新，审计范围为 **2026 年 8 月 22 日**的 7 个 Git 提交，以及本次确认纳入的未提交修复。**2026 年 8 月 23 日目前没有 Git 提交**，不能把未来日期写成已发布历史。
+`1.2.2` 是稳定性和维护更新。审计范围包含 **2026 年 8 月 22 日至 2026 年 8 月 23 日**的改动；`18bb0c5` 的 Git 时间为 **2026 年 8 月 23 日 01:56:44（+08:00）**，按当前日期属于本次发布检查范围。
 
 本版做了这些事情：
 
 - 将 `run/` 按职责拆成领域包，删除旧的 `run.*` 平铺导入路径；外部插件必须迁移到新的入口。
 - 修复启动器的项目根目录判断和备用 Web 端口；本机 `kemo_app` 桥接跟随实际 Web 地址，桥接修复版本为 `1.1.5`。
 - 任务计划支持 edit、retry、reset、revision 和安全 rollback；保存任务计划前对明显凭据形态做脱敏。
+- 任务计划 Web edit/retry 必须携带计划所属 `session_id`；后端会拒绝跨对话空间修改。任务摘要、执行记录和 revision 列表在返回浏览器前再次递归脱敏，兼容清理旧数据库中的敏感内容。
 - Windows 桌面网页端支持每用户独立的运行结束音效；移动端不显示也不播放。
+- 结束音效只接受显式 `status=completed` 的最终 `done`；暂停、拒绝、停止、失败、取消、受限、缺失状态和长任务中间 Run 均不播放。
 - 发送附件后立即清除引用；运行中引导上传使用 `purpose=input`。
 - 增加包结构、项目路径、备用端口和用户模板合同测试。
+- 更新器改为单入口：根 `update.py` 只调用 `update.cli.main`，实际实现按职责拆分在 `update/`。
+- 更新器增加单实例锁、远程版本清单与克隆源码一致性校验、失败即停和源码自动恢复。
+- 全量更新检查根版本和四个组件版本，任何组件降级都会被拒绝；更新日志、Git 错误、板块详情和配置差异输出前统一脱敏。
+- core 更新保留 `cron/task_cron_system` 的本地调度状态；同 schema 的 `global_config.json` 只补远程新增默认值，不覆盖本地值，schema 不同时默认停止。
 
-发布前要区分两类检查：`tests/`、`tests/template_tests/` 和前端测试会进入 GitHub CI；`开发临时目录/test_kemo` 与 `开发临时目录/release_check.py` 被 `.gitignore` 排除，只是本机发布前补强检查。任务计划 revision 目前没有自动保留上限，长期高频修改会增加 SQLite 大小；运行态 JSON、`runtime/` 和用户目录不属于版本文件。
+2026 年 8 月 23 日检查时的 42 项未提交内容包含 9 项本机运行态变化，不能全部加入发布：5 个 `cron/task_cron_system/*.json`，以及 `kemo_app`、`kemo_gateway_status`、`kemo_graph` 的 4 个清单/采集文件。其余内容由更新器源码、Web 源码、测试、文档和忽略规则组成。发布前要区分两类检查：`tests/`、`tests/template_tests/` 和前端测试会进入 GitHub CI；`开发临时目录/test_kemo` 与 `开发临时目录/release_check.py` 被 `.gitignore` 排除，只是本机发布前补强检查。任务计划 revision 目前没有自动保留上限，长期高频修改会增加 SQLite 大小；运行态 JSON、`runtime/` 和用户目录不属于版本文件。
 
 ## 命令
 
@@ -68,6 +74,7 @@ python update.py --module agents
 python update.py --module plugins
 python update.py --module web
 python update.py --module all
+python -m update --check
 ```
 
 常用选项：
@@ -75,11 +82,12 @@ python update.py --module all
 | 选项 | 说明 |
 |------|------|
 | `--check` | 只比较版本，不修改文件 |
-| `--force` | 版本相同时仍重新安装 |
-| `--yes` / `-y` | 使用默认答案处理确认提示 |
+| `--force` | 版本相同时仍重新安装；不能用于降级 |
+| `--yes` / `-y` | 确认更新；全局配置仍按安全默认策略处理 |
 | `--dry-run` | 展示将执行的操作，不写文件 |
-| `--skip-web-build` | 更新 Web 后不执行前端构建 |
-| `--skip-deps` | 更新 core 后不刷新 Python 依赖 |
+| `--skip-web-build` | 仅用于 `--dry-run` 预览；正式更新不允许跳过 Web 构建 |
+| `--skip-deps` | 仅用于 `--dry-run` 预览；正式更新不允许跳过 Python 依赖刷新 |
+| `--replace-global-config` | 明确允许覆盖本地 `global_config.json`；默认不覆盖 |
 | `--repo-url` / `--branch` | 覆盖远程仓库和分支 |
 
 ## 全量流程
@@ -87,18 +95,21 @@ python update.py --module all
 ```text
 读取本地/远程 version.json
   → 校验根版本与四个组件版本
+  → 拒绝根版本或任一所选组件降级
   → 用户确认
-  → 浅克隆远程仓库
-  → 创建本地备份
+  → 浅克隆远程仓库并校验克隆中的 version.json 与检查结果完全一致
+  → 取得全局更新锁并写入维护标记
+  → 创建可恢复的源码备份
   → 从克隆源码加载最新 update/ 板块实现
-  → 按 core → agents → plugins → web 执行选中板块
-  → core：补齐用户骨架，初始化记忆库，并事务迁移任务计划、消息幂等、上下文摘要和路由状态，再刷新 pip 依赖
-  → web：npm install + npm run build
+  → 按 core → agents → plugins → web 执行选中板块；首个 failed/partial 立即停止
+  → web：有 lockfile 时 npm ci，否则 npm install；随后 npm run build
+  → core：刷新 pip 依赖
+  → core：前面的源码、构建和依赖步骤成功后，再补齐用户骨架并初始化记忆、任务计划、消息幂等和运行日志数据库
   → 全部成功后原子提交 version.json
-  → 输出逐板块汇总
+  → 输出逐板块汇总并释放更新锁
 ```
 
-任一板块返回 `failed` 或 `partial` 时，本轮更新结束为失败，保留旧版本号并显示更新前备份位置。已经复制的代码不会被自动回滚，可在排除问题后直接重新执行更新，或使用备份手动恢复。
+任一板块、迁移、前端构建、依赖刷新或版本提交失败时，本轮立即停止，保留旧版本号，并使用更新前备份自动恢复受版本管理的源码路径。`users/`、运行时数据库、Cron 运行状态、本地拓展凭据和采集数据不会因恢复而被覆盖；内置拓展的 `expand.json`、`input_data.md` 等运行状态也按部署机状态前向保留，失败后不保证回滚到旧采集快照。数据库迁移仍是向前操作，因此生产环境仍应独立备份用户数据。
 
 ## core — 核心与公共资源
 
@@ -110,7 +121,7 @@ python update.py --module all
 |------|------|
 | `run/` | 对话、历史、Prompt、记忆、工具与运行时核心 |
 | `provider/` | Chat/Kemo Provider、协议适配与多模态 Asset 客户端 |
-| `cron/` | 定时任务执行和调度 |
+| `cron/` | 定时任务执行和调度代码；`task_cron_system/` 使用合并更新 |
 | `template/` | 各类创建模板 |
 | `tests/` | 后端测试 |
 | `global_knowledge/` | 全局知识库文档 |
@@ -127,10 +138,11 @@ python update.py --module all
 ### 特殊处理
 
 - `message/` 同步框架消息路由代码，但保留本地 `message/out/` 平台模块和运行数据。
-- `config/global_config.json` 内容不同时询问覆盖、保留或查看差异；schema 不同时额外显示顶层字段差异。
+- `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
+- `config/global_config.json` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。
 - 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
 - `global_expand/kemo_gateway_status/` 是内置例外：core 会同步其静态代码和说明，同时保留部署机的本地凭据、状态摘要、脱敏快照、图表和运行状态；存在本地配置时继续保持激活。
-- core 完成后补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。初始化失败时版本号不提交；更新器不扫描或导入其他存储格式。全部完成后才执行 `pip install -r requirements.txt`（除非跳过）。
+- core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。
 
 ## agents — 内置子智能体
 
@@ -159,7 +171,7 @@ python update.py --module all
 
 同步范围包括 Web 应用装配、兼容服务门面、`web/routes/` 路由层、`web/services/` 领域服务层，以及 `web/schemas.py`、`web/errors.py`、`web/constants.py` 等公共契约文件。新增的分层目录会随 web 板块递归安装，不需要在部署机手动创建。
 
-同步完成后默认在 `web/frontend/` 执行 `npm install` 和 `npm run build`。由于 Git 仓库不跟踪 `dist/`，没有 npm 时不能把旧构建产物视为更新成功；更新器会保留旧版本号并提示安装 Node.js。
+同步完成后默认在 `web/frontend/` 执行确定性安装：存在 `package-lock.json` 时使用 `npm ci`，否则使用 `npm install`，随后执行 `npm run build`。由于 Git 仓库不跟踪 `dist/`，没有 npm 时不能把旧构建产物视为更新成功；更新器会自动恢复源码并保留旧版本号。
 
 从 `0.1.x` 首次升级到 `0.2.x` 时，旧 core 清单尚不知道 `provider/` 和 `README_EN.md`。旧调度器默认执行全量更新时，会在 core 刷新更新模块后，由新版 web 板块补齐这两项兼容迁移，因此不需要再次使用 `--force` 更新。`0.2.x` 新调度器会显式关闭该桥接，单独更新 web 时不会越界修改 core。
 
@@ -167,7 +179,7 @@ python update.py --module all
 
 - 全量更新：所有步骤成功后写入远程完整版本文档，包括根版本和四个组件版本。
 - 单板块更新：只推进对应 `components.<module>.version`，根版本及其他组件保持不变。
-- `failed`、`partial`、依赖安装失败、Web 构建失败或版本写入失败：不提交新版本号。
+- `failed`、`partial`、用户骨架/数据库初始化失败、依赖安装失败、Web 构建失败或版本写入失败：不提交新版本号，并尝试自动恢复版本管理的源码路径。
 - 使用同目录临时文件并通过原子替换写入，避免中断时留下半个 JSON 文件。
 
 ## 当前未纳入板块自动同步的路径
@@ -184,7 +196,7 @@ python update.py --module all
 
 ## 备份规则
 
-更新前在 `.backups/update-<时间>/` 创建备份，默认只保留最近 2 份。备份排除：`.git/`、虚拟环境、旧备份、`users/`、`tmp/`、依赖目录、构建产物和 Python 缓存。
+正式更新前在 `.backups/update-<时间>-<高精度后缀>/` 创建备份，成功完成后默认只保留最近 2 份。失败更新不会先删除旧备份。备份排除：`.git/`、虚拟环境、旧备份、`users/`、`runtime/`、`tmp/`、`message/out/`、Cron 运行状态、本地拓展凭据/采集数据、依赖目录和 Python 缓存。前端构建产物会纳入恢复范围，避免失败后只剩新源码配旧页面。
 
 `users/` 不进入更新器备份并不表示它不重要；生产使用者必须建立独立的用户数据备份。
 
@@ -195,3 +207,4 @@ python update.py --module all
 3. 先运行 `--check`，重大更新再运行 `--dry-run`。
 4. 查看 `global_config.json` 差异，不盲目覆盖本地运行参数。
 5. 更新后运行后端测试、前端测试和生产构建，并重启 RuntimeHost。
+6. 暂存前检查 `git status --short`，排除 Cron 时间、拓展 `recent_update`、本地激活状态和采集正文。

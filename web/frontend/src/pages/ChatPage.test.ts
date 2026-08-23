@@ -85,8 +85,12 @@ describe('reduceRunEvent', () => {
     const uploadedDuringRun = { path: 'next.zip', name: 'next.zip', size: 24 }
     expect(removeSubmittedUploads([sent, uploadedDuringRun], [sent])).toEqual([uploadedDuringRun])
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed' } })).toBe(true)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'limited' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'cancelled' } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'paused' } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'rejected' } })).toBe(false)
+    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'stopped' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: false } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: true } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)

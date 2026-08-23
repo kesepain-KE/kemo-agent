@@ -31,6 +31,8 @@ runtime/
 *.bak
 *.tmp
 .backups/
+.update.lock
+.update.maintenance
 tmp_unstage_obsidian.txt
 tmp/*
 !tmp/.gitkeep

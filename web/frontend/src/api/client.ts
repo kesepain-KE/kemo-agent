@@ -412,8 +412,10 @@ export async function editPlan(
   user: string,
   planId: string,
   changes: Record<string, unknown>,
+  sessionId: string,
 ): Promise<PlanMutationResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/edit`, {
+  const query = new URLSearchParams({ session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/edit?${query.toString()}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
   })
 }
@@ -423,8 +425,10 @@ export async function retryPlanStep(
   planId: string,
   stepId: string,
   revision: number,
+  sessionId: string,
 ): Promise<PlanMutationResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}/retry`, {
+  const query = new URLSearchParams({ session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}/retry?${query.toString()}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
   })
 }

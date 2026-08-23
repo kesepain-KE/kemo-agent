@@ -13,6 +13,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +21,141 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class UpdateError(RuntimeError):
     """Raised for expected updater failures that should be shown to users."""
+
+
+_DISPLAY_SENSITIVE_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "access_token",
+        "authorization",
+        "cookie",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "session_secret",
+        "token",
+        "credential",
+        "credentials",
+    }
+)
+_DISPLAY_SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,})\b"
+)
+_DISPLAY_PRIVATE_KEY_RE = re.compile(
+    r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
+    r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
+_DISPLAY_BEARER_RE = re.compile(
+    r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{8,}"
+)
+_DISPLAY_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:api[_ -]?(?:key|token)|access[_ -]?token|refresh[_ -]?token|"
+    r"device[_ -]?token|bot[_ -]?token|authorization|cookie|password|"
+    r"private[_ -]?key|client[_ -]?secret|secret|token)\b"
+    r"\s*(?:=|:|：)\s*)[^\s,;]+"
+)
+_DISPLAY_URL_RE = re.compile(r"(?i)\bhttps?://[^\s'\"<>]+")
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).casefold()).strip("_")
+    if normalized in _DISPLAY_SENSITIVE_KEYS:
+        return True
+    return normalized.endswith(
+        ("_token", "_secret", "_password", "_credential", "_credentials", "_key")
+    )
+
+
+def _redact_command_arg(value: object) -> str:
+    """Render one command argument without exposing URL credentials or tokens."""
+
+    text = str(value)
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.scheme and parsed.netloc:
+        try:
+            hostname = parsed.hostname or ""
+            if ":" in hostname and not hostname.startswith("["):
+                hostname = f"[{hostname}]"
+            hostport = hostname
+            if parsed.port is not None:
+                hostport = f"{hostport}:{parsed.port}"
+            netloc = (
+                f"***@{hostport}"
+                if (parsed.username or parsed.password)
+                else parsed.netloc
+            )
+            query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+            if query_pairs:
+                query_pairs = [
+                    (
+                        key,
+                        "***"
+                        if _is_sensitive_key(key)
+                        else item,
+                    )
+                    for key, item in query_pairs
+                ]
+                query = urlencode(query_pairs)
+            else:
+                query = parsed.query
+            text = urlunsplit(
+                (parsed.scheme, netloc, parsed.path, query, parsed.fragment)
+            )
+        except ValueError:
+            # Invalid ports/URL syntax are still safe to render after the
+            # assignment and Bearer passes below.
+            pass
+    text = _DISPLAY_BEARER_RE.sub(r"\1***", text)
+    text = _DISPLAY_ASSIGNMENT_RE.sub(r"\1***", text)
+    text = _DISPLAY_SECRET_VALUE_RE.sub("***", text)
+    text = _DISPLAY_PRIVATE_KEY_RE.sub("***", text)
+    return text
+
+
+def redact_text(value: object) -> str:
+    """Redact credential-shaped values embedded in arbitrary diagnostics."""
+
+    text = str(value)
+    text = _DISPLAY_URL_RE.sub(
+        lambda match: _redact_command_arg(match.group(0)),
+        text,
+    )
+    text = _DISPLAY_BEARER_RE.sub(r"\1***", text)
+    text = _DISPLAY_ASSIGNMENT_RE.sub(r"\1***", text)
+    text = _DISPLAY_SECRET_VALUE_RE.sub("***", text)
+    text = _DISPLAY_PRIVATE_KEY_RE.sub("***", text)
+    return text
+
+
+def redact_json(value: object, *, key: str | None = None) -> object:
+    """Return a JSON-compatible copy with credential-shaped fields masked."""
+
+    if key is not None and _is_sensitive_key(key):
+        return "***"
+    if isinstance(value, dict):
+        return {
+            str(item_key): redact_json(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_json(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def format_command(command: Iterable[object]) -> str:
+    """Format a command for logs while redacting credential-shaped values."""
+
+    return " ".join(_redact_command_arg(item) for item in command)
 
 
 def green(text: str) -> str:
@@ -79,7 +215,7 @@ def run(
     dry_run: bool = False,
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
-    print("+ " + " ".join(cmd))
+    print("+ " + format_command(cmd))
     if dry_run and not capture:
         return subprocess.CompletedProcess(cmd, 0, "", "")
     kwargs: dict = {"text": True}
@@ -148,9 +284,12 @@ def fetch_json(url: str) -> dict:
         with urllib.request.urlopen(request, timeout=30) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError) as exc:
-        raise UpdateError(f"无法读取远程版本文件 {url}: {exc}") from exc
+        raise UpdateError(
+            f"无法读取远程版本文件 {_redact_command_arg(url)}: "
+            f"{redact_text(exc)}"
+        ) from exc
     if not isinstance(data, dict):
-        raise UpdateError(f"远程 JSON 不是对象: {url}")
+        raise UpdateError(f"远程 JSON 不是对象: {_redact_command_arg(url)}")
     return data
 
 

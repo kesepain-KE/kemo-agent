@@ -140,7 +140,7 @@ Web 历史列表按当前用户统一读取 `web`、`app`、`cli` 与 `message:<
 | Web 外观偏好 | `users/<name>/web_preferences.json` | Web UI 主题与字号等外观偏好 |
 | Web 服务 | `web/` | 前端（React + Vite）+ 后端（FastAPI），开发服务器默认 `:5173` |
 | 全局版本 | `version.json` | 5 组版本号（core/agents/plugins/web/all），启动时展示 |
-| 更新系统 | `update.py` + `update/` | 8 板块覆盖策略，版本对比，远程拉取 |
+| 更新系统 | `update.py` + `update/` | 根文件为薄入口；`update/` 内聚四板块调度、校验、备份、互斥和失败恢复 |
 | CLI 入口 | `cli.py` | 纯命令行交互，用户选择 → 对话 |
 | 重启模块 | `restart.py` | Web 端触发，保持端口不变 |
 | 环境安装 | `setup.py` / `requirements.txt` | 依赖安装与环境初始化 |

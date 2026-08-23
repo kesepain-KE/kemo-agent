@@ -3556,10 +3556,24 @@ class WebBackendTests(unittest.TestCase):
             wake_count += 1
 
         app = create_app(service=WebRunService(root, plan_waker=wake))
+        wrong_session_edit = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit?session_id=s2",
+            json={"revision": plan["revision"], "description": "跨空间修改"},
+        )
+        self.assertEqual(wrong_session_edit.status_code, 400, wrong_session_edit.text)
+        wrong_session_retry = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_2/retry?session_id=s2",
+            json={"revision": plan["revision"]},
+        )
+        self.assertEqual(wrong_session_retry.status_code, 400, wrong_session_retry.text)
         edited = self.request(
             app,
             "PATCH",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit?session_id=s1",
             json={
                 "revision": plan["revision"],
                 "title": "已修正计划",
@@ -3582,7 +3596,7 @@ class WebBackendTests(unittest.TestCase):
         stale = self.request(
             app,
             "PATCH",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit?session_id=s1",
             json={"revision": plan["revision"], "description": "陈旧修改"},
         )
         self.assertEqual(stale.status_code, 409, stale.text)
@@ -3590,7 +3604,7 @@ class WebBackendTests(unittest.TestCase):
         protected = self.request(
             app,
             "PATCH",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit?session_id=s1",
             json={
                 "revision": edited_plan["revision"],
                 "steps": [{"step_id": "step_1", "critical": False}],
@@ -3601,7 +3615,7 @@ class WebBackendTests(unittest.TestCase):
         retried = self.request(
             app,
             "POST",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_2/retry",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_2/retry?session_id=s1",
             json={"revision": edited_plan["revision"]},
         )
         self.assertEqual(retried.status_code, 200, retried.text)
@@ -3652,7 +3666,7 @@ class WebBackendTests(unittest.TestCase):
         response = self.request(
             app,
             "POST",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_1/retry",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/steps/step_1/retry?session_id=s1",
             json={"revision": plan["revision"]},
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -3679,7 +3693,7 @@ class WebBackendTests(unittest.TestCase):
         edited = self.request(
             app,
             "PATCH",
-            f"/api/users/alice/tasks/plans/{edit_plan['plan_id']}/edit",
+            f"/api/users/alice/tasks/plans/{edit_plan['plan_id']}/edit?session_id=s1",
             json={"revision": edit_plan["revision"], "description": "已修正"},
         )
         self.assertEqual(edited.status_code, 200, edited.text)
@@ -3746,7 +3760,7 @@ class WebBackendTests(unittest.TestCase):
             "authorization": "Bearer example-sensitive-value",
             "command": "safe-command",
         }
-        secret_revision["steps"][0]["result"] = "token: example-sensitive-value"
+        secret_revision["steps"][0]["result"] = "Bearer example-sensitive-value"
         database = sqlite3.connect(store.path)
         try:
             database.execute(
@@ -3769,7 +3783,7 @@ class WebBackendTests(unittest.TestCase):
                 """
                 INSERT INTO task_plan_revisions(
                     plan_id, revision, plan_json, note, created_at
-                ) VALUES(?, 3, ?, '旧版敏感快照', ?)
+                ) VALUES(?, 3, ?, 'token=old-sensitive', ?)
                 """,
                 (
                     plan["plan_id"],
@@ -3790,6 +3804,21 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(secret_step["tool_arguments"]["authorization"], "***")
         self.assertEqual(secret_step["tool_arguments"]["command"], "safe-command")
         self.assertEqual(secret_step["result"], "***")
+
+        listed_secret = self.request(
+            app,
+            "GET",
+            f"{base}/revisions?session_id=conversation-a",
+        )
+        self.assertEqual(listed_secret.status_code, 200, listed_secret.text)
+        self.assertEqual(listed_secret.json()["revisions"][0]["note"], "***")
+
+        tasks = self.request(app, "GET", "/api/users/alice/tasks")
+        self.assertEqual(tasks.status_code, 200, tasks.text)
+        self.assertNotIn("example-sensitive-value", tasks.text)
+        task_step = tasks.json()["plans"][0]["steps"][0]
+        self.assertEqual(task_step["tool_arguments"]["authorization"], "***")
+        self.assertEqual(task_step["result"], "***")
 
         rolled_back = self.request(
             app,

@@ -94,8 +94,8 @@ function pendingInputAttachment(file: PendingUploadedFile): InputAttachment {
 export function isSuccessfulRunCompletion(event: RunEvent) {
   if (event.type !== 'done' || event.metadata?.committed === false) return false
   if (event.metadata?.long_task === true && event.metadata?.terminal === false) return false
-  const status = String(event.metadata?.status || 'completed').toLowerCase()
-  return !['cancelled', 'failed', 'error', 'limited'].includes(status)
+  const status = String(event.metadata?.status || '').toLowerCase()
+  return status === 'completed'
 }
 
 function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
@@ -1881,7 +1881,7 @@ export function ChatPage() {
 
   const retryFailedPlanStep = async (plan: PlanSummary, stepId: string) => {
     try {
-      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision)
+      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision, plan.session_id)
       const updated = extractPlanSummary(response.plan)
       if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
       setPlanMutationNotices((current) => ({

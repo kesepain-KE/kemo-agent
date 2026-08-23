@@ -189,7 +189,7 @@ export function TasksPage() {
         title,
         description,
         ...(steps ? { steps } : {}),
-      })
+      }, plan.session_id)
       setPlanMutationFeedback(response.activated
         ? '计划已修正并自动恢复执行。'
         : response.reason === 'fix_incomplete'
@@ -202,7 +202,7 @@ export function TasksPage() {
   }
   const retryStep = async (plan: PlanSummary, stepId: string) => {
     try {
-      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision)
+      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision, plan.session_id)
       setPlanMutationFeedback(response.activated
         ? '失败步骤已重置，计划已自动恢复执行。'
         : response.reason === 'fix_incomplete'

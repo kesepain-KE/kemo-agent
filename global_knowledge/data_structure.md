@@ -21,7 +21,7 @@ kemo-agent/
 ├── shared_knowledge/       # 共享知识库
 ├── users/<name>/           # 用户配置、人格、历史、记忆和私有资源
 ├── template/               # 用户、子智能体、技能、拓展等创建模板
-├── update/                 # 分板块更新实现
+├── update/                 # 更新调度、版本校验、备份、锁、恢复与四板块实现
 ├── tests/                  # 后端测试
 ├── config/                 # 全局配置与全局人格
 ├── runtime/                # 结构化运行日志 SQLite（自动生成，不入 Git）
@@ -30,7 +30,7 @@ kemo-agent/
 ├── .env / .env.example     # 本机环境变量与无密钥示例
 ├── cli.py / start_web.py   # CLI 与 Web 启动入口
 ├── user_create.py          # 用户创建入口
-├── update.py               # 更新入口
+├── update.py               # 薄更新入口，调用 update.cli.main
 ├── version.json            # 总版本与板块版本
 └── LICENSE                 # Apache License 2.0 正文
 ```
@@ -85,6 +85,7 @@ kemo-agent/
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
 | `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
+| `release-1.2.2-stability.md` | 1.2.2 稳定性规则、42 项工作区分类、导入迁移和发布前检查 |
 | `env-reference.md` | `.env` 参数、优先级与安全要求 |
 | `global-config-reference.md` | `config/global_config.json` 全字段 |
 | `user-config-reference.md` | `users/<name>/user_config.json` 全字段 |

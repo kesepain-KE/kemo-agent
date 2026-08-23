@@ -2,7 +2,9 @@
 
 任务计划用于需要多个可验证步骤、依赖关系和中途控制的复杂任务。权威数据位于 `users/<user>/task_plan/task_plans.sqlite3`，由 `PlanStore` 管理；模板 JSON 只用于说明输入结构。
 
-简单的一次性操作不应创建计划。计划创建和编辑必须走 `task_plan` 子智能体；`task_plan` 工具只管理查看、批准、步骤结果、暂停、恢复和取消。
+简单的一次性操作不应创建计划。计划创建和复杂重编排必须走 `task_plan` 子智能体；运行中的
+`task_plan` 工具还可以查看、列出、修正计划、重试或重置失败步骤、记录步骤结果、批准、暂停、
+恢复和取消。所有修改都经过 `PlanStore` 的 revision 校验，不能直接改 SQLite。
 
 ## 创建流程
 
@@ -113,6 +115,19 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 
 ## 编辑与并发
 
-只允许编辑 `pending`、`approved` 或 `paused` 计划。每次更新都会增加 `revision`；界面保存前必须基于最新版本，收到“计划版本已变化”时重新读取并合并，而不是强制覆盖。运行结束或启动恢复时，未完成的运行步骤会回收到安全状态。
+只允许编辑 `pending`、`approved`、`paused` 或等待修正的 `failed` 计划；`running`、`completed` 和
+`cancelled` 计划不能编辑。`retry_step`/`reset_step` 只能处理 `failed` 或 `cancelled` 步骤，已完成
+步骤永远不能修改、删除或重置。每次更新都会增加 `revision`；界面保存前必须基于最新版本，收到
+“计划版本已变化”时重新读取并合并，而不是强制覆盖。`retry_step` 可以把暂停计划恢复为
+`approved`；`reset_step` 只清理步骤，不改变计划状态。若 `auto_accept=true` 或用户配置
+`task_plan.auto_retry_on_fix=true`，修正后才会自动等待执行器领取，否则仍需用户批准。运行结束或启动恢复时，
+未完成的运行步骤会回收到安全状态。
+
+网页任务计划的 edit/retry 请求必须带当前计划的 `session_id`。后端会拒绝用其他对话空间的
+`session_id` 修改或重试计划；任务总览可以跨来源只读查看，但不能借此改变计划归属。
+
+任务总览、执行记录和 revision 列表属于浏览器输出边界。服务层会对旧数据库中的工具参数、结果、
+错误和修订备注再次递归脱敏；Authorization、API Key、访问 Token、Bearer、`sk-` 密钥和私钥块
+不能通过只读接口返回。这个输出脱敏是持久化前校验的第二道保护，不能用来允许新计划保存凭据。
 
 数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`，并用 `task_plan_revisions` 保存不可改写的修订历史。大型参数、结果和错误通过 `task_plan_revision_blobs` 按计划内 SHA-256 去重，读取时透明还原；旧版明文 JSON 和压缩快照继续兼容。创建、修改、revision 与大型字段引用在同一事务提交，任一步失败都会整体回滚。启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。

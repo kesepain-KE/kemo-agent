@@ -31,8 +31,9 @@ def register_task_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         plan_id: str,
         body: dict[str, Any],
+        session_id: str = "",
     ) -> dict[str, Any]:
-        return backend.edit_plan(user, plan_id, body)
+        return backend.edit_plan(user, plan_id, body, session_id)
 
     @app.post("/api/users/{user}/tasks/plans/{plan_id}/steps/{step_id}/retry")
     async def retry_plan_step(
@@ -40,8 +41,9 @@ def register_task_routes(app: FastAPI, backend: WebRunService) -> None:
         plan_id: str,
         step_id: str,
         body: dict[str, Any],
+        session_id: str = "",
     ) -> dict[str, Any]:
-        return backend.retry_plan_step(user, plan_id, step_id, body)
+        return backend.retry_plan_step(user, plan_id, step_id, body, session_id)
 
     @app.get("/api/users/{user}/tasks/plans/{plan_id}/revisions")
     async def list_plan_revisions(

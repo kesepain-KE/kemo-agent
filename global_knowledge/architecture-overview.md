@@ -305,8 +305,12 @@ web/app.py
 
 ## 更新与重启
 
-`update.py` 按 core、agents、plugins、web 等板块执行更新，并保护用户数据、运行时数据库、配置
-和模块派生存储。详细边界见 `version-and-update-modules.md`。
+根目录 `update.py` 只保留兼容启动，实际更新逻辑位于 `update/` 包，并按 core、agents、plugins、
+web 四个板块执行。更新器在写入前取得单实例锁、校验远程清单与克隆源码一致，失败时停止后续
+板块并恢复版本管理的源码路径。用户数据、Cron 运行状态、本地配置和模块派生存储使用专门保护
+规则。`update.cli` 是唯一编排入口；版本、远程源码、调度、备份、锁、事务、构建和迁移分别由
+独立模块负责。全量更新拒绝任一组件降级，所有更新日志和配置差异在显示前脱敏。详细边界见
+`version-and-update-modules.md`。
 
 Web 重启由受保护接口启动 `restart.py` 辅助进程：等待旧进程退出后，以兼容启动参数重新拉起
 `start_web.py`。`.env` 在新进程启动时重新加载。
