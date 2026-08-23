@@ -1065,6 +1065,7 @@ def run(*, context):
         self.assertLess(len(continuation["content"]), 2_000)
         self.assertIsNotNone(provider.requests[1].tools)
         self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["status"], "completed")
 
         window_path = find_window(
             root,

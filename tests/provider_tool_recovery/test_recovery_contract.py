@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -116,10 +117,11 @@ def _history_summary_input() -> dict:
 
 
 def test_native_parse_error_is_normalized_before_tool_execution() -> None:
+    raw_arguments = '{"api_key":"sk-provider-secret-value'
     response = _response_with_tool(
         arguments={},
-        arguments_raw='{"title":"unfinished',
-        parse_error={"message": "Unterminated string"},
+        arguments_raw=raw_arguments,
+        parse_error={"message": "Unterminated sk-provider-secret-value"},
     )
 
     error = response_invalid_tool_arguments_error(response)
@@ -127,7 +129,16 @@ def test_native_parse_error_is_normalized_before_tool_execution() -> None:
     assert error is not None
     assert error["stop_reason"] == "invalid_tool_arguments"
     assert error["tool_name"] == "submit_structured_output"
-    assert error["arguments_raw"] == '{"title":"unfinished'
+    assert "arguments_raw" not in error
+    assert error["arguments_diagnostic"] == {
+        "available": True,
+        "length": len(raw_arguments),
+        "content_omitted": True,
+        "json_root_expected": "object",
+    }
+    assert error["parse_error"]["message"] == "工具参数 JSON 解析失败"
+    serialized = json.dumps(error, ensure_ascii=False)
+    assert "sk-provider-secret-value" not in serialized
 
 
 def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
@@ -138,11 +149,13 @@ def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
         output=[],
         incomplete_details={
             "reason": "invalid_tool_arguments",
+            "debug": {"authorization": "Bearer gateway-secret"},
             "invalid_tool_calls": [
                 {
                     "name": "subagent_dispatch",
                     "call_id": "call-subagent",
-                    "arguments_raw": "{",
+                    "arguments_raw": '{"password":"gateway-secret',
+                    "parse_error": {"message": "gateway-secret"},
                 }
             ],
         },
@@ -155,6 +168,37 @@ def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
     assert error["stop_reason"] == "invalid_tool_arguments"
     assert error["tool_name"] == "subagent_dispatch"
     assert "subagent_dispatch" in error["message"]
+    serialized = json.dumps(error, ensure_ascii=False)
+    assert "gateway-secret" not in serialized
+    assert "arguments_raw" not in serialized
+    assert "debug" not in error["incomplete_details"]
+
+
+def test_malformed_tool_identifier_cannot_bypass_diagnostic_redaction() -> None:
+    response = KemoResponse(
+        request_id="placeholder",
+        status=ResponseStatus.REQUIRES_ACTION,
+        model="mock",
+        output=[
+            ToolCallItem(
+                id="tool-item",
+                call_id="call\nBearer identifier-secret",
+                name="lookup\npassword=identifier-secret",
+                arguments={},
+                arguments_raw="{",
+                parse_error={"message": "invalid"},
+            )
+        ],
+        usage=_usage(),
+    )
+
+    error = response_invalid_tool_arguments_error(response)
+
+    assert error is not None
+    serialized = json.dumps(error, ensure_ascii=False)
+    assert "identifier-secret" not in serialized
+    assert error["tool_name"] == "unknown_tool"
+    assert error["call_id"] == ""
 
 
 def test_subagent_retries_malformed_structured_tool_arguments() -> None:

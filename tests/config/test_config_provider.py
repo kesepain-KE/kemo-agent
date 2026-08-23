@@ -532,6 +532,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(calls[0].call_id, "call-1")
         self.assertEqual(calls[0].name, "history_search")
         self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
+        self.assertIsNone(calls[0].arguments_raw)
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_truncated_chat_tool_arguments_are_never_published(self) -> None:
@@ -539,6 +540,9 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         response = provider.create(self.request("truncated-tool"))
         self.assertEqual(response.status, ResponseStatus.INCOMPLETE)
         self.assertEqual(response.incomplete_details["reason"], "output_truncated")
+        response_details = json.dumps(response.incomplete_details, ensure_ascii=False)
+        self.assertNotIn("arguments_raw", response_details)
+        self.assertNotIn('{"query":"unfinished', response_details)
         self.assertFalse(
             any(isinstance(item, ToolCallItem) for item in response.output)
         )
@@ -558,6 +562,17 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             )
         )
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
+        stream_details = json.dumps(
+            events[-1].response.incomplete_details,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("arguments_raw", stream_details)
+        self.assertNotIn('{"query":"unfinished', stream_details)
+        self.assertTrue(
+            events[-1].response.incomplete_details["invalid_tool_calls"][0][
+                "arguments_diagnostic"
+            ]["content_omitted"]
+        )
 
     def test_clean_eof_after_finish_reason_is_accepted(self) -> None:
         provider = create_provider(self.config("chat", model="eof-with-finish"))

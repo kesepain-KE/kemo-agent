@@ -20,6 +20,7 @@ from provider.adapters.compat import (
     kemo_response_to_chat,
 )
 from provider.adapters.gateway import KemoGatewayAdapter
+from provider.protocol.diagnostics import sanitize_provider_diagnostic
 from provider.protocol.enums import (
     MessagePhase,
     MessageRole,
@@ -333,6 +334,17 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
         self.assertEqual(converted.incomplete_details["reason"], "output_truncated")
         self.assertEqual(converted.incomplete_details["finish_reason"], "length")
+        serialized_details = json.dumps(
+            converted.incomplete_details,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("arguments_raw", serialized_details)
+        self.assertNotIn('{"query":"unfinished', serialized_details)
+        self.assertTrue(
+            converted.incomplete_details["invalid_tool_calls"][0][
+                "arguments_diagnostic"
+            ]["content_omitted"]
+        )
         self.assertFalse(
             any(isinstance(item, ToolCallItem) for item in converted.output)
         )
@@ -390,8 +402,8 @@ class UnifiedProtocolTests(unittest.TestCase):
                     call_id="call_bad",
                     name="history_search",
                     arguments={},
-                    arguments_raw='{"query":"unfinished',
-                    parse_error={"message": "Unterminated string"},
+                    arguments_raw='{"authorization":"Bearer provider-secret',
+                    parse_error={"message": "provider-secret"},
                 )
             ],
         )
@@ -402,6 +414,54 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(
             events[0].error["exception_type"], "ProviderToolArgumentsError"
         )
+        serialized_error = json.dumps(events[0].error, ensure_ascii=False)
+        self.assertNotIn("provider-secret", serialized_error)
+        self.assertNotIn("arguments_raw", serialized_error)
+
+    def test_provider_response_diagnostic_omits_raw_tool_arguments(self) -> None:
+        request = make_request(stream=False)
+        response = KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.REQUIRES_ACTION,
+            model=request.model,
+            output=[
+                ToolCallItem(
+                    id="call_item_safe",
+                    call_id="call_safe",
+                    name="history_search",
+                    arguments={"query": "safe"},
+                    arguments_raw="RAW_PROVIDER_ARGUMENT_MARKER",
+                )
+            ],
+        )
+
+        events = list(events_for_protocol_response(response))
+        terminal = events[-1]
+        serialized = json.dumps(terminal.metadata["provider_response"])
+
+        self.assertEqual(terminal.type, "done")
+        self.assertNotIn("RAW_PROVIDER_ARGUMENT_MARKER", serialized)
+        self.assertNotIn("arguments_raw", serialized)
+        self.assertIn("arguments_diagnostic", serialized)
+
+    def test_arguments_diagnostic_cannot_override_redacted_arguments(self) -> None:
+        secret = "OPAQUE_PROVIDER_ARGUMENT_SECRET"
+        sanitized = sanitize_provider_diagnostic(
+            {
+                "arguments": {"value": secret},
+                "arguments_diagnostic": {
+                    "available": True,
+                    "length": len(secret),
+                    "content_omitted": False,
+                    "preview": secret,
+                },
+            }
+        )
+
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("preview", serialized)
+        self.assertTrue(sanitized["arguments_diagnostic"]["content_omitted"])
 
     def test_json_roundtrip_and_protocol_version_validation(self) -> None:
         request = make_request()

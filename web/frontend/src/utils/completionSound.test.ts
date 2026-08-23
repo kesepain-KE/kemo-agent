@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { playUserCompletionSound } from './completionSound'
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -13,13 +14,16 @@ describe('playUserCompletionSound', () => {
     const AudioMock = vi.fn(function AudioMock(this: { play: typeof play }, _url: string) {
       this.play = play
     })
+    const fetchMock = vi.fn()
     vi.stubGlobal('Audio', AudioMock)
+    vi.stubGlobal('fetch', fetchMock)
 
     await expect(playUserCompletionSound('alice')).resolves.toBe(true)
     expect(AudioMock).toHaveBeenCalledOnce()
     expect(String(AudioMock.mock.calls[0][0])).toContain('/api/users/alice/completion-sound')
     expect(String(AudioMock.mock.calls[0][0])).not.toContain('?v=')
     expect(play).toHaveBeenCalledOnce()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('在手机端不创建 Audio，也不请求后端降级播放', async () => {
@@ -49,6 +53,39 @@ describe('playUserCompletionSound', () => {
     expect(fetchMock).toHaveBeenCalledOnce()
     expect(String(fetchMock.mock.calls[0][0])).toContain('/api/users/alice/completion-sound/fallback')
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' })
+  })
+
+  it('浏览器播放挂起时停止浏览器音频并请求 Windows 后端降级', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const pause = vi.fn()
+    const removeAttribute = vi.fn()
+    const load = vi.fn()
+    const pendingAudio = vi.fn(function PendingAudio(this: {
+      play: () => Promise<never>
+      pause: typeof pause
+      removeAttribute: typeof removeAttribute
+      load: typeof load
+    }) {
+      this.play = () => new Promise<never>(() => undefined)
+      this.pause = pause
+      this.removeAttribute = removeAttribute
+      this.load = load
+    })
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      user: 'alice', played: true, mode: 'user_wav', reason: 'browser_fallback',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('Audio', pendingAudio)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const playback = playUserCompletionSound('alice')
+    await vi.advanceTimersByTimeAsync(2_000)
+    await expect(playback).resolves.toBe(true)
+    expect(pause).toHaveBeenCalledOnce()
+    expect(removeAttribute).toHaveBeenCalledWith('src')
+    expect(load).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/users/alice/completion-sound/fallback')
   })
 
   it('浏览器和后端降级都失败时静默返回 false', async () => {

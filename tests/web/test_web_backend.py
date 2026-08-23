@@ -4319,6 +4319,23 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(missing_fallback.json()["played"])
         self.assertEqual(missing_fallback.json()["reason"], "not_configured")
 
+    def test_completion_sound_terminal_fallback_is_windows_only(self) -> None:
+        _, root = self.make_root()
+        backend = WebRunService(root)
+        backend.save_completion_sound(
+            "alice",
+            b"RIFF" + (4).to_bytes(4, "little") + b"WAVEdata",
+            "audio/wav",
+        )
+
+        with patch("web.services.files.platform.system", return_value="Linux"):
+            status = backend.completion_sound_status("alice")
+            fallback = backend.play_completion_sound_fallback("alice")
+
+        self.assertFalse(status["terminal_fallback_supported"])
+        self.assertFalse(fallback["played"])
+        self.assertEqual(fallback["reason"], "unsupported_host")
+
     def test_completion_sound_rejects_fixed_path_symlink(self) -> None:
         _, root = self.make_root()
         outside = root / "outside.mp3"

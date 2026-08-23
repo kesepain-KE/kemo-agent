@@ -17,6 +17,11 @@ from provider.protocol.enums import (
     StreamEventType,
 )
 from provider.protocol.errors import CapabilityError
+from provider.protocol.diagnostics import (
+    invalid_tool_call_diagnostic,
+    sanitize_provider_diagnostic,
+    tool_arguments_diagnostic,
+)
 from provider.protocol.models import (
     AudioContent,
     FileContent,
@@ -69,6 +74,7 @@ def _chat_incomplete_details(
     *,
     calls: list[ToolCallItem],
     invalid_calls: list[ToolCallItem],
+    invalid_call_diagnostics: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     normalized = str(finish_reason or "").strip().casefold()
     if normalized in _INCOMPLETE_CHAT_FINISH_REASONS:
@@ -91,12 +97,15 @@ def _chat_incomplete_details(
         return None
     if invalid_calls:
         details["invalid_tool_calls"] = [
-            {
-                "call_id": item.call_id,
-                "name": item.name,
-                "parse_error": copy.deepcopy(item.parse_error),
-                "arguments_raw": (item.arguments_raw or "")[:500],
-            }
+            invalid_tool_call_diagnostic(
+                call_id=item.call_id,
+                name=item.name,
+                raw_arguments=item.arguments_raw,
+                parse_error=item.parse_error,
+                arguments_diagnostic=(invalid_call_diagnostics or {}).get(
+                    item.call_id
+                ),
+            )
             for item in invalid_calls
         ]
     return details
@@ -632,6 +641,7 @@ def chat_stream_to_protocol(
     text_parts: list[str] = []
     calls: list[ToolCallItem] = []
     invalid_calls: list[ToolCallItem] = []
+    invalid_call_diagnostics: dict[str, dict[str, Any]] = {}
     usage = Usage()
     reasoning_added = False
     message_added = False
@@ -683,12 +693,15 @@ def chat_stream_to_protocol(
             )
             sequence += 1
         elif event.type == "tool_call_start":
+            legacy_raw_arguments = str(
+                event.metadata.get("raw_arguments") or ""
+            ) or None
             item = ToolCallItem(
                 id=_id("call"),
                 call_id=event.tool_call_id or _id("callid"),
                 name=event.tool_name,
                 arguments=event.arguments or {},
-                arguments_raw=str(event.metadata.get("raw_arguments") or "") or None,
+                arguments_raw=legacy_raw_arguments,
                 parse_error=(
                     copy.deepcopy(event.metadata.get("parse_error"))
                     if isinstance(event.metadata.get("parse_error"), dict)
@@ -698,6 +711,10 @@ def chat_stream_to_protocol(
             calls.append(item)
             if item.parse_error is not None:
                 invalid_calls.append(item)
+                invalid_call_diagnostics[item.call_id] = tool_arguments_diagnostic(
+                    legacy_raw_arguments,
+                    diagnostic=event.metadata.get("arguments_diagnostic"),
+                )
             event_finish_reason = str(
                 event.metadata.get("finish_reason") or ""
             ).strip().casefold()
@@ -729,6 +746,9 @@ def chat_stream_to_protocol(
             sequence += 1
         elif event.type == "error":
             raw_error = event.error or {}
+            safe_error = sanitize_provider_diagnostic(raw_error)
+            if not isinstance(safe_error, dict):
+                safe_error = {}
             from provider.protocol.models import UnifiedError
 
             yield ProviderStreamEvent(
@@ -737,10 +757,10 @@ def chat_stream_to_protocol(
                 request_id=request.request_id,
                 response_id=response_id,
                 error=UnifiedError(
-                    type=str(raw_error.get("exception_type") or "provider_error"),
-                    code=str(raw_error.get("code") or "PROVIDER_ERROR"),
-                    message=str(raw_error.get("message") or "Provider stream failed"),
-                    details=dict(raw_error),
+                    type=str(safe_error.get("exception_type") or "provider_error"),
+                    code=str(safe_error.get("code") or "PROVIDER_ERROR"),
+                    message=str(safe_error.get("message") or "Provider stream failed"),
+                    details=safe_error,
                 ),
             )
             return
@@ -762,6 +782,7 @@ def chat_stream_to_protocol(
         finish_reason,
         calls=calls,
         invalid_calls=invalid_calls,
+        invalid_call_diagnostics=invalid_call_diagnostics,
     )
     executable_calls = calls if incomplete_details is None else []
     output.extend(executable_calls)

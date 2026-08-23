@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from events import RunEvent
+from provider.protocol.diagnostics import sanitize_provider_diagnostic
 from provider.protocol.enums import ResponseStatus, StreamEventType
 from provider.protocol.models import (
     KemoRequest,
@@ -50,7 +51,11 @@ def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
             "exception_type": "ProviderProtocolError",
             "phase": phase,
         }
-    raw = value.model_dump(mode="json", exclude_none=True)
+    raw = sanitize_provider_diagnostic(
+        value.model_dump(mode="json", exclude_none=True)
+    )
+    if not isinstance(raw, dict):
+        raw = {}
     return {
         **raw,
         "exception_type": str(raw.get("type") or "ProviderProtocolError"),
@@ -62,7 +67,12 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
     if response.error is not None:
         return protocol_error(response.error)
     if response.status == ResponseStatus.INCOMPLETE:
-        details = copy.deepcopy(response.incomplete_details or {})
+        details = sanitize_provider_diagnostic(
+            copy.deepcopy(response.incomplete_details or {}),
+            key="incomplete_details",
+        )
+        if not isinstance(details, dict):
+            details = {}
         reason = str(details.get("reason") or "incomplete")
         return {
             "message": f"Provider 输出未完整结束：{reason}",
@@ -209,7 +219,6 @@ def events_for_protocol_response(
                 tool_call_id=item.call_id,
                 tool_name=item.name,
                 arguments=item.arguments,
-                metadata={"raw_arguments": item.arguments_raw},
                 **common,
             )
     yield from response_media_events(
@@ -226,8 +235,8 @@ def events_for_protocol_response(
         protocol_event_type="usage.updated",
         **common,
     )
-    response_payload = response.model_dump(
-        mode="json", by_alias=True, exclude_none=True
+    response_payload = sanitize_provider_diagnostic(
+        response.model_dump(mode="json", by_alias=True, exclude_none=True)
     )
     if response.status in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
         yield RunEvent(
@@ -239,7 +248,11 @@ def events_for_protocol_response(
                 "response_id": response.id,
                 "provider_response_id": response.provider_response_id,
                 "provider_response": response_payload,
-                **response.metadata,
+                **(
+                    sanitize_provider_diagnostic(response.metadata)
+                    if isinstance(response.metadata, dict)
+                    else {}
+                ),
             },
             **common,
         )
@@ -287,7 +300,6 @@ def run_events_for_protocol_event(
             yield RunEvent(
                 type="error",
                 error=invalid_tool_call_error(item),
-                metadata=metadata,
                 **common,
             )
             return
@@ -297,10 +309,6 @@ def run_events_for_protocol_event(
             tool_call_id=(item.call_id if item is not None else event.call_id or ""),
             tool_name=(item.name if item is not None else event.name or ""),
             arguments=arguments if isinstance(arguments, dict) else {"_value": arguments},
-            metadata={
-                **metadata,
-                "raw_arguments": item.arguments_raw if item is not None else None,
-            },
             **common,
         )
     elif event.type == StreamEventType.USAGE_UPDATED and event.usage is not None:
@@ -333,10 +341,15 @@ def run_events_for_protocol_event(
             return
         if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
             raise_if_context_length_exceeded(response.error)
-        payload = response.model_dump(mode="json", by_alias=True, exclude_none=True)
+        payload = sanitize_provider_diagnostic(
+            response.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
+        safe_response_metadata = sanitize_provider_diagnostic(response.metadata)
+        if not isinstance(safe_response_metadata, dict):
+            safe_response_metadata = {}
         terminal_metadata = {
             **metadata,
-            **response.metadata,
+            **safe_response_metadata,
             "model": response.model,
             "response_id": response.id,
             "provider_response_id": response.provider_response_id,
@@ -354,9 +367,7 @@ def run_events_for_protocol_event(
                 terminal_metadata["artifacts"] = copy.deepcopy(
                     response.metadata["artifacts"]
                 )
-                terminal_metadata["provider_response"] = response.model_dump(
-                    mode="json", by_alias=True, exclude_none=True
-                )
+                terminal_metadata["provider_response"] = payload
             yield RunEvent(
                 type="done",
                 usage=protocol_usage_dict(response.usage),

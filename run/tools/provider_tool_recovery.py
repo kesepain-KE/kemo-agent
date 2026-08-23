@@ -6,6 +6,10 @@ import copy
 from typing import Any
 
 from provider.protocol.enums import ResponseStatus
+from provider.protocol.diagnostics import (
+    invalid_tool_call_diagnostic,
+    safe_invalid_tool_details,
+)
 from provider.protocol.models import KemoResponse, ToolCallItem
 
 
@@ -16,15 +20,23 @@ PROVIDER_TOOL_ARGUMENTS_ERROR = "ProviderToolArgumentsError"
 def invalid_tool_call_error(item: ToolCallItem) -> dict[str, Any]:
     """Return the stable runtime error for one malformed tool call."""
 
+    diagnostic = invalid_tool_call_diagnostic(
+        call_id=item.call_id,
+        name=item.name,
+        raw_arguments=item.arguments_raw,
+        parse_error=item.parse_error,
+    )
+    safe_call_id = str(diagnostic.get("call_id") or "")
+    safe_tool_name = str(diagnostic.get("name") or "unknown_tool")
     return {
-        "message": f"Provider 返回的工具 {item.name!r} 参数不是完整 JSON 对象",
+        "message": f"Provider 返回的工具 {safe_tool_name!r} 参数不是完整 JSON 对象",
         "exception_type": PROVIDER_TOOL_ARGUMENTS_ERROR,
         "phase": "provider",
         "stop_reason": INVALID_TOOL_ARGUMENTS_STOP_REASON,
-        "call_id": item.call_id,
-        "tool_name": item.name,
-        "parse_error": copy.deepcopy(item.parse_error or {}),
-        "arguments_raw": (item.arguments_raw or "")[:500],
+        "call_id": safe_call_id,
+        "tool_name": safe_tool_name,
+        "parse_error": diagnostic["parse_error"],
+        "arguments_diagnostic": diagnostic["arguments_diagnostic"],
     }
 
 
@@ -78,12 +90,13 @@ def response_invalid_tool_arguments_error(
         != INVALID_TOOL_ARGUMENTS_STOP_REASON
     ):
         return None
+    safe_details = safe_invalid_tool_details(details)
     error: dict[str, Any] = {
         "message": "Provider 返回的工具参数不是完整 JSON 对象",
         "exception_type": PROVIDER_TOOL_ARGUMENTS_ERROR,
         "phase": "provider",
         "stop_reason": INVALID_TOOL_ARGUMENTS_STOP_REASON,
-        "incomplete_details": copy.deepcopy(details),
+        "incomplete_details": safe_details,
     }
     name = invalid_tool_name(error)
     if name:

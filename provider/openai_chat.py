@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any, Iterable
 
 from events import RunEvent
+from provider.protocol.diagnostics import safe_parse_error, tool_arguments_diagnostic
 from provider.schema import (
     ChatRequest,
     ChatResponse,
@@ -361,8 +362,14 @@ class OpenAIChatTransport:
                     arguments=arguments,
                     metadata={
                         "index": index,
-                        "raw_arguments": arguments_raw,
-                        "parse_error": parse_error,
+                        "parse_error": (
+                            safe_parse_error(parse_error) if parse_error else None
+                        ),
+                        "arguments_diagnostic": (
+                            tool_arguments_diagnostic(arguments_raw)
+                            if parse_error
+                            else None
+                        ),
                         "finish_reason": finish_reason,
                     },
                 )

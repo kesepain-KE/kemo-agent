@@ -2346,9 +2346,9 @@ def _iter_request_events_impl(
                         .get("injected_chars", 0),
                     },
                     "committed": True,
+                    "status": "completed",
                     **(
                         {
-                            "status": "completed",
                             "stop_reason": task_plan_boundary.stop_reason,
                             "plan_id": task_plan_boundary.plan_id,
                             "task_plan_status": task_plan_boundary.status,
