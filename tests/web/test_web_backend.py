@@ -4296,8 +4296,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(fallback.status_code, 200, fallback.text)
         self.assertTrue(fallback.json()["played"])
         self.assertEqual(fallback.json()["mode"], "user_wav")
-        playback.assert_called_once_with(
-            root / "users" / "alice" / "completion_sound.wav"
+        playback.assert_called_once()
+        self.assertEqual(
+            playback.call_args.args[0].resolve(),
+            (root / "users" / "alice" / "completion_sound.wav").resolve(),
         )
 
         with patch(
