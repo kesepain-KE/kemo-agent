@@ -55,13 +55,16 @@ export function LongTaskBubble({ state, stopping = false, onCancel }: {
         <span>{state.total_provider_requests} 请求</span>
         <span>{tokenLabel(state)} Token</span>
       </div>
-      {['running', 'pausing', 'cancelling'].includes(state.status) ? (
+      {['running', 'pausing', 'paused', 'cancelling'].includes(state.status) ? (
         <button type="button" className={styles.stop} onClick={onCancel} disabled={stopping || state.status === 'cancelling'}>
           <Square aria-hidden="true" />
-          {stopping || state.status === 'cancelling' ? '正在停止…' : '停止长任务'}
+          {stopping || state.status === 'cancelling'
+            ? '正在停止…'
+            : state.status === 'paused'
+              ? '结束长任务'
+              : '停止长任务'}
         </button>
       ) : null}
     </article>
   )
 }
-

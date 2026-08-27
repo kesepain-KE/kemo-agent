@@ -619,7 +619,11 @@ def execute_tool(
             release_execution(execution_id)
 
 
-_DOMAIN_MODULES = ("execution_watchdog", "provider_tool_recovery")
+_DOMAIN_MODULES = (
+    "execution_watchdog",
+    "provider_tool_recovery",
+    "background_jobs",
+)
 
 
 def __getattr__(name: str):

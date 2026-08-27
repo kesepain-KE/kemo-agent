@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import hashlib
+import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -25,8 +28,18 @@ from plugins.network.tool import _read_limited
 from plugins.network.tool import run as run_network
 from plugins.shell.tool import run as run_shell
 from plugins.shell.tool import _decode_output
+from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
 from plugins.task_time.tool import run as run_task_time
+from plugins.wait_for_condition.tool import run as run_wait_for_condition
 from plugins.web_search.tool import run as run_web_search
+from run.tools.background_jobs import (
+    MAX_ACTIVE_BACKGROUND_JOBS_PER_USER,
+    cancel_background_job,
+    prepare_background_job,
+    reconcile_background_job,
+    update_background_job as persist_background_job,
+)
+from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
 from run.scheduler import CronStore
 from run.tools import discover_tools, validate_arguments
 
@@ -96,9 +109,7 @@ class PluginManifestTests(unittest.TestCase):
         shell_schema = registry.get("shell").input_schema
         validate_arguments(shell_schema, {"command": "pwd"})
         with self.assertRaises(Exception):
-            validate_arguments(
-                shell_schema, {"action": "run_command", "command": "pwd"}
-            )
+            validate_arguments(shell_schema, {"command": "pwd", "unknown": True})
         network_schema = registry.get("network").input_schema
         self.assertEqual(
             set(network_schema["properties"]["action"]["enum"]),
@@ -849,6 +860,550 @@ class ShellPluginTests(unittest.TestCase):
             **values,
         }
 
+    @staticmethod
+    def _python_command(script: str) -> str:
+        arguments = [sys.executable, "-c", script]
+        return (
+            subprocess.list2cmdline(arguments)
+            if os.name == "nt"
+            else shlex.join(arguments)
+        )
+
+    def test_shell_manifest_exposes_managed_background_actions(self) -> None:
+        definition = discover_tools(PROJECT_ROOT, "alice").get("shell")
+        schema = definition.input_schema
+        self.assertEqual(definition.version, "1.4.0")
+        self.assertEqual(schema["required"], [])
+        self.assertEqual(
+            schema["properties"]["action"]["enum"],
+            ["run", "status", "cancel"],
+        )
+        self.assertIn("background", schema["properties"])
+        self.assertIn("job_id", schema["properties"])
+        validate_arguments(schema, {})
+        validate_arguments(schema, {"action": "status", "job_id": "job_example"})
+
+    def test_managed_background_job_completes_without_persisting_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            context = self._context(
+                root,
+                source="test",
+                session_id="space-a",
+                cancel_event=threading.Event(),
+            )
+            secret = "super-secret-command-argument"
+            command = self._python_command(
+                "import time; "
+                f"secret={secret!r}; "
+                "time.sleep(0.4); print('background-managed-ok')"
+            )
+            started = run_shell(command, background=True, context=context)
+            self.assertTrue(started["ok"], started)
+            self.assertRegex(started["job_id"], r"^job_[a-f0-9]{32}$")
+            self.assertGreater(started["pid"], 0)
+            self.assertTrue(started["process_started_at"])
+
+            waited = run_wait_for_condition(
+                "job_exit",
+                10,
+                check_interval=0.1,
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(waited["status"], "triggered")
+            self.assertEqual(waited["observation"]["status"], "completed")
+            self.assertEqual(waited["observation"]["exit_code"], 0)
+            stdout_path = root / waited["observation"]["stdout_path"]
+            self.assertIn("background-managed-ok", stdout_path.read_text("utf-8"))
+            self.assertNotIn(str(root), json.dumps(waited["observation"], ensure_ascii=False))
+
+            jobs_dir = root / "users" / "alice" / "runtime" / "background_jobs"
+            record_path = jobs_dir / f"{started['job_id']}.json"
+            request_path = jobs_dir / f"{started['job_id']}.request.json"
+            self.assertNotIn(secret, record_path.read_text("utf-8"))
+            self.assertFalse(request_path.exists())
+
+            status = run_shell(
+                action="status",
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(status["status"], "completed")
+
+    def test_background_start_cancel_is_not_reported_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            cancel = threading.Event()
+            cancel.set()
+            result = run_shell(
+                self._python_command("import time; time.sleep(2)"),
+                background=True,
+                context=self._context(root, cancel_event=cancel),
+            )
+            self.assertFalse(result["ok"], result)
+            self.assertIn(result["status"], {"cancelled", "cancelling"})
+
+    def test_managed_background_job_enforces_explicit_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            context = self._context(
+                root,
+                source="test",
+                session_id="timeout-space",
+                cancel_event=threading.Event(),
+            )
+            started_at = time.monotonic()
+            started = run_shell(
+                self._python_command("import time; time.sleep(4)"),
+                background=True,
+                timeout=1,
+                context=context,
+            )
+            waited = run_wait_for_condition(
+                "job_exit",
+                8,
+                check_interval=0.1,
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(waited["observation"]["status"], "failed")
+            self.assertEqual(
+                waited["observation"]["stop_reason"],
+                "background_timeout",
+            )
+            self.assertLess(time.monotonic() - started_at, 3)
+            self.assertFalse(waited["observation"].get("working_dir", "").startswith("/"))
+            self.assertNotIn(":\\", waited["observation"].get("stdout_path", ""))
+
+            foreign_context = {**context, "session_id": "space-b"}
+            with self.assertRaisesRegex(KeyError, "后台作业不存在"):
+                run_shell(
+                    action="status",
+                    job_id=started["job_id"],
+                    context=foreign_context,
+                )
+
+    def test_managed_background_job_cancel_is_terminal_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            context = self._context(
+                root,
+                source="test",
+                session_id="space-a",
+                cancel_event=threading.Event(),
+            )
+            started = run_shell(
+                self._python_command("import time; time.sleep(30)"),
+                background=True,
+                context=context,
+            )
+            self.assertTrue(started["ok"], started)
+            cancelled = run_shell(
+                action="cancel",
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertIn(cancelled["status"], {"cancelling", "cancelled"})
+            waited = run_wait_for_condition(
+                "job_exit",
+                10,
+                check_interval=0.1,
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(waited["observation"]["status"], "cancelled")
+            repeated = run_shell(
+                action="cancel",
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(repeated["status"], "cancelled")
+
+    def test_persisted_cancel_refuses_unknown_process_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            record, _ = prepare_background_job(
+                root,
+                "alice",
+                source="test",
+                session_id="identity-space",
+                working_dir=str(root),
+                shell_type="auto",
+                command_digest="digest",
+            )
+
+            def mark_running(current: dict) -> dict:
+                current.update(
+                    {
+                        "status": "running",
+                        "pid": 12345,
+                        "process_started_at": "expected-start",
+                        "process_name": "python.exe",
+                    }
+                )
+                return current
+
+            persist_background_job(root, "alice", record["job_id"], mark_running)
+            with (
+                patch(
+                    "run.tools.background_jobs.process_snapshot",
+                    return_value={
+                        "pid": 12345,
+                        "exists": True,
+                        "query_status": "access_denied",
+                        "identity_available": False,
+                    },
+                ),
+                patch("run.tools.background_jobs.terminate_pid_tree") as terminate,
+            ):
+                cancelled = cancel_background_job(root, "alice", record["job_id"])
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(
+                cancelled["error"]["code"],
+                "background_identity_unknown",
+            )
+            terminate.assert_not_called()
+
+    def test_persisted_cancel_refuses_missing_process_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            record, _ = prepare_background_job(
+                root,
+                "alice",
+                source="test",
+                session_id="missing-identity-space",
+                working_dir=str(root),
+                shell_type="auto",
+                command_digest="digest",
+            )
+            persist_background_job(
+                root,
+                "alice",
+                record["job_id"],
+                lambda current: {
+                    **current,
+                    "status": "running",
+                    "pid": 12345,
+                    "process_started_at": "",
+                    "process_name": "",
+                },
+            )
+            with (
+                patch(
+                    "run.tools.background_jobs.process_snapshot",
+                    return_value={
+                        "pid": 12345,
+                        "exists": True,
+                        "query_status": "ok",
+                    },
+                ),
+                patch("run.tools.background_jobs.terminate_pid_tree") as terminate,
+            ):
+                cancelled = cancel_background_job(root, "alice", record["job_id"])
+            self.assertEqual(cancelled["status"], "cancelled")
+            terminate.assert_not_called()
+
+    def test_reconcile_expired_deadline_terminates_known_process_and_settles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            record, _ = prepare_background_job(
+                root,
+                "alice",
+                source="test",
+                session_id="deadline-space",
+                working_dir=str(root),
+                shell_type="auto",
+                command_digest="digest",
+                timeout_seconds=60,
+            )
+            persist_background_job(
+                root,
+                "alice",
+                record["job_id"],
+                lambda current: {
+                    **current,
+                    "status": "running",
+                    "pid": 12345,
+                    "process_started_at": "expected-start",
+                    "process_name": "python.exe",
+                    "deadline_at": 0.0,
+                },
+            )
+            alive = True
+
+            def snapshot(pid: int) -> dict:
+                return {
+                    "pid": pid,
+                    "exists": alive if pid == 12345 else False,
+                    "query_status": "ok",
+                    "process_started_at": "expected-start" if pid == 12345 else "",
+                    "process_name": "python.exe" if pid == 12345 else "",
+                }
+
+            def terminate(*args, **kwargs):
+                nonlocal alive
+                alive = False
+                return True
+
+            with (
+                patch("run.tools.background_jobs.process_snapshot", side_effect=snapshot),
+                patch("run.tools.background_jobs.terminate_pid_tree", side_effect=terminate),
+            ):
+                settled = reconcile_background_job(root, "alice", record["job_id"])
+            self.assertEqual(settled["status"], "failed")
+            self.assertEqual(settled["stop_reason"], "background_timeout")
+            self.assertEqual(settled["error"]["code"], "background_timeout")
+
+    def test_background_job_active_quota_rejects_excess_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            with patch(
+                "run.tools.background_jobs.MAX_ACTIVE_BACKGROUND_JOBS_PER_USER",
+                1,
+            ):
+                prepare_background_job(
+                    root,
+                    "alice",
+                    source="test",
+                    session_id="quota-a",
+                    working_dir=str(root),
+                    shell_type="auto",
+                    command_digest="digest",
+                )
+                with self.assertRaisesRegex(ValueError, "活动作业数量"):
+                    prepare_background_job(
+                        root,
+                        "alice",
+                        source="test",
+                        session_id="quota-b",
+                        working_dir=str(root),
+                        shell_type="auto",
+                        command_digest="digest",
+                    )
+
+    def test_background_job_cleanup_removes_expired_terminal_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_root = root / "users" / "alice"
+            user_root.mkdir(parents=True)
+            record, paths = prepare_background_job(
+                root,
+                "alice",
+                source="test",
+                session_id="cleanup-old",
+                working_dir=str(root),
+                shell_type="auto",
+                command_digest="digest",
+            )
+            persist_background_job(
+                root,
+                "alice",
+                record["job_id"],
+                lambda current: {
+                    **current,
+                    "status": "completed",
+                    "finished_at": (datetime.now() - timedelta(days=8)).isoformat(),
+                },
+            )
+            paths["stdout"].write_text("old", encoding="utf-8")
+            with patch(
+                "run.tools.background_jobs.BACKGROUND_JOB_RETENTION_SECONDS",
+                60,
+            ):
+                prepare_background_job(
+                    root,
+                    "alice",
+                    source="test",
+                    session_id="cleanup-new",
+                    working_dir=str(root),
+                    shell_type="auto",
+                    command_digest="digest",
+                )
+            self.assertFalse(paths["record"].exists())
+            self.assertFalse(paths["stdout"].exists())
+
+    def test_managed_background_job_nonzero_exit_is_a_terminal_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            context = self._context(
+                root,
+                source="test",
+                session_id="space-a",
+                cancel_event=threading.Event(),
+            )
+            started = run_shell(
+                self._python_command("raise SystemExit(7)"),
+                background=True,
+                context=context,
+            )
+            waited = run_wait_for_condition(
+                "job_exit",
+                10,
+                check_interval=0.1,
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(waited["status"], "triggered")
+            self.assertEqual(waited["observation"]["status"], "failed")
+            self.assertEqual(waited["observation"]["exit_code"], 7)
+            self.assertEqual(
+                waited["observation"]["error"]["code"],
+                "background_process_failed",
+            )
+
+    def test_background_worker_registration_failure_terminates_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            fake_worker = SimpleNamespace(pid=12345, poll=lambda: None)
+            failed_record = {
+                "job_id": "job_00000000000000000000000000000000",
+                "status": "failed",
+                "error": {"code": "background_worker_start_failed"},
+            }
+            with (
+                patch("plugins.shell.tool.subprocess.Popen", return_value=fake_worker),
+                patch(
+                    "plugins.shell.tool.process_snapshot",
+                    return_value={
+                        "pid": 12345,
+                        "exists": True,
+                        "process_started_at": "started",
+                        "process_name": "python.exe",
+                    },
+                ),
+                patch(
+                    "plugins.shell.tool.update_background_job",
+                    side_effect=[RuntimeError("metadata write failed"), failed_record],
+                ),
+                patch("plugins.shell.tool.terminate_process_tree") as terminate,
+            ):
+                result = run_shell(
+                    self._python_command("print('must-not-survive')"),
+                    background=True,
+                    context=self._context(root),
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "failed")
+            terminate.assert_called_once_with(fake_worker)
+            requests = list(
+                (root / "users" / "alice" / "runtime" / "background_jobs").glob(
+                    "*.request.json"
+                )
+            )
+            self.assertEqual(requests, [])
+
+    def test_background_start_error_does_not_overwrite_worker_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            fake_worker = SimpleNamespace(pid=12345, poll=lambda: None)
+            calls = 0
+
+            def update_with_race(
+                update_root: Path,
+                update_user: str,
+                job_id: str,
+                mutator,
+            ):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    def complete(record: dict) -> dict:
+                        record["status"] = "completed"
+                        record["exit_code"] = 0
+                        return record
+
+                    persist_background_job(update_root, update_user, job_id, complete)
+                    raise RuntimeError("metadata write failed after worker completion")
+                return persist_background_job(update_root, update_user, job_id, mutator)
+
+            with (
+                patch("plugins.shell.tool.subprocess.Popen", return_value=fake_worker),
+                patch(
+                    "plugins.shell.tool.process_snapshot",
+                    return_value={
+                        "pid": 12345,
+                        "exists": True,
+                        "process_started_at": "started",
+                        "process_name": "python.exe",
+                    },
+                ),
+                patch(
+                    "plugins.shell.tool.update_background_job",
+                    side_effect=update_with_race,
+                ),
+                patch("plugins.shell.tool.terminate_process_tree"),
+            ):
+                result = run_shell(
+                    self._python_command("print('already-finished')"),
+                    background=True,
+                    context=self._context(root),
+                )
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["exit_code"], 0)
+
+    def test_managed_background_job_rejects_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "不支持 stdin"):
+                run_shell(
+                    self._python_command("print('unused')"),
+                    background=True,
+                    stdin="not-supported",
+                    context=self._context(root),
+                )
+
+    def test_background_log_capture_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bounded.log"
+            _capture_stream(
+                io.BytesIO(b"x" * (MAX_LOG_BYTES + 1)),
+                path,
+            )
+            data = path.read_bytes()
+            self.assertLessEqual(len(data), MAX_LOG_BYTES)
+            self.assertIn("日志输出已截断".encode("utf-8"), data)
+
+    def test_background_log_capture_drains_when_log_path_is_unwritable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            stream = io.BytesIO(b"x" * (MAX_LOG_BYTES + 1))
+            _capture_stream(stream, blocked / "stdout.log")
+            self.assertEqual(stream.tell(), MAX_LOG_BYTES + 1)
+
+    def test_managed_background_job_rejects_runtime_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_dir = root / "users" / "alice"
+            user_dir.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            runtime = user_dir / "runtime"
+            try:
+                runtime.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("当前 Windows 环境不允许创建目录符号链接")
+            with self.assertRaisesRegex(ValueError, "符号链接"):
+                run_shell(
+                    self._python_command("print('must-not-run')"),
+                    background=True,
+                    context=self._context(root),
+                )
+
     def test_stdin_is_forwarded_to_subprocess(self) -> None:
         command = f'"{sys.executable}" -c "import sys;print(sys.stdin.read())"'
         result = run_shell(
@@ -979,6 +1534,8 @@ class ShellPluginTests(unittest.TestCase):
                 self.assertEqual(spawned.call_args.kwargs["shell"], expected_shell)
 
     def test_shell_and_timeout_modes_are_validated(self) -> None:
+        with self.assertRaisesRegex(ValueError, "action"):
+            run_shell("pwd", action="run_command", context=self._context())
         with self.assertRaisesRegex(ValueError, "shell_type"):
             run_shell("pwd", shell_type="fish", context=self._context())
         with self.assertRaisesRegex(ValueError, "chain_timeout_mode"):

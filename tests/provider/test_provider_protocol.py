@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +22,12 @@ from provider.adapters.compat import (
     kemo_response_to_chat,
 )
 from provider.adapters.gateway import KemoGatewayAdapter
-from provider.protocol.diagnostics import sanitize_provider_diagnostic
+from provider.openai_chat import _error_detail
+from provider.protocol.diagnostics import (
+    safe_provider_body,
+    safe_provider_message,
+    sanitize_provider_diagnostic,
+)
 from provider.protocol.enums import (
     MessagePhase,
     MessageRole,
@@ -61,6 +68,7 @@ from provider.protocol.streaming import (
     parse_sse_events,
 )
 from provider.protocol.validation import validate_request
+from provider.tool_arguments import parse_tool_arguments
 from provider.schema import (
     ChatRequest,
     ChatResponse,
@@ -462,6 +470,174 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertNotIn("preview", serialized)
         self.assertTrue(sanitized["arguments_diagnostic"]["content_omitted"])
+
+    def test_provider_error_body_is_bounded_and_redacted(self) -> None:
+        secret = "RAW_TOOL_ARGUMENT_SECRET"
+        raw_body = (
+            '{"tool_calls":[{"function":{"arguments":"'
+            + secret
+            + '"}}]}'
+        )
+        raw_summary = safe_provider_body(raw_body.encode("utf-8"))
+        self.assertEqual(raw_summary["payload_type"], "bytes")
+        self.assertTrue(raw_summary["content_omitted"])
+        self.assertNotIn(secret, json.dumps(raw_summary, ensure_ascii=False))
+
+        structured = safe_provider_body(
+            {
+                "error": {"message": "upstream failed"},
+                "tool_calls": [
+                    {"function": {"arguments": secret}},
+                ],
+            }
+        )
+        serialized = json.dumps(structured, ensure_ascii=False)
+        self.assertIn("upstream failed", serialized)
+        self.assertNotIn(secret, serialized)
+        self.assertIn("arguments_diagnostic", serialized)
+
+        nested_secret = "NESTED_TOOL_ARGUMENT_SECRET"
+        nested = safe_provider_body(
+            {
+                "error": {
+                    "message": (
+                        '{"tool_calls":[{"function":{"arguments":"'
+                        + nested_secret
+                        + '"}}]}'
+                    )
+                }
+            }
+        )
+        self.assertNotIn(nested_secret, json.dumps(nested, ensure_ascii=False))
+        self.assertEqual(nested["error"]["message"], "Provider 错误信息已省略")
+
+    def test_provider_messages_preserve_short_errors_without_echoing_payloads(self) -> None:
+        self.assertEqual(
+            _error_detail({"error": {"message": "upstream failed"}}, "fallback"),
+            ("upstream failed", "provider_error"),
+        )
+
+        tool_payload = '{"tool_calls":[{"function":{"arguments":"SECRET"}}]}'
+        message, _ = _error_detail(
+            {"error": {"message": tool_payload}},
+            "safe fallback",
+        )
+        self.assertEqual(message, "safe fallback")
+        self.assertNotIn("SECRET", message)
+
+        credential_message = "password=supersecret Bearer abc123 token=opaque"
+        sanitized = safe_provider_message(credential_message, "safe fallback")
+        self.assertNotIn("supersecret", sanitized)
+        self.assertNotIn("abc123", sanitized)
+        self.assertNotIn("opaque", sanitized)
+
+    def test_provider_diagnostics_redact_prefixed_json_and_token_aliases(self) -> None:
+        for message, secret in (
+            ('upstream error: {"api_key":"PREFIXED_API_SECRET"}', "PREFIXED_API_SECRET"),
+            ('gateway: {"authToken":"PREFIXED_AUTH_SECRET"}', "PREFIXED_AUTH_SECRET"),
+        ):
+            sanitized = safe_provider_message(message, "safe fallback")
+            self.assertEqual(sanitized, "safe fallback")
+            self.assertNotIn(secret, sanitized)
+
+        structured = sanitize_provider_diagnostic(
+            {
+                "authToken": "AUTH_TOKEN_SECRET",
+                "id_token": "ID_TOKEN_SECRET",
+                "secret_key": "SECRET_KEY_SECRET",
+                "authorization_token": "AUTHORIZATION_TOKEN_SECRET",
+            }
+        )
+        self.assertEqual(
+            structured,
+            {
+                "authToken": "***",
+                "id_token": "***",
+                "secret_key": "***",
+                "authorization_token": "***",
+            },
+        )
+
+    def test_provider_diagnostic_depth_and_collection_limits_are_bounded(self) -> None:
+        nested: dict[str, object] = {"value": "leaf"}
+        for _ in range(1200):
+            nested = {"next": nested}
+        sanitized = safe_provider_body(nested)
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertIn("diagnostic_limit", serialized)
+        self.assertLess(len(serialized), 10000)
+
+        wide = {f"field_{index}": index for index in range(5000)}
+        bounded = safe_provider_body(wide)
+        self.assertIn("_omitted_items", bounded)
+
+    def test_provider_diagnostics_bound_large_strings_and_recursion(self) -> None:
+        bounded = safe_provider_body({"payload": "x" * 5_000_000})
+        serialized = json.dumps(bounded, ensure_ascii=False)
+        self.assertLess(len(serialized), 10000)
+        self.assertIn("诊断内容已截断", serialized)
+        self.assertEqual(
+            safe_provider_message("[" * 8192, "safe fallback"),
+            "safe fallback",
+        )
+
+    def test_provider_tool_argument_parser_handles_deep_and_oversized_values(self) -> None:
+        deep = parse_tool_arguments("[" * 8000 + "0" + "]" * 8000)
+        self.assertEqual(deep.parse_error["kind"], "invalid_json")
+        oversized = parse_tool_arguments({"payload": "x" * 1_100_000})
+        self.assertEqual(oversized.parse_error["kind"], "arguments_too_large")
+
+    def test_provider_tool_argument_parser_rejects_oversized_valid_prefix(self) -> None:
+        prefix = '{"x":1}'
+        oversized = prefix + (" " * (1_000_000 - len(prefix))) + "TRAILING"
+
+        parsed = parse_tool_arguments(oversized)
+
+        self.assertEqual(parsed.arguments, {})
+        self.assertEqual(parsed.parse_error["kind"], "arguments_too_large")
+        self.assertIsNone(parsed.arguments_raw)
+
+    def test_gateway_http_error_message_is_sanitized(self) -> None:
+        adapter = KemoGatewayAdapter(
+            {
+                "base_url": "https://gateway.test/v1",
+                "api_key": "secret",
+                "model": "m",
+            }
+        )
+        request = urllib.request.Request("https://gateway.test/v1/model/responses")
+
+        def raise_http_error(payload: bytes) -> ProviderError:
+            error = urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                {},
+                io.BytesIO(payload),
+            )
+            with patch(
+                "provider.adapters.gateway.urllib.request.urlopen",
+                side_effect=error,
+            ):
+                with self.assertRaises(ProviderError) as raised:
+                    adapter._open(request)
+            return raised.exception
+
+        ordinary = raise_http_error(b'{"error":{"message":"upstream failed"}}')
+        self.assertEqual(str(ordinary), "upstream failed")
+
+        secret = "GATEWAY_TOOL_SECRET"
+        malformed = raise_http_error(
+            (
+                '{"error":{"message":"{\\"tool_calls\\":[{'
+                '\\"function\\":{\\"arguments\\":\\"'
+                + secret
+                + '\\"}}]}"}}'
+            ).encode("utf-8")
+        )
+        self.assertEqual(str(malformed), "Kemo gateway HTTP 400")
+        self.assertNotIn(secret, str(malformed))
+        self.assertNotIn(secret, json.dumps(malformed.body, ensure_ascii=False))
 
     def test_json_roundtrip_and_protocol_version_validation(self) -> None:
         request = make_request()
@@ -1178,6 +1354,35 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(len(migrated["items"]["items"]), 2)
         commit_window(directory, migrated)
         self.assertEqual(len(load_window(directory)["items"]["items"]), 2)
+
+    def test_chat_compat_preserves_missing_empty_and_non_object_arguments(self) -> None:
+        for raw_arguments, expected_kind in (
+            (None, "missing_arguments"),
+            ("", "empty_arguments"),
+            ("[]", "non_object"),
+        ):
+            function = {"name": "file"}
+            if raw_arguments is not None:
+                function["arguments"] = raw_arguments
+            converted = chat_request_to_kemo(
+                ChatRequest(
+                    model="gateway/test",
+                    stream=False,
+                    messages=[
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {"id": "call_state", "function": function}
+                            ],
+                        }
+                    ],
+                )
+            )
+            call = next(
+                item for item in converted.input if isinstance(item, ToolCallItem)
+            )
+            self.assertEqual(call.arguments, {})
+            self.assertEqual(call.parse_error["kind"], expected_kind)
 
 
 if __name__ == "__main__":

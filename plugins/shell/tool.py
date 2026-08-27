@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import locale
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,8 +15,20 @@ from typing import Any
 
 from run.infra import (
     cancellable_subprocess_kwargs,
+    detached_subprocess_kwargs,
     hidden_subprocess_kwargs,
     terminate_process_tree,
+)
+from run.infra import process_snapshot
+from run.tools import (
+    assert_background_job_access,
+    cancel_background_job,
+    prepare_background_job,
+    public_background_job,
+    read_background_job,
+    reconcile_background_job,
+    update_background_job,
+    write_job_request,
 )
 
 
@@ -367,19 +381,7 @@ def _builtin(command: str, session: dict[str, Any], cwd: Path) -> dict[str, Any]
     return None
 
 
-def _run_process(
-    command: str,
-    *,
-    cwd: Path,
-    env_extra: dict[str, str],
-    stdin: str,
-    timeout: float,
-    cancel_event: threading.Event | None,
-    shell_type: str = "auto",
-) -> dict[str, Any]:
-    environment = os.environ.copy()
-    environment["PYTHONUTF8"] = "1"
-    environment.update(env_extra)
+def _process_command(command: str, shell_type: str) -> tuple[str | list[str], bool]:
     if shell_type == "cmd":
         process_command: str | list[str] = ["cmd", "/c", command]
         use_shell = False
@@ -411,6 +413,23 @@ def _run_process(
     else:
         process_command = command
         use_shell = True
+    return process_command, use_shell
+
+
+def _run_process(
+    command: str,
+    *,
+    cwd: Path,
+    env_extra: dict[str, str],
+    stdin: str,
+    timeout: float,
+    cancel_event: threading.Event | None,
+    shell_type: str = "auto",
+) -> dict[str, Any]:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment.update(env_extra)
+    process_command, use_shell = _process_command(command, shell_type)
     if cancel_event is None:
         try:
             completed = subprocess.run(
@@ -514,6 +533,140 @@ def _run_process(
         "exit_code": process.returncode,
         "timed_out": False,
         "truncated": truncated,
+    }
+
+
+def _start_background(
+    command: str,
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    shell_type: str,
+    context: dict[str, Any],
+    timeout: float,
+    cancel_event: threading.Event | None,
+) -> dict[str, Any]:
+    root = Path(str(context.get("root") or Path.cwd())).resolve()
+    source_root = Path(__file__).resolve().parents[2]
+    user = str(context.get("user") or "").strip()
+    if not user:
+        raise ValueError("后台模式需要工具上下文 user")
+    process_command, use_shell = _process_command(command, shell_type)
+    record, paths = prepare_background_job(
+        root,
+        user,
+        source=str(context.get("source") or context.get("caller") or ""),
+        session_id=str(context.get("session_id") or context.get("task_id") or ""),
+        working_dir=str(cwd),
+        shell_type=shell_type,
+        command_digest=hashlib.sha256(command.encode("utf-8")).hexdigest(),
+        timeout_seconds=timeout,
+    )
+    request = {
+        "schema_version": 1,
+        "root": str(root),
+        "user": user,
+        "job_id": record["job_id"],
+        "cwd": str(cwd),
+        "process_command": process_command,
+        "use_shell": use_shell,
+        "deadline_at": record.get("deadline_at"),
+    }
+    worker_environment = os.environ.copy()
+    worker_environment["PYTHONUTF8"] = "1"
+    worker_environment.update(environment)
+    worker: subprocess.Popen[Any] | None = None
+    try:
+        write_job_request(paths["request"], request)
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "run.tools.background_worker",
+                str(paths["request"]),
+            ],
+            cwd=str(source_root),
+            env=worker_environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **detached_subprocess_kwargs(),
+        )
+        worker_snapshot = process_snapshot(worker.pid)
+        if (
+            worker.poll() is None
+            and worker_snapshot.get("exists")
+            and not str(worker_snapshot.get("process_started_at") or "").strip()
+        ):
+            raise RuntimeError("后台 Worker 进程身份无法确认")
+
+        def mark_worker(current: dict[str, Any]) -> dict[str, Any]:
+            current["worker_pid"] = worker.pid
+            current["worker_started_at"] = str(
+                worker_snapshot.get("process_started_at") or ""
+            )
+            current["worker_name"] = str(worker_snapshot.get("process_name") or "")
+            return current
+
+        update_background_job(root, user, record["job_id"], mark_worker)
+    except BaseException as exc:
+        if worker is not None and worker.poll() is None:
+            terminate_process_tree(worker)
+        try:
+            paths["request"].unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        def fail_start(current: dict[str, Any]) -> dict[str, Any]:
+            if current.get("status") in {"completed", "failed", "cancelled", "interrupted"}:
+                return current
+            current["status"] = "failed"
+            current["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            current["stop_reason"] = "background_worker_start_failed"
+            current["error"] = {
+                "code": "background_worker_start_failed",
+                "message": "后台作业管理进程启动失败",
+                "exception_type": type(exc).__name__,
+            }
+            return current
+
+        failed = update_background_job(root, user, record["job_id"], fail_start)
+        terminal_ok = failed.get("status") not in {"failed", "interrupted"}
+        return {
+            "ok": terminal_ok,
+            "output": (
+                f"后台作业状态：{failed.get('status')}"
+                if terminal_ok
+                else "后台作业启动失败"
+            ),
+            **public_background_job(failed, root=root),
+        }
+
+    deadline = time.monotonic() + min(max(0.2, timeout), 5.0)
+    current = read_background_job(root, user, record["job_id"])
+    while current.get("status") == "starting" and time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            current = cancel_background_job(root, user, record["job_id"])
+            break
+        time.sleep(0.05)
+        current = read_background_job(root, user, record["job_id"])
+    if current.get("status") == "starting":
+        current = reconcile_background_job(root, user, record["job_id"])
+    public = public_background_job(current, root=root)
+    successful = current.get("status") not in {
+        "failed",
+        "interrupted",
+        "cancelled",
+        "cancelling",
+    }
+    return {
+        "ok": successful,
+        "output": (
+            f"后台作业已登记：{record['job_id']}"
+            if successful
+            else "后台作业未能稳定启动"
+        ),
+        **public,
     }
 
 
@@ -623,7 +776,7 @@ def _execute(
 
 
 def run(
-    command: str,
+    command: str = "",
     working_dir: str = "",
     timeout: int = 0,
     stdin: str = "",
@@ -632,16 +785,54 @@ def run(
     reset_session: bool = False,
     shell_type: str = "auto",
     chain_timeout_mode: str = "total",
+    action: str = "run",
+    background: bool = False,
+    job_id: str = "",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(command, str) or not command.strip():
-        raise ValueError("command 不能为空")
+    if action not in {"run", "status", "cancel"}:
+        raise ValueError("action 必须是 run/status/cancel")
+    if not isinstance(background, bool):
+        raise ValueError("background 必须是布尔值")
     if shell_type not in {"auto", "cmd", "powershell", "pwsh", "bash", "bash_login"}:
         raise ValueError(f"不支持的 shell_type: {shell_type}")
     if chain_timeout_mode not in {"total", "per_command"}:
         raise ValueError(f"不支持的 chain_timeout_mode: {chain_timeout_mode}")
     root = Path(context.get("root") or Path.cwd()).resolve()
+    user = str(context.get("user") or "").strip()
+    if action in {"status", "cancel"}:
+        if not user:
+            raise ValueError("后台作业操作需要工具上下文 user")
+        current = read_background_job(root, user, job_id)
+        assert_background_job_access(
+            current,
+            source=str(context.get("source") or context.get("caller") or ""),
+            session_id=str(context.get("session_id") or context.get("task_id") or ""),
+        )
+        current = (
+            cancel_background_job(root, user, job_id)
+            if action == "cancel"
+            else reconcile_background_job(root, user, job_id)
+        )
+        operation_ok = (
+            True
+            if action == "status"
+            else current.get("status") in {"cancelling", "cancelled"}
+            or bool(current.get("cancel_requested"))
+        )
+        return {
+            "ok": operation_ok,
+            "operation_ok": operation_ok,
+            "job_succeeded": current.get("status") == "completed",
+            "operation": action,
+            "output": f"后台作业状态：{current.get('status')}",
+            **public_background_job(current, root=root),
+        }
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("action=run 时 command 不能为空")
+    if background and stdin:
+        raise ValueError("后台模式不支持 stdin；请改用文件或命令参数传入")
     context_timeout = context.get("tool_timeout")
     if context_timeout is None:
         raise ValueError("tool_timeout 未在上下文中提供，请检查配置链路")
@@ -671,16 +862,28 @@ def run(
             environment[str(name)] = str(value)
             if session is not None:
                 session.setdefault("env", {})[str(name)] = str(value)
-        result = _execute(
-            command.strip(),
-            cwd=cwd,
-            environment=environment,
-            stdin=stdin,
-            timeout=effective_timeout,
-            cancel_event=cancel_event,
-            session=session,
-            shell_type=shell_type,
-            chain_timeout_mode=chain_timeout_mode,
+        result = (
+            _start_background(
+                command.strip(),
+                cwd=cwd,
+                environment=environment,
+                shell_type=shell_type,
+                context=context,
+                timeout=effective_timeout,
+                cancel_event=cancel_event,
+            )
+            if background
+            else _execute(
+                command.strip(),
+                cwd=cwd,
+                environment=environment,
+                stdin=stdin,
+                timeout=effective_timeout,
+                cancel_event=cancel_event,
+                session=session,
+                shell_type=shell_type,
+                chain_timeout_mode=chain_timeout_mode,
+            )
         )
         hint = _failure_hint(command.strip(), shell_type, result)
         if hint:

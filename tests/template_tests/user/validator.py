@@ -122,6 +122,28 @@ def _validate(
                     "user.completion_sound_template",
                     "结束音效按需上传，模板不预置文件",
                 )
+            failure_sound_files = sorted(
+                item.name
+                for item in destination.iterdir()
+                if item.is_file()
+                and item.name.casefold().startswith("failure_sound.")
+            )
+            failure_sound_dir = destination / "failure_sound"
+            if failure_sound_dir.is_dir():
+                report.failed(
+                    "user.failure_sound_directory",
+                    "用户模板不得创建单独的失败音效目录",
+                )
+            elif failure_sound_files:
+                report.failed(
+                    "user.failure_sound_template",
+                    "用户模板不得预置失败音效文件：" + ", ".join(failure_sound_files),
+                )
+            else:
+                report.passed(
+                    "user.failure_sound_template",
+                    "失败音效按需上传，模板不预置文件",
+                )
         prepare_user(root, user)
 
         try:

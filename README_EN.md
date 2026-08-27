@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.3-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,18 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.2`
+Current version: `1.2.3`
+
+### 1.2.3 update
+
+This is a stability patch for long-running work, tool calls, and process boundaries.
+
+- Provider tool arguments are parsed and schema-checked before execution; invalid arguments end in an explicit `incomplete` state.
+- Parallel tool calls are committed as a batch, so one malformed call cannot leak other calls from the same batch.
+- Background Shell jobs enforce their deadline in a detached worker; output is still drained when log writing fails.
+- PID identity and start information are checked before cancellation; uncertain identities are rejected, and public results do not expose host absolute paths.
+- Cancellation, Provider failures, and bounded retries archive the current text and reasoning idempotently, preventing duplicate content in one round.
+- Provider diagnostics recognize more sensitive-field aliases and enforce recursion/node budgets; prefixed JSON errors are sanitized before return.
 
 ### 1.2.2 update
 
@@ -214,7 +225,7 @@ This is a stability and maintenance release.
 - Project-root detection, fallback Web ports, and local bridge port tracking are fixed.
 - Task plans can be edited, retried, reset, inspected by revision, and safely rolled back.
 - Obvious Token, API Key, Bearer credential, and private-key text is redacted before task-plan persistence.
-- Each user can set a separate completion sound. It is used only by the Windows desktop Web client.
+- Each user can set separate sounds for successful completion and final failure. They are used only by the Windows desktop Web client; mobile clients do not show or play them.
 - Submitted attachment references are removed immediately to avoid reusing the same `asset_id`.
 - Mid-run guidance uploads use `purpose=input`.
 - Package-layout, project-path, fallback-port, and user-template tests were added.

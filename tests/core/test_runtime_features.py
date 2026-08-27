@@ -2316,6 +2316,10 @@ def run(*, context):
             find_window(root, "alice", "cli", "visible-invalid-tool-arguments")
         )
         self.assertIn("visible", window["text"]["messages"][-1]["content"])
+        self.assertEqual(
+            window["text"]["messages"][-1]["content"].count("visible"),
+            1,
+        )
         self.assertIn("thinking", window["think"]["rounds"][-1]["content"])
 
     def test_parallel_valid_and_invalid_tool_calls_retry_without_stale_card(
@@ -3574,6 +3578,58 @@ def run(*, context):
                 show_reasoning=False,
             )
         self.assertTrue(source.closed)
+
+    def test_invalid_parallel_tool_batch_is_atomic_before_execution(self) -> None:
+        _, root = self.make_root()
+        for name in ("first", "second"):
+            self.write_tool(root / "plugins", name, name)
+            (root / "plugins" / name / "tool.py").write_text(
+                "from pathlib import Path\n"
+                "def run(value, *, context):\n"
+                "    marker = Path(context['root']) / f'marker_{value}.txt'\n"
+                "    marker.write_text(value, encoding='utf-8')\n"
+                "    return {'value': value}\n",
+                "utf-8",
+            )
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("bad-a", "first", {"value": "one"}),
+                        ToolCall("bad-b", "second", {}),
+                    ],
+                ),
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall("good-a", "first", {"value": "one"}),
+                        ToolCall("good-b", "second", {"value": "two"}),
+                    ],
+                ),
+                ChatResponse(text="finished"),
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "invalid-parallel-atomic",
+                        "prompt": "run both",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+        assert events[-1].type == "done"
+        assert events[-1].metadata["tool_argument_retries"] == 1
+        assert len(provider.requests) == 3
+        results = [event for event in events if event.type == "tool_call_result"]
+        assert [event.tool_name for event in results] == ["first", "second"]
+        assert (root / "marker_one.txt").read_text(encoding="utf-8") == "one"
+        assert (root / "marker_two.txt").read_text(encoding="utf-8") == "two"
 
 
 if __name__ == "__main__":

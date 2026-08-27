@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.3-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,7 +204,18 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.2`
+当前版本：`1.2.3`
+
+### 1.2.3 更新
+
+这是一次针对长期运行、工具调用和进程边界的稳定性补丁。
+
+- Provider 工具参数必须先解析并通过 Schema 校验；非法参数会进入明确的 `incomplete` 终态，不会执行。
+- 并行工具调用按批次处理，单个调用异常时不会提前发布同批其他调用。
+- 后台 Shell 作业由独立 Worker 执行截止时间，日志写入失败时仍会持续读取输出，避免子进程阻塞。
+- 取消后台进程前会复核 PID 身份和启动信息，无法确认时拒绝破坏性操作；公开结果不暴露宿主机绝对路径。
+- 对话取消、Provider 异常和有界重试会幂等归档当前正文与思考，避免同一轮内容重复累加。
+- Provider 诊断增加敏感字段别名、递归深度和节点预算限制，前缀 JSON 错误也会先脱敏再返回。
 
 ### 1.2.2 更新
 
@@ -214,7 +225,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - 修复启动项目根目录、备用 Web 端口和本机桥接端口跟随。
 - 任务计划可以修改、重试、重置、查看修订和安全回滚。
 - 任务计划保存前会脱敏明显的 Token、API Key、Bearer 凭据和私钥内容。
-- 每个用户可以设置自己的运行结束音效；只在 Windows 桌面网页端使用。
+- 每个用户可以分别设置运行成功音效和运行失败音效；只在 Windows 桌面网页端使用，移动端不显示也不播放。
 - 发送附件后立即清除引用，避免重复使用同一个 `asset_id`。
 - 运行中引导上传统一使用 `purpose=input`。
 - 增加包结构、项目路径、备用端口和用户模板测试。

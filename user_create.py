@@ -474,6 +474,10 @@ def _menu_create(root: Path) -> None:
         "  结束音效:  未设置；Windows 桌面网页端上传后生成 "
         f"users/{name}/completion_sound.*"
     )
+    print(
+        "  失败音效:  未设置；Windows 桌面网页端上传后生成 "
+        f"users/{name}/failure_sound.*"
+    )
 
 
 # ── CLI 入口 ──

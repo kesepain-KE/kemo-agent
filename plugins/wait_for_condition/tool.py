@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
-import os
 from pathlib import Path
 import socket
 import time
 from typing import Any
+
+from run.infra import process_identity_matches, process_snapshot
+from run.tools import (
+    JOB_TERMINAL_STATUSES,
+    assert_background_job_access,
+    public_background_job,
+    read_background_job,
+    reconcile_background_job,
+)
 
 
 MAX_WAIT_SECONDS = 7200.0
@@ -18,6 +24,7 @@ MAX_CHECK_INTERVAL = 60.0
 CONDITIONS = frozenset(
     {
         "duration",
+        "job_exit",
         "process_exit",
         "path_exists",
         "path_missing",
@@ -53,51 +60,19 @@ def _path_snapshot(path: Path) -> dict[str, Any]:
 
 
 def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        raise ValueError("process_exit 需要 pid 为正整数")
-    if os.name == "nt":
-        process_query_limited_information = 0x1000
-        still_active = 259
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.OpenProcess(
-            process_query_limited_information,
-            False,
-            pid,
-        )
-        if handle:
-            exit_code = wintypes.DWORD()
-            try:
-                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                    return True
-                return exit_code.value == still_active
-            finally:
-                kernel32.CloseHandle(handle)
-        error = ctypes.get_last_error()
-        if error == 5:  # access denied still proves that the process exists
-            return True
-        if error in {0, 87, 1168}:  # invalid parameter / not found
-            return False
-        return False
-    proc_stat = Path(f"/proc/{pid}/stat")
-    try:
-        fields = proc_stat.read_text("utf-8").split()
-        if len(fields) >= 3 and fields[2] == "Z":
-            return False
-    except (FileNotFoundError, OSError, UnicodeDecodeError):
-        pass
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return bool(process_snapshot(pid).get("exists"))
+
+
+def _public_process_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "pid",
+        "exists",
+        "query_status",
+        "identity_available",
+        "process_started_at",
+        "process_name",
+    )
+    return {key: snapshot.get(key) for key in allowed if key in snapshot}
 
 
 def _tcp_open(host: str, port: int, timeout: float) -> bool:
@@ -118,6 +93,9 @@ def _validate(
     path: str,
     host: str,
     port: int,
+    process_started_at: str,
+    process_name: str,
+    job_id: str,
     root: Path,
 ) -> tuple[float, float, Path | None, str]:
     if condition not in CONDITIONS:
@@ -140,6 +118,14 @@ def _validate(
         isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
     ):
         raise ValueError("process_exit 需要 pid 为正整数")
+    if not isinstance(process_started_at, str):
+        raise ValueError("process_started_at 必须是字符串")
+    if not isinstance(process_name, str):
+        raise ValueError("process_name 必须是字符串")
+    if condition == "job_exit" and (
+        not isinstance(job_id, str) or not job_id.strip()
+    ):
+        raise ValueError("job_exit 需要非空 job_id")
     if condition.startswith("path_"):
         resolved_path = _resolve_path(path, root)
     if condition.startswith("tcp_"):
@@ -159,6 +145,9 @@ def run(
     path: str = "",
     host: str = "",
     port: int = 0,
+    process_started_at: str = "",
+    process_name: str = "",
+    job_id: str = "",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -176,12 +165,34 @@ def run(
         path,
         host,
         port,
+        process_started_at,
+        process_name,
+        job_id,
         root,
     )
+
+    user = str(context.get("user") or "").strip()
+    source = str(context.get("source") or context.get("caller") or "")
+    session_id = str(context.get("session_id") or context.get("task_id") or "")
+    if condition == "job_exit" and not user:
+        raise ValueError("job_exit 需要工具上下文 user")
+    if condition == "job_exit":
+        initial_job = read_background_job(root, user, job_id)
+        assert_background_job_access(
+            initial_job,
+            source=source,
+            session_id=session_id,
+        )
 
     started = time.monotonic()
     deadline = started + wait_seconds
     initial_path = _path_snapshot(resolved_path) if resolved_path is not None else None
+    requested_path = str(path).strip()
+    path_was_relative = bool(requested_path) and not Path(
+        requested_path
+    ).expanduser().is_absolute()
+    initial_process_exists: bool | None = None
+    ever_observed_alive = False
     checks = 0
     last_observation: dict[str, Any] = {}
 
@@ -201,14 +212,62 @@ def run(
         if condition == "duration":
             triggered = time.monotonic() >= deadline
             trigger = "duration_elapsed"
+        elif condition == "job_exit":
+            current_job = read_background_job(root, user, job_id)
+            assert_background_job_access(
+                current_job,
+                source=source,
+                session_id=session_id,
+            )
+            current_job = reconcile_background_job(root, user, job_id)
+            last_observation = public_background_job(current_job, root=root)
+            triggered = current_job.get("status") in JOB_TERMINAL_STATUSES
+            trigger = "job_exit"
         elif condition == "process_exit":
-            exists = _process_exists(pid)
-            last_observation = {"pid": pid, "process_exists": exists}
-            triggered = not exists
-            trigger = "process_exit"
+            snapshot = process_snapshot(pid)
+            exists = bool(snapshot.get("exists"))
+            has_expected_identity = bool(
+                process_started_at.strip() or process_name.strip()
+            )
+            identity_match = (
+                process_identity_matches(
+                    snapshot,
+                    process_started_at=process_started_at,
+                    process_name=process_name,
+                )
+                if has_expected_identity
+                else None
+            )
+            if initial_process_exists is None:
+                initial_process_exists = exists
+            if exists and identity_match is not False:
+                ever_observed_alive = True
+            last_observation = {
+                **_public_process_snapshot(snapshot),
+                "process_exists": exists,
+                "identity_match": identity_match,
+                "initial_exists": initial_process_exists,
+                "ever_observed_alive": ever_observed_alive,
+            }
+            if not exists:
+                triggered = True
+                trigger = (
+                    "process_already_absent"
+                    if initial_process_exists is False
+                    else "process_exit"
+                )
+            elif identity_match is False:
+                triggered = True
+                trigger = "process_replaced"
         elif resolved_path is not None:
             current_path = _path_snapshot(resolved_path)
-            last_observation = {"path": str(resolved_path), "snapshot": current_path}
+            last_observation = {
+                "requested_path": requested_path,
+                "resolved_path": str(resolved_path),
+                "path_was_relative": path_was_relative,
+                "path_base": str(root),
+                "snapshot": current_path,
+            }
             if condition == "path_exists":
                 triggered = bool(current_path.get("exists"))
             elif condition == "path_missing":

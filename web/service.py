@@ -39,9 +39,11 @@ from run.history import (
     find_record as find_index_record,
 )
 from run.long_task import (
+    LONG_TASK_ACTIVE_STATUSES,
     activate_long_task,
     finish_long_task,
     get_long_task_state,
+    reconcile_orphaned_long_task,
     record_long_task_run,
     request_long_task_cancel,
     set_long_task_current_run,
@@ -67,6 +69,7 @@ from web.constants import (
     AUDIO_PREVIEW_MAX_BYTES,
     AVATAR_MAX_BYTES,
     COMPLETION_SOUND_MAX_BYTES,
+    FAILURE_SOUND_MAX_BYTES,
     FILE_UPLOAD_MAX_BYTES,
     IMAGE_PREVIEW_MAX_BYTES,
     IMPORTANT_MEMORY_MAX_HARD_CHARS,
@@ -107,6 +110,7 @@ __all__ = [
     "AUDIO_PREVIEW_MAX_BYTES",
     "AVATAR_MAX_BYTES",
     "COMPLETION_SOUND_MAX_BYTES",
+    "FAILURE_SOUND_MAX_BYTES",
     "ActiveRun",
     "ConflictError",
     "FILE_UPLOAD_MAX_BYTES",
@@ -595,12 +599,43 @@ class WebRunService(
             self.root, name, normalized_source, normalized_session
         ) is None:
             raise NotFoundError(f"会话不存在：{normalized_session}")
+        persisted_state = get_long_task_state(
+            self.root, name, normalized_source, normalized_session
+        )
+        current_run_id = str(persisted_state.get("current_run_id") or "")
+        with self._active_runs_lock:
+            if current_run_id:
+                active = self._active_runs.get(current_run_id)
+                has_live_run = bool(
+                    active is not None
+                    and active.user == name
+                    and active.source == normalized_source
+                    and active.session_id == normalized_session
+                )
+            else:
+                # Activation briefly precedes assigning the first persisted
+                # Run id.  During only that narrow window, session ownership
+                # is the strongest available liveness signal.
+                has_live_run = any(
+                    active.user == name
+                    and active.source == normalized_source
+                    and active.session_id == normalized_session
+                    for active in self._active_runs.values()
+                )
         return {
             "user": name,
             "source": normalized_source,
             "session_id": normalized_session,
-            "long_task": get_long_task_state(
-                self.root, name, normalized_source, normalized_session
+            "long_task": (
+                persisted_state
+                if has_live_run
+                else reconcile_orphaned_long_task(
+                    self.root,
+                    name,
+                    normalized_source,
+                    normalized_session,
+                    has_live_run=False,
+                )
             ),
         }
 
@@ -650,6 +685,7 @@ class WebRunService(
             )
         except KeyError as exc:
             raise NotFoundError(str(exc)) from None
+        matched_run = False
         with self._active_runs_lock:
             for active in self._active_runs.values():
                 if (
@@ -657,8 +693,19 @@ class WebRunService(
                     and active.source == normalized_source
                     and active.session_id == normalized_session
                 ):
+                    matched_run = True
                     active.cancel_event.set()
                     active.guidance.close()
+        if not matched_run and state.get("status") in LONG_TASK_ACTIVE_STATUSES:
+            state = reconcile_orphaned_long_task(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+                has_live_run=False,
+                grace_seconds=0,
+                stop_reason="orphaned_user_cancel",
+            )
         return {
             "user": name,
             "source": normalized_source,
@@ -1043,6 +1090,79 @@ class WebRunService(
                     rendered.metadata["stop_reason"] = stop_reason
                 return rendered
 
+            def settle_abandoned_long_task(
+                *,
+                stop_reason: str,
+                error_code: str,
+                exception_type: str = "",
+            ) -> tuple[dict[str, Any], bool]:
+                state = state_snapshot()
+                if state.get("status") not in LONG_TASK_ACTIVE_STATUSES:
+                    return state, False
+                cancelled = cancel_event.is_set() or bool(
+                    state.get("cancel_requested")
+                )
+                error = None
+                if not cancelled:
+                    error = {
+                        "code": error_code,
+                        "message": "长任务运行意外中断，状态已安全收敛",
+                    }
+                    if exception_type:
+                        error["exception_type"] = str(exception_type)[:160]
+                try:
+                    state = finish_long_task(
+                        self.root,
+                        name,
+                        normalized_source,
+                        normalized_session,
+                        status="cancelled" if cancelled else "interrupted",
+                        stop_reason=(
+                            "user_emergency_stop" if cancelled else stop_reason
+                        ),
+                        error=error,
+                    )
+                except Exception:
+                    # The original failure remains authoritative.  A final
+                    # best-effort pass runs again before the ActiveRun is
+                    # removed, and the read-side orphan reconciler remains a
+                    # durable fallback after restart.
+                    pass
+                return state, True
+
+            def abandoned_terminal_event(
+                state: dict[str, Any],
+                *,
+                cancelled: bool,
+                error_code: str,
+                stop_reason: str,
+            ) -> RunEvent:
+                metadata = {
+                    "status": "cancelled" if cancelled else "interrupted",
+                    "committed": False,
+                    "stop_reason": (
+                        "user_emergency_stop" if cancelled else stop_reason
+                    ),
+                    **long_task_event_metadata(
+                        state,
+                        terminal=True,
+                        continuation=run_index > 0,
+                    ),
+                }
+                if cancelled:
+                    metadata["cancelled"] = True
+                    return RunEvent(type="done", metadata=metadata)
+                return RunEvent(
+                    type="error",
+                    error={
+                        "message": "长任务运行意外中断，已安全停止",
+                        "exception_type": "LongTaskInterrupted",
+                        "phase": "run",
+                        "code": error_code,
+                    },
+                    metadata=metadata,
+                )
+
             try:
                 # Keep the complete logical task under the same session lock.
                 # The single-Run engine takes the same RLock re-entrantly;
@@ -1153,6 +1273,19 @@ class WebRunService(
                             iterator = None
 
                         if terminal_event is None:
+                            state, was_active = settle_abandoned_long_task(
+                                stop_reason="missing_terminal_event",
+                                error_code="LONG_TASK_MISSING_TERMINAL",
+                            )
+                            if was_active:
+                                put(
+                                    abandoned_terminal_event(
+                                        state,
+                                        cancelled=cancel_event.is_set(),
+                                        error_code="LONG_TASK_MISSING_TERMINAL",
+                                        stop_reason="missing_terminal_event",
+                                    )
+                                )
                             return
 
                         stats = terminal_run_stats(terminal_event)
@@ -1212,12 +1345,24 @@ class WebRunService(
                                 next_guidance = GuidanceMailbox(maxsize=8)
                                 active.guidance.close()
                                 with self._active_runs_lock:
-                                    for key, value in list(self._active_runs.items()):
-                                        if value is active:
-                                            self._active_runs.pop(key, None)
                                     active.run_id = next_run_id
                                     active.guidance = next_guidance
+                                    # Keep the previous alias until the
+                                    # persisted current_run_id points at the
+                                    # replacement.  State polling can therefore
+                                    # never observe a healthy hand-off as an
+                                    # orphaned Run.
                                     self._active_runs[next_run_id] = active
+                                state = set_long_task_current_run(
+                                    self.root,
+                                    name,
+                                    normalized_source,
+                                    normalized_session,
+                                    next_run_id,
+                                )
+                                with self._active_runs_lock:
+                                    if self._active_runs.get(previous_run_id) is active:
+                                        self._active_runs.pop(previous_run_id, None)
                                 next_request = continuation_request(
                                     request,
                                     run_id=next_run_id,
@@ -1231,13 +1376,6 @@ class WebRunService(
                                 current_request = next_request
                                 current_run_id = next_run_id
                                 run_index += 1
-                                state = set_long_task_current_run(
-                                    self.root,
-                                    name,
-                                    normalized_source,
-                                    normalized_session,
-                                    next_run_id,
-                                )
                                 update_metadata = long_task_event_metadata(
                                     state,
                                     terminal=False,
@@ -1345,8 +1483,27 @@ class WebRunService(
                             )
                         )
             except BaseException as exc:
-                put(exc)
+                state, was_active = settle_abandoned_long_task(
+                    stop_reason="engine_exception",
+                    error_code="LONG_TASK_ENGINE_EXCEPTION",
+                    exception_type=type(exc).__name__,
+                )
+                if was_active and isinstance(exc, Exception):
+                    put(
+                        abandoned_terminal_event(
+                            state,
+                            cancelled=cancel_event.is_set(),
+                            error_code="LONG_TASK_ENGINE_EXCEPTION",
+                            stop_reason="engine_exception",
+                        )
+                    )
+                else:
+                    put(exc)
             finally:
+                settle_abandoned_long_task(
+                    stop_reason="worker_exited_without_terminal",
+                    error_code="LONG_TASK_WORKER_EXITED",
+                )
                 active.guidance.close()
                 if iterator is not None:
                     close = getattr(iterator, "close", None)

@@ -6,7 +6,9 @@ from run.infra.atomic_io import replace_with_retry
 from run.infra.errors import ContextLengthExceededError, EngineError
 from run.infra.process_utils import (
     cancellable_subprocess_kwargs,
+    detached_subprocess_kwargs,
     hidden_subprocess_kwargs,
+    terminate_pid_tree,
     terminate_process_tree,
 )
 
@@ -14,6 +16,7 @@ __all__ = [
     "ContextLengthExceededError",
     "EngineError",
     "cancellable_subprocess_kwargs",
+    "detached_subprocess_kwargs",
     "handle_cli_request",
     "handle_cli_compress",
     "handle_cli_status",
@@ -21,10 +24,11 @@ __all__ = [
     "resolve_interactive_context",
     "replace_with_retry",
     "stream_cli_request",
+    "terminate_pid_tree",
     "terminate_process_tree",
 ]
 
-_LAZY_MODULES = ("log_store", "process_execution", "cli")
+_LAZY_MODULES = ("log_store", "process_execution", "cli", "process_identity")
 
 
 def __getattr__(name: str):

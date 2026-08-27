@@ -1,7 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
 import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+
+describe('长任务气泡显示条件', () => {
+  it('只显示活跃状态和可操作的暂停状态', () => {
+    expect(shouldShowLongTaskBubble('running')).toBe(true)
+    expect(shouldShowLongTaskBubble('pausing')).toBe(true)
+    expect(shouldShowLongTaskBubble('cancelling')).toBe(true)
+    expect(shouldShowLongTaskBubble('paused')).toBe(true)
+    expect(shouldShowLongTaskBubble('failed')).toBe(false)
+    expect(shouldShowLongTaskBubble('interrupted')).toBe(false)
+    expect(shouldShowLongTaskBubble('completed')).toBe(false)
+    expect(shouldShowLongTaskBubble('cancelled')).toBe(false)
+  })
+})
 
 describe('reduceRunEvent', () => {
   it('批量合并高频流式增量，并允许非增量事件到达前同步冲刷', () => {
@@ -94,6 +107,22 @@ describe('reduceRunEvent', () => {
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: false } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: true } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
+  })
+
+  it('只把最终失败终态判定为失败音效，取消、暂停和受限停止不播放', () => {
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'failed' } })).toBe(true)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'error' } })).toBe(true)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'cancelled' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'cancelling' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'paused' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'pausing' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'limited' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'completed', long_task: true, terminal: false } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'error', metadata: { long_task: true, terminal: false } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'error', metadata: { long_task: true, terminal: true, long_task_state: { status: 'failed' } } })).toBe(true)
+    expect(isFailedRunCompletion({ type: 'error', metadata: { status: 'interrupted' } })).toBe(false)
+    expect(isFailedRunCompletion({ type: 'error', error: { message: 'Provider error' } })).toBe(true)
+    expect(isFailedRunCompletion({ type: 'error', metadata: { status: 'failed' }, error: { message: 'Provider error' } })).toBe(true)
   })
 
   it('用户消息导航只收集真实用户气泡并保留历史绝对轮次', () => {

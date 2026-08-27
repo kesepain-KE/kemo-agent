@@ -15,9 +15,11 @@ from provider.protocol.models import (
     ToolCallItem,
     Usage,
 )
+from provider.schema import ToolCall
 from run.agents import AgentRunError, AgentRunner
 from run.tools import (
     response_invalid_tool_arguments_error,
+    validate_tool_call_batch,
 )
 
 
@@ -139,6 +141,57 @@ def test_native_parse_error_is_normalized_before_tool_execution() -> None:
     assert error["parse_error"]["message"] == "工具参数 JSON 解析失败"
     serialized = json.dumps(error, ensure_ascii=False)
     assert "sk-provider-secret-value" not in serialized
+
+
+def test_missing_arguments_diagnostic_does_not_report_synthetic_empty_object() -> None:
+    call = ToolCall(
+        id="tool-item",
+        name="file",
+        arguments={},
+        parse_error={"kind": "missing_arguments"},
+    )
+    error = validate_tool_call_batch(
+        [call],
+        {
+            "file": {
+                "type": "object",
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            }
+        },
+    )
+
+    assert error is not None
+    diagnostic = error["invalid_tool_calls"][0]["arguments_diagnostic"]
+    assert diagnostic["available"] is False
+    assert diagnostic["length"] == 0
+
+
+def test_batch_validation_does_not_recursively_serialize_deep_arguments() -> None:
+    arguments = {}
+    for _ in range(3000):
+        arguments = {"nested": arguments}
+    call = ToolCall(
+        id="tool-item",
+        name="file",
+        arguments=arguments,
+    )
+
+    assert validate_tool_call_batch([call], {}) is None
+
+
+def test_batch_parse_error_kind_is_allowlisted() -> None:
+    call = ToolCall(
+        id="tool-item",
+        name="file",
+        arguments={},
+        parse_error={"kind": "password=diagnostic-secret"},
+    )
+    error = validate_tool_call_batch([call], {"file": {"type": "object"}})
+
+    assert error is not None
+    assert error["invalid_tool_calls"][0]["parse_error"]["kind"] == "invalid_json"
+    assert "diagnostic-secret" not in str(error)
 
 
 def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:

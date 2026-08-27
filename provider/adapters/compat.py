@@ -52,6 +52,7 @@ from provider.schema import (
     ToolCall,
     Usage as ChatUsage,
 )
+from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 def _id(prefix: str) -> str:
@@ -460,16 +461,17 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                     )
                 )
         for raw_call in raw.get("tool_calls") or []:
-            function = raw_call.get("function") if isinstance(raw_call, dict) else {}
-            arguments_raw = str(function.get("arguments") or "{}")
-            try:
-                arguments = json.loads(arguments_raw)
-                if not isinstance(arguments, dict):
-                    arguments = {"_value": arguments}
-                parse_error = None
-            except json.JSONDecodeError as exc:
-                arguments = {}
-                parse_error = {"message": str(exc)}
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            parsed_arguments = parse_tool_arguments(
+                function["arguments"] if "arguments" in function else MISSING
+            )
+            arguments = parsed_arguments.arguments
+            arguments_raw = parsed_arguments.arguments_raw
+            parse_error = parsed_arguments.parse_error
             original_call_id = str(raw_call.get("id") or "")
             call_id = _unique_id(original_call_id, "callid", call_ids)
             if original_call_id:

@@ -40,7 +40,7 @@ import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubbl
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
 import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
-import { playUserCompletionSound } from '../utils/completionSound'
+import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 
@@ -61,6 +61,10 @@ function eventId(prefix: string) {
 const EMPTY_CHAT_ITEMS: ChatItem[] = []
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 const HISTORY_PAGE_SIZE = 20
+
+export function shouldShowLongTaskBubble(status: string) {
+  return ['running', 'pausing', 'paused', 'cancelling'].includes(status)
+}
 
 export function removeSubmittedUploads(
   current: PendingUploadedFile[],
@@ -96,6 +100,36 @@ export function isSuccessfulRunCompletion(event: RunEvent) {
   if (event.metadata?.long_task === true && event.metadata?.terminal === false) return false
   const status = String(event.metadata?.status || '').toLowerCase()
   return status === 'completed'
+}
+
+const NON_FAILURE_RUN_STATUSES = new Set([
+  'cancelled',
+  'cancelling',
+  'paused',
+  'pausing',
+  'limited',
+  'interrupted',
+  'stopped',
+  'aborted',
+])
+
+export function isFailedRunCompletion(event: RunEvent) {
+  const metadata = event.metadata || {}
+  if (metadata.cancelled === true || event.error?.cancelled === true) return false
+  if (metadata.long_task === true && metadata.terminal === false) return false
+  const nestedState = metadata.long_task_state
+  const nestedStatus = nestedState && typeof nestedState === 'object'
+    ? String((nestedState as Record<string, unknown>).status || '').toLowerCase()
+    : ''
+  const status = String(metadata.status || nestedStatus || '').toLowerCase()
+  if (NON_FAILURE_RUN_STATUSES.has(status)) return false
+  if (event.type === 'done') return status === 'failed' || status === 'error'
+  if (event.type !== 'error') return false
+  if (status === 'failed' || status === 'error') return true
+  // The runtime can emit a terminal error without a status field when an
+  // exception escapes the provider adapter.  It is still a failed run unless
+  // explicitly marked as a non-terminal long-task update.
+  return Boolean(event.error) && metadata.terminal !== false
 }
 
 function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
@@ -1149,6 +1183,7 @@ export function ChatPage() {
   const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const submittedUploadsRef = useRef(new Map<string, PendingUploadedFile[]>())
   const completionSoundRunIdsRef = useRef(new Set<string>())
+  const failureSoundRunIdsRef = useRef(new Set<string>())
   const consumingNextTurnRef = useRef(false)
   const locallyCommittedSessionRef = useRef('')
   const undoneRoundBaselineRef = useRef<{
@@ -1169,6 +1204,14 @@ export function ChatPage() {
     if (played.size >= 100) played.clear()
     played.add(completedRunId)
     void playUserCompletionSound(user)
+  }
+  const playFailureSoundOnce = (failedRunId: string, event: RunEvent) => {
+    if (!isFailedRunCompletion(event)) return
+    const played = failureSoundRunIdsRef.current
+    if (played.has(failedRunId)) return
+    if (played.size >= 100) played.clear()
+    played.add(failedRunId)
+    void playUserFailureSound(user)
   }
   const activeCompression = [...liveItems].reverse().find(
     (item): item is Extract<ChatItem, { kind: 'context_compression' }> => item.kind === 'context_compression' && (!item.runId || item.runId === effectiveRunId),
@@ -1410,6 +1453,7 @@ export function ChatPage() {
             committed = event.metadata?.committed !== false
             successful = isSuccessfulRunCompletion(event)
             playCompletionSoundOnce(runId, event)
+            playFailureSoundOnce(runId, event)
             const terminalStatus = String(event.metadata?.status || 'completed').toLowerCase()
             restoreDraftAfterFailure = ['failed', 'error'].includes(terminalStatus)
             const submitted = submittedUploadsRef.current.get(runId) ?? []
@@ -1420,6 +1464,7 @@ export function ChatPage() {
           } else if (event.type === 'error') {
             terminalReceived = true
             restoreDraftAfterFailure = true
+            playFailureSoundOnce(runId, event)
             submittedUploadsRef.current.delete(runId)
           }
           updateChatRunItems(user, activeSession, (current) => reduceRunEvent(current, event))
@@ -1950,8 +1995,10 @@ export function ChatPage() {
             terminalReceived = true
             committed = event.metadata?.committed !== false
             playCompletionSoundOnce(runId, event)
+            playFailureSoundOnce(runId, event)
           } else if (event.type === 'error') {
             terminalReceived = true
+            playFailureSoundOnce(runId, event)
           }
           const updated = event.type === 'tool_call_result' ? extractPlanSummary(event.result) : null
           if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
@@ -2361,7 +2408,7 @@ export function ChatPage() {
       </div>
       <div className="composer-zone">
         {running && activeCompression ? <ContextCompressionBubble item={activeCompression} /> : null}
-        {longTaskQuery.data?.long_task && ['running', 'pausing', 'paused', 'failed', 'interrupted', 'cancelling'].includes(longTaskQuery.data.long_task.status) ? (
+        {longTaskQuery.data?.long_task && shouldShowLongTaskBubble(longTaskQuery.data.long_task.status) ? (
           <LongTaskBubble state={longTaskQuery.data.long_task} stopping={longTaskBusy} onCancel={() => { void stopLongTask() }} />
         ) : null}
         {dockedPlan ? (

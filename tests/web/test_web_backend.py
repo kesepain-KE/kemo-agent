@@ -3224,6 +3224,60 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(invalid.status_code, 400, invalid.text)
 
+    def test_long_task_state_reconciles_stale_orphan_after_restart(self) -> None:
+        _, root = self.make_root()
+        reserve_session(root, "alice", "web", "long-orphaned")
+        from run.long_task import activate_long_task, set_long_task_enabled
+
+        with patch("run.long_task._now", return_value="2020-01-01T00:00:00+00:00"):
+            set_long_task_enabled(root, "alice", "web", "long-orphaned", True)
+            activate_long_task(
+                root,
+                "alice",
+                "web",
+                "long-orphaned",
+                original_prompt="跨进程长任务",
+            )
+
+        service = WebRunService(root)
+        response = self.request(
+            create_app(service=service),
+            "GET",
+            "/api/users/alice/sessions/long-orphaned/long-task?source=web",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        state = response.json()["long_task"]
+        self.assertEqual(state["status"], "interrupted")
+        self.assertEqual(state["last_stop_reason"], "orphaned_run")
+        self.assertEqual(state["last_error"]["code"], "orphaned_long_task")
+
+    def test_long_task_cancel_finishes_orphan_instead_of_sticking_cancelling(self) -> None:
+        _, root = self.make_root()
+        reserve_session(root, "alice", "web", "long-orphan-cancel")
+        from run.long_task import activate_long_task, set_long_task_enabled
+
+        set_long_task_enabled(root, "alice", "web", "long-orphan-cancel", True)
+        activate_long_task(
+            root,
+            "alice",
+            "web",
+            "long-orphan-cancel",
+            original_prompt="等待用户终止",
+        )
+        service = WebRunService(root)
+        response = self.request(
+            create_app(service=service),
+            "POST",
+            "/api/users/alice/sessions/long-orphan-cancel/long-task/cancel?source=web",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        state = response.json()["long_task"]
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["last_stop_reason"], "orphaned_user_cancel")
+        self.assertIsNone(state["last_error"])
+
     def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(
         self,
     ) -> None:
@@ -4335,6 +4389,97 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(status["terminal_fallback_supported"])
         self.assertFalse(fallback["played"])
         self.assertEqual(fallback["reason"], "unsupported_host")
+
+    def test_failure_sound_is_user_scoped_validated_and_deletable(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        endpoint = "/api/users/alice/failure-sound"
+
+        missing_status = self.request(app, "GET", f"{endpoint}/status")
+        self.assertEqual(missing_status.status_code, 200, missing_status.text)
+        self.assertFalse(missing_status.json()["available"])
+        self.assertEqual(self.request(app, "GET", endpoint).status_code, 204)
+
+        mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x08failure"
+        uploaded = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("failed.mp3", mp3, "audio/mpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        status = uploaded.json()["status"]
+        self.assertTrue(status["available"])
+        self.assertEqual(status["filename"], "failure_sound.mp3")
+        target = root / "users" / "alice" / "failure_sound.mp3"
+        self.assertEqual(target.read_bytes(), mp3)
+        self.assertFalse((root / "users" / "alice" / "completion_sound.mp3").exists())
+
+        audio = self.request(app, "GET", endpoint)
+        self.assertEqual(audio.status_code, 200, audio.text)
+        self.assertEqual(audio.headers["content-type"], "audio/mpeg")
+        self.assertEqual(audio.content, mp3)
+
+        with patch(
+            "web.services.files._play_windows_failure_sound",
+            return_value="user_mp3_mci",
+        ) as playback:
+            fallback = self.request(app, "POST", f"{endpoint}/fallback")
+        self.assertTrue(fallback.json()["played"])
+        self.assertEqual(fallback.json()["mode"], "user_mp3_mci")
+        playback.assert_called_once()
+
+        invalid = self.request(
+            app,
+            "POST",
+            endpoint,
+            files={"file": ("bad.txt", b"not audio", "text/plain")},
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertEqual(target.read_bytes(), mp3)
+
+        deleted = self.request(app, "DELETE", endpoint)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["deleted"])
+        self.assertEqual(self.request(app, "GET", endpoint).status_code, 204)
+
+    def test_failure_sound_terminal_fallback_is_windows_only(self) -> None:
+        _, root = self.make_root()
+        backend = WebRunService(root)
+        backend.save_failure_sound(
+            "alice",
+            b"RIFF" + (4).to_bytes(4, "little") + b"WAVEdata",
+            "audio/wav",
+        )
+
+        with patch("web.services.files.platform.system", return_value="Linux"):
+            status = backend.failure_sound_status("alice")
+            fallback = backend.play_failure_sound_fallback("alice")
+        self.assertFalse(status["terminal_fallback_supported"])
+        self.assertFalse(fallback["played"])
+        self.assertEqual(fallback["reason"], "unsupported_host")
+
+    def test_failure_sound_rejects_old_symlink_before_writing_new_format(self) -> None:
+        _, root = self.make_root()
+        outside = root / "outside.mp3"
+        outside.write_bytes(b"outside")
+        link = root / "users" / "alice" / "failure_sound.mp3"
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"当前环境不能创建符号链接：{exc}")
+        app = create_app(service=WebRunService(root))
+        wav = b"RIFF" + (4).to_bytes(4, "little") + b"WAVEdata"
+        response = self.request(
+            app,
+            "POST",
+            "/api/users/alice/failure-sound",
+            files={"file": ("failed.wav", wav, "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertFalse((root / "users" / "alice" / "failure_sound.wav").exists())
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(outside.read_bytes(), b"outside")
 
     def test_completion_sound_rejects_fixed_path_symlink(self) -> None:
         _, root = self.make_root()

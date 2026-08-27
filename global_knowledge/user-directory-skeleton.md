@@ -38,7 +38,8 @@ users/<name>/
 │   ├── memory.sqlite3                  # 四档记忆及生命周期的唯一权威数据库
 │   ├── memory.sqlite3-wal              # 运行时 WAL，正常关闭后自动合并
 │   └── memory.sqlite3-shm              # SQLite 共享内存索引，运行时自动生成
-├── completion_sound.{mp3,wav,ogg,webm}  # 可选；Windows 网页端运行结束音效，未设置时不存在
+├── completion_sound.{mp3,wav,ogg,webm}  # 可选；Windows 网页端成功结束音效，未设置时不存在
+├── failure_sound.{mp3,wav,ogg,webm}     # 可选；Windows 网页端最终失败音效，未设置时不存在
 └── history/
     ├── history.sqlite3                  # 会话、正文、状态和检索的权威数据库
     ├── history.sqlite3-wal              # 运行时 WAL，正常关闭后自动合并
@@ -60,7 +61,8 @@ users/<name>/
 | `task_plan/task_plans.sqlite3` | `PlanStore`、任务计划工具 | 使用状态机和 revision 事务，不直接编辑表或放置 JSON |
 | `task_cron/` | `CronStore`、`task_time` | 时间统一保存为北京时间 ISO 8601 |
 | `agents/` | 子智能体创建器或可信管理员 | 自定义 `executor.py` 会在主进程执行，只安装可信代码 |
-| `completion_sound.*` | Windows 网页端结束音效 API | 上传后写入用户根目录；不进入 `download/`、`file_upload/` 或文件列表；未设置时不存在 |
+| `completion_sound.*` | Windows 网页端成功结束音效 API | 上传后写入用户根目录；不进入 `download/`、`file_upload/` 或文件列表；未设置时不存在 |
+| `failure_sound.*` | Windows 网页端最终失败音效 API | 上传后写入用户根目录；不进入 `download/`、`file_upload/` 或文件列表；未设置时不存在 |
 
 ## 用户名规则
 
@@ -76,8 +78,8 @@ python user_create.py
 ```
 
 创建流程会复制 `template/user/`，初始化知识索引、记忆库、历史库和任务计划库，并补齐其他空目录。
-可选的 `completion_sound.*` 不在模板中预置，首次由 Windows 网页端上传后才生成在用户根目录；更新器只初始化当前数据库 Schema，不扫描其他状态格式。
+可选的 `completion_sound.*` 和 `failure_sound.*` 不在模板中预置，首次由 Windows 网页端上传后才生成在用户根目录；更新器只初始化当前数据库 Schema，不扫描其他状态格式。
 
 ## 备份建议
 
-备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/` 和 `expand/`；若用户已设置结束音效，也一并保留用户根目录的 `completion_sound.*`。
+备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/` 和 `expand/`；若用户已设置音效，也一并保留用户根目录的 `completion_sound.*` 和 `failure_sound.*`。

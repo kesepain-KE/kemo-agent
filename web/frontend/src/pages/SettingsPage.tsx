@@ -6,7 +6,9 @@ import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   deleteCompletionSound,
+  deleteFailureSound,
   getCompletionSoundStatus,
+  getFailureSoundStatus,
   getGlobalConfig,
   getKemoModelCapabilities,
   getKemoProviderModels,
@@ -19,6 +21,7 @@ import {
   patchUserConfig,
   restartSystem,
   uploadCompletionSound,
+  uploadFailureSound,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
@@ -33,7 +36,7 @@ import {
 import { formatBytes, formatDateTime, ModuleError, ModuleFrame, RefreshActionButton, StatusChip } from '../components/ModuleUi'
 import { useUiStore } from '../store/ui'
 import { copyText } from '../utils/clipboard'
-import { playUserCompletionSound } from '../utils/completionSound'
+import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { isWindowsDesktop } from '../utils/platform'
 
 type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'version'
@@ -580,6 +583,12 @@ export function SettingsPage() {
     enabled: Boolean(user) && windowsDesktop && tab === 'appearance',
     retry: false,
   })
+  const failureSoundQuery = useQuery({
+    queryKey: ['failure-sound', user],
+    queryFn: () => getFailureSoundStatus(user),
+    enabled: Boolean(user) && windowsDesktop && tab === 'appearance',
+    retry: false,
+  })
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
   const [initialApiKey, setInitialApiKey] = useState('')
@@ -593,8 +602,11 @@ export function SettingsPage() {
   const [versionCopyState, setVersionCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [completionSoundFeedback, setCompletionSoundFeedback] = useState('')
   const [completionSoundPreviewing, setCompletionSoundPreviewing] = useState(false)
+  const [failureSoundFeedback, setFailureSoundFeedback] = useState('')
+  const [failureSoundPreviewing, setFailureSoundPreviewing] = useState(false)
   const restartTimerRef = useRef<number | null>(null)
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
+  const failureSoundInputRef = useRef<HTMLInputElement | null>(null)
   const selectedProviderModel = userDraft?.provider.model.trim() || ''
   const selectedCatalogModel = providerModels.find((item) => item.id === selectedProviderModel)
   const providerCapabilitiesEnabled = Boolean(
@@ -633,6 +645,22 @@ export function SettingsPage() {
     },
     onError: (error) => setCompletionSoundFeedback(error instanceof Error ? error.message : '结束音效清除失败'),
   })
+  const failureSoundUploadMutation = useMutation({
+    mutationFn: (file: File) => uploadFailureSound(user, file),
+    onSuccess: (response) => {
+      client.setQueryData(['failure-sound', user], response.status)
+      setFailureSoundFeedback('失败音效已保存。')
+    },
+    onError: (error) => setFailureSoundFeedback(error instanceof Error ? error.message : '失败音效上传失败'),
+  })
+  const failureSoundDeleteMutation = useMutation({
+    mutationFn: () => deleteFailureSound(user),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['failure-sound', user] })
+      setFailureSoundFeedback('失败音效已清除。')
+    },
+    onError: (error) => setFailureSoundFeedback(error instanceof Error ? error.message : '失败音效清除失败'),
+  })
 
   useEffect(() => () => {
     if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
@@ -653,6 +681,8 @@ export function SettingsPage() {
   useEffect(() => {
     setCompletionSoundFeedback('')
     setCompletionSoundPreviewing(false)
+    setFailureSoundFeedback('')
+    setFailureSoundPreviewing(false)
   }, [user, tab])
 
   useEffect(() => {
@@ -799,6 +829,24 @@ export function SettingsPage() {
       setCompletionSoundFeedback(played ? '正在试听结束音效。' : '无法播放结束音效；请检查浏览器播放权限。')
     } finally {
       setCompletionSoundPreviewing(false)
+    }
+  }
+
+  const chooseFailureSound = (file: File | undefined) => {
+    if (!file) return
+    setFailureSoundFeedback('')
+    failureSoundUploadMutation.mutate(file)
+  }
+
+  const previewFailureSound = async () => {
+    if (failureSoundPreviewing || !failureSoundQuery.data?.available) return
+    setFailureSoundFeedback('')
+    setFailureSoundPreviewing(true)
+    try {
+      const played = await playUserFailureSound(user)
+      setFailureSoundFeedback(played ? '正在试听失败音效。' : '无法播放失败音效；请检查浏览器播放权限。')
+    } finally {
+      setFailureSoundPreviewing(false)
     }
   }
 
@@ -1036,9 +1084,32 @@ export function SettingsPage() {
                 <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundDeleteMutation.isPending} onClick={() => completionSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
               </div>
               {completionSoundFeedback ? <div className="settings-inline-feedback completion-sound-feedback" role="status">{completionSoundFeedback}</div> : null}
-            </div>
-          </article> : null}
-        </> : null}
+           </div>
+           </article> : null}
+           {windowsDesktop ? <article className="setting-section">
+             <div className="setting-section-head"><strong>运行失败音效</strong><span>支持 Windows 桌面网页端；运行最终失败且不是取消、暂停或受限停止时播放。</span></div>
+             <div className="setting-row completion-sound-row">
+               <span className="setting-copy"><strong>{failureSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{failureSoundQuery.data?.available ? `${failureSoundQuery.data.filename} · ${formatBytes(failureSoundQuery.data.size)} · ${formatDateTime(failureSoundQuery.data.updated_at)}` : '支持 MP3、WAV、Ogg 和 WebM 音频。'}</span></span>
+               <div className="settings-inline-actions">
+                 <input
+                   ref={failureSoundInputRef}
+                   type="file"
+                   accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm"
+                   aria-label="选择失败音效文件"
+                   style={{ display: 'none' }}
+                   onChange={(event) => {
+                     chooseFailureSound(event.target.files?.[0])
+                     event.target.value = ''
+                   }}
+                 />
+                 <button type="button" className="module-btn" disabled={failureSoundUploadMutation.isPending} onClick={() => failureSoundInputRef.current?.click()}><Upload size={15} />{failureSoundUploadMutation.isPending ? '上传中…' : '上传音效'}</button>
+                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundPreviewing} onClick={() => { void previewFailureSound() }}><Play size={15} />{failureSoundPreviewing ? '试听中…' : '试听'}</button>
+                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundDeleteMutation.isPending} onClick={() => failureSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
+               </div>
+               {failureSoundFeedback ? <div className="settings-inline-feedback completion-sound-feedback" role="status">{failureSoundFeedback}</div> : null}
+             </div>
+           </article> : null}
+         </> : null}
 
         {tab === 'provider' && userDraft ? <>
           <ConfigSaveBar label="保存模型与 Provider" description="保存后从下一次 Run 开始使用，不对运行中的请求热切换协议。" pending={saveMutation.isPending} saved={savedLabel === '保存模型与 Provider'} onSave={saveProvider} />

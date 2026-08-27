@@ -1,6 +1,6 @@
 # shell
 
-系统命令执行工具。运行本地命令，支持会话模式、原生单进程命令链、可选命令解释器和跨平台输出解码。无沙箱限制。
+系统命令执行工具。运行本地命令，支持同步执行、受管理后台作业、会话模式、原生单进程命令链、可选命令解释器和跨平台输出解码。无沙箱限制。
 
 ## 使用原则
 
@@ -10,6 +10,17 @@
 4. **连续失败即停止**：同一命令连续失败 2 次即停止重试，向用户报告操作目标、错误信息和需要的帮助，不得以相同参数反复尝试。
 5. **合理设置超时**：编译、下载、数据处理等长时间命令应主动设置 `timeout`；未显式设置时使用 `global_config.json → tools.timeout` 注入的运行时默认值，显式有效值会同时覆盖 shell 内部期限和框架外层看门狗。
 6. **哈希能力降级**：Windows PowerShell 若缺少 `Get-FileHash`，优先改用 `file` 工具的 `hash` action；必须走系统命令时使用 `certutil -hashfile <path> SHA256`。shell 会在识别到这类失败时保留原错误并附加 `hint`。
+7. **长命令使用受管理后台作业**：需要把命令留在后台继续运行时，调用 `action=run, background=true`。保存返回的 `job_id`，优先用 `wait_for_condition(condition=job_exit)` 等待；不要自行拼接 `Start-Process -PassThru`、`$!` 或猜测 PID。
+
+## 受管理后台作业
+
+- `action=run, background=false`：原同步模式，等待命令结束后返回输出。
+- `action=run, background=true`：立即登记后台作业并返回 `job_id`、PID、进程创建时间和受控日志路径。后台作业必须取得进程创建时间才能启用持久化取消/对账；无法确认身份时会安全失败，不会按裸 PID 杀进程。后台作业不支持 `stdin`；日志路径以项目根目录为基准返回相对路径，不暴露宿主机绝对路径。
+- `action=status, job_id=...`：查询并收敛一个后台作业的状态。
+- `action=cancel, job_id=...`：请求取消作业并终止已登记且身份校验通过的进程树；已结束作业重复取消是幂等操作。返回值中的 `ok` 表示取消请求是否被接受，`job_succeeded` 表示作业是否实际成功完成。
+
+后台作业按用户、来源和对话空间隔离。持久作业记录不保存原始命令，只保存命令摘要；原始命令请求由管理进程读取后立即删除。用户命令若自行再次创建完全脱离的子进程，不属于该作业的可靠生命周期范围。
+后台 stdout/stderr 会由管理进程流式收集，每个流有固定大小上限；超过上限的新增输出会丢弃，并在日志末尾写入截断标记。每个用户同时运行的后台作业数和后台作业目录总容量都有上限，已结束记录会在保留期后自动清理。即使日志写入失败，管理进程仍会继续读取管道，避免子进程因管道缓冲区填满而死锁。
 
 ## 会话模式
 
@@ -25,9 +36,12 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:--:|------|
-| `command` | string | ✅ | 要执行的命令，支持 && / \|\| / ; 命令链 |
+| `action` | string | | run / status / cancel，默认 run |
+| `command` | string | 条件 | action=run 时必填；支持 && / \|\| / ; 命令链 |
+| `background` | bool | | action=run 时是否创建受管理后台作业，默认 false |
+| `job_id` | string | 条件 | action=status/cancel 时必填 |
 | `working_dir` | string | | 工作目录，默认继承会话 cwd 或项目根 |
-| `timeout` | int | | 超时秒数（1-3600），默认来自 `global_config.json → tools.timeout` |
+| `timeout` | int | | 超时秒数（1-3600），默认来自 `global_config.json → tools.timeout`；后台模式由独立 Worker 强制执行 deadline |
 | `stdin` | string | | 标准输入文本 |
 | `env` | object | | 附加环境变量；会话模式下写入会话状态 |
 | `session_id` | string | | 会话标识，相同值共享 cwd / env / history |
@@ -40,11 +54,23 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
 ```json
 {
   "name": "shell",
-  "description": "执行本地系统命令。专用工具优先，不可逆操作须先确认；支持会话、原生单进程命令链、解释器选择和跨平台输出解码。",
+  "description": "执行本地系统命令。支持同步执行与受管理后台作业；后台作业可按 job_id 查询、取消并配合 wait_for_condition 等待。",
   "input_schema": {
     "type": "object",
     "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["run", "status", "cancel"],
+        "default": "run",
+        "description": "run=执行命令，status=查询后台作业，cancel=取消后台作业"
+      },
       "command": {"type": "string", "description": "要执行的命令，支持 &&、||、; 命令链"},
+      "background": {
+        "type": "boolean",
+        "default": false,
+        "description": "action=run 时是否创建受管理后台作业；后台模式不支持 stdin"
+      },
+      "job_id": {"type": "string", "description": "action=status/cancel 使用的后台作业 ID"},
       "working_dir": {"type": "string", "description": "工作目录，默认继承会话 cwd 或项目根"},
       "timeout": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "超时秒数，默认来自 global_config.json → tools.timeout"},
       "stdin": {"type": "string", "description": "标准输入文本"},
@@ -64,10 +90,10 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
         "description": "框架内置命令链超时策略：total=全链共享 timeout，per_command=每段独立使用 timeout；外部脚本始终整体计时"
       }
     },
-    "required": ["command"],
+    "required": [],
     "additionalProperties": false
   },
-  "version": "1.3.0",
+  "version": "1.4.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

@@ -7,13 +7,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "schema_version": 1,
   "components": {
-    "core": {"version": "1.2.2"},
-    "agents": {"version": "1.2.2"},
-    "plugins": {"version": "1.2.2"},
-    "web": {"version": "1.2.2"}
+    "core": {"version": "1.2.3"},
+    "agents": {"version": "1.2.3"},
+    "plugins": {"version": "1.2.3"},
+    "web": {"version": "1.2.3"}
   }
 }
 ```
@@ -54,8 +54,8 @@
 - 修复启动器的项目根目录判断和备用 Web 端口；本机 `kemo_app` 桥接跟随实际 Web 地址，桥接修复版本为 `1.1.5`。
 - 任务计划支持 edit、retry、reset、revision 和安全 rollback；保存任务计划前对明显凭据形态做脱敏。
 - 任务计划 Web edit/retry 必须携带计划所属 `session_id`；后端会拒绝跨对话空间修改。任务摘要、执行记录和 revision 列表在返回浏览器前再次递归脱敏，兼容清理旧数据库中的敏感内容。
-- Windows 桌面网页端支持每用户独立的运行结束音效；移动端不显示也不播放。
-- 结束音效只接受显式 `status=completed` 的最终 `done`；暂停、拒绝、停止、失败、取消、受限、缺失状态和长任务中间 Run 均不播放。
+- Windows 桌面网页端支持每用户独立的运行结束音效和运行失败音效；移动端不显示也不播放。
+- 成功音效只接受显式 `status=completed` 的最终 `done`；失败音效只接受明确的最终 `status=failed/error`。暂停、拒绝、停止、取消、受限、缺失状态和长任务中间 Run 均不播放。
 - 发送附件后立即清除引用；运行中引导上传使用 `purpose=input`。
 - 增加包结构、项目路径、备用端口和用户模板合同测试。
 - 更新器改为单入口：根 `update.py` 只调用 `update.cli.main`，实际实现按职责拆分在 `update/`。
@@ -64,6 +64,18 @@
 - core 更新保留 `cron/task_cron_system` 的本地调度状态；同 schema 的 `global_config.json` 只补远程新增默认值，不覆盖本地值，schema 不同时默认停止。
 
 2026 年 8 月 23 日检查时的 42 项未提交内容包含 9 项本机运行态变化，不能全部加入发布：5 个 `cron/task_cron_system/*.json`，以及 `kemo_app`、`kemo_gateway_status`、`kemo_graph` 的 4 个清单/采集文件。其余内容由更新器源码、Web 源码、测试、文档和忽略规则组成。发布前要区分两类检查：`tests/`、`tests/template_tests/` 和前端测试会进入 GitHub CI；`开发临时目录/test_kemo` 与 `开发临时目录/release_check.py` 被 `.gitignore` 排除，只是本机发布前补强检查。任务计划 revision 目前没有自动保留上限，长期高频修改会增加 SQLite 大小；运行态 JSON、`runtime/` 和用户目录不属于版本文件。
+
+## 1.2.3
+
+`1.2.3` 是在 1.2.2 之后的稳定性补丁，重点收口工具调用、后台进程和重试边界：
+
+- Kemo 网关先校验完整工具参数，再发布 `tool_call.completed`；并行调用按批次原子发布，非法调用统一进入 `response.incomplete`。
+- 工具参数 Schema 增加递归、节点和数组安全上限，避免深层输入触发递归崩溃或绕过尾部校验。
+- Shell 后台 Worker 强制执行 `deadline_at`，日志写入异常仍会 drain 输出；用户取消前复核 PID 身份，公开状态只返回项目根相对路径。
+- Provider 诊断只保留有界、脱敏的信息；常见 Token/Key 别名、前缀 JSON、循环引用和深层结构都按安全规则处理。
+- 对话流在取消、异常、缺失终态和参数重试时只归档一次当前正文/思考，避免跨 attempt 重复累加。
+
+本版本不新增用户配置字段，不改变 Chat 协议固定思考档位，也不改变已有长任务、任务计划或记忆数据格式。版本检查、仓库卫生检查、Python 测试、前端测试和构建仍是发布门禁。
 
 ## 命令
 

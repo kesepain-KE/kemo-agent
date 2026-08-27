@@ -86,6 +86,7 @@ kemo-agent/
 | `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
 | `release-1.2.2-stability.md` | 1.2.2 稳定性规则、42 项工作区分类、导入迁移和发布前检查 |
+| `release-1.2.3-stability.md` | 1.2.3 稳定性补丁、工具参数安全、后台作业与进程边界检查 |
 | `env-reference.md` | `.env` 参数、优先级与安全要求 |
 | `global-config-reference.md` | `config/global_config.json` 全字段 |
 | `user-config-reference.md` | `users/<name>/user_config.json` 全字段 |

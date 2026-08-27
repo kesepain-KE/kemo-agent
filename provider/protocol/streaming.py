@@ -18,6 +18,7 @@ from provider.protocol.enums import (
     StreamEventType,
     TERMINAL_STREAM_EVENTS,
 )
+from provider.protocol.diagnostics import sanitize_provider_diagnostic
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.models import (
     Item,
@@ -167,7 +168,17 @@ def parse_sse_events(lines: Iterable[bytes | str]) -> Iterator[ProviderStreamEve
         try:
             value = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise StreamProtocolError("SSE data 不是有效 JSON", details={"data": payload[:500]}) from exc
+            raise StreamProtocolError(
+                "SSE data 不是有效 JSON",
+                details={
+                    "parse_error": {
+                        "kind": "invalid_json",
+                        "line": exc.lineno,
+                        "column": exc.colno,
+                        "position": exc.pos,
+                    }
+                },
+            ) from exc
         if not isinstance(value, dict):
             raise StreamProtocolError("SSE data 根节点必须是对象")
         if event_id and "event_id" not in value:
@@ -179,7 +190,10 @@ def parse_sse_events(lines: Iterable[bytes | str]) -> Iterator[ProviderStreamEve
         except Exception as exc:
             raise StreamProtocolError(
                 f"统一流事件校验失败：{exc}",
-                details={"event": event_name, "data": value},
+                details={
+                    "event": event_name,
+                    "data": sanitize_provider_diagnostic(value),
+                },
             ) from exc
 
 

@@ -43,7 +43,7 @@ describe('AppShell user persistence', () => {
   })
 })
 
-describe('Windows completion sound', () => {
+describe('Windows run sound', () => {
   it('只在成功 done 后播放一次', async () => {
     vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
     const play = vi.fn().mockResolvedValue(undefined)
@@ -83,7 +83,45 @@ describe('Windows completion sound', () => {
     expect(play).toHaveBeenCalledOnce()
   })
 
-  it('取消、失败和受限终态不播放', async () => {
+  it('最终失败 done 后播放失败音效一次，不播放成功音效', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const play = vi.fn().mockResolvedValue(undefined)
+    const AudioMock = vi.fn(function AudioMock(this: { play: typeof play }, _url: string) {
+      this.play = play
+    })
+    vi.stubGlobal('Audio', AudioMock)
+    let chatRequests = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      return new Response(
+        'event: done\ndata: {"type":"done","metadata":{"committed":false,"status":"failed"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '失败音效测试已就绪' }], round_metrics: [], round_traces: [],
+      })),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('失败音效测试已就绪')
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(input, { target: { value: '触发失败音效' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => expect(chatRequests).toBe(1))
+    await waitFor(() => expect(AudioMock).toHaveBeenCalledOnce())
+    expect(String(AudioMock.mock.calls[0][0])).toContain('/api/users/kesepain/failure-sound')
+    expect(String(AudioMock.mock.calls[0][0])).not.toContain('/completion-sound')
+    expect(play).toHaveBeenCalledOnce()
+  })
+
+  it('受限终态不播放音效', async () => {
     vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
     const AudioMock = vi.fn()
     vi.stubGlobal('Audio', AudioMock)

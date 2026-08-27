@@ -24,6 +24,7 @@ from provider.schema import ProviderError
 from run.infra import ContextLengthExceededError, EngineError
 from run.extensions import persist_response_media
 from run.tools import invalid_tool_call_error
+from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 def protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
@@ -303,7 +304,30 @@ def run_events_for_protocol_event(
                 **common,
             )
             return
-        arguments = item.arguments if item is not None else event.data.get("arguments", {})
+        if item is not None:
+            arguments = item.arguments
+        else:
+            raw_arguments = (
+                event.data["arguments"]
+                if isinstance(event.data, dict) and "arguments" in event.data
+                else MISSING
+            )
+            parsed_arguments = parse_tool_arguments(raw_arguments)
+            item = ToolCallItem(
+                id=event.item_id or f"call_{event.sequence or 0}",
+                call_id=event.call_id or f"call_{event.sequence or 0}",
+                name=event.name or "unknown_tool",
+                arguments=parsed_arguments.arguments,
+                arguments_raw=parsed_arguments.arguments_raw,
+                parse_error=parsed_arguments.parse_error,
+            )
+            if item.parse_error is not None:
+                yield RunEvent(
+                    type="error",
+                    error=invalid_tool_call_error(item),
+                    **common,
+                )
+                return
         yield RunEvent(
             type="tool_call_start",
             tool_call_id=(item.call_id if item is not None else event.call_id or ""),

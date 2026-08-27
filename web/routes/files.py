@@ -11,6 +11,7 @@ from web.schemas import DeleteManyBody, TextBody
 from web.service import (
     AVATAR_MAX_BYTES,
     COMPLETION_SOUND_MAX_BYTES,
+    FAILURE_SOUND_MAX_BYTES,
     FILE_UPLOAD_MAX_BYTES,
     WebRunService,
 )
@@ -259,6 +260,59 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.delete("/api/users/{user}/completion-sound")
     async def delete_completion_sound(user: str) -> dict[str, Any]:
         return {"ok": True, "deleted": backend.delete_completion_sound(user)}
+
+    @app.post("/api/users/{user}/failure-sound")
+    async def upload_failure_sound(
+        user: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        content_type = file.content_type
+        try:
+            data = await file.read(FAILURE_SOUND_MAX_BYTES + 1)
+        finally:
+            await file.close()
+        status = backend.save_failure_sound(user, data, content_type)
+        return {"ok": True, "status": status}
+
+    @app.get("/api/users/{user}/failure-sound/status")
+    async def failure_sound_status(user: str) -> dict[str, Any]:
+        return backend.failure_sound_status(user)
+
+    @app.post("/api/users/{user}/failure-sound/fallback")
+    async def failure_sound_fallback(user: str) -> dict[str, Any]:
+        return backend.play_failure_sound_fallback(user)
+
+    @app.get("/api/users/{user}/failure-sound")
+    async def failure_sound(user: str, request: Request) -> Response:
+        target = backend.failure_sound_path(user)
+        if target is None:
+            return Response(status_code=204)
+        status = backend.failure_sound_status(user)
+        try:
+            stat = target.stat()
+        except OSError:
+            return Response(status_code=204)
+        etag = f'W/"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+        cache_headers = {
+            "Cache-Control": "private, no-cache",
+            "ETag": etag,
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; media-src 'self'",
+        }
+        if request.headers.get("if-none-match", "").strip() == etag:
+            return Response(status_code=304, headers=cache_headers)
+        data = backend.load_failure_sound(user)
+        if data is None:
+            return Response(status_code=204)
+        return Response(
+            content=data,
+            media_type=status["mime_type"],
+            headers=cache_headers,
+        )
+
+    @app.delete("/api/users/{user}/failure-sound")
+    async def delete_failure_sound(user: str) -> dict[str, Any]:
+        return {"ok": True, "deleted": backend.delete_failure_sound(user)}
 
     @app.get("/api/tmp")
     async def tmp_files(

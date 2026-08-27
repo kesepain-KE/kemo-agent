@@ -303,6 +303,66 @@ def finish_long_task(
     return _mutate_state(root, user, source, session_id, mutate)
 
 
+def reconcile_orphaned_long_task(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    has_live_run: bool,
+    grace_seconds: float = 5.0,
+    stop_reason: str = "orphaned_run",
+) -> dict[str, Any]:
+    """Settle a persisted active state after its owning Run disappeared.
+
+    The explicit operation keeps ``get_long_task_state`` side-effect free.
+    A short grace period protects the hand-off between two continuation Runs;
+    callers handling an explicit user cancellation may pass zero.
+    """
+
+    if has_live_run:
+        return get_long_task_state(root, user, source, session_id)
+    grace = max(0.0, float(grace_seconds or 0.0))
+    snapshot = get_long_task_state(root, user, source, session_id)
+    if snapshot.get("status") not in LONG_TASK_ACTIVE_STATUSES:
+        return snapshot
+    updated = _parse_time(snapshot.get("updated_at"))
+    if updated is not None and grace > 0:
+        age = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
+        if age < grace:
+            return snapshot
+
+    def mutate(current: dict[str, Any]) -> dict[str, Any]:
+        status = str(current.get("status") or "")
+        if status not in LONG_TASK_ACTIVE_STATUSES:
+            return current
+        updated = _parse_time(current.get("updated_at"))
+        if updated is not None and grace > 0:
+            age = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
+            if age < grace:
+                return current
+        cancelled = status == "cancelling" or bool(current.get("cancel_requested"))
+        now = _now()
+        current["status"] = "cancelled" if cancelled else "interrupted"
+        current["updated_at"] = now
+        current["finished_at"] = now
+        current["active_elapsed_ms"] = _final_elapsed_ms(current)
+        current["current_run_id"] = ""
+        current["last_stop_reason"] = str(stop_reason or "orphaned_run")
+        current["cancel_requested"] = cancelled
+        current["last_error"] = (
+            None
+            if cancelled
+            else {
+                "code": "orphaned_long_task",
+                "message": "长任务运行已不存在，状态已自动收敛",
+            }
+        )
+        return current
+
+    return _mutate_state(root, user, source, session_id, mutate)
+
+
 def request_long_task_cancel(
     root: Path, user: str, source: str, session_id: str
 ) -> dict[str, Any]:
@@ -329,6 +389,7 @@ __all__ = [
     "record_long_task_run",
     "set_long_task_current_run",
     "finish_long_task",
+    "reconcile_orphaned_long_task",
     "request_long_task_cancel",
 ]
 

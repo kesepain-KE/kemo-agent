@@ -91,6 +91,7 @@ from run.tools import (
     invalid_tool_name as _invalid_tool_name,
     is_invalid_tool_arguments_error as _is_invalid_tool_arguments_error,
     messages_with_tool_argument_repair as _messages_with_tool_argument_repair,
+    validate_tool_call_batch as _validate_tool_call_batch,
 )
 from run.conversation.request_input import (
     content_display as _content_display,
@@ -139,6 +140,22 @@ _EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
 _FILE_LIVE_READ_ACTIONS = frozenset(
     {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
 )
+
+
+def _tool_schema_map(schemas: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for raw in schemas or []:
+        if not isinstance(raw, dict):
+            continue
+        function = raw.get("function")
+        function = function if isinstance(function, dict) else raw
+        name = str(function.get("name") or "").strip()
+        parameters = function.get("parameters") or function.get("input_schema")
+        if name and isinstance(parameters, dict):
+            result[name] = parameters
+    return result
+
+
 def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
     """Return whether a successful result is stable for the rest of this run.
 
@@ -1268,11 +1285,24 @@ def _iter_request_events_impl(
                 provider_attempt = 0
                 invalid_tool_arguments_retries = 0
                 repair_tool_name = ""
+                retry_preview_text = ""
+                retry_preview_reasoning = ""
                 iteration_text: list[str] = []
                 iteration_reasoning: list[str] = []
+                iteration_observed_committed = False
                 calls: list[ToolCall] = []
                 iteration_done: RunEvent | None = None
                 iteration_usage: Usage | None = None
+                tool_schema_map = _tool_schema_map(registry.schemas())
+
+                def flush_iteration_observed() -> None:
+                    nonlocal iteration_observed_committed
+                    if iteration_observed_committed:
+                        return
+                    observed_text.extend(iteration_text)
+                    observed_reasoning.extend(iteration_reasoning)
+                    iteration_observed_committed = True
+
                 while True:
                     if provider_attempt > 0:
                         refresh_dynamic_system_message()
@@ -1321,6 +1351,9 @@ def _iter_request_events_impl(
                     )
                     iteration_done = None
                     iteration_usage = None
+                    iteration_text = []
+                    iteration_reasoning = []
+                    iteration_observed_committed = False
                     retry_invalid_tool_arguments = False
                     attempt_published_media = False
                     attempt_calls: list[ToolCall] = []
@@ -1336,6 +1369,7 @@ def _iter_request_events_impl(
                                 cancel_event=cancel_event,
                             ):
                                 if cancel_event is not None and cancel_event.is_set():
+                                    flush_iteration_observed()
                                     yield commit_cancelled_round()
                                     return
                                 if pending_guidance_ack:
@@ -1361,17 +1395,29 @@ def _iter_request_events_impl(
                                     )
                                 if event.type == "text_delta":
                                     iteration_text.append(event.content)
-                                    observed_text.append(event.content)
                                     yield event
                                 elif event.type == "reasoning_delta":
                                     iteration_reasoning.append(event.content)
-                                    observed_reasoning.append(event.content)
                                     yield event
                                 elif event.type == "tool_call_start":
                                     call = ToolCall(
                                         id=event.tool_call_id,
                                         name=event.tool_name,
                                         arguments=event.arguments or {},
+                                        arguments_raw=(
+                                            event.metadata.get("raw_arguments")
+                                            if isinstance(
+                                                event.metadata.get("raw_arguments"), str
+                                            )
+                                            else None
+                                        ),
+                                        parse_error=(
+                                            copy.deepcopy(event.metadata.get("parse_error"))
+                                            if isinstance(
+                                                event.metadata.get("parse_error"), dict
+                                            )
+                                            else None
+                                        ),
                                     )
                                     # Tool cards and pending-call state are committed only
                                     # after the complete Provider attempt is known to be
@@ -1406,6 +1452,12 @@ def _iter_request_events_impl(
                                         )
                                         iteration_usage = None
                                     if can_retry_invalid_arguments:
+                                        if not retry_preview_text:
+                                            retry_preview_text = "".join(iteration_text)
+                                        if not retry_preview_reasoning:
+                                            retry_preview_reasoning = "".join(
+                                                iteration_reasoning
+                                            )
                                         invalid_tool_arguments_retries += 1
                                         tool_argument_retry_count += 1
                                         round_state.tool_argument_retries = (
@@ -1429,6 +1481,7 @@ def _iter_request_events_impl(
                                         provider_responses.append(
                                             copy.deepcopy(provider_response)
                                         )
+                                    flush_iteration_observed()
                                     terminal_event = commit_failed_round(
                                         failure,
                                         reason="provider_error_event",
@@ -1445,6 +1498,7 @@ def _iter_request_events_impl(
                         break
                     except ProviderCongestionError as exc:
                         if cancel_event is not None and cancel_event.is_set():
+                            flush_iteration_observed()
                             yield commit_cancelled_round()
                             return
                         terminal_event = commit_failed_round(
@@ -1459,6 +1513,7 @@ def _iter_request_events_impl(
                         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                             raise
                         if cancel_event is not None and cancel_event.is_set():
+                            flush_iteration_observed()
                             yield commit_cancelled_round()
                             return
                         context_length_error = _is_context_length_exceeded(exc)
@@ -1467,6 +1522,7 @@ def _iter_request_events_impl(
                             or iteration != 1
                             or context_retry_count >= 2
                         ):
+                            flush_iteration_observed()
                             if iteration_usage is not None:
                                 _record_provider_request(
                                     usage_total, iteration_usage
@@ -1637,6 +1693,7 @@ def _iter_request_events_impl(
 
                 if iteration_done is None:
                     exc = EngineError("Provider 事件流缺少 done 终态")
+                    flush_iteration_observed()
                     if iteration_usage is not None:
                         _record_provider_request(usage_total, iteration_usage)
                         iteration_usage = None
@@ -1648,14 +1705,80 @@ def _iter_request_events_impl(
                         error_event(exc, phase="provider"), terminal_event
                     )
                     return
+                invalid_batch = _validate_tool_call_batch(
+                    attempt_calls,
+                    tool_schema_map,
+                )
+                if invalid_batch is not None:
+                    if iteration_usage is not None:
+                        _record_provider_request(usage_total, iteration_usage)
+                        iteration_usage = None
+                    provider_response = iteration_done.metadata.get("provider_response")
+                    if isinstance(provider_response, dict):
+                        provider_responses.append(copy.deepcopy(provider_response))
+                    can_retry_invalid_arguments = (
+                        invalid_tool_arguments_retries
+                        < invalid_tool_arguments_retry_limit
+                        and not attempt_published_media
+                    )
+                    if can_retry_invalid_arguments:
+                        if not retry_preview_text:
+                            retry_preview_text = "".join(iteration_text)
+                        if not retry_preview_reasoning:
+                            retry_preview_reasoning = "".join(iteration_reasoning)
+                        invalid_tool_arguments_retries += 1
+                        tool_argument_retry_count += 1
+                        round_state.tool_argument_retries = tool_argument_retry_count
+                        repair_tool_name = _invalid_tool_name(invalid_batch)
+                        continue
+                    failure = copy.deepcopy(invalid_batch)
+                    failure["retry_count"] = invalid_tool_arguments_retries
+                    failure["retry_limit"] = invalid_tool_arguments_retry_limit
+                    if retry_preview_text:
+                        if not "".join(iteration_text).startswith(retry_preview_text):
+                            iteration_text.insert(0, retry_preview_text)
+                        retry_preview_text = ""
+                    if retry_preview_reasoning:
+                        if not "".join(iteration_reasoning).startswith(
+                            retry_preview_reasoning
+                        ):
+                            iteration_reasoning.insert(0, retry_preview_reasoning)
+                        retry_preview_reasoning = ""
+                    flush_iteration_observed()
+                    terminal_event = commit_failed_round(
+                        failure,
+                        reason="invalid_tool_arguments",
+                    )
+                    yield _committed_failure_event(
+                        RunEvent(
+                            type="error",
+                            error=failure,
+                            metadata={"provider_response": provider_response}
+                            if isinstance(provider_response, dict)
+                            else {},
+                        ),
+                        terminal_event,
+                    )
+                    return
                 if iteration_usage is None:
                     iteration_usage = _usage_from_dict(iteration_done.usage)
+                if retry_preview_text:
+                    accepted_text = "".join(iteration_text)
+                    if not accepted_text.startswith(retry_preview_text):
+                        iteration_text.insert(0, retry_preview_text)
+                    retry_preview_text = ""
+                if retry_preview_reasoning:
+                    accepted_reasoning = "".join(iteration_reasoning)
+                    if not accepted_reasoning.startswith(retry_preview_reasoning):
+                        iteration_reasoning.insert(0, retry_preview_reasoning)
+                    retry_preview_reasoning = ""
                 for call, tool_event in zip(
                     attempt_calls,
                     attempt_tool_events,
                     strict=True,
                 ):
                     if cancel_event is not None and cancel_event.is_set():
+                        flush_iteration_observed()
                         yield commit_cancelled_round()
                         return
                     calls.append(call)
@@ -1667,6 +1790,7 @@ def _iter_request_events_impl(
                     yield tool_event
                 for usage_event in attempt_usage_events:
                     if cancel_event is not None and cancel_event.is_set():
+                        flush_iteration_observed()
                         yield commit_cancelled_round()
                         return
                     yield usage_event
@@ -1678,6 +1802,7 @@ def _iter_request_events_impl(
                     last_sent_local_tokens = request_local_tokens
                 all_text.extend(iteration_text)
                 all_reasoning.extend(iteration_reasoning)
+                flush_iteration_observed()
                 _record_provider_request(usage_total, iteration_usage)
                 final_metadata = dict(iteration_done.metadata)
                 provider_response = final_metadata.get("provider_response")
@@ -1733,6 +1858,7 @@ def _iter_request_events_impl(
                         )
                         return
                     if cancel_event is not None and cancel_event.is_set():
+                        flush_iteration_observed()
                         yield commit_cancelled_round()
                         return
                     signature = tool_call_signature(call.name, call.arguments)
@@ -1998,6 +2124,7 @@ def _iter_request_events_impl(
                 )
                 return
             if cancel_event is not None and cancel_event.is_set():
+                flush_iteration_observed()
                 yield commit_cancelled_round()
                 return
 

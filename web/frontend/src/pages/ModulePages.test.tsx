@@ -53,6 +53,9 @@ describe('V16 module pages', () => {
         filename: uploaded && !deleted ? 'completion_sound.mp3' : '', mime_type: uploaded && !deleted ? 'audio/mpeg' : '',
         size: uploaded && !deleted ? 16 : 0, updated_at: uploaded && !deleted ? '2026-08-22T08:00:00Z' : '',
       })),
+      http.get('/api/users/kesepain/failure-sound/status', () => HttpResponse.json({
+        user: 'kesepain', enabled: false, available: false, filename: '', mime_type: '', size: 0, updated_at: '',
+      })),
       http.post('/api/users/kesepain/completion-sound', () => {
         uploadRequests += 1
         uploaded = true
@@ -70,17 +73,18 @@ describe('V16 module pages', () => {
 
     renderPage('settings')
     expect(await screen.findByText('运行结束音效')).toBeInTheDocument()
+    expect(screen.getByText('运行失败音效')).toBeInTheDocument()
     expect(screen.getByText('支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。')).toBeInTheDocument()
     expect(screen.queryByText('播放规则')).not.toBeInTheDocument()
-    expect(screen.getByText('未设置')).toBeInTheDocument()
+    expect(screen.getAllByText('未设置')).toHaveLength(2)
     fireEvent.change(screen.getByLabelText('选择结束音效文件'), {
       target: { files: [new File(['ID3audio'], 'done.mp3', { type: 'audio/mpeg' })] },
     })
     expect(await screen.findByText('结束音效已保存。')).toBeInTheDocument()
     expect(uploadRequests).toBe(1)
     expect(screen.getByText(/completion_sound\.mp3/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '试听' })).toBeEnabled()
-    fireEvent.click(screen.getByRole('button', { name: '清除' }))
+    expect(screen.getAllByRole('button', { name: '试听' })[0]).toBeEnabled()
+    fireEvent.click(screen.getAllByRole('button', { name: '清除' })[0])
     expect(await screen.findByText('结束音效已清除。')).toBeInTheDocument()
     userAgent.mockRestore()
   })

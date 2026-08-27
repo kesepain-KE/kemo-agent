@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from events import RunEvent
 from run.history import reserve_session
@@ -11,6 +12,7 @@ from run.long_task import (
     activate_long_task,
     finish_long_task,
     get_long_task_state,
+    reconcile_orphaned_long_task,
     set_long_task_enabled,
 )
 from run.long_task import semantic_user_text
@@ -80,6 +82,99 @@ class LongTaskTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelling")
         self.assertFalse(state["enabled"])
 
+    def test_orphaned_active_state_is_reconciled_without_overwriting_terminal_state(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "orphaned")
+        set_long_task_enabled(root, "alice", "web", "orphaned", True)
+        active = activate_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned",
+            original_prompt="执行长任务",
+        )
+        self.assertIsNotNone(active)
+        active_updated_at = active["updated_at"]
+
+        grace_protected = reconcile_orphaned_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned",
+            has_live_run=False,
+            grace_seconds=60,
+        )
+        self.assertEqual(grace_protected["status"], "running")
+        self.assertEqual(grace_protected["updated_at"], active_updated_at)
+
+        preserved = reconcile_orphaned_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned",
+            has_live_run=True,
+            grace_seconds=0,
+        )
+        self.assertEqual(preserved["status"], "running")
+
+        interrupted = reconcile_orphaned_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned",
+            has_live_run=False,
+            grace_seconds=0,
+            stop_reason="process_restarted",
+        )
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertEqual(interrupted["last_stop_reason"], "process_restarted")
+        self.assertEqual(interrupted["current_run_id"], "")
+        self.assertEqual(
+            interrupted["last_error"]["code"], "orphaned_long_task"
+        )
+        interrupted_updated_at = interrupted["updated_at"]
+
+        unchanged = reconcile_orphaned_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned",
+            has_live_run=False,
+            grace_seconds=0,
+            stop_reason="must_not_replace_terminal",
+        )
+        self.assertEqual(unchanged["status"], "interrupted")
+        self.assertEqual(unchanged["last_stop_reason"], "process_restarted")
+        self.assertEqual(unchanged["updated_at"], interrupted_updated_at)
+
+    def test_orphaned_cancelling_state_finishes_as_cancelled(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "orphaned-cancel")
+        set_long_task_enabled(root, "alice", "web", "orphaned-cancel", True)
+        activate_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned-cancel",
+            original_prompt="执行长任务",
+        )
+        from run.long_task import request_long_task_cancel
+
+        request_long_task_cancel(root, "alice", "web", "orphaned-cancel")
+        cancelled = reconcile_orphaned_long_task(
+            root,
+            "alice",
+            "web",
+            "orphaned-cancel",
+            has_live_run=False,
+            grace_seconds=0,
+            stop_reason="orphaned_user_cancel",
+        )
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["last_stop_reason"], "orphaned_user_cancel")
+        self.assertIsNone(cancelled["last_error"])
+
     def test_only_max_tool_iteration_terminal_continues_and_emits_one_done(self) -> None:
         _, root = self.make_root()
         self.reserve(root, "continued")
@@ -140,6 +235,59 @@ class LongTaskTests(unittest.TestCase):
         self.assertEqual(final_state["total_provider_requests"], 3)
         self.assertEqual(final_state["usage"]["total_tokens"], 15)
 
+    def test_continuation_handoff_never_looks_orphaned_to_state_polling(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "handoff")
+        set_long_task_enabled(root, "alice", "web", "handoff", True)
+        requests: list[str] = []
+
+        def source(request, **_kwargs):
+            requests.append(str(request["run_id"]))
+            if len(requests) == 1:
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "committed": True,
+                        "status": "limited",
+                        "stop_reason": "max_tool_iterations",
+                    },
+                )
+            else:
+                yield RunEvent(
+                    type="done",
+                    metadata={"committed": True, "status": "completed"},
+                )
+
+        service = WebRunService(root, event_source=source)
+        import web.service as web_service_module
+
+        original = web_service_module.set_long_task_current_run
+        observed_statuses: list[str] = []
+
+        def observe_handoff(*args, **kwargs):
+            observed_statuses.append(
+                service.long_task_state("alice", "handoff")["long_task"]["status"]
+            )
+            return original(*args, **kwargs)
+
+        with patch.object(
+            web_service_module,
+            "set_long_task_current_run",
+            side_effect=observe_handoff,
+        ):
+            events = list(
+                service.stream_chat(
+                    "alice",
+                    "handoff",
+                    "继续执行",
+                    cancel_event=threading.Event(),
+                    run_id="run_handoff_initial",
+                )
+            )
+
+        self.assertEqual(observed_statuses, ["running"])
+        self.assertEqual(events[-1].metadata["long_task_state"]["status"], "completed")
+
     def test_disabled_and_non_tool_limit_runs_do_not_continue(self) -> None:
         for session_id, enabled, stop_reason in (
             ("disabled", False, "max_tool_iterations"),
@@ -166,6 +314,98 @@ class LongTaskTests(unittest.TestCase):
                 )
                 self.assertEqual([event.type for event in events], ["done"])
                 self.assertEqual(len(seen), 1)
+
+    def test_continuation_stream_without_terminal_is_interrupted(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "missing-terminal")
+        set_long_task_enabled(root, "alice", "web", "missing-terminal", True)
+        requests: list[str] = []
+
+        def source(request, **_kwargs):
+            requests.append(str(request["run_id"]))
+            if len(requests) == 1:
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "committed": True,
+                        "status": "limited",
+                        "stop_reason": "max_tool_iterations",
+                    },
+                )
+            else:
+                yield RunEvent(type="text_delta", content="未完成")
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_chat(
+                "alice",
+                "missing-terminal",
+                "执行长任务",
+                cancel_event=threading.Event(),
+                run_id="run_missing_terminal",
+            )
+        )
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["long_task_update", "text_delta", "error"],
+        )
+        self.assertEqual(events[-1].error["code"], "LONG_TASK_MISSING_TERMINAL")
+        self.assertEqual(events[-1].metadata["status"], "interrupted")
+        self.assertFalse(events[-1].metadata["committed"])
+        self.assertEqual(
+            get_long_task_state(root, "alice", "web", "missing-terminal")[
+                "status"
+            ],
+            "interrupted",
+        )
+        self.assertFalse(service.has_active_runs())
+
+    def test_continuation_engine_exception_is_interrupted_without_raw_message(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "engine-exception")
+        set_long_task_enabled(root, "alice", "web", "engine-exception", True)
+        requests: list[str] = []
+        secret = "PROVIDER_EXCEPTION_SECRET"
+
+        def source(request, **_kwargs):
+            requests.append(str(request["run_id"]))
+            if len(requests) == 1:
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "committed": True,
+                        "status": "limited",
+                        "stop_reason": "max_tool_iterations",
+                    },
+                )
+                return
+            raise RuntimeError(secret)
+            yield  # pragma: no cover
+
+        service = WebRunService(root, event_source=source)
+        events = list(
+            service.stream_chat(
+                "alice",
+                "engine-exception",
+                "执行长任务",
+                cancel_event=threading.Event(),
+                run_id="run_engine_exception",
+            )
+        )
+
+        self.assertEqual([event.type for event in events], ["long_task_update", "error"])
+        serialized = str(events[-1].to_dict())
+        self.assertNotIn(secret, serialized)
+        self.assertEqual(events[-1].error["code"], "LONG_TASK_ENGINE_EXCEPTION")
+        self.assertEqual(events[-1].metadata["status"], "interrupted")
+        self.assertEqual(
+            get_long_task_state(root, "alice", "web", "engine-exception")[
+                "status"
+            ],
+            "interrupted",
+        )
+        self.assertFalse(service.has_active_runs())
 
     def test_synthetic_control_text_does_not_pollute_memory_or_summary(self) -> None:
         original = "检查整个项目并完成修复"

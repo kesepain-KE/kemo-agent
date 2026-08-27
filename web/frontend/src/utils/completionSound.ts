@@ -1,4 +1,9 @@
-import { getCompletionSoundUrl, playCompletionSoundFallback } from '../api/client'
+import {
+  getCompletionSoundUrl,
+  getFailureSoundUrl,
+  playCompletionSoundFallback,
+  playFailureSoundFallback,
+} from '../api/client'
 import { isWindowsDesktop } from './platform'
 
 const BROWSER_PLAYBACK_TIMEOUT_MS = 2_000
@@ -34,19 +39,31 @@ async function playInBrowser(audio: HTMLAudioElement): Promise<boolean> {
   return played
 }
 
-export async function playUserCompletionSound(user: string): Promise<boolean> {
+export type RunSoundKind = 'completion' | 'failure'
+
+export async function playUserRunSound(user: string, kind: RunSoundKind): Promise<boolean> {
   if (!user || !isWindowsDesktop()) return false
+  const soundUrl = kind === 'failure' ? getFailureSoundUrl(user) : getCompletionSoundUrl(user)
+  const fallback = kind === 'failure' ? playFailureSoundFallback : playCompletionSoundFallback
   if (typeof Audio !== 'undefined') {
     try {
-      const audio = new Audio(getCompletionSoundUrl(user))
+      const audio = new Audio(soundUrl)
       if (await playInBrowser(audio)) return true
     } catch {
       // Continue with the Windows host fallback below.
     }
   }
   try {
-    return (await playCompletionSoundFallback(user)).played
+    return (await fallback(user)).played
   } catch {
     return false
   }
+}
+
+export async function playUserCompletionSound(user: string): Promise<boolean> {
+  return playUserRunSound(user, 'completion')
+}
+
+export async function playUserFailureSound(user: string): Promise<boolean> {
+  return playUserRunSound(user, 'failure')
 }

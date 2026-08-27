@@ -26,6 +26,7 @@ from provider.adapters.reliability import (
 )
 from provider.protocol.errors import StreamProtocolError
 from provider.protocol.assets import AssetDescriptor
+from provider.protocol.diagnostics import safe_provider_body, safe_provider_message
 from provider.protocol.models import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -128,7 +129,7 @@ class KemoGatewayAdapter:
             raise ProviderError(
                 "Kemo gateway 返回了无效的 Asset 描述",
                 category="gateway_protocol_error",
-                body=raw[:1000],
+                body=safe_provider_body(raw),
             ) from exc
 
     def _open(self, request: urllib.request.Request):
@@ -140,16 +141,25 @@ class KemoGatewayAdapter:
                 body: Any = json.loads(raw.decode("utf-8")) if raw else None
             except (UnicodeDecodeError, json.JSONDecodeError):
                 body = raw.decode("utf-8", errors="replace")[:1000]
-            message = f"Kemo gateway HTTP {exc.code}"
+            fallback = f"Kemo gateway HTTP {exc.code}"
+            message = fallback
             declared_retryable: bool | None = None
             if isinstance(body, dict):
                 error = body.get("error")
                 if isinstance(error, dict):
-                    message = str(error.get("message") or message)
+                    message = safe_provider_message(
+                        error.get("message"),
+                        fallback,
+                    )
                     if isinstance(error.get("retryable"), bool):
                         declared_retryable = bool(error["retryable"])
+            safe_body = safe_provider_body(body)
             if exc.code in {401, 403}:
-                raise ProviderAuthError(message, status_code=exc.code, body=body) from exc
+                raise ProviderAuthError(
+                    message,
+                    status_code=exc.code,
+                    body=safe_body,
+                ) from exc
             raise ProviderError(
                 message,
                 category="gateway_error",
@@ -160,14 +170,22 @@ class KemoGatewayAdapter:
                     else exc.code in _RETRYABLE_STATUS
                 ),
                 retry_after_ms=parse_retry_after_ms(exc, body),
-                body=body,
+                body=safe_body,
             ) from exc
         except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (socket.timeout, TimeoutError)):
-                raise ProviderTimeoutError(f"Kemo gateway 请求超时：{reason}") from exc
+                raise ProviderTimeoutError(
+                    safe_provider_message(
+                        f"Kemo gateway 请求超时：{reason}",
+                        "Kemo gateway 请求超时",
+                    )
+                ) from exc
             raise ProviderError(
-                f"Kemo gateway 连接失败：{reason}",
+                safe_provider_message(
+                    f"Kemo gateway 连接失败：{reason}",
+                    "Kemo gateway 连接失败",
+                ),
                 category="connection_error",
                 retryable=True,
             ) from exc
@@ -262,7 +280,7 @@ class KemoGatewayAdapter:
             raise ProviderError(
                 "Kemo gateway 返回了无效的模型能力声明",
                 category="gateway_protocol_error",
-                body=raw[:1000],
+                body=safe_provider_body(raw),
             ) from exc
 
     def models(self, *, task: str | None = None) -> ModelCatalogResponse:
@@ -281,7 +299,7 @@ class KemoGatewayAdapter:
             raise ProviderError(
                 "Kemo gateway 返回了无效的模型目录",
                 category="gateway_protocol_error",
-                body=raw[:1000],
+                body=safe_provider_body(raw),
             ) from exc
 
     def create(
@@ -356,7 +374,7 @@ class KemoGatewayAdapter:
                 raise ProviderError(
                     "Kemo gateway 返回了无效的 embedding 响应",
                     category="gateway_protocol_error",
-                    body=raw[:1000],
+                    body=safe_provider_body(raw),
                 ) from exc
 
         return self._retry_policy.run(send, cancel_event=cancel_event)
@@ -403,7 +421,7 @@ class KemoGatewayAdapter:
                 raise ProviderError(
                     "Kemo gateway 返回了无效的 rerank 响应",
                     category="gateway_protocol_error",
-                    body=raw[:1000],
+                    body=safe_provider_body(raw),
                 ) from exc
 
         return self._retry_policy.run(send, cancel_event=cancel_event)
@@ -681,12 +699,17 @@ class KemoGatewayAdapter:
                 raise ProviderTimeoutError(f"等待 Kemo Asset 就绪超时：{current.id}")
             current = self.get_asset(current.id)
         if current.status != "ready":
-            message = str((current.error or {}).get("message") or "Asset 不可用")
+            message = safe_provider_message(
+                (current.error or {}).get("message"),
+                "Asset 不可用",
+            )
             raise ProviderError(
                 f"Kemo Asset {current.id} 状态为 {current.status}：{message}",
                 category="asset_error",
                 retryable=False,
-                body=current.model_dump(mode="json", exclude_none=True),
+                body=safe_provider_body(
+                    current.model_dump(mode="json", exclude_none=True)
+                ),
             )
         return current
 

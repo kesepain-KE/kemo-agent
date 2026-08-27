@@ -11,7 +11,12 @@ import urllib.request
 from typing import Any, Iterable
 
 from events import RunEvent
-from provider.protocol.diagnostics import safe_parse_error, tool_arguments_diagnostic
+from provider.protocol.diagnostics import (
+    safe_parse_error,
+    safe_provider_message,
+    safe_provider_body,
+    tool_arguments_diagnostic,
+)
 from provider.schema import (
     ChatRequest,
     ChatResponse,
@@ -21,6 +26,7 @@ from provider.schema import (
     ToolCall,
     Usage,
 )
+from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -33,11 +39,14 @@ def _error_detail(data: Any, fallback: str) -> tuple[str, str]:
     if isinstance(value, dict) and "error" in value:
         value = value["error"]
     if isinstance(value, dict):
-        message = str(value.get("message") or value.get("detail") or fallback)
-        category = str(value.get("type") or "provider_error")
+        message = safe_provider_message(
+            value.get("message") or value.get("detail"),
+            fallback,
+        )
+        category = safe_provider_message(value.get("type"), "provider_error")
         return message, category
     if value not in (None, ""):
-        return str(value), "provider_error"
+        return safe_provider_message(value, fallback), "provider_error"
     return fallback, "provider_error"
 
 
@@ -45,39 +54,20 @@ def _decode_json(raw: bytes, context: str) -> dict[str, Any]:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProviderError(f"{context} 返回了无效 JSON", body=raw[:500]) from exc
+        raise ProviderError(f"{context} 返回了无效 JSON", body=safe_provider_body(raw)) from exc
     if not isinstance(data, dict):
-        raise ProviderError(f"{context} 返回根节点必须是 JSON 对象", body=data)
+        raise ProviderError(
+            f"{context} 返回根节点必须是 JSON 对象",
+            body=safe_provider_body(data),
+        )
     return data
 
 
 def _parse_arguments(
     value: Any,
 ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
-    if isinstance(value, dict):
-        return value, json.dumps(value, ensure_ascii=False), None
-    if not isinstance(value, str) or not value:
-        return {}, value if isinstance(value, str) else None, None
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError as exc:
-        return (
-            {},
-            value,
-            {
-                "message": str(exc),
-                "line": exc.lineno,
-                "column": exc.colno,
-                "position": exc.pos,
-            },
-        )
-    if not isinstance(parsed, dict):
-        return (
-            {},
-            value,
-            {"message": "工具参数 JSON 根节点必须是对象"},
-        )
-    return parsed, value, None
+    parsed = parse_tool_arguments(value)
+    return parsed.arguments, parsed.arguments_raw, parsed.parse_error
 
 
 def _estimate_tokens(text: str) -> int:
@@ -130,23 +120,34 @@ class OpenAIChatTransport:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 body = raw.decode("utf-8", errors="replace")[:1000]
             message, category = _error_detail(body, f"HTTP {exc.code}")
+            safe_body = safe_provider_body(body)
             if exc.code in {401, 403}:
                 raise ProviderAuthError(
-                    message, status_code=exc.code, body=body
+                    message, status_code=exc.code, body=safe_body
                 ) from exc
             raise ProviderError(
                 message,
                 category=category,
                 status_code=exc.code,
                 retryable=exc.code in _RETRYABLE_STATUS,
-                body=body,
+                body=safe_body,
             ) from exc
         except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (socket.timeout, TimeoutError)):
-                raise ProviderTimeoutError(f"Provider 请求超时：{reason}") from exc
+                raise ProviderTimeoutError(
+                    safe_provider_message(
+                        f"Provider 请求超时：{reason}",
+                        "Provider 请求超时",
+                    )
+                ) from exc
             raise ProviderError(
-                f"Provider 连接失败：{reason}", category="connection_error", retryable=True
+                safe_provider_message(
+                    f"Provider 连接失败：{reason}",
+                    "Provider 连接失败",
+                ),
+                category="connection_error",
+                retryable=True,
             ) from exc
 
     def _payload(self, request: ChatRequest, *, stream: bool) -> dict[str, Any]:
@@ -201,7 +202,10 @@ class OpenAIChatTransport:
     def _response(self, data: dict[str, Any], request: ChatRequest) -> ChatResponse:
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise ProviderError("Chat Completions 响应缺少 choices", body=data)
+            raise ProviderError(
+                "Chat Completions 响应缺少 choices",
+                body=safe_provider_body(data),
+            )
         choice = choices[0] if isinstance(choices[0], dict) else {}
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         text = message.get("content") or ""
@@ -221,7 +225,7 @@ class OpenAIChatTransport:
                 continue
             function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
             arguments, arguments_raw, parse_error = _parse_arguments(
-                function.get("arguments")
+                function["arguments"] if "arguments" in function else MISSING
             )
             tool_calls.append(
                 ToolCall(
@@ -253,7 +257,7 @@ class OpenAIChatTransport:
         )
         response = self._open(http_request)
         text_parts: list[str] = []
-        tool_parts: dict[int, dict[str, str]] = {}
+        tool_parts: dict[int, dict[str, Any]] = {}
         final_usage: Usage | None = None
         done_received = False
         finish_reason = ""
@@ -283,12 +287,19 @@ class OpenAIChatTransport:
                 try:
                     data = json.loads(value)
                 except json.JSONDecodeError as exc:
-                    raise ProviderError("Provider 返回了畸形 SSE JSON", body=value[:500]) from exc
+                    raise ProviderError(
+                        "Provider 返回了畸形 SSE JSON",
+                        body=safe_provider_body(value),
+                    ) from exc
                 if not isinstance(data, dict):
                     continue
                 if data.get("error"):
                     message, category = _error_detail(data, "流式上游错误")
-                    raise ProviderError(message, category=category, body=data)
+                    raise ProviderError(
+                        message,
+                        category=category,
+                        body=safe_provider_body(data),
+                    )
                 response_id = str(data.get("id") or response_id)
                 response_model = str(data.get("model") or response_model)
                 if data.get("usage"):
@@ -312,9 +323,7 @@ class OpenAIChatTransport:
                         if not isinstance(raw_call, dict):
                             continue
                         index = int(raw_call.get("index", position))
-                        part = tool_parts.setdefault(
-                            index, {"id": "", "name": "", "arguments": ""}
-                        )
+                        part = tool_parts.setdefault(index, {"id": "", "name": ""})
                         if raw_call.get("id"):
                             part["id"] += str(raw_call["id"])
                         function = (
@@ -324,22 +333,26 @@ class OpenAIChatTransport:
                         )
                         if function.get("name"):
                             part["name"] += str(function["name"])
-                        if function.get("arguments"):
-                            part["arguments"] += str(function["arguments"])
+                        if "arguments" in function:
+                            part["arguments_seen"] = True
+                        if function.get("arguments") is not None:
+                            part["arguments"] = str(part.get("arguments") or "") + str(
+                                function["arguments"]
+                            )
                     legacy_function = delta.get("function_call")
                     if isinstance(legacy_function, dict):
                         part = tool_parts.setdefault(
                             0,
-                            {
-                                "id": "function-call-0",
-                                "name": "",
-                                "arguments": "",
-                            },
+                            {"id": "function-call-0", "name": ""},
                         )
                         if legacy_function.get("name"):
                             part["name"] += str(legacy_function["name"])
-                        if legacy_function.get("arguments"):
-                            part["arguments"] += str(legacy_function["arguments"])
+                        if "arguments" in legacy_function:
+                            part["arguments_seen"] = True
+                        if legacy_function.get("arguments") is not None:
+                            part["arguments"] = str(part.get("arguments") or "") + str(
+                                legacy_function["arguments"]
+                            )
             # A few OpenAI-compatible services close the HTTP body cleanly after
             # the final choice instead of sending the optional literal [DONE].
             # A real finish_reason is sufficient; EOF without either marker is
@@ -353,7 +366,7 @@ class OpenAIChatTransport:
             for index in sorted(tool_parts):
                 part = tool_parts[index]
                 arguments, arguments_raw, parse_error = _parse_arguments(
-                    part["arguments"]
+                    part["arguments"] if part.get("arguments_seen") else MISSING
                 )
                 yield RunEvent(
                     type="tool_call_start",

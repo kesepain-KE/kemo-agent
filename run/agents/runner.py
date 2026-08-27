@@ -54,6 +54,7 @@ from run.tools import (
     invalid_tool_name,
     response_invalid_tool_arguments_error,
     system_prompt_with_tool_argument_repair,
+    validate_tool_call_batch,
 )
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
@@ -659,6 +660,31 @@ class AgentRunner:
                 final_model = response.model or runtime["model"]
                 invalid_error = response_invalid_tool_arguments_error(response)
                 if invalid_error is None:
+                    declared_tool_schemas: dict[str, dict[str, Any]] = {}
+                    for raw_schema in context.tool_registry.schemas():
+                        function = (
+                            raw_schema.get("function")
+                            if isinstance(raw_schema.get("function"), dict)
+                            else raw_schema
+                        )
+                        name = str(function.get("name") or "").strip()
+                        parameters = function.get("parameters") or function.get(
+                            "input_schema"
+                        )
+                        if name and isinstance(parameters, dict):
+                            declared_tool_schemas[name] = parameters
+                    for tool in tool_definitions:
+                        if isinstance(tool.parameters, dict):
+                            declared_tool_schemas[tool.name] = tool.parameters
+                    invalid_error = validate_tool_call_batch(
+                        [
+                            item
+                            for item in response.output
+                            if isinstance(item, ToolCallItem)
+                        ],
+                        declared_tool_schemas,
+                    )
+                if invalid_error is None:
                     break
                 if (
                     invalid_tool_arguments_retries
@@ -782,6 +808,7 @@ class AgentRunner:
                                 "user": self.user,
                                 "caller": "subagent",
                                 "agent": definition.name,
+                                "task_id": context.task_id,
                                 "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
                                 "agent_timeout": agent_timeout,

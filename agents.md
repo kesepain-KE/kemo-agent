@@ -2,6 +2,8 @@
 
 本文件是智能体操作自身的完整手册。涵盖架构、安全、资源位置、配置结构、工具、记忆、上下文、子代理、调度、prompt 拼接、provider 和交付标准。
 
+> 当前稳定版本：`kemo-agent 1.2.3`，配套 Kemo 网关为 `kemo-adapter-api 0.7.6`。本补丁只收紧既有工具、后台进程、诊断和流式重试边界，不新增用户配置字段。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+
 ---
 
 ## 1. 架构概览
@@ -127,7 +129,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
 | 用户下载产物 | `users/<name>/download/` | 智能体生成的文件 |
 | 用户上传文件 | `users/<name>/file_upload/` | 用户上传的附件 |
-| 运行结束音效 | `users/<name>/completion_sound.*` | 可选固定根文件；仅 Windows 桌面网页端启用，不进入文件列表，未设置时不存在 |
+| 运行结束/失败音效 | `users/<name>/completion_sound.*`、`users/<name>/failure_sound.*` | 可选固定根文件；仅 Windows 桌面网页端启用，不进入文件列表，未设置时不存在；成功与最终失败分别使用独立音效 |
 | 智能体临时文件 | `tmp/` | 智能体中途生成的中间文件（不交给用户） |
 | 创建模板 | `template/` | 子代理/拓展/消息/感知/技能/定时任务/任务计划/用户的创建骨架 |
 | 模块验收基准 | `tests/template_tests/<kind>/` | 子代理、拓展、外部消息、感知、技能和用户包各自独立的创建后合同测试 |
@@ -359,6 +361,8 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 插件工具清单的可选 `strict` 默认为 `false`。只有整个参数 Schema（包括所有嵌套 object）满足目标 Provider 的严格结构化输出子集时才能设为 `true`；包含开放参数对象或可选字段的普通工具必须保持非严格，不能由网关静默改写。
 - 插件工具清单的可选 `timeout_policy` 默认为 `argument_or_default`；只有自身管理子智能体整体期限的调度工具使用 `agent_runtime`，普通插件不得借此绕过工具超时边界。
 - Provider 工具调用只有在参数已解析为完整 JSON 对象且响应处于可执行终态时才能进入执行循环。Chat 的 `finish_reason=length/max_tokens/max_output_tokens/content_filter`、无效参数 JSON，以及 Kemo `ToolCallItem.parse_error` 都必须在执行前拒绝；禁止把残缺原文包装成 `_raw` 参数后尝试调用工具。
+- 后台 `shell(background=true)` 由独立 Worker 按 `deadline_at` 强制截止；日志不可写时仍必须持续读取子进程输出。`status` 与 `cancel` 要区分操作是否成功和作业是否成功，公开结果不得返回宿主机绝对路径。
+- 取消后台作业前必须复核 PID 的进程名和启动时间；身份缺失、进程已复用或无法确认时宁可拒绝取消，不得猜测并杀死其他进程。`wait_for_condition` 的超时只说明等待未满足，不代表目标作业失败。
 
 ---
 
@@ -711,7 +715,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 - Settings 和 Health 只返回认证状态，不返回 Token、用户名、密码、Session Secret 或 Cookie 内容。
 - Web 用户配置接口只返回脱敏后的只读镜像，不提供配置写入路由。
 - Web 可只读查看 Prompt/Expand 诊断、记忆预览、当前用户子代理、消息插件状态、摘要缓存与真实 RuntimeHost 状态；独立 Web 模式明确显示 `unmanaged`。
-- Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。运行结束音效使用独立的 `completion_sound.*` API，不纳入文件列表，上传后校验音频 MIME/签名与大小；仅 Windows 桌面网页端显示设置并播放，浏览器播放失败时允许受保护的终端降级。
+- Web 文件 API 只允许浏览、下载或删除 `file_upload`、`download` 和 `tmp` 中的普通文件；拒绝路径穿越、目录删除、符号链接和隐藏缓存项。头像上传限制为 5 MB 的 PNG/JPEG/GIF/WebP，并校验 MIME 与文件签名。运行结束音效和运行失败音效分别使用独立的 `completion_sound.*`、`failure_sound.*` API，不纳入文件列表，上传后校验音频 MIME/签名与大小；仅 Windows 桌面网页端显示设置并播放，浏览器播放失败时允许受保护的终端降级。成功音效只对应最终 `completed`，失败音效只对应明确的最终 `failed/error`，取消、暂停、受限停止和长任务中间 Run 均不播放。
 - 文件页全局摘要使用短期进程内缓存；Web 写入、移动、建目录和删除会显式失效，插件或外部程序直接写盘则最多在短 TTL 后重新扫描。搜索仍按有界深度和条目预算实时扫描，不使用可能过期的摘要缓存。
 - 用户人格和全局人格可通过受保护 Web API 原子更新；全局人格影响所有用户，当前唯一 Web 认证主体视为管理员。`user_config.json` 仍保持只读。
 - Web 前端的 `/files` 页面落地用户文件与 `tmp` 浏览、下载和二次确认删除；`/runtime` 页面落地子代理、外部消息状态与三层 Expand 库存；`/profile` 页面落地头像上传和用户/全局人格编辑。

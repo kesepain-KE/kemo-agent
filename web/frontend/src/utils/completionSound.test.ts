@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { playUserCompletionSound } from './completionSound'
+import { playUserCompletionSound, playUserFailureSound } from './completionSound'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -96,5 +96,34 @@ describe('playUserCompletionSound', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
 
     await expect(playUserCompletionSound('alice')).resolves.toBe(false)
+  })
+})
+
+describe('playUserFailureSound', () => {
+  it('在 Windows 桌面端使用独立的失败音效地址', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const play = vi.fn().mockResolvedValue(undefined)
+    const AudioMock = vi.fn(function AudioMock(this: { play: typeof play }, _url: string) {
+      this.play = play
+    })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('Audio', AudioMock)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(playUserFailureSound('alice')).resolves.toBe(true)
+    expect(String(AudioMock.mock.calls[0][0])).toContain('/api/users/alice/failure-sound')
+    expect(String(AudioMock.mock.calls[0][0])).not.toContain('/completion-sound')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('移动端跳过失败音效播放', async () => {
+    const AudioMock = vi.fn()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('Audio', AudioMock)
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 15; Mobile)')
+    await expect(playUserFailureSound('alice')).resolves.toBe(false)
+    expect(AudioMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

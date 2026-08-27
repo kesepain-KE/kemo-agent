@@ -1290,6 +1290,11 @@ export interface CompletionSoundFallbackResponse {
   reason: 'browser_fallback' | 'not_configured' | 'unsupported_host' | 'playback_failed' | string
 }
 
+export type FailureSoundStatus = CompletionSoundStatus
+export type FailureSoundUploadResponse = CompletionSoundUploadResponse
+export type FailureSoundDeleteResponse = CompletionSoundDeleteResponse
+export type FailureSoundFallbackResponse = CompletionSoundFallbackResponse
+
 export interface InventoryFile {
   name: string
   relative_path: string

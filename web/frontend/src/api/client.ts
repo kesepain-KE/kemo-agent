@@ -9,6 +9,10 @@ import type {
   CompletionSoundFallbackResponse,
   CompletionSoundStatus,
   CompletionSoundUploadResponse,
+  FailureSoundDeleteResponse,
+  FailureSoundFallbackResponse,
+  FailureSoundStatus,
+  FailureSoundUploadResponse,
   ConfigFullResponse,
   ExpandsResponse,
   ExpandScope,
@@ -873,6 +877,36 @@ export async function deleteCompletionSound(user: string): Promise<CompletionSou
 
 export async function playCompletionSoundFallback(user: string): Promise<CompletionSoundFallbackResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound/fallback`, {
+    method: 'POST',
+  })
+}
+
+export function getFailureSoundUrl(user: string, revision?: string | number): string {
+  const suffix = revision === undefined ? '' : `?v=${encodeURIComponent(String(revision))}`
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/failure-sound${suffix}`
+}
+
+export async function getFailureSoundStatus(user: string): Promise<FailureSoundStatus> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound/status`)
+}
+
+export async function uploadFailureSound(user: string, file: File): Promise<FailureSoundUploadResponse> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound`, {
+    method: 'POST',
+    body,
+  })
+}
+
+export async function deleteFailureSound(user: string): Promise<FailureSoundDeleteResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound`, {
+    method: 'DELETE',
+  })
+}
+
+export async function playFailureSoundFallback(user: string): Promise<FailureSoundFallbackResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound/fallback`, {
     method: 'POST',
   })
 }
