@@ -267,6 +267,12 @@ def run(request_path: Path) -> int:
                 process.wait(timeout=0.25)
             except subprocess.TimeoutExpired:
                 continue
+        # The process can exit in the small window between the last poll and
+        # the deadline check.  Treat a late observation as a timeout as well;
+        # otherwise the same explicit timeout is reported as process_exit on
+        # slower CI hosts and the result is nondeterministic.
+        if deadline_at is not None and time.time() >= deadline_at:
+            timed_out = True
         exit_code = process.returncode
         for capture_thread in capture_threads:
             capture_thread.join(timeout=2.0)

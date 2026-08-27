@@ -85,6 +85,30 @@ def _normalize_key(value: Any) -> str:
     return text.casefold().replace("-", "_").replace(" ", "_")
 
 
+def _has_excessive_json_nesting(value: str, *, limit: int = _MAX_DIAGNOSTIC_DEPTH) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "]}":
+            depth = max(0, depth - 1)
+    return False
+
+
 def redact_diagnostic_text(value: Any) -> str:
     """Redact credential-shaped material from non-executable diagnostics."""
 
@@ -96,8 +120,10 @@ def redact_diagnostic_text(value: Any) -> str:
 
 
 def _has_embedded_json(value: str) -> bool:
-    decoder = json.JSONDecoder()
     compact = value.lstrip()
+    if _has_excessive_json_nesting(compact):
+        return True
+    decoder = json.JSONDecoder()
     for index, marker in enumerate(compact):
         if marker not in "[{":
             continue

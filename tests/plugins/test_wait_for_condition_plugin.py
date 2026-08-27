@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -84,7 +85,10 @@ class WaitForConditionPluginTests(unittest.TestCase):
         self.assertEqual(created["status"], "triggered")
         self.assertLess(created["elapsed_seconds"], 1.5)
         self.assertEqual(created["observation"]["requested_path"], "result.txt")
-        self.assertEqual(created["observation"]["resolved_path"], str(target))
+        self.assertEqual(
+            os.path.normcase(os.path.realpath(created["observation"]["resolved_path"])),
+            os.path.normcase(os.path.realpath(str(target))),
+        )
         self.assertTrue(created["observation"]["path_was_relative"])
         self.assertEqual(created["observation"]["path_base"], str(self.root))
 

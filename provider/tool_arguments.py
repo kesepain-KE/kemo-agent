@@ -101,6 +101,32 @@ def _limit_error(kind: str, message: str) -> dict[str, Any]:
     return {"kind": kind, "message": message}
 
 
+def _raw_json_nesting_exceeds(raw: str, *, limit: int) -> bool:
+    """Detect excessive JSON container nesting without invoking the JSON parser."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "]}":
+            depth = max(0, depth - 1)
+    return False
+
+
 def parse_tool_arguments(value: Any = MISSING) -> ParsedToolArguments:
     if value is MISSING:
         return ParsedToolArguments(
@@ -158,6 +184,12 @@ def parse_tool_arguments(value: Any = MISSING) -> ParsedToolArguments:
                 None,
                 _limit_error("arguments_too_large", "工具参数原始内容超过大小上限"),
             )
+    if _raw_json_nesting_exceeds(raw, limit=_MAX_ARGUMENT_DEPTH):
+        return ParsedToolArguments(
+            {},
+            raw,
+            _limit_error("invalid_json", "工具参数 JSON 嵌套层级超过解析上限"),
+        )
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, RecursionError) as exc:
