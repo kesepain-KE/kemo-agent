@@ -121,6 +121,7 @@ const runEventSchema = z
       'context_compression',
       'long_task_update',
       'usage',
+      'retrying',
       'error',
       'done',
     ]),
@@ -134,6 +135,12 @@ const runEventSchema = z
     metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough()
+
+function isProvisionalRunError(event: RunEvent) {
+  return event.type === 'error'
+    && event.metadata?.retryable === true
+    && event.metadata?.committed === false
+}
 
 export async function getHealth(): Promise<{ status: string; service: string; version: number }> {
   return requestJson('/api/health')
@@ -1112,7 +1119,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
         throw new ApiError('SSE 事件名称与数据类型不一致', 0, 'invalid_sse')
       }
       options.onEvent(event)
-      if (event.type === 'error' || event.type === 'done') terminal = true
+      if ((event.type === 'error' && !isProvisionalRunError(event)) || event.type === 'done') terminal = true
     }
     if (done) break
   }
@@ -1121,7 +1128,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     for (const frame of parsed.frames) {
       const event = runEventSchema.parse(JSON.parse(frame.data)) as RunEvent
       options.onEvent(event)
-      if (event.type === 'error' || event.type === 'done') terminal = true
+      if ((event.type === 'error' && !isProvisionalRunError(event)) || event.type === 'done') terminal = true
     }
   }
   if (!terminal) throw new ApiError('聊天流在终态事件前结束', 0, 'missing_terminal')

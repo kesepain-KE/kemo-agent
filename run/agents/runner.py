@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import importlib.util
 import math
@@ -35,6 +36,8 @@ from provider.protocol.models import (
     Usage,
     text_from_content,
 )
+from provider.protocol.diagnostics import safe_provider_message
+from provider.schema import ProviderError
 from agents._runtime.resources import (
     AgentPromptBundle,
     build_agent_prompt_bundle,
@@ -62,15 +65,400 @@ from run.tools import (
     ToolResultTooLargeError,
     ToolRegistry,
     execute_tool,
+    tool_call_signature,
 )
 
 
 _AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
 _AGENT_CANCEL_CLEANUP_GRACE = 0.1
 _STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
+_MAX_AGENT_RETRY_ATTEMPTS = 5
+_MAX_AGENT_RETRY_RECOVERY_CALLS = 32
+_MAX_AGENT_RETRY_RECOVERY_CHARS = 120_000
+_AGENT_RETRYABLE_CATEGORIES = frozenset(
+    {
+        "connection_error",
+        "gateway_error",
+        "provider_error",
+        "timeout",
+        "upstream_error",
+    }
+)
+_AGENT_NON_RETRYABLE_CATEGORIES = frozenset(
+    {
+        "auth_error",
+        "authorization_error",
+        "asset_error",
+        "asset_integrity_error",
+        "capability_error",
+        "context_length_exceeded",
+        "gateway_protocol_error",
+        "idempotency_conflict",
+        "invalid_request",
+        "protocol_error",
+        "request_too_large",
+        "request_validation_error",
+        "result_too_large",
+        "execution_capacity",
+        "validation_error",
+    }
+)
+_AGENT_NON_RETRYABLE_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
 _SERIAL_EXECUTION_LOCKS_GUARD = threading.RLock()
 _SERIAL_EXECUTION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _SERIAL_EXECUTION_LOCAL = threading.local()
+
+
+def _new_agent_usage() -> dict[str, Any]:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated": False,
+    }
+
+
+@dataclass(slots=True)
+class _AgentRetryState:
+    recovery: dict[str, dict[str, Any]] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=_new_agent_usage)
+    response_ids: list[str] = field(default_factory=list)
+    auxiliary: dict[str, Any] = field(default_factory=dict)
+
+
+def _agent_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_tool_result_reuse_allowed(
+    name: str,
+    arguments: dict[str, Any],
+) -> bool:
+    """Return whether replaying a successful tool result is safe in one run."""
+
+    if name == "expand_call":
+        command = str(arguments.get("command") or "").strip().casefold()
+        return command not in {"configuration_status", "query", "refresh", "status"}
+    if name == "file":
+        action = str(arguments.get("action") or "").strip().casefold()
+        return action not in {
+            "exists",
+            "hash",
+            "list_dir",
+            "read",
+            "read_range",
+            "search",
+            "stat",
+            "tree_dir",
+        }
+    return True
+
+
+def _record_agent_recovery(
+    state: _AgentRetryState,
+    call: ToolCallItem,
+    payload: dict[str, Any],
+) -> None:
+    if not isinstance(payload, dict):
+        return
+    succeeded = payload.get("ok") is True
+    if succeeded and not _agent_tool_result_reuse_allowed(call.name, call.arguments):
+        return
+    signature = tool_call_signature(call.name, call.arguments)
+    if signature in state.recovery:
+        return
+    candidate = {
+        "id": str(call.call_id or f"recovered_{len(state.recovery) + 1}"),
+        "name": str(call.name),
+        "arguments": copy.deepcopy(call.arguments),
+        "result": copy.deepcopy(payload),
+        "replay_policy": "reuse" if succeeded else "blocked",
+    }
+    if len(state.recovery) >= _MAX_AGENT_RETRY_RECOVERY_CALLS:
+        return
+    projected = sum(len(_agent_json(value)) for value in state.recovery.values())
+    if projected + len(_agent_json(candidate)) > _MAX_AGENT_RETRY_RECOVERY_CHARS:
+        return
+    state.recovery[signature] = candidate
+
+
+def _agent_recovery_items(
+    recovery: dict[str, dict[str, Any]],
+) -> list[Any]:
+    items: list[Any] = []
+    used_call_ids: set[str] = set()
+    for value in recovery.values():
+        name = str(value.get("name") or "unknown_tool").strip()
+        arguments = value.get("arguments")
+        result = value.get("result")
+        if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
+            continue
+        call_id = str(value.get("id") or "").strip()
+        if not call_id or call_id in used_call_ids:
+            call_id = f"recovered_{uuid.uuid4().hex}"
+        used_call_ids.add(call_id)
+        items.extend(
+            [
+                ToolCallItem(
+                    id=f"recovered_call_{uuid.uuid4().hex}",
+                    call_id=call_id,
+                    name=name,
+                    arguments=copy.deepcopy(arguments),
+                ),
+                ToolResultItem(
+                    id=f"recovered_result_{uuid.uuid4().hex}",
+                    call_id=call_id,
+                    name=name,
+                    is_error=result.get("ok") is not True,
+                    content=[JsonContent(data=copy.deepcopy(result))],
+                ),
+            ]
+        )
+    return items
+
+
+def _agent_recovery_records(
+    recovery: dict[str, dict[str, Any]],
+    *,
+    exclude_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    excluded = exclude_ids or set()
+    records: list[dict[str, Any]] = []
+    for value in recovery.values():
+        call_id = str(value.get("id") or "")
+        name = str(value.get("name") or "unknown_tool")
+        arguments = value.get("arguments")
+        result = value.get("result")
+        if (
+            not call_id
+            or call_id in excluded
+            or not isinstance(arguments, dict)
+            or not isinstance(result, dict)
+        ):
+            continue
+        records.append(
+            {
+                "id": call_id,
+                "name": name,
+                "arguments": copy.deepcopy(arguments),
+                "status": (
+                    "recovered" if result.get("ok") is True else "recovery_blocked"
+                ),
+                "duplicate": False,
+                "consecutive_identical_calls": 0,
+                "result": copy.deepcopy(result),
+                "iteration": 0,
+                "elapsed_ms": 0,
+                "recovered": True,
+            }
+        )
+    return records
+
+
+def _agent_tool_failure_is_retryable(
+    payload: dict[str, Any],
+    status: str,
+) -> bool:
+    if status in {
+        "cancelled",
+        "duplicate_reused",
+        "identical_call_blocked",
+        "not_executed",
+        "result_too_large",
+        "retry_reuse_blocked",
+        "temporarily_unavailable",
+        "timed_out_running",
+    }:
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict) or error.get("cancelled") is True:
+        return False
+    declared = error.get("retryable")
+    if isinstance(declared, bool):
+        return declared
+    if error.get("still_running") is True:
+        return False
+    category = str(
+        error.get("category")
+        or error.get("type")
+        or error.get("exception_type")
+        or ""
+    ).casefold()
+    if category in _AGENT_RETRYABLE_CATEGORIES:
+        return True
+    for key in ("status_code", "provider_status"):
+        try:
+            if int(error.get(key)) in {408, 425, 429, 500, 502, 503, 504}:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _agent_error_is_retryable(
+    error: BaseException,
+    *,
+    cancel_event: threading.Event,
+) -> bool:
+    if cancel_event.is_set():
+        return False
+    error_type = type(error).__name__
+    if error_type in {"AgentCancelledError", "ToolCancelledError"}:
+        return False
+    if error_type == "AgentInputError":
+        return False
+    declared = getattr(error, "retryable_declared", None)
+    # Structured/JSON output failures are commonly caused by transient
+    # truncation or provider formatting drift; let the bounded retry loop
+    # repair them just like other provider response failures.
+    if error_type == "AgentOutputError":
+        return bool(getattr(error, "retryable", True)) if declared is True else True
+    if error_type == "AgentTimeoutError":
+        return bool(getattr(error, "process_terminated", False))
+    if declared is True:
+        return bool(getattr(error, "retryable", False))
+    if declared is not False:
+        explicit_retryable = getattr(error, "retryable", None)
+        if isinstance(explicit_retryable, bool):
+            return explicit_retryable
+    if bool(getattr(error, "still_running", False)):
+        return False
+    category = str(
+        getattr(error, "category", "")
+        or getattr(error, "code", "")
+        or ""
+    ).casefold()
+    if category in _AGENT_NON_RETRYABLE_CATEGORIES:
+        return False
+    for raw_status in (
+        getattr(error, "status_code", None),
+        getattr(error, "provider_status", None),
+    ):
+        try:
+            if int(raw_status) in _AGENT_NON_RETRYABLE_STATUSES:
+                return False
+        except (TypeError, ValueError):
+            continue
+    if category in _AGENT_RETRYABLE_CATEGORIES:
+        return True
+    if error_type in {
+        "AgentProviderError",
+        "ProviderError",
+        "ProviderCongestionError",
+    }:
+        return True
+    return False
+
+
+def _agent_retry_delay_seconds(error: BaseException, failed_attempt: int) -> float:
+    raw = getattr(error, "retry_after_ms", None)
+    try:
+        milliseconds = int(raw)
+    except (TypeError, ValueError):
+        milliseconds = -1
+    if milliseconds >= 0:
+        return min(120.0, max(0.25, milliseconds / 1000.0))
+    return min(2.0, 0.25 * (2 ** max(0, failed_attempt - 1)))
+
+
+def _agent_retry_reason(error: BaseException) -> str:
+    raw = str(
+        getattr(error, "category", "")
+        or getattr(error, "code", "")
+        or type(error).__name__
+    ).strip()
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in raw
+    )
+    return safe[:80] or "agent_error"
+
+
+def _mark_agent_retry_exhausted(
+    error: BaseException,
+    *,
+    attempts: int,
+    max_attempts: int,
+) -> None:
+    setattr(error, "retry_exhausted", True)
+    setattr(error, "retry_attempts", attempts)
+    setattr(error, "retry_max_attempts", max_attempts)
+    setattr(error, "retryable_declared", True)
+    setattr(error, "retryable", False)
+
+
+def _run_agent_with_retries(
+    function: Callable[[Any, dict[str, Any]], "AgentRunResult"],
+    context: Any,
+    input_data: dict[str, Any],
+    *,
+    max_attempts: int,
+) -> "AgentRunResult":
+    state = _AgentRetryState()
+    for attempt in range(1, max_attempts + 1):
+        context.attempt = attempt
+        context.max_attempts = max_attempts
+        context.retry_state = state
+        try:
+            result = function(context, input_data)
+            if not isinstance(result, AgentRunResult):
+                raise AgentRunError(
+                    f"子代理 {context.definition.name} executor 必须返回 AgentRunResult"
+                )
+            result.metadata = {
+                **result.metadata,
+                "retry_attempts": attempt,
+                "retry_max_attempts": max_attempts,
+            }
+            return result
+        except (KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as exc:
+            if isinstance(exc, AgentCancelledError):
+                raise
+            if context.cancel_event.is_set():
+                raise AgentCancelledError(
+                    f"子代理 {context.definition.name} 已取消"
+                ) from exc
+            if not _agent_error_is_retryable(
+                exc,
+                cancel_event=context.cancel_event,
+            ):
+                raise
+            if attempt >= max_attempts:
+                _mark_agent_retry_exhausted(
+                    exc,
+                    attempts=attempt,
+                    max_attempts=max_attempts,
+                )
+                raise
+            _event(
+                context.event_callback,
+                agent=context.definition.name,
+                status="retrying",
+                task_id=context.task_id,
+                detail={
+                    "failed_attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "exception_type": type(exc).__name__,
+                    "reason": _agent_retry_reason(exc),
+                },
+            )
+            if context.cancel_event.wait(_agent_retry_delay_seconds(exc, attempt)):
+                raise AgentCancelledError(
+                    f"子代理 {context.definition.name} 重试等待期间已取消"
+                ) from exc
+    raise AssertionError("子代理重试循环异常退出")
 
 
 def _response_items_for_next_request(output: list[Any]) -> list[Any]:
@@ -142,13 +530,19 @@ def _execute_agent(
     *,
     serial_lock: threading.Lock | None,
     serial_key: tuple[str, str] | None,
+    max_attempts: int,
 ) -> "AgentRunResult":
     def execute() -> AgentRunResult:
         owned = _owned_serial_execution_keys()
         if serial_key is not None:
             owned.add(serial_key)
         try:
-            return function(context, input_data)
+            return _run_agent_with_retries(
+                function,
+                context,
+                input_data,
+                max_attempts=max_attempts,
+            )
         finally:
             if serial_key is not None:
                 owned.discard(serial_key)
@@ -166,7 +560,12 @@ def _execute_agent(
                 f"子代理 {context.definition.name} 在等待用户级串行执行时已取消"
             )
         return execute()
-    return function(context, input_data)
+    return _run_agent_with_retries(
+        function,
+        context,
+        input_data,
+        max_attempts=max_attempts,
+    )
 
 
 class AgentRunError(RuntimeError):
@@ -181,6 +580,47 @@ class AgentOutputError(AgentRunError):
     def __init__(self, message: str, *, raw_text: str = "") -> None:
         super().__init__(message)
         self.raw_text = str(raw_text or "")
+
+
+class AgentProviderError(AgentRunError):
+    """A Provider response failure with safe retry classification metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "provider_error",
+        code: str = "",
+        status_code: int | None = None,
+        retryable: bool | None = None,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = str(category or "provider_error")[:160]
+        self.code = str(code or "")[:160]
+        self.status_code = status_code
+        self.retryable_declared = isinstance(retryable, bool)
+        self.retryable = bool(retryable) if self.retryable_declared else False
+        self.retry_after_ms = retry_after_ms
+
+
+class AgentToolRetryError(AgentRunError):
+    """A transient tool failure that should restart the subagent attempt."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        *,
+        status_code: int | None = None,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        super().__init__("子代理工具调用出现可恢复错误，正在准备自动重试")
+        self.tool_name = str(tool_name or "unknown_tool")[:160]
+        self.category = "tool_error"
+        self.status_code = status_code
+        self.retryable_declared = True
+        self.retryable = True
+        self.retry_after_ms = retry_after_ms
 
 
 class AgentTimeoutError(AgentRunError):
@@ -368,9 +808,19 @@ class AgentExecutionContext:
     max_tokens: int | None
     task_id: str
     structured_output_tool: bool
+    event_callback: Callable[[RunEvent], None] | None = field(default=None, repr=False)
+    attempt: int = 1
+    max_attempts: int = 1
+    retry_state: _AgentRetryState | None = field(default=None, repr=False)
 
     def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
-        return self.runner._run_model(self, input_data)
+        return self.runner._run_model(
+            self,
+            input_data,
+            retry_state=self.retry_state,
+            attempt=self.attempt,
+            max_attempts=self.max_attempts,
+        )
 
 
 def _load_executor(
@@ -467,7 +917,12 @@ class AgentRunner:
         self,
         context: AgentExecutionContext,
         input_data: dict[str, Any],
+        *,
+        retry_state: _AgentRetryState | None = None,
+        attempt: int = 1,
+        max_attempts: int = 1,
     ) -> AgentRunResult:
+        retry_state = retry_state or _AgentRetryState()
         definition = context.definition
         runtime = resolve_agent_provider_config(
             self.config,
@@ -500,17 +955,13 @@ class AgentRunner:
                 item_id=f"msg_{uuid.uuid4().hex}",
             )
         ]
-        total_usage: dict[str, Any] = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "estimated": False,
-        }
+        items.extend(_agent_recovery_items(retry_state.recovery))
+        total_usage: dict[str, Any] = copy.deepcopy(retry_state.usage)
         tool_records: list[dict[str, Any]] = []
         final_text = ""
         final_data: dict[str, Any] | None = None
         final_model = runtime["model"]
-        response_ids: list[str] = []
+        response_ids: list[str] = list(retry_state.response_ids)
         parent_request_id: str | None = None
         tool_config = self.config.get("tools") or {}
         raw_global_tool_calls = tool_config.get("max_iterations", 80)
@@ -564,6 +1015,17 @@ class AgentRunner:
         failure_limit = raw_failure_limit
         failures = ConsecutiveToolFailureTracker(failure_limit)
         identical_calls = ConsecutiveIdenticalToolCallTracker(identical_call_limit)
+        seen_calls: dict[str, dict[str, Any]] = {
+            signature: copy.deepcopy(value["result"])
+            for signature, value in retry_state.recovery.items()
+            if value.get("replay_policy") == "reuse"
+            and isinstance(value.get("result"), dict)
+        }
+        blocked_recovery: dict[str, dict[str, Any]] = {
+            signature: value
+            for signature, value in retry_state.recovery.items()
+            if value.get("replay_policy") == "blocked"
+        }
         tool_argument_retry_count = 0
         for iteration in range(1, max_provider_iterations + 1):
             if context.cancel_event.is_set():
@@ -609,7 +1071,7 @@ class AgentRunner:
                             KemoRequest(
                                 request_id=request_id,
                                 parent_request_id=parent_request_id,
-                                attempt=invalid_tool_arguments_retries + 1,
+                                attempt=attempt + invalid_tool_arguments_retries,
                                 model=runtime["model"],
                                 stream=False,
                                 system_prompt=request_system,
@@ -643,6 +1105,7 @@ class AgentRunner:
                                     "tool_argument_retry": (
                                         invalid_tool_arguments_retries
                                     ),
+                                    "retry_attempt": attempt,
                                 },
                             )
                         )
@@ -655,8 +1118,10 @@ class AgentRunner:
                 if not isinstance(response, KemoResponse):
                     raise AgentRunError("Provider create() 必须返回 KemoResponse")
                 response_ids.append(response.id)
+                retry_state.response_ids = list(response_ids)
                 parent_request_id = parent_request_id or request_id
                 self._merge_usage(total_usage, self._usage_dict(response.usage))
+                retry_state.usage = copy.deepcopy(total_usage)
                 final_model = response.model or runtime["model"]
                 invalid_error = response_invalid_tool_arguments_error(response)
                 if invalid_error is None:
@@ -702,12 +1167,37 @@ class AgentRunner:
                 ResponseStatus.COMPLETED,
                 ResponseStatus.REQUIRES_ACTION,
             }:
-                message = (
-                    response.error.message
-                    if response.error is not None
-                    else str(response.status)
+                if response.error is not None:
+                    provider_error = response.error
+                    message = safe_provider_message(
+                        provider_error.message,
+                        "Provider 响应失败",
+                    )
+                    retryable: bool | None = None
+                    fields_set = getattr(provider_error, "model_fields_set", set())
+                    if "retryable" in fields_set:
+                        retryable = provider_error.retryable
+                    elif isinstance(provider_error.details, dict):
+                        declared = provider_error.details.get("retryable")
+                        if isinstance(declared, bool):
+                            retryable = declared
+                    raise AgentProviderError(
+                        f"子代理 Provider 响应失败：{message}",
+                        category=provider_error.type or "provider_error",
+                        code=provider_error.code,
+                        status_code=provider_error.provider_status,
+                        retryable=retryable,
+                        retry_after_ms=provider_error.retry_after_ms,
+                    )
+                raise AgentProviderError(
+                    f"子代理 Provider 响应失败：{response.status}",
+                    category=(
+                        "provider_incomplete"
+                        if response.status == ResponseStatus.INCOMPLETE
+                        else "provider_error"
+                    ),
+                    retryable=response.status != ResponseStatus.CANCELLED,
                 )
-                raise AgentRunError(f"子代理 Provider 响应失败：{message}")
             normalized_output = _response_items_for_next_request(response.output)
             calls = [
                 item for item in normalized_output if isinstance(item, ToolCallItem)
@@ -757,12 +1247,19 @@ class AgentRunner:
                     text_from_content(item.content) for item in messages
                 )
                 break
+            retryable_tool_failure: AgentToolRetryError | None = None
             for call in calls:
                 if processed_tool_calls >= max_tool_calls:
                     raise AgentRunError(
                         f"子代理 {definition.name} 已达到最大工具调用次数 {max_tool_calls}"
                     )
                 processed_tool_calls += 1
+                signature = tool_call_signature(call.name, call.arguments)
+                reuse_allowed = _agent_tool_result_reuse_allowed(
+                    call.name,
+                    call.arguments,
+                )
+                duplicate = False
                 identical_call_count = identical_calls.record(call.name, call.arguments)
                 if identical_calls.is_blocked(identical_call_count):
                     payload = {
@@ -798,80 +1295,112 @@ class AgentRunner:
                     }
                     status = "temporarily_unavailable"
                 else:
-                    try:
-                        tool = context.tool_registry.get(call.name)
-                        value = execute_tool(
-                            tool,
-                            call.arguments,
-                            context={
-                                "root": str(self.root),
-                                "user": self.user,
-                                "caller": "subagent",
-                                "agent": definition.name,
-                                "task_id": context.task_id,
-                                "agent_trigger": input_data.get("trigger"),
-                                "tool_timeout": tool_timeout,
-                                "agent_timeout": agent_timeout,
-                                "knowledge_scopes": list(
-                                    definition.capabilities.knowledge_scopes
+                    blocked_result = retry_state.recovery.get(signature)
+                    if (
+                        not isinstance(blocked_result, dict)
+                        or blocked_result.get("replay_policy") != "blocked"
+                    ):
+                        blocked_result = None
+                    duplicate = reuse_allowed and signature in seen_calls
+                    if blocked_result is not None:
+                        payload = copy.deepcopy(blocked_result.get("result") or {})
+                        status = "retry_reuse_blocked"
+                        duplicate = True
+                    elif duplicate:
+                        payload = copy.deepcopy(seen_calls[signature])
+                        status = "duplicate_reused"
+                    else:
+                        try:
+                            tool = context.tool_registry.get(call.name)
+                            value = execute_tool(
+                                tool,
+                                call.arguments,
+                                context={
+                                    "root": str(self.root),
+                                    "user": self.user,
+                                    "caller": "subagent",
+                                    "agent": definition.name,
+                                    "task_id": context.task_id,
+                                    "agent_trigger": input_data.get("trigger"),
+                                    "tool_timeout": tool_timeout,
+                                    "agent_timeout": agent_timeout,
+                                    "knowledge_scopes": list(
+                                        definition.capabilities.knowledge_scopes
+                                    ),
+                                },
+                                timeout=tool_timeout,
+                                cancel_event=context.cancel_event,
+                            )
+                            payload = {"ok": True, "result": value}
+                            status = "completed"
+                        except ToolResultTooLargeError as exc:
+                            payload = {"ok": False, "error": exc.error_payload()}
+                            status = "result_too_large"
+                        except Exception as exc:
+                            error = {
+                                "message": safe_provider_message(
+                                    str(exc),
+                                    "工具调用失败",
                                 ),
-                            },
-                            timeout=tool_timeout,
-                            cancel_event=context.cancel_event,
-                        )
-                        payload = {"ok": True, "result": value}
-                        status = "completed"
-                    except ToolResultTooLargeError as exc:
-                        payload = {"ok": False, "error": exc.error_payload()}
-                        status = "result_too_large"
-                    except Exception as exc:
-                        error = {
-                            "message": str(exc),
-                            "exception_type": str(
-                                getattr(exc, "remote_exception_type", "")
-                                or type(exc).__name__
-                            ),
-                        }
-                        for field in ("category", "retryable", "still_running"):
-                            value = getattr(exc, field, None)
-                            if isinstance(value, (bool, int, float)):
-                                error[field] = value
-                            elif isinstance(value, str) and value.strip():
-                                error[field] = value.strip()[:160]
-                        payload = {
-                            "ok": False,
-                            "error": error,
-                        }
-                        if bool(getattr(exc, "still_running", False)):
-                            failures.unavailable.add(call.name)
-                            status = "timed_out_running"
-                        else:
-                            status = "failed"
-                    failure_count = failures.record(
-                        call.name,
-                        succeeded=(
-                            bool(payload.get("ok")) or status == "result_too_large"
-                        ),
-                    )
-                    if failure_count >= failure_limit:
-                        payload["error"].update(
-                            {
-                                "consecutive_failures": failure_count,
-                                "temporarily_unavailable": True,
-                                "instruction": "请更换工具或调整方案，不要继续重试该工具",
+                                "exception_type": str(
+                                    getattr(exc, "remote_exception_type", "")
+                                    or type(exc).__name__
+                                ),
                             }
+                            for field in ("category", "retry_after_ms", "still_running"):
+                                value = getattr(exc, field, None)
+                                if isinstance(value, (bool, int, float)):
+                                    error[field] = value
+                                elif isinstance(value, str) and value.strip():
+                                    error[field] = value.strip()[:160]
+                            retryable = getattr(exc, "retryable", None)
+                            if isinstance(retryable, bool) and getattr(
+                                exc,
+                                "retryable_declared",
+                                True,
+                            ):
+                                error["retryable"] = retryable
+                            payload = {
+                                "ok": False,
+                                "error": error,
+                            }
+                            if bool(getattr(exc, "still_running", False)):
+                                failures.unavailable.add(call.name)
+                                status = "timed_out_running"
+                            else:
+                                status = "failed"
+                        if payload.get("ok") is True:
+                            if reuse_allowed:
+                                seen_calls[signature] = copy.deepcopy(payload)
+                        else:
+                            seen_calls.pop(signature, None)
+                        failure_count = failures.record(
+                            call.name,
+                            succeeded=(
+                                bool(payload.get("ok")) or status == "result_too_large"
+                            ),
                         )
+                        if failure_count >= failure_limit:
+                            payload["error"].update(
+                                {
+                                    "consecutive_failures": failure_count,
+                                    "temporarily_unavailable": True,
+                                    "instruction": "请更换工具或调整方案，不要继续重试该工具",
+                                }
+                            )
                 tool_records.append(
                     {
                         "id": call.call_id,
                         "name": call.name,
                         "arguments": call.arguments,
                         "status": status,
+                        "duplicate": duplicate,
                         "result": payload,
                         "iteration": iteration,
                         "consecutive_identical_calls": identical_call_count,
                     }
                 )
+                _record_agent_recovery(retry_state, call, payload)
                 items.append(
                     ToolResultItem(
                         id=f"result_{uuid.uuid4().hex}",
@@ -881,6 +1410,21 @@ class AgentRunner:
                         content=[JsonContent(data=payload)],
                     )
                 )
+                if (
+                    attempt < max_attempts
+                    and retryable_tool_failure is None
+                    and _agent_tool_failure_is_retryable(payload, status)
+                ):
+                    error = payload.get("error")
+                    if not isinstance(error, dict):
+                        error = {}
+                    retryable_tool_failure = AgentToolRetryError(
+                        call.name,
+                        status_code=_safe_int(error.get("status_code")),
+                        retry_after_ms=_safe_int(error.get("retry_after_ms")),
+                    )
+            if retryable_tool_failure is not None:
+                raise retryable_tool_failure
         else:
             raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
         if final_data is None:
@@ -893,6 +1437,18 @@ class AgentRunner:
                 raise AgentOutputError(str(exc), raw_text=final_text) from exc
         else:
             data = final_data
+        current_tool_ids = {
+            str(record.get("id") or "")
+            for record in tool_records
+            if isinstance(record, dict)
+        }
+        committed_tool_records = [
+            *_agent_recovery_records(
+                retry_state.recovery,
+                exclude_ids=current_tool_ids,
+            ),
+            *tool_records,
+        ]
         return AgentRunResult(
             agent=definition.name,
             data=data,
@@ -906,7 +1462,7 @@ class AgentRunner:
                 "source": definition.source,
                 "task_id": context.task_id,
                 "prompt": context.prompt_bundle.diagnostics,
-                "tool_calls": tool_records,
+                "tool_calls": committed_tool_records,
                 "response_ids": response_ids,
                 "tool_argument_retries": tool_argument_retry_count,
                 "structured_output_transport": (
@@ -978,6 +1534,7 @@ class AgentRunner:
             max_tokens=max_tokens,
             task_id=task_id,
             structured_output_tool=bool(structured_output_tool),
+            event_callback=event_callback,
         )
         function = _load_executor(definition)
         _event(event_callback, agent=name, status="started", task_id=task_id)
@@ -1006,6 +1563,7 @@ class AgentRunner:
                 input_data,
                 serial_lock=serial_lock,
                 serial_key=serial_key,
+                max_attempts=_MAX_AGENT_RETRY_ATTEMPTS,
             )
             attach_execution(execution_id, future, executor)
         except BaseException:
@@ -1116,7 +1674,25 @@ class AgentRunner:
                 status = "timed_out" if exc.process_terminated else "timed_out_running"
             else:
                 status = "failed"
-            detail = {"error": str(exc), "exception_type": type(exc).__name__}
+            detail = {
+                "error": safe_provider_message(str(exc), "子代理运行失败"),
+                "exception_type": type(exc).__name__,
+            }
+            for field_name in (
+                "category",
+                "code",
+                "status_code",
+                "retryable",
+                "retry_after_ms",
+                "retry_attempts",
+                "retry_max_attempts",
+                "retry_exhausted",
+            ):
+                value = getattr(exc, field_name, None)
+                if isinstance(value, (bool, int, float)):
+                    detail[field_name] = value
+                elif isinstance(value, str) and value.strip():
+                    detail[field_name] = value.strip()[:160]
             if isinstance(exc, AgentTimeoutError):
                 detail.update(
                     {

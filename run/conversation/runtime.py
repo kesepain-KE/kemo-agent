@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
@@ -84,6 +85,7 @@ from run.config import (
 )
 from run.conversation.provider_events import (
     is_context_length_exceeded as _is_context_length_exceeded,
+    metric_provider_response_payload as _metric_provider_response_payload,
     provider_events as _provider_events,
     raise_if_context_length_exceeded as _raise_if_context_length_exceeded,
 )
@@ -140,6 +142,44 @@ _EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
 _FILE_LIVE_READ_ACTIONS = frozenset(
     {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
 )
+_MAX_AUTO_RETRY_ATTEMPTS = 5
+_MAX_RETRY_RECOVERY_CALLS = 32
+_MAX_RETRY_RECOVERY_CHARS = 120_000
+_MAX_RETRY_GUIDANCE_ITEMS = 32
+_MAX_RETRY_GUIDANCE_CHARS = 120_000
+_NON_RETRYABLE_ERROR_CATEGORIES = frozenset(
+    {
+        "auth_error",
+        "authorization_error",
+        "capability_error",
+        "context_length_exceeded",
+        "gateway_protocol_error",
+        "idempotency_conflict",
+        "invalid_request",
+        "protocol_error",
+        "request_validation_error",
+        "validation_error",
+    }
+)
+_NON_RETRYABLE_ERROR_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+
+
+def _metric_provider_responses(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        projected
+        for value in values
+        if (projected := _metric_provider_response_payload(value)) is not None
+    ]
+
+
+def _event_provider_response(
+    event: RunEvent,
+    *,
+    durable: bool = False,
+) -> dict[str, Any] | None:
+    container = event.internal if durable else event.metadata
+    value = container.get("provider_response") if isinstance(container, dict) else None
+    return value if isinstance(value, dict) else None
 
 
 def _tool_schema_map(schemas: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -274,6 +314,350 @@ def _json_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _guidance_detail_key(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    identifier = str(value.get("id") or "").strip()
+    if identifier:
+        return f"id:{identifier}"
+    return _json_result(
+        {
+            "text": str(value.get("text") or ""),
+            "uploaded_files": value.get("uploaded_files")
+            if isinstance(value.get("uploaded_files"), list)
+            else [],
+        }
+    )
+
+
+def _remember_retry_guidance(state: Any, values: list[Any]) -> None:
+    """Keep bounded guidance details available if this attempt must be retried."""
+
+    if not isinstance(state, dict):
+        return
+    entries = state.setdefault("guidance", [])
+    if not isinstance(entries, list):
+        entries = []
+        state["guidance"] = entries
+    existing = {
+        key
+        for key in (_guidance_detail_key(item) for item in entries)
+        if key
+    }
+    total_chars = sum(len(_json_result(item)) for item in entries)
+    for raw in values:
+        normalized = normalize_guidance(raw)
+        if normalized is None:
+            continue
+        detail = normalized.history_detail()
+        key = _guidance_detail_key(detail)
+        if not key or key in existing:
+            continue
+        encoded = len(_json_result(detail))
+        if len(entries) >= _MAX_RETRY_GUIDANCE_ITEMS:
+            break
+        if total_chars + encoded > _MAX_RETRY_GUIDANCE_CHARS:
+            break
+        entries.append(copy.deepcopy(detail))
+        existing.add(key)
+        total_chars += encoded
+
+
+def _auto_retry_attempt_limit(request: dict[str, Any]) -> int:
+    """Return the bounded run retry limit without exposing a user setting."""
+
+    raw = request.get("_auto_retry_max_attempts", _MAX_AUTO_RETRY_ATTEMPTS)
+    if isinstance(raw, bool):
+        return _MAX_AUTO_RETRY_ATTEMPTS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _MAX_AUTO_RETRY_ATTEMPTS
+    return max(1, min(_MAX_AUTO_RETRY_ATTEMPTS, value))
+
+
+def _retry_error_is_eligible(
+    event: RunEvent,
+    *,
+    cancel_event: threading.Event | None,
+) -> bool:
+    """Identify runtime failures that may be retried by the outer coordinator."""
+
+    if event.type != "error":
+        return False
+    if cancel_event is not None and cancel_event.is_set():
+        return False
+    metadata = event.metadata or {}
+    error = event.error if isinstance(event.error, dict) else {}
+    if metadata.get("cancelled") is True or error.get("cancelled") is True:
+        return False
+    phase = str(error.get("phase") or metadata.get("phase") or "run").casefold()
+    # Input validation is deterministic and must be reported immediately.
+    if phase == "request":
+        return False
+    # Provider/adapter declarations are authoritative.  Do not let the
+    # provisional-commit marker turn an explicit retryable=false into true.
+    containers: list[dict[str, Any]] = [error, metadata]
+    nested_details = error.get("details")
+    if isinstance(nested_details, dict):
+        containers.append(nested_details)
+    for container in containers:
+        declared = container.get("retryable")
+        if isinstance(declared, bool):
+            return declared
+    category = str(
+        error.get("category")
+        or error.get("type")
+        or (nested_details.get("category") if isinstance(nested_details, dict) else "")
+        or ""
+    ).casefold()
+    if category in _NON_RETRYABLE_ERROR_CATEGORIES:
+        return False
+    for container in containers:
+        try:
+            status = int(container.get("status_code"))
+        except (TypeError, ValueError):
+            try:
+                status = int(container.get("provider_status"))
+            except (TypeError, ValueError):
+                status = None
+        if status in _NON_RETRYABLE_ERROR_STATUSES:
+            return False
+    return True
+
+
+def _failure_requires_immediate_commit(error: Any) -> bool:
+    """Do not leave a deterministic/non-retryable failure provisional."""
+
+    if isinstance(error, BaseException):
+        declared = getattr(error, "retryable_declared", None)
+        if declared is True:
+            return getattr(error, "retryable", None) is False
+        category = str(
+            getattr(error, "category", "")
+            or getattr(error, "code", "")
+            or ""
+        ).casefold()
+        if category in _NON_RETRYABLE_ERROR_CATEGORIES:
+            return True
+        for raw_status in (
+            getattr(error, "status_code", None),
+            getattr(error, "provider_status", None),
+        ):
+            try:
+                if int(raw_status) in _NON_RETRYABLE_ERROR_STATUSES:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+    if not isinstance(error, dict):
+        return False
+    containers: list[dict[str, Any]] = [error]
+    details = error.get("details")
+    if isinstance(details, dict):
+        containers.append(details)
+    for container in containers:
+        if isinstance(container.get("retryable"), bool):
+            return container["retryable"] is False
+    category = str(
+        error.get("category")
+        or error.get("type")
+        or (details.get("category") if isinstance(details, dict) else "")
+        or ""
+    ).casefold()
+    if category in _NON_RETRYABLE_ERROR_CATEGORIES:
+        return True
+    for container in containers:
+        try:
+            status = int(container.get("status_code"))
+        except (TypeError, ValueError):
+            try:
+                status = int(container.get("provider_status"))
+            except (TypeError, ValueError):
+                status = None
+        if status in _NON_RETRYABLE_ERROR_STATUSES:
+            return True
+    return str(error.get("phase") or "").casefold() == "request"
+
+
+def _retry_reason(event: RunEvent) -> str:
+    error = event.error if isinstance(event.error, dict) else {}
+    raw = str(
+        (event.metadata or {}).get("stop_reason")
+        or error.get("code")
+        or error.get("exception_type")
+        or "run_error"
+    ).strip()
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in raw
+    )
+    return safe[:80] or "run_error"
+
+
+def _retrying_event(
+    event: RunEvent,
+    *,
+    run_id: str,
+    failed_attempt: int,
+    next_attempt: int,
+    max_attempts: int,
+) -> RunEvent:
+    error = event.error if isinstance(event.error, dict) else {}
+    exception_type = str(error.get("exception_type") or "RuntimeError").strip()
+    return RunEvent(
+        type="retrying",
+        content=f"运行出现问题，正在自动重试（第 {next_attempt}/{max_attempts} 次）",
+        metadata={
+            "run_id": run_id,
+            "failed_attempt": failed_attempt,
+            "next_attempt": next_attempt,
+            "max_attempts": max_attempts,
+            "exception_type": exception_type[:80],
+            "reason": _retry_reason(event),
+        },
+    )
+
+
+def _collect_retry_recovery(
+    recovery: dict[str, dict[str, Any]],
+    event: RunEvent,
+) -> None:
+    """Remember bounded successful tool results for a later run attempt."""
+
+    if event.type != "tool_call_result":
+        return
+    result = event.result
+    arguments = event.arguments
+    name = str(event.tool_name or "").strip()
+    if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
+        return
+    ok = result.get("ok") is True
+    if ok and not _tool_result_reuse_allowed(name, arguments):
+        return
+    signature = tool_call_signature(name, arguments)
+    if signature in recovery:
+        return
+    candidate = {
+        "id": str(event.tool_call_id or f"recovered_{len(recovery) + 1}"),
+        "name": name,
+        "arguments": copy.deepcopy(arguments),
+        "result": copy.deepcopy(result),
+        "replay_policy": "reuse" if ok else "blocked",
+    }
+    if len(recovery) >= _MAX_RETRY_RECOVERY_CALLS:
+        return
+    projected = sum(len(_json_result(value)) for value in recovery.values())
+    if projected + len(_json_result(candidate)) > _MAX_RETRY_RECOVERY_CHARS:
+        return
+    recovery[signature] = candidate
+
+
+def _retry_recovery_messages(
+    recovery: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for item in recovery.values():
+        name = str(item.get("name") or "unknown_tool")
+        call_id = str(item.get("id") or f"recovered_{len(messages) + 1}")
+        arguments = item.get("arguments")
+        result = item.get("result")
+        if not isinstance(arguments, dict) or not isinstance(result, dict):
+            continue
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": _json_result(arguments),
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": _json_result(result),
+            }
+        )
+    return messages
+
+
+def _retry_recovery_provider_responses(
+    recovery: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Represent recovered tool calls/results as bounded synthetic history output."""
+
+    responses: list[dict[str, Any]] = []
+    for index, item in enumerate(recovery.values(), start=1):
+        name = str(item.get("name") or "unknown_tool")
+        call_id = str(item.get("id") or f"recovered_{index}")
+        arguments = item.get("arguments")
+        result = item.get("result")
+        if not isinstance(arguments, dict) or not isinstance(result, dict):
+            continue
+        responses.append(
+            {
+                "id": f"retry_recovery_response_{index}",
+                "_iteration": 0,
+                "output": [
+                    {
+                        "id": f"retry_recovery_call_{index}",
+                        "type": "tool_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": copy.deepcopy(arguments),
+                    },
+                    {
+                        "id": f"retry_recovery_result_{index}",
+                        "type": "tool_result",
+                        "call_id": call_id,
+                        "name": name,
+                        "is_error": result.get("ok") is False,
+                        "content": [{"type": "json", "data": copy.deepcopy(result)}],
+                    },
+                ],
+            }
+        )
+    return responses
+
+
+def _retry_recovery_tool_records(
+    recovery: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in recovery.values():
+        name = str(item.get("name") or "unknown_tool")
+        call_id = str(item.get("id") or "")
+        arguments = item.get("arguments")
+        result = item.get("result")
+        if not call_id or not isinstance(arguments, dict) or not isinstance(result, dict):
+            continue
+        records.append(
+            {
+                "id": call_id,
+                "name": name,
+                "arguments": copy.deepcopy(arguments),
+                "status": "recovered" if result.get("ok") is True else "recovery_blocked",
+                "duplicate": False,
+                "consecutive_identical_calls": 0,
+                "result": copy.deepcopy(result),
+                "iteration": 0,
+                "elapsed_ms": 0,
+                "recovered": True,
+            }
+        )
+    return records
+
+
 def _tool_context_diagnostics(
     tool_records: list[dict[str, Any]],
     *,
@@ -318,7 +702,6 @@ def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
     for field in (
         "category",
         "status_code",
-        "retryable",
         "retry_after_ms",
         "attempt_count",
         "still_running",
@@ -328,7 +711,50 @@ def _tool_error_payload(exc: BaseException) -> dict[str, Any]:
             detail[field] = value
         elif isinstance(value, str) and value.strip():
             detail[field] = value.strip()[:160]
+    retryable = getattr(exc, "retryable", None)
+    if (
+        isinstance(retryable, bool)
+        and getattr(exc, "retryable_declared", True)
+    ):
+        detail["retryable"] = retryable
     return detail
+
+
+def _tool_failure_is_retryable(
+    result_payload: dict[str, Any],
+    status: str,
+) -> bool:
+    """Allow outer retries only for explicitly/transiently retryable tool errors."""
+
+    if status in {
+        "cancelled",
+        "duplicate_reused",
+        "identical_call_blocked",
+        "not_executed",
+        "recovery_blocked",
+        "result_too_large",
+        "retry_reuse_blocked",
+        "temporarily_unavailable",
+    }:
+        return False
+    error = result_payload.get("error")
+    if not isinstance(error, dict) or error.get("cancelled") is True:
+        return False
+    declared = error.get("retryable")
+    if isinstance(declared, bool):
+        return declared
+    if error.get("still_running") is True:
+        return True
+    category = str(error.get("category") or error.get("type") or "").casefold()
+    if category in {"connection_error", "gateway_error", "timeout", "upstream_error"}:
+        return True
+    for key in ("status_code", "provider_status"):
+        try:
+            if int(error.get(key)) in {408, 425, 429, 500, 502, 503, 504}:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _ensure_fixed_content_fits(
@@ -456,17 +882,31 @@ def _committed_failure_event(
     event: RunEvent,
     terminal_event: RunEvent,
 ) -> RunEvent:
-    """Expose durable failure state without replacing the public error terminal."""
+    """Expose failure state without replacing the public error terminal."""
 
+    committed = bool(terminal_event.metadata.get("committed", True))
+    failure = copy.deepcopy(terminal_event.metadata.get("failure") or {})
+    declared_retryable = failure.get("retryable")
+    if not isinstance(declared_retryable, bool):
+        declared_retryable = terminal_event.metadata.get("retryable")
+    if not isinstance(declared_retryable, bool):
+        declared_retryable = not committed
     event.metadata = {
         **event.metadata,
-        "committed": True,
+        "committed": committed,
+        "retryable": declared_retryable,
         "status": "failed",
         "stop_reason": terminal_event.metadata.get(
             "stop_reason", "provider_error"
         ),
-        "failure": copy.deepcopy(terminal_event.metadata.get("failure") or {}),
+        "failure": failure,
     }
+    if event.usage is None and terminal_event.usage is not None:
+        event.usage = dict(terminal_event.usage)
+    if not committed and failure:
+        # Provisional attempts are not shown as final failures and must not
+        # carry an upstream response body into the retry event stream.
+        event.error = failure
     return event
 
 
@@ -805,6 +1245,7 @@ def _iter_request_events_impl(
             consumed_guidance = round_state.consumed_guidance
             consumed_guidance_details = round_state.consumed_guidance_details
             provider_responses = round_state.provider_responses
+            durable_provider_responses = round_state.durable_provider_responses
             usage_total = round_state.usage_total
             context_stats = context_selection.stats()
             round_state.context_stats = context_stats
@@ -957,12 +1398,49 @@ def _iter_request_events_impl(
             )
             commit_terminal_round = terminal_committer.commit_terminal_round
             commit_cancelled_round = terminal_committer.commit_cancelled_round
-            commit_failed_round = terminal_committer.commit_failed_round
+            defer_failure_commit = bool(request.get("_defer_failure_commit", False))
+
+            def commit_failed_round(
+                error: Any,
+                *,
+                reason: str = "provider_error",
+            ) -> RunEvent:
+                return terminal_committer.commit_failed_round(
+                    error,
+                    reason=reason,
+                    persist=(
+                        not defer_failure_commit
+                        or _failure_requires_immediate_commit(error)
+                    ),
+                )
 
             if cancel_event is not None and cancel_event.is_set():
                 yield commit_cancelled_round()
                 return
             messages = context_selection.messages
+            retry_recovery = request.get("_retry_recovery")
+            recovery_map: dict[str, dict[str, Any]] = {}
+            if isinstance(retry_recovery, list):
+                for raw in retry_recovery:
+                    if not isinstance(raw, dict):
+                        continue
+                    name = str(raw.get("name") or "").strip()
+                    arguments = raw.get("arguments")
+                    result = raw.get("result")
+                    if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
+                        continue
+                    ok = result.get("ok") is True
+                    if ok and not _tool_result_reuse_allowed(name, arguments):
+                        continue
+                    recovery_map[tool_call_signature(name, arguments)] = {
+                        "id": str(raw.get("id") or ""),
+                        "name": name,
+                        "arguments": copy.deepcopy(arguments),
+                        "result": copy.deepcopy(result),
+                        "replay_policy": "reuse" if ok else "blocked",
+                    }
+                if recovery_map:
+                    messages.extend(_retry_recovery_messages(recovery_map))
             context_stats = context_selection.stats()
             context_stats["summary"] = summary_diagnostics
             context_stats["summary_usage"] = summary_usage
@@ -1139,11 +1617,20 @@ def _iter_request_events_impl(
             )
             stream = bool(request.get("stream", runtime_provider.get("stream", False)))
             guidance_channel = request.get("_guidance_queue")
+            retry_state = request.get("_retry_state")
             pending_guidance_ack: list[GuidanceInput] = []
             remote_guidance_assets: dict[str, str] = {}
             protocol_parent_request_id: str | None = None
             usage_total.clear()
-            usage_total.update(copy.deepcopy(summary_usage))
+            retry_usage_base = request.get("_retry_usage_base")
+            if isinstance(retry_usage_base, dict):
+                usage_total.update(copy.deepcopy(retry_usage_base))
+                if summary_usage.get("total_tokens", 0) or summary_usage.get(
+                    "provider_request_count", 0
+                ):
+                    _merge_usage(usage_total, _usage_from_dict(summary_usage))
+            else:
+                usage_total.update(copy.deepcopy(summary_usage))
             if compression_usage.get("provider_request_count", 0):
                 _record_provider_request(
                     usage_total,
@@ -1155,7 +1642,19 @@ def _iter_request_events_impl(
                     usage=dict(summary_usage),
                     metadata={"phase": "context_summary"},
                 )
-            seen_calls: dict[str, dict[str, Any]] = {}
+            seen_calls: dict[str, dict[str, Any]] = {
+                signature: copy.deepcopy(item["result"])
+                for signature, item in recovery_map.items()
+                if item.get("replay_policy") == "reuse"
+            } if recovery_map else {}
+            blocked_recovery: dict[str, dict[str, Any]] = {
+                signature: item
+                for signature, item in recovery_map.items()
+                if item.get("replay_policy") == "blocked"
+            }
+            round_state.recovered_tool_records = _retry_recovery_tool_records(
+                recovery_map
+            )
             final_metadata: dict[str, Any] = {}
             completed = False
             context_retry_count = 0
@@ -1163,6 +1662,8 @@ def _iter_request_events_impl(
             task_plan_boundary: TaskPlanCreationBoundary | None = None
             last_provider_input_tokens: int | None = None
             last_sent_local_tokens: int | None = None
+
+            guidance_messages_for_retry: list[dict[str, Any]] = []
 
             def prepare_pending_guidance(values: list[Any]) -> list[dict[str, Any]]:
                 """Prepare new text/media guidance and register its run assets."""
@@ -1189,8 +1690,14 @@ def _iter_request_events_impl(
                     if asset_id and asset_id not in known_ids:
                         uploaded_descriptors.append(descriptor)
                         known_ids.add(asset_id)
+                guidance_messages_for_retry.extend(copy.deepcopy(prepared.messages))
                 pending_guidance_ack.extend(prepared.inputs)
+                _remember_retry_guidance(retry_state, prepared.inputs)
                 return prepared.messages
+
+            replayed_guidance = request.get("_retry_guidance")
+            if isinstance(replayed_guidance, list) and replayed_guidance:
+                messages.extend(prepare_pending_guidance(replayed_guidance))
 
             def refresh_dynamic_system_message() -> None:
                 nonlocal prompt_bundle, system_message
@@ -1474,9 +1981,7 @@ def _iter_request_events_impl(
                                         failure["retry_limit"] = (
                                             invalid_tool_arguments_retry_limit
                                         )
-                                    provider_response = event.metadata.get(
-                                        "provider_response"
-                                    )
+                                    provider_response = _event_provider_response(event)
                                     if isinstance(provider_response, dict):
                                         provider_responses.append(
                                             copy.deepcopy(provider_response)
@@ -1660,6 +2165,10 @@ def _iter_request_events_impl(
                             context_selection, system_message=system_message
                         )
                         messages = context_selection.messages
+                        if recovery_map:
+                            messages.extend(_retry_recovery_messages(recovery_map))
+                        if guidance_messages_for_retry:
+                            messages.extend(copy.deepcopy(guidance_messages_for_retry))
                         context_stats = context_selection.stats()
                         context_stats["summary"] = retry_diagnostics
                         context_stats["summary_usage"] = summary_usage
@@ -1713,9 +2222,20 @@ def _iter_request_events_impl(
                     if iteration_usage is not None:
                         _record_provider_request(usage_total, iteration_usage)
                         iteration_usage = None
-                    provider_response = iteration_done.metadata.get("provider_response")
+                    provider_response = _event_provider_response(iteration_done)
                     if isinstance(provider_response, dict):
                         provider_responses.append(copy.deepcopy(provider_response))
+                    durable_provider_response = _event_provider_response(
+                        iteration_done,
+                        durable=True,
+                    )
+                    if isinstance(durable_provider_response, dict):
+                        durable_provider_responses.append(
+                            {
+                                **copy.deepcopy(durable_provider_response),
+                                "_iteration": iteration,
+                            }
+                        )
                     can_retry_invalid_arguments = (
                         invalid_tool_arguments_retries
                         < invalid_tool_arguments_retry_limit
@@ -1805,9 +2325,20 @@ def _iter_request_events_impl(
                 flush_iteration_observed()
                 _record_provider_request(usage_total, iteration_usage)
                 final_metadata = dict(iteration_done.metadata)
-                provider_response = final_metadata.get("provider_response")
+                provider_response = _event_provider_response(iteration_done)
                 if isinstance(provider_response, dict):
                     provider_responses.append(copy.deepcopy(provider_response))
+                durable_provider_response = _event_provider_response(
+                    iteration_done,
+                    durable=True,
+                )
+                if isinstance(durable_provider_response, dict):
+                    durable_provider_responses.append(
+                        {
+                            **copy.deepcopy(durable_provider_response),
+                            "_iteration": iteration,
+                        }
+                    )
                 protocol_parent_request_id = protocol_request.request_id
 
                 if not calls:
@@ -1841,6 +2372,7 @@ def _iter_request_events_impl(
                         ),
                     )
                 )
+                retryable_tool_failure: dict[str, Any] | None = None
                 for call_index, call in enumerate(calls):
                     if len(tool_records) >= max_tool_calls:
                         _close_guidance(guidance_channel)
@@ -1905,8 +2437,15 @@ def _iter_request_events_impl(
                         }
                         status = "temporarily_unavailable"
                     else:
+                        blocked_result = blocked_recovery.get(signature)
                         duplicate = reuse_allowed and signature in seen_calls
-                        if duplicate:
+                        if blocked_result is not None:
+                            result_payload = copy.deepcopy(
+                                blocked_result.get("result")
+                            )
+                            status = "retry_reuse_blocked"
+                            duplicate = True
+                        elif duplicate:
                             result_payload = copy.deepcopy(seen_calls[signature])
                             status = "duplicate_reused"
                         else:
@@ -2046,6 +2585,16 @@ def _iter_request_events_impl(
                             "content": _json_result(result_payload),
                         }
                     )
+                    if (
+                        defer_failure_commit
+                        and retryable_tool_failure is None
+                        and _tool_failure_is_retryable(result_payload, status)
+                    ):
+                        retryable_tool_failure = {
+                            "tool_name": call.name,
+                            "error": copy.deepcopy(result_payload.get("error") or {}),
+                            "status": status,
+                        }
                     if request.get("_task_plan_mode") is None:
                         task_plan_boundary = detect_task_plan_creation_boundary(
                             tool_name=call.name,
@@ -2113,6 +2662,28 @@ def _iter_request_events_impl(
                     break
                 pending_guidance = _drain_guidance(guidance_channel)
                 messages.extend(prepare_pending_guidance(pending_guidance))
+                if retryable_tool_failure is not None:
+                    failure_error = retryable_tool_failure.get("error")
+                    if not isinstance(failure_error, dict):
+                        failure_error = {}
+                    retry_after_ms: int | None = None
+                    try:
+                        raw_retry_after = failure_error.get("retry_after_ms")
+                        if raw_retry_after is not None:
+                            retry_after_ms = max(0, int(raw_retry_after))
+                    except (TypeError, ValueError):
+                        retry_after_ms = None
+                    raise ProviderError(
+                        "工具调用失败，正在准备自动重试",
+                        category="tool_error",
+                        status_code=(
+                            int(failure_error["status_code"])
+                            if str(failure_error.get("status_code") or "").isdigit()
+                            else None
+                        ),
+                        retryable=True,
+                        retry_after_ms=retry_after_ms,
+                    )
 
             if not completed:
                 yield commit_terminal_round(
@@ -2163,7 +2734,17 @@ def _iter_request_events_impl(
                 ]
             )
             window["think"]["rounds"].append({"round": round_number, "content": reasoning})
-            window["tool"]["rounds"].append({"round": round_number, "calls": tool_records})
+            committed_tool_records = [
+                *round_state.recovered_tool_records,
+                *tool_records,
+            ]
+            window["tool"]["rounds"].append(
+                {"round": round_number, "calls": committed_tool_records}
+            )
+            history_provider_responses = [
+                *_retry_recovery_provider_responses(recovery_map),
+                *durable_provider_responses,
+            ]
             append_round_items(
                 window,
                 round_number=round_number,
@@ -2174,7 +2755,7 @@ def _iter_request_events_impl(
                 reasoning=reasoning,
                 text=text,
                 tool_records=tool_records,
-                provider_responses=provider_responses,
+                provider_responses=history_provider_responses,
                 user_metadata=user_metadata or None,
             )
             window["data"]["rounds"] = round_number
@@ -2187,11 +2768,11 @@ def _iter_request_events_impl(
                     "round": round_number,
                     "usage": dict(usage_total),
                     "elapsed_ms": round_elapsed_ms,
-                    "tool_calls": len(tool_records),
+                    "tool_calls": len(committed_tool_records),
                     "tool_argument_retries": tool_argument_retry_count,
                     "guidance": list(consumed_guidance),
                     "guidance_details": copy.deepcopy(consumed_guidance_details),
-                    "provider_responses": copy.deepcopy(provider_responses),
+                    "provider_responses": _metric_provider_responses(provider_responses),
                     **(
                         {
                             "status": "completed",
@@ -2493,18 +3074,36 @@ def _iter_request_events_impl(
         except (KeyboardInterrupt, GeneratorExit):
             raise
         except BaseException as exc:
-            if (
-                isinstance(exc, ContextLengthExceededError)
-                and terminal_committer is not None
-                and not round_state.finalized
-            ):
-                terminal_event = terminal_committer.commit_failed_round(
-                    exc,
-                    reason="provider_context_recovery_failed",
-                )
-                yield _committed_failure_event(
-                    error_event(exc, phase="provider"), terminal_event
-                )
+            if terminal_committer is not None and not round_state.finalized:
+                if cancel_event is not None and cancel_event.is_set():
+                    yield terminal_committer.commit_cancelled_round()
+                else:
+                    defer_failure_commit = bool(
+                        request.get("_defer_failure_commit", False)
+                    )
+                    terminal_event = terminal_committer.commit_failed_round(
+                        exc,
+                        reason=(
+                            "provider_context_recovery_failed"
+                            if isinstance(exc, ContextLengthExceededError)
+                            else "runtime_exception"
+                        ),
+                        persist=(
+                            not defer_failure_commit
+                            or _failure_requires_immediate_commit(exc)
+                        ),
+                    )
+                    yield _committed_failure_event(
+                        error_event(
+                            exc,
+                            phase=(
+                                "provider"
+                                if isinstance(exc, ContextLengthExceededError)
+                                else "run"
+                            ),
+                        ),
+                        terminal_event,
+                    )
             else:
                 yield error_event(exc, phase="run")
         finally:
@@ -2525,11 +3124,219 @@ def _iter_request_events_impl(
                         user,
                         source,
                         session_id,
-                        run_state="idle",
+                        run_state=(
+                            "running"
+                            if request.get("_defer_failure_commit")
+                            and not round_state.finalized
+                            else "idle"
+                        ),
                         run_id=run_id or None,
                     )
                 except Exception:
                     pass
+
+
+def _iter_request_events_unlocked(
+    request: dict[str, Any],
+    *,
+    root: Path | None = None,
+    provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
+    tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
+    cancel_event: threading.Event | None = None,
+) -> Iterator[RunEvent]:
+    """Run bounded automatic retries; the caller owns session serialization."""
+
+    run_id = str(request.get("run_id") or "")
+    auto_retry = request.get("_auto_retry", True) is not False
+    max_attempts = _auto_retry_attempt_limit(request) if auto_retry else 1
+    recovery: dict[str, dict[str, Any]] = {}
+    retry_state: dict[str, Any] = {"guidance": []}
+    retry_usage: dict[str, Any] = {}
+    run_sequence = 0
+
+    def publish(event: RunEvent) -> RunEvent:
+        nonlocal run_sequence
+        event.event_id = event.event_id or f"run_evt_{uuid.uuid4().hex}"
+        event.run_sequence = run_sequence
+        if event.sequence is None:
+            event.sequence = run_sequence
+        if run_id:
+            event.metadata.setdefault("run_id", run_id)
+        run_sequence += 1
+        return event
+
+    def retry_delay_seconds(attempt: int, event: RunEvent) -> float:
+        candidates: list[Any] = []
+        error = event.error if isinstance(event.error, dict) else {}
+        candidates.append(error.get("retry_after_ms"))
+        details = error.get("details")
+        if isinstance(details, dict):
+            candidates.append(details.get("retry_after_ms"))
+        candidates.append((event.metadata or {}).get("retry_after_ms"))
+        for raw in candidates:
+            try:
+                milliseconds = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if milliseconds >= 0:
+                return min(120.0, max(0.25, milliseconds / 1000.0))
+        return min(2.0, 0.25 * (2 ** (attempt - 1)))
+
+    def wait_before_retry(attempt: int, event: RunEvent) -> bool:
+        delay = retry_delay_seconds(attempt, event)
+        if cancel_event is not None:
+            return cancel_event.wait(delay)
+        time.sleep(delay)
+        return False
+
+    def emit_cancelled_attempt() -> Iterator[RunEvent]:
+        cancelled_request = dict(request)
+        cancelled_request["_auto_retry"] = False
+        cancelled_request["_defer_failure_commit"] = False
+        cancelled_request["_retry_recovery"] = [
+            copy.deepcopy(value) for value in recovery.values()
+        ]
+        cancelled_request["_retry_state"] = retry_state
+        cancelled_request["_retry_guidance"] = [
+            copy.deepcopy(value)
+            for value in retry_state.get("guidance", [])
+            if isinstance(value, dict)
+        ]
+        if retry_usage:
+            cancelled_request["_retry_usage_base"] = copy.deepcopy(retry_usage)
+        yield from _iter_request_events_impl(
+            cancelled_request,
+            root=root,
+            provider_factory=provider_factory,
+            tool_registry_factory=tool_registry_factory,
+            cancel_event=cancel_event,
+        )
+
+    for attempt in range(1, max_attempts + 1):
+        attempt_request = dict(request)
+        if auto_retry:
+            attempt_request["_defer_failure_commit"] = attempt < max_attempts
+            attempt_request["_retry_attempt"] = attempt
+            attempt_request["_retry_recovery"] = [
+                copy.deepcopy(value) for value in recovery.values()
+            ]
+            attempt_request["_retry_state"] = retry_state
+            attempt_request["_retry_guidance"] = [
+                copy.deepcopy(value)
+                for value in retry_state.get("guidance", [])
+                if isinstance(value, dict)
+            ]
+            if retry_usage:
+                attempt_request["_retry_usage_base"] = copy.deepcopy(retry_usage)
+        terminal_seen = False
+        retry_scheduled = False
+        for event in _iter_request_events_impl(
+            attempt_request,
+            root=root,
+            provider_factory=provider_factory,
+            tool_registry_factory=tool_registry_factory,
+            cancel_event=cancel_event,
+        ):
+            _collect_retry_recovery(recovery, event)
+            if event.type in {"done", "error"}:
+                raw_usage = event.usage
+                if not isinstance(raw_usage, dict):
+                    raw_usage = event.metadata.get("usage")
+                if isinstance(raw_usage, dict):
+                    retry_usage = copy.deepcopy(raw_usage)
+            if event.type == "error" and _retry_error_is_eligible(
+                event, cancel_event=cancel_event
+            ):
+                if attempt < max_attempts:
+                    event.metadata = {
+                        **event.metadata,
+                        "committed": False,
+                        "retryable": event.metadata.get("retryable", True),
+                        "failed_attempt": attempt,
+                        "max_attempts": max_attempts,
+                    }
+                    yield publish(
+                        _retrying_event(
+                            event,
+                            run_id=run_id,
+                            failed_attempt=attempt,
+                            next_attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                        )
+                    )
+                    retry_scheduled = True
+                    break
+                event.metadata = {
+                    **event.metadata,
+                    "retry_attempts": attempt,
+                    "max_attempts": max_attempts,
+                }
+                yield publish(event)
+                return
+            if event.type in {"done", "error"}:
+                terminal_seen = True
+                event.metadata = {
+                    **event.metadata,
+                    "retry_attempts": attempt,
+                    "max_attempts": max_attempts,
+                }
+            yield publish(event)
+            if event.type in {"done", "error"}:
+                return
+        if retry_scheduled:
+            if wait_before_retry(attempt, event):
+                yield from (publish(item) for item in emit_cancelled_attempt())
+                return
+            continue
+        if terminal_seen:
+            return
+        # A provider/adapter can terminate its iterator without a terminal
+        # event. Treat that as a retryable transport failure rather than
+        # silently ending the SSE stream.
+        missing = RunEvent(
+            type="error",
+            error={
+                "message": "响应流在终态事件到达前结束",
+                "exception_type": "MissingTerminalEvent",
+                "phase": "run",
+            },
+        )
+        if attempt < max_attempts:
+            missing.metadata = {
+                "committed": False,
+                "retryable": True,
+                "failed_attempt": attempt,
+                "max_attempts": max_attempts,
+            }
+            yield publish(
+                _retrying_event(
+                    missing,
+                    run_id=run_id,
+                    failed_attempt=attempt,
+                    next_attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+            )
+            if wait_before_retry(attempt, missing):
+                yield from (publish(item) for item in emit_cancelled_attempt())
+                return
+            continue
+        yield publish(missing)
+        return
+
+
+def _request_session_lock(
+    request: dict[str, Any],
+    root: Path | None,
+):
+    try:
+        user = _required_text(request, "user")
+        source = _required_text(request, "source")
+        session_id = _required_text(request, "session_id")
+        base = (root or project_root()).resolve()
+    except Exception:
+        return nullcontext()
+    return _session_lock(base, user, source, session_id)
 
 
 def iter_request_events(
@@ -2540,25 +3347,16 @@ def iter_request_events(
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
 ) -> Iterator[RunEvent]:
-    """Expose a task-wide ordered event stream over per-Provider sequences."""
+    """Serialize one logical request, including all automatic retry attempts."""
 
-    run_id = str(request.get("run_id") or "")
-    for run_sequence, event in enumerate(
-        _iter_request_events_impl(
+    with _request_session_lock(request, root):
+        yield from _iter_request_events_unlocked(
             request,
             root=root,
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             cancel_event=cancel_event,
         )
-    ):
-        event.event_id = event.event_id or f"run_evt_{uuid.uuid4().hex}"
-        event.run_sequence = run_sequence
-        if event.sequence is None:
-            event.sequence = run_sequence
-        if run_id:
-            event.metadata.setdefault("run_id", run_id)
-        yield event
 
 
 async def stream_request(
@@ -2605,7 +3403,10 @@ def handle_request(
         tool_registry_factory=tool_registry_factory,
         cancel_event=cancel_event,
     ):
-        if event.type == "error":
+        if event.type == "error" and not (
+            event.metadata.get("retryable") is True
+            and event.metadata.get("committed") is False
+        ):
             detail = event.error or {}
             raise EngineError(str(detail.get("message") or "运行失败"))
         if event.type == "done":

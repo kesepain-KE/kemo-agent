@@ -1033,10 +1033,20 @@ class WebRunService(
         consumer_closed = threading.Event()
 
         def put(value: RunEvent | BaseException | object) -> bool:
+            provisional_error = (
+                isinstance(value, RunEvent)
+                and value.type == "error"
+                and value.metadata.get("retryable") is True
+                and value.metadata.get("committed") is False
+            )
             terminal_value = (
                 value is _WORKER_DONE
                 or isinstance(value, BaseException)
-                or (isinstance(value, RunEvent) and value.type in {"done", "error"})
+                or (
+                    isinstance(value, RunEvent)
+                    and value.type in {"done", "error"}
+                    and not provisional_error
+                )
             )
             while True:
                 if consumer_closed.is_set():
@@ -1228,6 +1238,15 @@ class WebRunService(
                                     terminal_event = event
                                     break
                                 if event.type == "error":
+                                    if (
+                                        event.metadata.get("retryable") is True
+                                        and event.metadata.get("committed") is False
+                                    ):
+                                        # The core runtime will emit a
+                                        # retrying event next.  Do not expose a
+                                        # provisional error as the Web/SSE
+                                        # terminal or close the long task.
+                                        continue
                                     state = state_snapshot()
                                     if state.get("task_id") and state.get("status") in {
                                         "running",

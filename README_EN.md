@@ -216,6 +216,8 @@ This is a stability patch for long-running work, tool calls, and process boundar
 - PID identity and start information are checked before cancellation; uncertain identities are rejected, and public results do not expose host absolute paths.
 - Cancellation, Provider failures, and bounded retries archive the current text and reasoning idempotently, preventing duplicate content in one round.
 - Provider diagnostics recognize more sensitive-field aliases and enforce recursion/node budgets; prefixed JSON errors are sanitized before return.
+- Main-agent and subagent output-parse failures use a bounded retry budget of up to five attempts; context-compression memory extraction is reused across those attempts to avoid duplicate writes, and an exhausted `context_manage` repair is not multiplied by the outer loop.
+- Persisted Provider response identifiers are sanitized and length-bounded, limiting oversized or sensitive values in history.
 
 ### 1.2.2 update
 

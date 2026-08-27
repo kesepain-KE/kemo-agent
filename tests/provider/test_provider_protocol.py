@@ -50,6 +50,7 @@ from provider.protocol.models import (
     Measurement,
     MessageItem,
     ModelCapabilities,
+    ProviderState,
     ReasoningConfig,
     ReasoningItem,
     RerankDocument,
@@ -446,11 +447,105 @@ class UnifiedProtocolTests(unittest.TestCase):
         events = list(events_for_protocol_response(response))
         terminal = events[-1]
         serialized = json.dumps(terminal.metadata["provider_response"])
+        durable = terminal.internal["provider_response"]
 
         self.assertEqual(terminal.type, "done")
         self.assertNotIn("RAW_PROVIDER_ARGUMENT_MARKER", serialized)
         self.assertNotIn("arguments_raw", serialized)
         self.assertIn("arguments_diagnostic", serialized)
+        self.assertEqual(durable["output"][0]["type"], "tool_call")
+        self.assertEqual(durable["output"][0]["call_id"], "call_safe")
+        self.assertEqual(durable["output"][0]["name"], "history_search")
+        self.assertNotIn("internal", terminal.to_dict())
+
+    def test_long_provider_diagnostic_cannot_truncate_durable_tool_call(self) -> None:
+        request = make_request(stream=False)
+        response = KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.REQUIRES_ACTION,
+            model=request.model,
+            output=[
+                ReasoningItem(id="rs_long", content="R" * 12_000),
+                ToolCallItem(
+                    id="call_item_after_long_text",
+                    call_id="call_after_long_text",
+                    name="file",
+                    arguments={"action": "stat", "path": "safe.txt"},
+                ),
+            ],
+        )
+
+        terminal = list(events_for_protocol_response(response))[-1]
+        public_serialized = json.dumps(
+            terminal.metadata["provider_response"], ensure_ascii=False
+        )
+        durable_call = terminal.internal["provider_response"]["output"][-1]
+
+        self.assertIn("诊断内容已截断", public_serialized)
+        self.assertEqual(durable_call["type"], "tool_call")
+        self.assertEqual(durable_call["call_id"], "call_after_long_text")
+        self.assertEqual(durable_call["name"], "file")
+        self.assertEqual(durable_call["arguments"]["action"], "stat")
+        self.assertNotIn("internal", terminal.to_dict())
+
+    def test_credential_shaped_provider_state_is_omitted_from_durable_history(self) -> None:
+        request = make_request(stream=False)
+        response = KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.COMPLETED,
+            model=request.model,
+            output=[
+                ReasoningItem(
+                    id="rs_secret_state",
+                    content="safe reasoning",
+                    provider_state=ProviderState(
+                        kind="opaque",
+                        data="Bearer provider-secret",
+                        provider="gateway",
+                    ),
+                )
+            ],
+        )
+
+        terminal = list(events_for_protocol_response(response))[-1]
+        durable_output = terminal.internal["provider_response"]["output"]
+
+        self.assertEqual(durable_output[0]["type"], "reasoning")
+        self.assertNotIn("provider_state", durable_output[0])
+        self.assertNotIn("provider-secret", json.dumps(durable_output, ensure_ascii=False))
+
+    def test_stream_terminal_keeps_durable_tool_call_for_history(self) -> None:
+        request = make_request(stream=True)
+        response = KemoResponse(
+            request_id=request.request_id,
+            status=ResponseStatus.REQUIRES_ACTION,
+            model=request.model,
+            output=[
+                ReasoningItem(id="rs_stream_long", content="S" * 12_000),
+                ToolCallItem(
+                    id="call_item_stream",
+                    call_id="call_stream",
+                    name="file",
+                    arguments={"action": "stat", "path": "safe.txt"},
+                ),
+            ],
+        )
+        protocol_terminal = ProviderStreamEvent(
+            type=StreamEventType.RESPONSE_COMPLETED,
+            sequence=9,
+            request_id=request.request_id,
+            response_id=response.id,
+            response=response,
+        )
+
+        terminal = list(run_events_for_protocol_event(protocol_terminal))[-1]
+        durable_call = terminal.internal["provider_response"]["output"][-1]
+
+        self.assertEqual(terminal.type, "done")
+        self.assertEqual(durable_call["type"], "tool_call")
+        self.assertEqual(durable_call["call_id"], "call_stream")
+        self.assertEqual(durable_call["name"], "file")
+        self.assertNotIn("internal", terminal.to_dict())
 
     def test_arguments_diagnostic_cannot_override_redacted_arguments(self) -> None:
         secret = "OPAQUE_PROVIDER_ARGUMENT_SECRET"

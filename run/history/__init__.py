@@ -74,6 +74,7 @@ _ARCHIVE_DATA_FIELDS = frozenset(
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 _SUMMARY_UNCHANGED = object()
+_DIAGNOSTIC_TRUNCATION_MARKER = "诊断内容已截断"
 
 
 class HistoryError(RuntimeError):
@@ -130,6 +131,44 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
 
 def _item_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _is_corrupted_provider_item(item: dict[str, Any]) -> bool:
+    kind = str(item.get("type") or "")
+    if kind not in {"message", "reasoning", "tool_call", "tool_result"}:
+        return True
+    if kind == "tool_call":
+        for key in ("call_id", "name"):
+            value = str(item.get(key) or "")
+            if not value or _DIAGNOSTIC_TRUNCATION_MARKER in value:
+                return True
+    return False
+
+
+def _history_tool_call_item(
+    record: dict[str, Any],
+    *,
+    round_number: int,
+    iteration: int,
+    response_id: str = "",
+) -> dict[str, Any]:
+    metadata = {
+        "round": round_number,
+        "iteration": iteration,
+        "history_source": "tool_record_pair_repair",
+    }
+    if response_id:
+        metadata["response_id"] = response_id
+    return {
+        "id": _item_id("call"),
+        "type": "tool_call",
+        "status": "completed",
+        "call_id": str(record.get("id") or _item_id("callid")),
+        "name": str(record.get("name") or "unknown_tool"),
+        "arguments": copy.deepcopy(record.get("arguments") or {}),
+        "metadata": metadata,
+        "extensions": {},
+    }
 
 
 def _text_content(value: Any) -> list[dict[str, Any]]:
@@ -310,12 +349,21 @@ def append_round_items(
 
     has_reasoning = False
     has_assistant = False
-    for iteration, response in enumerate(provider_responses, start=1):
+    matched_record_indices: set[int] = set()
+    for response_index, response in enumerate(provider_responses, start=1):
+        raw_iteration = response.get("_iteration") if isinstance(response, dict) else None
+        try:
+            iteration = int(raw_iteration) if raw_iteration is not None else response_index
+        except (TypeError, ValueError):
+            iteration = response_index
         response_id = str(response.get("id") or "")
+        iteration_call_ids: set[str] = set()
         for raw in response.get("output", []) if isinstance(response, dict) else []:
             if not isinstance(raw, dict):
                 continue
             item = json.loads(json.dumps(raw, ensure_ascii=False, default=str))
+            if _is_corrupted_provider_item(item):
+                continue
             metadata = item.get("metadata")
             if not isinstance(metadata, dict):
                 metadata = {}
@@ -329,20 +377,34 @@ def append_round_items(
             has_assistant = has_assistant or (
                 item.get("type") == "message" and item.get("role") == "assistant"
             )
+            if item.get("type") == "tool_call":
+                iteration_call_ids.add(str(item.get("call_id") or ""))
             items.append(item)
-        for record in tool_records:
+        for record_index, record in enumerate(tool_records):
             if (
                 not isinstance(record, dict)
                 or int(record.get("iteration", 1)) != iteration
             ):
                 continue
+            matched_record_indices.add(record_index)
+            call_id = str(record.get("id") or _item_id("callid"))
+            if call_id and call_id not in iteration_call_ids:
+                items.append(
+                    _history_tool_call_item(
+                        {**record, "id": call_id},
+                        round_number=round_number,
+                        iteration=iteration,
+                        response_id=response_id,
+                    )
+                )
+                iteration_call_ids.add(call_id)
             result = record.get("result")
             items.append(
                 {
                     "id": _item_id("result"),
                     "type": "tool_result",
                     "status": "completed",
-                    "call_id": str(record.get("id") or ""),
+                    "call_id": call_id,
                     "name": str(record.get("name") or "unknown_tool"),
                     "is_error": bool(
                         isinstance(result, dict) and result.get("ok") is False
@@ -355,6 +417,50 @@ def append_round_items(
                     },
                     "extensions": {},
                 }
+            )
+
+    if provider_responses:
+        # Custom/legacy Providers may not expose a durable native response for
+        # every iteration.  Preserve unmatched execution records instead of
+        # silently dropping them just because a recovered response exists.
+        for record_index, record in enumerate(tool_records):
+            if record_index in matched_record_indices or not isinstance(record, dict):
+                continue
+            call_id = str(record.get("id") or _item_id("callid"))
+            name = str(record.get("name") or "unknown_tool")
+            iteration = int(record.get("iteration", 1))
+            metadata = {
+                "round": round_number,
+                "iteration": iteration,
+                "history_source": "tool_record_pair_repair",
+            }
+            items.extend(
+                [
+                    {
+                        "id": _item_id("call"),
+                        "type": "tool_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": copy.deepcopy(record.get("arguments") or {}),
+                        "metadata": metadata,
+                        "extensions": {},
+                    },
+                    {
+                        "id": _item_id("result"),
+                        "type": "tool_result",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": name,
+                        "is_error": bool(
+                            isinstance(record.get("result"), dict)
+                            and record["result"].get("ok") is False
+                        ),
+                        "content": [{"type": "json", "data": record.get("result")}],
+                        "metadata": metadata,
+                        "extensions": {},
+                    },
+                ]
             )
 
     if not provider_responses:

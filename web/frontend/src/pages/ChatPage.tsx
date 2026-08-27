@@ -61,6 +61,16 @@ function eventId(prefix: string) {
 const EMPTY_CHAT_ITEMS: ChatItem[] = []
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 const HISTORY_PAGE_SIZE = 20
+type RunRetryNotice = {
+  failedAttempt: number
+  nextAttempt: number
+  maxAttempts: number
+}
+
+type RunErrorNotice = {
+  id: string
+  message: string
+}
 
 export function shouldShowLongTaskBubble(status: string) {
   return ['running', 'pausing', 'paused', 'cancelling'].includes(status)
@@ -115,6 +125,7 @@ const NON_FAILURE_RUN_STATUSES = new Set([
 
 export function isFailedRunCompletion(event: RunEvent) {
   const metadata = event.metadata || {}
+  if (metadata.retryable === true && metadata.committed === false) return false
   if (metadata.cancelled === true || event.error?.cancelled === true) return false
   if (metadata.long_task === true && metadata.terminal === false) return false
   const nestedState = metadata.long_task_state
@@ -394,6 +405,16 @@ function currentRoundStartIndex(items: ChatItem[]) {
     if (isConversationBoundary(items[index])) return index + 1
   }
   return 0
+}
+
+export function resetCurrentRoundItemsForRetry(items: ChatItem[]) {
+  return items.slice(0, currentRoundStartIndex(items))
+}
+
+function isProvisionalRunError(event: RunEvent) {
+  return event.type === 'error'
+    && event.metadata?.retryable === true
+    && event.metadata?.committed === false
 }
 
 function findLastCurrentRoundItemIndex(
@@ -1176,6 +1197,8 @@ export function ChatPage() {
   const [planMutationNotices, setPlanMutationNotices] = useState<Record<string, string>>({})
   const [showFollowOutput, setShowFollowOutput] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [runRetryNotice, setRunRetryNotice] = useState<RunRetryNotice | null>(null)
+  const [runErrorNotice, setRunErrorNotice] = useState<RunErrorNotice | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
@@ -1315,8 +1338,16 @@ export function ChatPage() {
     setStopping(false)
     setPlanOverrides({})
     setPlanMutationNotices({})
+    setRunRetryNotice(null)
+    setRunErrorNotice(null)
     abortChatRun()
   }, [abortChatRun, user, sessionId])
+
+  useEffect(() => {
+    if (!runErrorNotice) return
+    const timer = window.setTimeout(() => setRunErrorNotice(null), 10_000)
+    return () => window.clearTimeout(timer)
+  }, [runErrorNotice])
 
   useEffect(() => {
     if (!handoffReady || !liveSessionId) return
@@ -1380,6 +1411,8 @@ export function ChatPage() {
       undoneRoundBaselineRef.current,
     )
     beginChatRun(user, activeSession, runId, historyUserMessages)
+    setRunRetryNotice(null)
+    setRunErrorNotice(null)
     setDraft('')
     if (uploadedFiles.length) {
       setPendingUploads((current) => removeSubmittedUploads(current, uploadedFiles))
@@ -1443,6 +1476,20 @@ export function ChatPage() {
               setActiveRunId(nextRunId)
             }
           }
+          if (event.type === 'retrying') {
+            const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
+            const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
+            const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 5))
+            // Apply deltas from the failed attempt before removing that attempt.
+            // Otherwise a pending batch can be flushed after the reset and mix
+            // failed-attempt text with the next attempt.
+            deltaBatcher.flush()
+            setRunRetryNotice({ failedAttempt, nextAttempt, maxAttempts })
+            setRunErrorNotice(null)
+            updateChatRunItems(user, activeSession, resetCurrentRoundItemsForRetry)
+            return
+          }
+          if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
             deltaBatcher.push(event)
             return
@@ -1452,6 +1499,18 @@ export function ChatPage() {
             terminalReceived = true
             committed = event.metadata?.committed !== false
             successful = isSuccessfulRunCompletion(event)
+            setRunRetryNotice(null)
+            if (isFailedRunCompletion(event)) {
+              const failure = event.metadata?.failure && typeof event.metadata.failure === 'object'
+                ? event.metadata.failure as Record<string, unknown>
+                : undefined
+              setRunErrorNotice({
+                id: eventId('run-error'),
+                message: `最终错误：${String(event.error?.message || failure?.message || '智能体运行失败')}`,
+              })
+            } else {
+              setRunErrorNotice(null)
+            }
             playCompletionSoundOnce(runId, event)
             playFailureSoundOnce(runId, event)
             const terminalStatus = String(event.metadata?.status || 'completed').toLowerCase()
@@ -1463,7 +1522,13 @@ export function ChatPage() {
             }
           } else if (event.type === 'error') {
             terminalReceived = true
+            committed = event.metadata?.committed !== false
             restoreDraftAfterFailure = true
+            setRunRetryNotice(null)
+            setRunErrorNotice({
+              id: eventId('run-error'),
+              message: `最终错误：${String(event.error?.message || '智能体运行失败')}`,
+            })
             playFailureSoundOnce(runId, event)
             submittedUploadsRef.current.delete(runId)
           }
@@ -1474,12 +1539,20 @@ export function ChatPage() {
       if (!terminalReceived) {
         terminalReceived = true
         restoreDraftAfterFailure = true
+        const interruptionMessage = '响应流在终态事件到达前结束，未收到最终状态'
+        const missingEvent: RunEvent = {
+          type: 'error',
+          error: { message: interruptionMessage, exception_type: 'MissingTerminalEvent' },
+          metadata: { status: 'interrupted', terminal: false },
+        }
+        setRunRetryNotice(null)
+        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
         updateChatRunItems(user, activeSession, (current) => [
           ...finalizeCurrentRoundItems(current, {
-            message: '响应流在终态事件到达前结束',
+            message: interruptionMessage,
             exception_type: 'MissingTerminalEvent',
           }),
-          { id: eventId('error'), kind: 'error', content: '响应流意外结束，请重新发送' },
+          { id: eventId('error'), kind: 'error', content: interruptionMessage },
         ])
       }
       await refreshSessions()
@@ -1501,23 +1574,34 @@ export function ChatPage() {
       const aborted = (error as Error).name === 'AbortError'
       const missingTerminal = error instanceof ApiError && error.code === 'missing_terminal'
       const message = missingTerminal
-        ? '响应流意外结束，请重新发送'
+        ? '响应流在终态事件到达前结束，未收到最终状态'
         : error instanceof Error ? error.message : '聊天失败'
+      const interruptionMessage = missingTerminal
+        ? message
+        : '响应连接已中断，未收到最终状态'
+      if (aborted) {
+        setRunRetryNotice(null)
+        setRunErrorNotice(null)
+      }
       if (!terminalReceived) {
         updateChatRunItems(user, activeSession, (current) => {
           const finalized = finalizeCurrentRoundItems(current, {
             message: aborted
               ? '当前响应连接已中断'
-              : missingTerminal ? '响应流在终态事件到达前结束' : message,
+              : interruptionMessage,
             exception_type: aborted
               ? 'ClientStreamAborted'
-              : missingTerminal ? 'MissingTerminalEvent' : 'ClientStreamError',
+              : missingTerminal ? 'MissingTerminalEvent' : 'ClientStreamInterrupted',
             ...(aborted ? { cancelled: true } : {}),
           })
           return aborted
             ? finalized
-            : [...finalized, { id: eventId('error'), kind: 'error', content: message }]
+            : [...finalized, { id: eventId('error'), kind: 'error', content: interruptionMessage }]
         })
+      }
+      if (!aborted && !terminalReceived) {
+        setRunRetryNotice(null)
+        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
       }
       if (!terminalReceived && !aborted) {
         restoreDraftAfterFailure = true
@@ -1950,6 +2034,8 @@ export function ChatPage() {
     const runId = `run_${randomUUID().replaceAll('-', '')}`
     const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
     beginChatRun(user, activeSession, runId, historyUserMessages)
+    setRunRetryNotice(null)
+    setRunErrorNotice(null)
     updateChatRunItems(user, activeSession, (current) => [
       ...current,
       { id: eventId('plan_execution'), kind: 'execution_marker', planId: plan.plan_id },
@@ -1986,6 +2072,19 @@ export function ChatPage() {
             refreshedRunningPlan = true
             void queryClient.invalidateQueries({ queryKey: ['tasks', user] })
           }
+          if (event.type === 'retrying') {
+            const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
+            const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
+            const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 5))
+            // Keep the retry boundary ordered with the buffered failed-attempt
+            // deltas so they cannot be applied after the reset.
+            deltaBatcher.flush()
+            setRunRetryNotice({ failedAttempt, nextAttempt, maxAttempts })
+            setRunErrorNotice(null)
+            updateChatRunItems(user, activeSession, resetCurrentRoundItemsForRetry)
+            return
+          }
+          if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
             deltaBatcher.push(event)
             return
@@ -1994,10 +2093,22 @@ export function ChatPage() {
           if (event.type === 'done') {
             terminalReceived = true
             committed = event.metadata?.committed !== false
+            setRunRetryNotice(null)
+            if (isFailedRunCompletion(event)) {
+              const failure = event.metadata?.failure && typeof event.metadata.failure === 'object'
+                ? event.metadata.failure as Record<string, unknown>
+                : undefined
+              setRunErrorNotice({ id: eventId('run-error'), message: `最终错误：${String(event.error?.message || failure?.message || '任务计划执行失败')}` })
+            } else {
+              setRunErrorNotice(null)
+            }
             playCompletionSoundOnce(runId, event)
             playFailureSoundOnce(runId, event)
           } else if (event.type === 'error') {
             terminalReceived = true
+            committed = event.metadata?.committed !== false
+            setRunRetryNotice(null)
+            setRunErrorNotice({ id: eventId('run-error'), message: `最终错误：${String(event.error?.message || '任务计划执行失败')}` })
             playFailureSoundOnce(runId, event)
           }
           const updated = event.type === 'tool_call_result' ? extractPlanSummary(event.result) : null
@@ -2008,12 +2119,20 @@ export function ChatPage() {
       deltaBatcher.flush()
       if (!terminalReceived) {
         terminalReceived = true
+        const interruptionMessage = '任务计划响应流在终态事件到达前结束，未收到最终状态'
+        const missingEvent: RunEvent = {
+          type: 'error',
+          error: { message: interruptionMessage, exception_type: 'MissingTerminalEvent' },
+          metadata: { status: 'interrupted', terminal: false },
+        }
+        setRunRetryNotice(null)
+        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
         updateChatRunItems(user, activeSession, (current) => [
           ...finalizeCurrentRoundItems(current, {
-            message: '任务计划响应流在终态事件到达前结束',
+            message: interruptionMessage,
             exception_type: 'MissingTerminalEvent',
           }),
-          { id: eventId('error'), kind: 'error', content: '任务计划响应流意外结束，请重试' },
+          { id: eventId('error'), kind: 'error', content: interruptionMessage },
         ])
       }
       await refreshSessions()
@@ -2029,23 +2148,34 @@ export function ChatPage() {
       const aborted = (error as Error).name === 'AbortError'
       const missingTerminal = error instanceof ApiError && error.code === 'missing_terminal'
       const message = missingTerminal
-        ? '任务计划响应流意外结束，请重试'
+        ? '任务计划响应流在终态事件到达前结束，未收到最终状态'
         : error instanceof Error ? error.message : '任务计划执行失败'
+      const interruptionMessage = missingTerminal
+        ? message
+        : '任务计划响应连接已中断，未收到最终状态'
+      if (aborted) {
+        setRunRetryNotice(null)
+        setRunErrorNotice(null)
+      }
       if (!terminalReceived) {
         updateChatRunItems(user, activeSession, (current) => {
           const finalized = finalizeCurrentRoundItems(current, {
             message: aborted
               ? '任务计划响应连接已中断'
-              : missingTerminal ? '任务计划响应流在终态事件到达前结束' : message,
+              : interruptionMessage,
             exception_type: aborted
               ? 'ClientStreamAborted'
-              : missingTerminal ? 'MissingTerminalEvent' : 'PlanStreamError',
+              : missingTerminal ? 'MissingTerminalEvent' : 'ClientStreamInterrupted',
             ...(aborted ? { cancelled: true } : {}),
           })
           return aborted
             ? finalized
-            : [...finalized, { id: eventId('error'), kind: 'error', content: message }]
+            : [...finalized, { id: eventId('error'), kind: 'error', content: interruptionMessage }]
         })
+      }
+      if (!aborted && !terminalReceived) {
+        setRunRetryNotice(null)
+        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
       }
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
     } finally {
@@ -2407,6 +2537,17 @@ export function ChatPage() {
         />
       </div>
       <div className="composer-zone">
+        {runRetryNotice ? (
+          <div className="run-retry-bubble" role="status" aria-live="polite">
+            <span>运行出现问题，正在自动重试（第 {runRetryNotice.nextAttempt}/{runRetryNotice.maxAttempts} 次）</span>
+          </div>
+        ) : null}
+        {runErrorNotice ? (
+          <div className="run-error-bubble" role="alert">
+            <span>{runErrorNotice.message}</span>
+            <button type="button" onClick={() => setRunErrorNotice(null)} aria-label="关闭运行错误提示">×</button>
+          </div>
+        ) : null}
         {running && activeCompression ? <ContextCompressionBubble item={activeCompression} /> : null}
         {longTaskQuery.data?.long_task && shouldShowLongTaskBubble(longTaskQuery.data.long_task.status) ? (
           <LongTaskBubble state={longTaskQuery.data.long_task} stopping={longTaskBusy} onCancel={() => { void stopLongTask() }} />

@@ -455,6 +455,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 - 自动、手动和 Provider 超限压缩通过非终态 `context_compression` 运行事件报告 `started`、`ready` 或 `failed`；`ready` 只表示摘要可供当前请求使用。队列策略下记忆仍需等本轮提交后由后台按批处理，只有 `memory_processed_round` 推进到 `memory_target_round` 才表示裁剪轮次的记忆分析完成，分析完成也允许零新增候选。
 - 摘要缓存在 `history/history.sqlite3` 的 `history_context_summaries` 表中；后续压缩沿绝对轮号继承旧摘要，只把新移出的轮次交给 `context_manage` 增量整理，缓存 schema 升级时自动重建。runtime 窗口裁剪与摘要版本在同一个 SQLite 事务提交。
 - `context_manage` 使用严格输出 Schema；摘要输入包含正文、reasoning/think 和工具结果，以 64000 tokens 为目标上限按完整轮次分块，单个轮次不会被拆散，单次输出上限为 20000 tokens，为模型推理和完整 JSON 正文共同预留空间。摘要只保留对后续仍有价值的精炼判断依据，不保留逐步内部推演或工具长输出。JSON 缺失、截断、空 narrative 或 Schema 不合格时自动携带校验错误修复一次，第二次仍失败才向调用方报告，且不得覆盖已有摘要缓存。
+- 子代理的 Provider 输出解析失败、截断 JSON 和结构化输出错误进入最多 5 次的有界重试；取消、认证、输入校验和确定性协议错误不重试。`context_manage` 已完成一次专用格式修复后若仍失败，不再被外层重复放大。压缩前已经成功完成的记忆提取结果在同一重试链路中复用，避免重复写盘。
 - 手动压缩只有在摘要缓存、runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围全部落盘并重新读取校验通过后才返回成功；失败时回滚本次 runtime 裁剪与摘要缓存，用户可继续使用原运行窗口重试。
 - `history.sqlite3` 的 archive 窗口始终保留完整原始记录和累计轮数；runtime 窗口才受限并会裁剪。归档元数据不保存 context/summary 诊断；runtime 行丢失时仅从 archive 恢复最近 `max_rounds` 轮。
 

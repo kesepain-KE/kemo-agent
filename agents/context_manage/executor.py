@@ -1,4 +1,4 @@
-from run.agents import AgentOutputError
+from run.agents import AgentOutputError, AgentRunResult
 from run.memory import extract_compressed_round_memory
 
 
@@ -32,10 +32,16 @@ def _run_model_with_repair(context, input_data):
             result = context.run_model(_repair_input(input_data, first_error))
         except AgentOutputError as repair_error:
             raw_text = repair_error.raw_text or first_error.raw_text
-            raise AgentOutputError(
+            exhausted = AgentOutputError(
                 f"context_manage JSON 修复失败：{repair_error}",
                 raw_text=raw_text,
-            ) from repair_error
+            )
+            # This executor already performed its dedicated repair request.
+            # Do not multiply that bounded two-request flow through the
+            # generic outer retry loop, which could repeat side effects.
+            exhausted.retryable_declared = True
+            exhausted.retryable = False
+            raise exhausted from repair_error
         result.metadata["format_repaired"] = True
         result.metadata["format_error"] = str(first_error)
         return result
@@ -54,6 +60,14 @@ def execute(context, input_data):
     rounds = input_data.get("rounds")
     memory_result = None
     model_input = dict(input_data)
+    retry_state = getattr(context, "retry_state", None)
+    cached_memory = (
+        retry_state.auxiliary.get("context_memory_extraction")
+        if retry_state is not None
+        else None
+    )
+    if isinstance(cached_memory, AgentRunResult):
+        memory_result = cached_memory
     has_memory_payload = isinstance(rounds, list) and any(
         isinstance(item, dict) and (item.get("messages") or item.get("tools"))
         for item in rounds
@@ -63,15 +77,18 @@ def execute(context, input_data):
         and has_memory_payload
         and not bool(input_data.get("skip_memory_extraction", False))
     ):
-        memory_result = extract_compressed_round_memory(
-            root=context.runner.root,
-            user=context.runner.user,
-            config=context.runner.config,
-            rounds=rounds,
-            trigger=trigger,
-            agent_runner=context.runner,
-            cancel_event=context.cancel_event,
-        )
+        if memory_result is None:
+            memory_result = extract_compressed_round_memory(
+                root=context.runner.root,
+                user=context.runner.user,
+                config=context.runner.config,
+                rounds=rounds,
+                trigger=trigger,
+                agent_runner=context.runner,
+                cancel_event=context.cancel_event,
+            )
+            if retry_state is not None:
+                retry_state.auxiliary["context_memory_extraction"] = memory_result
         model_input["memory_extraction"] = {
             "completed": True,
             "candidate_count": len(memory_result.data.get("candidates") or []),

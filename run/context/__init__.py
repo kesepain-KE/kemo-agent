@@ -18,6 +18,7 @@ from run.tools import MAX_TOOL_RESULT_CHARS, ToolResultTooLargeError
 
 DEFAULT_OLDER_TOOL_RESULT_CHARS = 200
 SMALL_FILE_DIRECTORY_RESULT_CHARS = 4_000
+_DIAGNOSTIC_TRUNCATION_MARKER = "诊断内容已截断"
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +360,101 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
     return result or None
 
 
+def _repair_orphan_tool_results(
+    messages: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Repair historical result/call pairing without replaying any tool.
+
+    Older builds persisted the public, size-bounded Provider diagnostic as if it
+    were the native response.  Once the diagnostic budget was exhausted, a
+    tool-call Item could retain its position while losing structural fields,
+    leaving the separately stored tool result orphaned.  The tool partition is
+    the durable execution record, so it can restore the missing call in the
+    Provider-only context view.
+    """
+
+    record_by_id: dict[str, dict[str, Any]] = {}
+    for raw_record in records if isinstance(records, list) else []:
+        if not isinstance(raw_record, dict):
+            continue
+        call_id = str(raw_record.get("id") or "")
+        if call_id:
+            record_by_id.setdefault(call_id, raw_record)
+
+    repaired: list[dict[str, Any]] = []
+    emitted_call_ids: set[str] = set()
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        message = copy.deepcopy(raw_message)
+        role = str(message.get("role") or "")
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            valid_calls: list[dict[str, Any]] = []
+            for raw_call in message["tool_calls"]:
+                if not isinstance(raw_call, dict):
+                    continue
+                function = raw_call.get("function")
+                function = function if isinstance(function, dict) else {}
+                call_id = str(raw_call.get("id") or "")
+                name = str(function.get("name") or "")
+                corrupted = (
+                    not call_id
+                    or not name
+                    or _DIAGNOSTIC_TRUNCATION_MARKER in call_id
+                    or _DIAGNOSTIC_TRUNCATION_MARKER in name
+                )
+                if corrupted or call_id in emitted_call_ids:
+                    continue
+                valid_calls.append(raw_call)
+                emitted_call_ids.add(call_id)
+            if valid_calls:
+                message["tool_calls"] = valid_calls
+            else:
+                message.pop("tool_calls", None)
+            if (
+                not valid_calls
+                and message.get("content") in (None, "")
+                and not isinstance(message.get("_kemo_reasoning"), dict)
+                and not isinstance(message.get("_kemo_message"), dict)
+            ):
+                continue
+            repaired.append(message)
+            continue
+
+        if role == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            if call_id and call_id not in emitted_call_ids:
+                record = record_by_id.get(call_id)
+                if record is not None:
+                    name = str(record.get("name") or message.get("name") or "unknown_tool")
+                    repaired.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": _stable_json(
+                                            record.get("arguments") or {}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    )
+                    emitted_call_ids.add(call_id)
+                    message["name"] = name
+            repaired.append(message)
+            continue
+
+        repaired.append(message)
+    return repaired
+
+
 def _context_tool_result(
     value: Any,
     *,
@@ -485,7 +581,7 @@ def build_round_groups(
         is_recent = index > total - policy.recent_tool_rounds
         provider_messages: list[dict[str, Any]] = []
         if item_groups is not None:
-            provider_messages = copy.deepcopy(raw_group)
+            provider_messages = _repair_orphan_tool_results(raw_group, records)
             for message in provider_messages:
                 if message.get("role") == "tool":
                     message["content"] = _context_tool_result(

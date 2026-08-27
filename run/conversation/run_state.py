@@ -35,10 +35,12 @@ class RoundState:
     observed_text: list[str] = field(default_factory=list)
     observed_reasoning: list[str] = field(default_factory=list)
     tool_records: list[dict[str, Any]] = field(default_factory=list)
+    recovered_tool_records: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     consumed_guidance: list[str] = field(default_factory=list)
     consumed_guidance_details: list[dict[str, Any]] = field(default_factory=list)
     provider_responses: list[dict[str, Any]] = field(default_factory=list)
+    durable_provider_responses: list[dict[str, Any]] = field(default_factory=list)
     tool_argument_retries: int = 0
     usage_total: dict[str, Any] = field(default_factory=new_usage_total)
     context_stats: dict[str, Any] = field(default_factory=dict)

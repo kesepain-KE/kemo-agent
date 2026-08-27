@@ -16,6 +16,7 @@ EventType = Literal[
     "context_compression",
     "long_task_update",
     "usage",
+    "retrying",
     "error",
     "done",
 ]
@@ -42,6 +43,7 @@ class RunEvent:
     usage: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    internal: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"type": self.type}
@@ -83,6 +85,7 @@ class RunEvent:
             "context_compression",
             "long_task_update",
             "usage",
+            "retrying",
             "error",
             "done",
         }:
@@ -125,7 +128,6 @@ def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
     for field in (
         "category",
         "status_code",
-        "retryable",
         "retry_after_ms",
         "attempt_count",
     ):
@@ -134,6 +136,12 @@ def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
             detail[field] = value
         elif isinstance(value, str) and value.strip():
             detail[field] = value.strip()[:160]
+    retryable = getattr(exc, "retryable", None)
+    if (
+        isinstance(retryable, bool)
+        and getattr(exc, "retryable_declared", True)
+    ):
+        detail["retryable"] = retryable
     return RunEvent(
         type="error",
         error=detail,

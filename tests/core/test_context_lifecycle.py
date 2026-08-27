@@ -6,6 +6,8 @@ import threading
 import unittest
 from pathlib import Path
 
+from provider.adapters.compat import chat_request_to_kemo
+from provider.schema import ChatRequest
 from provider.schema import Usage
 from run.agents import AgentRunResult
 from run.context import ContextPolicy, build_round_groups, select_context
@@ -19,6 +21,7 @@ from run.conversation import copy_committed_round_to_archive
 from run.tools import MAX_TOOL_RESULT_CHARS
 from run.history import (
     _trim_to_max_rounds,
+    append_round_items,
     commit_window,
     empty_window,
     load_runtime_window,
@@ -346,6 +349,125 @@ class ContextLifecycleTests(unittest.TestCase):
             )
         self.assertIn('"compressed": true', groups[0].messages[2]["content"])
         self.assertNotIn('"compressed": true', groups[-1].messages[2]["content"])
+
+    def test_native_history_repairs_orphan_tool_result_from_tool_partition(self) -> None:
+        window = empty_window("alice", "web", "orphan-tool-result")
+        window["data"]["rounds"] = 1
+        window["tool"]["rounds"] = [
+            {
+                "round": 1,
+                "calls": [
+                    {
+                        "id": "call_recovered",
+                        "name": "file",
+                        "arguments": {"action": "stat", "path": "safe.txt"},
+                        "result": {"ok": True, "size": 7},
+                        "iteration": 1,
+                        "status": "completed",
+                    }
+                ],
+            }
+        ]
+        window["items"]["items"] = [
+            {
+                "id": "msg_user",
+                "type": "message",
+                "status": "completed",
+                "role": "user",
+                "content": [{"type": "text", "text": "inspect"}],
+                "metadata": {"round": 1},
+            },
+            {
+                "id": "…(诊断内容已截断)",
+                "type": "…(诊断内容已截断)",
+                "status": "…(诊断内容已截断)",
+                "call_id": "…(诊断内容已截断)",
+                "name": "…(诊断内容已截断)",
+                "metadata": {"round": 1, "iteration": 1},
+            },
+            {
+                "id": "result_recovered",
+                "type": "tool_result",
+                "status": "completed",
+                "call_id": "call_recovered",
+                "name": "file",
+                "content": [{"type": "json", "data": {"ok": True, "size": 7}}],
+                "metadata": {"round": 1, "iteration": 1},
+            },
+        ]
+
+        groups = build_round_groups(window, ContextPolicy())
+
+        self.assertEqual(
+            [message["role"] for message in groups[0].messages],
+            ["user", "assistant", "tool"],
+        )
+        call = groups[0].messages[1]["tool_calls"][0]
+        result = groups[0].messages[2]
+        self.assertEqual(call["id"], "call_recovered")
+        self.assertEqual(call["function"]["name"], "file")
+        self.assertEqual(result["tool_call_id"], "call_recovered")
+
+        protocol_request = chat_request_to_kemo(
+            ChatRequest(model="gateway-model", messages=groups[0].messages)
+        )
+        self.assertEqual(protocol_request.input[-2].call_id, "call_recovered")
+        self.assertEqual(protocol_request.input[-1].call_id, "call_recovered")
+
+    def test_native_history_does_not_duplicate_valid_tool_call(self) -> None:
+        window = make_window(1, with_tools=True)
+        window["items"] = synthesize_items(window)
+
+        messages = build_round_groups(window, ContextPolicy())[0].messages
+
+        calls = [
+            call
+            for message in messages
+            for call in (message.get("tool_calls") or [])
+        ]
+        self.assertEqual([call["id"] for call in calls], ["call-1"])
+
+    def test_append_round_items_pairs_result_when_provider_item_is_corrupted(self) -> None:
+        window = empty_window("alice", "web", "persisted-pair-repair")
+
+        append_round_items(
+            window,
+            round_number=1,
+            user_content=[{"type": "text", "text": "inspect"}],
+            reasoning="",
+            text="",
+            tool_records=[
+                {
+                    "id": "call_persisted",
+                    "name": "file",
+                    "arguments": {"action": "stat", "path": "safe.txt"},
+                    "result": {"ok": True},
+                    "iteration": 1,
+                    "status": "completed",
+                }
+            ],
+            provider_responses=[
+                {
+                    "id": "resp_persisted",
+                    "output": [
+                        {
+                            "id": "…(诊断内容已截断)",
+                            "type": "…(诊断内容已截断)",
+                            "call_id": "…(诊断内容已截断)",
+                            "name": "…(诊断内容已截断)",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        protocol_items = window["items"]["items"][1:]
+        self.assertEqual(
+            [item["type"] for item in protocol_items],
+            ["tool_call", "tool_result"],
+        )
+        self.assertEqual(protocol_items[0]["call_id"], "call_persisted")
+        self.assertEqual(protocol_items[1]["call_id"], "call_persisted")
 
     def test_small_file_directory_results_remain_complete_in_older_rounds(self) -> None:
         window = make_window(4, with_tools=True)

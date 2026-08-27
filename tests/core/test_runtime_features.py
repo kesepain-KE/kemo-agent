@@ -1042,6 +1042,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "oversized-tool-result",
                         "prompt": "读取",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,
@@ -1191,6 +1192,13 @@ def run(*, context):
             ["opaque-state-1", "opaque-state-2"],
         )
         self.assertEqual(len({item.id for item in historical_reasoning}), 2)
+        committed = load_window(
+            find_window(root, "alice", "cli", "native-provider-state")
+        )
+        self.assertNotIn(
+            "provider_state",
+            json.dumps(committed["data"]["round_metrics"], ensure_ascii=False),
+        )
 
     def test_stream_tool_continuation_preserves_reasoning_content(self) -> None:
         _, root = self.make_root(stream=True)
@@ -1805,6 +1813,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "failed-memory",
                         "prompt": "do not extract this failed round",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,
@@ -1885,6 +1894,53 @@ def run(*, context):
             window["data"]["round_metrics"][0]["guidance"],
             ["focus on the revised target"],
         )
+
+    def test_retry_preserves_consumed_guidance_without_duplicate_history(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        guidance: queue.Queue[str] = queue.Queue()
+        guidance.put("continue with the revised target")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("retry-guidance-call", "lookup", {"value": "x"})],
+                ),
+                ProviderError("gateway disconnected", status_code=502, category="upstream_error"),
+                ChatResponse(text="recovered"),
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "retry-guidance",
+                        "prompt": "start",
+                        "run_id": "run_retry_guidance",
+                        "_guidance_queue": guidance,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(len([event for event in events if event.type == "retrying"]), 1)
+        replayed = [
+            message
+            for message in provider.requests[-1].messages
+            if message.get("role") == "user"
+            and "运行中引导" in str(message.get("content") or "")
+        ]
+        self.assertEqual(len(replayed), 1)
+        self.assertIn("continue with the revised target", replayed[0]["content"])
+        metric = load_window(
+            find_window(root, "alice", "cli", "retry-guidance")
+        )["data"]["round_metrics"][0]
+        self.assertEqual(metric["guidance"], ["continue with the revised target"])
 
     def test_runtime_attachment_only_guidance_reaches_provider_and_history(
         self,
@@ -2056,6 +2112,7 @@ def run(*, context):
                         "session_id": "missing-done",
                         "prompt": "go",
                         "stream": True,
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: EmptyStreamProvider(),
@@ -2090,6 +2147,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "provider-busy",
                         "prompt": "go",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: ScriptedProvider(),
@@ -2389,6 +2447,295 @@ def run(*, context):
         self.assertEqual(events[-1].type, "done")
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
 
+    def test_runtime_error_retries_without_committing_provisional_rounds(self) -> None:
+        _, root = self.make_root(stream=True)
+        provider = ScriptedProvider(
+            streams=[
+                [
+                    RunEvent(type="text_delta", content="旧尝试"),
+                    RunEvent(
+                        type="error",
+                        error={
+                            "message": "网关暂时断开",
+                            "exception_type": "ProviderConnectionError",
+                        },
+                    ),
+                ],
+                [
+                    RunEvent(type="text_delta", content="最终回答"),
+                    RunEvent(type="done", usage={}),
+                ],
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "auto-retry-success",
+                        "prompt": "执行任务",
+                        "stream": True,
+                        "run_id": "run_auto_retry",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events].count("retrying"), 1)
+        self.assertEqual(events[-1].type, "done")
+        self.assertTrue(events[-1].metadata["committed"])
+        self.assertEqual([event.run_sequence for event in events], list(range(len(events))))
+        self.assertTrue(all(event.metadata.get("run_id") == "run_auto_retry" for event in events))
+        self.assertEqual(events[-1].metadata["retry_attempts"], 2)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(
+            load_window(find_window(root, "alice", "cli", "auto-retry-success"))["text"]["messages"][1]["content"],
+            "最终回答",
+        )
+
+    def test_runtime_error_retries_at_most_five_times_then_commits_once(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[
+                ProviderError(
+                    "网关不可用",
+                    status_code=503,
+                    category="upstream_error",
+                    retryable=True,
+                )
+                for _ in range(5)
+            ]
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "auto-retry-exhausted",
+                        "prompt": "执行任务",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events].count("retrying"), 4)
+        self.assertEqual([event.type for event in events].count("error"), 1)
+        self.assertTrue(events[-1].metadata["committed"])
+        self.assertEqual(len(provider.requests), 5)
+        window = load_window(find_window(root, "alice", "cli", "auto-retry-exhausted"))
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(len(window["data"]["round_metrics"]), 1)
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_retryable_tool_failure_enters_outer_retry_before_next_provider_iteration(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("tool-failure", "lookup", {"value": "x"})],
+                ),
+                ChatResponse(text="工具失败后已恢复"),
+            ]
+        )
+        tool_failure = ProviderError(
+            "temporary tool gateway failure",
+            category="gateway_error",
+            status_code=502,
+            retryable=True,
+        )
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation.runtime.execute_tool",
+                side_effect=tool_failure,
+            ) as mocked_execute,
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "retryable-tool-failure",
+                        "prompt": "执行工具",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events].count("retrying"), 1)
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["text"], "工具失败后已恢复")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(mocked_execute.call_count, 1)
+        recovery_messages = provider.requests[1].messages
+        self.assertTrue(
+            any(
+                message.get("role") == "tool"
+                and "temporary tool gateway failure" in message.get("content", "")
+                for message in recovery_messages
+            )
+        )
+
+    def test_explicit_non_retryable_provider_error_commits_without_retry(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[
+                ProviderError(
+                    "authentication rejected",
+                    status_code=503,
+                    category="auth_error",
+                    retryable=False,
+                )
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "explicit-no-retry",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["error"])
+        self.assertFalse(events[0].metadata["retryable"])
+        self.assertTrue(events[0].metadata["committed"])
+        self.assertEqual(len(provider.requests), 1)
+        window = load_window(
+            find_window(root, "alice", "cli", "explicit-no-retry")
+        )
+        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_retry_after_is_bounded_and_used_for_outer_retry(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[
+                ProviderError(
+                    "gateway busy",
+                    status_code=503,
+                    category="upstream_error",
+                    retry_after_ms=999_999,
+                ),
+                ChatResponse(text="recovered"),
+            ]
+        )
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.time.sleep") as sleep,
+        ):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "retry-after",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(result["text"], "recovered")
+        sleep.assert_called_once_with(120.0)
+
+    def test_retry_reuses_successful_tool_result_to_avoid_duplicate_side_effect(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("first-call", "lookup", {"value": "x"})],
+                ),
+                ProviderError("网关断开", status_code=502, category="upstream_error"),
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("retry-call", "lookup", {"value": "x"})],
+                ),
+                ChatResponse(text="已完成"),
+            ]
+        )
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.execute_tool", wraps=execute_tool) as mocked_execute,
+        ):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "auto-retry-tool-reuse",
+                    "prompt": "查一下",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(result["text"], "已完成")
+        self.assertEqual(mocked_execute.call_count, 1)
+
+    def test_retry_does_not_repeat_failed_tool_side_effect(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("failed-first", "lookup", {"value": "x"})],
+                ),
+                ProviderError("gateway disconnected", status_code=502, category="upstream_error"),
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("failed-retry", "lookup", {"value": "x"})],
+                ),
+                ChatResponse(text="completed after blocked retry"),
+            ]
+        )
+        tool_failure = ProviderError("tool side effect failed", retryable=True)
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation.runtime.execute_tool",
+                side_effect=tool_failure,
+            ) as mocked_execute,
+        ):
+            result = handle_request(
+                {
+                    "user": "alice",
+                    "source": "cli",
+                    "session_id": "retry-blocked-tool",
+                    "prompt": "go",
+                },
+                root=root,
+                provider_factory=lambda _: provider,
+            )
+
+        self.assertEqual(result["text"], "completed after blocked retry")
+        self.assertEqual(mocked_execute.call_count, 1)
+        calls = load_window(
+            find_window(root, "alice", "cli", "retry-blocked-tool")
+        )["tool"]["rounds"][0]["calls"]
+        self.assertEqual(
+            [call["status"] for call in calls],
+            ["recovery_blocked", "retry_reuse_blocked"],
+        )
+
     def test_invalid_tool_arguments_retry_limit_commits_one_failed_round(self) -> None:
         _, root = self.make_root()
 
@@ -2418,6 +2765,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "invalid-tool-argument-limit",
                         "prompt": "call expand",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,
@@ -2464,6 +2812,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "context-unrecoverable",
                         "prompt": "go",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,
@@ -2511,6 +2860,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "err",
                         "prompt": "go",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: error_provider,
@@ -2853,6 +3203,7 @@ def run(*, context):
                     "source": "cli",
                     "session_id": "failed-duplicate",
                     "prompt": "go",
+                    "_auto_retry_max_attempts": 1,
                 },
                 root=root,
                 provider_factory=lambda _: provider,
@@ -3019,6 +3370,7 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "failure-limit",
                         "prompt": "go",
+                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,

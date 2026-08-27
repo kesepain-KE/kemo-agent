@@ -10,6 +10,7 @@ export type RunEventType =
   | 'context_compression'
   | 'long_task_update'
   | 'usage'
+  | 'retrying'
   | 'error'
   | 'done'
 

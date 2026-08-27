@@ -4,11 +4,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agents._runtime.user_packages import UserAgentPackageError
 from plugins.subagent_dispatch.tool import run as dispatch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
-from provider.schema import ChatResponse, ToolCall, Usage
+from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agents import AgentScheduler
 from run.agents import AgentRunError, AgentRunner
 from run.agents import (
@@ -20,13 +21,16 @@ from run.agents import (
 
 
 class ScriptedProvider:
-    def __init__(self, responses: list[ChatResponse]) -> None:
+    def __init__(self, responses: list[ChatResponse | BaseException]) -> None:
         self.responses = list(responses)
         self.requests = []
 
     def chat(self, request):
         self.requests.append(request)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def create(self, request):
         return chat_response_to_kemo(self.chat(kemo_request_to_chat(request)), request)
@@ -542,6 +546,92 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
         self.assertEqual(result.metadata["tool_calls"][0]["status"], "completed")
 
+    def test_subagent_retry_reuses_successful_tool_result_after_provider_failure(self) -> None:
+        _, root, config = self.make_root()
+        self.write_plugin(root, "echo")
+        self.write_agent(root, "alice", "retry_agent", tools=["echo"])
+        provider = ScriptedProvider(
+            [
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("call-1", "echo", {"value": "x"})],
+                ),
+                ProviderError(
+                    "gateway disconnected",
+                    category="connection_error",
+                    retryable=True,
+                    retry_after_ms=0,
+                ),
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("call-2", "echo", {"value": "x"})],
+                ),
+                ChatResponse(text='{"answer":"recovered"}', model="mock"),
+            ]
+        )
+        with patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0):
+            with patch(
+                "run.agents.runner.execute_tool",
+                return_value={"value": "stable"},
+            ) as mocked_execute:
+                result = AgentRunner(
+                    root,
+                    "alice",
+                    config=config,
+                    provider_factory=lambda _: provider,
+                ).run("retry_agent", {})
+
+        self.assertEqual(result.data, {"answer": "recovered"})
+        self.assertEqual(len(provider.requests), 4)
+        self.assertEqual(mocked_execute.call_count, 1)
+        self.assertEqual(
+            [call["status"] for call in result.metadata["tool_calls"]],
+            ["recovered", "duplicate_reused"],
+        )
+        self.assertEqual(result.metadata["retry_attempts"], 2)
+
+    def test_subagent_retry_blocks_failed_tool_side_effect_signature(self) -> None:
+        _, root, config = self.make_root()
+        self.write_plugin(root, "echo")
+        self.write_agent(root, "alice", "failed_retry_agent", tools=["echo"])
+        provider = ScriptedProvider(
+            [
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("call-1", "echo", {"value": "x"})],
+                ),
+                ChatResponse(
+                    text="",
+                    tool_calls=[ToolCall("call-2", "echo", {"value": "x"})],
+                ),
+                ChatResponse(text='{"answer":"blocked and recovered"}', model="mock"),
+            ]
+        )
+        with (
+            patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0),
+            patch(
+                "run.agents.runner.execute_tool",
+                side_effect=ProviderError(
+                    "temporary tool failure",
+                    category="gateway_error",
+                    retryable=True,
+                ),
+            ) as mocked_execute,
+        ):
+            result = AgentRunner(
+                root,
+                "alice",
+                config=config,
+                provider_factory=lambda _: provider,
+            ).run("failed_retry_agent", {})
+
+        self.assertEqual(result.data, {"answer": "blocked and recovered"})
+        self.assertEqual(mocked_execute.call_count, 1)
+        self.assertEqual(
+            [call["status"] for call in result.metadata["tool_calls"]],
+            ["recovery_blocked", "retry_reuse_blocked"],
+        )
+
     def test_global_tool_call_limit_is_a_hard_ceiling_for_subagents(self) -> None:
         _, root, config = self.make_root()
         config["tools"]["max_iterations"] = 1
@@ -603,7 +693,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         calls = result.metadata["tool_calls"]
         self.assertEqual(
             [call["status"] for call in calls],
-            ["completed", "completed", "identical_call_blocked", "completed"],
+            ["completed", "duplicate_reused", "identical_call_blocked", "completed"],
         )
         self.assertEqual(calls[2]["consecutive_identical_calls"], 3)
         self.assertEqual(calls[3]["consecutive_identical_calls"], 1)

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
 import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 
 describe('长任务气泡显示条件', () => {
@@ -394,6 +394,21 @@ describe('reduceRunEvent', () => {
       status: 'error',
       result: { ok: false, error: { exception_type: 'ClientStreamError' } },
     })
+  })
+
+  it('自动重试时保留当前用户消息并清除失败尝试的中间项', () => {
+    const userItem: Extract<ChatItem, { kind: 'message' }> = {
+      id: 'u1', kind: 'message', role: 'user', content: '执行任务',
+    }
+    const items: ChatItem[] = [
+      userItem,
+      { id: 'r1', kind: 'reasoning', content: '旧思考', streaming: true },
+      { id: 't1', kind: 'tool', callId: 'c1', name: 'shell', status: 'error' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '旧正文', streaming: false },
+      { id: 'e1', kind: 'error', content: '旧错误' },
+    ]
+
+    expect(resetCurrentRoundItemsForRetry(items)).toEqual([userItem])
   })
 
   it('Provider error 事件统一收束当前思考、正文和工具', () => {

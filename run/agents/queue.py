@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
 from events import RunEvent
+from provider.protocol.diagnostics import safe_provider_message
 from run.agents.runner import (
     AgentCancelledError,
     AgentRunResult,
@@ -30,6 +31,32 @@ TaskStatus = Literal[
     "timed_out_running",
 ]
 _TERMINAL = {"completed", "failed", "cancelled", "timed_out", "timed_out_running"}
+_ERROR_DETAIL_FIELDS = (
+    "category",
+    "code",
+    "status_code",
+    "retryable",
+    "retry_after_ms",
+    "retry_attempts",
+    "retry_max_attempts",
+    "retry_exhausted",
+)
+
+
+def _agent_task_error_detail(error: BaseException) -> dict[str, Any]:
+    """Keep a bounded, classified error snapshot for scheduler clients."""
+
+    detail: dict[str, Any] = {
+        "message": safe_provider_message(str(error), "子代理任务失败"),
+        "exception_type": type(error).__name__,
+    }
+    for field_name in _ERROR_DETAIL_FIELDS:
+        value = getattr(error, field_name, None)
+        if isinstance(value, (bool, int, float)):
+            detail[field_name] = value
+        elif isinstance(value, str) and value.strip():
+            detail[field_name] = value.strip()[:160]
+    return detail
 
 
 class AgentQueueError(RuntimeError):
@@ -328,10 +355,7 @@ class AgentScheduler:
                             )
                         else:
                             task.status = "failed"
-                        task.error = {
-                            "message": str(exc),
-                            "exception_type": type(exc).__name__,
-                        }
+                        task.error = _agent_task_error_detail(exc)
                         if isinstance(exc, AgentTimeoutError):
                             task.error.update(
                                 {

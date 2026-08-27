@@ -18,9 +18,11 @@ from provider.protocol.models import (
     ReasoningItem,
     ToolCallItem,
     ToolResultItem,
+    UnifiedError,
     Usage,
     text_from_content,
 )
+from provider.schema import ProviderError
 from run.agents import AgentQueueError, AgentScheduler
 from run.agents import (
     AgentCancelledError,
@@ -308,6 +310,115 @@ class SubAgentRuntimeTests(unittest.TestCase):
         request = provider.requests[0]
         self.assertEqual(request.reasoning.effort, "ultra")
         self.assertEqual(request.provider_options["reasoning_effort"], "ultra")
+
+    def test_runner_retries_transient_provider_failure_and_reports_attempts(self) -> None:
+        class FlakyProvider(MockProvider):
+            def create(inner_self, request):
+                if not inner_self.requests:
+                    inner_self.requests.append(request)
+                    raise ProviderError(
+                        "gateway disconnected",
+                        category="connection_error",
+                        retryable=True,
+                        retry_after_ms=0,
+                    )
+                return super().create(request)
+
+        provider = FlakyProvider()
+        events = []
+        with (
+            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch(
+                "run.agents.runner._agent_retry_delay_seconds",
+                return_value=0.0,
+            ),
+        ):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                event_callback=events.append,
+            )
+
+        self.assertEqual(result.data, SUMMARY)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(result.metadata["retry_attempts"], 2)
+        self.assertEqual(
+            [event.metadata["status"] for event in events],
+            ["started", "retrying", "completed"],
+        )
+        self.assertEqual(events[1].metadata["failed_attempt"], 1)
+        self.assertEqual(events[1].metadata["next_attempt"], 2)
+
+    def test_runner_stops_after_five_transient_provider_failures(self) -> None:
+        class FailingProvider(MockProvider):
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                raise ProviderError(
+                    "gateway unavailable",
+                    category="upstream_error",
+                    retryable=True,
+                    retry_after_ms=0,
+                )
+
+        provider = FailingProvider()
+        events = []
+        with (
+            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch(
+                "run.agents.runner._agent_retry_delay_seconds",
+                return_value=0.0,
+            ),
+        ):
+            with self.assertRaises(ProviderError) as raised:
+                self.runner(provider).run(
+                    "context_manage",
+                    {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                    event_callback=events.append,
+                )
+
+        self.assertEqual(len(provider.requests), 5)
+        self.assertTrue(raised.exception.retry_exhausted)
+        self.assertEqual(raised.exception.retry_attempts, 5)
+        self.assertEqual(raised.exception.retry_max_attempts, 5)
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(
+            [event.metadata["status"] for event in events],
+            ["started", "retrying", "retrying", "retrying", "retrying", "failed"],
+        )
+
+    def test_runner_retries_gateway_response_when_retryable_is_omitted(self) -> None:
+        class FailedResponseProvider(MockProvider):
+            def create(inner_self, request):
+                if not inner_self.requests:
+                    inner_self.requests.append(request)
+                    return KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.FAILED,
+                        model=request.model,
+                        error=UnifiedError(
+                            type="connection_error",
+                            code="UPSTREAM_DISCONNECTED",
+                            message="gateway disconnected",
+                            provider_status=503,
+                        ),
+                    )
+                return super().create(request)
+
+        provider = FailedResponseProvider()
+        with (
+            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch(
+                "run.agents.runner._agent_retry_delay_seconds",
+                return_value=0.0,
+            ),
+        ):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+
+        self.assertEqual(result.data, SUMMARY)
+        self.assertEqual(len(provider.requests), 2)
 
     def test_runner_keeps_chat_reasoning_chain_without_capability_lookup(self) -> None:
         provider = MockProvider()
@@ -900,6 +1011,33 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["error"]["exception_type"], "AgentTimeoutError")
         self.assertTrue(snapshot["error"]["cancel_requested"])
         self.assertTrue(snapshot["error"]["process_terminated"])
+
+    def test_scheduler_preserves_retry_classification_in_error_snapshot(self) -> None:
+        registry = discover_agents(self.root)
+        runner = StubRunner(registry, [])
+
+        def failed(*args, **kwargs):
+            del args, kwargs
+            raise ProviderError(
+                "gateway unavailable",
+                category="gateway_error",
+                status_code=503,
+                retryable=False,
+                retry_after_ms=1500,
+            )
+
+        runner.run = failed
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        task = scheduler.submit("self_improve", {"value": 1})
+        with self.assertRaises(AgentQueueError):
+            scheduler.wait(task, 1)
+        snapshot = scheduler.get(task)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["error"]["category"], "gateway_error")
+        self.assertEqual(snapshot["error"]["status_code"], 503)
+        self.assertFalse(snapshot["error"]["retryable"])
+        self.assertEqual(snapshot["error"]["retry_after_ms"], 1500)
 
 
 if __name__ == "__main__":

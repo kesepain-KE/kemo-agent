@@ -25,6 +25,7 @@ from run.history import (
     queue_memory_extraction,
 )
 from run.config import PromptBundle
+from run.conversation.provider_events import metric_provider_response_payload
 from run.conversation.run_state import RoundState, RunDependencies, RunIdentity
 from run.conversation.session_runtime import copy_committed_round_to_archive
 from run.conversation.usage import merge_usage, usage_from_dict
@@ -52,10 +53,15 @@ def _safe_failure_detail(error: Any) -> dict[str, Any]:
             "exception_type": type(error).__name__,
             "category": getattr(error, "category", ""),
             "status_code": getattr(error, "status_code", None),
-            "retryable": getattr(error, "retryable", None),
             "retry_after_ms": getattr(error, "retry_after_ms", None),
             "attempt_count": getattr(error, "attempt_count", None),
         }
+        retryable = getattr(error, "retryable", None)
+        if (
+            isinstance(retryable, bool)
+            and getattr(error, "retryable_declared", True)
+        ):
+            source["retryable"] = retryable
     elif isinstance(error, dict):
         source = dict(error)
         nested = error.get("details")
@@ -215,7 +221,8 @@ class TerminalRoundCommitter:
                 },
             )
     
-        cancelled_records = copy.deepcopy(context.state.tool_records)
+        cancelled_records = copy.deepcopy(context.state.recovered_tool_records)
+        cancelled_records.extend(copy.deepcopy(context.state.tool_records))
         recorded_ids = {
             str(record.get("id") or "")
             for record in cancelled_records
@@ -308,6 +315,11 @@ class TerminalRoundCommitter:
         if not isinstance(metrics, list):
             metrics = []
             cancelled_window["data"]["round_metrics"] = metrics
+        metric_provider_responses = [
+            projected
+            for value in context.state.provider_responses
+            if (projected := metric_provider_response_payload(value)) is not None
+        ]
         terminal_metric = {
             "round": round_number,
             "usage": dict(context.state.usage_total),
@@ -316,7 +328,7 @@ class TerminalRoundCommitter:
             "tool_argument_retries": context.state.tool_argument_retries,
             "guidance": list(context.state.consumed_guidance),
             "guidance_details": copy.deepcopy(context.state.consumed_guidance_details),
-            "provider_responses": copy.deepcopy(context.state.provider_responses),
+            "provider_responses": metric_provider_responses,
             "status": status,
             "stop_reason": reason,
             **(
@@ -464,7 +476,30 @@ class TerminalRoundCommitter:
         error: Any,
         *,
         reason: str = "provider_error",
+        persist: bool = True,
     ) -> RunEvent:
+        failure = _safe_failure_detail(error)
+        if not persist:
+            # Automatic retries must not create a durable failed round for each
+            # provisional attempt.  Keep only a bounded, classification-only
+            # event for the retry coordinator; the final attempt persists the
+            # normal failed-round record.
+            retryable = failure.get("retryable")
+            if not isinstance(retryable, bool):
+                retryable = True
+            return RunEvent(
+                type="error",
+                error=copy.deepcopy(failure),
+                usage=dict(self.context.state.usage_total),
+                metadata={
+                    "committed": False,
+                    "retryable": retryable,
+                    "status": "failed",
+                    "stop_reason": reason,
+                    "failure": copy.deepcopy(failure),
+                    "run_id": self.context.identity.run_id,
+                },
+            )
         return self.commit_terminal_round(
             status="failed",
             reason=reason,
@@ -475,5 +510,5 @@ class TerminalRoundCommitter:
             pending_message="工具调用因模型服务错误中断",
             pending_exception_type="ProviderRunInterrupted",
             pending_status="failed",
-            failure=_safe_failure_detail(error),
+            failure=failure,
         )

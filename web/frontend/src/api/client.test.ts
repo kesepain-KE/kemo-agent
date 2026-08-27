@@ -83,6 +83,25 @@ describe('parseSseFrames', () => {
     expect(events).toEqual(['text_delta', 'done'])
   })
 
+  it('不会把自动重试事件误判为流终态', async () => {
+    server.use(http.post('/api/chat', () => new HttpResponse(
+      'event: retrying\ndata: {"type":"retrying","content":"正在重试","metadata":{"next_attempt":2,"max_attempts":5}}\n\n'
+      + 'event: done\ndata: {"type":"done","metadata":{"status":"completed"}}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )))
+    const events: string[] = []
+
+    await streamChat({
+      user: 'kesepain',
+      sessionId: 's1',
+      prompt: '重试',
+      runId: 'run_retry',
+      onEvent: (event) => events.push(event.type),
+    })
+
+    expect(events).toEqual(['retrying', 'done'])
+  })
+
   it('暂停计划使用无 revision 的状态指令接口', async () => {
     const result = await commandPlan('kesepain', 'plan_12345678', 'pause')
     expect(result).toMatchObject({ action: 'pause', updated: true, plan: { status: 'paused' } })

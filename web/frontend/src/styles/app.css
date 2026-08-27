@@ -104,6 +104,11 @@ button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .route-loading { height: 100%; display: grid; place-items: center; color: var(--muted-2); font-size: .8125rem; }
 .center-state { padding: 32px; color: var(--muted-2); font-size: .8125rem; text-align: center; }
 .chat-error, .module-error { margin: 10px 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--red) 24%, transparent); border-radius: var(--radius-control); background: var(--red-soft); color: var(--red); font-size: .8125rem; }
+.run-retry-bubble, .run-error-bubble { width: min(100%, var(--conversation-width)); margin: 0 auto 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius-control); font-size: .75rem; }
+.run-retry-bubble { background: var(--brand-soft); color: var(--brand); }
+.run-error-bubble { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-color: color-mix(in srgb, var(--red) 24%, transparent); background: var(--red-soft); color: var(--red); }
+.run-error-bubble span { min-width: 0; overflow-wrap: anywhere; }
+.run-error-bubble button { flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 1.1rem; line-height: 1; cursor: pointer; }
 .module-error { margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
 .status-dot.offline { background: var(--red); }
 .spin { animation: kemo-spin .8s linear infinite; }
@@ -1330,6 +1335,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   .usage-card-head { gap: 5px; }
   .usage-card-head > .usage-summary-chip { min-height: 28px; padding-inline: 8px; }
   .composer-zone { padding: 12px 8px 8px; }
+  .run-retry-bubble, .run-error-bubble { width: 100%; margin-bottom: 7px; }
   .composer { border-radius: 12px; }
 }
 

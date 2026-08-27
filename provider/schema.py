@@ -8,6 +8,9 @@ from typing import Any, Iterable, Protocol
 from events import RunEvent
 
 
+_RETRYABLE_UNSET = object()
+
+
 class ProviderError(RuntimeError):
     """Base error raised by a provider implementation."""
 
@@ -17,7 +20,7 @@ class ProviderError(RuntimeError):
         *,
         category: str = "provider_error",
         status_code: int | None = None,
-        retryable: bool = False,
+        retryable: bool | object = _RETRYABLE_UNSET,
         retry_after_ms: int | None = None,
         attempt_count: int | None = None,
         body: Any = None,
@@ -25,7 +28,12 @@ class ProviderError(RuntimeError):
         super().__init__(message)
         self.category = category
         self.status_code = status_code
-        self.retryable = retryable
+        # Keep the historical boolean attribute for callers, but remember
+        # whether the provider explicitly supplied a retry decision.  An
+        # omitted decision is classified by the runtime (usually as a
+        # transient failure); an explicit false must remain authoritative.
+        self.retryable_declared = isinstance(retryable, bool)
+        self.retryable = retryable if self.retryable_declared else False
         self.retry_after_ms = retry_after_ms
         self.attempt_count = attempt_count
         self.body = body

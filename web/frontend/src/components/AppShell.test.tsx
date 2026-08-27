@@ -152,6 +152,36 @@ describe('Windows run sound', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
     expect(AudioMock).not.toHaveBeenCalled()
   })
+
+  it('客户端流中断只显示未确认状态，不播放失败音效', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    const AudioMock = vi.fn()
+    vi.stubGlobal('Audio', AudioMock)
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      return new Response(
+        'event: text_delta\ndata: {"type":"text_delta","content":"partial"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '断流测试已就绪' }], round_metrics: [], round_traces: [],
+      })),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('断流测试已就绪')
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(input, { target: { value: '模拟断流' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect((await screen.findAllByText('响应流在终态事件到达前结束，未收到最终状态')).length).toBeGreaterThan(0)
+    expect(AudioMock).not.toHaveBeenCalled()
+  })
 })
 
 function renderApp(path = '/chat') {
@@ -770,7 +800,7 @@ describe('AppShell navigation', () => {
     fireEvent.change(composer, { target: { value: '请重试这项任务' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 
-    expect(await screen.findByText('响应流意外结束，请重新发送')).toBeInTheDocument()
+    expect((await screen.findAllByText('响应流在终态事件到达前结束，未收到最终状态')).length).toBeGreaterThan(0)
     await waitFor(() => expect(composer).toHaveValue('请重试这项任务'))
     expect(screen.getByText('旧正文')).toBeInTheDocument()
 
@@ -781,6 +811,33 @@ describe('AppShell navigation', () => {
     expect(screen.queryByText('旧正文新正文')).not.toBeInTheDocument()
     expect(screen.queryByText('旧思考新思考')).not.toBeInTheDocument()
     expect(attempt).toBe(2)
+  })
+
+  it('自动重试事件会清除失败尝试的思考和正文，不产生累加', async () => {
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      return new Response(
+        'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"旧思考"}\n\n'
+        + 'event: text_delta\ndata: {"type":"text_delta","content":"旧正文"}\n\n'
+        + 'event: retrying\ndata: {"type":"retrying","content":"正在自动重试","metadata":{"failed_attempt":1,"next_attempt":2,"max_attempts":5}}\n\n'
+        + 'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"新思考"}\n\n'
+        + 'event: text_delta\ndata: {"type":"text_delta","content":"新正文"}\n\n'
+        + 'event: done\ndata: {"type":"done","metadata":{"status":"completed","committed":true}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '自动重试' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('新正文')).toBeInTheDocument()
+    expect(screen.queryByText('旧正文')).not.toBeInTheDocument()
+    expect(screen.queryByText('旧思考')).not.toBeInTheDocument()
+    expect(screen.queryByText('旧正文新正文')).not.toBeInTheDocument()
   })
 
   it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {
