@@ -1563,7 +1563,13 @@ class WebRunService(
             finally:
                 consumer_closed.set()
                 cancel_event.set()
-                worker.join(timeout=1.0)
+                if not worker.join(timeout=5.0):
+                    # The producer is still alive (blocked in put() or inside
+                    # the Run generator).  Release the user gate and forget the
+                    # active run immediately so the user slot is never leaked;
+                    # the daemon worker will eventually drain its queue and
+                    # exit on its own.
+                    pass
                 with self._active_runs_lock:
                     for key, value in list(self._active_runs.items()):
                         if value is active:
