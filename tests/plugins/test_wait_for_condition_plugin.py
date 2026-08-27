@@ -90,7 +90,10 @@ class WaitForConditionPluginTests(unittest.TestCase):
             os.path.normcase(os.path.realpath(str(target))),
         )
         self.assertTrue(created["observation"]["path_was_relative"])
-        self.assertEqual(created["observation"]["path_base"], str(self.root))
+        self.assertEqual(
+            os.path.normcase(os.path.realpath(created["observation"]["path_base"])),
+            os.path.normcase(os.path.realpath(str(self.root))),
+        )
 
         missing = run(
             "path_missing",
