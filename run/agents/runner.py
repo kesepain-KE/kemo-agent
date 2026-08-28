@@ -624,13 +624,29 @@ class AgentToolRetryError(AgentRunError):
 
 
 class AgentTimeoutError(AgentRunError):
-    def __init__(self, message: str, *, process_terminated: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        process_terminated: bool = False,
+        completion_future: Any = None,
+    ) -> None:
         super().__init__(message)
         self.process_terminated = bool(process_terminated)
+        self.completion_future = completion_future
 
 
 class AgentCancelledError(AgentRunError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        process_terminated: bool = True,
+        completion_future: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.process_terminated = bool(process_terminated)
+        self.completion_future = completion_future
 
 
 @dataclass(slots=True)
@@ -1579,8 +1595,12 @@ class AgentRunner:
                     cleanup_deadline = time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
                     while not future.done() and time.monotonic() < cleanup_deadline:
                         time.sleep(0.05)
-                    abandon_execution(execution_id)
-                    raise AgentCancelledError(f"子代理 {name} 已取消")
+                    process_terminated = not abandon_execution(execution_id)
+                    raise AgentCancelledError(
+                        f"子代理 {name} 已取消",
+                        process_terminated=process_terminated,
+                        completion_future=(None if process_terminated else future),
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     if survival_seconds > 0:
@@ -1600,8 +1620,12 @@ class AgentRunner:
                                     and time.monotonic() < cleanup_deadline
                                 ):
                                     time.sleep(0.05)
-                                abandon_execution(execution_id)
-                                raise AgentCancelledError(f"子代理 {name} 已取消")
+                                process_terminated = not abandon_execution(execution_id)
+                                raise AgentCancelledError(
+                                    f"子代理 {name} 已取消",
+                                    process_terminated=process_terminated,
+                                    completion_future=(None if process_terminated else future),
+                                )
                             survival_remaining = survival_deadline - time.monotonic()
                             if survival_remaining <= 0:
                                 break
@@ -1650,6 +1674,7 @@ class AgentRunner:
                         f"存活期 {survival_seconds:g}s 内未完成；"
                         f"已自动请求取消，{state}",
                         process_terminated=process_terminated,
+                        completion_future=(None if process_terminated else future),
                     )
                 if future.done():
                     result = future.result()

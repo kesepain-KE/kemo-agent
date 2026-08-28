@@ -8,6 +8,7 @@
 |------|------|------|
 | 内置 | `agents/<name>/` | 框架受信任子智能体，可携带执行代码 |
 | 用户 | `users/<user>/agents/<name>/` | 当前用户热插拔子智能体，不能覆盖内置名称 |
+| 外部绑定 | `global_expand/<name>/agent_bridge.json`、`shared_expand/<name>/agent_bridge.json` 或 `users/<user>/expand/<name>/agent_bridge.json` | 通过已授权拓展隔离进程调用外部智能体；不把远程地址或凭据交给核心 |
 
 发现管线每次执行前重新扫描，因此用户子智能体新增或修改后通常无需重启。自定义 Python 执行器会被主进程直接导入，没有代码沙箱，只能安装可信代码。
 
@@ -120,4 +121,32 @@ def execute(context, input_data: dict):
 
 主智能体通过 `subagent_dispatch` 的 `list/call/status/cancel` 调用公开代理。同步任务使用 `wait=true`；长任务可后台提交并查询状态。调用前读取目标 `trigger.md`，按照约定构造结构化输入。
 
-子智能体整体期限来自 `agent_runtime.default_timeout`，与其内部每次工具调用的 `tools.timeout` 相互独立。同步调用的 `subagent_dispatch` 使用子智能体期限作为外层看门狗基准，不会在普通工具默认期限到达时提前返回。子智能体整体超时后框架会自动发送取消信号并等待短暂清理：执行线程已经退出时记录 `timed_out`，仍未退出时记录 `timed_out_running`，不得把后者描述成已经强制终止。
+### 外部智能体绑定
+
+拓展可以额外放置 `agent_bridge.json`，把外部 kemo-agent、其他 Agent 服务或本地代理程序
+包装成可调用的同步子代理。文件只声明公开名称、说明、`command`、输入/输出 JSON Schema
+和可选超时，不声明 URL、Token、密码或其他凭据：
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "name": "researcher",
+      "description": "外部研究智能体",
+      "command": "external_agent_call",
+      "input_schema": {"type": "object", "additionalProperties": true},
+      "output_schema": {"type": "object", "additionalProperties": true},
+      "timeout": 600
+    }
+  ]
+}
+```
+
+调用句柄为 `external:<scope>:<拓展名>:<代理名>`。核心会在调用前重新检查拓展白名单、
+清单、符号链接和 Schema，再通过 `start_expand.py` 传递 `{agent, input, protocol}`；拓展返回
+`{"status":"completed","data":{...}}` 后，核心再次校验输出。当前只允许 `wait=true` 同步调用，
+因为外部服务尚未共享 kemo-agent 的持久任务状态、取消和恢复合同。远程服务的认证信息必须由
+拓展从受信环境变量或私有配置读取，不能写入桥接清单、Prompt、回复或日志。
+
+子智能体整体期限来自 `agent_runtime.default_timeout`，与其内部每次工具调用的 `tools.timeout` 相互独立。同步调用的 `subagent_dispatch` 使用调用方传入的 `timeout` 作为本次等待期限，不会在普通工具默认期限到达时提前截断；期限到达后，如果子代理仍在排队或运行，会先返回 `task_id`，继续保留任务用于状态追踪和取消。收尾存活期内自然完成时记录 `completed_after_timeout`；如果调用方已经收到超时结果、底层线程之后才完成，状态会从 `timed_out_running` 收敛到 `completed`，并在结果元数据中标记 `completed_after_detach`。收尾后执行线程仍未退出时记录 `timed_out_running`，该状态仍允许发起取消请求，不能描述成已经强制终止。

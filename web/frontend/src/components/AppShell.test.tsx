@@ -838,6 +838,7 @@ describe('AppShell navigation', () => {
     expect(screen.queryByText('旧正文')).not.toBeInTheDocument()
     expect(screen.queryByText('旧思考')).not.toBeInTheDocument()
     expect(screen.queryByText('旧正文新正文')).not.toBeInTheDocument()
+    expect(screen.queryByText(/运行出现问题，正在自动重试/)).not.toBeInTheDocument()
   })
 
   it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {

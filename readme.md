@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.3-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.4-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,7 +204,17 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.3`
+当前版本：`1.2.4`
+
+### 1.2.4 更新
+
+这是一次子智能体连接和运行稳定性更新。
+
+- 网页端子智能体模型设置补充明确说明：默认档负责普通子智能体，轻量档负责摘要、上下文压缩和临时记忆整理，推理档负责任务计划、自我改进和深度分析。
+- 智能体在重试期间显示状态气泡；下一次尝试真正产生思考、正文或工具进度后立即清除，成功终态也会清除，不把临时重试状态留在输入框上方。
+- 子智能体可以通过已授权拓展目录中的 `agent_bridge.json` 绑定外部 kemo-agent、其他 Agent 服务或本地代理程序，统一使用 `subagent_dispatch` 列出和同步调用。
+- 外部绑定复用拓展的隔离进程、白名单、超时、取消、路径和结果大小边界；远程地址、访问令牌和密码只能由拓展内部从受信环境变量或私有配置读取。
+- 外部代理输入和输出都按声明的 JSON Schema 校验；没有统一持久任务状态前不提供后台 `wait=false`，避免留下无法取消或恢复的远程任务。
 
 ### 1.2.3 更新
 

@@ -87,12 +87,14 @@ kemo-agent/
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
 | `release-1.2.2-stability.md` | 1.2.2 稳定性规则、42 项工作区分类、导入迁移和发布前检查 |
 | `release-1.2.3-stability.md` | 1.2.3 稳定性补丁、工具参数安全、后台作业与进程边界检查 |
+| `release-1.2.4-stability.md` | 1.2.4 外部智能体桥接、重试气泡和子智能体模型配置说明 |
 | `env-reference.md` | `.env` 参数、优先级与安全要求 |
 | `global-config-reference.md` | `config/global_config.json` 全字段 |
 | `user-config-reference.md` | `users/<name>/user_config.json` 全字段 |
 | `cron-task-creation.md` | 北京时间定时任务的创建与状态机 |
 | `task-plan-creation.md` | 多步骤任务计划的创建与执行规则 |
 | `subagent-creation.md` | 内置/用户子智能体包与授权规则 |
+| `external-agent-bridge.md` | 通过已授权拓展绑定外部智能体的清单、Schema、调用和安全边界 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
 | `logging-storage.md` | Cron 与外部消息结构化日志、迁移和保留规则 |

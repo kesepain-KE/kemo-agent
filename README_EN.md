@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.3-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.4-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,17 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.3`
+Current version: `1.2.4`
+
+### 1.2.4 update
+
+This is a subagent connectivity and runtime-stability update.
+
+- Web subagent model settings now explain the three profiles in plain language: default for ordinary subagents, cheap for summaries/context compression/temporary-memory work, and reasoning for task plans, self-improvement, and deeper analysis.
+- The retry bubble is cleared as soon as the next attempt produces real reasoning, text, or tool progress, and is also cleared by a successful terminal event.
+- Subagents can bind to an external kemo-agent, another Agent service, or a local adapter through an authorized Expand module's `agent_bridge.json`; `subagent_dispatch` lists and synchronously calls the binding.
+- External bindings reuse Expand process isolation, allowlists, timeout, cancellation, path, and result-size limits. Remote URLs, access tokens, and passwords remain inside the trusted adapter configuration or environment.
+- Input and output are validated against the declared JSON Schemas. Background `wait=false` is intentionally unavailable until a shared persistent task-state contract exists.
 
 ### 1.2.3 update
 

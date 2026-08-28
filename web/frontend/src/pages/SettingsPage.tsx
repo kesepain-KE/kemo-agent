@@ -108,9 +108,9 @@ const multimodalFields: Array<{ key: MultimodalKey; label: string; description: 
 ]
 
 const agentModelFields: Array<{ key: AgentModelProfile; label: string; description: string }> = [
-  { key: 'default', label: '默认子智能体模型', description: '普通子智能体使用；留空时继承主对话模型' },
-  { key: 'cheap', label: '轻量子智能体模型', description: '摘要、上下文整理等轻量任务使用；留空时继承主对话模型' },
-  { key: 'reasoning', label: '推理子智能体模型', description: '任务规划和深度整理使用；留空时继承主对话模型' },
+  { key: 'default', label: '默认子智能体模型', description: '普通用户子智能体和未指定档位的后台代理；留空时继承主对话模型' },
+  { key: 'cheap', label: '轻量子智能体模型', description: '历史摘要、上下文压缩和临时记忆整理等高频轻量任务；留空时继承主对话模型' },
+  { key: 'reasoning', label: '推理子智能体模型', description: '任务计划、自我改进和需要较深分析的后台任务；留空时继承主对话模型' },
 ]
 
 function isSettingsTab(value: string | null): value is SettingsTab {

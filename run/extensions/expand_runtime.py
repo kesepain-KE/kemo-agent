@@ -15,7 +15,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from run.extensions.attachments import validate_media_file
 from run.config import load_config
@@ -578,6 +578,7 @@ def invoke_expand(
     params: dict[str, Any] | None,
     timeout: float,
     cancel_event: threading.Event | None = None,
+    result_validator: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     """Invoke one Expand operation in a child process and publish its artifacts."""
 
@@ -649,6 +650,8 @@ def invoke_expand(
                 status = str(result.get("status") or "").strip().casefold()
                 if result.get("ok") is False or status in {"error", "failed", "failure"}:
                     raise ExpandOperationError(_operation_failure_reason(result))
+            if result_validator is not None:
+                result_validator(result)
             try:
                 artifacts = _publish_artifacts(root.resolve(), user, module_root, result)
             except ExpandOperationError as exc:

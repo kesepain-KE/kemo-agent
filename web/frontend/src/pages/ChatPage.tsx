@@ -417,6 +417,18 @@ function isProvisionalRunError(event: RunEvent) {
     && event.metadata?.committed === false
 }
 
+export function isRetryAttemptProgress(event: RunEvent) {
+  return [
+    'text_delta',
+    'reasoning_delta',
+    'tool_call_start',
+    'tool_call_result',
+    'media_output',
+    'guidance_applied',
+    'usage',
+  ].includes(event.type)
+}
+
 function findLastCurrentRoundItemIndex(
   items: ChatItem[],
   predicate: (candidate: ChatItem) => boolean,
@@ -1491,9 +1503,11 @@ export function ChatPage() {
           }
           if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+            setRunRetryNotice(null)
             deltaBatcher.push(event)
             return
           }
+          if (isRetryAttemptProgress(event)) setRunRetryNotice(null)
           deltaBatcher.flush()
           if (event.type === 'done') {
             terminalReceived = true
@@ -2086,9 +2100,11 @@ export function ChatPage() {
           }
           if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+            setRunRetryNotice(null)
             deltaBatcher.push(event)
             return
           }
+          if (isRetryAttemptProgress(event)) setRunRetryNotice(null)
           deltaBatcher.flush()
           if (event.type === 'done') {
             terminalReceived = true

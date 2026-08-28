@@ -80,7 +80,37 @@
 - `self_improve` 由主智能体调用时只允许 `manual_review`；压缩提取和记忆晋升模式属于引擎/调度器私有入口。
 - `context_manage` 是引擎内部代理，不出现在公开列表中；手动压缩必须走 `/compress` 对应的会话管线。
 - 其他公开子代理只获得自身 `agent-config.json` 声明的能力以及调用方显式输入，不会继承主智能体的工具权限。
-- 同步调用默认遵循 `agent_runtime.default_timeout`，也可以在 `call` 中传入独立的 `timeout` 秒数；不会被普通 `tools.timeout` 提前截断。达到期限后，框架默认再保留 `agent_runtime.timeout_survival_seconds` 秒的收尾存活期；期间自然完成会返回结果并标记 `completed_after_timeout`，仍未完成才返回 `timed_out` 或 `timed_out_running`。存活期内仍可取消。
+- 同步调用默认遵循 `agent_runtime.default_timeout`，也可以在 `call` 中传入独立的 `timeout` 秒数；不会被普通 `tools.timeout` 提前截断。这个 `timeout` 是主智能体本次等待期限，不是到点立即杀掉子代理的命令：期限到达且任务仍在排队或运行时，调用会返回 `task_id`，子代理继续进入收尾存活期。之后使用 `action=status` 追踪，使用 `action=cancel` 请求停止。收尾存活期内自然完成会标记 `completed_after_timeout`；若调用方已经收到超时结果后底层线程才完成，状态会从 `timed_out_running` 收敛到 `completed`，并在结果元数据中标记 `completed_after_detach`。执行线程未退出时保留 `timed_out_running`，此状态仍可发起取消请求，不能描述成已经强制终止。
+
+### 调用外部智能体
+
+`action=list` 也会列出当前用户已授权拓展中的外部智能体。外部条目的名称采用
+`external:<scope>:<拓展名>:<代理名>`，例如 `external:user:remote_bridge:researcher`。
+调用时继续使用 `action=call`，把该完整句柄放入 `agent`，把业务数据放入 `input`，并保持
+`wait=true`。外部调用通过拓展的隔离进程执行，仍受拓展白名单、路径安全、超时、取消和结果大小限制；
+当前不支持 `wait=false`，避免在没有统一任务状态合同的情况下遗留无人管理的远程任务。
+
+要绑定外部智能体，在对应拓展目录内增加可选的 `agent_bridge.json`：
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "name": "researcher",
+      "description": "外部研究智能体",
+      "command": "external_agent_call",
+      "input_schema": {"type": "object", "additionalProperties": true},
+      "output_schema": {"type": "object", "additionalProperties": true},
+      "timeout": 600
+    }
+  ]
+}
+```
+
+拓展的 `start_expand.py` 收到的参数为 `{agent, input, protocol}`，必须返回
+`{"status":"completed","data":{...}}`（可选 `usage`、`model`）。远程 URL、访问令牌和其他
+凭据只能保存在拓展自己的受信配置或环境变量中，不能写入 `agent_bridge.json`、Prompt、回复或日志。
 
 ## Tool
 
@@ -92,7 +122,7 @@
     "type": "object",
     "properties": {
       "action": {"type": "string", "enum": ["list", "create", "call", "status", "cancel"]},
-      "agent": {"type": "string", "description": "call 时使用的公开子代理名称"},
+      "agent": {"type": "string", "description": "call 时使用的公开子代理名称；外部智能体使用 external:<scope>:<拓展名>:<代理名> 句柄"},
       "input": {"type": "object", "description": "call 时传给子代理的结构化输入"},
       "definition": {
         "type": "object",
@@ -151,6 +181,8 @@
   "version": "1.0.0",
   "enabled": true,
   "entrypoint": "tool.py:run",
-  "timeout_policy": "agent_runtime"
+  "timeout_policy": "agent_runtime",
+  "timeout_grace_seconds": 5,
+  "execution_mode": "thread"
 }
 ```

@@ -123,6 +123,7 @@ _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
+_SUBAGENT_DEFAULT_WATCHDOG_SECONDS = 3_600.0
 MAX_TOOL_RESULT_CHARS = 100_000
 
 
@@ -440,15 +441,39 @@ def resolve_tool_timeout(
         raise ToolValidationError(
             f"工具 {tool.name} timeout_policy 无效：{tool.timeout_policy}"
         )
+    properties = tool.input_schema.get("properties") or {}
+    timeout_rule = properties.get("timeout")
     if tool.timeout_policy == "agent_runtime":
+        # A caller-provided subagent timeout is the deadline for this tool as
+        # well.  Otherwise the process/thread watchdog can expire first and
+        # hide the task id that lets the caller inspect or cancel a still-
+        # running subagent.
+        if "timeout" in arguments and isinstance(timeout_rule, dict):
+            requested = _positive_timeout(arguments["timeout"], field="参数 timeout")
+            grace = float(tool.timeout_grace_seconds)
+            if not math.isfinite(grace) or grace < 0 or grace > 30:
+                raise ToolValidationError(
+                    f"工具 {tool.name} timeout_grace_seconds 必须是 0..30 秒之间"
+                )
+            return requested + grace
         runtime_timeout = (context or {}).get("agent_timeout", default)
+        if tool.name == "subagent_dispatch" and isinstance(timeout_rule, dict):
+            # External bindings may declare a 3600-second default.  Keep the
+            # dispatch wrapper alive long enough to return a task handle even
+            # when the model omits an explicit timeout argument.
+            runtime_timeout = max(
+                _positive_timeout(
+                    runtime_timeout,
+                    field="agent_runtime.default_timeout",
+                ),
+                _SUBAGENT_DEFAULT_WATCHDOG_SECONDS,
+            )
+            return runtime_timeout + _AGENT_TOOL_WATCHDOG_GRACE
         return _positive_timeout(
             runtime_timeout,
             field="agent_runtime.default_timeout",
         ) + _AGENT_TOOL_WATCHDOG_GRACE
 
-    properties = tool.input_schema.get("properties") or {}
-    timeout_rule = properties.get("timeout")
     if "timeout" in arguments and isinstance(timeout_rule, dict):
         requested = _positive_timeout(arguments["timeout"], field="参数 timeout")
         grace = float(tool.timeout_grace_seconds)

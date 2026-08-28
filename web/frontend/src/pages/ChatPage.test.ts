@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
 import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 
 describe('长任务气泡显示条件', () => {
@@ -17,6 +17,13 @@ describe('长任务气泡显示条件', () => {
 })
 
 describe('reduceRunEvent', () => {
+  it('重试成功收到下一次尝试的首个事件后清除重试气泡', () => {
+    expect(isRetryAttemptProgress({ type: 'reasoning_delta', content: '新尝试' })).toBe(true)
+    expect(isRetryAttemptProgress({ type: 'tool_call_start', tool_name: 'file' })).toBe(true)
+    expect(isRetryAttemptProgress({ type: 'retrying', content: '等待重试' })).toBe(false)
+    expect(isRetryAttemptProgress({ type: 'error', metadata: { retryable: true, committed: false } })).toBe(false)
+  })
+
   it('批量合并高频流式增量，并允许非增量事件到达前同步冲刷', () => {
     vi.useFakeTimers()
     try {

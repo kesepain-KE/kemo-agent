@@ -1302,7 +1302,11 @@ class PlanGenerationTests(unittest.TestCase):
 
     def test_dispatch_task_plan_uses_authoritative_payload_and_requires_wait(self) -> None:
         _, root = _make_root(["alice"])
-        definition = SimpleNamespace(name="task_plan")
+        definition = SimpleNamespace(
+            name="task_plan",
+            timeout=600.0,
+            execution="background_serial",
+        )
         enriched = {
             "action": "create",
             "goal": "test",
@@ -1316,6 +1320,21 @@ class PlanGenerationTests(unittest.TestCase):
             model="mock",
         )
         context = {"root": str(root), "user": "alice", "source": "web", "session_id": "s1"}
+        submitted: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        class RecordingScheduler:
+            def submit(self, *args, **kwargs):
+                submitted.append((args, kwargs))
+                handler = kwargs.get("result_handler")
+                if handler is not None:
+                    handler(result)
+                return "agent-task-test"
+
+            def wait(self, task_id, timeout=None):
+                del task_id, timeout
+                return result
+
+        scheduler = RecordingScheduler()
         with (
             patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
             patch("plugins.subagent_dispatch.tool.load_config", return_value=CONFIG),
@@ -1323,10 +1342,12 @@ class PlanGenerationTests(unittest.TestCase):
                 "plugins.subagent_dispatch.tool.prepare_main_agent_invocation",
                 return_value=SimpleNamespace(payload=enriched, synchronous_only=True),
             ) as prepare,
-            patch("plugins.subagent_dispatch.tool.AgentRunner") as runner,
+            patch(
+                "plugins.subagent_dispatch.tool.get_agent_scheduler",
+                return_value=scheduler,
+            ),
             patch("plugins.subagent_dispatch.tool.persist_main_agent_result", return_value=None) as persist,
         ):
-            runner.return_value.run.return_value = result
             dispatched = dispatch_subagent(
                 "call",
                 agent="task_plan",
@@ -1335,7 +1356,8 @@ class PlanGenerationTests(unittest.TestCase):
             )
 
         prepare.assert_called_once()
-        runner.return_value.run.assert_called_once_with("task_plan", enriched)
+        self.assertEqual(submitted[0][0], ("task_plan", enriched))
+        self.assertTrue(submitted[0][1]["allow_sync"])
         persist.assert_called_once()
         self.assertEqual(dispatched["data"]["action"], "skip")
 
