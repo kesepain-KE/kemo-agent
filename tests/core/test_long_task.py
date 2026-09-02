@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import queue
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ from run.long_task import (
 from run.long_task import semantic_user_text
 from run.scheduler import _summary_rounds
 from run.memory import memory_round_payload
+from run.conversation import GuidanceMailbox
 from web.service import WebRunService
 
 
@@ -287,6 +289,187 @@ class LongTaskTests(unittest.TestCase):
 
         self.assertEqual(observed_statuses, ["running"])
         self.assertEqual(events[-1].metadata["long_task_state"]["status"], "completed")
+
+    def test_continuation_alias_guidance_is_delivered_to_replacement_mailbox(self) -> None:
+        _, root = self.make_root()
+        session_id = "handoff-guidance"
+        self.reserve(root, session_id)
+        set_long_task_enabled(root, "alice", "web", session_id, True)
+        requests: list[dict[str, object]] = []
+        received: list[object] = []
+        close_started = threading.Event()
+        allow_close = threading.Event()
+
+        def source(request, **_kwargs):
+            requests.append(dict(request))
+            if len(requests) == 1:
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "committed": True,
+                        "status": "limited",
+                        "stop_reason": "max_tool_iterations",
+                    },
+                )
+                return
+            try:
+                received.append(request["_guidance_queue"].get(timeout=2))
+            except queue.Empty:
+                received.append(None)
+            yield RunEvent(
+                type="done",
+                metadata={"committed": True, "status": "completed"},
+            )
+
+        service = WebRunService(root, event_source=source)
+        stream = service.stream_chat(
+            "alice",
+            session_id,
+            "执行长任务",
+            cancel_event=threading.Event(),
+            run_id="run_handoff_guidance",
+        )
+        with service._active_runs_lock:
+            initial_mailbox = service._active_runs["run_handoff_guidance"].guidance
+
+        original_close = GuidanceMailbox.close
+
+        def blocking_close(mailbox: GuidanceMailbox) -> None:
+            if mailbox is initial_mailbox and not close_started.is_set():
+                close_started.set()
+                if not allow_close.wait(timeout=2):
+                    raise AssertionError("长任务续跑 mailbox 关闭未完成")
+            original_close(mailbox)
+
+        captured: list[RunEvent] = []
+        worker = threading.Thread(target=lambda: captured.extend(stream))
+        with patch.object(GuidanceMailbox, "close", new=blocking_close):
+            worker.start()
+            self.assertTrue(close_started.wait(timeout=2))
+
+            submitted: dict[str, object] = {}
+            submit_called = threading.Event()
+            submit_done = threading.Event()
+            original_submit = service.submit_guidance
+
+            def submit_guidance(*args, **kwargs):
+                submit_called.set()
+                try:
+                    submitted["value"] = original_submit(*args, **kwargs)
+                finally:
+                    submit_done.set()
+
+            with patch.object(service, "submit_guidance", side_effect=submit_guidance):
+                submitter = threading.Thread(
+                    target=lambda: service.submit_guidance(
+                        "alice",
+                        "run_handoff_guidance",
+                        "交给续跑",
+                        source="web",
+                        session_id=session_id,
+                    )
+                )
+                submitter.start()
+                self.assertTrue(submit_called.wait(timeout=2))
+                # The hand-off owns the service lock while closing/replacing
+                # the mailbox; submission through the old alias must wait.
+                self.assertFalse(submit_done.wait(timeout=0.2))
+                allow_close.set()
+                submitter.join(timeout=3)
+                self.assertFalse(submitter.is_alive())
+
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(submitted["value"]["status"], "accepted_current_run")
+        self.assertEqual(received, ["交给续跑"])
+        self.assertEqual([event.type for event in captured], ["long_task_update", "done"])
+
+    def test_interleaved_long_tasks_keep_continuations_in_their_own_sessions(self) -> None:
+        _, root = self.make_root()
+        self.reserve(root, "long-a")
+        self.reserve(root, "long-b")
+        set_long_task_enabled(root, "alice", "web", "long-a", True)
+        requests: list[tuple[str, str]] = []
+        request_counts: dict[str, int] = {}
+        lock = threading.Lock()
+
+        def source(request, **_kwargs):
+            session_id = str(request["session_id"])
+            with lock:
+                request_counts[session_id] = request_counts.get(session_id, 0) + 1
+                ordinal = request_counts[session_id]
+                requests.append((str(request["source"]), session_id))
+            if session_id == "long-a" and ordinal == 1:
+                yield RunEvent(
+                    type="done",
+                    metadata={
+                        "committed": True,
+                        "status": "limited",
+                        "stop_reason": "max_tool_iterations",
+                    },
+                )
+                return
+            yield RunEvent(
+                type="done",
+                metadata={"committed": True, "status": "completed"},
+            )
+
+        service = WebRunService(root, event_source=source)
+        captured: dict[str, list[RunEvent]] = {"long-a": [], "long-b": []}
+        workers = [
+            threading.Thread(
+                target=lambda session=session: captured[session].extend(
+                    service.stream_chat(
+                        "alice",
+                        session,
+                        "执行",
+                        cancel_event=threading.Event(),
+                        run_id=f"run_{session.replace('-', '_')}_123",
+                    )
+                )
+            )
+            for session in captured
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(
+            request_counts,
+            {"long-a": 2, "long-b": 1},
+        )
+        self.assertTrue(all(source_name == "web" for source_name, _ in requests))
+        self.assertEqual(
+            {session for _, session in requests},
+            {"long-a", "long-b"},
+        )
+        self.assertEqual(
+            [event.type for event in captured["long-a"]],
+            ["long_task_update", "done"],
+        )
+        self.assertEqual([event.type for event in captured["long-b"]], ["done"])
+        self.assertTrue(
+            all(
+                event.metadata["session_id"] == "long-a"
+                for event in captured["long-a"]
+            )
+        )
+        self.assertTrue(
+            all(
+                event.metadata["session_id"] == "long-b"
+                for event in captured["long-b"]
+            )
+        )
+        self.assertEqual(
+            get_long_task_state(root, "alice", "web", "long-a")["run_count"],
+            2,
+        )
+        self.assertEqual(
+            get_long_task_state(root, "alice", "web", "long-b")["run_count"],
+            0,
+        )
 
     def test_disabled_and_non_tool_limit_runs_do_not_continue(self) -> None:
         for session_id, enabled, stop_reason in (

@@ -18,7 +18,45 @@ from pathlib import Path
 from typing import Any
 
 
+def _windows_pythonw_executable() -> str | None:
+    """Return the sibling ``pythonw.exe`` used to hide spawn workers."""
+
+    if os.name != "nt":
+        return None
+    candidate = Path(sys.executable).with_name("pythonw.exe")
+    try:
+        return str(candidate.resolve()) if candidate.is_file() else None
+    except OSError:
+        return None
+
+
+def _configure_isolated_process_context(context: Any) -> str | None:
+    """Use a console-less interpreter for Windows spawn workers when present."""
+
+    executable = _windows_pythonw_executable()
+    if executable:
+        context.set_executable(executable)
+    return executable
+
+
 _PROCESS_CONTEXT = multiprocessing.get_context("spawn")
+# ``multiprocessing``'s Windows spawn implementation otherwise starts
+# ``python.exe`` with no creation flags.  A console-less interpreter keeps
+# every framework-managed process-mode plugin from flashing a console.
+_ISOLATED_EXECUTABLE = _configure_isolated_process_context(_PROCESS_CONTEXT)
+
+
+def _ensure_worker_stdio() -> None:
+    """Give console-less Windows workers safe discard streams for plugin code."""
+
+    for name, mode in (("stdin", "r"), ("stdout", "w"), ("stderr", "w")):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            stream = open(os.devnull, mode, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        setattr(sys, name, stream)
 
 
 def _load_callable(module_path: str, function_name: str):
@@ -67,6 +105,7 @@ def _isolated_worker(
     cancel_event: Any,
     connection: Connection,
 ) -> None:
+    _ensure_worker_stdio()
     if os.name != "nt":
         try:
             os.setsid()

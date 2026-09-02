@@ -41,6 +41,15 @@ finally:
         sys.modules.pop("upstream", None)
     else:
         sys.modules["upstream"] = _previous_upstream
+_previous_upstream_for_events = sys.modules.get("upstream", _missing_module)
+sys.modules["upstream"] = bridge_upstream
+try:
+    bridge_events = _load_module("kemo_app_test_events", "events.py")
+finally:
+    if _previous_upstream_for_events is _missing_module:
+        sys.modules.pop("upstream", None)
+    else:
+        sys.modules["upstream"] = _previous_upstream_for_events
 _previous_lifecycle = sys.modules.get("lifecycle", _missing_module)
 _previous_start_expand = sys.modules.get("start_expand", _missing_module)
 try:
@@ -128,6 +137,73 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn("record = await RUNS.start(session.username, payload)", source)
         self.assertNotIn('UPSTREAM.open_stream("POST", "/api/chat"', source)
 
+    def test_active_runs_allows_device_only_recovery_scope(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('if not requested_session and not requested_client:', source)
+        self.assertIn('raise HTTPException(400, "client_id_or_session_id_required")', source)
+        self.assertIn('client_id=requested_client,', source)
+        self.assertIn('session_id=requested_session,', source)
+
+    def test_bridge_controls_forward_the_durable_run_session_scope(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        broker_source = (MODULE_ROOT / "run_broker.py").read_text(encoding="utf-8")
+        self.assertIn("scope = RUNS.scope(session.username, body.run_id)", source)
+        self.assertIn('"source": APP_SOURCE', source)
+        self.assertIn('"session_id": requested_session', source)
+        self.assertIn("def scope(self, username: str, run_id: str)", broker_source)
+
+    def test_bridge_uses_core_session_id_length_for_all_boundaries(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("SESSION_ID_MAX_LENGTH = 128", source)
+        self.assertNotIn("session_id: str = Field(min_length=1, max_length=256)", source)
+        self.assertNotIn('session_id: str = Query("", max_length=256)', source)
+        self.assertNotIn("len(subscribed_session_id) > 256", source)
+        self.assertIn("FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH)", source)
+
+    def test_bridge_run_scope_lookup_is_user_scoped_without_replay_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+            store.create(
+                "alice",
+                {"run_id": "run_scope", "session_id": "app-session", "prompt": "hello"},
+            )
+            self.assertEqual(
+                store.get("alice", "run_scope")["session_id"],
+                "app-session",
+            )
+            with self.assertRaises(KeyError):
+                store.get("bob", "run_scope")
+            store.close()
+
+    def test_long_task_replacement_run_ids_are_durable_aliases_in_one_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
+            store.create(
+                "alice",
+                {"run_id": "run-initial", "session_id": "app-session", "client_id": "phone"},
+            )
+            store.append(
+                "alice",
+                "run-initial",
+                json.dumps(
+                    {
+                        "type": "long_task_update",
+                        "metadata": {"next_run_id": "run-next-123"},
+                    }
+                ),
+            )
+            self.assertEqual(store.get("alice", "run-next-123")["run_id"], "run-initial")
+            self.assertEqual(
+                len(store.events_after("alice", "run-next-123", 0)),
+                1,
+            )
+            broker = bridge_run_broker.RunBroker(object(), store)
+            with self.assertRaises(KeyError):
+                broker.snapshot("alice", "run-next-123", session_id="other-session")
+            with self.assertRaises(KeyError):
+                store.get("bob", "run-next-123")
+            store.close()
+
     def test_chat_streams_the_broker_issued_run_id_for_legacy_clients(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn(
@@ -136,7 +212,7 @@ class KemoAppExpandTests(unittest.TestCase):
         )
         self.assertIn('"run_id": run_id', source)
         self.assertIn(
-            'RUNS.stream(session.username, str(record["run_id"]), after=0)',
+            'session_id=requested_session',
             source,
         )
 
@@ -339,6 +415,179 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('params={"source": APP_SOURCE, "client_id": client_id}', source)
         self.assertIn('f"/api/users/{user}/overview", params=params', source)
         self.assertIn('f"/api/users/{user}/runtime/status", params=params', source)
+
+    def test_bridge_task_and_status_routes_keep_explicit_session_scope(self) -> None:
+        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        events = (MODULE_ROOT / "events.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'data = await _tasks(session.username, session_id=requested_session)',
+            source,
+        )
+        self.assertIn('if client_id and not resolved_session_id:', source)
+        self.assertIn(
+            'params = {"source": APP_SOURCE, "session_id": resolved_session_id}',
+            source,
+        )
+        self.assertIn(
+            'if target_session and connection_session != target_session:',
+            events,
+        )
+
+    def test_event_hub_never_delivers_scoped_events_to_other_or_unbound_connections(self) -> None:
+        async def scenario() -> None:
+            hub = bridge_events.EventHub(object())
+            session_a = hub.subscribe("alice", "phone-a", "session-a")
+            session_b = hub.subscribe("alice", "phone-b", "session-b")
+            unbound = hub.subscribe("alice", "legacy-phone")
+            try:
+                await hub.publish(
+                    "alice",
+                    "conversation.completed",
+                    {"session_id": "session-a"},
+                    session_id="session-a",
+                )
+                self.assertEqual((await session_a.get())["session_id"], "session-a")
+                self.assertTrue(session_b.empty())
+                self.assertTrue(unbound.empty())
+
+                # A missing scope is never a wildcard for conversation or
+                # task-plan events.  This protects future callers that forget
+                # to pass session_id from turning private events into a
+                # user-wide broadcast.
+                await hub.publish(
+                    "alice",
+                    "conversation.completed",
+                    {"session_id": "session-a"},
+                )
+                await hub.publish(
+                    "alice",
+                    "task_plan.completed",
+                    {"session_id": "session-a"},
+                )
+                self.assertTrue(session_a.empty())
+                self.assertTrue(session_b.empty())
+                self.assertTrue(unbound.empty())
+
+                # The envelope scope and payload scope must agree; otherwise
+                # a misrouted plan snapshot is dropped instead of delivered to
+                # the wrong conversation.
+                await hub.publish(
+                    "alice",
+                    "task_plan.completed",
+                    {"session_id": "session-b"},
+                    session_id="session-a",
+                )
+                self.assertTrue(session_a.empty())
+                self.assertTrue(session_b.empty())
+                self.assertTrue(unbound.empty())
+
+                await hub.publish("alice", "system.warning", {"message": "health"})
+                self.assertEqual((await session_a.get())["type"], "system.warning")
+                self.assertEqual((await session_b.get())["type"], "system.warning")
+                self.assertEqual((await unbound.get())["type"], "system.warning")
+
+                self.assertFalse(
+                    await hub.publish_to_device(
+                        "alice",
+                        "phone-a",
+                        "task_plan.completed",
+                        {},
+                    )
+                )
+                self.assertTrue(session_a.empty())
+                self.assertTrue(session_b.empty())
+                self.assertTrue(unbound.empty())
+
+                self.assertTrue(
+                    await hub.publish_to_device(
+                        "alice",
+                        "phone-a",
+                        "task_plan.completed",
+                        {},
+                        session_id="session-a",
+                    )
+                )
+                self.assertEqual((await session_a.get())["type"], "task_plan.completed")
+                self.assertTrue(session_b.empty())
+                self.assertTrue(unbound.empty())
+            finally:
+                await hub.stop()
+
+        asyncio.run(scenario())
+
+    def test_terminal_done_statuses_preserve_failure_and_interruption(self) -> None:
+        expected = {
+            "": "completed",
+            "completed": "completed",
+            "success": "completed",
+            "failed": "failed",
+            "error": "failed",
+            "limited": "interrupted",
+            "paused": "interrupted",
+            "interrupted": "interrupted",
+            "cancelled": "cancelled",
+        }
+        for upstream_status, bridge_status in expected.items():
+            payload = json.dumps(
+                {"type": "done", "metadata": {"status": upstream_status}}
+            )
+            status, _ = bridge_run_broker._terminal_status(payload)
+            self.assertEqual(status, bridge_status, upstream_status)
+
+        # Some upstream adapters put status beside metadata.  It must receive
+        # the same mapping instead of falling through to completed.
+        status, _ = bridge_run_broker._terminal_status(
+            json.dumps({"type": "done", "status": "failed"})
+        )
+        self.assertEqual(status, "failed")
+
+    def test_event_hub_snapshot_uses_app_source_and_custom_app_session_ids(self) -> None:
+        async def scenario() -> None:
+            calls: list[tuple[str, str, dict[str, object]]] = []
+
+            class Upstream:
+                async def request_json(self, method, path, **kwargs):
+                    calls.append((method, path, kwargs))
+                    if path.endswith("/tasks"):
+                        return {"plans": []}
+                    return {"sessions": []}
+
+                async def health(self):
+                    return {"status": "ok"}
+
+            hub = bridge_events.EventHub(Upstream())
+            snapshot = await hub._snapshot("alice")
+            self.assertEqual(snapshot["tasks"], {"plans": []})
+            task_call = next(call for call in calls if call[1].endswith("/tasks"))
+            session_call = next(call for call in calls if call[1].endswith("/sessions"))
+            self.assertEqual(task_call[2]["params"], {"source": "app"})
+            self.assertEqual(
+                session_call[2]["params"],
+                {"source": "app", "limit": "50"},
+            )
+
+            queue = hub.subscribe("alice", "phone-a", "custom-session")
+            await hub._emit_diff(
+                "alice",
+                {"health": {"status": "ok"}, "tasks": {"plans": []}, "sessions": {"sessions": []}},
+                {
+                    "health": {"status": "ok"},
+                    "tasks": {"plans": []},
+                    "sessions": {
+                        "sessions": [
+                            {
+                                "session_id": "custom-session",
+                                "source": "app",
+                                "rounds": 1,
+                            }
+                        ]
+                    },
+                },
+            )
+            self.assertEqual((await queue.get())["type"], "conversation.completed")
+            await hub.stop()
+
+        asyncio.run(scenario())
 
     def test_conversation_delete_and_close_forward_android_client_id(self) -> None:
         source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")

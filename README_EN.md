@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.4-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.5-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,17 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.4`
+Current version: `1.2.5`
+
+### 1.2.5 update
+
+This is a release-readiness stability patch focused on deletion, recovery, knowledge boundaries, and memory extraction.
+
+- Deleted conversations now keep a durable delete fence. A late terminal commit from an in-flight Run cannot recreate the session, history windows, or active binding.
+- Knowledge-index discovery rejects both symbolic links and Windows junctions, so a link cannot inject files from outside the project tree.
+- The `on_commit` round-memory extraction call now uses the real extractor parameter contract, allowing candidates to be produced during normal runs.
+- App bridge recovery may query all active Runs for one device with `client_id` alone; a request without either device or conversation scope is still rejected.
+- Regression coverage was added for these boundaries, and the release check plus backend tests pass.
 
 ### 1.2.4 update
 

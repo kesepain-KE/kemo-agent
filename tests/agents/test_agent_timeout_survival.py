@@ -227,7 +227,12 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
     def test_dispatch_validates_and_forwards_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            context = {"root": str(root), "user": "alice"}
+            context = {
+                "root": str(root),
+                "user": "alice",
+                "source": "web",
+                "session_id": "timeout-validation",
+            }
             definition = SimpleNamespace(name="custom", timeout=10.0)
             result = AgentRunResult("custom", {"ok": True}, "{}", {}, "mock")
             submitted: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -237,8 +242,9 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                     submitted.append((args, kwargs))
                     return "agent-task-test"
 
-                def wait(self, task_id, timeout=None):
+                def wait(self, task_id, timeout=None, **kwargs):
                     self.last_wait = (task_id, timeout)
+                    del kwargs
                     return result
 
             with (
@@ -318,20 +324,28 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                 del args, kwargs
                 return "agent-task-running"
 
-            def wait(self, task_id, timeout=None):
+            def wait(self, task_id, timeout=None, **scope):
                 del task_id, timeout
+                self.wait_scope = scope
                 raise AgentTaskWaitTimeout("等待超时")
 
-            def get(self, task_id):
+            def get(self, task_id, **scope):
+                self.get_scope = scope
                 return {"id": task_id, "status": self.status}
 
-            def cancel(self, task_id):
+            def cancel(self, task_id, **scope):
+                self.cancel_scope = scope
                 self.cancelled = True
                 self.status = "cancelled"
                 return True
 
         scheduler = RunningScheduler()
-        context = {"root": str(self.root), "user": "kesepain"}
+        context = {
+            "root": str(self.root),
+            "user": "kesepain",
+            "source": "web",
+            "session_id": "subagent-timeout-test",
+        }
         with (
             patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
             patch("plugins.subagent_dispatch.tool.load_config", return_value={}),
@@ -367,6 +381,38 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         self.assertEqual(status["status"], "running")
         self.assertTrue(cancelled["cancelled"])
         self.assertTrue(scheduler.cancelled)
+        self.assertEqual(scheduler.wait_scope, {"source": "web", "session_id": "subagent-timeout-test"})
+        self.assertEqual(scheduler.get_scope, {"source": "web", "session_id": "subagent-timeout-test"})
+        self.assertEqual(scheduler.cancel_scope, {"source": "web", "session_id": "subagent-timeout-test"})
+
+    def test_scoped_control_rejects_scheduler_without_scope_api(self) -> None:
+        definition = SimpleNamespace(name="custom", timeout=10.0, execution="sync")
+
+        class LegacyScheduler:
+            def get(self, task_id):
+                return {"id": task_id, "status": "running"}
+
+        context = {
+            "root": str(self.root),
+            "user": "kesepain",
+            "source": "web",
+            "session_id": "scope-required",
+        }
+        with (
+            patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
+            patch("plugins.subagent_dispatch.tool.load_config", return_value={}),
+            patch(
+                "plugins.subagent_dispatch.tool.get_agent_scheduler",
+                return_value=LegacyScheduler(),
+            ),
+            self.assertRaisesRegex(AgentError, "不支持对话空间作用域"),
+        ):
+            dispatch_subagent(
+                "status",
+                agent="custom",
+                task_id="agent-task-legacy",
+                context=context,
+            )
 
     def test_cancel_race_preserves_non_terminated_timeout_status(self) -> None:
         registry = discover_agents(self.root)

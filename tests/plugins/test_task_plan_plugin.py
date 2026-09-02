@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.task_plan.tool import run
@@ -39,13 +40,15 @@ class TaskPlanPluginTests(unittest.TestCase):
         steps: int = 2,
         status: str = "pending",
         auto_accept: bool = False,
+        source: str = "test",
+        session_id: str = "session-a",
     ) -> dict:
         plan = normalize_plan(
             title="测试计划",
             description="验证运行态插件",
             user="alice",
-            source="test",
-            session_id="session-a",
+            source=source,
+            session_id=session_id,
             status=status,
             auto_accept=auto_accept,
             steps=[
@@ -91,14 +94,9 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(viewed["plan"]["plan_id"], plan["plan_id"])
 
     def test_active_plan_fallback_does_not_cross_conversation_spaces(self) -> None:
-        plan_a = self.create_plan()
-        PlanStore(self.root, "alice").update(
-            plan_a["plan_id"],
-            lambda plan: {
-                **plan,
-                "source": "web",
-                "session_id": "conversation-a",
-            },
+        plan_a = self.create_plan(
+            source="web",
+            session_id="conversation-a",
         )
         context_b = {
             **self.context,
@@ -133,24 +131,13 @@ class TaskPlanPluginTests(unittest.TestCase):
         )
 
     def test_list_only_returns_current_conversation_space(self) -> None:
-        plan_a = self.create_plan()
-        store = PlanStore(self.root, "alice")
-        store.update(
-            plan_a["plan_id"],
-            lambda plan: {
-                **plan,
-                "source": "web",
-                "session_id": "conversation-a",
-            },
+        plan_a = self.create_plan(
+            source="web",
+            session_id="conversation-a",
         )
-        plan_b = self.create_plan()
-        store.update(
-            plan_b["plan_id"],
-            lambda plan: {
-                **plan,
-                "source": "web",
-                "session_id": "conversation-b",
-            },
+        self.create_plan(
+            source="web",
+            session_id="conversation-b",
         )
 
         listed = run(
@@ -173,6 +160,141 @@ class TaskPlanPluginTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("source", result["error"])
+
+    def test_step_done_does_not_overwrite_a_concurrent_completion(self) -> None:
+        plan = self.create_plan(status="approved")
+        delegate = PlanStore(self.root, "alice")
+
+        class RacingStore:
+            def __init__(self) -> None:
+                self.read_count = 0
+
+            def read(self, plan_id: str) -> dict:
+                value = delegate.read(plan_id)
+                self.read_count += 1
+                if self.read_count == 2:
+                    delegate.update(
+                        plan_id,
+                        lambda current: {
+                            **current,
+                            "status": "running",
+                            "current_step": "step_1",
+                            "steps": [
+                                {
+                                    **step,
+                                    "status": "completed",
+                                    "result": "另一个执行器的结果",
+                                    "finished_at": "external",
+                                }
+                                if step.get("step_id") == "step_1"
+                                else step
+                                for step in current["steps"]
+                            ],
+                        },
+                    )
+                return value
+
+            def update(self, *args, **kwargs):
+                return delegate.update(*args, **kwargs)
+
+        racing = RacingStore()
+        with patch("plugins.task_plan.tool.PlanStore", return_value=racing):
+            result = run(
+                action="step_done",
+                plan_id=plan["plan_id"],
+                step_id="step_1",
+                result="陈旧执行器的结果",
+                context=self.context,
+            )
+
+        self.assertTrue(result["ok"])
+        current = delegate.read(plan["plan_id"])
+        self.assertEqual(current["steps"][0]["status"], "completed")
+        self.assertEqual(current["steps"][0]["result"], "另一个执行器的结果")
+
+    def test_step_fail_does_not_overwrite_a_concurrent_completion(self) -> None:
+        plan = self.create_plan(status="approved")
+        delegate = PlanStore(self.root, "alice")
+
+        class RacingStore:
+            def __init__(self) -> None:
+                self.read_count = 0
+
+            def read(self, plan_id: str) -> dict:
+                value = delegate.read(plan_id)
+                self.read_count += 1
+                if self.read_count == 2:
+                    delegate.update(
+                        plan_id,
+                        lambda current: {
+                            **current,
+                            "status": "running",
+                            "current_step": "step_1",
+                            "steps": [
+                                {
+                                    **step,
+                                    "status": "completed",
+                                    "result": "已完成",
+                                    "finished_at": "external",
+                                }
+                                if step.get("step_id") == "step_1"
+                                else step
+                                for step in current["steps"]
+                            ],
+                        },
+                    )
+                return value
+
+            def update(self, *args, **kwargs):
+                return delegate.update(*args, **kwargs)
+
+        racing = RacingStore()
+        with patch("plugins.task_plan.tool.PlanStore", return_value=racing):
+            result = run(
+                action="step_fail",
+                plan_id=plan["plan_id"],
+                step_id="step_1",
+                error="陈旧执行器的错误",
+                context=self.context,
+            )
+
+        self.assertFalse(result["ok"])
+        current = delegate.read(plan["plan_id"])
+        self.assertEqual(current["steps"][0]["status"], "completed")
+        self.assertEqual(current["steps"][0]["result"], "已完成")
+
+    def test_all_plan_actions_fail_closed_without_complete_scope(self) -> None:
+        plan = self.create_plan()
+        for action in (
+            "view",
+            "abort",
+            "approve",
+            "pause",
+            "resume",
+            "edit",
+            "retry_step",
+            "reset_step",
+            "step_done",
+            "step_fail",
+        ):
+            with self.subTest(action=action):
+                result = run(
+                    action=action,
+                    plan_id=plan["plan_id"],
+                    step_id="step_1",
+                    revision=plan["revision"],
+                    title="should not apply",
+                    result="should not apply",
+                    error="should not apply",
+                    context={"root": str(self.root), "user": "alice"},
+                )
+                self.assertFalse(result["ok"])
+                self.assertIn("source", result["error"])
+
+        self.assertEqual(
+            PlanStore(self.root, "alice").read(plan["plan_id"])["status"],
+            "pending",
+        )
 
     def test_step_done_persists_result_is_idempotent_and_auto_completes(self) -> None:
         plan = self.create_plan(status="approved")

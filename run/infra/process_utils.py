@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 import os
 import signal
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -28,10 +28,32 @@ def hidden_subprocess_kwargs() -> dict[str, Any]:
     }
 
 
-def cancellable_subprocess_kwargs() -> dict[str, Any]:
-    """Start a child in its own process group without showing a Windows console."""
+def visible_subprocess_kwargs() -> dict[str, Any]:
+    """Return options for an explicitly requested visible Windows console."""
+
+    if sys.platform != "win32":
+        return {}
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+    }
+
+
+def cancellable_subprocess_kwargs(*, show_terminal: bool = False) -> dict[str, Any]:
+    """Start a child in its own process group.
+
+    Windows children stay hidden by default.  A caller must explicitly pass
+    ``show_terminal=True`` to request a new visible console; the visible mode
+    intentionally does not combine ``CREATE_NEW_CONSOLE`` with the hidden
+    startup flags.
+    """
 
     if sys.platform == "win32":
+        if show_terminal:
+            options = visible_subprocess_kwargs()
+            options["creationflags"] = int(options.get("creationflags", 0)) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+            return options
         options = hidden_subprocess_kwargs()
         options["creationflags"] = int(options.get("creationflags", 0)) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
@@ -40,10 +62,21 @@ def cancellable_subprocess_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def detached_subprocess_kwargs() -> dict[str, Any]:
-    """Start a long-lived child detached from the launching tool process."""
+def detached_subprocess_kwargs(*, show_terminal: bool = False) -> dict[str, Any]:
+    """Start a long-lived child detached from the launching tool process.
+
+    The management process remains hidden by default.  Explicit visible mode
+    creates a new console for the managed command and omits
+    ``DETACHED_PROCESS`` because that flag would suppress the console.
+    """
 
     if sys.platform == "win32":
+        if show_terminal:
+            options = visible_subprocess_kwargs()
+            options["creationflags"] = int(options.get("creationflags", 0)) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+            return options
         options = hidden_subprocess_kwargs()
         options["creationflags"] = (
             int(options.get("creationflags", 0))

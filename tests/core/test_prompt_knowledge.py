@@ -12,6 +12,7 @@ from provider.schema import ChatResponse, Usage
 from run.engine import handle_request
 from run.config import select_knowledge_index
 from run.config import build_system_prompt
+from run.config.prompt_sources import PromptSourceError
 
 
 class MockProvider:
@@ -143,6 +144,76 @@ class PromptKnowledgeTests(unittest.TestCase):
         self.assertEqual(selection.original_chars, selection.injected_chars)
         self.assertEqual(selection.original_items, selection.injected_items)
         self.assertFalse(selection.truncated)
+
+    def test_index_selection_never_follows_symlinked_sources(self) -> None:
+        _, root, _ = self.make_root()
+        outside = root / "outside-knowledge"
+        outside.mkdir()
+        (outside / "index.md").write_text("OUTSIDE_INDEX", "utf-8")
+        user_base = root / "users" / "alice" / "knowledge"
+        linked_file = user_base / "index.md"
+        linked_dir = user_base / "linked-scope"
+        try:
+            linked_file.symlink_to(outside / "index.md")
+            linked_dir.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("当前系统不允许测试进程创建符号链接")
+
+        selection = select_knowledge_index(root, "alice")
+
+        self.assertEqual(selection.documents, ())
+        self.assertNotIn("OUTSIDE_INDEX", selection.text)
+
+    def test_index_selection_rejects_windows_junction_sources(self) -> None:
+        _, root, _ = self.make_root()
+        outside = root / "outside-junction"
+        outside.mkdir()
+        (outside / "index.md").write_text("OUTSIDE_JUNCTION_INDEX", "utf-8")
+        user_base = root / "users" / "alice" / "knowledge"
+        is_junction = getattr(Path, "is_junction", None)
+        if is_junction is None:
+            self.skipTest("当前 Python 不支持 Path.is_junction")
+
+        original = is_junction
+
+        def fake_is_junction(path: Path) -> bool:
+            return path == user_base or original(path)
+
+        with patch.object(Path, "is_junction", fake_is_junction):
+            selection = select_knowledge_index(root, "alice")
+
+        self.assertEqual(selection.documents, ())
+        self.assertNotIn("OUTSIDE_JUNCTION_INDEX", selection.text)
+
+    def test_index_selection_skips_a_source_that_becomes_unreadable(self) -> None:
+        _, root, _ = self.make_root()
+        first = root / "users" / "alice" / "knowledge" / "index.md"
+        second = root / "users" / "alice" / "knowledge" / "data_structure.md"
+        first.write_text("FIRST", "utf-8")
+        second.write_text("SECOND", "utf-8")
+
+        def read(path: Path) -> str:
+            if path == first:
+                raise PromptSourceError("源文件在扫描后不可读")
+            return path.read_text("utf-8")
+
+        with patch("run.config.knowledge.read_required_text", side_effect=read):
+            selection = select_knowledge_index(root, "alice")
+
+        self.assertEqual([item.relative_path for item in selection.documents], ["data_structure.md"])
+        self.assertEqual(selection.text, "[user:data_structure.md]\nSECOND")
+
+    def test_index_selection_tolerates_enumerator_failure(self) -> None:
+        _, root, _ = self.make_root()
+
+        with patch(
+            "run.config.knowledge.iter_files",
+            side_effect=OSError("知识库目录在扫描期间不可访问"),
+        ):
+            selection = select_knowledge_index(root, "alice")
+
+        self.assertEqual(selection.documents, ())
+        self.assertEqual(selection.text, "")
 
 
 if __name__ == "__main__":

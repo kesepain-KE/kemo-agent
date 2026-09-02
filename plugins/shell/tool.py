@@ -18,6 +18,7 @@ from run.infra import (
     detached_subprocess_kwargs,
     hidden_subprocess_kwargs,
     terminate_process_tree,
+    visible_subprocess_kwargs,
 )
 from run.infra import process_snapshot
 from run.tools import (
@@ -425,6 +426,7 @@ def _run_process(
     timeout: float,
     cancel_event: threading.Event | None,
     shell_type: str = "auto",
+    show_terminal: bool = False,
 ) -> dict[str, Any]:
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
@@ -440,7 +442,11 @@ def _run_process(
                 input=stdin.encode("utf-8") if stdin else None,
                 timeout=timeout,
                 capture_output=True,
-                **hidden_subprocess_kwargs(),
+                **(
+                    visible_subprocess_kwargs()
+                    if show_terminal
+                    else hidden_subprocess_kwargs()
+                ),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = _decode_output(exc.stdout or b"")
@@ -479,7 +485,7 @@ def _run_process(
         stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        **cancellable_subprocess_kwargs(),
+        **cancellable_subprocess_kwargs(show_terminal=show_terminal),
     )
     input_data = stdin.encode("utf-8") if stdin else None
     deadline = time.monotonic() + timeout
@@ -545,6 +551,7 @@ def _start_background(
     context: dict[str, Any],
     timeout: float,
     cancel_event: threading.Event | None,
+    show_terminal: bool = False,
 ) -> dict[str, Any]:
     root = Path(str(context.get("root") or Path.cwd())).resolve()
     source_root = Path(__file__).resolve().parents[2]
@@ -570,6 +577,7 @@ def _start_background(
         "cwd": str(cwd),
         "process_command": process_command,
         "use_shell": use_shell,
+        "show_terminal": show_terminal,
         "deadline_at": record.get("deadline_at"),
     }
     worker_environment = os.environ.copy()
@@ -681,6 +689,7 @@ def _execute(
     session: dict[str, Any] | None,
     shell_type: str = "auto",
     chain_timeout_mode: str = "total",
+    show_terminal: bool = False,
 ) -> dict[str, Any]:
     commands: list[str] = []
     operators: list[str] = []
@@ -702,6 +711,7 @@ def _execute(
             timeout=timeout,
             cancel_event=cancel_event,
             shell_type=shell_type,
+            show_terminal=show_terminal,
         )
         return {**result, "cwd": str(cwd)}
 
@@ -788,6 +798,7 @@ def run(
     action: str = "run",
     background: bool = False,
     job_id: str = "",
+    show_terminal: bool = False,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -795,6 +806,8 @@ def run(
         raise ValueError("action 必须是 run/status/cancel")
     if not isinstance(background, bool):
         raise ValueError("background 必须是布尔值")
+    if not isinstance(show_terminal, bool):
+        raise ValueError("show_terminal 必须是布尔值")
     if shell_type not in {"auto", "cmd", "powershell", "pwsh", "bash", "bash_login"}:
         raise ValueError(f"不支持的 shell_type: {shell_type}")
     if chain_timeout_mode not in {"total", "per_command"}:
@@ -871,6 +884,7 @@ def run(
                 context=context,
                 timeout=effective_timeout,
                 cancel_event=cancel_event,
+                show_terminal=show_terminal,
             )
             if background
             else _execute(
@@ -883,6 +897,7 @@ def run(
                 session=session,
                 shell_type=shell_type,
                 chain_timeout_mode=chain_timeout_mode,
+                show_terminal=show_terminal,
             )
         )
         hint = _failure_hint(command.strip(), shell_type, result)

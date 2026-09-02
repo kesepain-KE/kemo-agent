@@ -55,6 +55,7 @@ _ARCHIVE_DATA_FIELDS = frozenset(
         "user",
         "source",
         "session_id",
+        "session_generation",
         "title",
         "created_at",
         "updated_at",
@@ -86,11 +87,11 @@ def _now() -> str:
 
 
 def _window_name(session_id: str = "") -> str:
-    # Window identifiers remain opaque even when callers provide a custom
-    # session identifier.
-    value = str(session_id or "")
-    if value.startswith("conv_") and value.replace("_", "").isalnum():
-        return value
+    # The physical window key is deliberately independent from the caller's
+    # logical session id.  ``history_windows`` and its partition tables are
+    # keyed by this name, while source/session ownership is stored separately;
+    # reusing a caller-provided ``conv_*`` id could therefore make two sources
+    # overwrite one another when they happen to choose the same session id.
     return new_conversation_id()
 
 
@@ -100,8 +101,19 @@ def _lock(path: Path) -> threading.RLock:
         return _LOCKS.setdefault(key, threading.RLock())
 
 
-def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
+def empty_window(
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    session_generation: str = "",
+) -> dict[str, Any]:
     timestamp = _now()
+    # A generation is authoritative only when the session reservation supplied
+    # one.  Creating an unrelated in-memory window must not mint a value that
+    # looks like an old session generation; otherwise a normal metadata write
+    # would be indistinguishable from a stale writer after a session is reused.
+    generation = str(session_generation or "").strip()
     return {
         "text": {"schema_version": SCHEMA_VERSION, "messages": []},
         "think": {"schema_version": SCHEMA_VERSION, "rounds": []},
@@ -112,6 +124,7 @@ def empty_window(user: str, source: str, session_id: str) -> dict[str, Any]:
             "user": user,
             "source": source,
             "session_id": session_id,
+            "session_generation": generation,
             "title": "",
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -675,11 +688,11 @@ def commit_terminal_windows(
             )
             stored_data = save_window_bundle(
                 [
-                    (archive_directory, stored_archive, _SUMMARY_UNCHANGED),
-                    (runtime_directory, stored_runtime, summary_cache),
+                (archive_directory, stored_archive, _SUMMARY_UNCHANGED),
+                (runtime_directory, stored_runtime, summary_cache),
                 ],
                 session_record=record,
-                active_updates=active_updates,
+                conditional_active_updates=active_updates,
                 updated_at=timestamp,
             )
             for target, data in (
@@ -1255,13 +1268,28 @@ def prepare_window(
     conversation windows.
     """
 
+    indexed = find_index_record(root, user, source, session_id)
     existing = find_window(root, user, source, session_id)
     if existing is not None:
-        return existing, load_window(existing), False
+        window = load_window(existing)
+        generation = str((indexed or {}).get("session_generation") or "").strip()
+        if generation:
+            data = window.get("data")
+            if isinstance(data, dict) and not str(
+                data.get("session_generation") or ""
+            ).strip():
+                data["session_generation"] = generation
+        return existing, window, False
     history_dir = user_dir(user, root) / "history"
+    generation = str((indexed or {}).get("session_generation") or "").strip()
     return (
         history_dir / _window_name(session_id),
-        empty_window(user, source, session_id),
+        empty_window(
+            user,
+            source,
+            session_id,
+            session_generation=generation,
+        ),
         True,
     )
 
@@ -1427,7 +1455,13 @@ def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
 def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
     existing = find_window(root, user, source, session_id)
     directory = existing or user_dir(user, root) / "history" / _window_name(session_id)
-    window = empty_window(user, source, session_id)
+    indexed = find_index_record(root, user, source, session_id)
+    window = empty_window(
+        user,
+        source,
+        session_id,
+        session_generation=str((indexed or {}).get("session_generation") or ""),
+    )
     commit_window(directory, window)
     commit_window(runtime_window_path(directory), copy.deepcopy(window))
     return directory

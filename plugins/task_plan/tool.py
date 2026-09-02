@@ -54,13 +54,17 @@ def _find_active_plan(
     source: str = "",
     session_id: str = "",
 ) -> dict[str, Any] | None:
-    isolate_conversation = bool(source and session_id)
+    # A missing scope is never a wildcard.  Returning no plan here prevents a
+    # caller that forgot its conversation identity from selecting another
+    # session's active plan.
+    if not source or not session_id:
+        return None
     for plan in store.list_plans():
         if str(plan.get("status") or "") not in _ACTIVE_STATUSES:
             continue
-        if isolate_conversation and str(plan.get("source") or "") != source:
+        if str(plan.get("source") or "") != source:
             continue
-        if isolate_conversation and str(plan.get("session_id") or "") != session_id:
+        if str(plan.get("session_id") or "") != session_id:
             continue
         return plan
     return None
@@ -114,7 +118,7 @@ def _belongs_to_conversation(plan: dict[str, Any], context: dict[str, Any]) -> b
     source = str(context.get("source") or "")
     session_id = str(context.get("session_id") or "")
     if not source or not session_id:
-        return True
+        return False
     return (
         str(plan.get("source") or "") == source
         and str(plan.get("session_id") or "") == session_id
@@ -129,9 +133,26 @@ def _auto_complete_check(store: PlanStore, plan_id: str) -> dict[str, Any]:
         for step in steps
     ) and all(step.get("status") == "completed" for step in steps):
         if plan.get("status") != "completed":
+            def mark_completed(current: dict[str, Any]) -> dict[str, Any]:
+                current_steps = current.get("steps") or []
+                # Re-check the predicate inside the atomic update.  A reset,
+                # cancellation, or retry may have changed the plan after the
+                # read above; a stale completion check must never resurrect it.
+                if (
+                    not current_steps
+                    or not all(
+                        isinstance(step, dict)
+                        and step.get("status") == "completed"
+                        for step in current_steps
+                    )
+                    or current.get("status") not in {"approved", "running", "paused"}
+                ):
+                    return current
+                return {**current, "status": "completed"}
+
             return store.update(
                 plan_id,
-                lambda current: {**current, "status": "completed"},
+                mark_completed,
             )
     return plan
 
@@ -161,9 +182,22 @@ def _step_done(
         )
 
     def mark(plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("status") not in allowed_statuses:
+            raise ValueError(
+                f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法更新步骤"
+            )
         target = _step_by_id(plan, step_id)
         if target is None:
             raise ValueError(f"步骤不存在: {step_id}")
+        if target.get("status") == "completed":
+            # A concurrent executor may have completed this step after the
+            # optimistic read.  Keep that result and remain idempotent rather
+            # than overwriting it with a stale response.
+            return plan
+        if target.get("status") in {"failed", "skipped", "cancelled"}:
+            raise ValueError(
+                f"步骤 {step_id} 当前状态为 {target.get('status')!r}，无法完成"
+            )
         target["status"] = "completed"
         target["error"] = None
         if result_text:
@@ -172,6 +206,11 @@ def _step_done(
         plan["current_step"] = step_id
         if plan.get("status") == "approved":
             plan["status"] = "running"
+        if plan.get("steps") and all(
+            isinstance(step, dict) and step.get("status") == "completed"
+            for step in plan["steps"]
+        ):
+            plan["status"] = "completed"
         return plan
 
     store.update(plan_id, mark, note=f"完成步骤 {step_id}")
@@ -196,9 +235,17 @@ def _step_fail(
         )
 
     def mark(plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("status") not in {"approved", "running", "paused"}:
+            raise ValueError(
+                f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法更新步骤"
+            )
         target = _step_by_id(plan, step_id)
         if target is None:
             raise ValueError(f"步骤不存在: {step_id}")
+        if target.get("status") in _STEP_TERMINAL_STATUSES:
+            raise ValueError(
+                f"步骤 {step_id} 当前状态为 {target.get('status')!r}，无法失败"
+            )
         target["status"] = "failed"
         target["result"] = None
         target["error"] = {
@@ -237,6 +284,10 @@ def run(
     selected_action = str(action or "").strip().casefold()
     if selected_action not in _ACTIONS:
         return _result(False, error=f"未知 action: {selected_action or action}")
+    scope_source = str(context.get("source") or "").strip()
+    scope_session = str(context.get("session_id") or "").strip()
+    if not scope_source or not scope_session:
+        return _result(False, error="任务计划操作缺少 source 或 session_id 对话身份")
     if (
         str(context.get("task_plan_mode") or "") == "executor_managed"
         and selected_action in {"step_done", "step_fail"}
@@ -247,10 +298,6 @@ def run(
         )
 
     if selected_action == "list":
-        source = str(context.get("source") or "")
-        session_id = str(context.get("session_id") or "")
-        if not source or not session_id:
-            return _result(False, error="任务计划列表缺少 source 或 session_id 对话身份")
         plans = [
             plan
             for plan in store.list_plans()

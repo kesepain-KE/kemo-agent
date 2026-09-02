@@ -58,6 +58,8 @@ def analyze_memory_batch(
     agent_runner: AgentRunner,
     cancel_event: threading.Event | None,
     source: dict[str, Any] | None = None,
+    agent_source: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Analyze a bounded batch of completed rounds without mutating state."""
 
@@ -75,6 +77,11 @@ def analyze_memory_batch(
         }
     )
     try:
+        runner_kwargs: dict[str, Any] = {"cancel_event": cancel_event}
+        if str(agent_source or "").strip():
+            runner_kwargs["source"] = str(agent_source).strip()
+        if str(session_id or "").strip():
+            runner_kwargs["session_id"] = str(session_id).strip()
         result = agent_runner.run(
             "self_improve",
             {
@@ -82,7 +89,7 @@ def analyze_memory_batch(
                 "rounds": rounds,
                 "source": effective_source,
             },
-            cancel_event=cancel_event,
+            **runner_kwargs,
         )
         candidates = result.data.get("candidates")
         if not isinstance(candidates, list):
@@ -122,6 +129,8 @@ def analyze_round_memory(
     tool_records: list[dict[str, Any]],
     agent_runner: AgentRunner,
     cancel_event: threading.Event | None,
+    agent_source: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Compatibility wrapper for callers that intentionally process one round."""
 
@@ -138,6 +147,8 @@ def analyze_round_memory(
         agent_runner=agent_runner,
         cancel_event=cancel_event,
         source={"source": "round_commit", "round": round_number},
+        agent_source=agent_source,
+        session_id=session_id,
     )
 
 
@@ -148,6 +159,8 @@ def analyze_memory_batch_resilient(
     cancel_event: threading.Event | None,
     source: dict[str, Any] | None = None,
     retry_once: bool = True,
+    agent_source: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Retry malformed batch output once, then isolate it by contiguous halves."""
 
@@ -156,6 +169,8 @@ def analyze_memory_batch_resilient(
         agent_runner=agent_runner,
         cancel_event=cancel_event,
         source=source,
+        agent_source=agent_source,
+        session_id=session_id,
     )
     if analysis.get("status") == "completed":
         return analysis
@@ -171,6 +186,8 @@ def analyze_memory_batch_resilient(
             agent_runner=agent_runner,
             cancel_event=cancel_event,
             source=source,
+            agent_source=agent_source,
+            session_id=session_id,
         )
         if retried.get("status") == "completed":
             return retried
@@ -201,6 +218,8 @@ def analyze_memory_batch_resilient(
             cancel_event=cancel_event,
             source=subset_source,
             retry_once=False,
+            agent_source=agent_source,
+            session_id=session_id,
         )
         if part.get("status") != "completed":
             return {
@@ -342,6 +361,8 @@ def extract_round_memory(
     tool_records: list[dict[str, Any]],
     agent_runner: AgentRunner,
     cancel_event: threading.Event | None,
+    agent_source: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Analyze and persist one completed round synchronously."""
 
@@ -353,6 +374,8 @@ def extract_round_memory(
         tool_records=tool_records,
         agent_runner=agent_runner,
         cancel_event=cancel_event,
+        agent_source=agent_source,
+        session_id=session_id,
     )
     return persist_round_memory_analysis(
         root=root,
@@ -493,6 +516,8 @@ def extract_memory_backlog(
                     source=batch_source,
                     agent_runner=agent_runner,
                     cancel_event=cancel_event,
+                    agent_source=source,
+                    session_id=session_id,
                 )
                 extraction = persist_round_memory_analysis(
                     root=root,

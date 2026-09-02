@@ -1526,6 +1526,7 @@ export type ChatItem =
   | { id: string; kind: 'execution_marker'; planId: string }
   | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; roundsBefore: number; roundsRemoved: number; roundsRemaining: number; memoryMode: string; memoryStatus: string; content: string }
   | { id: string; kind: 'long_task_boundary'; taskId: string; continuation: number }
+  | { id: string; kind: 'retry_boundary'; attempt: number; phase: 'snapshot' | 'active' }
   | { id: string; kind: 'media'; artifact: MediaArtifact }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
   | {

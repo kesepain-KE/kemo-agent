@@ -195,6 +195,8 @@ def get_or_create_summary(
     max_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
     response_hook: Callable[[dict[str, Any]], None] | None = None,
     event_callback: Callable[[RunEvent], None] | None = None,
+    source: str = "",
+    session_id: str = "",
     skip_memory_extraction: bool = False,
     previous_cache: dict[str, Any] | None = None,
     round_offset: int = 0,
@@ -264,13 +266,16 @@ def get_or_create_summary(
             }
             if skip_memory_extraction:
                 model_input["skip_memory_extraction"] = True
-            result = agent_runner.run(
-                agent_name,
-                model_input,
-                cancel_event=cancel_event,
-                event_callback=event_callback,
-                max_tokens=max_tokens,
-            )
+            runner_kwargs: dict[str, Any] = {
+                "cancel_event": cancel_event,
+                "event_callback": event_callback,
+                "max_tokens": max_tokens,
+            }
+            if str(source or "").strip():
+                runner_kwargs["source"] = str(source).strip()
+            if str(session_id or "").strip():
+                runner_kwargs["session_id"] = str(session_id).strip()
+            result = agent_runner.run(agent_name, model_input, **runner_kwargs)
             rolling = _normalise_summary(result.data)
             memory_extraction = result.metadata.get("memory_extraction")
             if isinstance(memory_extraction, dict):

@@ -38,12 +38,15 @@ describe('parseSseFrames', () => {
       return HttpResponse.json({ run_id: params.runId, status: 'accepted_current_run', queued: 1 })
     }))
     const result = await submitGuidance('kesepain', 'run_test_123', 'adjust', {
+      sessionId: 'session-guidance',
       guidanceId: 'guidance_123',
       uploadedFiles: ['clip.mp4', 'voice.mp3'],
     })
     expect(result).toMatchObject({ run_id: 'run_test_123', status: 'accepted_current_run', queued: 1 })
     expect(body).toEqual({
       user: 'kesepain',
+      source: 'web',
+      session_id: 'session-guidance',
       guidance: 'adjust',
       guidance_id: 'guidance_123',
       uploaded_files: ['clip.mp4', 'voice.mp3'],

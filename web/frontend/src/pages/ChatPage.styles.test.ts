@@ -11,7 +11,8 @@ describe('ChatPage guidance styles', () => {
 
     expect(rule).toContain('min-width: 0')
     expect(rule).toContain('max-width: 100%')
-    expect(rule).toContain('overflow: hidden')
+    expect(rule).toContain('overflow-x: hidden')
+    expect(rule).toContain('overflow-y: auto')
   })
 
   it('scrolls unbroken guidance content horizontally inside its own bubble', () => {
@@ -22,6 +23,16 @@ describe('ChatPage guidance styles', () => {
     expect(rule).toContain('overflow-x: auto')
     expect(rule).toContain('white-space: pre')
     expect(rule).toContain('scrollbar-width: thin')
+  })
+
+  it('limits every guidance bubble to one third of the viewport', () => {
+    const rule = stylesheet.match(/\.guidance-message\s*\{([^}]*)\}/g)?.map((value) => value.replace(/^\.guidance-message\s*\{/, '').replace(/\}$/, '')).find((value) => value.includes('max-height: 33.333vh')) ?? ''
+
+    expect(rule).toContain('max-width: 100%')
+    expect(rule).toContain('box-sizing: border-box')
+    expect(rule).toContain('max-height: 33.333vh')
+    expect(rule).toContain('max-height: 33.333dvh')
+    expect(rule).toContain('overflow-y: auto')
   })
 })
 

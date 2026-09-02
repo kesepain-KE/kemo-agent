@@ -337,6 +337,18 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
   }
 
   for (const item of items) {
+    if (item.kind === 'retry_boundary') {
+      if (!activeAssistant) {
+        assistantSequence += 1
+        activeAssistant = {
+          id: `assistant_turn_${currentUserId}_${assistantSequence}`,
+          kind: 'assistant',
+          items: [],
+        }
+      }
+      activeAssistant.items.push(item)
+      continue
+    }
     if (item.kind === 'long_task_boundary') {
       flushAssistant()
       currentUserId = item.id
@@ -407,8 +419,55 @@ function currentRoundStartIndex(items: ChatItem[]) {
   return 0
 }
 
-export function resetCurrentRoundItemsForRetry(items: ChatItem[]) {
-  return items.slice(0, currentRoundStartIndex(items))
+function snapshotRetryItem(item: ChatItem): ChatItem {
+  if (item.kind === 'message' && item.role === 'assistant' && item.streaming) {
+    return { ...item, streaming: false }
+  }
+  if (item.kind === 'reasoning' && item.streaming) {
+    return { ...item, streaming: false }
+  }
+  if (item.kind === 'tool' && item.status === 'running') {
+    return {
+      ...item,
+      status: 'error',
+      result: {
+        ok: false,
+        error: {
+          message: '本次尝试未完成，尚未收到工具结果；当前仅保留快照',
+          exception_type: 'RetryAttemptBoundary',
+        },
+      },
+    }
+  }
+  return item
+}
+
+export function resetCurrentRoundItemsForRetry(
+  items: ChatItem[],
+  failedAttempt = 1,
+  nextAttempt = failedAttempt + 1,
+) {
+  const roundStart = currentRoundStartIndex(items)
+  const prefix = items.slice(0, roundStart)
+  const currentAttempt = items.slice(roundStart)
+  if (!currentAttempt.length) return prefix
+  const retrySeed = String(prefix.at(-1)?.id || 'opening').replace(/[^A-Za-z0-9_-]/g, '_')
+  return [
+    ...prefix,
+    {
+      id: `retry_boundary_${retrySeed}_${failedAttempt}_snapshot`,
+      kind: 'retry_boundary' as const,
+      attempt: failedAttempt,
+      phase: 'snapshot' as const,
+    },
+    ...currentAttempt.map(snapshotRetryItem),
+    {
+      id: `retry_boundary_${retrySeed}_${nextAttempt}_active`,
+      kind: 'retry_boundary' as const,
+      attempt: nextAttempt,
+      phase: 'active' as const,
+    },
+  ]
 }
 
 function isProvisionalRunError(event: RunEvent) {
@@ -938,6 +997,7 @@ export function selectDockedPlan(plans: PlanSummary[]) {
 function isConversationBoundary(item: ChatItem) {
   return item.kind === 'execution_marker'
     || item.kind === 'long_task_boundary'
+    || item.kind === 'retry_boundary'
     || item.kind === 'message' && item.role === 'user'
 }
 
@@ -998,16 +1058,27 @@ type AssistantMessageItem = Extract<ChatItem, { kind: 'message' }>
 type UsageItem = Extract<ChatItem, { kind: 'usage' }>
 type TaskPlanItem = Extract<ChatItem, { kind: 'task_plan' }>
 
+function currentRetryAttemptItems(items: ChatItem[]) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.kind === 'retry_boundary' && item.phase === 'active') {
+      return items.slice(index + 1)
+    }
+  }
+  return items
+}
+
 export function partitionAssistantTurnItems(items: ChatItem[]) {
+  const currentAttempt = currentRetryAttemptItems(items)
   return {
-    assistantMessages: items.filter(
+    assistantMessages: currentAttempt.filter(
       (item): item is AssistantMessageItem => item.kind === 'message' && item.role === 'assistant',
     ),
-    usageItems: items.filter((item): item is UsageItem => item.kind === 'usage'),
-    planItems: items.filter(
+    usageItems: currentAttempt.filter((item): item is UsageItem => item.kind === 'usage'),
+    planItems: currentAttempt.filter(
       (item): item is TaskPlanItem => item.kind === 'task_plan' && item.presentation !== 'reference',
     ),
-    finalizedGuidance: items.filter(
+    finalizedGuidance: currentAttempt.filter(
       (item): item is GuidanceItem => item.kind === 'guidance' && Boolean(item.finalized),
     ),
   }
@@ -1173,7 +1244,14 @@ export function buildSenseDataItems(sources: SenseSourceSummary[]): SenseDataIte
 }
 
 export function ChatPage() {
-  const { user, userAvatarUrl, sessionId, clientId, chatRunning: running, setChatRunning: setRunning, chatRunId: activeRunId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, setChatRunning: setRunning, chatRunId: activeRunId, chatRunSessionId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  // AppShell resolves controls for the displayed conversation.  Keep the
+  // session check as a defensive guard for an in-flight route transition.
+  const running = Boolean(
+    chatRunningForSession
+    && chatRunSessionId
+    && (!sessionId || chatRunSessionId === sessionId),
+  )
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -1227,10 +1305,26 @@ export function ChatPage() {
   } | null>(null)
   const lastAttemptSessionRef = useRef(sessionId)
   const conversationKeyRef = useRef(`${user}\u0000${sessionId}`)
-  const liveSessionId = sessionId || lastAttemptSessionRef.current
+  const liveSessionId = running && chatRunSessionId
+    ? chatRunSessionId
+    : sessionId || lastAttemptSessionRef.current || chatRunSessionId
   const liveRun = liveSessionId ? chatRuns[chatRunKey(user, liveSessionId)] : undefined
   const effectiveRunId = activeRunId || liveRun?.runId || ''
   const liveItems = liveRun?.items ?? EMPTY_CHAT_ITEMS
+  const currentUserRef = useRef(user)
+  const currentLiveSessionRef = useRef(liveSessionId)
+  currentUserRef.current = user
+  currentLiveSessionRef.current = liveSessionId
+  const isCurrentConversation = (targetUser: string, targetSession: string) => (
+    currentUserRef.current === targetUser
+    && currentLiveSessionRef.current === targetSession
+  )
+  const setRunRetryNoticeFor = (targetUser: string, targetSession: string, value: RunRetryNotice | null) => {
+    if (isCurrentConversation(targetUser, targetSession)) setRunRetryNotice(value)
+  }
+  const setRunErrorNoticeFor = (targetUser: string, targetSession: string, value: RunErrorNotice | null) => {
+    if (isCurrentConversation(targetUser, targetSession)) setRunErrorNotice(value)
+  }
 
   const playCompletionSoundOnce = (completedRunId: string, event: RunEvent) => {
     if (!isSuccessfulRunCompletion(event)) return
@@ -1283,8 +1377,8 @@ export function ChatPage() {
     },
   })
   const tasksQuery = useQuery({
-    queryKey: ['tasks', user],
-    queryFn: () => getTasks(user),
+    queryKey: ['tasks', user, sessionId],
+    queryFn: () => getTasks(user, sessionId),
     enabled: Boolean(user),
     refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
   })
@@ -1332,7 +1426,7 @@ export function ChatPage() {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return
     conversationKeyRef.current = conversationKey
-    lastAttemptSessionRef.current = sessionId
+    if (!running) lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
     loadingEarlierRef.current = false
     prependSnapshotRef.current = null
@@ -1341,7 +1435,7 @@ export function ChatPage() {
     undoneRoundBaselineRef.current = null
     setEditedSources(new Set())
     setCopiedItem('')
-    if (!running) setActiveRunId('')
+    if (!running) setActiveRunId('', user, sessionId)
     setKnowledgeDrawerOpen(false)
     setCapabilityDrawerOpen(false)
     setConversationBusy('')
@@ -1352,7 +1446,6 @@ export function ChatPage() {
     setPlanMutationNotices({})
     setRunRetryNotice(null)
     setRunErrorNotice(null)
-    abortChatRun()
   }, [abortChatRun, user, sessionId])
 
   useEffect(() => {
@@ -1407,10 +1500,14 @@ export function ChatPage() {
     const hasContent = Boolean(options.content?.length)
     if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && (running || stopping)) || uploading) return false
     const activeSession = options.sessionId || sessionId || createSessionId()
+    const targetUser = user
     const submissionDraftKey = draftKey
     let finalDraftKey = submissionDraftKey
     lastAttemptSessionRef.current = activeSession
+    currentUserRef.current = targetUser
+    currentLiveSessionRef.current = activeSession
     const runId = `run_${randomUUID().replaceAll('-', '')}`
+    let activeRunIdForScope = runId
     if (uploadedFiles.length) {
       submittedUploadsRef.current.set(runId, uploadedFiles.map((file) => ({ ...file })))
     }
@@ -1422,15 +1519,15 @@ export function ChatPage() {
       editingSource,
       undoneRoundBaselineRef.current,
     )
-    beginChatRun(user, activeSession, runId, historyUserMessages)
-    setRunRetryNotice(null)
-    setRunErrorNotice(null)
+    beginChatRun(targetUser, activeSession, runId, historyUserMessages)
+    setRunRetryNoticeFor(targetUser, activeSession, null)
+    setRunErrorNoticeFor(targetUser, activeSession, null)
     setDraft('')
     if (uploadedFiles.length) {
       setPendingUploads((current) => removeSubmittedUploads(current, uploadedFiles))
     }
-    setRunning(true)
-    setActiveRunId(runId)
+    setRunning(true, targetUser, activeSession, runId)
+    setActiveRunId(runId, targetUser, activeSession)
     setConversationMenuOpen(false)
     followOutputRef.current = true
     setShowFollowOutput(false)
@@ -1453,7 +1550,7 @@ export function ChatPage() {
     )
     setEditingSource(null)
     const controller = new AbortController()
-    setChatAbortController(controller)
+    setChatAbortController(controller, targetUser, activeSession, runId)
     let committed = false
     let successful = false
     let restoreDraftAfterFailure = false
@@ -1484,46 +1581,48 @@ export function ChatPage() {
           if (event.type === 'long_task_update') {
             const nextRunId = String(event.metadata?.next_run_id || '')
             if (nextRunId) {
-              beginChatRun(user, activeSession, nextRunId, historyUserMessages)
-              setActiveRunId(nextRunId)
+              beginChatRun(targetUser, activeSession, nextRunId, historyUserMessages)
+              setActiveRunId(nextRunId, targetUser, activeSession)
+              activeRunIdForScope = nextRunId
+              setChatAbortController(controller, targetUser, activeSession, nextRunId)
             }
           }
           if (event.type === 'retrying') {
             const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
             const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
             const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 5))
-            // Apply deltas from the failed attempt before removing that attempt.
-            // Otherwise a pending batch can be flushed after the reset and mix
-            // failed-attempt text with the next attempt.
+            // Apply deltas from the failed attempt before sealing it as a
+            // snapshot. Otherwise a pending batch can be flushed after the
+            // boundary and mix failed-attempt text with the next attempt.
             deltaBatcher.flush()
-            setRunRetryNotice({ failedAttempt, nextAttempt, maxAttempts })
-            setRunErrorNotice(null)
-            updateChatRunItems(user, activeSession, resetCurrentRoundItemsForRetry)
+            setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
+            setRunErrorNoticeFor(targetUser, activeSession, null)
+            updateChatRunItems(user, activeSession, (current) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt))
             return
           }
           if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
-            setRunRetryNotice(null)
+            setRunRetryNoticeFor(targetUser, activeSession, null)
             deltaBatcher.push(event)
             return
           }
-          if (isRetryAttemptProgress(event)) setRunRetryNotice(null)
+          if (isRetryAttemptProgress(event)) setRunRetryNoticeFor(targetUser, activeSession, null)
           deltaBatcher.flush()
           if (event.type === 'done') {
             terminalReceived = true
             committed = event.metadata?.committed !== false
             successful = isSuccessfulRunCompletion(event)
-            setRunRetryNotice(null)
+            setRunRetryNoticeFor(targetUser, activeSession, null)
             if (isFailedRunCompletion(event)) {
               const failure = event.metadata?.failure && typeof event.metadata.failure === 'object'
                 ? event.metadata.failure as Record<string, unknown>
                 : undefined
-              setRunErrorNotice({
+              setRunErrorNoticeFor(targetUser, activeSession, {
                 id: eventId('run-error'),
                 message: `最终错误：${String(event.error?.message || failure?.message || '智能体运行失败')}`,
               })
             } else {
-              setRunErrorNotice(null)
+              setRunErrorNoticeFor(targetUser, activeSession, null)
             }
             playCompletionSoundOnce(runId, event)
             playFailureSoundOnce(runId, event)
@@ -1538,8 +1637,8 @@ export function ChatPage() {
             terminalReceived = true
             committed = event.metadata?.committed !== false
             restoreDraftAfterFailure = true
-            setRunRetryNotice(null)
-            setRunErrorNotice({
+            setRunRetryNoticeFor(targetUser, activeSession, null)
+            setRunErrorNoticeFor(targetUser, activeSession, {
               id: eventId('run-error'),
               message: `最终错误：${String(event.error?.message || '智能体运行失败')}`,
             })
@@ -1559,8 +1658,8 @@ export function ChatPage() {
           error: { message: interruptionMessage, exception_type: 'MissingTerminalEvent' },
           metadata: { status: 'interrupted', terminal: false },
         }
-        setRunRetryNotice(null)
-        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: interruptionMessage })
         updateChatRunItems(user, activeSession, (current) => [
           ...finalizeCurrentRoundItems(current, {
             message: interruptionMessage,
@@ -1570,7 +1669,7 @@ export function ChatPage() {
         ])
       }
       await refreshSessions()
-      if (!sessionId) {
+      if (!sessionId && isCurrentConversation(targetUser, activeSession)) {
         locallyCommittedSessionRef.current = activeSession
         finalDraftKey = chatDraftKey(user, activeSession)
         moveDraft(submissionDraftKey, finalDraftKey)
@@ -1594,8 +1693,8 @@ export function ChatPage() {
         ? message
         : '响应连接已中断，未收到最终状态'
       if (aborted) {
-        setRunRetryNotice(null)
-        setRunErrorNotice(null)
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, null)
       }
       if (!terminalReceived) {
         updateChatRunItems(user, activeSession, (current) => {
@@ -1614,8 +1713,8 @@ export function ChatPage() {
         })
       }
       if (!aborted && !terminalReceived) {
-        setRunRetryNotice(null)
-        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: interruptionMessage })
       }
       if (!terminalReceived && !aborted) {
         restoreDraftAfterFailure = true
@@ -1627,10 +1726,10 @@ export function ChatPage() {
         setDraftText(finalDraftKey, (current) => current || prompt)
       }
       finishChatRun(user, activeSession, committed)
-      setChatAbortController(null)
-      setActiveRunId('')
-      setRunning(false)
-      setStopping(false)
+      setChatAbortController(null, targetUser, activeSession, activeRunIdForScope)
+      setActiveRunId('', targetUser, activeSession, activeRunIdForScope)
+      setRunning(false, targetUser, activeSession, activeRunIdForScope)
+      if (isCurrentConversation(targetUser, activeSession)) setStopping(false)
       void queryClient.invalidateQueries({ queryKey: ['long-task', user, activeSession] })
     }
     return committed
@@ -1721,7 +1820,7 @@ export function ChatPage() {
   }
   const newConversation = async () => {
     const previousDraftKey = draftKey
-    abortChatRun()
+    abortChatRun(user, liveSessionId, effectiveRunId)
     await createNewSession()
     clearDraft(previousDraftKey)
     if (liveSessionId) clearChatRun(user, liveSessionId)
@@ -1888,6 +1987,10 @@ export function ChatPage() {
     const guidance = draft.trim()
     const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
     if ((!guidance && !uploadedFiles.length) || !user || !running || !effectiveRunId || uploading) return
+    const targetUser = user
+    const targetSession = liveSessionId
+    const targetRunId = effectiveRunId
+    if (!targetSession) return
     const id = eventId('guidance')
     const attachments = uploadedFiles.map(pendingInputAttachment)
     const displayText = guidance || `附件引导：${uploadedFiles.map((file) => file.name).join('、')}`
@@ -1898,7 +2001,7 @@ export function ChatPage() {
       }
     }
     const queueForNextTurn = () => {
-      if (!liveSessionId) return false
+      if (!targetSession) return false
       setLiveItems((current) => current.filter((item) => item.id !== id))
       const message: PendingNextTurnMessage = {
         id,
@@ -1910,7 +2013,7 @@ export function ChatPage() {
         ),
         status: 'queued',
       }
-      queueNextTurnMessage(user, liveSessionId, message)
+      queueNextTurnMessage(targetUser, targetSession, message)
       clearSubmittedInput()
       return true
     }
@@ -1928,7 +2031,8 @@ export function ChatPage() {
     }])
     clearSubmittedInput()
     try {
-      const result = await submitGuidance(user, effectiveRunId, guidance, {
+      const result = await submitGuidance(targetUser, targetRunId, guidance, {
+        sessionId: targetSession,
         guidanceId: id,
         uploadedFiles: uploadedFiles.map((file) => file.path),
       })
@@ -2013,7 +2117,13 @@ export function ChatPage() {
   const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
   const commandPlanStatus = async (plan: PlanSummary, action: 'pause' | 'cancel') => {
     try {
-      const response = await commandPlan(user, plan.plan_id, action)
+      const response = await commandPlan(
+        user,
+        plan.plan_id,
+        action,
+        plan.session_id,
+        plan.source || 'web',
+      )
       const updated = extractPlanSummary(response.plan)
       if (updated) setPlanOverrides((current) => ({ ...current, [updated.plan_id]: updated }))
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
@@ -2044,13 +2154,16 @@ export function ChatPage() {
   const executePlan = async (plan: PlanSummary) => {
     if (!user || running) return
     const activeSession = plan.session_id || sessionId || createSessionId()
+    const targetUser = user
     lastAttemptSessionRef.current = activeSession
+    currentUserRef.current = targetUser
+    currentLiveSessionRef.current = activeSession
     const runId = `run_${randomUUID().replaceAll('-', '')}`
     const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
-    beginChatRun(user, activeSession, runId, historyUserMessages)
-    setRunRetryNotice(null)
-    setRunErrorNotice(null)
-    updateChatRunItems(user, activeSession, (current) => [
+    beginChatRun(targetUser, activeSession, runId, historyUserMessages)
+    setRunRetryNoticeFor(targetUser, activeSession, null)
+    setRunErrorNoticeFor(targetUser, activeSession, null)
+    updateChatRunItems(targetUser, activeSession, (current) => [
       ...current,
       { id: eventId('plan_execution'), kind: 'execution_marker', planId: plan.plan_id },
     ])
@@ -2058,12 +2171,12 @@ export function ChatPage() {
       ...current,
       [plan.plan_id]: { ...plan, status: 'running', revision: plan.revision + 1 },
     }))
-    setRunning(true)
-    setActiveRunId(runId)
+    setRunning(true, targetUser, activeSession, runId)
+    setActiveRunId(runId, targetUser, activeSession)
     followOutputRef.current = true
     setShowFollowOutput(false)
     const controller = new AbortController()
-    setChatAbortController(controller)
+    setChatAbortController(controller, targetUser, activeSession, runId)
     let committed = false
     let refreshedRunningPlan = false
     let terminalReceived = false
@@ -2091,40 +2204,40 @@ export function ChatPage() {
             const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
             const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 5))
             // Keep the retry boundary ordered with the buffered failed-attempt
-            // deltas so they cannot be applied after the reset.
+            // deltas so they cannot be applied after the snapshot is sealed.
             deltaBatcher.flush()
-            setRunRetryNotice({ failedAttempt, nextAttempt, maxAttempts })
-            setRunErrorNotice(null)
-            updateChatRunItems(user, activeSession, resetCurrentRoundItemsForRetry)
+            setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
+            setRunErrorNoticeFor(targetUser, activeSession, null)
+            updateChatRunItems(user, activeSession, (current) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt))
             return
           }
           if (isProvisionalRunError(event)) return
           if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
-            setRunRetryNotice(null)
+            setRunRetryNoticeFor(targetUser, activeSession, null)
             deltaBatcher.push(event)
             return
           }
-          if (isRetryAttemptProgress(event)) setRunRetryNotice(null)
+          if (isRetryAttemptProgress(event)) setRunRetryNoticeFor(targetUser, activeSession, null)
           deltaBatcher.flush()
           if (event.type === 'done') {
             terminalReceived = true
             committed = event.metadata?.committed !== false
-            setRunRetryNotice(null)
+            setRunRetryNoticeFor(targetUser, activeSession, null)
             if (isFailedRunCompletion(event)) {
               const failure = event.metadata?.failure && typeof event.metadata.failure === 'object'
                 ? event.metadata.failure as Record<string, unknown>
                 : undefined
-              setRunErrorNotice({ id: eventId('run-error'), message: `最终错误：${String(event.error?.message || failure?.message || '任务计划执行失败')}` })
+              setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: `最终错误：${String(event.error?.message || failure?.message || '任务计划执行失败')}` })
             } else {
-              setRunErrorNotice(null)
+              setRunErrorNoticeFor(targetUser, activeSession, null)
             }
             playCompletionSoundOnce(runId, event)
             playFailureSoundOnce(runId, event)
           } else if (event.type === 'error') {
             terminalReceived = true
             committed = event.metadata?.committed !== false
-            setRunRetryNotice(null)
-            setRunErrorNotice({ id: eventId('run-error'), message: `最终错误：${String(event.error?.message || '任务计划执行失败')}` })
+            setRunRetryNoticeFor(targetUser, activeSession, null)
+            setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: `最终错误：${String(event.error?.message || '任务计划执行失败')}` })
             playFailureSoundOnce(runId, event)
           }
           const updated = event.type === 'tool_call_result' ? extractPlanSummary(event.result) : null
@@ -2141,8 +2254,8 @@ export function ChatPage() {
           error: { message: interruptionMessage, exception_type: 'MissingTerminalEvent' },
           metadata: { status: 'interrupted', terminal: false },
         }
-        setRunRetryNotice(null)
-        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: interruptionMessage })
         updateChatRunItems(user, activeSession, (current) => [
           ...finalizeCurrentRoundItems(current, {
             message: interruptionMessage,
@@ -2152,7 +2265,7 @@ export function ChatPage() {
         ])
       }
       await refreshSessions()
-      if (!sessionId) {
+      if (!sessionId && isCurrentConversation(targetUser, activeSession)) {
         locallyCommittedSessionRef.current = activeSession
         setSessionId(activeSession)
       }
@@ -2170,8 +2283,8 @@ export function ChatPage() {
         ? message
         : '任务计划响应连接已中断，未收到最终状态'
       if (aborted) {
-        setRunRetryNotice(null)
-        setRunErrorNotice(null)
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, null)
       }
       if (!terminalReceived) {
         updateChatRunItems(user, activeSession, (current) => {
@@ -2190,17 +2303,17 @@ export function ChatPage() {
         })
       }
       if (!aborted && !terminalReceived) {
-        setRunRetryNotice(null)
-        setRunErrorNotice({ id: eventId('run-error'), message: interruptionMessage })
+        setRunRetryNoticeFor(targetUser, activeSession, null)
+        setRunErrorNoticeFor(targetUser, activeSession, { id: eventId('run-error'), message: interruptionMessage })
       }
       await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
     } finally {
       deltaBatcher.dispose()
       finishChatRun(user, activeSession, committed)
-      setChatAbortController(null)
-      setActiveRunId('')
-      setRunning(false)
-      setStopping(false)
+      setChatAbortController(null, targetUser, activeSession, runId)
+      setActiveRunId('', targetUser, activeSession, runId)
+      setRunning(false, targetUser, activeSession, runId)
+      if (isCurrentConversation(targetUser, activeSession)) setStopping(false)
     }
   }
 
@@ -2230,18 +2343,22 @@ export function ChatPage() {
     if (dockedPlan?.status === 'running') {
       void commandPlanStatus(dockedPlan, 'pause')
     }
-    if (!user || !effectiveRunId || stopping) return
+    const targetUser = user
+    const targetSession = liveSessionId
+    const targetRunId = effectiveRunId
+    if (!targetUser || !targetSession || !targetRunId || stopping) return
     setStopping(true)
     const longTaskActive = ['running', 'pausing', 'cancelling'].includes(String(longTaskQuery.data?.long_task.status || ''))
     await executeStopRequest(
-      () => longTaskActive && sessionId
-        ? cancelSessionLongTask(user, sessionId)
-        : cancelRun(user, effectiveRunId),
+      () => longTaskActive
+        ? cancelSessionLongTask(targetUser, targetSession)
+        : cancelRun(targetUser, targetRunId, targetSession),
       (error) => {
-        abortChatRun()
+        abortChatRun(targetUser, targetSession, targetRunId)
         const message = error instanceof Error
           ? `紧急停止请求失败：${error.message}`
           : '紧急停止请求失败，已断开当前响应'
+        if (!isCurrentConversation(targetUser, targetSession)) return
         setLiveItems((current) => [
           ...finalizeCurrentRoundItems(current, {
             message: '紧急停止请求失败，当前响应已在前端断开',
@@ -2498,6 +2615,13 @@ export function ChatPage() {
                   {block.items.map((item) => {
                     if (item.kind === 'context_compression') return null
                     if (item.kind === 'long_task_boundary') return <div className="long-task-boundary" key={item.id}>长任务自动续跑 · 第 {item.continuation + 1} Run</div>
+                    if (item.kind === 'retry_boundary') {
+                      return <div className={`retry-boundary ${item.phase}`} key={item.id}>
+                        {item.phase === 'snapshot'
+                          ? `第 ${item.attempt} 次尝试未完成 · 已保留快照`
+                          : `第 ${item.attempt} 次尝试继续执行`}
+                      </div>
+                    }
                     if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
                     if (item.kind === 'execution_marker') return null
                     if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />

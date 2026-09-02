@@ -75,11 +75,12 @@ export interface ShellOutletContext {
   sessionId: string
   clientId: string
   chatRunning: boolean
-  setChatRunning: (running: boolean) => void
+  setChatRunning: (running: boolean, user?: string, sessionId?: string, runId?: string) => void
   chatRunId: string
-  setChatRunId: (runId: string) => void
-  setChatAbortController: (controller: AbortController | null) => void
-  abortChatRun: () => void
+  chatRunSessionId: string
+  setChatRunId: (runId: string, user?: string, sessionId?: string, expectedRunId?: string) => void
+  setChatAbortController: (controller: AbortController | null, user?: string, sessionId?: string, runId?: string) => void
+  abortChatRun: (user?: string, sessionId?: string, runId?: string) => void
   chatRuns: Record<string, ChatRunSnapshot>
   beginChatRun: (user: string, sessionId: string, runId: string, historyUserMessages: number) => void
   updateChatRunItems: (user: string, sessionId: string, updater: ChatItemsUpdater) => void
@@ -116,6 +117,14 @@ export interface ChatRunSnapshot {
   runId: string
   historyUserMessages: number
   nextTurnQueue: PendingNextTurnMessage[]
+}
+
+interface ChatRunControl {
+  user: string
+  sessionId: string
+  runId: string
+  running: boolean
+  controller: AbortController | null
 }
 
 export function chatRunKey(user: string, sessionId: string) {
@@ -342,10 +351,10 @@ export function AppShell() {
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
   const [logoutPending, setLogoutPending] = useState(false)
   const [avatarRevision, setAvatarRevision] = useState(0)
-  const [chatRunning, setChatRunning] = useState(false)
-  const [chatRunId, setChatRunId] = useState('')
+  const [, setChatControlRevision] = useState(0)
+  const chatRunControlsRef = useRef(new Map<string, ChatRunControl>())
+  const chatDraftRunKeysRef = useRef(new Map<string, string>())
   const [chatRuns, setChatRuns] = useState<Record<string, ChatRunSnapshot>>({})
-  const chatAbortControllerRef = useRef<AbortController | null>(null)
   const locationRef = useRef(location)
   const userRef = useRef(user)
   const sessionIdRef = useRef(sessionId)
@@ -357,6 +366,20 @@ export function AppShell() {
   locationRef.current = location
   userRef.current = user
   sessionIdRef.current = sessionId
+
+  const bumpChatControlRevision = () => setChatControlRevision((value) => value + 1)
+  const getCurrentChatRunControl = () => {
+    const currentUser = userRef.current
+    if (!currentUser) return undefined
+    const key = sessionIdRef.current
+      ? chatRunKey(currentUser, sessionIdRef.current)
+      : chatDraftRunKeysRef.current.get(currentUser) || ''
+    return key ? chatRunControlsRef.current.get(key) : undefined
+  }
+  const currentChatRunControl = getCurrentChatRunControl()
+  const chatRunning = Boolean(currentChatRunControl?.running)
+  const chatRunId = currentChatRunControl?.runId || ''
+  const chatRunSessionId = currentChatRunControl?.sessionId || ''
 
   const beginChatRun = useCallback((runUser: string, runSessionId: string, runId: string, historyUserMessages: number) => {
     const key = chatRunKey(runUser, runSessionId)
@@ -542,11 +565,97 @@ export function AppShell() {
     setParams(next)
   }
 
-  const setChatAbortController = (controller: AbortController | null) => {
-    chatAbortControllerRef.current = controller
+  const resolveRunScope = (runUser?: string, runSessionId?: string, runId = '') => ({
+    user: runUser ?? userRef.current,
+    sessionId: runSessionId ?? sessionIdRef.current,
+    runId,
+  })
+
+  const setChatRunning = (running: boolean, runUser?: string, runSessionId?: string, runId = '') => {
+    const scope = resolveRunScope(runUser, runSessionId, runId)
+    if (!scope.user || !scope.sessionId) return
+    const key = chatRunKey(scope.user, scope.sessionId)
+    const current = chatRunControlsRef.current.get(key)
+    if (!running) {
+      if (!current || (scope.runId && current.runId && current.runId !== scope.runId)) return
+      chatRunControlsRef.current.delete(key)
+      if (chatDraftRunKeysRef.current.get(scope.user) === key) {
+        chatDraftRunKeysRef.current.delete(scope.user)
+      }
+      bumpChatControlRevision()
+      return
+    }
+    chatRunControlsRef.current.set(key, {
+      user: scope.user,
+      sessionId: scope.sessionId,
+      runId: scope.runId || current?.runId || '',
+      running: true,
+      controller: current?.controller || null,
+    })
+    if (!sessionIdRef.current && userRef.current === scope.user) {
+      chatDraftRunKeysRef.current.set(scope.user, key)
+    }
+    bumpChatControlRevision()
   }
 
-  const abortChatRun = () => chatAbortControllerRef.current?.abort()
+  const setChatRunId = (runId: string, runUser?: string, runSessionId?: string, expectedRunId = '') => {
+    const scope = resolveRunScope(runUser, runSessionId, runId)
+    if (!scope.user || !scope.sessionId) return
+    const key = chatRunKey(scope.user, scope.sessionId)
+    const current = chatRunControlsRef.current.get(key)
+    if (!runId) {
+      if (!current || (expectedRunId && current.runId !== expectedRunId)) return
+      chatRunControlsRef.current.set(key, { ...current, runId: '' })
+      bumpChatControlRevision()
+      return
+    }
+    chatRunControlsRef.current.set(key, {
+      user: scope.user,
+      sessionId: scope.sessionId,
+      runId,
+      running: current?.running ?? true,
+      controller: current?.controller || null,
+    })
+    bumpChatControlRevision()
+  }
+
+  const setChatAbortController = (
+    controller: AbortController | null,
+    runUser?: string,
+    runSessionId?: string,
+    runId = '',
+  ) => {
+    const scope = resolveRunScope(runUser, runSessionId, runId)
+    if (!scope.user || !scope.sessionId) return
+    const key = chatRunKey(scope.user, scope.sessionId)
+    const current = chatRunControlsRef.current.get(key)
+    if (controller) {
+      chatRunControlsRef.current.set(key, {
+        user: scope.user,
+        sessionId: scope.sessionId,
+        runId: runId || current?.runId || '',
+        running: current?.running ?? true,
+        controller,
+      })
+      bumpChatControlRevision()
+      return
+    }
+    if (!current || (runId && current.runId !== runId)) return
+    chatRunControlsRef.current.set(key, { ...current, controller: null })
+    bumpChatControlRevision()
+  }
+
+  const abortChatRun = (runUser?: string, runSessionId?: string, runId?: string) => {
+    const current = runUser === undefined && runSessionId === undefined && runId === undefined
+      ? getCurrentChatRunControl()
+      : (() => {
+          const scope = resolveRunScope(runUser, runSessionId, runId || '')
+          if (!scope.user || !scope.sessionId) return undefined
+          return chatRunControlsRef.current.get(chatRunKey(scope.user, scope.sessionId))
+        })()
+    if (!current || (runId && current.runId !== runId)) return
+    current.controller?.abort()
+  }
 
   const setSessionId = (nextSession: string) => {
     const next = new URLSearchParams(params)
@@ -574,8 +683,15 @@ export function AppShell() {
 
   useEffect(() => {
     const active = activeSessionQuery.data?.session?.session_id
-    if (!sessionId && !sessionTransitioning && active) setSessionId(active)
-  }, [activeSessionQuery.data?.session?.session_id, sessionId, sessionTransitioning])
+    const listed = Boolean(
+      active
+      && sessionsQuery.data?.sessions.some((candidate) => (
+        (candidate.source || 'web') === 'web'
+        && candidate.session_id === active
+      )),
+    )
+    if (!sessionId && !sessionTransitioning && !chatRunning && active && listed) setSessionId(active)
+  }, [activeSessionQuery.data?.session?.session_id, chatRunning, sessionId, sessionTransitioning, sessionsQuery.data?.sessions])
 
   useEffect(() => {
     if (!user || !sessionId) return
@@ -907,7 +1023,7 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-          <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+          <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, chatRunSessionId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

@@ -71,34 +71,17 @@ kemo-agent/
 
 | 文件 | 内容 |
 |------|------|
-| `expand-creation.md` | 拓展层级、清单、数据注入与操控入口 |
-| `kemo-gateway-status-expand.md` | 内置 Kemo 网关状态拓展的激活、权限、产物与更新边界 |
-| `kemo-graph-expand.md` | Kemo Graph 外挂文档站、绝对路径注册表、手动同步与按需查询边界 |
-| `kemo-transport-reliability.md` | Kemo 请求幂等、SSE 续传、有限重试、取消、完整性与 HTTPS 边界 |
-| `sense-creation.md` | 全局感知模块的创建与刷新规则 |
-| `skill-creation.md` | 共享技能和用户技能的结构与作用域 |
-| `knowledge-creation.md` | 三层知识库及索引维护规则 |
-| `history-storage.md` | 用户级 SQLite 历史表、分页、搜索、备份与旧格式边界 |
-| `persistence-write-path.md` | 高频任务内存态、采集按变化写入、历史增量提交与终态事务边界 |
-| `memory-storage.md` | 用户级 SQLite 记忆表、生命周期事务、每日加权约束、热视图与旧格式边界 |
-| `runtime-state-storage.md` | 任务计划、上下文摘要、消息幂等和外部路由状态的数据库分工与迁移 |
+| `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同 |
+| `builtin-expansions.md` | 内置 Kemo 网关状态拓展和 Kemo Graph 外挂文档站边界 |
+| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、SSE 续传和取消边界 |
+| `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
+| `storage-and-persistence.md` | 历史、记忆、运行状态、日志和高频写盘规则 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
-| `user-directory-skeleton.md` | 用户文件夹的完整骨架与目录所有权 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
-| `release-1.2.2-stability.md` | 1.2.2 稳定性规则、42 项工作区分类、导入迁移和发布前检查 |
-| `release-1.2.3-stability.md` | 1.2.3 稳定性补丁、工具参数安全、后台作业与进程边界检查 |
-| `release-1.2.4-stability.md` | 1.2.4 外部智能体桥接、重试气泡和子智能体模型配置说明 |
-| `env-reference.md` | `.env` 参数、优先级与安全要求 |
-| `global-config-reference.md` | `config/global_config.json` 全字段 |
-| `user-config-reference.md` | `users/<name>/user_config.json` 全字段 |
-| `cron-task-creation.md` | 北京时间定时任务的创建与状态机 |
-| `task-plan-creation.md` | 多步骤任务计划的创建与执行规则 |
-| `subagent-creation.md` | 内置/用户子智能体包与授权规则 |
-| `external-agent-bridge.md` | 通过已授权拓展绑定外部智能体的清单、Schema、调用和安全边界 |
+| `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级 |
+| `task-automation.md` | 多步骤任务计划和北京时间定时任务规则 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
-| `logging-storage.md` | Cron 与外部消息结构化日志、迁移和保留规则 |
-| `provider-tool-call-safety.md` | Chat/Kemo 工具调用完整性、终态、截断与参数安全边界 |
 | `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南 |
 | `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期与并发模型 |
 | `project-introduction.md` | 项目定位、核心能力、部署与使用入口 |
@@ -111,6 +94,7 @@ kemo-agent/
 3. 凭据、个人隐私、Cookie、Token 和本机秘密不得进入全局知识库。
 4. `.bak`、缓存、日志和运行产物不列入知识索引。
 5. 目录中只有 `data_structure.md`、`index.md`、`索引.md`、`目录.md` 会作为知识索引自动注入；其他正文按需读取。
+6. 全局知识库不保存版本发布说明、更新日志、单次审计记录或工作区提交清单；长期有效的功能规则应合并到对应专题文档。
 
 ## 模块目录的共同原则
 

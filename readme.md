@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.4-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.5-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,7 +204,17 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.4`
+当前版本：`1.2.5`
+
+### 1.2.5 更新
+
+这是一次发布前稳定性修复，重点保证删除、恢复、知识库读取和记忆提取在并发与异常情况下仍然安全。
+
+- 删除会话后增加持久删除栅栏；已经在运行中的旧 Run 即使迟到提交，也不会重新创建会话、历史窗口或活跃绑定。
+- 知识库索引读取同时拒绝符号链接和 Windows junction，不能通过链接把项目外部文件注入 Prompt。
+- 修复 `on_commit` 当前轮记忆提取的参数合同，确保真实运行可以把记忆候选正常交给提取器。
+- App 桥接恢复活动 Run 时，允许只用 `client_id` 查询本设备的全部活动 Run；仍禁止在没有设备或会话范围时查询。
+- 增加上述边界的回归测试，并通过发布检查与后端测试。
 
 ### 1.2.4 更新
 

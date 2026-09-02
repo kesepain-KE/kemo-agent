@@ -234,7 +234,8 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
   `run_replay_retention_seconds` 与 `run_replay_max_terminal_per_user` 调整；删除 APP 会话或全部
   APP 会话时会同步删除对应的终态桥接副本；仍在运行的记录会持久标记为“终态后删除”，到达终态
   后立即清除，即使桥接进程中途重启也不会遗留已删除会话的副本。
-- APP 重启后先调用 `/v1/runs/active?client_id=...` 发现当前设备的运行；随后通过
+- APP 重启后先调用 `/v1/runs/active?client_id=...` 发现当前设备的全部运行（也可以同时提供
+  `session_id` 将结果限制到一个对话空间）；随后通过
   `/v1/runs/{run_id}/snapshot?after=...` 补齐缺失事件，再用
   `/v1/runs/{run_id}/stream?after=...` 接续实时流。恢复操作不得重新提交原始用户请求。
 - 桥接进程或框架进程重启仍是实际运行边界。遗留的未完成日志标记为 `interrupted`，APP 应读取

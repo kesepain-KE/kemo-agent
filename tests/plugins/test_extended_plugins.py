@@ -879,9 +879,53 @@ class ShellPluginTests(unittest.TestCase):
             ["run", "status", "cancel"],
         )
         self.assertIn("background", schema["properties"])
+        self.assertIn("show_terminal", schema["properties"])
         self.assertIn("job_id", schema["properties"])
         validate_arguments(schema, {})
         validate_arguments(schema, {"action": "status", "job_id": "job_example"})
+        validate_arguments(schema, {"command": "pwd", "show_terminal": True})
+
+    def test_shell_hides_sync_console_by_default_and_allows_explicit_visibility(self) -> None:
+        completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
+        with (
+            patch(
+                "plugins.shell.tool.subprocess.run", return_value=completed
+            ) as spawned,
+            patch(
+                "plugins.shell.tool.hidden_subprocess_kwargs",
+                return_value={"mode": "hidden"},
+            ) as hidden,
+            patch(
+                "plugins.shell.tool.visible_subprocess_kwargs",
+                return_value={"mode": "visible"},
+            ) as visible,
+        ):
+            run_shell("external-command", context=self._context())
+            self.assertEqual(spawned.call_args.kwargs["mode"], "hidden")
+            hidden.assert_called_once_with()
+            visible.assert_not_called()
+
+            run_shell(
+                "external-command",
+                show_terminal=True,
+                context=self._context(),
+            )
+            self.assertEqual(spawned.call_args.kwargs["mode"], "visible")
+            visible.assert_called_once_with()
+
+    def test_shell_forwards_explicit_visibility_to_managed_background_command(self) -> None:
+        with patch(
+            "plugins.shell.tool._start_background",
+            return_value={"ok": True, "status": "running"},
+        ) as start_background:
+            result = run_shell(
+                "external-command",
+                background=True,
+                show_terminal=True,
+                context=self._context(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertTrue(start_background.call_args.kwargs["show_terminal"])
 
     def test_managed_background_job_completes_without_persisting_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

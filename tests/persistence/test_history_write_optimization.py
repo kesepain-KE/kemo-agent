@@ -9,7 +9,9 @@ import pytest
 
 from run.history import (
     commit_terminal_windows,
+    delete_session,
     empty_window,
+    find_window,
     load_window,
     patch_archive_metadata,
     runtime_window_path,
@@ -18,9 +20,74 @@ from run.history import (
     _configure,
     _ensure_schema,
     database_path,
+    get_active,
+    reserve_session,
     read_registry_record,
     save_window,
 )
+
+
+def test_late_terminal_commit_does_not_overwrite_newer_active_session(tmp_path: Path) -> None:
+    (tmp_path / "users" / "alice").mkdir(parents=True)
+    reserve_session(
+        tmp_path,
+        "alice",
+        "web",
+        "session-a",
+        active_key="interactive:alice",
+    )
+    reserve_session(
+        tmp_path,
+        "alice",
+        "web",
+        "session-b",
+        active_key="interactive:alice",
+    )
+    archive = _archive(tmp_path, session_id="session-a")
+    archive_window = empty_window("alice", "web", "session-a")
+    _append_round(archive_window, 1)
+    commit_terminal_windows(
+        archive,
+        archive_window,
+        runtime_window_path(archive),
+        copy.deepcopy(archive_window),
+        active_key="interactive:alice",
+    )
+    assert get_active(tmp_path, "alice", "interactive:alice")["session_id"] == "session-b"
+
+
+def test_late_terminal_commit_after_delete_cannot_recreate_session(tmp_path: Path) -> None:
+    archive = _archive(tmp_path, session_id="session-deleted")
+    archive_window = empty_window("alice", "web", "session-deleted")
+    _append_round(archive_window, 1)
+    commit_terminal_windows(
+        archive,
+        archive_window,
+        runtime_window_path(archive),
+        copy.deepcopy(archive_window),
+        active_key="interactive:alice",
+    )
+    reserve_session(
+        tmp_path,
+        "alice",
+        "web",
+        "session-deleted",
+        active_key="interactive:alice",
+    )
+
+    delete_session(tmp_path, "alice", "web", "session-deleted")
+
+    commit_terminal_windows(
+        archive,
+        archive_window,
+        runtime_window_path(archive),
+        copy.deepcopy(archive_window),
+        active_key="interactive:alice",
+    )
+
+    assert read_registry_record(tmp_path, "alice", "web", "session-deleted") is None
+    assert get_active(tmp_path, "alice", "interactive:alice") is None
+    assert find_window(tmp_path, "alice", "web", "session-deleted") is None
 
 
 def _archive(root: Path, user: str = "alice", session_id: str = "conv_write") -> Path:
@@ -286,7 +353,7 @@ def test_schema_v3_migrates_legacy_partition_blobs_without_losing_rounds(
             "SELECT COUNT(*) FROM history_rounds "
             "WHERE window_kind='archive' AND window_name='conv_write'"
         ).fetchone()[0]
-    assert version == "3"
+    assert version == "5"
     assert compact["storage"] == "history_messages"
     assert count == 2
     assert round_count == 1

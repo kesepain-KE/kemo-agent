@@ -13,6 +13,19 @@ from typing import Any
 from upstream import UpstreamClient
 
 
+_USER_WIDE_EVENT_TYPES = frozenset({"system.warning", "cron.result"})
+_DEVICE_WIDE_EVENT_TYPES = frozenset({"device.command"})
+
+
+def _event_data_matches_session(data: Any, target_session: str) -> bool:
+    """Reject a payload that names a different conversation than its route."""
+
+    if not target_session or not isinstance(data, dict):
+        return True
+    embedded = str(data.get("session_id") or "").strip()
+    return not embedded or embedded == target_session
+
+
 class EventHub:
     def __init__(self, upstream: UpstreamClient, poll_interval: float = 5.0, state_path: Path | None = None) -> None:
         self.upstream = upstream
@@ -39,12 +52,18 @@ class EventHub:
         self._connections.clear()
         self._write_connection_state()
 
-    def subscribe(self, username: str, device_id: str) -> asyncio.Queue[dict[str, Any]]:
+    def subscribe(
+        self,
+        username: str,
+        device_id: str,
+        session_id: str = "",
+    ) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         self._queues[username].add(queue)
         self._connections[queue] = {
             "user": username,
             "device_id": device_id or "unknown",
+            "session_id": str(session_id or "").strip(),
             "connected_at": int(time.time()),
             "capabilities": {},
         }
@@ -129,9 +148,35 @@ class EventHub:
         except OSError:
             return
 
-    async def publish(self, username: str, event_type: str, data: Any) -> None:
-        event = {"type": event_type, "ts": int(time.time()), "data": data}
+    async def publish(
+        self,
+        username: str,
+        event_type: str,
+        data: Any,
+        *,
+        session_id: str = "",
+    ) -> None:
+        target_session = str(session_id or "").strip()
+        # Only the explicit user-wide health/cron events may omit a
+        # conversation scope.  All conversation and task-plan events fail
+        # closed instead of becoming an accidental user-wide broadcast.
+        if not target_session and event_type not in _USER_WIDE_EVENT_TYPES:
+            return
+        if not _event_data_matches_session(data, target_session):
+            return
+        event = {
+            "type": event_type,
+            "ts": int(time.time()),
+            "session_id": target_session,
+            "data": data,
+        }
         for queue in tuple(self._queues.get(username, ())):
+            connection = self._connections.get(queue, {})
+            connection_session = str(connection.get("session_id") or "")
+            # A scoped event must never be delivered to an unbound connection.
+            # An empty subscription scope is not a wildcard.
+            if target_session and connection_session != target_session:
+                continue
             if queue.full():
                 try:
                     queue.get_nowait()
@@ -139,12 +184,40 @@ class EventHub:
                     pass
             queue.put_nowait(event)
 
-    async def publish_to_device(self, username: str, device_id: str, event_type: str, data: Any) -> bool:
-        event = {"type": event_type, "ts": int(time.time()), "data": data}
+    async def publish_to_device(
+        self,
+        username: str,
+        device_id: str,
+        event_type: str,
+        data: Any,
+        *,
+        session_id: str = "",
+    ) -> bool:
+        target_session = str(session_id or "").strip()
+        if (
+            not target_session
+            and event_type not in _USER_WIDE_EVENT_TYPES
+            and event_type not in _DEVICE_WIDE_EVENT_TYPES
+        ):
+            # Device targeting is not a conversation wildcard.  Keep private
+            # conversation/task events fail-closed when a caller omits the
+            # session, while still allowing the internal device wake command.
+            return False
+        if not _event_data_matches_session(data, target_session):
+            return False
+        event = {
+            "type": event_type,
+            "ts": int(time.time()),
+            "session_id": target_session,
+            "data": data,
+        }
         delivered = False
         for queue in tuple(self._queues.get(username, ())):
             connection = self._connections.get(queue, {})
             if str(connection.get("device_id") or "") != device_id:
+                continue
+            connection_session = str(connection.get("session_id") or "")
+            if target_session and connection_session != target_session:
                 continue
             delivered = True
             if queue.full():
@@ -170,12 +243,16 @@ class EventHub:
 
     async def _snapshot(self, username: str) -> dict[str, Any]:
         tasks, health, sessions = await asyncio.gather(
-            self.upstream.request_json("GET", f"/api/users/{username}/tasks"),
+            self.upstream.request_json(
+                "GET",
+                f"/api/users/{username}/tasks",
+                params={"source": "app"},
+            ),
             self.upstream.health(),
             self.upstream.request_json(
                 "GET",
                 f"/api/users/{username}/sessions",
-                params={"source": "web", "limit": "50"},
+                params={"source": "app", "limit": "50"},
             ),
         )
         return {"tasks": tasks, "health": health, "sessions": sessions}
@@ -187,6 +264,8 @@ class EventHub:
         new_plans = _index_items(current.get("tasks"), ("plans", "task_plans"))
         for key, item in new_plans.items():
             old = old_plans.get(key, {})
+            if str(item.get("source") or "").strip() != "app":
+                continue
             status = str(item.get("status", ""))
             if status != str(old.get("status", "")):
                 mapped = {
@@ -196,8 +275,14 @@ class EventHub:
                     "completed": "task_plan.completed",
                     "failed": "task_plan.failed",
                 }.get(status)
-                if mapped:
-                    await self.publish(username, mapped, item)
+                plan_session_id = str(item.get("session_id") or "").strip()
+                if mapped and plan_session_id:
+                    await self.publish(
+                        username,
+                        mapped,
+                        item,
+                        session_id=plan_session_id,
+                    )
         old_crons = _index_items(previous.get("tasks"), ("cron_tasks", "crons", "cron", "scheduled"))
         new_crons = _index_items(current.get("tasks"), ("cron_tasks", "crons", "cron", "scheduled"))
         for key, item in new_crons.items():
@@ -213,12 +298,19 @@ class EventHub:
         old_sessions = _index_sessions(previous.get("sessions"))
         new_sessions = _index_sessions(current.get("sessions"))
         for session_id, item in new_sessions.items():
-            if not session_id.startswith("app-"):
+            # Use the explicit source returned by the source-scoped query;
+            # session-id naming is not an ownership contract.
+            if str(item.get("source") or "").strip() != "app":
                 continue
             old_rounds = int(old_sessions.get(session_id, {}).get("rounds") or 0)
             new_rounds = int(item.get("rounds") or 0)
             if new_rounds > old_rounds:
-                await self.publish(username, "conversation.completed", item)
+                await self.publish(
+                    username,
+                    "conversation.completed",
+                    item,
+                    session_id=session_id,
+                )
 
 
 def _index_items(value: Any, keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:

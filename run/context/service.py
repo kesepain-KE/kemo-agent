@@ -72,6 +72,8 @@ def compress_per_round_tool_think(
     conserved_rounds: int,
     agent_runner: AgentRunner,
     cancel_event: threading.Event | None,
+    source: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Compress at most one newly unprotected round in the mutable temp mirror."""
 
@@ -107,6 +109,14 @@ def compress_per_round_tool_think(
     summary = ""
     usage: dict[str, Any] = {}
     if has_payload:
+        runner_kwargs: dict[str, Any] = {
+            "cancel_event": cancel_event,
+            "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS,
+        }
+        if str(source or "").strip():
+            runner_kwargs["source"] = str(source).strip()
+        if str(session_id or "").strip():
+            runner_kwargs["session_id"] = str(session_id).strip()
         result = agent_runner.run(
             "context_manage",
             {
@@ -121,8 +131,7 @@ def compress_per_round_tool_think(
                 ],
                 "trigger": "tool_think_compress",
             },
-            cancel_event=cancel_event,
-            max_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
+            **runner_kwargs,
         )
         summary = _tool_think_summary(result.data)
         if not summary:

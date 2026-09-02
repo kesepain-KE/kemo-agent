@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import quote
 
 import httpx
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Path as FastAPIPath, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,7 @@ VERSION = "1.1.5"
 SERVICE_ID = "kemo_app"
 SERVICE_NAME = "kemo app 桥接服务"
 APP_SOURCE = "app"
+SESSION_ID_MAX_LENGTH = 128
 INSTANCE_ID = str(os.environ.get("KEMO_APP_INSTANCE_ID") or "").strip()
 
 
@@ -117,7 +118,7 @@ class UserLogin(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(min_length=1, max_length=SESSION_ID_MAX_LENGTH)
     prompt: str = ""
     content: list[dict[str, Any]] = Field(default_factory=list)
     uploaded_files: list[str] = Field(default_factory=list)
@@ -138,6 +139,7 @@ class UndoLastRoundRequest(BaseModel):
 
 class GuidanceRequest(BaseModel):
     run_id: str
+    session_id: str = Field(min_length=1, max_length=SESSION_ID_MAX_LENGTH)
     guidance: str = ""
     guidance_id: str = ""
     uploaded_files: list[str] = Field(default_factory=list)
@@ -257,6 +259,9 @@ async def auth_logout(x_kemo_session: str = Header(default=""), _: None = Depend
 
 @app.post("/v1/chat")
 async def chat(body: ChatRequest, session: Session = Depends(require_session)) -> StreamingResponse:
+    requested_session = str(body.session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
     # Older App clients did not send a run id.  Keep that compatibility
     # contract while ensuring the broker and the SSE subscriber use the same
     # durable identifier.
@@ -265,6 +270,7 @@ async def chat(body: ChatRequest, session: Session = Depends(require_session)) -
         **body.model_dump(exclude={"reasoning_effort"}),
         "user": session.username,
         "source": APP_SOURCE,
+        "session_id": requested_session,
         "run_id": run_id,
     }
     try:
@@ -278,7 +284,12 @@ async def chat(body: ChatRequest, session: Session = Depends(require_session)) -
         # The subscriber may disappear at any point.  RUNS owns the upstream
         # stream independently, so generator cancellation only detaches this
         # phone and never cancels the framework run.
-        async for event in RUNS.stream(session.username, str(record["run_id"]), after=0):
+        async for event in RUNS.stream(
+            session.username,
+            str(record["run_id"]),
+            after=0,
+            session_id=requested_session,
+        ):
             if event is None:
                 yield b": kemo-keep-alive\n\n"
             else:
@@ -292,11 +303,19 @@ async def chat(body: ChatRequest, session: Session = Depends(require_session)) -
 @app.get("/v1/runs/active")
 async def active_runs(
     client_id: str = Query("", max_length=128),
-    session_id: str = Query("", max_length=256),
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
     session: Session = Depends(require_session),
 ) -> dict[str, Any]:
+    requested_client = str(client_id or "").strip()
+    requested_session = str(session_id or "").strip()
+    if not requested_session and not requested_client:
+        raise HTTPException(400, "client_id_or_session_id_required")
     return {
-        "runs": RUNS.active(session.username, client_id=client_id, session_id=session_id),
+        "runs": RUNS.active(
+            session.username,
+            client_id=requested_client,
+            session_id=requested_session,
+        ),
     }
 
 
@@ -304,10 +323,19 @@ async def active_runs(
 async def run_snapshot(
     run_id: str,
     after: int = Query(0, ge=0),
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
     session: Session = Depends(require_session),
 ) -> dict[str, Any]:
+    requested_session = str(session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
     try:
-        return RUNS.snapshot(session.username, run_id, after)
+        return RUNS.snapshot(
+            session.username,
+            run_id,
+            after,
+            session_id=requested_session,
+        )
     except KeyError as exc:
         raise HTTPException(404, "run_not_found") from exc
 
@@ -316,15 +344,29 @@ async def run_snapshot(
 async def resume_run_stream(
     run_id: str,
     after: int = Query(0, ge=0),
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
     session: Session = Depends(require_session),
 ) -> StreamingResponse:
+    requested_session = str(session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
     try:
-        RUNS.snapshot(session.username, run_id, after)
+        RUNS.snapshot(
+            session.username,
+            run_id,
+            after,
+            session_id=requested_session,
+        )
     except KeyError as exc:
         raise HTTPException(404, "run_not_found") from exc
 
     async def generate() -> AsyncIterator[bytes]:
-        async for event in RUNS.stream(session.username, run_id, after=after):
+        async for event in RUNS.stream(
+            session.username,
+            run_id,
+            after=after,
+            session_id=requested_session,
+        ):
             if event is None:
                 yield b": kemo-keep-alive\n\n"
             else:
@@ -343,15 +385,52 @@ async def resume_run_stream(
 
 @app.post("/v1/guidance")
 async def guidance(body: GuidanceRequest, session: Session = Depends(require_session)) -> Any:
-    return await UPSTREAM.request_json("POST", f"/api/runs/{quote(body.run_id, safe='')}/guidance", json_body={"user": session.username, "guidance": body.guidance, "guidance_id": body.guidance_id, "uploaded_files": body.uploaded_files})
+    try:
+        scope = RUNS.scope(session.username, body.run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "run_not_found") from exc
+    requested_session = str(body.session_id or "").strip()
+    stored_session = str(scope.get("session_id") or "").strip()
+    if not requested_session or not stored_session or requested_session != stored_session:
+        raise HTTPException(404, "run_not_found")
+    return await UPSTREAM.request_json(
+        "POST",
+        f"/api/runs/{quote(body.run_id, safe='')}/guidance",
+        json_body={
+            "user": session.username,
+            "source": APP_SOURCE,
+            "session_id": requested_session,
+            "guidance": body.guidance,
+            "guidance_id": body.guidance_id,
+            "uploaded_files": body.uploaded_files,
+        },
+    )
 
 
 @app.post("/v1/runs/{run_id}/cancel")
-async def cancel_run(run_id: str, session: Session = Depends(require_session)) -> Any:
+async def cancel_run(
+    run_id: str,
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
+    session: Session = Depends(require_session),
+) -> Any:
+    requested_session = str(session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
+    try:
+        scope = RUNS.scope(session.username, run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "run_not_found") from exc
+    stored_session = str(scope.get("session_id") or "").strip()
+    if not stored_session or stored_session != requested_session:
+        raise HTTPException(404, "run_not_found")
     result = await UPSTREAM.request_json(
         "POST",
         f"/api/runs/{quote(run_id, safe='')}/cancel",
-        json_body={"user": session.username},
+        json_body={
+            "user": session.username,
+            "source": APP_SOURCE,
+            "session_id": requested_session,
+        },
     )
     try:
         RUNS.mark_cancelling(session.username, run_id)
@@ -395,7 +474,7 @@ async def conversations_delete_all(session: Session = Depends(require_session)) 
 
 
 @app.get("/v1/conversations/{session_id}/messages")
-async def conversation_messages(session_id: str, source: str = Query("app"), limit: int = Query(100, ge=1, le=100), before: int | None = Query(None), session: Session = Depends(require_session)) -> Any:
+async def conversation_messages(session_id: str = FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH), source: str = Query("app"), limit: int = Query(100, ge=1, le=100), before: int | None = Query(None), session: Session = Depends(require_session)) -> Any:
     params: dict[str, Any] = {"source": APP_SOURCE, "limit": limit}
     if before is not None:
         params["before"] = before
@@ -404,7 +483,7 @@ async def conversation_messages(session_id: str, source: str = Query("app"), lim
 
 @app.delete("/v1/conversations/{session_id}")
 async def conversation_delete(
-    session_id: str,
+    session_id: str = FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH),
     client_id: str = Query("", max_length=128),
     session: Session = Depends(require_session),
 ) -> Any:
@@ -422,7 +501,7 @@ async def conversation_delete(
 
 @app.post("/v1/conversations/{session_id}/close")
 async def conversation_close(
-    session_id: str,
+    session_id: str = FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH),
     client_id: str = Query("", max_length=128),
     session: Session = Depends(require_session),
 ) -> Any:
@@ -437,7 +516,7 @@ async def conversation_close(
 
 
 @app.post("/v1/conversations/{session_id}/compress")
-async def conversation_compress(session_id: str, session: Session = Depends(require_session)) -> Any:
+async def conversation_compress(session_id: str = FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH), session: Session = Depends(require_session)) -> Any:
     return await UPSTREAM.request_json(
         "POST",
         f"/api/users/{quote(session.username, safe='')}/sessions/{quote(session_id, safe='')}/compress",
@@ -447,8 +526,8 @@ async def conversation_compress(session_id: str, session: Session = Depends(requ
 
 @app.post("/v1/conversations/{session_id}/undo-last-round")
 async def conversation_undo_last_round(
-    session_id: str,
     body: UndoLastRoundRequest,
+    session_id: str = FastAPIPath(..., min_length=1, max_length=SESSION_ID_MAX_LENGTH),
     session: Session = Depends(require_session),
 ) -> Any:
     return await UPSTREAM.request_json(
@@ -497,16 +576,34 @@ async def upload(file: UploadFile = File(...), path: str = Query("", max_length=
 
 
 @app.get("/v1/task_plans")
-async def task_plans(session: Session = Depends(require_session)) -> Any:
-    data = await _tasks(session.username)
+async def task_plans(
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
+    session: Session = Depends(require_session),
+) -> Any:
+    requested_session = str(session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
+    data = await _tasks(session.username, session_id=requested_session)
     return _select(data, "plans", "task_plans", default=data)
 
 
 @app.post("/v1/task_plans/{plan_id}/{action}")
-async def task_plan_action(plan_id: str, action: str, session: Session = Depends(require_session)) -> Any:
+async def task_plan_action(
+    plan_id: str,
+    action: str,
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
+    session: Session = Depends(require_session),
+) -> Any:
     if action not in {"approve", "pause", "resume", "abort"}:
         raise HTTPException(400, "unsupported_action")
-    return await UPSTREAM.request_json("POST", f"/api/users/{quote(session.username, safe='')}/tasks/plans/{quote(plan_id, safe='')}/actions/{action}")
+    requested_session = str(session_id or "").strip()
+    if not requested_session:
+        raise HTTPException(400, "session_id_required")
+    return await UPSTREAM.request_json(
+        "POST",
+        f"/api/users/{quote(session.username, safe='')}/tasks/plans/{quote(plan_id, safe='')}/actions/{action}",
+        params={"source": APP_SOURCE, "session_id": requested_session},
+    )
 
 
 @app.get("/v1/cron")
@@ -532,13 +629,16 @@ async def delete_cron(task_id: str, session: Session = Depends(require_session))
 
 @app.get("/v1/status")
 async def status(
-    session_id: str = Query("", max_length=128),
+    session_id: str = Query("", max_length=SESSION_ID_MAX_LENGTH),
     client_id: str = Query("", max_length=128),
     session: Session = Depends(require_session),
 ) -> Any:
     user = quote(session.username, safe="")
-    resolved_session_id = session_id
-    if client_id:
+    resolved_session_id = str(session_id or "").strip()
+    # An explicitly selected conversation is authoritative.  ``client_id``
+    # may only resolve the active conversation when the caller did not send
+    # a session id, otherwise status for session A could silently become B.
+    if client_id and not resolved_session_id:
         active = await UPSTREAM.request_json(
             "GET",
             f"/api/users/{user}/sessions/active",
@@ -550,9 +650,9 @@ async def status(
                 active_id = str(active_session.get("session_id") or "").strip()
                 if active_id:
                     resolved_session_id = active_id
-    params = {"source": APP_SOURCE}
-    if resolved_session_id:
-        params["session_id"] = resolved_session_id
+    if not resolved_session_id:
+        raise HTTPException(400, "session_id_required")
+    params = {"source": APP_SOURCE, "session_id": resolved_session_id}
     health_value, overview, runtime = await asyncio.gather(
         UPSTREAM.health(),
         UPSTREAM.request_json("GET", f"/api/users/{user}/overview", params=params),
@@ -810,9 +910,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     device_id = _normalized_device_id(
         websocket.headers.get("x-kemo-device-id", "")
     )
+    subscribed_session_id = str(
+        websocket.query_params.get("session_id") or ""
+    ).strip()
+    if not subscribed_session_id or len(subscribed_session_id) > SESSION_ID_MAX_LENGTH:
+        # An unbound socket is a user-wide notification channel, not a valid
+        # conversation stream.  Refuse it so a stale/legacy client cannot
+        # accidentally observe another conversation after reconnecting.
+        await websocket.close(code=4400, reason="session_id_required")
+        return
     await websocket.accept()
-    queue = EVENTS.subscribe(session.username, device_id)
-    await websocket.send_json({"type": "connected", "ts": int(time.time()), "data": {"user": session.username, "device_id": device_id}})
+    queue = EVENTS.subscribe(session.username, device_id, subscribed_session_id)
+    await websocket.send_json({"type": "connected", "ts": int(time.time()), "session_id": subscribed_session_id, "data": {"user": session.username, "device_id": device_id}})
     for command in DEVICE_COMMANDS.pending_for(session.username, device_id):
         await websocket.send_json({"type": "device.command", "ts": int(time.time()), "data": command})
     try:
@@ -862,8 +971,16 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         EVENTS.unsubscribe(session.username, queue)
 
 
-async def _tasks(username: str) -> Any:
-    return await UPSTREAM.request_json("GET", f"/api/users/{quote(username, safe='')}/tasks")
+async def _tasks(username: str, *, session_id: str = "") -> Any:
+    params: dict[str, str] = {"source": APP_SOURCE}
+    requested_session = str(session_id or "").strip()
+    if requested_session:
+        params["session_id"] = requested_session
+    return await UPSTREAM.request_json(
+        "GET",
+        f"/api/users/{quote(username, safe='')}/tasks",
+        params=params,
+    )
 
 
 def _select(value: Any, *keys: str, default: Any) -> Any:

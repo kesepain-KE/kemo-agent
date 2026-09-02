@@ -85,6 +85,8 @@ class AgentTask:
     id: str
     agent: str
     input_data: dict[str, Any]
+    source: str = ""
+    session_id: str = ""
     status: TaskStatus = "queued"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     started_at: str = ""
@@ -98,6 +100,7 @@ class AgentTask:
     job: Callable[[threading.Event], Any] | None = field(default=None, repr=False)
     serial: bool = True
     result_handler: Callable[[AgentRunResult], None] | None = field(default=None, repr=False)
+    event_callback: Callable[[RunEvent], None] | None = field(default=None, repr=False)
     result: Any = None
     error: dict[str, Any] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -120,6 +123,8 @@ class AgentTask:
         return {
             "id": self.id,
             "agent": self.agent,
+            "source": self.source,
+            "session_id": self.session_id,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -313,7 +318,8 @@ class AgentScheduler:
         )
 
     def _emit(self, task: AgentTask, status: str, **detail: Any) -> None:
-        if self.event_callback is None:
+        callback = task.event_callback or self.event_callback
+        if callback is None:
             return
         metadata = {
             "phase": "subagent",
@@ -322,7 +328,37 @@ class AgentScheduler:
             "task_id": task.id,
             **detail,
         }
-        self.event_callback(RunEvent(type="reasoning_delta", metadata=metadata))
+        # Task ownership is authoritative; diagnostic detail cannot redirect
+        # an event into another conversation space.
+        metadata["source"] = task.source
+        metadata["session_id"] = task.session_id
+        callback(RunEvent(type="reasoning_delta", metadata=metadata))
+
+    @staticmethod
+    def _require_task_scope_locked(
+        task: AgentTask,
+        *,
+        source: str = "",
+        session_id: str = "",
+    ) -> None:
+        expected_source = str(source or "").strip()
+        expected_session = str(session_id or "").strip()
+        if not expected_source and not expected_session:
+            if task.source or task.session_id:
+                # Scoped tasks must never be readable or cancellable through
+                # the historical unscoped API.  Keep truly legacy unscoped
+                # tasks usable for trusted internal callers.
+                raise AgentTaskNotFoundError(f"未知子代理任务：{task.id}")
+            return
+        if (
+            not expected_source
+            or not expected_session
+            or task.source != expected_source
+            or task.session_id != expected_session
+        ):
+            # Keep ownership failures indistinguishable from an unknown task
+            # so a caller cannot probe another conversation space by id.
+            raise AgentTaskNotFoundError(f"未知子代理任务：{task.id}")
 
     def submit(
         self,
@@ -334,10 +370,13 @@ class AgentScheduler:
         model_override: str | None = None,
         max_tokens: int | None = None,
         result_handler: Callable[[AgentRunResult], None] | None = None,
+        event_callback: Callable[[RunEvent], None] | None = None,
         block: bool = False,
         enqueue_timeout: float | None = None,
         allow_sync: bool = False,
         config: dict[str, Any] | None = None,
+        source: str = "",
+        session_id: str = "",
     ) -> str:
         registry = (
             self.runner.refresh_registry()
@@ -351,6 +390,10 @@ class AgentScheduler:
             raise AgentQueueError("子代理输入必须是 JSON 对象")
         if config is not None and not isinstance(config, dict):
             raise AgentQueueError("子代理 config 必须是 JSON 对象")
+        normalized_source = str(source or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        if bool(normalized_source) != bool(normalized_session_id):
+            raise AgentQueueError("子代理 source 和 session_id 必须同时提供或同时省略")
         if timeout_survival_seconds is None:
             raw_survival = (self.runner.config.get("agent_runtime") or {}).get(
                 "timeout_survival_seconds", 0.0
@@ -373,6 +416,8 @@ class AgentScheduler:
                 id=f"agent-task-{uuid.uuid4().hex}",
                 agent=agent,
                 input_data=copy.deepcopy(input_data),
+                source=normalized_source,
+                session_id=normalized_session_id,
                 timeout=timeout,
                 survival_seconds=survival_seconds,
                 model_override=model_override,
@@ -380,6 +425,7 @@ class AgentScheduler:
                 config=copy.deepcopy(config) if config is not None else None,
                 serial=definition.execution == "background_serial",
                 result_handler=result_handler,
+                event_callback=event_callback,
             )
             self._tasks[task.id] = task
             self._last_activity = time.monotonic()
@@ -415,6 +461,9 @@ class AgentScheduler:
         timeout_survival_seconds: float | None = None,
         block: bool = False,
         enqueue_timeout: float | None = None,
+        source: str = "",
+        session_id: str = "",
+        event_callback: Callable[[RunEvent], None] | None = None,
     ) -> str:
         """Queue a trusted framework-owned job with the same status/cancel contract."""
 
@@ -422,6 +471,10 @@ class AgentScheduler:
             raise AgentQueueError("子代理输入必须是 JSON 对象")
         if not callable(job):
             raise AgentQueueError("子代理任务入口不可调用")
+        normalized_source = str(source or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        if bool(normalized_source) != bool(normalized_session_id):
+            raise AgentQueueError("子代理 source 和 session_id 必须同时提供或同时省略")
         if timeout_survival_seconds is None:
             raw_survival = (self.runner.config.get("agent_runtime") or {}).get(
                 "timeout_survival_seconds", 0.0
@@ -444,10 +497,13 @@ class AgentScheduler:
                 id=f"agent-task-{uuid.uuid4().hex}",
                 agent=str(agent or "external"),
                 input_data=copy.deepcopy(input_data),
+                source=normalized_source,
+                session_id=normalized_session_id,
                 timeout=timeout,
                 survival_seconds=survival_seconds,
                 job=job,
                 serial=False,
+                event_callback=event_callback,
             )
             self._tasks[task.id] = task
             self._last_activity = time.monotonic()
@@ -471,19 +527,34 @@ class AgentScheduler:
             self._emit(task, "queued")
         return task.id
 
-    def get(self, task_id: str) -> dict[str, Any]:
+    def get(
+        self,
+        task_id: str,
+        *,
+        source: str = "",
+        session_id: str = "",
+    ) -> dict[str, Any]:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 raise AgentTaskNotFoundError(f"未知子代理任务：{task_id}")
+            self._require_task_scope_locked(task, source=source, session_id=session_id)
             self._last_activity = time.monotonic()
             return task.snapshot()
 
-    def wait(self, task_id: str, timeout: float | None = None) -> Any:
+    def wait(
+        self,
+        task_id: str,
+        timeout: float | None = None,
+        *,
+        source: str = "",
+        session_id: str = "",
+    ) -> Any:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 raise AgentTaskNotFoundError(f"未知子代理任务：{task_id}")
+            self._require_task_scope_locked(task, source=source, session_id=session_id)
         if not task.done_event.wait(timeout):
             raise AgentTaskWaitTimeout(f"等待子代理任务超时：{task_id}")
         with self._lock:
@@ -494,11 +565,18 @@ class AgentScheduler:
                 raise AgentCancelledError(str(detail.get("message") or "任务已取消"))
             raise AgentQueueError(str(detail.get("message") or "子代理任务失败"))
 
-    def cancel(self, task_id: str) -> bool:
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        source: str = "",
+        session_id: str = "",
+    ) -> bool:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 raise AgentTaskNotFoundError(f"未知子代理任务：{task_id}")
+            self._require_task_scope_locked(task, source=source, session_id=session_id)
             detail = task.error if isinstance(task.error, dict) else {}
             still_running = (
                 task.status == "timed_out_running"
@@ -622,9 +700,13 @@ class AgentScheduler:
                                 timeout=task.timeout,
                                 timeout_survival_seconds=task.survival_seconds,
                                 model_override=task.model_override,
-                                event_callback=self.event_callback,
+                                event_callback=(
+                                    task.event_callback or self.event_callback
+                                ),
                                 task_id=task.id,
                                 max_tokens=task.max_tokens,
+                                source=task.source,
+                                session_id=task.session_id,
                             )
                         if task.result_handler is not None:
                             task.result_handler(result)

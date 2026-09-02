@@ -577,6 +577,45 @@ def run(*, context):
             self.assertNotEqual(result["pid"], os.getpid())
             self.assertFalse(result["cancelled"])
 
+    def test_manifest_tool_process_keeps_safe_stdio_without_console(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = Path(directory)
+            (plugin / "tool.py").write_text(
+                """
+import sys
+
+def run(*, context):
+    print("worker-diagnostic")
+    return {"stdout_available": sys.stdout is not None}
+""".strip()
+                + "\n",
+                "utf-8",
+            )
+            tool = ToolDefinition(
+                name="isolated_stdio_tool",
+                description="stdio",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                version="1.0.0",
+                enabled=True,
+                entrypoint="tool.py:run",
+                source="test",
+                directory=plugin,
+                execution_mode="process",
+            )
+
+            result = execute_tool(
+                tool,
+                {},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=5,
+            )
+
+        self.assertTrue(result["stdout_available"])
+
     def test_subagent_tool_uses_agent_runtime_watchdog(self) -> None:
         tool = ToolDefinition(
             name="subagent_dispatch",
@@ -1684,8 +1723,10 @@ def run(*, context):
         )
         observed: dict[str, Any] = {}
 
-        def extract_after_commit(**kwargs):
+        def extract_after_commit(*, agent_source, session_id, **kwargs):
             observed.update(kwargs)
+            observed["agent_source"] = agent_source
+            observed["session_id"] = session_id
             self.assertIsNotNone(find_window(root, "alice", "cli", "memory-round"))
             return {
                 "status": "completed",
@@ -1716,6 +1757,8 @@ def run(*, context):
 
         self.assertEqual(observed["round_number"], 1)
         self.assertEqual(observed["prompt"], "我的设备是 J1900。")
+        self.assertEqual(observed["agent_source"], "cli")
+        self.assertEqual(observed["session_id"], "memory-round")
         self.assertEqual(result["memory"]["extraction_mode"], "on_commit")
         self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
         archive = load_window(find_window(root, "alice", "cli", "memory-round"))

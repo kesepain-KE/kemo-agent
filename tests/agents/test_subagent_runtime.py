@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from events import RunEvent
 from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.models import (
     KemoResponse,
@@ -23,7 +24,7 @@ from provider.protocol.models import (
     text_from_content,
 )
 from provider.schema import ProviderError
-from run.agents import AgentQueueError, AgentScheduler
+from run.agents import AgentQueueError, AgentScheduler, AgentTaskNotFoundError
 from run.agents import (
     AgentCancelledError,
     AgentOutputError,
@@ -954,9 +955,59 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "context_manage",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 event_callback=events.append,
+                source="web",
+                session_id="session-a",
             )
         self.assertEqual([event.metadata["status"] for event in events], ["started", "completed"])
         self.assertTrue(all(event.metadata["phase"] == "subagent" for event in events))
+        self.assertTrue(all(event.metadata["source"] == "web" for event in events))
+        self.assertTrue(all(event.metadata["session_id"] == "session-a" for event in events))
+
+    def test_scheduler_task_callbacks_do_not_cross_conversation_spaces(self) -> None:
+        registry = discover_agents(self.root)
+
+        class CallbackRunner(StubRunner):
+            def run(self, name, input_data, **kwargs):
+                callback = kwargs.get("event_callback")
+                if callback is not None:
+                    callback(
+                        RunEvent(
+                            type="reasoning_delta",
+                            metadata={
+                                "status": "runner",
+                                "source": kwargs.get("source"),
+                                "session_id": kwargs.get("session_id"),
+                            },
+                        )
+                    )
+                return AgentRunResult(name, {"value": input_data["value"]}, "{}", {}, "mock")
+
+        runner = CallbackRunner(registry, [])
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        events_a: list[RunEvent] = []
+        events_b: list[RunEvent] = []
+        task_a = scheduler.submit(
+            "self_improve",
+            {"value": 1},
+            source="web",
+            session_id="session-a",
+            event_callback=events_a.append,
+        )
+        task_b = scheduler.submit(
+            "self_improve",
+            {"value": 2},
+            source="web",
+            session_id="session-b",
+            event_callback=events_b.append,
+        )
+        scheduler.wait(task_a, timeout=1, source="web", session_id="session-a")
+        scheduler.wait(task_b, timeout=1, source="web", session_id="session-b")
+
+        self.assertTrue(events_a)
+        self.assertTrue(events_b)
+        self.assertTrue(all(event.metadata["session_id"] == "session-a" for event in events_a))
+        self.assertTrue(all(event.metadata["session_id"] == "session-b" for event in events_b))
 
     def test_scheduler_is_serial_and_supports_cancel(self) -> None:
         registry = discover_agents(self.root)
@@ -988,6 +1039,41 @@ class SubAgentRuntimeTests(unittest.TestCase):
         scheduler.wait(third, 1)
         with self.assertRaises(AgentQueueError):
             scheduler.submit("context_manage", {"rounds": [], "trigger": "manual"})
+
+    def test_scoped_scheduler_task_cannot_use_legacy_unscoped_access(self) -> None:
+        registry = discover_agents(self.root)
+        runner = StubRunner(registry, [])
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        task_id = scheduler.submit(
+            "self_improve",
+            {"value": 1},
+            source="web",
+            session_id="session-a",
+        )
+        with self.assertRaises(AgentTaskNotFoundError):
+            scheduler.get(task_id)
+        with self.assertRaises(AgentTaskNotFoundError):
+            scheduler.wait(task_id, timeout=0)
+        with self.assertRaises(AgentTaskNotFoundError):
+            scheduler.cancel(task_id)
+        runner.gate.set()
+
+    def test_scheduler_rejects_partial_conversation_scope(self) -> None:
+        registry = discover_agents(self.root)
+        runner = StubRunner(registry, [])
+        scheduler = AgentScheduler(runner)
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+
+        with self.assertRaises(AgentQueueError):
+            scheduler.submit("self_improve", {"value": 1}, source="web")
+        with self.assertRaises(AgentQueueError):
+            scheduler.submit_callable(
+                "external",
+                {},
+                lambda _cancel_event: None,
+                session_id="session-a",
+            )
 
     def test_scheduler_preserves_subagent_timeout_status(self) -> None:
         registry = discover_agents(self.root)

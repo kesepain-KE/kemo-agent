@@ -30,6 +30,83 @@ _MAX_DETACHED_SURVIVAL_SECONDS = 3_600.0
 _MAX_EXTERNAL_REQUEST_TIMEOUT_SECONDS = 3_600.0
 
 
+def _scope(context: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(context.get("source") or "").strip(),
+        str(context.get("session_id") or "").strip(),
+    )
+
+
+def _require_control_scope(context: dict[str, Any]) -> tuple[str, str]:
+    source, session_id = _scope(context)
+    if not source or not session_id:
+        raise AgentError("子代理控制操作缺少 source 或 session_id 对话身份")
+    return source, session_id
+
+
+def _scheduler_get(
+    scheduler: Any,
+    task_id: str,
+    *,
+    source: str = "",
+    session_id: str = "",
+) -> Any:
+    if source and session_id:
+        try:
+            return scheduler.get(task_id, source=source, session_id=session_id)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc):
+                raise AgentError(
+                    "子代理调度器不支持对话空间作用域，已拒绝无作用域读取"
+                ) from exc
+            raise
+    return scheduler.get(task_id)
+
+
+def _scheduler_wait(
+    scheduler: Any,
+    task_id: str,
+    *,
+    timeout: float | None = None,
+    source: str = "",
+    session_id: str = "",
+) -> Any:
+    if source and session_id:
+        try:
+            return scheduler.wait(
+                task_id,
+                timeout=timeout,
+                source=source,
+                session_id=session_id,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc):
+                raise AgentError(
+                    "子代理调度器不支持对话空间作用域，已拒绝无作用域等待"
+                ) from exc
+            raise
+    return scheduler.wait(task_id, timeout=timeout)
+
+
+def _scheduler_cancel(
+    scheduler: Any,
+    task_id: str,
+    *,
+    source: str = "",
+    session_id: str = "",
+) -> Any:
+    if source and session_id:
+        try:
+            return scheduler.cancel(task_id, source=source, session_id=session_id)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc):
+                raise AgentError(
+                    "子代理调度器不支持对话空间作用域，已拒绝无作用域取消"
+                ) from exc
+            raise
+    return scheduler.cancel(task_id)
+
+
 def _detached_survival_seconds(config: dict[str, Any]) -> float:
     runtime = config.get("agent_runtime") or {}
     if not isinstance(runtime, dict):
@@ -64,30 +141,44 @@ def _wait_for_task(
     *,
     timeout: float,
     cancel_event: Any = None,
+    source: str = "",
+    session_id: str = "",
 ) -> tuple[bool, Any]:
     """Wait up to the caller deadline without cancelling a live task."""
 
     deadline = time.monotonic() + timeout
     while True:
         if cancel_event is not None and cancel_event.is_set():
-            scheduler.cancel(task_id)
+            _scheduler_cancel(scheduler, task_id, source=source, session_id=session_id)
             raise AgentCancelledError("子代理调用已取消")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            snapshot = scheduler.get(task_id)
+            snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
             status = snapshot.get("status")
             if status in {"queued", "running", "timed_out_running"}:
                 return False, snapshot
             try:
-                return True, scheduler.wait(task_id, timeout=0)
+                return True, _scheduler_wait(
+                    scheduler,
+                    task_id,
+                    timeout=0,
+                    source=source,
+                    session_id=session_id,
+                )
             except AgentTaskWaitTimeout:
                 continue
         try:
-            return True, scheduler.wait(task_id, timeout=min(0.1, remaining))
+            return True, _scheduler_wait(
+                scheduler,
+                task_id,
+                timeout=min(0.1, remaining),
+                source=source,
+                session_id=session_id,
+            )
         except AgentTaskWaitTimeout:
             continue
         except AgentQueueError:
-            snapshot = scheduler.get(task_id)
+            snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
             if snapshot.get("status") in {"queued", "running", "timed_out_running"}:
                 return False, snapshot
             raise
@@ -132,6 +223,7 @@ def run(
 ) -> dict[str, Any]:
     root = Path(context["root"]).resolve()
     user = str(context["user"])
+    scope_source, scope_session = _scope(context)
     public = {definition.name: definition for definition in _public(root, user)}
     if action == "list":
         agents = [
@@ -165,6 +257,9 @@ def run(
         }
     config = load_config(user, root)
     if action == "call":
+        # Every queued child agent must have a complete conversation scope so
+        # status/wait/cancel cannot later fall back to a user-wide wildcard.
+        _require_control_scope(context)
         if timeout is not None:
             if isinstance(timeout, bool):
                 raise AgentError("timeout 必须是正数")
@@ -207,12 +302,16 @@ def run(
                     ),
                     timeout=execution_timeout,
                     timeout_survival_seconds=survival,
+                    source=scope_source,
+                    session_id=scope_session,
                 )
                 completed, value = _wait_for_task(
                     scheduler,
                     task_id,
                     timeout=requested_timeout,
                     cancel_event=context.get("cancel_event"),
+                    source=scope_source,
+                    session_id=scope_session,
                 )
                 if not completed:
                     return _running_task_response(
@@ -268,12 +367,16 @@ def run(
                 result_handler=persist_result if agent == "task_plan" else None,
                 allow_sync=True,
                 config=config,
+                source=scope_source,
+                session_id=scope_session,
             )
             completed, value = _wait_for_task(
                 scheduler,
                 task_id,
                 timeout=requested_timeout,
                 cancel_event=context.get("cancel_event"),
+                source=scope_source,
+                session_id=scope_session,
             )
             if not completed:
                 return _running_task_response(
@@ -296,15 +399,31 @@ def run(
             return response
         scheduler = get_agent_scheduler(root, user, config=config)
         submit_kwargs = {"timeout": timeout, "config": config} if timeout is not None else {"config": config}
-        submitted = scheduler.submit(agent, payload, **submit_kwargs)
+        submitted = scheduler.submit(
+            agent,
+            payload,
+            **submit_kwargs,
+            source=scope_source,
+            session_id=scope_session,
+        )
         return {"status": "queued", "agent": agent, "task_id": submitted}
     scheduler = get_agent_scheduler(root, user, config=config)
     if action == "status":
         if not task_id:
             raise ValueError("status 需要 task_id")
-        return scheduler.get(task_id)
+        source, session_id = _require_control_scope(context)
+        return _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
     if action == "cancel":
         if not task_id:
             raise ValueError("cancel 需要 task_id")
-        return {"task_id": task_id, "cancelled": scheduler.cancel(task_id)}
+        source, session_id = _require_control_scope(context)
+        return {
+            "task_id": task_id,
+            "cancelled": _scheduler_cancel(
+                scheduler,
+                task_id,
+                source=source,
+                session_id=session_id,
+            ),
+        }
     raise ValueError(f"未知 action：{action}")

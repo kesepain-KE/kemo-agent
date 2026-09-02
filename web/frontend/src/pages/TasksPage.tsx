@@ -109,8 +109,14 @@ export function TasksPage() {
   })
   const data = query.data
   const refresh = () => client.invalidateQueries({ queryKey: ['tasks', user] })
-  const planPause = useMutation({ mutationFn: (id: string) => commandPlan(user, id, 'pause'), onSuccess: refresh })
-  const planDelete = useMutation({ mutationFn: (id: string) => deletePlan(user, id), onSuccess: refresh })
+  const planPause = useMutation({
+    mutationFn: (plan: PlanSummary) => commandPlan(user, plan.plan_id, 'pause', plan.session_id, plan.source || 'web'),
+    onSuccess: refresh,
+  })
+  const planDelete = useMutation({
+    mutationFn: (plan: PlanSummary) => deletePlan(user, plan.plan_id, plan.session_id, plan.source || 'web'),
+    onSuccess: refresh,
+  })
   const cronUpdate = useMutation({ mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => updateCron(user, id, body), onSuccess: refresh })
   const cronDelete = useMutation({ mutationFn: (id: string) => deleteCron(user, id), onSuccess: refresh })
   const plans = data?.plans || []
@@ -189,7 +195,7 @@ export function TasksPage() {
         title,
         description,
         ...(steps ? { steps } : {}),
-      }, plan.session_id)
+      }, plan.session_id, plan.source || 'web')
       setPlanMutationFeedback(response.activated
         ? '计划已修正并自动恢复执行。'
         : response.reason === 'fix_incomplete'
@@ -202,7 +208,7 @@ export function TasksPage() {
   }
   const retryStep = async (plan: PlanSummary, stepId: string) => {
     try {
-      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision, plan.session_id)
+      const response = await retryPlanStep(user, plan.plan_id, stepId, plan.revision, plan.session_id, plan.source || 'web')
       setPlanMutationFeedback(response.activated
         ? '失败步骤已重置，计划已自动恢复执行。'
         : response.reason === 'fix_incomplete'
@@ -229,11 +235,11 @@ export function TasksPage() {
     setHistoryFeedback('')
     rollbackMutation.mutate({ plan, revision })
   }
-  const removePlan = (plan: PlanSummary) => { if (window.confirm(`删除任务计划“${plan.title}”？`)) planDelete.mutate(plan.plan_id) }
+  const removePlan = (plan: PlanSummary) => { if (window.confirm(`删除任务计划“${plan.title}”？`)) planDelete.mutate(plan) }
   const removeCron = (task: CronTaskSummary) => { if (window.confirm(`删除定时任务“${task.title}”？`)) cronDelete.mutate(task.task_id) }
   const removeHistory = (record: ExecutionRecord) => {
     if (!window.confirm(`删除执行记录“${record.title}”？`)) return
-    if (record.kind === 'plan') planDelete.mutate(record.id)
+    if (record.kind === 'plan' && record.plan) planDelete.mutate(record.plan)
     else cronDelete.mutate(record.id)
   }
 
@@ -242,7 +248,7 @@ export function TasksPage() {
     <section className={styles.stats}><MetricCard label="活动计划" value={plans.length} detail="总创建计划" symbol={<ClipboardList size={16} />} /><MetricCard label="执行中" value={plans.filter((plan) => plan.status === 'running').length} detail="正在执行" symbol={<Play size={16} />} /><MetricCard label="已完成" value={plans.filter((plan) => plan.status === 'completed').length} detail="已完成计划" symbol={<CheckCircle2 size={16} />} tone="success" /></section>
     <div className="module-toolbar"><div className="module-tabs">{(['plans', 'cron', 'history'] as const).map((item) => <button key={item} className={`module-tab-btn ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>{item === 'plans' ? '任务计划' : item === 'cron' ? '定时任务' : '执行记录'}</button>)}</div><div className="toolbar-spacer" /></div>
     {tab === 'plans' && planMutationFeedback && <div className={styles.mutationFeedback} role="status">{planMutationFeedback}</div>}
-    {tab === 'plans' && <div className={styles.planLayout}><main className={`${styles.planList} ${plans.length ? styles.populatedList : ''}`}>{plans.length ? plans.map((plan) => <PlanCard key={plan.plan_id} plan={plan} selected={plan.plan_id === selectedPlanId} onSelect={() => setSelectedPlanId(plan.plan_id)} onModify={() => { void modify(plan) }} onPause={() => planPause.mutate(plan.plan_id)} onRetryStep={(stepId) => { void retryStep(plan, stepId) }} onDelete={() => removePlan(plan)} />) : <EmptyPanel title="暂无任务计划" description="在对话中描述目标，kemo-agent 会生成计划草案并等待确认。" icon={<ClipboardList size={21} />} />}</main><PlanDetailPanel plan={selectedPlan} historyOpen={Boolean(selectedPlan && historyPlanId === selectedPlan.plan_id)} revisions={revisionsQuery.data?.revisions || []} selectedRevision={selectedRevision} snapshot={revisionQuery.data?.plan} historyLoading={revisionsQuery.isLoading || revisionQuery.isLoading} historyError={(revisionsQuery.error || revisionQuery.error) instanceof Error ? String((revisionsQuery.error || revisionQuery.error)?.message || '') : ''} historyFeedback={historyFeedback} rollbackPending={rollbackMutation.isPending} onToggleHistory={() => selectedPlan && toggleHistory(selectedPlan)} onSelectRevision={(revision) => { setSelectedRevision(revision); setHistoryFeedback('') }} onRollback={(revision) => selectedPlan && rollbackRevision(selectedPlan, revision)} /></div>}
+    {tab === 'plans' && <div className={styles.planLayout}><main className={`${styles.planList} ${plans.length ? styles.populatedList : ''}`}>{plans.length ? plans.map((plan) => <PlanCard key={plan.plan_id} plan={plan} selected={plan.plan_id === selectedPlanId} onSelect={() => setSelectedPlanId(plan.plan_id)} onModify={() => { void modify(plan) }} onPause={() => planPause.mutate(plan)} onRetryStep={(stepId) => { void retryStep(plan, stepId) }} onDelete={() => removePlan(plan)} />) : <EmptyPanel title="暂无任务计划" description="在对话中描述目标，kemo-agent 会生成计划草案并等待确认。" icon={<ClipboardList size={21} />} />}</main><PlanDetailPanel plan={selectedPlan} historyOpen={Boolean(selectedPlan && historyPlanId === selectedPlan.plan_id)} revisions={revisionsQuery.data?.revisions || []} selectedRevision={selectedRevision} snapshot={revisionQuery.data?.plan} historyLoading={revisionsQuery.isLoading || revisionQuery.isLoading} historyError={(revisionsQuery.error || revisionQuery.error) instanceof Error ? String((revisionsQuery.error || revisionQuery.error)?.message || '') : ''} historyFeedback={historyFeedback} rollbackPending={rollbackMutation.isPending} onToggleHistory={() => selectedPlan && toggleHistory(selectedPlan)} onSelectRevision={(revision) => { setSelectedRevision(revision); setHistoryFeedback('') }} onRollback={(revision) => selectedPlan && rollbackRevision(selectedPlan, revision)} /></div>}
     {tab === 'cron' && <div className={styles.planLayout}><main className={`${styles.planList} ${cronTasks.length ? styles.populatedList : ''}`}>{cronTasks.length ? cronTasks.map((task) => <CronCard key={task.task_id} task={task} selected={task.task_id === selectedCronId} onSelect={() => setSelectedCronId(task.task_id)} onTogglePause={() => cronUpdate.mutate({ id: task.task_id, body: { status: task.status === 'paused' ? 'enabled' : 'paused' } })} onDelete={() => removeCron(task)} />) : <EmptyPanel title="暂无定时任务" description="当前用户没有可显示的定时任务。" icon={<TimerReset size={21} />} />}</main><CronDetailPanel task={selectedCron} /></div>}
     {tab === 'history' && <div className={styles.planLayout}><main className={`${styles.planList} ${history.length ? styles.populatedList : ''}`}>{history.length ? history.map((record) => <ExecutionCard key={record.key} record={record} selected={record.key === selectedHistoryKey} onSelect={() => setSelectedHistoryKey(record.key)} onDelete={() => removeHistory(record)} />) : <EmptyPanel title="暂无执行记录" description="已完成、失败或取消的任务计划和定时任务会出现在这里。" icon={<CheckCircle2 size={21} />} />}</main><ExecutionDetailPanel record={selectedHistory} /></div>}
   </ModuleFrame>

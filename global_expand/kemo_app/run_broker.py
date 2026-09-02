@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -26,6 +27,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"
 MAX_REPLAY_EVENTS = 20_000
 DEFAULT_TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_TERMINAL_RUN_LIMIT = 500
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,14 @@ class RunStore:
                     PRIMARY KEY(run_id, event_id),
                     FOREIGN KEY(run_id) REFERENCES app_runs(run_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS app_run_aliases (
+                    alias_run_id TEXT PRIMARY KEY,
+                    canonical_run_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    FOREIGN KEY(canonical_run_id) REFERENCES app_runs(run_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_app_run_aliases_canonical
+                    ON app_run_aliases(canonical_run_id, username);
                 """
             )
             columns = {
@@ -120,6 +130,76 @@ class RunStore:
         with self._lock:
             self._connection.close()
 
+    def _resolve_run_id_locked(self, username: str, run_id: str) -> str:
+        """Resolve a canonical run id while enforcing user ownership."""
+
+        normalized = str(run_id or "").strip()
+        if not normalized:
+            raise KeyError(run_id)
+        direct = self._connection.execute(
+            "SELECT run_id, username FROM app_runs WHERE run_id=?",
+            (normalized,),
+        ).fetchone()
+        if direct is not None:
+            if str(direct["username"]) != username:
+                raise PermissionError("run_user_mismatch")
+            return normalized
+        alias = self._connection.execute(
+            "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
+            (normalized,),
+        ).fetchone()
+        if alias is None:
+            raise KeyError(run_id)
+        if str(alias["username"]) != username:
+            raise PermissionError("run_user_mismatch")
+        canonical = str(alias["canonical_run_id"])
+        owner = self._connection.execute(
+            "SELECT username FROM app_runs WHERE run_id=?",
+            (canonical,),
+        ).fetchone()
+        if owner is None:
+            raise KeyError(run_id)
+        if str(owner["username"]) != username:
+            raise PermissionError("run_user_mismatch")
+        return canonical
+
+    def canonical_id(self, username: str, run_id: str) -> str:
+        with self._lock:
+            return self._resolve_run_id_locked(username, run_id)
+
+    def _register_alias_locked(
+        self,
+        username: str,
+        alias_run_id: str,
+        canonical_run_id: str,
+    ) -> None:
+        alias = str(alias_run_id or "").strip()
+        canonical = str(canonical_run_id or "").strip()
+        if (
+            not alias
+            or alias == canonical
+            or not _RUN_ID_RE.fullmatch(alias)
+            or not canonical
+        ):
+            return
+        direct = self._connection.execute(
+            "SELECT run_id FROM app_runs WHERE run_id=?",
+            (alias,),
+        ).fetchone()
+        if direct is not None:
+            # Never replace a real run id with an upstream-provided alias.
+            return
+        existing = self._connection.execute(
+            "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
+            (alias,),
+        ).fetchone()
+        if existing is not None:
+            return
+        self._connection.execute(
+            "INSERT INTO app_run_aliases(alias_run_id, canonical_run_id, username) VALUES(?,?,?)",
+            (alias, canonical, username),
+        )
+
     def create(self, username: str, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         run_id = str(payload.get("run_id") or "").strip()
         session_id = str(payload.get("session_id") or "").strip()
@@ -135,6 +215,23 @@ class RunStore:
                 value = dict(existing)
                 if value["username"] != username:
                     raise PermissionError("run_user_mismatch")
+                if value["session_id"] != session_id:
+                    raise ValueError("run_session_mismatch")
+                return value, False
+            alias = self._connection.execute(
+                "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
+                (run_id,),
+            ).fetchone()
+            if alias is not None:
+                if str(alias["username"]) != username:
+                    raise PermissionError("run_user_mismatch")
+                canonical = self._connection.execute(
+                    "SELECT * FROM app_runs WHERE run_id=?",
+                    (str(alias["canonical_run_id"]),),
+                ).fetchone()
+                if canonical is None:
+                    raise KeyError(run_id)
+                value = dict(canonical)
                 if value["session_id"] != session_id:
                     raise ValueError("run_session_mismatch")
                 return value, False
@@ -160,9 +257,15 @@ class RunStore:
 
     def get(self, username: str, run_id: str) -> dict[str, Any]:
         with self._lock:
+            try:
+                canonical = self._resolve_run_id_locked(username, run_id)
+            except PermissionError as exc:
+                # Keep reads indistinguishable from an unknown run so a
+                # caller cannot probe another user's run ids.
+                raise KeyError(run_id) from exc
             row = self._connection.execute(
                 "SELECT * FROM app_runs WHERE run_id=? AND username=?",
-                (run_id, username),
+                (canonical, username),
             ).fetchone()
         if row is None:
             raise KeyError(run_id)
@@ -174,10 +277,11 @@ class RunStore:
         now = int(time.time())
         finished_at = now if status in TERMINAL_STATUSES else 0
         with self._lock:
+            canonical = self._resolve_run_id_locked(username, run_id)
             cursor = self._connection.execute(
                 """UPDATE app_runs SET status=?,updated_at=?,finished_at=?,error=?
                    WHERE run_id=? AND username=?""",
-                (status, now, finished_at, error[:500], run_id, username),
+                (status, now, finished_at, error[:500], canonical, username),
             )
             if cursor.rowcount != 1:
                 raise KeyError(run_id)
@@ -188,9 +292,10 @@ class RunStore:
         now = int(time.time())
         terminal_status, error = _terminal_status(data)
         with self._lock:
+            canonical = self._resolve_run_id_locked(username, run_id)
             row = self._connection.execute(
                 "SELECT username,last_event_id,status FROM app_runs WHERE run_id=?",
-                (run_id,),
+                (canonical,),
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
@@ -199,26 +304,28 @@ class RunStore:
             event_id = int(row["last_event_id"]) + 1
             self._connection.execute(
                 "INSERT INTO app_run_events(run_id,event_id,data,created_at) VALUES(?,?,?,?)",
-                (run_id, event_id, data, now),
+                (canonical, event_id, data, now),
             )
+            continuation_id = _continuation_run_id(data)
+            self._register_alias_locked(username, continuation_id, canonical)
             status = terminal_status or ("cancelling" if row["status"] == "cancelling" else "running")
             finished_at = now if terminal_status else 0
             self._connection.execute(
                 """UPDATE app_runs
                    SET status=?,updated_at=?,finished_at=?,last_event_id=?,error=?
                    WHERE run_id=?""",
-                (status, now, finished_at, event_id, error[:500], run_id),
+                (status, now, finished_at, event_id, error[:500], canonical),
             )
             self._connection.commit()
         return StoredEvent(event_id, data, now)
 
     def events_after(self, username: str, run_id: str, after: int) -> list[StoredEvent]:
-        self.get(username, run_id)
         with self._lock:
+            canonical = self._resolve_run_id_locked(username, run_id)
             rows = self._connection.execute(
                 """SELECT event_id,data,created_at FROM app_run_events
                    WHERE run_id=? AND event_id>? ORDER BY event_id LIMIT ?""",
-                (run_id, max(0, int(after)), MAX_REPLAY_EVENTS),
+                (canonical, max(0, int(after)), MAX_REPLAY_EVENTS),
             ).fetchall()
         return [StoredEvent(int(row["event_id"]), str(row["data"]), int(row["created_at"])) for row in rows]
 
@@ -337,10 +444,11 @@ class RunStore:
         """Finish a deferred conversation deletion after its active run ends."""
 
         with self._lock:
+            canonical = self._resolve_run_id_locked(username, run_id)
             row = self._connection.execute(
                 "SELECT status,delete_when_terminal FROM app_runs "
                 "WHERE run_id=? AND username=?",
-                (run_id, username),
+                (canonical, username),
             ).fetchone()
             if (
                 row is None
@@ -348,7 +456,7 @@ class RunStore:
                 or str(row["status"]) not in TERMINAL_STATUSES
             ):
                 return False
-            self._delete_run_ids_locked([run_id])
+            self._delete_run_ids_locked([canonical])
             self._connection.commit()
             return True
 
@@ -385,8 +493,17 @@ class RunBroker:
                 record = self.store.set_status(username, run_id, "interrupted", "bridge_run_not_attached")
         return record
 
-    def snapshot(self, username: str, run_id: str, after: int = 0) -> dict[str, Any]:
+    def snapshot(
+        self,
+        username: str,
+        run_id: str,
+        after: int = 0,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
         record = self.store.get(username, run_id)
+        if session_id and str(record.get("session_id") or "") != str(session_id):
+            raise KeyError(run_id)
         events = self.store.events_after(username, run_id, after)
         status = str(record["status"])
         try:
@@ -411,6 +528,15 @@ class RunBroker:
                 {"event_id": event.event_id, "data": event.data, "created_at": event.created_at}
                 for event in events
             ],
+        }
+
+    def scope(self, username: str, run_id: str) -> dict[str, str]:
+        """Return the durable ownership scope without loading replay events."""
+
+        record = self.store.get(username, run_id)
+        return {
+            "run_id": str(record["run_id"]),
+            "session_id": str(record["session_id"]),
         }
 
     def active(self, username: str, *, client_id: str = "", session_id: str = "") -> list[dict[str, Any]]:
@@ -445,9 +571,27 @@ class RunBroker:
         self._forget_runs(deleted)
         return len(deleted)
 
-    async def stream(self, username: str, run_id: str, after: int = 0) -> AsyncIterator[StoredEvent | None]:
+    async def stream(
+        self,
+        username: str,
+        run_id: str,
+        after: int = 0,
+        *,
+        session_id: str = "",
+    ) -> AsyncIterator[StoredEvent | None]:
+        try:
+            canonical_run_id = self.store.canonical_id(username, run_id)
+        except (KeyError, PermissionError):
+            return
+        if session_id:
+            try:
+                record = self.store.get(username, canonical_run_id)
+            except (KeyError, PermissionError):
+                return
+            if str(record.get("session_id") or "") != str(session_id):
+                return
         cursor = max(0, int(after))
-        condition = self._conditions.setdefault(run_id, asyncio.Condition())
+        condition = self._conditions.setdefault(canonical_run_id, asyncio.Condition())
         while True:
             try:
                 events = self.store.events_after(username, run_id, cursor)
@@ -541,6 +685,31 @@ class RunBroker:
             condition.notify_all()
 
 
+def _continuation_run_id(data: str) -> str:
+    """Extract a long-task replacement run id from one upstream event."""
+
+    try:
+        value = json.loads(data)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    nested = value.get("data") if isinstance(value.get("data"), dict) else value
+    event_type = str(
+        value.get("type")
+        or value.get("event")
+        or nested.get("type")
+        or nested.get("event")
+        or ""
+    )
+    if event_type != "long_task_update":
+        return ""
+    metadata = nested.get("metadata") if isinstance(nested.get("metadata"), dict) else {}
+    candidate = metadata.get("next_run_id") or nested.get("next_run_id") or value.get("next_run_id")
+    rendered = str(candidate or "").strip()
+    return rendered if _RUN_ID_RE.fullmatch(rendered) else ""
+
+
 def _terminal_status(data: str) -> tuple[str | None, str]:
     if data.strip() == "[DONE]":
         return "completed", ""
@@ -554,10 +723,23 @@ def _terminal_status(data: str) -> tuple[str | None, str]:
     event_type = str(value.get("type") or value.get("event") or nested.get("type") or nested.get("event") or "")
     if event_type in {"done", "completed"}:
         metadata = nested.get("metadata") if isinstance(nested.get("metadata"), dict) else {}
-        status = str(metadata.get("status") or "").lower()
-        if status == "cancelled":
+        raw_status = metadata.get("status")
+        if raw_status is None:
+            raw_status = nested.get("status")
+        if raw_status is None and nested is not value:
+            raw_status = value.get("status")
+        status = str(raw_status or "").strip().casefold()
+        if status in {"cancelled", "canceled", "cancelling"}:
             return "cancelled", ""
-        return "completed", ""
+        if status in {"failed", "error"}:
+            return "failed", f"upstream_terminal_status:{status}"
+        if status in {"interrupted", "aborted", "stopped", "limited", "paused"}:
+            return "interrupted", f"upstream_terminal_status:{status}"
+        if status in {"", "completed", "success", "succeeded", "done"}:
+            return "completed", ""
+        # Do not silently advertise success for a newly introduced terminal
+        # status until the bridge contract explicitly maps it.
+        return "failed", f"upstream_terminal_status:{status[:64]}"
     if event_type == "error":
         error_value = nested.get("error")
         if isinstance(error_value, dict):

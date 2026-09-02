@@ -403,18 +403,32 @@ export async function getRuntimeStatus(
   return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${suffix}`)
 }
 
-export async function getTasks(user: string): Promise<TasksResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks`)
+export async function getTasks(user: string, sessionId = ''): Promise<TasksResponse> {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`)
 }
 
-export async function createPlan(user: string, plan: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans`, {
+export async function createPlan(
+  user: string,
+  plan: Record<string, unknown>,
+  sessionId = "",
+  source = "web",
+): Promise<Record<string, unknown>> {
+  const query = new URLSearchParams({ session_id: sessionId, source })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans?${query.toString()}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(plan),
   })
 }
 
-export async function updatePlan(user: string, planId: string, plan: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, {
+export async function updatePlan(
+  user: string,
+  planId: string,
+  plan: Record<string, unknown>,
+  sessionId = "",
+  source = "web",
+): Promise<Record<string, unknown>> {
+  const query = new URLSearchParams({ session_id: sessionId, source })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}?${query.toString()}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(plan),
   })
 }
@@ -424,8 +438,9 @@ export async function editPlan(
   planId: string,
   changes: Record<string, unknown>,
   sessionId: string,
+  source = "web",
 ): Promise<PlanMutationResponse> {
-  const query = new URLSearchParams({ session_id: sessionId })
+  const query = new URLSearchParams({ session_id: sessionId, source })
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/edit?${query.toString()}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
   })
@@ -437,8 +452,9 @@ export async function retryPlanStep(
   stepId: string,
   revision: number,
   sessionId: string,
+  source = "web",
 ): Promise<PlanMutationResponse> {
-  const query = new URLSearchParams({ session_id: sessionId })
+  const query = new URLSearchParams({ session_id: sessionId, source })
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}/retry?${query.toString()}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
   })
@@ -448,8 +464,9 @@ export async function getPlanRevisions(
   user: string,
   planId: string,
   sessionId: string,
+  source = "web",
 ): Promise<PlanRevisionsResponse> {
-  const query = new URLSearchParams({ session_id: sessionId })
+  const query = new URLSearchParams({ session_id: sessionId, source })
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions?${query.toString()}`)
 }
 
@@ -458,8 +475,9 @@ export async function getPlanRevision(
   planId: string,
   revision: number,
   sessionId: string,
+  source = "web",
 ): Promise<PlanRevisionResponse> {
-  const query = new URLSearchParams({ session_id: sessionId })
+  const query = new URLSearchParams({ session_id: sessionId, source })
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions/${revision}?${query.toString()}`)
 }
 
@@ -469,8 +487,9 @@ export async function rollbackPlan(
   revision: number,
   currentRevision: number,
   sessionId: string,
+  source = "web",
 ): Promise<PlanRollbackResponse> {
-  const query = new URLSearchParams({ session_id: sessionId })
+  const query = new URLSearchParams({ session_id: sessionId, source })
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/rollback?${query.toString()}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, current_revision: currentRevision }),
   })
@@ -480,14 +499,23 @@ export async function commandPlan(
   user: string,
   planId: string,
   action: 'pause' | 'cancel',
+  sessionId = "",
+  source = "web",
 ): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/actions/${action}`, {
+  const query = new URLSearchParams({ session_id: sessionId, source })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/actions/${action}?${query.toString()}`, {
     method: 'POST',
   })
 }
 
-export async function deletePlan(user: string, planId: string): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' })
+export async function deletePlan(
+  user: string,
+  planId: string,
+  sessionId = "",
+  source = "web",
+): Promise<Record<string, unknown>> {
+  const query = new URLSearchParams({ session_id: sessionId, source })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}?${query.toString()}`, { method: 'DELETE' })
 }
 
 export async function createCron(user: string, task: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1026,7 +1054,7 @@ export async function submitGuidance(
   user: string,
   runId: string,
   guidance: string,
-  options: { guidanceId?: string; uploadedFiles?: string[] } = {},
+  options: { sessionId: string; source?: 'web' | 'app'; guidanceId?: string; uploadedFiles?: string[] },
 ): Promise<{
   run_id: string
   status: 'accepted_current_run' | 'queued_next_turn'
@@ -1038,6 +1066,8 @@ export async function submitGuidance(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       user,
+      source: options.source || 'web',
+      session_id: options.sessionId,
       guidance,
       guidance_id: options.guidanceId || '',
       uploaded_files: options.uploadedFiles || [],
@@ -1048,11 +1078,13 @@ export async function submitGuidance(
 export async function cancelRun(
   user: string,
   runId: string,
+  sessionId: string,
+  source: 'web' | 'app' = 'web',
 ): Promise<{ run_id: string; user: string; session_id: string; status: 'stopping' }> {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user }),
+    body: JSON.stringify({ user, source, session_id: sessionId }),
   })
 }
 

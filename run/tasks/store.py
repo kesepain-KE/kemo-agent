@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -37,12 +38,17 @@ _SENSITIVE_ARGUMENT_KEYS = frozenset({
     "refresh_token",
     "password",
     "secret",
+    "secret_key",
+    "signing_key",
+    "encryption_key",
+    "client_key",
     "private_key",
     "token",
 })
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?ix)\b(?:authorization|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
-    r"password|secret|cookie|private[_ -]?key|token)\b"
+    r"password|secret(?:[_ -]?key)?|signing[_ -]?key|encryption[_ -]?key|"
+    r"client[_ -]?key|cookie|private[_ -]?key|token)\b"
     r"\s*(?:=|:|：|是)\s*[^\s,;\]}]{8,}"
 )
 _BEARER_SECRET_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
@@ -905,7 +911,14 @@ class PlanStore:
                     current = self._load(database, plan_id)
                     if current is None:
                         raise PlanNotFoundError(f"计划不存在：{plan_id}")
-                    expected_revision = int(current.get("revision", 1))
+                    # Mutators are allowed to update the supplied dictionary in
+                    # place.  Keep an immutable snapshot for all comparisons;
+                    # otherwise a newly inserted credential can overwrite the
+                    # very object used as the validation baseline.
+                    original = copy.deepcopy(current)
+                    expected_revision = int(original.get("revision", 1))
+                    original_source = original.get("source")
+                    original_session_id = original.get("session_id")
                     updated = mutator(current)
                     if not isinstance(updated, dict):
                         raise PlanError("mutator 必须返回 dict")
@@ -913,10 +926,17 @@ class PlanStore:
                         raise PlanValidationError("更新不能修改 plan_id")
                     if updated.get("user") != self.user:
                         raise PlanValidationError("更新不能修改计划所属用户")
+                    if (
+                        updated.get("source") != original_source
+                        or updated.get("session_id") != original_session_id
+                    ):
+                        raise PlanValidationError(
+                            "更新不能修改计划所属对话空间"
+                        )
                     updated["revision"] = expected_revision + 1
                     updated["updated_at"] = _now()
                     _validate_plan(updated)
-                    _validate_sensitive_argument_change(updated, current=current)
+                    _validate_sensitive_argument_change(updated, current=original)
                     actual = database.execute(
                         "SELECT revision FROM task_plans WHERE plan_id=?", (plan_id,)
                     ).fetchone()

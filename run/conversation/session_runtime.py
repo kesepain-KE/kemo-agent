@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,11 @@ def session_lock(
     source: str,
     session_id: str,
 ) -> threading.RLock:
-    key = (str(root.resolve()), user, source, session_id)
+    # Windows paths are case-insensitive.  Normalize only the path component
+    # so aliases such as ``E:\\code\\kemo-agent`` and ``e:\\code\\kemo-agent``
+    # cannot bypass the same in-process session lock; user/source/session
+    # values remain case-sensitive protocol identities.
+    key = (os.path.normcase(str(root.resolve())), user, source, session_id)
     with _SESSION_LOCKS_GUARD:
         return _SESSION_LOCKS.setdefault(key, threading.RLock())
 

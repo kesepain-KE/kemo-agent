@@ -15,7 +15,7 @@ from events import RunEvent
 from provider.factory import create_provider
 from run.engine import iter_request_events
 from run.tasks.executor import execute_plan
-from run.tasks.store import PlanStore
+from run.tasks.store import PlanError, PlanStore
 from run.tools import ToolRegistry, discover_tools
 from run.config import list_users
 
@@ -99,8 +99,23 @@ class TaskPlanScheduler:
         return None
 
     def _execute(self, user: str, plan_id: str) -> dict[str, Any]:
+        current_scope: dict[str, str] = {"user": user, "plan_id": plan_id}
+        try:
+            selected_plan = PlanStore(self.root, user).read(plan_id)
+        except PlanError:
+            # The executor remains the authority for claiming and validating
+            # the plan.  Keep the diagnostic state useful even if this
+            # best-effort read races with deletion or database recovery.
+            selected_plan = None
+        if isinstance(selected_plan, dict):
+            current_scope.update(
+                {
+                    "source": str(selected_plan.get("source") or ""),
+                    "session_id": str(selected_plan.get("session_id") or ""),
+                }
+            )
         with self._lock:
-            self._current = {"user": user, "plan_id": plan_id}
+            self._current = current_scope
 
         def agent_events(request: dict[str, Any]) -> Iterator[RunEvent]:
             if self.transport_registry is not None:
@@ -133,6 +148,8 @@ class TaskPlanScheduler:
             result = {
                 "user": user,
                 "plan_id": plan_id,
+                "source": str(plan.get("source") or ""),
+                "session_id": str(plan.get("session_id") or ""),
                 "status": str(plan.get("status") or ""),
                 "terminal": terminal,
                 "errors": errors,
@@ -144,6 +161,8 @@ class TaskPlanScheduler:
             result = {
                 "user": user,
                 "plan_id": plan_id,
+                "source": current_scope.get("source", ""),
+                "session_id": current_scope.get("session_id", ""),
                 "status": "error",
                 "errors": [{"message": str(exc), "exception_type": type(exc).__name__}],
             }

@@ -14,7 +14,8 @@ from run.scheduler import (
     CronStore,
     normalize_task,
 )
-from run.tasks import cancel_plan, pause_plan
+from run.history import find_record as find_index_record
+from run.tasks import _normalized_key, cancel_plan, pause_plan
 from run.memory import contains_sensitive_credential
 from run.tasks import (
     edit_plan_fields,
@@ -45,7 +46,7 @@ _SENSITIVE_TASK_PLAN_KEYS = frozenset({
     "refresh_token",
     "secret",
     "session_secret",
-    "set-cookie",
+    "set_cookie",
     "token",
 })
 _TASK_PLAN_SECRET_ASSIGNMENT_RE = re.compile(
@@ -65,6 +66,15 @@ _TASK_PLAN_PRIVATE_KEY_RE = re.compile(
 )
 
 
+def _normalized_task_plan_key(value: Any) -> str:
+    """Normalize legacy task-plan keys, including camelCase spellings."""
+
+    rendered = str(value or "").strip()
+    rendered = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", rendered)
+    rendered = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", rendered)
+    return _normalized_key(rendered)
+
+
 def _redact_plan_revision(value: Any) -> Any:
     """Return a browser-safe revision view without mutating rollback snapshots."""
 
@@ -72,8 +82,8 @@ def _redact_plan_revision(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             rendered = str(key)
-            lowered = rendered.casefold()
-            if lowered in _SENSITIVE_TASK_PLAN_KEYS or lowered.endswith(("_secret", "_token")):
+            normalized = _normalized_task_plan_key(rendered)
+            if normalized in _SENSITIVE_TASK_PLAN_KEYS or normalized.endswith(("_secret", "_token")):
                 result[rendered] = _REDACTED_TASK_PLAN_VALUE
             else:
                 result[rendered] = _redact_plan_revision(item)
@@ -164,9 +174,25 @@ class TaskServiceMixin:
         )
         return summary
 
-    def tasks(self, user: Any) -> dict[str, Any]:
+    def tasks(
+        self,
+        user: Any,
+        *,
+        source: Any = "web",
+        session_id: Any = "",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
-        plans = [self._plan_summary(item) for item in PlanStore(self.root, name).list_plans()]
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id) if session_id else ""
+        plans = [
+            self._plan_summary(item)
+            for item in PlanStore(self.root, name).list_plans()
+            if str(item.get("source") or "").strip() == normalized_source
+            and (
+                not normalized_session
+                or str(item.get("session_id") or "").strip() == normalized_session
+            )
+        ]
         crons = [self._cron_summary(item) for item in CronStore(self.root, name).list_tasks()]
         plans.sort(key=lambda item: item["updated_at"], reverse=True)
         crons.sort(
@@ -218,32 +244,52 @@ class TaskServiceMixin:
             "executions": executions[:100],
         }
 
-    @staticmethod
     def _require_plan_session(
+        self,
         store: PlanStore,
         plan_id: str,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
+        expected_source = self.require_source(source)
         expected_session = str(session_id or "").strip()
         if not expected_session:
             raise InvalidRequestError("任务计划操作缺少 session_id 对话身份")
         plan = store.read(plan_id)
-        if str(plan.get("session_id") or "") != expected_session:
+        if (
+            str(plan.get("source") or "") != expected_source
+            or str(plan.get("session_id") or "") != expected_session
+        ):
             raise InvalidRequestError("当前对话空间不能访问其他对话空间的任务计划")
         return plan
 
-    def create_plan(self, user: Any, payload: Any) -> dict[str, Any]:
+    def create_plan(
+        self,
+        user: Any,
+        payload: Any,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("计划必须是对象")
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        if find_index_record(
+            self.root,
+            name,
+            normalized_source,
+            normalized_session,
+        ) is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
         try:
             plan = normalize_plan(
                 plan_id=payload.get("plan_id"),
                 title=payload.get("title", ""),
                 description=payload.get("description", ""),
                 user=name,
-                source="web",
-                session_id=str(payload.get("session_id") or "web"),
+                source=normalized_source,
+                session_id=normalized_session,
                 steps=payload.get("steps") or [],
                 auto_accept=payload.get("auto_accept", False),
                 reminder=payload.get("reminder", ""),
@@ -257,10 +303,20 @@ class TaskServiceMixin:
             self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
 
-    def update_plan(self, user: Any, plan_id: Any, payload: Any) -> dict[str, Any]:
+    def update_plan(
+        self,
+        user: Any,
+        plan_id: Any,
+        payload: Any,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("计划更新必须是对象")
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        store = PlanStore(self.root, name)
         expected = payload.get("revision")
 
         def mutate(current: dict[str, Any]) -> dict[str, Any]:
@@ -284,7 +340,13 @@ class TaskServiceMixin:
             return updated
 
         try:
-            stored = PlanStore(self.root, name).update(str(plan_id), mutate)
+            self._require_plan_session(
+                store,
+                str(plan_id),
+                normalized_session,
+                normalized_source,
+            )
+            stored = store.update(str(plan_id), mutate)
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
         except PlanConflictError as exc:
@@ -301,6 +363,7 @@ class TaskServiceMixin:
         plan_id: Any,
         payload: Any,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
@@ -312,7 +375,7 @@ class TaskServiceMixin:
         }
         store = PlanStore(self.root, name)
         try:
-            current = self._require_plan_session(store, str(plan_id), session_id)
+            current = self._require_plan_session(store, str(plan_id), session_id, source)
             config = load_config(name, self.root)
             auto_retry_on_fix = (
                 (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
@@ -353,13 +416,14 @@ class TaskServiceMixin:
         step_id: Any,
         payload: Any,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("步骤重试参数必须是对象")
         store = PlanStore(self.root, name)
         try:
-            current = self._require_plan_session(store, str(plan_id), session_id)
+            current = self._require_plan_session(store, str(plan_id), session_id, source)
             config = load_config(name, self.root)
             auto_retry_on_fix = (
                 (config.get("task_plan") or {}).get("auto_retry_on_fix", False)
@@ -401,12 +465,13 @@ class TaskServiceMixin:
         user: Any,
         plan_id: Any,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         store = PlanStore(self.root, name)
         normalized_plan_id = str(plan_id)
         try:
-            self._require_plan_session(store, normalized_plan_id, session_id)
+            self._require_plan_session(store, normalized_plan_id, session_id, source)
             revisions = [
                 _redact_plan_revision(item)
                 for item in store.list_revisions(normalized_plan_id)
@@ -430,13 +495,14 @@ class TaskServiceMixin:
         plan_id: Any,
         revision: Any,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         store = PlanStore(self.root, name)
         normalized_plan_id = str(plan_id)
         try:
             normalized_revision = int(revision)
-            self._require_plan_session(store, normalized_plan_id, session_id)
+            self._require_plan_session(store, normalized_plan_id, session_id, source)
             plan = store.get_revision(normalized_plan_id, normalized_revision)
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
@@ -458,6 +524,7 @@ class TaskServiceMixin:
         revision: Any,
         current_revision: Any,
         session_id: Any,
+        source: Any = "web",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         store = PlanStore(self.root, name)
@@ -465,7 +532,7 @@ class TaskServiceMixin:
         try:
             normalized_revision = int(revision)
             normalized_current_revision = int(current_revision)
-            self._require_plan_session(store, normalized_plan_id, session_id)
+            self._require_plan_session(store, normalized_plan_id, session_id, source)
             stored = store.rollback(
                 normalized_plan_id,
                 normalized_revision,
@@ -489,10 +556,26 @@ class TaskServiceMixin:
             "updated": True,
         }
 
-    def command_plan(self, user: Any, plan_id: Any, action: Any) -> dict[str, Any]:
+    def command_plan(
+        self,
+        user: Any,
+        plan_id: Any,
+        action: Any,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_action = str(action or "").strip().casefold()
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        store = PlanStore(self.root, name)
         try:
+            self._require_plan_session(
+                store,
+                str(plan_id),
+                normalized_session,
+                normalized_source,
+            )
             if normalized_action == "pause":
                 stored = pause_plan(self.root, name, str(plan_id))
             elif normalized_action == "cancel":
@@ -512,9 +595,29 @@ class TaskServiceMixin:
             "updated": True,
         }
 
-    def delete_plan(self, user: Any, plan_id: Any) -> dict[str, Any]:
+    def delete_plan(
+        self,
+        user: Any,
+        plan_id: Any,
+        session_id: Any = "",
+        source: Any = "web",
+    ) -> dict[str, Any]:
         name = self.require_user(user)
-        if not PlanStore(self.root, name).delete(str(plan_id)):
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        store = PlanStore(self.root, name)
+        try:
+            current = self._require_plan_session(
+                store,
+                str(plan_id),
+                normalized_session,
+                normalized_source,
+            )
+        except PlanNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        if str(current.get("status") or "") == "running":
+            raise ConflictError("运行中的任务计划不能删除，请先暂停或取消")
+        if not store.delete(str(plan_id)):
             raise NotFoundError(f"计划不存在：{plan_id}")
         return {"user": name, "plan_id": str(plan_id), "deleted": True}
 

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppShell, injectionPolicyPresentation, persistLastActiveUser, readLastActiveUser, resolveCurrentUser } from './AppShell'
 import { ChatPage } from '../pages/ChatPage'
@@ -187,10 +187,15 @@ describe('Windows run sound', () => {
 function renderApp(path = '/chat') {
   let currentSearch = new URL(path, 'http://test').search
   let currentPathname = new URL(path, 'http://test').pathname
+  let navigateRoute: ((target: string) => void) | undefined
   function LocationProbe() {
     const location = useLocation()
     currentSearch = location.search
     currentPathname = location.pathname
+    return null
+  }
+  function NavigationProbe() {
+    navigateRoute = useNavigate()
     return null
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -198,6 +203,7 @@ function renderApp(path = '/chat') {
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
         <LocationProbe />
+        <NavigationProbe />
         <Routes>
           <Route path="/" element={<AppShell />}>
             <Route path="chat" element={<ChatPage />} />
@@ -207,7 +213,15 @@ function renderApp(path = '/chat') {
       </MemoryRouter>
     </QueryClientProvider>,
   )
-  return { getSearch: () => currentSearch, getPathname: () => currentPathname, client }
+  return {
+    getSearch: () => currentSearch,
+    getPathname: () => currentPathname,
+    navigate: (target: string) => {
+      if (!navigateRoute) throw new Error('导航器尚未挂载')
+      act(() => navigateRoute?.(target))
+    },
+    client,
+  }
 }
 
 function session(id: string, title: string, index: number): SessionSummary {
@@ -343,6 +357,69 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
     expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
+  })
+
+  it('不同会话并行运行时保留各自的停止控制器', async () => {
+    const encoder = new TextEncoder()
+    const streamControllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>()
+    const requestSignals = new Map<string, AbortSignal | null | undefined>()
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      const body = JSON.parse(String(init?.body || '{}')) as { session_id?: string }
+      const sessionId = String(body.session_id || '')
+      requestSignals.set(sessionId, init?.signal)
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamControllers.set(sessionId, controller)
+          init?.signal?.addEventListener('abort', () => {
+            try {
+              controller.error(new DOMException('Aborted', 'AbortError'))
+            } catch {
+              // The stream may already have been closed by the test cleanup.
+            }
+          }, { once: true })
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    server.use(
+      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', sessions: [session('s1', '会话 A', 1), session('s2', '会话 B', 2)],
+      })),
+      http.get('/api/users/kesepain/sessions/:sessionId/history', ({ params }) => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: params.sessionId,
+        messages: [], round_metrics: [], round_traces: [],
+      })),
+    )
+
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const firstInput = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(firstInput, { target: { value: '会话 A 运行' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await screen.findByRole('button', { name: '停止生成' })
+    await waitFor(() => expect(requestSignals.has('s1')).toBe(true))
+
+    app.navigate('/chat?user=kesepain&session=s2')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '会话 B 运行' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(requestSignals.has('s2')).toBe(true))
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
+    streamControllers.get('s2')?.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":false,"status":"cancelled","cancelled":true}}\n\n'))
+    streamControllers.get('s2')?.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+
+    app.navigate('/chat?user=kesepain&session=s1')
+    await waitFor(() => expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument())
+    streamControllers.get('s1')?.enqueue(encoder.encode('event: done\ndata: {"type":"done"}\n\n'))
+    streamControllers.get('s1')?.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
   })
 
   it('切换页面后继续接收流式事件并在返回对话页时恢复现场', async () => {
@@ -813,16 +890,20 @@ describe('AppShell navigation', () => {
     expect(attempt).toBe(2)
   })
 
-  it('自动重试事件会清除失败尝试的思考和正文，不产生累加', async () => {
+  it('自动重试事件会保留失败尝试快照并隔离新尝试，不产生累加', async () => {
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
       return new Response(
         'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"旧思考"}\n\n'
+        + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"old-call","tool_name":"old-tool","arguments":{"value":"before-retry"}}\n\n'
+        + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"old-call","tool_name":"old-tool","result":{"ok":true},"metadata":{"status":"completed"}}\n\n'
         + 'event: text_delta\ndata: {"type":"text_delta","content":"旧正文"}\n\n'
         + 'event: retrying\ndata: {"type":"retrying","content":"正在自动重试","metadata":{"failed_attempt":1,"next_attempt":2,"max_attempts":5}}\n\n'
         + 'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"新思考"}\n\n'
+        + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"new-call","tool_name":"new-tool","arguments":{"value":"after-retry"}}\n\n'
+        + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"new-call","tool_name":"new-tool","result":{"ok":true},"metadata":{"status":"completed"}}\n\n'
         + 'event: text_delta\ndata: {"type":"text_delta","content":"新正文"}\n\n'
         + 'event: done\ndata: {"type":"done","metadata":{"status":"completed","committed":true}}\n\n',
         { headers: { 'Content-Type': 'text/event-stream' } },
@@ -835,8 +916,10 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 
     expect(await screen.findByText('新正文')).toBeInTheDocument()
-    expect(screen.queryByText('旧正文')).not.toBeInTheDocument()
-    expect(screen.queryByText('旧思考')).not.toBeInTheDocument()
+    expect(screen.getByText('旧正文')).toBeInTheDocument()
+    expect(screen.getByText('旧思考')).toBeInTheDocument()
+    expect(screen.getByText('old-tool')).toBeInTheDocument()
+    expect(screen.getByText('new-tool')).toBeInTheDocument()
     expect(screen.queryByText('旧正文新正文')).not.toBeInTheDocument()
     expect(screen.queryByText(/运行出现问题，正在自动重试/)).not.toBeInTheDocument()
   })

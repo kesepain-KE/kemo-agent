@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentDefinition
-from run.config import select_knowledge_index
+from run.config import MainAgentSourcePolicy, select_knowledge_index
 from run.config import SkillDescriptor, load_prompt_source_registry, truncate_chars
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
@@ -21,6 +21,24 @@ class AgentPromptBundle:
     text: str
     section_order: tuple[str, ...]
     diagnostics: dict[str, Any]
+
+
+def effective_knowledge_scopes(
+    definition: AgentDefinition,
+    config: dict[str, Any],
+) -> tuple[str, ...]:
+    """Return the capability scopes still allowed by the user's policy.
+
+    A subagent manifest is an upper bound, not a way to bypass the user's
+    disabled global/shared knowledge settings.  Preserve manifest order so
+    prompt and tool diagnostics remain deterministic.
+    """
+
+    capabilities = definition.capabilities
+    if not capabilities.knowledge_index_enabled:
+        return ()
+    allowed = set(MainAgentSourcePolicy.from_config(config).direct_knowledge_scopes())
+    return tuple(scope for scope in capabilities.knowledge_scopes if scope in allowed)
 
 
 def _descriptor_text(descriptors: tuple[SkillDescriptor, ...], max_chars: int) -> str:
@@ -51,14 +69,11 @@ def build_agent_prompt_bundle(
         }
     )
     skill_text = _descriptor_text(skills, skill_limit)
+    knowledge_scopes = effective_knowledge_scopes(definition, config)
     knowledge = select_knowledge_index(
         root,
         user,
-        scopes=(
-            capabilities.knowledge_scopes
-            if capabilities.knowledge_index_enabled
-            else ()
-        ),
+        scopes=knowledge_scopes,
     )
     sections: list[tuple[str, str]] = [("agent_instruction", definition.instruction)]
     if definition.trigger_registration:
@@ -82,6 +97,7 @@ def build_agent_prompt_bundle(
             {"scope": item.scope, "path": item.relative_path}
             for item in knowledge.documents
         ],
+        "knowledge_scopes": list(knowledge_scopes),
     }
     return AgentPromptBundle(text, tuple(name for name, _ in sections), diagnostics)
 

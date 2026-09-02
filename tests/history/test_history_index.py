@@ -9,11 +9,13 @@ from run.history import (
     find_window,
     list_sessions,
     load_window,
+    prepare_window,
 )
 from run.history import (
     claim_pending_memory,
     claim_pending_summary,
     close_session,
+    delete_session,
     find_record,
     finish_memory_claim,
     finish_summary_claim,
@@ -223,6 +225,37 @@ class HistoryIndexTests(unittest.TestCase):
 
         self.assertEqual(find_window(root, "alice", "web", "target-session"), expected)
 
+    def test_new_windows_isolate_sources_with_the_same_session_id(self) -> None:
+        from run.history import get_or_create_window
+
+        _, root = self.make_root()
+        session_id = "conv_shared_session"
+        web_path, web_window = get_or_create_window(
+            root, "alice", "web", session_id
+        )
+        app_path, app_window = get_or_create_window(
+            root, "alice", "app", session_id
+        )
+
+        self.assertNotEqual(web_path, app_path)
+        web_window["text"]["messages"] = [{"role": "user", "content": "web"}]
+        app_window["text"]["messages"] = [{"role": "user", "content": "app"}]
+        commit_window(web_path, web_window)
+        commit_window(app_path, app_window)
+
+        self.assertEqual(
+            load_window(find_window(root, "alice", "web", session_id))["text"][
+                "messages"
+            ][0]["content"],
+            "web",
+        )
+        self.assertEqual(
+            load_window(find_window(root, "alice", "app", session_id))["text"][
+                "messages"
+            ][0]["content"],
+            "app",
+        )
+
     def test_deleting_a_window_is_a_database_operation(self) -> None:
         _, root = self.make_root()
         archive = self.commit_archive(
@@ -256,6 +289,70 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertIsNone(get_active(root, "alice", "interactive:alice"))
         remove_session(root, "alice", "web", session_id)
         self.assertIsNone(find_record(root, "alice", "web", session_id))
+
+    def test_reused_session_rejects_late_commit_from_previous_generation(self) -> None:
+        _, root = self.make_root()
+        session_id = "reused-session"
+        old_directory = self.commit_archive(
+            root,
+            source="web",
+            session_id=session_id,
+            directory_name="conv_old_generation",
+        )
+        old_window = load_window(old_directory)
+        old_generation = find_record(root, "alice", "web", session_id)[
+            "session_generation"
+        ]
+
+        delete_session(root, "alice", "web", session_id)
+        replacement = reserve_session(root, "alice", "web", session_id)
+
+        self.assertNotEqual(
+            replacement["session_generation"],
+            old_generation,
+        )
+
+        # Simulate a terminal writer that was already holding the old window in
+        # memory when the user deleted and recreated the logical session.
+        commit_window(old_directory, old_window)
+
+        self.assertFalse(window_exists(old_directory))
+        current = find_record(root, "alice", "web", session_id)
+        self.assertIsNotNone(current)
+        self.assertEqual(
+            current["session_generation"],
+            replacement["session_generation"],
+        )
+
+    def test_reused_session_rejects_late_commit_of_unpersisted_window(self) -> None:
+        _, root = self.make_root()
+        session_id = "unpersisted-reused-session"
+        reserve_session(root, "alice", "web", session_id)
+        old_directory, old_window, is_new = prepare_window(
+            root, "alice", "web", session_id
+        )
+        self.assertTrue(is_new)
+        old_window["text"]["messages"] = [
+            {"role": "user", "content": "stale"},
+        ]
+
+        delete_session(root, "alice", "web", session_id)
+        replacement = reserve_session(root, "alice", "web", session_id)
+        self.assertTrue(replacement["session_generation"])
+
+        # The old run had only prepared this physical window in memory.  There
+        # is no deleted-window tombstone to catch it, so the session generation
+        # fence must reject the late commit after the logical id is reused.
+        commit_window(old_directory, old_window)
+
+        self.assertFalse(window_exists(old_directory))
+        self.assertIsNone(find_window(root, "alice", "web", session_id))
+        current = find_record(root, "alice", "web", session_id)
+        self.assertIsNotNone(current)
+        self.assertEqual(
+            current["session_generation"],
+            replacement["session_generation"],
+        )
 
     def test_active_references_do_not_collide_across_sources(self) -> None:
         _, root = self.make_root()

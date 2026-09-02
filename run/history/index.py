@@ -205,6 +205,11 @@ def _record_from_data(
     archive_memory_status = str(data.get("memory_status") or "").strip()
     indexed_memory_status = str(old.get("memory_status") or "").strip()
     memory_claim_active = bool(old.get("memory_claim_id"))
+    session_generation = (
+        str(data.get("session_generation") or "").strip()
+        or str(old.get("session_generation") or "").strip()
+        or uuid.uuid4().hex
+    )
     memory_status = (
         "processing"
         if memory_claim_active
@@ -222,6 +227,7 @@ def _record_from_data(
         ),
         "session_id": session_id,
         "source": source,
+        "session_generation": session_generation,
         "chain": chain_for_source(source),
         "origins": sorted(
             {
@@ -350,7 +356,9 @@ def _active_record(sessions: dict[str, Any], value: Any) -> dict[str, Any] | Non
     source = str(value.get("source") or "")
     session_id = str(value.get("session_id") or "")
     record = sessions.get(session_key(source, session_id))
-    return record if isinstance(record, dict) else None
+    if not isinstance(record, dict) or record.get("lifecycle") == "deleted":
+        return None
+    return record
 
 
 def _active_matches(value: Any, source: str, session_id: str) -> bool:
@@ -396,7 +404,10 @@ def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
         changed = True
     for active_key, value in list(index.setdefault("active", {}).items()):
         record = _active_record(sessions, value)
-        if not isinstance(record, dict) or record.get("lifecycle") == "closed":
+        if not isinstance(record, dict) or record.get("lifecycle") in {
+            "closed",
+            "deleted",
+        }:
             index["active"].pop(active_key, None)
             changed = True
             continue
@@ -506,6 +517,19 @@ def upsert_window(
 
     with index_lock(root, user):
         previous = read_registry_record(root, user, source, session_id)
+        incoming_generation = str(data.get("session_generation") or "").strip()
+        current_generation = str(
+            (previous or {}).get("session_generation") or ""
+        ).strip()
+        if (
+            incoming_generation
+            and current_generation
+            and incoming_generation != current_generation
+        ):
+            # A terminal writer from an older reservation must not move the
+            # registry back to a session generation that has already been
+            # replaced.
+            return copy.deepcopy(previous)
         record = build_window_record(
             source=source,
             session_id=session_id,
@@ -531,6 +555,9 @@ def _reserved_record(
         "conversation_id": session_id,
         "session_id": session_id,
         "source": source,
+        "session_generation": (
+            str(old.get("session_generation") or "").strip() or uuid.uuid4().hex
+        ),
         "chain": chain_for_source(source),
         "origins": sorted(
             {
@@ -583,6 +610,7 @@ def reserve_session(
             record,
             active_updates=active_updates,
             updated_at=_now(),
+            allow_deleted_reuse=True,
         )
 
 
@@ -612,14 +640,17 @@ def get_or_reserve_active(
         if (
             isinstance(record, dict)
             and record.get("source") == source
-            and record.get("lifecycle") != "closed"
+            and record.get("lifecycle") not in {"closed", "deleted"}
         ):
             return copy.deepcopy(record), False
 
         preferred = str(preferred_session_id or "").strip()
         if preferred:
             candidate = read_registry_record(root, user, source, preferred)
-            if isinstance(candidate, dict) and candidate.get("lifecycle") != "closed":
+            if isinstance(candidate, dict) and candidate.get("lifecycle") not in {
+                "closed",
+                "deleted",
+            }:
                 written = upsert_registry_record(
                     root,
                     user,
@@ -631,7 +662,10 @@ def get_or_reserve_active(
 
         if reuse_latest:
             latest = read_latest_registry_record(root, user, source)
-            if isinstance(latest, dict) and latest.get("lifecycle") != "closed":
+            if isinstance(latest, dict) and latest.get("lifecycle") not in {
+                "closed",
+                "deleted",
+            }:
                 latest_session = str(latest.get("session_id") or "")
                 written = upsert_registry_record(
                     root,
@@ -657,6 +691,7 @@ def get_or_reserve_active(
             record,
             active_updates={active_key: _active_reference(source, session_id)},
             updated_at=_now(),
+            allow_deleted_reuse=True,
         )
         return written, True
 
@@ -680,6 +715,7 @@ def update_run_state(
     run_state: str,
     run_id: str | None = None,
     directory: Path | None = None,
+    session_generation: str = "",
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
         record = read_registry_record(root, user, source, session_id)
@@ -690,7 +726,12 @@ def update_run_state(
                 source=source,
                 session_id=session_id,
                 directory=directory,
-                data={"user": user, "source": source, "session_id": session_id},
+                data={
+                    "user": user,
+                    "source": source,
+                    "session_id": session_id,
+                    "session_generation": str(session_generation or "").strip(),
+                },
             )
         record["run_state"] = run_state
         record["run_state_updated_at"] = _now()
@@ -1304,6 +1345,20 @@ def retry_summary(
 
 def remove_session(root: Path, user: str, source: str, session_id: str) -> None:
     with index_lock(root, user):
+        # Keep a durable delete fence so an in-flight terminal writer cannot
+        # recreate this session after the registry row is removed.
+        from run.history.store import connection
+
+        with connection(root, user, write=True) as database:
+            database.execute(
+                """
+                INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
+                VALUES(?, ?, datetime('now'))
+                ON CONFLICT(source, session_id) DO UPDATE SET
+                    deleted_at=excluded.deleted_at
+                """,
+                (str(source), str(session_id)),
+            )
         index = _load_index_unlocked(root, user)
         index.setdefault("sessions", {}).pop(session_key(source, session_id), None)
         for active_key, active_session in list(index.setdefault("active", {}).items()):
@@ -1314,6 +1369,8 @@ def remove_session(root: Path, user: str, source: str, session_id: str) -> None:
 
 def remove_all_sessions(root: Path, user: str, source: str) -> int:
     with index_lock(root, user):
+        from run.history.store import connection
+
         index = _load_index_unlocked(root, user)
         sessions = index.setdefault("sessions", {})
         targets = [
@@ -1322,6 +1379,16 @@ def remove_all_sessions(root: Path, user: str, source: str) -> int:
             if isinstance(record, dict) and record.get("source") == source
         ]
         target_ids = {str(record.get("session_id") or "") for _, record in targets}
+        with connection(root, user, write=True) as database:
+            database.executemany(
+                """
+                INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
+                VALUES(?, ?, datetime('now'))
+                ON CONFLICT(source, session_id) DO UPDATE SET
+                    deleted_at=excluded.deleted_at
+                """,
+                [(str(source), session_id) for session_id in target_ids if session_id],
+            )
         for key, _ in targets:
             sessions.pop(key, None)
         for active_key, active_session in list(index.setdefault("active", {}).items()):

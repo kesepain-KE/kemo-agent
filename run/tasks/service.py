@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from provider.factory import create_provider
 from run.agents import AgentRunError, AgentRunner
-from run.config import load_config
+from run.config import MainAgentSourcePolicy, load_config, select_knowledge_index
 from run.memory import MemoryStore
 from run.tasks.store import PlanStore, PlanValidationError, normalize_plan
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
@@ -104,24 +104,48 @@ def _read_index(path: Path) -> str:
         raise PlanGenerationError(f"知识库索引不可读：{path}（{exc}）") from exc
 
 
-def _collect_knowledge_indexes(root: Path, user: str) -> dict[str, str]:
-    """Read all three data_structure.md knowledge indexes without truncation."""
+def _collect_knowledge_indexes(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    """Collect only policy-enabled index documents in the canonical order.
+
+    Task-plan input used to read one hard-coded ``data_structure.md`` file per
+    scope and ignored the user's knowledge switches.  Keep the three legacy
+    payload fields for the task-plan contract, but source their contents from
+    the same selector used by the main prompt pipeline.  This makes nested
+    ``index.md``/localized index files and scope filtering consistent without
+    changing the subagent input schema.
+    """
+
+    policy = MainAgentSourcePolicy.from_config(config)
+    selection = select_knowledge_index(
+        root,
+        user,
+        scopes=policy.direct_knowledge_scopes(),
+    )
+    grouped: dict[str, list[str]] = {
+        "global": [],
+        "shared": [],
+        "user": [],
+    }
+    for document in selection.documents:
+        grouped.setdefault(document.scope, []).append(document.content)
     return {
-        "global_knowledge_index": _read_index(
-            root / "global_knowledge" / "data_structure.md"
-        ),
-        "shared_knowledge_index": _read_index(
-            root / "shared_knowledge" / "data_structure.md"
-        ),
-        "user_knowledge_index": _read_index(
-            root / "users" / user / "knowledge" / "data_structure.md"
-        ),
+        "global_knowledge_index": "\n\n".join(grouped["global"]),
+        "shared_knowledge_index": "\n\n".join(grouped["shared"]),
+        "user_knowledge_index": "\n\n".join(grouped["user"]),
     }
 
 
-def _planning_injections(root: Path, user: str) -> dict[str, str]:
+def _planning_injections(
+    root: Path,
+    user: str,
+    config: dict[str, Any],
+) -> dict[str, str]:
     skills = _collect_skills(root, user)
-    knowledge = _collect_knowledge_indexes(root, user)
+    knowledge = _collect_knowledge_indexes(root, user, config)
     return {
         "plugin_skills": skills["plugin_skills"],
         "shared_skills_text": skills["shared_skills"],
@@ -249,7 +273,7 @@ def prepare_task_plan_input(
     goal = str(input_data.get("goal") or "")
     edit_request = input_data.get("edit_request")
     memory_query = str(edit_request or goal)
-    injections = _planning_injections(root, user)
+    injections = _planning_injections(root, user, cfg)
 
     payload: dict[str, Any] = {
         "action": input_data.get("action"),
@@ -385,7 +409,12 @@ def generate_plan(
             user,
             config=cfg,
             provider_factory=provider_factory,
-        ).run("task_plan", input_data)
+        ).run(
+            "task_plan",
+            input_data,
+            source=source,
+            session_id=session_id,
+        )
     except AgentRunError as exc:
         raise PlanGenerationError(f"task_plan 子代理执行失败：{exc}") from exc
 

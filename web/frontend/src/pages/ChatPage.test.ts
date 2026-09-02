@@ -403,7 +403,7 @@ describe('reduceRunEvent', () => {
     })
   })
 
-  it('自动重试时保留当前用户消息并清除失败尝试的中间项', () => {
+  it('自动重试时保留失败尝试快照并开启新的尝试边界', () => {
     const userItem: Extract<ChatItem, { kind: 'message' }> = {
       id: 'u1', kind: 'message', role: 'user', content: '执行任务',
     }
@@ -415,7 +415,25 @@ describe('reduceRunEvent', () => {
       { id: 'e1', kind: 'error', content: '旧错误' },
     ]
 
-    expect(resetCurrentRoundItemsForRetry(items)).toEqual([userItem])
+    const retried = resetCurrentRoundItemsForRetry(items, 1, 2)
+    expect(retried).toEqual([
+      userItem,
+      { id: 'retry_boundary_u1_1_snapshot', kind: 'retry_boundary', attempt: 1, phase: 'snapshot' },
+      { id: 'r1', kind: 'reasoning', content: '旧思考', streaming: false },
+      { id: 't1', kind: 'tool', callId: 'c1', name: 'shell', status: 'error' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '旧正文', streaming: false },
+      { id: 'e1', kind: 'error', content: '旧错误' },
+      { id: 'retry_boundary_u1_2_active', kind: 'retry_boundary', attempt: 2, phase: 'active' },
+    ])
+
+    const nextAttempt = reduceRunEvent(retried, {
+      type: 'tool_call_start',
+      tool_call_id: 'c1',
+      tool_name: 'shell',
+      arguments: { value: 'new' },
+    })
+    expect(nextAttempt.filter((item) => item.kind === 'tool')).toHaveLength(2)
+    expect(nextAttempt.at(-1)).toMatchObject({ kind: 'tool', callId: 'c1', status: 'running' })
   })
 
   it('Provider error 事件统一收束当前思考、正文和工具', () => {

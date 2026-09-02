@@ -474,6 +474,43 @@ class PlanStoreTests(unittest.TestCase):
                 },
             )
 
+    def test_plan_update_rejects_sensitive_arguments_after_in_place_mutation(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        created = store.create(_make_plan([{
+            "step_id": "step_1",
+            "title": "普通参数",
+            "description": "原计划",
+            "tool_name": None,
+            "tool_arguments": {},
+            "critical": True,
+        }]))
+
+        def mutate(current):
+            current["steps"][0]["tool_arguments"]["api_key"] = "secret-value"
+            return current
+
+        with self.assertRaisesRegex(PlanValidationError, "不得持久化"):
+            store.update(created["plan_id"], mutate)
+        persisted = store.read(created["plan_id"])
+        self.assertEqual(persisted["revision"], created["revision"])
+        self.assertEqual(persisted["steps"][0]["tool_arguments"], {})
+
+    def test_plan_rejects_common_secret_key_variants(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        for key in ("secret_key", "signing_key", "encryption_key", "client_key"):
+            plan = _make_plan([{
+                "step_id": "step_1",
+                "title": "敏感参数",
+                "description": "不得进入计划数据库",
+                "tool_name": None,
+                "tool_arguments": {key: "secret-value"},
+                "critical": True,
+            }])
+            with self.assertRaisesRegex(PlanValidationError, "不得持久化"):
+                store.create(plan)
+
     def test_revision_snapshot_failure_rolls_back_plan_update(self) -> None:
         _, root = _make_root(["alice"])
         store = PlanStore(root, "alice")
@@ -593,6 +630,73 @@ class PlanStoreTests(unittest.TestCase):
         self.assertEqual(len(bob_store.list_plans()), 1)
         self.assertEqual(alice_store.list_plans()[0]["title"], "Test Plan")
         self.assertEqual(bob_store.list_plans()[0]["title"], "Test Plan")
+
+    def test_plan_conversation_scope_cannot_be_changed_after_creation(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        plan = normalize_plan(
+            title="Scoped plan",
+            description="scope is immutable",
+            user="alice",
+            source="web",
+            session_id="space-a",
+            steps=[
+                {
+                    "step_id": "step_1",
+                    "title": "A",
+                    "description": "A",
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                }
+            ],
+        )
+        created = store.create(plan)
+        with self.assertRaises(PlanValidationError):
+            store.update(
+                created["plan_id"],
+                lambda current: {
+                    **current,
+                    "source": "app",
+                    "session_id": "space-b",
+                },
+            )
+        unchanged = store.read(created["plan_id"])
+        self.assertEqual(unchanged["source"], "web")
+        self.assertEqual(unchanged["session_id"], "space-a")
+
+    def test_plan_conversation_scope_cannot_be_changed_by_in_place_mutator(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        plan = normalize_plan(
+            title="Scoped plan",
+            description="scope is immutable",
+            user="alice",
+            source="web",
+            session_id="space-a",
+            steps=[
+                {
+                    "step_id": "step_1",
+                    "title": "A",
+                    "description": "A",
+                    "tool_name": None,
+                    "tool_arguments": {},
+                    "critical": True,
+                }
+            ],
+        )
+        created = store.create(plan)
+
+        def mutate_in_place(current: dict[str, object]) -> dict[str, object]:
+            current["source"] = "app"
+            current["session_id"] = "space-b"
+            return current
+
+        with self.assertRaises(PlanValidationError):
+            store.update(created["plan_id"], mutate_in_place)
+        unchanged = store.read(created["plan_id"])
+        self.assertEqual(unchanged["source"], "web")
+        self.assertEqual(unchanged["session_id"], "space-a")
 
     def test_recover_interrupted(self) -> None:
         _, root = _make_root(["alice"])
@@ -816,7 +920,16 @@ class PlanExecutionTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["source"], "cli")
+        self.assertEqual(result["session_id"], "default")
         self.assertEqual(len(requests), 2)
+        self.assertTrue(
+            all(
+                request["source"] == "cli"
+                and request["session_id"] == "default"
+                for request in requests
+            )
+        )
         self.assertIn("只执行当前步骤", requests[0]["prompt"])
         self.assertIn("step_1", requests[0]["prompt"])
         self.assertIn("step_2", requests[1]["prompt"])
@@ -826,6 +939,105 @@ class PlanExecutionTests(unittest.TestCase):
             [step["status"] for step in stored["steps"]],
             ["completed", "completed"],
         )
+
+    def test_scheduler_keeps_each_plan_request_in_its_own_conversation_space(self) -> None:
+        store = PlanStore(self.root, "alice")
+        plans = {}
+        for session_id in ("space-a", "space-b"):
+            plan = store.create(
+                normalize_plan(
+                    title=f"Plan {session_id}",
+                    description="scoped scheduler test",
+                    user="alice",
+                    source="web",
+                    session_id=session_id,
+                    status="approved",
+                    steps=[
+                        {
+                            "step_id": "step_1",
+                            "title": "Run",
+                            "description": "run one scoped step",
+                            "tool_name": None,
+                            "tool_arguments": {},
+                            "critical": True,
+                        }
+                    ],
+                )
+            )
+            plans[plan["plan_id"]] = session_id
+
+        requests: list[dict[str, Any]] = []
+
+        def event_source(request, **_kwargs):
+            requests.append(dict(request))
+            yield RunEvent(
+                type="tool_call_result",
+                tool_name="",
+                result={"ok": True, "result": "done"},
+                metadata={"status": "completed"},
+            )
+            yield RunEvent(type="done", metadata={"committed": True})
+
+        scheduler = TaskPlanScheduler(self.root, event_source=event_source)
+        results = [scheduler.scan_once(), scheduler.scan_once()]
+
+        self.assertTrue(all(result is not None for result in results))
+        result_scopes = {
+            (result["source"], result["session_id"])
+            for result in results
+            if result is not None
+        }
+        self.assertEqual(result_scopes, {("web", "space-a"), ("web", "space-b")})
+        self.assertEqual(
+            {
+                (request["_task_plan_id"], request["source"], request["session_id"])
+                for request in requests
+            },
+            {
+                (plan_id, "web", session_id)
+                for plan_id, session_id in plans.items()
+            },
+        )
+
+    def test_executor_events_keep_the_plan_scope_over_agent_metadata(self) -> None:
+        plan = self._plan_with_steps([
+            {
+                "step_id": "step_1",
+                "title": "Scoped step",
+                "description": "Verify event ownership",
+                "tool_name": None,
+                "tool_arguments": {},
+                "critical": True,
+            },
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+
+        def event_source(_request):
+            yield RunEvent(
+                type="text_delta",
+                content="progress",
+                metadata={"source": "other", "session_id": "other-session"},
+            )
+            yield RunEvent(
+                type="done",
+                metadata={"status": "completed", "source": "other", "session_id": "other-session"},
+            )
+
+        events = list(
+            execute_plan(
+                root=self.root,
+                user="alice",
+                plan_id=plan["plan_id"],
+                config=CONFIG,
+                agent_event_source=event_source,
+            )
+        )
+
+        self.assertTrue(events)
+        for event in events:
+            self.assertEqual(event.metadata["plan_id"], plan["plan_id"])
+            self.assertEqual(event.metadata["source"], plan["source"])
+            self.assertEqual(event.metadata["session_id"], plan["session_id"])
 
     def test_agent_limited_terminal_preserves_reason_when_plan_pauses(self) -> None:
         plan = self._plan_with_steps([
@@ -1264,6 +1476,46 @@ class PlanGenerationTests(unittest.TestCase):
             "当前任务计划已创建，请让用户点击批准后执行",
         )
 
+    def test_generation_uses_configured_knowledge_scopes_and_named_indexes(self) -> None:
+        _, root = _make_root(["alice"])
+        files = {
+            root / "global_knowledge" / "index.md": "GLOBAL INDEX",
+            root / "shared_knowledge" / "索引.md": "SHARED INDEX",
+            root / "users" / "alice" / "knowledge" / "目录.md": "USER INDEX",
+        }
+        for path, content in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, "utf-8")
+
+        payload = prepare_task_plan_input(
+            root=root,
+            user="alice",
+            input_data={"action": "create", "goal": "goal"},
+            config={
+                **CONFIG,
+                "knowledge": {"use_shared": False, "use_global": False},
+            },
+            tool_registry=ToolRegistry({}),
+        )
+
+        self.assertEqual(payload["global_knowledge_index"], "")
+        self.assertEqual(payload["shared_knowledge_index"], "")
+        self.assertEqual(payload["user_knowledge_index"], "USER INDEX")
+
+        enabled = prepare_task_plan_input(
+            root=root,
+            user="alice",
+            input_data={"action": "create", "goal": "goal"},
+            config={
+                **CONFIG,
+                "knowledge": {"use_shared": True, "use_global": True},
+            },
+            tool_registry=ToolRegistry({}),
+        )
+        self.assertEqual(enabled["global_knowledge_index"], "GLOBAL INDEX")
+        self.assertEqual(enabled["shared_knowledge_index"], "SHARED INDEX")
+        self.assertEqual(enabled["user_knowledge_index"], "USER INDEX")
+
     def test_authoritative_input_overrides_forged_tool_list_and_limits(self) -> None:
         _, root = _make_root(["alice"])
         shell = ToolDefinition(
@@ -1330,8 +1582,9 @@ class PlanGenerationTests(unittest.TestCase):
                     handler(result)
                 return "agent-task-test"
 
-            def wait(self, task_id, timeout=None):
+            def wait(self, task_id, timeout=None, **kwargs):
                 del task_id, timeout
+                del kwargs
                 return result
 
         scheduler = RecordingScheduler()

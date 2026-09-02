@@ -2,7 +2,7 @@
 
 本文件是智能体操作自身的完整手册。涵盖架构、安全、资源位置、配置结构、工具、记忆、上下文、子代理、调度、prompt 拼接、provider 和交付标准。
 
-> 当前稳定版本：`kemo-agent 1.2.4`，配套 Kemo 网关为 `kemo-adapter-api 0.7.6`。本版本增加外部智能体桥接并收紧重试气泡与子代理配置说明，不在浏览器或 Prompt 中传递外部凭据。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+> 当前稳定版本：`kemo-agent 1.2.5`，配套 Kemo 网关为 `kemo-adapter-api 0.7.6`。本版本继续收紧历史删除、知识库路径、记忆提取和 App 运行恢复边界，不在浏览器或 Prompt 中传递外部凭据。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
 
 ---
 
@@ -123,7 +123,7 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 | 感知模块 | `global_sense/<module>/` | 每个直接子目录为独立模块，必须由 `sense.json` 的 `data_md` 指定唯一注入文件 |
 | 内置子代理 | `agents/<name>/` | 受信任代码包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、`executor.py`、可选 `schema.json` |
 | 用户子代理 | `users/<name>/agents/<agent>/` | 可信热插拔包：`AGENT.md`、`agent.json`、`agent-config.json`、`trigger.md`、可选 `executor.py`、可选 `schema.json` |
-| 用户历史 | `users/<name>/history/history.sqlite3` | 每用户独立 SQLite WAL；会话、活跃绑定、归档/运行时窗口、消息检索和后台任务状态统一事务化存储 |
+| 用户历史 | `users/<name>/history/history.sqlite3` | 每用户独立 SQLite WAL；会话、活跃绑定、删除栅栏、归档/运行时窗口、消息检索和后台任务状态统一事务化存储 |
 | 用户记忆 | `users/<name>/improve/memory.sqlite3` | 每用户独立 SQLite WAL；四档正文、生命周期、每日加权证据、幂等操作和热画像来源统一事务化存储 |
 | 任务计划 | `users/<name>/task_plan/task_plans.sqlite3` | 计划、步骤与依赖的用户级 SQLite WAL |
 | 定时任务 | `users/<name>/task_cron/` | cron 任务文件 |
@@ -219,9 +219,9 @@ Web 历史列表按当前用户统一读取 `web`、`app`、`cli` 与 `message:<
 3. **未命中再走常规流程**：知识库无匹配时，才考虑网络搜索、Provider 内置知识或其他来源。
 4. **跨层合并**：用户层命中部分、共享/全局层命中另一部分时，合并所有命中结果，用户层内容优先展示。
 
-> **Kemo Graph 外挂场景**：`global_expand/kemo_graph/` 是独立的侧载文档站连接器，`plugins/kemo_graph/` 只解释注册表并生成规范调用。它不替换、不增强、不缩减三层知识库或任何记忆，也没有专用 Prompt 段、核心配置开关或后台自动同步任务。管理员在拓展自己的 `graph_config.json` 中注册稳定 Library ID 与绝对路径；只有用户明确要求查询、更新或维护此外挂时，才通过 `expand_call(scope="global", module="kemo_graph", ...)` 操作。Markdown 正文使用 `upload`，本地 PDF、Office、EPUB 等文件使用管理员专属 `import_file`，默认均不立即 ingest。其本地目录摘要只按普通 `[expand_data][global:kemo_graph]` 规则注入；“继续、下一步、重来”等短指令不得触发新查询。完整合同见 `global_knowledge/kemo-graph-expand.md`。
+> **Kemo Graph 外挂场景**：`global_expand/kemo_graph/` 是独立的侧载文档站连接器，`plugins/kemo_graph/` 只解释注册表并生成规范调用。它不替换、不增强、不缩减三层知识库或任何记忆，也没有专用 Prompt 段、核心配置开关或后台自动同步任务。管理员在拓展自己的 `graph_config.json` 中注册稳定 Library ID 与绝对路径；只有用户明确要求查询、更新或维护此外挂时，才通过 `expand_call(scope="global", module="kemo_graph", ...)` 操作。Markdown 正文使用 `upload`，本地 PDF、Office、EPUB 等文件使用管理员专属 `import_file`，默认均不立即 ingest。其本地目录摘要只按普通 `[expand_data][global:kemo_graph]` 规则注入；“继续、下一步、重来”等短指令不得触发新查询。完整合同见 `global_knowledge/builtin-expansions.md`。
 
-> **Kemo 网关状态场景**：`global_expand/kemo_gateway_status/` 是默认未激活的全局只读拓展，面向“一个 kemo-agent 连接一个 Kemo 网关”的部署方式。它只调用网关的 `GET /status`（独立 `STATUS_TOKEN` Bearer 鉴权），读取运行阶段、版本、Provider/模型注册、当日调用与 Token 统计以及脱敏调用日志，并生成 PNG 图表；**不调用任何管理写接口，不具备启停 Provider、修改密钥或重启网关的权限**。`base_url` 支持本地、局域网或公网地址（HTTPS 使用系统证书校验，禁止跟随重定向）。只有用户明确要求“激活 Kemo 网关状态拓展”并提供网关根地址与独立 `STATUS_TOKEN` 时，才调用 `expand_call(scope="global", module="kemo_gateway_status", command="activate", ...)`；未激活时不得自行猜测地址、扫描端口或要求网关状态。Token 属敏感凭据，不得写入回复、记忆、知识库或日志。完整合同见 `global_knowledge/kemo-gateway-status-expand.md`。
+> **Kemo 网关状态场景**：`global_expand/kemo_gateway_status/` 是默认未激活的全局只读拓展，面向“一个 kemo-agent 连接一个 Kemo 网关”的部署方式。它只调用网关的 `GET /status`（独立 `STATUS_TOKEN` Bearer 鉴权），读取运行阶段、版本、Provider/模型注册、当日调用与 Token 统计以及脱敏调用日志，并生成 PNG 图表；**不调用任何管理写接口，不具备启停 Provider、修改密钥或重启网关的权限**。`base_url` 支持本地、局域网或公网地址（HTTPS 使用系统证书校验，禁止跟随重定向）。只有用户明确要求“激活 Kemo 网关状态拓展”并提供网关根地址与独立 `STATUS_TOKEN` 时，才调用 `expand_call(scope="global", module="kemo_gateway_status", command="activate", ...)`；未激活时不得自行猜测地址、扫描端口或要求网关状态。Token 属敏感凭据，不得写入回复、记忆、知识库或日志。完整合同见 `global_knowledge/builtin-expansions.md`。
 
 > **Kemo 网关项目操控手册**：若用户要求修改 kemo-adapter-api 网关项目（新增厂商、改协议、改密钥、改配置、重启等），必须先在网关项目根目录读取 `agent_control.md`（智能体操纵 Kemo 网关索引），再按其中指引读取 `ADD_DIY/` 下对应手册，不得凭通用 OpenAI 兼容经验或旧对话直接修改网关。该文件位于网关项目目录（例如 `E:\code\kemo-adapter-api\agent_control.md`），具体路径以用户指定的网关项目位置为准；kemo-agent 自身不持有该文件，需要时通过 `file` 工具读取。
 
@@ -330,7 +330,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
 |------|------|------|
 | `auto_accept` | bool | 是否自动执行计划，默认 false |
 
-详细结构说明见 `global_knowledge/user-config-reference.md`。
+详细结构说明见 `global_knowledge/configuration-reference.md`。
 
 ---
 
@@ -356,6 +356,7 @@ Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.time
   Provider 工具 schema 中临时移除；其他工具穿插执行会重置连续失败计数。
 - 用户取消时立即向当前工具发送独立取消信号，不继续执行后续工具调用；工具超时也会发送取消信号并留出短暂清理窗口，但不会误取消整个对话。
 - 插件默认以 `execution_mode=process` 在独立子进程运行；超时或取消后框架终止其进程树，避免无视取消的插件继续写盘、占用线程或重复产生副作用。只有必须共享主进程对象的可信插件才可显式声明 `execution_mode=thread`；线程模式继续使用协作取消，并由遗留执行看门狗阻止同一执行重复启动及无限堆积。
+- Windows 下框架启动的插件隔离进程、拓展/感知子进程和后台 Shell 默认不显示终端窗口；只有 Shell 工具的单次调用明确传入 `show_terminal=true` 才创建可见控制台，不能通过会话或用户配置隐式开启。插件自身绕过框架直接创建的窗口不属于框架启动策略范围。
 - 工具上下文注入 `root`、`user`、`source`、`session_id`、`window`、`tool_timeout`，不注入主对话历史。
 - 当前已注册工具见 `plugins/` 目录，每个插件的 `SKILL.md` 描述触发条件和参数。
 - 插件工具清单的可选 `strict` 默认为 `false`。只有整个参数 Schema（包括所有嵌套 object）满足目标 Provider 的严格结构化输出子集时才能设为 `true`；包含开放参数对象或可选字段的普通工具必须保持非严格，不能由网关静默改写。
@@ -741,7 +742,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 
 - Provider 和基于标准库的 HTTP 请求自动遵循 `HTTP_PROXY` / `HTTPS_PROXY`；留空时直连。
 - TLS 证书校验始终使用系统默认安全策略，不再支持 `HTTP_VERIFY_SSL` 绕过。
-- Kemo 的 HTTP 模式只适用于同机或可信内网；跨主机、非可信局域网或公网必须使用 HTTPS 反向代理。完整的幂等、续传、取消和故障边界见 `global_knowledge/kemo-transport-reliability.md`。
+- Kemo 的 HTTP 模式只适用于同机或可信内网；跨主机、非可信局域网或公网必须使用 HTTPS 反向代理。完整的幂等、续传、取消和故障边界见 `global_knowledge/provider-reliability.md`。
 - `web_search` 始终参与正常的插件发现与白名单过滤；`TAVILY_API_KEY` 为空时，调用会返回配置引导且不会发起网络请求。配置密钥后需重启智能体使环境变量生效。
 
 ---

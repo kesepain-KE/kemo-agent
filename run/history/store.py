@@ -19,7 +19,7 @@ from run.config import user_dir
 
 
 HISTORY_DB_FILENAME = "history.sqlite3"
-HISTORY_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 5
 _SUMMARY_UNSET = object()
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
@@ -41,6 +41,82 @@ def _object(value: Any, default: Any) -> Any:
     except json.JSONDecodeError:
         return copy.deepcopy(default)
     return parsed
+
+
+def _session_is_deleted(
+    database: sqlite3.Connection, *, source: str, session_id: str
+) -> bool:
+    row = database.execute(
+        "SELECT 1 FROM history_deleted_sessions WHERE source=? AND session_id=?",
+        (str(source), str(session_id)),
+    ).fetchone()
+    return row is not None
+
+
+def _session_generation(
+    database: sqlite3.Connection, *, source: str, session_id: str
+) -> str:
+    row = database.execute(
+        "SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
+        (str(source), str(session_id)),
+    ).fetchone()
+    if row is None:
+        return ""
+    record = _object(row["record_json"], {})
+    return str(record.get("session_generation") or "").strip() if isinstance(record, dict) else ""
+
+
+def _deleted_window_exists(
+    database: sqlite3.Connection, *, kind: str, name: str
+) -> bool:
+    row = database.execute(
+        "SELECT 1 FROM history_deleted_windows WHERE window_kind=? AND window_name=?",
+        (str(kind), str(name)),
+    ).fetchone()
+    return row is not None
+
+
+def _remember_deleted_window(
+    database: sqlite3.Connection,
+    *,
+    kind: str,
+    name: str,
+    source: str,
+    session_id: str,
+    session_generation: str = "",
+) -> None:
+    database.execute(
+        """
+        INSERT INTO history_deleted_windows(
+            window_kind, window_name, source, session_id,
+            session_generation, deleted_at
+        ) VALUES(?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(window_kind, window_name) DO UPDATE SET
+            source=excluded.source,
+            session_id=excluded.session_id,
+            session_generation=excluded.session_generation,
+            deleted_at=excluded.deleted_at
+        """,
+        (
+            str(kind),
+            str(name),
+            str(source),
+            str(session_id),
+            str(session_generation or ""),
+        ),
+    )
+
+
+def clear_session_delete_fence(
+    root: Path, user: str, source: str, session_id: str
+) -> None:
+    """Allow an explicit new reservation to reuse a deleted logical id."""
+
+    with connection(root, user, write=True) as database:
+        database.execute(
+            "DELETE FROM history_deleted_sessions WHERE source=? AND session_id=?",
+            (str(source), str(session_id)),
+        )
 
 
 def _configure(connection: sqlite3.Connection, *, initialize: bool = False) -> None:
@@ -191,6 +267,33 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             session_id TEXT NOT NULL
         );
+
+        -- A deleted session must remain fenced off long enough to reject
+        -- terminal commits that were already in flight when the user deleted
+        -- it.  The row is cleared only by an explicit new reservation for the
+        -- same logical id; ordinary registry upserts cannot remove it.
+        CREATE TABLE IF NOT EXISTS history_deleted_sessions (
+            source TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (source, session_id)
+        );
+
+        -- Keep physical window tombstones so a late writer cannot recreate a
+        -- deleted window after the same logical session id is reserved again.
+        -- New physical windows for an existing session are still allowed; only
+        -- a previously deleted window name is fenced.
+        CREATE TABLE IF NOT EXISTS history_deleted_windows (
+            window_kind TEXT NOT NULL CHECK (window_kind IN ('archive', 'runtime')),
+            window_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            session_generation TEXT NOT NULL DEFAULT '',
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (window_kind, window_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_deleted_windows_session
+            ON history_deleted_windows(source, session_id, deleted_at DESC);
 
         CREATE TABLE IF NOT EXISTS history_messages (
             window_name TEXT NOT NULL,
@@ -650,6 +753,43 @@ def _save_window_on_connection(
     think = copy.deepcopy(window.get("think") or {})
     tool = copy.deepcopy(window.get("tool") or {})
     items = copy.deepcopy(window.get("items") or {})
+    source = str(data.get("source") or "")
+    session_id = str(data.get("session_id") or "")
+    incoming_generation = str(
+        window.get("_session_generation") or data.get("session_generation") or ""
+    ).strip()
+    if incoming_generation:
+        data["session_generation"] = incoming_generation
+    if _deleted_window_exists(database, kind=kind, name=name):
+        # Physical names are generated by the framework and are not reused.
+        # Refuse every later write to a tombstoned name, including a stale
+        # writer that no longer carries the generation field.
+        return data
+    if source and session_id and _session_is_deleted(
+        database, source=source, session_id=session_id
+    ):
+        # A run may finish after its conversation was deleted.  Do not recreate
+        # either history window; returning the caller's in-memory data keeps
+        # the terminal event path deterministic without persisting stale data.
+        return data
+    current_generation = _session_generation(
+        database,
+        source=source,
+        session_id=session_id,
+    ) if source and session_id else ""
+    if (
+        current_generation
+        and incoming_generation
+        and incoming_generation != current_generation
+    ):
+        # A writer from a previous reservation must never be rebound to the
+        # current logical session.  Physical-window tombstones protect already
+        # committed windows; this generation check also fences a window that
+        # was only prepared in memory when the old session was deleted.
+        return data
+    if current_generation and not incoming_generation:
+        data["session_generation"] = current_generation
+        incoming_generation = current_generation
     existing = database.execute(
         "SELECT title FROM history_windows WHERE window_kind=? AND window_name=?",
         (kind, name),
@@ -657,8 +797,6 @@ def _save_window_on_connection(
     if existing is not None:
         data["title"] = str(existing["title"] or "")
     data["complete"] = True
-    source = str(data.get("source") or "")
-    session_id = str(data.get("session_id") or "")
     created_at = str(data.get("created_at") or data.get("updated_at") or "")
     updated_at = str(data.get("updated_at") or "")
     messages = text.get("messages", []) if isinstance(text, dict) else []
@@ -688,6 +826,11 @@ def _save_window_on_connection(
         metrics=data.get("round_metrics"),
     )
     stored_data = copy.deepcopy(data)
+    if kind == "archive":
+        # session_generation is an internal concurrency marker.  Keep the
+        # historical archive payload contract unchanged while retaining the
+        # marker in the returned in-memory data and registry record.
+        stored_data.pop("session_generation", None)
     stored_data.pop("round_metrics", None)
     stored_data["round_metrics_storage"] = "history_rounds"
     stored_think = _partition_reference(think, default_schema=1)
@@ -745,30 +888,91 @@ def _write_registry_state(
     *,
     record: dict[str, Any] | None,
     active_updates: dict[str, dict[str, str] | None] | None,
+    conditional_active_updates: dict[str, dict[str, str] | None] | None = None,
     updated_at: str,
 ) -> None:
+    stale_record = False
+    if record is not None:
+        record_source = str(record.get("source") or "")
+        record_session_id = str(record.get("session_id") or "")
+        if record_source and record_session_id and _session_is_deleted(
+            database,
+            source=record_source,
+            session_id=record_session_id,
+        ):
+            # A late terminal commit must not recreate a deleted session row or
+            # its active pointer.
+            record = None
+        else:
+            incoming_generation = str(
+                record.get("session_generation") or ""
+            ).strip()
+            current_generation = _session_generation(
+                database,
+                source=record_source,
+                session_id=record_session_id,
+            )
+            if (
+                incoming_generation
+                and current_generation
+                and incoming_generation != current_generation
+            ):
+                # Do not let a stale terminal commit replace the current
+                # registry row or move its active binding backwards.
+                record = None
+                stale_record = True
+    if stale_record:
+        active_updates = None
+        conditional_active_updates = None
     if record is not None:
         _upsert_session_row(database, record)
-    for active_key, binding in (active_updates or {}).items():
+    def apply_active_update(
+        active_key: str,
+        binding: dict[str, str] | None,
+        *,
+        conditional: bool,
+    ) -> None:
+        current = database.execute(
+            "SELECT source, session_id FROM history_active_sessions WHERE active_key=?",
+            (str(active_key),),
+        ).fetchone()
+        if conditional and binding is not None and current is not None:
+            expected = (str(binding.get("source") or ""), str(binding.get("session_id") or ""))
+            existing = (str(current["source"]), str(current["session_id"]))
+            if existing != expected:
+                # A newer session was explicitly selected while this older
+                # run was finishing.  Do not let the late terminal commit
+                # move the active pointer backwards.
+                return
         if binding is None:
-            database.execute(
-                "DELETE FROM history_active_sessions WHERE active_key=?",
-                (str(active_key),),
-            )
-        else:
-            source = str(binding.get("source") or "")
-            session_id = str(binding.get("session_id") or "")
-            if source and session_id:
+            if not conditional:
                 database.execute(
-                    """
-                    INSERT INTO history_active_sessions(active_key, source, session_id)
-                    VALUES(?, ?, ?)
-                    ON CONFLICT(active_key) DO UPDATE SET
-                        source=excluded.source, session_id=excluded.session_id
-                    """,
-                    (str(active_key), source, session_id),
+                    "DELETE FROM history_active_sessions WHERE active_key=?",
+                    (str(active_key),),
                 )
-    if record is not None or active_updates:
+            return
+        source = str(binding.get("source") or "")
+        session_id = str(binding.get("session_id") or "")
+        if source and session_id and _session_is_deleted(
+            database, source=source, session_id=session_id
+        ):
+            return
+        if source and session_id:
+            database.execute(
+                """
+                INSERT INTO history_active_sessions(active_key, source, session_id)
+                VALUES(?, ?, ?)
+                ON CONFLICT(active_key) DO UPDATE SET
+                    source=excluded.source, session_id=excluded.session_id
+                """,
+                (str(active_key), source, session_id),
+            )
+
+    for active_key, binding in (active_updates or {}).items():
+        apply_active_update(active_key, binding, conditional=False)
+    for active_key, binding in (conditional_active_updates or {}).items():
+        apply_active_update(active_key, binding, conditional=True)
+    if record is not None or active_updates or conditional_active_updates:
         database.execute(
             """
             INSERT INTO history_meta(key, value) VALUES('registry_revision', '1')
@@ -787,6 +991,7 @@ def save_window_bundle(
     *,
     session_record: dict[str, Any] | None = None,
     active_updates: dict[str, dict[str, str] | None] | None = None,
+    conditional_active_updates: dict[str, dict[str, str] | None] | None = None,
     updated_at: str = "",
 ) -> list[dict[str, Any]]:
     if not entries:
@@ -811,6 +1016,7 @@ def save_window_bundle(
             database,
             record=copy.deepcopy(session_record) if session_record is not None else None,
             active_updates=active_updates,
+            conditional_active_updates=conditional_active_updates,
             updated_at=str(updated_at or (session_record or {}).get("updated_at") or ""),
         )
     return stored
@@ -934,9 +1140,14 @@ def read_context_summary(runtime_path: Path) -> dict[str, Any] | None:
             SELECT schema_version, source_hash, previous_source_hash,
                    covered_through_round, covered_rounds_json, summary_json,
                    memory_extractions_json, created_at
-            FROM history_context_summaries WHERE window_name=?
+            FROM history_context_summaries
+            WHERE window_name=?
+              AND EXISTS (
+                  SELECT 1 FROM history_windows
+                  WHERE window_kind='runtime' AND window_name=?
+              )
             """,
-            (name,),
+            (name, name),
         ).fetchone()
     if row is None:
         return None
@@ -958,12 +1169,18 @@ def write_context_summary(runtime_path: Path, cache: dict[str, Any] | None) -> N
         window = database.execute(
             """
             SELECT source, session_id FROM history_windows
-            WHERE window_name=?
-            ORDER BY CASE window_kind WHEN 'runtime' THEN 0 ELSE 1 END
+            WHERE window_kind='runtime' AND window_name=?
             LIMIT 1
             """,
             (name,),
         ).fetchone()
+        if window is None or _deleted_window_exists(
+            database, kind="runtime", name=name
+        ):
+            # A summary worker can finish after its runtime window was deleted.
+            # Do not create an orphan cache that could be observed by a later
+            # session using the same logical conversation id.
+            return
         _store_context_summary(
             database,
             window_name=name,
@@ -978,8 +1195,15 @@ def context_summary_exists(runtime_path: Path) -> bool:
     with connection(root, user) as database:
         return (
             database.execute(
-                "SELECT 1 FROM history_context_summaries WHERE window_name=?",
-                (name,),
+                """
+                SELECT 1 FROM history_context_summaries
+                WHERE window_name=?
+                  AND EXISTS (
+                      SELECT 1 FROM history_windows
+                      WHERE window_kind='runtime' AND window_name=?
+                  )
+                """,
+                (name, name),
             ).fetchone()
             is not None
         )
@@ -1101,6 +1325,27 @@ def window_exists(directory: Path) -> bool:
 def delete_window(directory: Path) -> bool:
     root, user, kind, name = window_location(directory)
     with connection(root, user, write=True) as database:
+        row = database.execute(
+            """
+            SELECT source, session_id, data_json
+            FROM history_windows WHERE window_kind=? AND window_name=?
+            """,
+            (kind, name),
+        ).fetchone()
+        if row is not None and kind != "runtime":
+            stored_data = _object(row["data_json"], {})
+            _remember_deleted_window(
+                database,
+                kind=kind,
+                name=name,
+                source=str(row["source"] or ""),
+                session_id=str(row["session_id"] or ""),
+                session_generation=(
+                    str(stored_data.get("session_generation") or "")
+                    if isinstance(stored_data, dict)
+                    else ""
+                ),
+            )
         database.execute(
             "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
             (kind, name),
@@ -1179,11 +1424,34 @@ def rename_windows(
 
 def delete_session_windows(root: Path, user: str, source: str, session_id: str) -> int:
     with connection(root, user, write=True) as database:
+        database.execute(
+            """
+            INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
+            VALUES(?, ?, datetime('now'))
+            ON CONFLICT(source, session_id) DO UPDATE SET
+                deleted_at=excluded.deleted_at
+            """,
+            (str(source), str(session_id)),
+        )
         windows = database.execute(
-            "SELECT window_kind, window_name FROM history_windows "
+            "SELECT window_kind, window_name, data_json FROM history_windows "
             "WHERE source=? AND session_id=?",
             (source, session_id),
         ).fetchall()
+        for row in windows:
+            stored_data = _object(row["data_json"], {})
+            _remember_deleted_window(
+                database,
+                kind=str(row["window_kind"]),
+                name=str(row["window_name"]),
+                source=source,
+                session_id=session_id,
+                session_generation=(
+                    str(stored_data.get("session_generation") or "")
+                    if isinstance(stored_data, dict)
+                    else ""
+                ),
+            )
         database.executemany(
             "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
             [(row["window_kind"], row["window_name"]) for row in windows],
@@ -1205,6 +1473,19 @@ def delete_session_windows(root: Path, user: str, source: str, session_id: str) 
 
 def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]:
     with connection(root, user, write=True) as database:
+        session_rows = database.execute(
+            "SELECT DISTINCT session_id FROM history_windows WHERE source=?",
+            (str(source),),
+        ).fetchall()
+        database.executemany(
+            """
+            INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
+            VALUES(?, ?, datetime('now'))
+            ON CONFLICT(source, session_id) DO UPDATE SET
+                deleted_at=excluded.deleted_at
+            """,
+            [(str(source), str(row["session_id"])) for row in session_rows],
+        )
         session_count = int(
             database.execute(
                 "SELECT COUNT(DISTINCT session_id) FROM history_windows WHERE source=?",
@@ -1212,9 +1493,24 @@ def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]
             ).fetchone()[0]
         )
         windows = database.execute(
-            "SELECT window_kind, window_name FROM history_windows WHERE source=?",
+            "SELECT window_kind, window_name, session_id, data_json "
+            "FROM history_windows WHERE source=?",
             (source,),
         ).fetchall()
+        for row in windows:
+            stored_data = _object(row["data_json"], {})
+            _remember_deleted_window(
+                database,
+                kind=str(row["window_kind"]),
+                name=str(row["window_name"]),
+                source=source,
+                session_id=str(row["session_id"] or ""),
+                session_generation=(
+                    str(stored_data.get("session_generation") or "")
+                    if isinstance(stored_data, dict)
+                    else ""
+                ),
+            )
         database.executemany(
             "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
             [(row["window_kind"], row["window_name"]) for row in windows],
@@ -1322,6 +1618,18 @@ def _upsert_session_row(database: sqlite3.Connection, record: dict[str, Any]) ->
     session_id = str(record.get("session_id") or "")
     if not source or not session_id:
         raise ValueError("历史会话记录缺少 source 或 session_id")
+    incoming_generation = str(record.get("session_generation") or "").strip()
+    current_generation = _session_generation(
+        database,
+        source=source,
+        session_id=session_id,
+    )
+    if (
+        incoming_generation
+        and current_generation
+        and incoming_generation != current_generation
+    ):
+        return
     database.execute(
         """
         INSERT INTO history_sessions(
@@ -1367,11 +1675,23 @@ def upsert_registry_record(
     *,
     active_updates: dict[str, dict[str, str] | None] | None = None,
     updated_at: str = "",
+    allow_deleted_reuse: bool = False,
 ) -> dict[str, Any]:
     """Atomically upsert one session and optional active bindings."""
 
     rendered = copy.deepcopy(record)
     with connection(root, user, write=True) as database:
+        source = str(rendered.get("source") or "")
+        session_id = str(rendered.get("session_id") or "")
+        if source and session_id and _session_is_deleted(
+            database, source=source, session_id=session_id
+        ):
+            if not allow_deleted_reuse:
+                raise RuntimeError(f"历史会话已删除，拒绝重新写入：{source}/{session_id}")
+            database.execute(
+                "DELETE FROM history_deleted_sessions WHERE source=? AND session_id=?",
+                (source, session_id),
+            )
         _upsert_session_row(database, rendered)
         for active_key, binding in (active_updates or {}).items():
             if binding is None:
@@ -1383,6 +1703,10 @@ def upsert_registry_record(
             source = str(binding.get("source") or "")
             session_id = str(binding.get("session_id") or "")
             if not source or not session_id:
+                continue
+            if _session_is_deleted(
+                database, source=source, session_id=session_id
+            ):
                 continue
             database.execute(
                 """
@@ -1497,6 +1821,12 @@ def write_registry(
             session_id = str(record.get("session_id") or "")
             if not source or not session_id:
                 continue
+            if _session_is_deleted(
+                database, source=source, session_id=session_id
+            ):
+                # A stale index snapshot must not resurrect a session that was
+                # deleted by another worker.
+                continue
             key = (source, session_id)
             current_keys.add(key)
             rendered = _json(record)
@@ -1524,6 +1854,10 @@ def write_registry(
             source = str(value.get("source") or "")
             session_id = str(value.get("session_id") or "")
             if source and session_id:
+                if _session_is_deleted(
+                    database, source=source, session_id=session_id
+                ):
+                    continue
                 normalized_key = str(active_key)
                 current_active[normalized_key] = (source, session_id)
                 if existing_active.get(normalized_key) == (source, session_id):

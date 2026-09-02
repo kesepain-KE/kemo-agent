@@ -150,7 +150,7 @@ Provider 内部统一为 Kemo 协议对象：
 - `provider/adapters/compat.py` 在 Chat 与内部 Kemo 结构之间转换。
 
 两条协议都必须在工具执行前确认终态和参数 JSON 完整。Chat 的截断、内容过滤和损坏参数不会
-被包装成半个工具调用继续执行。详细规则见 `provider-tool-call-safety.md`。
+被包装成半个工具调用继续执行。详细规则见 `provider-reliability.md`。
 
 ### 8. 执行工具循环
 
@@ -287,10 +287,7 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 
 深入阅读：
 
-- `history-storage.md`；
-- `memory-storage.md`；
-- `runtime-state-storage.md`；
-- `logging-storage.md`。
+- `storage-and-persistence.md`。
 
 ## Web 分层
 
@@ -327,14 +324,10 @@ Web 重启由受保护接口启动 `restart.py` 辅助进程：等待旧进程�
 | 目标 | 首选文档 |
 |------|----------|
 | 开发 Provider 工具 | `plugin-development.md` |
-| 创建子代理 | `subagent-creation.md` |
-| 创建感知 | `sense-creation.md` |
-| 创建拓展 | `expand-creation.md` |
-| 创建技能 | `skill-creation.md` |
+| 创建子代理、技能、感知、拓展或外部代理 | `module-development.md` |
 | 接入外部消息 | `external-message-route-creation.md` |
-| 修改历史存储 | `history-storage.md` |
-| 修改记忆存储 | `memory-storage.md` |
-| 修改配置 | `global-config-reference.md`、`user-config-reference.md` |
+| 修改存储、写盘或运行日志 | `storage-and-persistence.md` |
+| 修改配置 | `configuration-reference.md` |
 
 修改任何核心链路后，应先运行相关定向测试，再运行完整 `python -m pytest -q`。创建或实质修改
 子代理、拓展、消息、感知、技能或用户包时，还必须运行 `tests/template_tests/<kind>/` 对应

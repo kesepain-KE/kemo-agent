@@ -450,7 +450,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertNotIn("BOB_ONLY", bob_system)
         self.assertNotIn("ALICE_ONLY", bob_system)
 
-    def test_main_source_policy_does_not_restrict_subagent_capabilities(self) -> None:
+    def test_main_source_policy_restricts_subagent_knowledge_capabilities(self) -> None:
         _, root, config = self.make_root()
         config.update(
             {
@@ -516,7 +516,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         system_prompt = provider.requests[0].messages[0]["content"]
         self.assertIn("CHILD_SKILL", system_prompt)
         self.assertNotIn("CHILD_EXPAND", system_prompt)
-        self.assertIn("CHILD_KNOWLEDGE", system_prompt)
+        self.assertNotIn("CHILD_KNOWLEDGE", system_prompt)
 
     def test_agent_tool_whitelist_drives_provider_tool_loop(self) -> None:
         _, root, config = self.make_root()

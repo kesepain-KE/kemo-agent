@@ -610,6 +610,26 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(second["source_hash"], first["source_hash"])
 
+    def test_summary_subagent_receives_the_owning_conversation_scope(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime_path = make_summary_runtime(Path(temporary.name))
+        provider = SummaryRunner()
+        groups = build_round_groups(make_window(1), ContextPolicy())
+
+        get_or_create_summary(
+            runtime_path=runtime_path,
+            groups=groups,
+            agent_runner=provider,
+            agent_name="context_manage",
+            trigger="round_limit",
+            source="web",
+            session_id="session-a",
+        )
+
+        self.assertEqual(provider.kwargs[0]["source"], "web")
+        self.assertEqual(provider.kwargs[0]["session_id"], "session-a")
+
     def test_summary_source_includes_reasoning_and_schema_upgrade_invalidates_cache(
         self,
     ) -> None:

@@ -44,7 +44,7 @@ from run.history import (
 from run.history import window_exists
 from run.memory import MemoryStore
 from tests.support.memory_db import update_fragment_metadata
-from run.config import PROMPT_SECTION_ORDER
+from run.config import PROMPT_SECTION_ORDER, build_prompt_bundle
 from run.extensions import clear_model_capability_cache
 from run.tasks import PlanStore, normalize_plan
 from web.app import create_app
@@ -657,6 +657,115 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_states["perception"], "disabled")
         self.assertNotIn("[expand_data]", runtime.json()["prompt"]["content"])
         self.assertNotIn("[perception]", runtime.json()["prompt"]["content"])
+
+    def test_runtime_and_overview_prompt_state_isolated_by_source_and_session(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "history": {"schema_version": 3},
+                    "memory": {"storage_schema_version": 4},
+                    "agents": {"max_rounds": 30, "token_limit": 100000},
+                    "tools": {"enabled": True},
+                }
+            ),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider": {
+                        "type": "chat",
+                        "base_url": "https://example.test/v1",
+                        "model": "test-model",
+                    },
+                }
+            ),
+            "utf-8",
+        )
+        reserve_session(root, "alice", "web", "scope-a")
+        reserve_session(root, "alice", "web", "scope-b")
+        for session_id in ("scope-a", "scope-b"):
+            window = empty_window("alice", "web", session_id)
+            commit_window(
+                root / "users" / "alice" / "history" / f"{session_id}-window",
+                window,
+            )
+
+        store = PlanStore(root, "alice")
+        for session_id, title in (
+            ("scope-a", "A-only plan"),
+            ("scope-b", "B-must-not-appear"),
+        ):
+            store.create(
+                normalize_plan(
+                    title=title,
+                    description=f"{title} description",
+                    user="alice",
+                    source="web",
+                    session_id=session_id,
+                    status="approved",
+                    steps=[
+                        {
+                            "step_id": "step_1",
+                            "title": "Inspect",
+                            "description": "read-only",
+                            "tool_name": None,
+                            "tool_arguments": {},
+                            "critical": True,
+                        }
+                    ],
+                )
+            )
+
+        service = WebRunService(root)
+        with patch(
+            "web.services.runtime_status.build_prompt_bundle",
+            wraps=build_prompt_bundle,
+        ) as build_bundle:
+            scoped = service.runtime_status(
+                "alice",
+                source="web",
+                session_id="scope-a",
+                sections="summary,prompt",
+            )
+            self.assertTrue(
+                any(
+                    call.kwargs.get("source") == "web"
+                    and call.kwargs.get("session_id") == "scope-a"
+                    for call in build_bundle.call_args_list
+                )
+            )
+
+        prompt_text = scoped["prompt"]["content"]
+        self.assertIn("A-only plan", prompt_text)
+        self.assertNotIn("B-must-not-appear", prompt_text)
+        self.assertNotIn("scope-b", prompt_text)
+
+        new_session = service.runtime_status(
+            "alice",
+            source="web",
+            session_id="",
+            sections="summary,prompt",
+        )
+        self.assertNotIn("A-only plan", new_session["prompt"]["content"])
+        self.assertNotIn("B-must-not-appear", new_session["prompt"]["content"])
+
+        overview = service.overview(
+            "alice",
+            source="web",
+            session_id="scope-a",
+        )
+        self.assertEqual(overview["active_plan"]["title"], "A-only plan")
+        self.assertTrue(
+            all(
+                "B-must-not-appear" not in str(item)
+                for item in overview["activities"]
+            )
+        )
 
     def test_media_preview_is_inline_range_capable_and_enforces_limits(self) -> None:
         _, root = self.make_root()
@@ -3046,6 +3155,68 @@ class WebBackendTests(unittest.TestCase):
                 for active in service._active_runs.values()
             ))
 
+    def test_disconnected_consumer_keeps_slow_run_scoped_and_cancellable(self) -> None:
+        _, root = self.make_root()
+        session_id = "consumer-disconnect-slow"
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def source(*_args, **kwargs):
+            worker_started.set()
+            yield RunEvent(type="text_delta", content="partial")
+            # Simulate a provider/tool that does not return immediately after
+            # the client disconnects.  The ActiveRun must remain addressable
+            # until this worker really exits.
+            release_worker.wait(timeout=10)
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        iterator = service.stream_chat(
+            "alice",
+            session_id,
+            "start",
+            cancel_event=threading.Event(),
+            run_id="run_slow_disconnect_123",
+        )
+        self.assertEqual(next(iterator).type, "text_delta")
+        self.assertTrue(worker_started.wait(timeout=2))
+
+        close_thread = threading.Thread(target=iterator.close)
+        close_thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            active = None
+            while time.monotonic() < deadline:
+                with service._active_runs_lock:
+                    active = service._active_runs.get("run_slow_disconnect_123")
+                if active is not None:
+                    break
+                time.sleep(0.01)
+            self.assertIsNotNone(active)
+            self.assertTrue(active.cancel_event.is_set())
+
+            stopping = service.cancel_run(
+                "alice",
+                "run_slow_disconnect_123",
+                source="web",
+                session_id=session_id,
+            )
+            self.assertEqual(stopping["status"], "stopping")
+            self.assertTrue(active.cancel_event.is_set())
+        finally:
+            release_worker.set()
+            close_thread.join(timeout=3)
+            self.assertFalse(close_thread.is_alive())
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with service._active_runs_lock:
+                if "run_slow_disconnect_123" not in service._active_runs:
+                    break
+            time.sleep(0.01)
+        with service._active_runs_lock:
+            self.assertNotIn("run_slow_disconnect_123", service._active_runs)
+
     def test_web_guidance_queue_is_user_scoped_and_removed_after_run(self) -> None:
         _, root = self.make_root()
         seen: list[str] = []
@@ -3065,16 +3236,34 @@ class WebBackendTests(unittest.TestCase):
         captured: list[RunEvent] = []
         worker = threading.Thread(target=lambda: captured.extend(iterator))
         worker.start()
-        queued = service.submit_guidance("alice", "run_guidance_123", "adjust target")
+        queued = service.submit_guidance(
+            "alice",
+            "run_guidance_123",
+            "adjust target",
+            source="web",
+            session_id="guided-session",
+        )
         with self.assertRaisesRegex(Exception, "运行不存在"):
-            service.submit_guidance("bob", "run_guidance_123", "cross user")
+            service.submit_guidance(
+                "bob",
+                "run_guidance_123",
+                "cross user",
+                source="web",
+                session_id="guided-session",
+            )
         worker.join(timeout=3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(queued["status"], "accepted_current_run")
         self.assertEqual(seen, ["adjust target"])
         self.assertEqual(captured[-1].metadata["run_id"], "run_guidance_123")
         with self.assertRaisesRegex(Exception, "运行不存在"):
-            service.submit_guidance("alice", "run_guidance_123", "too late")
+            service.submit_guidance(
+                "alice",
+                "run_guidance_123",
+                "too late",
+                source="web",
+                session_id="guided-session",
+            )
 
     def test_web_guidance_after_final_boundary_is_queued_for_next_turn(self) -> None:
         _, root = self.make_root()
@@ -3084,12 +3273,175 @@ class WebBackendTests(unittest.TestCase):
         service._active_runs[active.run_id] = active
 
         response = service.submit_guidance(
-            "alice", active.run_id, "continue as a new turn"
+            "alice",
+            active.run_id,
+            "continue as a new turn",
+            source="web",
+            session_id="guided-session",
         )
 
         self.assertEqual(response["status"], "queued_next_turn")
         self.assertEqual(response["queued"], 0)
         self.assertEqual(active.guidance.qsize(), 0)
+
+    def test_web_run_controls_require_matching_session_and_source(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        active = ActiveRun(
+            "run_scope_guard",
+            "alice",
+            "scope-a",
+            source="web",
+        )
+        service._active_runs[active.run_id] = active
+
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.submit_guidance(
+                "alice",
+                active.run_id,
+                "wrong session",
+                source="web",
+                session_id="scope-b",
+            )
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.submit_guidance(
+                "alice",
+                active.run_id,
+                "wrong source",
+                source="app",
+                session_id="scope-a",
+            )
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.cancel_run(
+                "alice",
+                active.run_id,
+                source="web",
+                session_id="scope-b",
+            )
+        self.assertFalse(active.cancel_event.is_set())
+
+        accepted = service.submit_guidance(
+            "alice",
+            active.run_id,
+            "matching scope",
+            source="web",
+            session_id="scope-a",
+        )
+        self.assertEqual(accepted["status"], "accepted_current_run")
+        self.assertEqual(active.guidance.get_nowait(), "matching scope")
+        cancelled = service.cancel_run(
+            "alice",
+            active.run_id,
+            source="web",
+            session_id="scope-a",
+        )
+        self.assertEqual(cancelled["status"], "stopping")
+        self.assertTrue(active.cancel_event.is_set())
+
+    def test_interleaved_runs_keep_guidance_cancel_and_event_metadata_in_scope(self) -> None:
+        _, root = self.make_root()
+        started = {session: threading.Event() for session in ("space-a", "space-b")}
+        release = {session: threading.Event() for session in ("space-a", "space-b")}
+
+        def source(request, **_kwargs):
+            session_id = str(request["session_id"])
+            started[session_id].set()
+            # Deliberately provide forged event metadata; WebRunService must
+            # replace it with the request's authoritative scope.
+            yield RunEvent(
+                type="text_delta",
+                content=session_id,
+                metadata={"source": "app", "session_id": "other-space"},
+            )
+            release[session_id].wait(timeout=2)
+            yield RunEvent(
+                type="done",
+                metadata={"source": "app", "session_id": "other-space"},
+            )
+
+        service = WebRunService(root, event_source=source)
+        streams = {
+            session: service.stream_chat(
+                "alice",
+                session,
+                "开始",
+                cancel_event=threading.Event(),
+                run_id=f"run_{session.replace('-', '_')}_123",
+            )
+            for session in ("space-a", "space-b")
+        }
+        captured: dict[str, list[RunEvent]] = {session: [] for session in streams}
+        workers = [
+            threading.Thread(
+                target=lambda current=session: captured[current].extend(streams[current]),
+                name=f"scope-test-{session}",
+            )
+            for session in streams
+        ]
+        for worker in workers:
+            worker.start()
+        self.assertTrue(started["space-a"].wait(timeout=2))
+        self.assertTrue(started["space-b"].wait(timeout=2))
+
+        with self.assertRaisesRegex(Exception, "运行不存在"):
+            service.submit_guidance(
+                "alice",
+                "run_space_a_123",
+                "不能进入 A",
+                source="web",
+                session_id="space-b",
+            )
+        accepted = service.submit_guidance(
+            "alice",
+            "run_space_a_123",
+            "只给 A",
+            source="web",
+            session_id="space-a",
+        )
+        self.assertEqual(accepted["session_id"], "space-a")
+        service.cancel_run(
+            "alice",
+            "run_space_a_123",
+            source="web",
+            session_id="space-a",
+        )
+        with service._active_runs_lock:
+            active_b = service._active_runs.get("run_space_b_123")
+            self.assertIsNotNone(active_b)
+            self.assertFalse(active_b.cancel_event.is_set())
+
+        release["space-a"].set()
+        release["space-b"].set()
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+
+        for session, events in captured.items():
+            self.assertEqual([event.type for event in events], ["text_delta", "done"])
+            self.assertTrue(all(event.metadata["source"] == "web" for event in events))
+            self.assertTrue(all(event.metadata["session_id"] == session for event in events))
+
+    def test_web_run_control_http_requires_scope_fields(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        active = ActiveRun("run_scope_http", "alice", "scope-http", source="web")
+        service._active_runs[active.run_id] = active
+        app = create_app(service=service)
+
+        missing_guidance_scope = self.request(
+            app,
+            "POST",
+            "/api/runs/run_scope_http/guidance",
+            json={"user": "alice", "guidance": "hello"},
+        )
+        self.assertEqual(missing_guidance_scope.status_code, 400, missing_guidance_scope.text)
+        missing_cancel_scope = self.request(
+            app,
+            "POST",
+            "/api/runs/run_scope_http/cancel",
+            json={"user": "alice"},
+        )
+        self.assertEqual(missing_cancel_scope.status_code, 400, missing_cancel_scope.text)
 
     def test_web_guidance_accepts_attachment_only_and_revalidates_user_scope(
         self,
@@ -3106,6 +3458,8 @@ class WebBackendTests(unittest.TestCase):
             "alice",
             active.run_id,
             "",
+            source="web",
+            session_id="guided-session",
             guidance_id="guidance_media",
             uploaded_files=["clip.txt"],
         )
@@ -3121,6 +3475,8 @@ class WebBackendTests(unittest.TestCase):
                 "alice",
                 active.run_id,
                 "",
+                source="web",
+                session_id="guided-session",
                 guidance_id="missing_media",
                 uploaded_files=["missing.mp4"],
             )
@@ -3135,7 +3491,7 @@ class WebBackendTests(unittest.TestCase):
             create_app(service=service),
             "POST",
             "/api/runs/run_cancel_123/cancel",
-            json={"user": "alice"},
+            json={"user": "alice", "source": "web", "session_id": "cancel-session"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "stopping")
@@ -3146,7 +3502,7 @@ class WebBackendTests(unittest.TestCase):
             create_app(service=service),
             "POST",
             "/api/runs/run_cancel_123/cancel",
-            json={"user": "bob"},
+            json={"user": "bob", "source": "web", "session_id": "cancel-session"},
         )
         self.assertEqual(denied.status_code, 404, denied.text)
         self.assertFalse(active.cancel_event.is_set())
@@ -3305,7 +3661,12 @@ class WebBackendTests(unittest.TestCase):
             run_id="run_cancel_stream_123",
         )
         self.assertEqual(next(iterator).type, "text_delta")
-        service.cancel_run("alice", "run_cancel_stream_123")
+        service.cancel_run(
+            "alice",
+            "run_cancel_stream_123",
+            source="web",
+            session_id="cancel-stream",
+        )
         terminal = list(iterator)
         self.assertEqual([event.type for event in terminal], ["done"])
         self.assertEqual(terminal[0].metadata["status"], "cancelled")
@@ -3452,6 +3813,7 @@ class WebBackendTests(unittest.TestCase):
                 "root": str(root),
                 "user": "alice",
                 "source": "web",
+                "session_id": "s1",
                 "task_plan_id": plan["plan_id"],
                 "task_plan_mode": request["_task_plan_mode"],
             }
@@ -3531,6 +3893,127 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(stored["status"], "pending")
         self.assertEqual(stored["session_id"], "conversation-a")
 
+    def test_task_list_isolated_by_source_and_optional_conversation(self) -> None:
+        _, root = self.make_root()
+        store = PlanStore(root, "alice")
+
+        def create(title: str, source: str, session_id: str) -> dict[str, Any]:
+            return store.create(
+                normalize_plan(
+                    title=title,
+                    description=title,
+                    user="alice",
+                    source=source,
+                    session_id=session_id,
+                    steps=[
+                        {
+                            "step_id": "step_1",
+                            "title": "执行",
+                            "description": "执行",
+                            "critical": True,
+                        }
+                    ],
+                )
+            )
+
+        web_a = create("Web A", "web", "session-a")
+        web_b = create("Web B", "web", "session-b")
+        app_a = create("App A", "app", "session-a")
+        service = WebRunService(root)
+
+        web_all = service.tasks("alice", source="web")
+        self.assertEqual({item["plan_id"] for item in web_all["plans"]}, {web_a["plan_id"], web_b["plan_id"]})
+        web_session = service.tasks("alice", source="web", session_id="session-a")
+        self.assertEqual([item["plan_id"] for item in web_session["plans"]], [web_a["plan_id"]])
+        app_session = service.tasks("alice", source="app", session_id="session-a")
+        self.assertEqual([item["plan_id"] for item in app_session["plans"]], [app_a["plan_id"]])
+
+        app = create_app(service=service)
+        response = self.request(
+            app,
+            "GET",
+            "/api/users/alice/tasks?source=web&session_id=session-a",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [item["plan_id"] for item in response.json()["plans"]],
+            [web_a["plan_id"]],
+        )
+
+    def test_plan_creation_requires_scoped_session_and_ignores_body_scope(self) -> None:
+        _, root = self.make_root()
+        reserve_session(root, "alice", "web", "session-a")
+        reserve_session(root, "alice", "web", "session-b")
+        reserve_session(root, "alice", "app", "session-a")
+        app = create_app(service=WebRunService(root))
+
+        missing_scope = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/plans",
+            json={
+                "title": "没有作用域的计划",
+                "description": "必须拒绝",
+                "session_id": "session-a",
+                "source": "app",
+                "steps": [{
+                    "step_id": "step_1",
+                    "title": "执行",
+                    "description": "执行",
+                }],
+            },
+        )
+        self.assertEqual(missing_scope.status_code, 400, missing_scope.text)
+
+        created = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/plans?source=web&session_id=session-a",
+            json={
+                "title": "A 空间计划",
+                "description": "只能属于 A",
+                # Body scope is untrusted and must not redirect ownership.
+                "session_id": "session-b",
+                "source": "app",
+                "steps": [{
+                    "step_id": "step_1",
+                    "title": "执行",
+                    "description": "执行",
+                }],
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        plan = created.json()["plan"]
+        self.assertEqual(plan["source"], "web")
+        self.assertEqual(plan["session_id"], "session-a")
+
+        in_a = self.request(
+            app,
+            "GET",
+            "/api/users/alice/tasks?source=web&session_id=session-a",
+        )
+        in_b = self.request(
+            app,
+            "GET",
+            "/api/users/alice/tasks?source=web&session_id=session-b",
+        )
+        in_app = self.request(
+            app,
+            "GET",
+            "/api/users/alice/tasks?source=app&session_id=session-a",
+        )
+        self.assertEqual([item["plan_id"] for item in in_a.json()["plans"]], [plan["plan_id"]])
+        self.assertEqual(in_b.json()["plans"], [])
+        self.assertEqual(in_app.json()["plans"], [])
+
+        cross_space = self.request(
+            app,
+            "PATCH",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/edit?source=web&session_id=session-b",
+            json={"revision": plan["revision"], "title": "越权修改"},
+        )
+        self.assertEqual(cross_space.status_code, 400, cross_space.text)
+
     def test_plan_pause_command_uses_latest_disk_state_without_revision(self) -> None:
         _, root = self.make_root()
         store = PlanStore(root, "alice")
@@ -3539,6 +4022,8 @@ class WebBackendTests(unittest.TestCase):
                 title="可暂停计划",
                 description="验证无 revision 指令",
                 user="alice",
+                source="web",
+                session_id="web",
                 status="running",
                 steps=[
                     {
@@ -3558,7 +4043,7 @@ class WebBackendTests(unittest.TestCase):
         response = self.request(
             app,
             "POST",
-            f"/api/users/alice/tasks/plans/{plan['plan_id']}/actions/pause",
+            f"/api/users/alice/tasks/plans/{plan['plan_id']}/actions/pause?source=web&session_id=web",
         )
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -3812,6 +4297,15 @@ class WebBackendTests(unittest.TestCase):
         secret_revision["revision"] = 3
         secret_revision["steps"][0]["tool_arguments"] = {
             "authorization": "Bearer example-sensitive-value",
+            "apiKey": "synthetic-api-key-value",
+            "accessToken": "synthetic-access-token-value",
+            "refreshToken": "synthetic-refresh-token-value",
+            "sessionSecret": "synthetic-session-secret-value",
+            "api-key": "synthetic-hyphen-key-value",
+            "nested": {
+                "Authorization": "synthetic-nested-authorization-value",
+                "keep": "safe-nested-value",
+            },
             "command": "safe-command",
         }
         secret_revision["steps"][0]["result"] = "Bearer example-sensitive-value"
@@ -3856,6 +4350,17 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(secret_view.status_code, 200, secret_view.text)
         secret_step = secret_view.json()["plan"]["steps"][0]
         self.assertEqual(secret_step["tool_arguments"]["authorization"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["apiKey"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["accessToken"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["refreshToken"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["sessionSecret"], "***")
+        self.assertEqual(secret_step["tool_arguments"]["api-key"], "***")
+        self.assertEqual(
+            secret_step["tool_arguments"]["nested"]["Authorization"], "***"
+        )
+        self.assertEqual(
+            secret_step["tool_arguments"]["nested"]["keep"], "safe-nested-value"
+        )
         self.assertEqual(secret_step["tool_arguments"]["command"], "safe-command")
         self.assertEqual(secret_step["result"], "***")
 
@@ -3919,6 +4424,33 @@ class WebBackendTests(unittest.TestCase):
             f"{base}/revisions/99?session_id=conversation-a",
         )
         self.assertEqual(missing.status_code, 404, missing.text)
+
+    def test_missing_plan_mutation_endpoints_return_not_found(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        plan_id = "plan_missing"
+
+        update = self.request(
+            app,
+            "PUT",
+            f"/api/users/alice/tasks/plans/{plan_id}?session_id=session-a",
+            json={},
+        )
+        self.assertEqual(update.status_code, 404, update.text)
+
+        pause = self.request(
+            app,
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan_id}/actions/pause?session_id=session-a",
+        )
+        self.assertEqual(pause.status_code, 404, pause.text)
+
+        delete = self.request(
+            app,
+            "DELETE",
+            f"/api/users/alice/tasks/plans/{plan_id}?session_id=session-a",
+        )
+        self.assertEqual(delete.status_code, 404, delete.text)
 
     def test_knowledge_api_hides_and_protects_kemo_graph_storage(self) -> None:
         _, root = self.make_root()
@@ -4068,12 +4600,13 @@ class WebBackendTests(unittest.TestCase):
             ),
             "utf-8",
         )
+        reserve_session(root, "alice", "web", "web")
         app = create_app(service=WebRunService(root))
 
         plan = self.request(
             app,
             "POST",
-            "/api/users/alice/tasks/plans",
+            "/api/users/alice/tasks/plans?source=web&session_id=web",
             json={
                 "title": "Web plan",
                 "description": "created by web",
@@ -4092,7 +4625,7 @@ class WebBackendTests(unittest.TestCase):
         paused = self.request(
             app,
             "PUT",
-            f"/api/users/alice/tasks/plans/{plan_id}",
+            f"/api/users/alice/tasks/plans/{plan_id}?source=web&session_id=web",
             json={"revision": 1, "status": "paused"},
         )
         self.assertEqual(paused.json()["plan"]["status"], "paused")
@@ -4780,6 +5313,8 @@ class WebBackendTests(unittest.TestCase):
                 title="Observer plan",
                 description="safe metadata",
                 user="alice",
+                source="web",
+                session_id="observer-session",
                 steps=[
                     {
                         "step_id": "step_1",

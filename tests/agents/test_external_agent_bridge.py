@@ -135,7 +135,12 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 agent=self.handle,
                 input={"value": "x"},
                 wait=False,
-                context={"root": str(self.root), "user": "alice"},
+                context={
+                    "root": str(self.root),
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "external-control",
+                },
             )
 
     def test_external_binding_rejects_invalid_input_before_expand(self) -> None:
@@ -163,7 +168,12 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 agent=self.handle,
                 input={"value": "x"},
                 timeout=True,
-                context={"root": str(self.root), "user": "alice"},
+                context={
+                    "root": str(self.root),
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "external-control",
+                },
             )
 
     def test_external_binding_rejects_non_terminal_result_status(self) -> None:
@@ -187,8 +197,9 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 submitted["kwargs"] = kwargs
                 return "agent-task-external"
 
-            def wait(self, task_id, timeout=None):
+            def wait(self, task_id, timeout=None, **kwargs):
                 del task_id, timeout
+                del kwargs
                 return {
                     "status": "completed",
                     "agent": handle,
@@ -213,7 +224,12 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 agent=self.handle,
                 input={"value": "x"},
                 timeout=3_600,
-                context={"root": str(self.root), "user": "alice"},
+                context={
+                    "root": str(self.root),
+                    "user": "alice",
+                    "source": "web",
+                    "session_id": "external-timeout",
+                },
             )
 
         self.assertEqual(result["status"], "completed")
@@ -233,7 +249,12 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                     agent=self.handle,
                     input={"value": "x"},
                     timeout=3_601,
-                    context={"root": str(self.root), "user": "alice"},
+                    context={
+                        "root": str(self.root),
+                        "user": "alice",
+                        "source": "web",
+                        "session_id": "external-timeout",
+                    },
                 )
 
     def test_non_terminal_result_does_not_publish_artifacts(self) -> None:

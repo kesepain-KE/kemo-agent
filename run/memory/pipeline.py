@@ -99,6 +99,8 @@ def extract_compressed_round_memory(
     trigger: str,
     agent_runner: Any,
     cancel_event: Any = None,
+    agent_source: str = "",
+    session_id: str = "",
 ) -> AgentRunResult:
     """Extract and persist memory from complete rounds before compression."""
     complete_rounds = [item for item in rounds if isinstance(item, dict)]
@@ -114,6 +116,11 @@ def extract_compressed_round_memory(
         "trigger": trigger,
         "rounds": round_numbers,
     }
+    runner_kwargs: dict[str, Any] = {"cancel_event": cancel_event}
+    if str(agent_source or "").strip():
+        runner_kwargs["source"] = str(agent_source).strip()
+    if str(session_id or "").strip():
+        runner_kwargs["session_id"] = str(session_id).strip()
     result = agent_runner.run(
         "self_improve",
         {
@@ -121,7 +128,7 @@ def extract_compressed_round_memory(
             "rounds": complete_rounds,
             "source": source,
         },
-        cancel_event=cancel_event,
+        **runner_kwargs,
     )
     candidates = result.data.get("candidates")
     if not isinstance(candidates, list):

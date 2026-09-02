@@ -29,9 +29,9 @@
 
 | 序号 | 字段 | 来源 |
 |------|------|------|
-| 5 | `global_knowledge_index` | `global_knowledge/data_structure.md` |
-| 6 | `shared_knowledge_index` | `shared_knowledge/data_structure.md` |
-| 7 | `user_knowledge_index` | `users/<name>/knowledge/data_structure.md` |
+| 5 | `global_knowledge_index` | 当前启用范围内的 `index.md` / `data_structure.md` / `索引.md` / `目录.md` |
+| 6 | `shared_knowledge_index` | 当前启用范围内的 `index.md` / `data_structure.md` / `索引.md` / `目录.md` |
+| 7 | `user_knowledge_index` | 当前启用范围内的 `index.md` / `data_structure.md` / `索引.md` / `目录.md` |
 
 ### 任务数据
 
@@ -56,9 +56,9 @@
 
 ## 编辑限制
 
-只能编辑以下状态的计划：`pending` / `approved` / `paused`
+只能编辑以下状态的计划：`pending` / `approved` / `paused` / `failed`
 
-不能编辑：`completed` / `cancelled` / `failed`
+不能编辑：`completed` / `cancelled`
 
 已完成步骤（`status=completed`）不可修改。
 

@@ -16,6 +16,7 @@
 
 - `action=run, background=false`：原同步模式，等待命令结束后返回输出。
 - `action=run, background=true`：立即登记后台作业并返回 `job_id`、PID、进程创建时间和受控日志路径。后台作业必须取得进程创建时间才能启用持久化取消/对账；无法确认身份时会安全失败，不会按裸 PID 杀进程。后台作业不支持 `stdin`；日志路径以项目根目录为基准返回相对路径，不暴露宿主机绝对路径。
+- Windows 下同步命令、后台 Worker 和后台命令默认都不显示终端窗口。只有单次调用明确传入 `show_terminal=true` 时，命令才会在新的可见控制台中运行；该参数不写入会话或用户配置。后台管理 Worker 本身始终隐藏。
 - `action=status, job_id=...`：查询并收敛一个后台作业的状态。
 - `action=cancel, job_id=...`：请求取消作业并终止已登记且身份校验通过的进程树；已结束作业重复取消是幂等操作。返回值中的 `ok` 表示取消请求是否被接受，`job_succeeded` 表示作业是否实际成功完成。
 
@@ -39,6 +40,7 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
 | `action` | string | | run / status / cancel，默认 run |
 | `command` | string | 条件 | action=run 时必填；支持 && / \|\| / ; 命令链 |
 | `background` | bool | | action=run 时是否创建受管理后台作业，默认 false |
+| `show_terminal` | bool | | Windows 下是否为本次命令创建可见终端，默认 false；其他平台忽略 |
 | `job_id` | string | 条件 | action=status/cancel 时必填 |
 | `working_dir` | string | | 工作目录，默认继承会话 cwd 或项目根 |
 | `timeout` | int | | 超时秒数（1-3600），默认来自 `global_config.json → tools.timeout`；后台模式由独立 Worker 强制执行 deadline |
@@ -69,6 +71,11 @@ cat / type、ls / dir、mkdir、echo、rm / del 也以内置方式执行；rm / 
         "type": "boolean",
         "default": false,
         "description": "action=run 时是否创建受管理后台作业；后台模式不支持 stdin"
+      },
+      "show_terminal": {
+        "type": "boolean",
+        "default": false,
+        "description": "仅本次 Windows 命令是否创建可见终端；默认 false，其他平台忽略"
       },
       "job_id": {"type": "string", "description": "action=status/cancel 使用的后台作业 ID"},
       "working_dir": {"type": "string", "description": "工作目录，默认继承会话 cwd 或项目根"},

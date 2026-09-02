@@ -5,7 +5,7 @@
 处理超时、取消、结果大小和权限边界。
 
 Provider 返回工具调用是否完整、Chat/Kemo 两条协议怎样判断可执行终态，另见
-`provider-tool-call-safety.md`。本文从插件注册和运行时执行角度补充该文档。
+`provider-reliability.md`。本文从插件注册和运行时执行角度补充该文档。
 
 ## 位置与发现
 

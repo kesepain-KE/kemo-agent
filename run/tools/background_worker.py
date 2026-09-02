@@ -173,6 +173,9 @@ def run(request_path: Path) -> int:
         raise ValueError("后台作业 process_command 无效")
     if isinstance(command, list) and not all(isinstance(item, str) for item in command):
         raise ValueError("后台作业 process_command 列表无效")
+    show_terminal = request.get("show_terminal", False)
+    if not isinstance(show_terminal, bool):
+        raise ValueError("后台作业 show_terminal 无效")
     cwd = Path(str(request["cwd"])).resolve()
     paths = job_paths(root, user, job_id)
     stdout_path = paths["stdout"]
@@ -195,7 +198,7 @@ def run(request_path: Path) -> int:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            **cancellable_subprocess_kwargs(),
+            **cancellable_subprocess_kwargs(show_terminal=show_terminal),
         )
         if deadline_at is not None and time.time() >= deadline_at:
             terminate_process_tree(process)

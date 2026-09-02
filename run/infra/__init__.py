@@ -10,6 +10,7 @@ from run.infra.process_utils import (
     hidden_subprocess_kwargs,
     terminate_pid_tree,
     terminate_process_tree,
+    visible_subprocess_kwargs,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "stream_cli_request",
     "terminate_pid_tree",
     "terminate_process_tree",
+    "visible_subprocess_kwargs",
 ]
 
 _LAZY_MODULES = ("log_store", "process_execution", "cli", "process_identity")
