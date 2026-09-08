@@ -8,10 +8,18 @@ import os
 import re
 import sys
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+from run.config.markdown import scan_markdown_structure
+from run.config.prompt_models import (
+    ExpandMeta,
+    ExpandSelection,
+    PerceptionSelection,
+    SenseMeta,
+    SkillDescriptor,
+)
 
 
 class PromptSourceError(RuntimeError):
@@ -27,8 +35,6 @@ class PerceptionError(PromptSourceError):
 
 
 _NUMBER_PART = re.compile(r"(\d+)")
-_TITLE = re.compile(r"^#\s+(.+?)\s*$")
-_SECONDARY_HEADING = re.compile(r"^##\s+")
 _SENSE_JSON_FIELDS = {
     "name",
     "data_md",
@@ -53,65 +59,6 @@ _EXPAND_JSON_OPTIONAL_FIELDS = {"recent_update"}
 _EXPAND_HEALTH = {"正常", "异常"}
 _EXPAND_INJECTION_HEADING = re.compile(r"^##\s+注入层\s*$", re.MULTILINE)
 _EXPAND_OPERATION_HEADING = re.compile(r"^##\s+操作层\s*$", re.MULTILINE)
-
-
-@dataclass(frozen=True, slots=True)
-class SkillDescriptor:
-    title: str
-    description: str
-    path: Path
-    relative_path: str
-    scope: str
-
-
-@dataclass(frozen=True, slots=True)
-class ExpandSelection:
-    text: str
-    source_files: tuple[str, ...]
-    original_chars: int
-    injected_chars: int
-    original_items: int
-    injected_items: int
-    truncated: bool
-
-
-@dataclass(frozen=True, slots=True)
-class PerceptionSelection:
-    text: str
-    source_files: tuple[str, ...]
-    original_chars: int
-    injected_chars: int
-    original_items: int
-    injected_items: int
-    truncated: bool
-
-
-@dataclass(frozen=True, slots=True)
-class SenseMeta:
-    name: str
-    data_md: str
-    recent_update: str
-    health: str
-    start_update: str
-    data_md_path: Path
-    valid: bool
-    error: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ExpandMeta:
-    name: str
-    explain: str
-    open_input: bool
-    input_data: str
-    input_health: str
-    start_update: str
-    open_control: bool
-    start_expand: str
-    start_control: str
-    module_dir: Path
-    valid: bool
-    error: str = ""
 
 
 def _invalid_expand_meta(module_dir: Path, error: str, *, name: str = "") -> ExpandMeta:
@@ -487,25 +434,31 @@ def truncate_chars(text: str, max_chars: int) -> tuple[str, bool]:
 def parse_skill_descriptor(path: Path, *, scope: str, root: Path) -> SkillDescriptor:
     text = read_required_text(path)
     lines = text.splitlines()
-    title_index = -1
-    title = ""
-    for index, line in enumerate(lines):
-        matched = _TITLE.fullmatch(line.strip())
-        if matched:
-            title_index = index
-            title = matched.group(1).strip()
-            break
-    if title_index < 0 or not title:
+    structure = scan_markdown_structure(text)
+    title_heading = next(
+        (heading for heading in structure.headings if heading.level == 1),
+        None,
+    )
+    if title_heading is None:
         raise PromptRegistrationError(f"SKILL.md 缺少一级标题：{path}")
-    description_lines: list[str] = []
-    for line in lines[title_index + 1 :]:
-        stripped = line.strip()
-        if _SECONDARY_HEADING.match(stripped) or stripped == "---":
-            break
-        description_lines.append(line)
+    stop_lines = {
+        heading.line
+        for heading in structure.headings
+        if heading.line > title_heading.line and heading.level == 2
+    }
+    stop_lines.update(
+        index
+        for index, line in enumerate(lines)
+        if index > title_heading.line
+        and index not in structure.code_lines
+        and line.strip() == "---"
+    )
+    description_end = min(stop_lines, default=len(lines))
     return SkillDescriptor(
-        title=title,
-        description="\n".join(description_lines).strip(),
+        title=title_heading.text,
+        description="\n".join(
+            lines[title_heading.line + 1 : description_end]
+        ).strip(),
         path=path,
         relative_path=relative_path(path, root),
         scope=scope,

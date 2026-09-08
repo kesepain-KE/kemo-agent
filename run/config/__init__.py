@@ -51,16 +51,46 @@ class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
 
 
-def load_dotenv(path: Path, *, override: bool = False) -> None:
-    """Load simple KEY=VALUE entries without adding a third-party dependency."""
+def dotenv_values(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_entries: int | None = None,
+    max_value_chars: int | None = None,
+    duplicate_policy: str = "last",
+    case_insensitive_names: bool = False,
+) -> dict[str, str]:
+    """Read simple ``KEY=VALUE`` entries without mutating the process.
+
+    Keeping parsing separate from installation lets isolated module processes
+    consume their own private ``.env`` without changing the Web process or a
+    concurrently running module's environment.
+    """
+
+    if duplicate_policy not in {"first", "last", "error"}:
+        raise ValueError("duplicate_policy 必须是 first、last 或 error")
+
     try:
-        lines = path.read_text("utf-8-sig").splitlines()
+        if max_bytes is None:
+            text = path.read_text("utf-8-sig")
+        else:
+            if max_bytes <= 0:
+                raise ValueError("max_bytes 必须大于 0")
+            with path.open("rb") as handle:
+                raw = handle.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise ConfigError(f"环境变量文件超过 {max_bytes} 字节上限：{path}")
+            text = raw.decode("utf-8-sig")
     except FileNotFoundError:
-        return
-    except OSError as exc:
+        return {}
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError) as exc:
         raise ConfigError(f"环境变量文件不可读：{path}（{exc}）") from exc
 
-    for line_number, raw_line in enumerate(lines, start=1):
+    values: dict[str, str] = {}
+    stored_names: dict[str, str] = {}
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -73,6 +103,36 @@ def load_dotenv(path: Path, *, override: bool = False) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'\"', "'"}:
             value = value[1:-1]
+        if "\x00" in value:
+            raise ConfigError(f".env 第 {line_number} 行包含空字符")
+        if max_value_chars is not None and len(value) > max_value_chars:
+            raise ConfigError(
+                f".env 第 {line_number} 行的值超过 {max_value_chars} 字符上限"
+            )
+        identity = name.casefold() if case_insensitive_names else name
+        previous_name = stored_names.get(identity)
+        if previous_name is not None:
+            if duplicate_policy == "error":
+                raise ConfigError(f".env 第 {line_number} 行重复定义变量 {name}")
+            if duplicate_policy == "first":
+                continue
+            if previous_name != name:
+                values.pop(previous_name, None)
+        elif max_entries is not None and len(values) >= max_entries:
+            raise ConfigError(f".env 变量数量超过 {max_entries} 项上限")
+        stored_names[identity] = name
+        values[name] = value
+    return values
+
+
+def load_dotenv(path: Path, *, override: bool = False) -> None:
+    """Load simple KEY=VALUE entries without adding a third-party dependency."""
+
+    for name, value in dotenv_values(
+        path,
+        duplicate_policy="last" if override else "first",
+        case_insensitive_names=os.name == "nt",
+    ).items():
         if override or name not in os.environ:
             os.environ[name] = value
 
@@ -281,6 +341,7 @@ _DOMAIN_MODULES = (
     "source_policy",
     "users",
     "prompt_sources",
+    "markdown",
     "knowledge",
     "prompt",
 )
