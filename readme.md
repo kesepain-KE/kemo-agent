@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.5-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.6-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,17 +204,30 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.5`
+当前版本：`1.2.6`
+
+### 1.2.6 更新
+
+这是一次运行环境、外挂同步和跨平台工具的稳定性更新。
+
+- Expand 和 Sense 子进程改用隔离环境。模块从自己的 `.env` 读取专用配置，不再继承框架的 Provider 或 Web 密钥。
+- Shell 可明确选择 `cmd`、PowerShell、bash、zsh、fish 等解释器；自动模式按平台和命令语法选择，默认不加载个人启动配置，也不会弹出可见终端。
+- 主智能体和子智能体统一判断可重试的 Provider 故障；诊断内容经过递归脱敏和长度限制，不能把原始密钥或过大响应写入历史。
+- 技能和插件的 Markdown 解析会忽略代码块中的标题示例，减少正常说明文件被误判为合同错误的情况。
+- Kemo Graph 外挂补齐目录不可用保护、状态时间与文档数量、失败文档精确重试、批量删除结果核对和更严格的路径扫描。
+- kemo-agent 同步本地文件时发送扫描得到的 `expected_origin_hash`；配套 kemo-graph 会从同一个私有快照完成哈希和转换，源文件中途变化时安全拒绝，不推进同步游标。
+- 网页 Markdown 的裸链接在中文标点前正确结束，长链接可以换行，并保留键盘操作所需的焦点提示。
 
 ### 1.2.5 更新
 
-这是一次发布前稳定性修复，重点保证删除、恢复、知识库读取和记忆提取在并发与异常情况下仍然安全。
+这是一次发布前稳定性修复，重点保证删除、恢复、知识库读取、记忆提取和网页显示在并发与异常情况下仍然安全。
 
 - 删除会话后增加持久删除栅栏；已经在运行中的旧 Run 即使迟到提交，也不会重新创建会话、历史窗口或活跃绑定。
 - 知识库索引读取同时拒绝符号链接和 Windows junction，不能通过链接把项目外部文件注入 Prompt。
 - 修复 `on_commit` 当前轮记忆提取的参数合同，确保真实运行可以把记忆候选正常交给提取器。
 - App 桥接恢复活动 Run 时，允许只用 `client_id` 查询本设备的全部活动 Run；仍禁止在没有设备或会话范围时查询。
-- 增加上述边界的回归测试，并通过发布检查与后端测试。
+- 修复网页 Markdown 裸链接的中文标点边界：链接会在中文标点或界定符前正确结束，不再把后续正文一起变成链接；聊天长链接可以换行，并保留清晰的键盘焦点提示。
+- 增加上述后端边界的回归测试并通过发布检查；网页链接修复通过完整前端测试与生产构建。
 
 ### 1.2.4 更新
 

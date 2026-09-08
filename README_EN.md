@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.5-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.6-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,17 +204,30 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.5`
+Current version: `1.2.6`
+
+### 1.2.6 update
+
+This release improves runtime isolation, external knowledge synchronization, and cross-platform tools.
+
+- Expand and Sense subprocesses now use isolated environments. A module reads its own `.env` and no longer inherits Provider or Web secrets from the framework.
+- Shell can explicitly select cmd, PowerShell, bash, zsh, or fish. Auto mode chooses from the platform and command syntax, avoids personal startup files by default, and does not open a visible terminal.
+- Main-agent and subagent Provider failures use the same retry classification. Diagnostic payloads are recursively sanitized and size-bounded before they can enter history.
+- Skill and plugin Markdown parsing ignores heading examples inside code blocks, reducing false contract failures for valid documentation.
+- The Kemo Graph integration now protects unavailable source roots, reports status age and document counts, supports targeted retry of failed documents, validates batch-delete results, and scans paths more strictly.
+- During local-file synchronization, kemo-agent sends the scanned `expected_origin_hash`. A matching kemo-graph release hashes and converts one private snapshot, rejecting a file that changes before commit without advancing the sync cursor.
+- Bare Web Markdown links now stop before adjacent Chinese punctuation, long links wrap, and keyboard focus remains visible.
 
 ### 1.2.5 update
 
-This is a release-readiness stability patch focused on deletion, recovery, knowledge boundaries, and memory extraction.
+This is a release-readiness stability patch focused on deletion, recovery, knowledge boundaries, memory extraction, and Web rendering.
 
 - Deleted conversations now keep a durable delete fence. A late terminal commit from an in-flight Run cannot recreate the session, history windows, or active binding.
 - Knowledge-index discovery rejects both symbolic links and Windows junctions, so a link cannot inject files from outside the project tree.
 - The `on_commit` round-memory extraction call now uses the real extractor parameter contract, allowing candidates to be produced during normal runs.
 - App bridge recovery may query all active Runs for one device with `client_id` alone; a request without either device or conversation scope is still rejected.
-- Regression coverage was added for these boundaries, and the release check plus backend tests pass.
+- Bare links in Web Markdown now stop at adjacent Chinese punctuation or delimiters instead of absorbing the following prose; long links in chat wrap safely and retain a clear keyboard-focus indicator.
+- Regression coverage for the backend boundaries passes the release check, while the Web-link fix passes the complete frontend test suite and production build.
 
 ### 1.2.4 update
 
