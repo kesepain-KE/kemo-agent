@@ -79,6 +79,10 @@ global_expand/*
 !global_expand/kemo_graph/**
 !global_expand/kemo_app/
 !global_expand/kemo_app/**
+# Built-in module source is tracked, but private runtime configuration is not.
+global_expand/**/.env
+global_expand/**/.env.*
+!global_expand/**/.env.example
 **/kemo-graph-storage/
 global_sense/*
 !global_sense/register.py
