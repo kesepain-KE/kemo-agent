@@ -33,6 +33,7 @@ from run.agents import (
     AgentTimeoutError,
 )
 from run.agents import AgentDisabledError, AgentManifestError, discover_agents
+from run.agents.runner import AgentProviderError
 from run.extensions import clear_model_capability_cache
 
 
@@ -420,6 +421,100 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 2)
+
+    def test_runner_does_not_retry_deterministic_incomplete_response(self) -> None:
+        class TruncatedProvider(MockProvider):
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.INCOMPLETE,
+                    model=request.model,
+                    incomplete_details={
+                        "reason": "output_truncated",
+                        "finish_reason": "length",
+                        "category": "upstream_error",
+                        "retryable": True,
+                    },
+                )
+
+        provider = TruncatedProvider()
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            with self.assertRaises(AgentProviderError) as raised:
+                self.runner(provider).run(
+                    "context_manage",
+                    {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertTrue(raised.exception.retryable_declared)
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.code, "output_truncated")
+
+    def test_runner_retries_transient_incomplete_response(self) -> None:
+        class EmptyThenCompleteProvider(MockProvider):
+            def create(inner_self, request):
+                if not inner_self.requests:
+                    inner_self.requests.append(request)
+                    return KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.INCOMPLETE,
+                        model=request.model,
+                        incomplete_details={
+                            "reason": "empty_output",
+                            "category": "upstream_error",
+                            "status_code": 503,
+                            "retry_after_ms": 0,
+                        },
+                    )
+                return super().create(request)
+
+        provider = EmptyThenCompleteProvider()
+        with (
+            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch(
+                "run.agents.runner._agent_retry_delay_seconds",
+                return_value=0.0,
+            ),
+        ):
+            result = self.runner(provider).run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+
+        self.assertEqual(result.data, SUMMARY)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(result.metadata["retry_attempts"], 2)
+
+    def test_runner_unknown_incomplete_respects_base_http_400(self) -> None:
+        class InvalidRequestProvider(MockProvider):
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.INCOMPLETE,
+                    model=request.model,
+                    error=UnifiedError(
+                        type="provider_error",
+                        code="INVALID_ARGUMENT",
+                        message="request rejected",
+                        provider_status=400,
+                    ),
+                    incomplete_details={"reason": "provider_specific_stop"},
+                )
+
+        provider = InvalidRequestProvider()
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            with self.assertRaises(AgentProviderError) as raised:
+                self.runner(provider).run(
+                    "context_manage",
+                    {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertTrue(raised.exception.retryable_declared)
+        self.assertFalse(raised.exception.retryable)
 
     def test_runner_keeps_chat_reasoning_chain_without_capability_lookup(self) -> None:
         provider = MockProvider()

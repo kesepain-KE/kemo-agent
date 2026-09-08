@@ -21,6 +21,7 @@ from provider.schema import ProviderAuthError, ProviderError
 from run.config import (
     ConfigError,
     load_config,
+    load_dotenv,
     provider_runtime_config,
     resolve_capability_model,
 )
@@ -316,6 +317,19 @@ class ConfigAndHistoryTests(unittest.TestCase):
             self.assertEqual(os.environ["TEST_DOTENV_VALUE"], "from-file")
             self.assertEqual(os.environ["TEST_DOTENV_KEEP"], "from-process")
         os.environ.pop("TEST_DOTENV_VALUE", None)
+
+    def test_dotenv_duplicate_order_preserves_override_contract(self) -> None:
+        _, root = self.make_root()
+        path = root / ".env"
+        path.write_text(
+            "TEST_DUPLICATE_VALUE=first\nTEST_DUPLICATE_VALUE=last\n",
+            "utf-8",
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            load_dotenv(path)
+            self.assertEqual(os.environ["TEST_DUPLICATE_VALUE"], "first")
+            load_dotenv(path, override=True)
+            self.assertEqual(os.environ["TEST_DUPLICATE_VALUE"], "last")
 
     def test_runtime_secret_from_environment(self) -> None:
         config = {

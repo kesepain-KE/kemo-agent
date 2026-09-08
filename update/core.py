@@ -112,6 +112,7 @@ KEMO_APP_EXPAND_FILES = (
     ".gitignore",
     "README.md",
     "app.py",
+    "payload_tools.py",
     "auth.py",
     "config.example.json",
     "credential_registry.py",

@@ -24,6 +24,7 @@ from provider.adapters.compat import (
 from provider.adapters.gateway import KemoGatewayAdapter
 from provider.openai_chat import _error_detail
 from provider.protocol.diagnostics import (
+    incomplete_retry_metadata,
     safe_provider_body,
     safe_provider_message,
     sanitize_provider_diagnostic,
@@ -263,6 +264,63 @@ class UnifiedProtocolTests(unittest.TestCase):
             "utf-8",
         )
         return temporary, root
+
+    def test_incomplete_retry_classification_prioritizes_deterministic_reasons(
+        self,
+    ) -> None:
+        for details in (
+            {"reason": "output_truncated"},
+            {"reason": "content_filtered"},
+            {"reason": "cancelled"},
+            {"reason": "incomplete", "finish_reason": "length"},
+            {"reason": "incomplete", "finish_reason": "max_tokens"},
+            {"reason": "incomplete", "finish_reason": "content_filter"},
+        ):
+            with self.subTest(details=details):
+                decision = incomplete_retry_metadata(
+                    {
+                        **details,
+                        "category": "upstream_error",
+                        "status_code": 503,
+                        "retryable": True,
+                    }
+                )
+                self.assertFalse(decision["retryable"])
+
+        self.assertTrue(
+            incomplete_retry_metadata({"reason": "empty_output"})["retryable"]
+        )
+        self.assertFalse(
+            incomplete_retry_metadata(
+                {"reason": "empty_output", "retryable": False}
+            )["retryable"]
+        )
+        for fallback in (
+            {"fallback_category": "content_filter"},
+            {"fallback_code": "invalid_request"},
+            {"fallback_status_code": 400},
+        ):
+            with self.subTest(fallback=fallback):
+                decision = incomplete_retry_metadata(
+                    {},
+                    fallback_retryable=True,
+                    **fallback,
+                )
+                self.assertFalse(decision["retryable"])
+
+        contradictory_details = incomplete_retry_metadata(
+            {
+                "reason": "empty_output",
+                "category": "upstream_error",
+                "status_code": 503,
+                "retryable": True,
+            },
+            fallback_retryable=True,
+            fallback_category="content_filter",
+            fallback_code="invalid_request",
+            fallback_status_code=400,
+        )
+        self.assertFalse(contradictory_details["retryable"])
 
     def test_chat_stream_usage_promotes_cache_and_reasoning_fields(self) -> None:
         request = KemoRequest(

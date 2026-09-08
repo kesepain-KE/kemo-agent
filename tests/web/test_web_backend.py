@@ -5736,6 +5736,19 @@ class WebBackendTests(unittest.TestCase):
             refreshed.json()["source"]["collected_markdown"], "runtime refreshed"
         )
 
+        runtime_dotenv = root / "global_sense" / "runtime" / ".env"
+        runtime_dotenv.write_text("not-an-assignment\n", "utf-8")
+        with patch("web.services.sense.subprocess.run") as sense_process:
+            invalid_environment = self.request(
+                app,
+                "POST",
+                "/api/users/alice/sense/runtime/refresh",
+            )
+        self.assertEqual(invalid_environment.status_code, 500)
+        self.assertIn("感知模块环境无效：runtime", invalid_environment.text)
+        sense_process.assert_not_called()
+        runtime_dotenv.unlink()
+
         disabled_runtime = self.request(
             app,
             "PATCH",

@@ -21,13 +21,14 @@ from provider.adapters.compat import (
     chat_stream_to_protocol,
     kemo_request_to_chat,
 )
-from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.models import (
     KemoResponse,
     MessageItem,
     ProviderState,
     ReasoningItem,
     ToolCallItem,
+    UnifiedError,
 )
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agents import AgentRunResult
@@ -2664,6 +2665,196 @@ def run(*, context):
             find_window(root, "alice", "cli", "explicit-no-retry")
         )
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_deterministic_incomplete_reason_does_not_retry_unchanged_request(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+
+        class TruncatedProvider:
+            def __init__(inner_self) -> None:
+                inner_self.requests = []
+
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.INCOMPLETE,
+                    model=request.model,
+                    incomplete_details={
+                        "reason": "output_truncated",
+                        "finish_reason": "max_tokens",
+                        "category": "upstream_error",
+                        "status_code": 503,
+                        "retryable": True,
+                    },
+                )
+
+        provider = TruncatedProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "deterministic-incomplete",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(events[-1].type, "error")
+        self.assertFalse(events[-1].error["retryable"])
+        self.assertTrue(events[-1].metadata["committed"])
+
+    def test_transient_incomplete_metadata_retries_and_recovers(self) -> None:
+        _, root = self.make_root()
+
+        class EmptyThenCompleteProvider:
+            def __init__(inner_self) -> None:
+                inner_self.requests = []
+
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                if len(inner_self.requests) == 1:
+                    return KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.INCOMPLETE,
+                        model=request.model,
+                        incomplete_details={
+                            "reason": "empty_output",
+                            "category": "upstream_error",
+                            "status_code": 503,
+                            "retry_after_ms": 0,
+                        },
+                    )
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.COMPLETED,
+                    model=request.model,
+                    output=[
+                        MessageItem.text(
+                            MessageRole.ASSISTANT,
+                            "recovered",
+                            phase=MessagePhase.FINAL_ANSWER,
+                        )
+                    ],
+                )
+
+        provider = EmptyThenCompleteProvider()
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.time.sleep") as sleep,
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "transient-incomplete",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual([event.type for event in events].count("retrying"), 1)
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["retry_attempts"], 2)
+        sleep.assert_called_once()
+
+    def test_cancelled_protocol_response_never_retries_provider_error(self) -> None:
+        _, root = self.make_root()
+
+        class CancelledProvider:
+            def __init__(inner_self) -> None:
+                inner_self.requests = []
+
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.CANCELLED,
+                    model=request.model,
+                    error=UnifiedError(
+                        type="upstream_error",
+                        code="PROVIDER_CANCELLED",
+                        message="provider cancelled",
+                        provider_status=503,
+                        retryable=True,
+                    ),
+                )
+
+        provider = CancelledProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "cancelled-protocol-response",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(events[-1].type, "error")
+        self.assertTrue(events[-1].error["cancelled"])
+        self.assertFalse(events[-1].error["retryable"])
+        self.assertTrue(events[-1].metadata["committed"])
+
+    def test_unknown_incomplete_respects_non_retryable_base_status(self) -> None:
+        _, root = self.make_root()
+
+        class InvalidRequestProvider:
+            def __init__(inner_self) -> None:
+                inner_self.requests = []
+
+            def create(inner_self, request):
+                inner_self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    status=ResponseStatus.INCOMPLETE,
+                    model=request.model,
+                    error=UnifiedError(
+                        type="provider_error",
+                        code="INVALID_ARGUMENT",
+                        message="request rejected",
+                        provider_status=400,
+                    ),
+                    incomplete_details={"reason": "provider_specific_stop"},
+                )
+
+        provider = InvalidRequestProvider()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "incomplete-http-400",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(events[-1].type, "error")
+        self.assertEqual(events[-1].error["status_code"], 400)
+        self.assertFalse(events[-1].error["retryable"])
 
     def test_retry_after_is_bounded_and_used_for_outer_retry(self) -> None:
         _, root = self.make_root()

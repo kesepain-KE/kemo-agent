@@ -1,20 +1,33 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
 import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from plugins.expand_call.tool import run as call_expand
 from plugins.expand_creater.tool import run as create_expand
-from run.extensions import ExpandRuntimeError, invoke_expand, read_expand_runtime
+from run.extensions import (
+    ExpandOperationError,
+    ExpandRuntimeError,
+    invoke_expand,
+    read_expand_runtime,
+)
 from run.extensions import (
     ModuleRuntimeCancelled,
     ModuleRuntimeTimeout,
     run_module_updater,
 )
+from run.infra.process_identity import process_identity_matches, process_snapshot
+from run.tools import ToolProcessError, discover_tools, execute_tool
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ExpandCallPluginTests(unittest.TestCase):
@@ -26,6 +39,10 @@ class ExpandCallPluginTests(unittest.TestCase):
         (self.root / "config" / "global_config.json").write_text("{}", "utf-8")
         (self.root / "users" / "alice").mkdir(parents=True)
         (self.root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        shutil.copytree(
+            PROJECT_ROOT / "plugins" / "expand_call",
+            self.root / "plugins" / "expand_call",
+        )
         self.context = {
             "root": str(self.root),
             "user": "alice",
@@ -113,6 +130,44 @@ class ExpandCallPluginTests(unittest.TestCase):
             "user": "alice", "scope": "user", "module": "flexible_data"
         })
 
+    def test_module_process_uses_private_env_without_framework_secrets(self) -> None:
+        module = self._create(code=(
+            "import os\n"
+            "def execute(command, params=None):\n"
+            "    return {'ok': True, 'configured': bool(os.getenv('EXPAND_API_KEY')), "
+            "'provider_visible': bool(os.getenv('KEMO_API_KEY')), "
+            "'web_base_url': os.getenv('KEMO_AGENT_WEB_BASE_URL'), "
+            "'has_path': bool(os.getenv('PATH'))}\n"
+        ))
+        (module / ".env").write_text(
+            "EXPAND_API_KEY=module-owned\n"
+            "KEMO_AGENT_WEB_BASE_URL=http://stale.invalid:1\n",
+            "utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "KEMO_API_KEY": "framework-provider-secret",
+                "EXPAND_API_KEY": "parent-value-must-not-win",
+                "KEMO_AGENT_WEB_BASE_URL": "http://127.0.0.1:24680",
+            },
+            clear=False,
+        ):
+            result = invoke_expand(
+                root=self.root,
+                user="alice",
+                scope="user",
+                module="flexible_data",
+                command="environment",
+                params={},
+                timeout=10,
+            )["result"]
+
+        self.assertTrue(result["configured"])
+        self.assertFalse(result["provider_visible"])
+        self.assertTrue(result["has_path"])
+        self.assertEqual(result["web_base_url"], "http://127.0.0.1:24680")
+
     def test_structured_domain_failure_keeps_the_original_error(self) -> None:
         self._create(
             code=(
@@ -135,6 +190,122 @@ class ExpandCallPluginTests(unittest.TestCase):
                 "initialize",
                 context=self.context,
             )
+
+    def test_retryable_metadata_is_preserved_for_safe_read_command(self) -> None:
+        created = self._create(
+            code=(
+                "class TemporaryFailure(RuntimeError):\n"
+                "    category = 'upstream_error'\n"
+                "    status_code = 503\n"
+                "    retryable = True\n"
+                "    retry_after_ms = 900\n"
+                "def execute(command, params=None):\n"
+                "    raise TemporaryFailure('temporary graph outage')\n"
+            )
+        )
+        module = self.root / "global_expand" / "kemo_graph"
+        module.parent.mkdir(parents=True)
+        shutil.move(str(created), str(module))
+
+        definition = discover_tools(self.root, "alice").get("expand_call")
+        with self.assertRaises(ToolProcessError) as raised:
+            execute_tool(
+                definition,
+                {
+                    "scope": "global",
+                    "module": "kemo_graph",
+                    "command": "query",
+                },
+                context=self.context,
+                timeout=10,
+            )
+
+        self.assertEqual(raised.exception.category, "upstream_error")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after_ms, 900)
+
+    def test_untrusted_or_mutating_expand_command_cannot_enable_whole_call_retry(
+        self,
+    ) -> None:
+        self._create(
+            code=(
+                "def execute(command, params=None):\n"
+                "    return {'ok': False, 'error': {\n"
+                "        'message': 'write outcome unknown',\n"
+                "        'category': 'upstream_error',\n"
+                "        'status_code': 503,\n"
+                "        'retryable': True,\n"
+                "        'retry_after_ms': 700,\n"
+                "    }}\n"
+            )
+        )
+
+        for command in ("query", "ingest"):
+            with self.subTest(command=command):
+                with self.assertRaises(ExpandOperationError) as raised:
+                    call_expand(
+                        "user",
+                        "flexible_data",
+                        command,
+                        context=self.context,
+                    )
+
+                self.assertEqual(raised.exception.category, "upstream_error")
+                self.assertEqual(raised.exception.status_code, 503)
+                self.assertFalse(raised.exception.retryable)
+                self.assertEqual(raised.exception.retry_after_ms, 700)
+
+    def test_library_failure_metadata_is_aggregated_before_safe_read_retry(self) -> None:
+        created = self._create(
+            code=(
+                "def execute(command, params=None):\n"
+                "    rows = [{'library_id': 'public', 'ok': False, "
+                "'status': 'error', 'error': 'temporary outage', "
+                "'category': 'upstream_error', 'status_code': 503, "
+                "'retryable': True, 'retry_after_ms': 500}]\n"
+                "    if (params or {}).get('mixed'):\n"
+                "        rows.append({'library_id': 'private', 'ok': False, "
+                "'status': 'source_unavailable', 'error': 'source missing'})\n"
+                "    return {'ok': False, 'retryable': True, 'libraries': rows}\n"
+            )
+        )
+        module = self.root / "global_expand" / "kemo_graph"
+        module.parent.mkdir(parents=True)
+        shutil.move(str(created), str(module))
+
+        with self.assertRaises(ExpandOperationError) as retryable:
+            call_expand(
+                "global",
+                "kemo_graph",
+                "status",
+                context=self.context,
+            )
+        self.assertIn("public: temporary outage", str(retryable.exception))
+        self.assertEqual(retryable.exception.category, "upstream_error")
+        self.assertEqual(retryable.exception.status_code, 503)
+        self.assertTrue(retryable.exception.retryable)
+        self.assertEqual(retryable.exception.retry_after_ms, 500)
+
+        with self.assertRaises(ExpandOperationError) as mixed:
+            call_expand(
+                "global",
+                "kemo_graph",
+                "status",
+                {"mixed": True},
+                context=self.context,
+            )
+        self.assertIn("private: source missing", str(mixed.exception))
+        self.assertFalse(mixed.exception.retryable)
+
+        with self.assertRaises(ExpandOperationError) as non_whitelisted:
+            call_expand(
+                "global",
+                "kemo_graph",
+                "libraries",
+                context=self.context,
+            )
+        self.assertFalse(non_whitelisted.exception.retryable)
 
     def test_shared_allowlist_and_artifact_boundary_are_enforced(self) -> None:
         module = self._create(
@@ -194,25 +365,79 @@ class ExpandCallPluginTests(unittest.TestCase):
         module = self._create(
             code=(
                 "import subprocess, sys, time\n"
+                "from pathlib import Path\n"
                 "def execute(command, params=None):\n"
                 "    child = \"import time; from pathlib import Path; "
-                "time.sleep(1); Path('orphan.txt').write_text('late', 'utf-8')\"\n"
-                "    subprocess.Popen([sys.executable, '-c', child])\n"
-                "    time.sleep(5)\n"
+                "time.sleep(10); Path('orphan.txt').write_text('late', 'utf-8')\"\n"
+                "    process = subprocess.Popen([sys.executable, '-c', child])\n"
+                "    Path('child.pid').write_text(str(process.pid), encoding='ascii')\n"
+                "    time.sleep(10)\n"
                 "    return {'ok': True}\n"
             )
         )
-        with self.assertRaises(ModuleRuntimeTimeout):
-            invoke_expand(
-                root=self.root,
-                user="alice",
-                scope="user",
-                module="flexible_data",
-                command="slow",
-                params={},
-                timeout=0.2,
+        errors: list[BaseException] = []
+
+        def invoke() -> None:
+            try:
+                invoke_expand(
+                    root=self.root,
+                    user="alice",
+                    scope="user",
+                    module="flexible_data",
+                    command="slow",
+                    params={},
+                    timeout=2.0,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        pid_path = module / "child.pid"
+        child_pid: int | None = None
+        ready_deadline = time.monotonic() + 4.0
+        while child_pid is None and worker.is_alive():
+            try:
+                raw_pid = pid_path.read_text("ascii").strip()
+                child_pid = int(raw_pid) if raw_pid else None
+            except (FileNotFoundError, OSError, UnicodeError, ValueError):
+                child_pid = None
+            if time.monotonic() >= ready_deadline:
+                break
+            time.sleep(0.01)
+
+        # The old one-second marker assertion measured taskkill startup latency:
+        # under concurrent CI load the child could write before taskkill finished,
+        # even though no descendant remained after termination returned.  Observe
+        # the actual child identity so this test checks the process-tree contract.
+        self.assertIsNotNone(child_pid, "拓展子进程未在超时前报告后代 PID")
+        assert child_pid is not None
+        child_before = process_snapshot(child_pid)
+        self.assertTrue(child_before.get("exists"), "后代进程未成功启动")
+
+        worker.join(timeout=8.0)
+        self.assertFalse(worker.is_alive(), "拓展调用超时后未及时返回")
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ModuleRuntimeTimeout)
+
+        child_after = process_snapshot(child_pid)
+        if child_before.get("identity_available"):
+            self.assertIsNot(
+                process_identity_matches(
+                    child_after,
+                    process_started_at=str(
+                        child_before.get("process_started_at") or ""
+                    ),
+                    process_name=str(child_before.get("process_name") or ""),
+                ),
+                True,
+                "拓展调用超时后原后代进程仍在运行",
             )
-        time.sleep(1.2)
+        else:
+            self.assertFalse(
+                child_after.get("exists"),
+                "拓展调用超时后后代进程仍在运行",
+            )
         self.assertFalse((module / "orphan.txt").exists())
         runtime = read_expand_runtime(module)
         self.assertEqual(runtime["control"]["status"], "failed")

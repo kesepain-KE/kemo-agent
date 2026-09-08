@@ -26,8 +26,15 @@ from plugins.network.tool import _ACTIONS as NETWORK_ACTIONS
 from plugins.network.tool import _open as open_network
 from plugins.network.tool import _read_limited
 from plugins.network.tool import run as run_network
+from plugins.shell.tool import (
+    _auto_shell_priority,
+    _decode_output,
+    _find_shell_executable,
+    _looks_like_powershell,
+    _merged_shell_environment,
+    _shell_environment,
+)
 from plugins.shell.tool import run as run_shell
-from plugins.shell.tool import _decode_output
 from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
 from plugins.task_time.tool import run as run_task_time
 from plugins.wait_for_condition.tool import run as run_wait_for_condition
@@ -147,6 +154,46 @@ class PluginManifestTests(unittest.TestCase):
                 f"# duplicate\ndescription\n\n{block}\n\n{block}\n", "utf-8"
             )
             with self.assertRaisesRegex(PluginManifestError, "只能声明一个"):
+                discover_plugin_manifests(root)
+
+    def test_headings_inside_code_fences_do_not_change_plugin_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root / "plugins" / "fenced"
+            plugin.mkdir(parents=True)
+            (plugin / "tool.py").write_text("def run():\n    return {}\n", "utf-8")
+            tool = {
+                "name": "fenced",
+                "description": "x",
+                "input_schema": {"type": "object"},
+                "version": "1",
+                "enabled": True,
+                "entrypoint": "tool.py:run",
+            }
+            (plugin / "SKILL.md").write_text(
+                "<!--\n# stale title\n## Tool\n-->\n"
+                "# fenced\ndescription\n\n```python\n# fake title\n## Tool\n```\n\n"
+                "## Tool\n```json\n"
+                + json.dumps(tool)
+                + "\n```\n",
+                "utf-8",
+            )
+
+            manifests = discover_plugin_manifests(root)
+            self.assertEqual(len(manifests), 1)
+            self.assertEqual(manifests[0].tool, tool)
+
+    def test_unlabelled_tool_fence_is_reported_as_missing_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root / "plugins" / "unlabelled"
+            plugin.mkdir(parents=True)
+            (plugin / "SKILL.md").write_text(
+                "# unlabelled\ndescription\n\n## Tool\n```\n{}\n```\n",
+                "utf-8",
+            )
+
+            with self.assertRaisesRegex(PluginManifestError, "缺少 JSON"):
                 discover_plugin_manifests(root)
 
     def test_plugin_strict_flag_must_be_boolean(self) -> None:
@@ -872,7 +919,7 @@ class ShellPluginTests(unittest.TestCase):
     def test_shell_manifest_exposes_managed_background_actions(self) -> None:
         definition = discover_tools(PROJECT_ROOT, "alice").get("shell")
         schema = definition.input_schema
-        self.assertEqual(definition.version, "1.4.0")
+        self.assertEqual(definition.version, "1.5.0")
         self.assertEqual(schema["required"], [])
         self.assertEqual(
             schema["properties"]["action"]["enum"],
@@ -881,6 +928,22 @@ class ShellPluginTests(unittest.TestCase):
         self.assertIn("background", schema["properties"])
         self.assertIn("show_terminal", schema["properties"])
         self.assertIn("job_id", schema["properties"])
+        self.assertEqual(
+            schema["properties"]["shell_type"]["enum"],
+            [
+                "auto",
+                "cmd",
+                "powershell",
+                "pwsh",
+                "sh",
+                "bash",
+                "bash_login",
+                "zsh",
+                "zsh_login",
+                "fish",
+                "fish_login",
+            ],
+        )
         validate_arguments(schema, {})
         validate_arguments(schema, {"action": "status", "job_id": "job_example"})
         validate_arguments(schema, {"command": "pwd", "show_terminal": True})
@@ -1544,22 +1607,52 @@ class ShellPluginTests(unittest.TestCase):
     def test_shell_type_selects_explicit_interpreter(self) -> None:
         completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
         cases = {
-            "auto": ("external-command", True),
-            "cmd": (["cmd", "/c", "external-command"], False),
+            "cmd": ('cmd-bin /d /s /c "external-command"', False),
             "powershell": (
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command"],
+                ["powershell-bin", "-NoProfile", "-NonInteractive", "-Command"],
                 False,
             ),
             "pwsh": (
-                ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+                ["pwsh-bin", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
                 False,
             ),
-            "bash": (["bash", "-c", "external-command"], False),
-            "bash_login": (["bash", "-l", "-c", "external-command"], False),
+            "sh": (["sh-bin", "-c", "external-command"], False),
+            "bash": (
+                [
+                    "bash-bin",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    "external-command",
+                ],
+                False,
+            ),
+            "bash_login": (
+                ["bash_login-bin", "-l", "-c", "external-command"],
+                False,
+            ),
+            "zsh": (["zsh-bin", "-f", "-c", "external-command"], False),
+            "zsh_login": (
+                ["zsh_login-bin", "-l", "-c", "external-command"],
+                False,
+            ),
+            "fish": (
+                ["fish-bin", "--no-config", "-c", "external-command"],
+                False,
+            ),
+            "fish_login": (
+                ["fish_login-bin", "-l", "-c", "external-command"],
+                False,
+            ),
         }
         for shell_type, (expected_command, expected_shell) in cases.items():
             with (
                 self.subTest(shell_type=shell_type),
+                patch("plugins.shell.tool._is_windows", return_value=True),
+                patch(
+                    "plugins.shell.tool._find_shell_executable",
+                    return_value=f"{shell_type}-bin",
+                ),
                 patch(
                     "plugins.shell.tool.subprocess.run", return_value=completed
                 ) as spawned,
@@ -1577,11 +1670,315 @@ class ShellPluginTests(unittest.TestCase):
                     self.assertEqual(actual_command, expected_command)
                 self.assertEqual(spawned.call_args.kwargs["shell"], expected_shell)
 
+    def test_auto_shell_uses_command_aware_windows_priority(self) -> None:
+        completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
+
+        def available(shell_type: str, **_kwargs) -> str:
+            return f"{shell_type}-bin"
+
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch("plugins.shell.tool._find_shell_executable", side_effect=available),
+            patch(
+                "plugins.shell.tool.subprocess.run", return_value=completed
+            ) as spawned,
+        ):
+            generic = run_shell(
+                '"C:\\Program Files\\tool.exe" --version',
+                context=self._context(),
+            )
+            self.assertEqual(generic["shell_type"], "cmd")
+            self.assertTrue(spawned.call_args.args[0].startswith("cmd-bin "))
+            self.assertFalse(spawned.call_args.kwargs["shell"])
+
+            powershell = run_shell(
+                "Get-ChildItem -LiteralPath . | Select-Object -First 1",
+                context=self._context(),
+            )
+            self.assertEqual(powershell["shell_type"], "pwsh")
+            self.assertEqual(spawned.call_args.args[0][0], "pwsh-bin")
+            self.assertFalse(spawned.call_args.kwargs["shell"])
+
+    def test_auto_shell_ignores_powershell_text_in_program_arguments(self) -> None:
+        false_cases = (
+            'python -c "print(\'$env:KEMO_REVIEW_MISSING\')"',
+            subprocess.list2cmdline(
+                [sys.executable, "-c", 'print("$env:KEMO_REVIEW_MISSING")']
+            ),
+            'node -e "console.log(\'Get-Item -LiteralPath x.ps1\')"',
+            "tool.exe --name Get-Item",
+            "tool.exe --script build.ps1",
+            "tool.exe -LiteralPath .",
+            '"C:\\Program Files\\tool.exe" Get-Item "$env:PATH" build.ps1',
+            'cmd /d /c "Get-Item -LiteralPath ."',
+            'tool.exe "x | Select-Object"',
+            "echo ^| Get-Item",
+            "echo `| Get-Item",
+            '"C:\\Program Files\\tool.exe" | Select-Object',
+            "Get-Item.exe",
+            ".\\Get-Item",
+            "python runner.py Get-Item build.ps1 -LiteralPath",
+            'python -c "unterminated $env:VALUE',
+        )
+        true_cases = (
+            "Get-ChildItem -LiteralPath .",
+            "Microsoft.PowerShell.Management\\Get-ChildItem .",
+            "external.exe | Select-Object -First 1",
+            "external.exe; Get-Item .",
+            "external.exe\nGet-Date",
+            "external.exe && Get-Item .",
+            "external.exe || Get-Item .",
+            '$x = 42; Write-Output "$x"',
+            '$env:MODE = "test"',
+            '& ".\\tool.exe" --version',
+            'external.exe | & ".\\filter.ps1"',
+            '. ".\\profile.ps1"',
+            ".\\build.ps1 -Configuration Release",
+            "echo $env:PATH",
+            'Write-Output "$env:PATH"',
+        )
+        for command in false_cases:
+            with self.subTest(command=command):
+                self.assertFalse(_looks_like_powershell(command))
+        for command in true_cases:
+            with self.subTest(command=command):
+                self.assertTrue(_looks_like_powershell(command))
+
+    @unittest.skipUnless(os.name == "nt", "需要 Windows cmd.exe")
+    def test_auto_shell_preserves_literal_powershell_text_for_real_program(self) -> None:
+        for script in (
+            "print('$env:KEMO_REVIEW_MISSING')",
+            'print("$env:KEMO_REVIEW_MISSING")',
+        ):
+            with self.subTest(script=script):
+                result = run_shell(
+                    self._python_command(script),
+                    context=self._context(),
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["shell_type"], "cmd")
+                self.assertEqual(result["output"], "$env:KEMO_REVIEW_MISSING")
+
+    def test_auto_shell_priorities_are_platform_specific_and_non_login(self) -> None:
+        with patch("plugins.shell.tool._is_windows", return_value=False):
+            with patch("plugins.shell.tool.sys.platform", "darwin"):
+                self.assertEqual(
+                    _auto_shell_priority("echo ok"), ("zsh", "bash", "sh")
+                )
+            with patch("plugins.shell.tool.sys.platform", "linux"):
+                self.assertEqual(
+                    _auto_shell_priority("echo ok"), ("bash", "sh", "zsh")
+                )
+            with patch("plugins.shell.tool.sys.platform", "freebsd14"):
+                self.assertEqual(
+                    _auto_shell_priority("echo ok"), ("sh", "bash", "zsh")
+                )
+
+    def test_auto_shell_skips_missing_candidates_and_explicit_missing_fails(self) -> None:
+        completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
+
+        def only_powershell(shell_type: str, **_kwargs) -> str | None:
+            return "powershell-bin" if shell_type == "powershell" else None
+
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch(
+                "plugins.shell.tool._find_shell_executable",
+                side_effect=only_powershell,
+            ),
+            patch("plugins.shell.tool.subprocess.run", return_value=completed),
+        ):
+            result = run_shell("Get-ChildItem", context=self._context())
+        self.assertEqual(result["shell_type"], "powershell")
+
+        with patch("plugins.shell.tool._find_shell_executable", return_value=None):
+            with self.assertRaisesRegex(ValueError, "解释器不可用"):
+                run_shell("echo ok", shell_type="zsh", context=self._context())
+            with self.assertRaisesRegex(RuntimeError, "没有可用的命令解释器"):
+                run_shell("external-command", context=self._context())
+
+    def test_non_login_shell_ignores_inherited_startup_hooks(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"BASH_ENV": "inherited-bash", "ENV": "inherited-sh"},
+            clear=False,
+        ):
+            isolated = _shell_environment({}, resolved_shell_type="bash")
+            explicit = _shell_environment(
+                {"BASH_ENV": "explicit-bash"}, resolved_shell_type="bash"
+            )
+            login = _shell_environment({}, resolved_shell_type="bash_login")
+        self.assertNotIn("BASH_ENV", isolated)
+        self.assertNotIn("ENV", isolated)
+        self.assertEqual(explicit["BASH_ENV"], "explicit-bash")
+        self.assertEqual(login["BASH_ENV"], "inherited-bash")
+
+    def test_shell_lookup_uses_call_and_session_path(self) -> None:
+        completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
+        observed: list[tuple[str, str | None, str, Path]] = []
+
+        def available(
+            shell_type: str,
+            *,
+            search_path: str | None,
+            comspec: str = "",
+            cwd: Path,
+        ) -> str:
+            observed.append((shell_type, search_path, comspec, cwd))
+            return f"{shell_type}-bin"
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch("plugins.shell.tool._find_shell_executable", side_effect=available),
+            patch("plugins.shell.tool.subprocess.run", return_value=completed),
+        ):
+            root = Path(directory)
+            portable = str(root / "portable-bin")
+            direct = run_shell(
+                "external-command",
+                shell_type="zsh",
+                env={"PATH": portable},
+                context=self._context(root),
+            )
+            self.assertTrue(direct["ok"])
+            self.assertEqual(
+                observed[-1],
+                ("zsh", portable, os.environ.get("ComSpec", ""), root),
+            )
+
+            session_id = "portable-shell-session"
+            run_shell(
+                f"set Path={portable}",
+                session_id=session_id,
+                context=self._context(root),
+            )
+            session_result = run_shell(
+                "external-command",
+                shell_type="fish",
+                session_id=session_id,
+                context=self._context(root),
+            )
+            self.assertTrue(session_result["ok"])
+            self.assertEqual(observed[-1][0:2], ("fish", portable))
+            self.assertEqual(observed[-1][3], root)
+
+    def test_shell_lookup_respects_empty_path_and_validates_comspec(self) -> None:
+        with patch("plugins.shell.tool.shutil.which", return_value=None) as located:
+            self.assertIsNone(
+                _find_shell_executable(
+                    "zsh", search_path="", comspec="", cwd=Path.cwd()
+                )
+            )
+        located.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as directory:
+            comspec = Path(directory) / "portable-cmd.exe"
+            comspec.touch()
+            with patch("plugins.shell.tool._is_windows", return_value=True):
+                self.assertEqual(
+                    _find_shell_executable(
+                        "cmd",
+                        search_path="",
+                        comspec=str(comspec),
+                        cwd=Path(directory),
+                    ),
+                    str(comspec.resolve()),
+                )
+                portable = Path(directory) / "portable"
+                portable.mkdir()
+                fallback_executable = portable / "cmd.exe"
+                fallback_executable.touch()
+                with patch(
+                    "plugins.shell.tool.shutil.which",
+                    return_value=str(fallback_executable),
+                ) as located:
+                    fallback = _find_shell_executable(
+                        "cmd",
+                        search_path="portable",
+                        comspec=directory,
+                        cwd=Path(directory),
+                    )
+            self.assertEqual(fallback, str(fallback_executable.resolve()))
+            located.assert_called_once_with(str(portable / "cmd.exe"), path="")
+
+    def test_windows_environment_keys_are_case_insensitive_and_normalized(self) -> None:
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch.dict(
+                os.environ,
+                {"Path": "host", "Bash_Env": "inherited"},
+                clear=True,
+            ),
+        ):
+            merged = _merged_shell_environment({"PATH": "portable"})
+            isolated = _shell_environment({}, resolved_shell_type="bash")
+            explicit = _shell_environment(
+                {"bash_env": "explicit"}, resolved_shell_type="bash"
+            )
+        path_keys = [key for key in merged if key.casefold() == "path"]
+        self.assertEqual(path_keys, ["PATH"])
+        self.assertEqual(merged["PATH"], "portable")
+        self.assertFalse(any(key.casefold() == "bash_env" for key in isolated))
+        self.assertEqual(explicit["bash_env"], "explicit")
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("pwsh"), "需要 Windows PowerShell 7"
+    )
+    def test_relative_call_path_drives_sync_and_background_shell_lookup(self) -> None:
+        pwsh = Path(str(shutil.which("pwsh"))).resolve()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            try:
+                relative_path = os.path.relpath(pwsh.parent, root)
+            except ValueError:
+                self.skipTest("临时目录与 PowerShell 不在同一 Windows 驱动器")
+            context = self._context(
+                root,
+                source="test",
+                session_id="relative-path-space",
+                cancel_event=threading.Event(),
+            )
+            with patch.dict(os.environ, {"PATH": ""}, clear=False):
+                sync = run_shell(
+                    "Write-Output RELATIVE_PATH_SYNC_OK",
+                    working_dir=str(root),
+                    env={"PATH": relative_path},
+                    shell_type="pwsh",
+                    context=context,
+                )
+                started = run_shell(
+                    "Write-Output RELATIVE_PATH_BACKGROUND_OK",
+                    working_dir=str(root),
+                    env={"PATH": relative_path},
+                    shell_type="pwsh",
+                    background=True,
+                    context=context,
+                )
+            self.assertTrue(sync["ok"], sync)
+            self.assertEqual(sync["output"], "RELATIVE_PATH_SYNC_OK")
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(started["shell_type"], "pwsh")
+            waited = run_wait_for_condition(
+                "job_exit",
+                10,
+                check_interval=0.1,
+                job_id=started["job_id"],
+                context=context,
+            )
+            self.assertEqual(waited["status"], "triggered")
+            self.assertEqual(waited["observation"]["status"], "completed")
+            stdout_path = root / waited["observation"]["stdout_path"]
+            self.assertIn(
+                "RELATIVE_PATH_BACKGROUND_OK", stdout_path.read_text("utf-8")
+            )
+
     def test_shell_and_timeout_modes_are_validated(self) -> None:
         with self.assertRaisesRegex(ValueError, "action"):
             run_shell("pwd", action="run_command", context=self._context())
         with self.assertRaisesRegex(ValueError, "shell_type"):
-            run_shell("pwd", shell_type="fish", context=self._context())
+            run_shell("pwd", shell_type="nushell", context=self._context())
         with self.assertRaisesRegex(ValueError, "chain_timeout_mode"):
             run_shell("pwd", chain_timeout_mode="forever", context=self._context())
 
@@ -1610,6 +2007,41 @@ class ShellPluginTests(unittest.TestCase):
             process.assert_called_once()
             self.assertEqual(process.call_args.args[0], "one; two")
             self.assertEqual(process.call_args.kwargs["timeout"], 10.0)
+
+    def test_auto_builtin_defers_shell_syntax_and_options_to_interpreter(self) -> None:
+        process_result = {
+            "ok": True,
+            "output": "native",
+            "exit_code": 0,
+            "timed_out": False,
+            "truncated": False,
+            "shell_type": "pwsh",
+        }
+        for command in (
+            "echo $env:Path",
+            "echo value | external-command",
+            "echo value > output.txt",
+            "ls -la",
+        ):
+            with (
+                self.subTest(command=command),
+                patch(
+                    "plugins.shell.tool._run_process", return_value=process_result
+                ) as process,
+            ):
+                result = run_shell(command, context=self._context())
+            self.assertTrue(result["ok"])
+            process.assert_called_once()
+            self.assertEqual(process.call_args.args[0], command)
+
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch(
+                "plugins.shell.tool._run_process", return_value=process_result
+            ) as process,
+        ):
+            run_shell("dir /s", context=self._context())
+        process.assert_called_once()
 
     def test_windows_command_failures_include_platform_specific_hints(self) -> None:
         failure = {

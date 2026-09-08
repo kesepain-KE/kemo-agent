@@ -8,6 +8,7 @@ from pathlib import Path
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.skill_creater.tool import run
+from run.config import parse_skill_descriptor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -152,8 +153,11 @@ class SkillCreaterPluginTests(unittest.TestCase):
             base = root / "users" / "alice" / "user_skills" / "user_create"
             cases = {
                 "missing-title": ("正文\n", "一级标题"),
-                "second-title": ("# one\n\n# two\n", "只能包含一个一级标题"),
                 "missing-json": ("# tool\n\n## Tool\n\n正文\n", "缺少 JSON"),
+                "unlabelled-fence": (
+                    "# tool\n\n## Tool\n\n```\n{}\n```\n",
+                    "缺少 JSON",
+                ),
                 "invalid-json": ("# tool\n\n## Tool\n\n```json\n{bad}\n```\n", "JSON 无效"),
                 "array-json": ("# tool\n\n## Tool\n\n```json\n[]\n```\n", "必须是对象"),
             }
@@ -164,6 +168,53 @@ class SkillCreaterPluginTests(unittest.TestCase):
                 result = run("validate", "user_create", name=name, context=context)
                 self.assertFalse(result["valid"])
                 self.assertTrue(any(expected in error for error in result["errors"]), result["errors"])
+
+    def test_markdown_structure_ignores_code_and_matches_runtime_title_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.prepare_root(root)
+            context = self.context(root)
+            content = (
+                "<!--\n"
+                "# HTML 注释里的旧标题\n"
+                "## Tool\n"
+                "-->\n"
+                "```text\n"
+                "# 围栏里的伪标题\n"
+                "```\n"
+                "```bad`info\n"
+                "# real title\n\n"
+                "真实描述。\n\n"
+                "```python\n"
+                "# Python 注释不是标题\n"
+                "## Tool\n"
+                "```\n\n"
+                "~~~shell\n"
+                "# Shell 注释不是标题\n"
+                "~~~\n\n"
+                "    # 缩进代码也不是标题\n\n"
+                "# another section title\n"
+            )
+            created = run(
+                "create",
+                "user_create",
+                name="markdown-structure",
+                content=content,
+                context=context,
+            )
+
+            self.assertTrue(created["valid"])
+            self.assertEqual(
+                run("list", "user_create", context=context)["skills"],
+                [{"name": "markdown-structure", "title": "real title"}],
+            )
+            descriptor = parse_skill_descriptor(
+                Path(created["path"]) / "SKILL.md",
+                scope="user_create",
+                root=root,
+            )
+            self.assertEqual(descriptor.title, "real title")
+            self.assertIn("真实描述。", descriptor.description)
 
     def test_argument_permissions_context_and_path_safety(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
