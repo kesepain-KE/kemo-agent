@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -11,22 +10,13 @@ import sqlite3
 from typing import Any
 
 from run.memory.store import connection, database_path
-
-
-def _memory_api() -> Any:
-    # Imported lazily because run.memory installs this implementation after
-    # defining the shared validation helpers and public data classes.
-    from run import memory
-
-    return memory
-
-
-def _hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _filename_key(filename: str) -> str:
-    return filename.casefold()
+from run.memory.sqlite_support import (
+    content_hash as _hash,
+    entry_from_row as _entry_from_row,
+    filename_key as _filename_key,
+    memory_api as _memory_api,
+    row_meta as _row_meta,
+)
 
 
 class SqliteMemoryStore:
@@ -40,28 +30,6 @@ class SqliteMemoryStore:
 
     def database_path(self) -> Path:
         return database_path(self.root, self.user)
-
-    @staticmethod
-    def _meta(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "weight": int(row["weight"]),
-            "created_at": str(row["created_at"]),
-            "content_updated_at": str(row["content_updated_at"]),
-            "updated_at": str(row["content_updated_at"]),
-            "last_used_at": row["last_used_at"],
-            "last_weight_date": row["last_weight_date"],
-            "tier_entered_at": str(row["tier_entered_at"]),
-            "expires_at": row["expires_at"],
-        }
-
-    @classmethod
-    def _entry_from_row(cls, row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "filename": str(row["filename"]),
-            "content": str(row["content"]),
-            "tier": str(row["tier"]),
-            **cls._meta(row),
-        }
 
     def _row_by_filename(
         self,
@@ -189,7 +157,7 @@ class SqliteMemoryStore:
         current = now or api.utc_now()
         with self._lock, connection(self.root, self.user, write=True) as database:
             row = self._insert_fragment(database, tier, filename, content, current)
-            return self._entry_from_row(row)
+            return _entry_from_row(row)
 
     def locate(self, filename: str) -> Any | None:
         api = _memory_api()
@@ -212,7 +180,7 @@ class SqliteMemoryStore:
     def get_entry(self, tier: str, filename: str) -> dict[str, Any] | None:
         with connection(self.root, self.user) as database:
             row = self._row_by_filename(database, filename, tier=tier)
-        return self._entry_from_row(row) if row is not None else None
+        return _entry_from_row(row) if row is not None else None
 
     def _entry(
         self, location: Any, meta: dict[str, Any] | None = None
@@ -239,7 +207,7 @@ class SqliteMemoryStore:
                 "SELECT * FROM memory_fragments WHERE tier=? ORDER BY filename_key",
                 (tier,),
             ).fetchall()
-        return [self._entry_from_row(row) for row in rows]
+        return [_entry_from_row(row) for row in rows]
 
     def load_all(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         del now
@@ -253,7 +221,7 @@ class SqliteMemoryStore:
                     weight DESC, filename_key
                 """
             ).fetchall()
-        return [self._entry_from_row(row) for row in rows]
+        return [_entry_from_row(row) for row in rows]
 
     def list_file_references(self) -> list[dict[str, Any]]:
         with connection(self.root, self.user) as database:
@@ -429,7 +397,7 @@ class SqliteMemoryStore:
             target_meta = self._new_meta(
                 target_tier,
                 current,
-                source_meta=self._meta(target),
+                source_meta=_row_meta(target),
                 content_changed=True,
             )
             database.execute(
@@ -465,7 +433,7 @@ class SqliteMemoryStore:
             meta = self._new_meta(
                 target_tier,
                 current,
-                source_meta=self._meta(row),
+                source_meta=_row_meta(row),
                 content_changed=merged_content is not None,
             )
         database.execute(
@@ -767,7 +735,7 @@ class SqliteMemoryStore:
             scored.append((score, row))
         scored.sort(key=lambda pair: (-pair[0], str(pair[1]["filename"]).casefold()))
         return [
-            dict(self._entry_from_row(row), _score=score)
+            dict(_entry_from_row(row), _score=score)
             for score, row in scored[: max(0, limit)]
         ]
 
@@ -802,7 +770,7 @@ class SqliteMemoryStore:
             if tier == "permanent" or max_files is None
             else rows[:max_files]
         )
-        selected = [self._entry_from_row(row) for row in selected_rows]
+        selected = [_entry_from_row(row) for row in selected_rows]
 
         def line(item: dict[str, Any]) -> str:
             if tier == "permanent":
