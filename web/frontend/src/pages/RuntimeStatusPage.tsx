@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import remarkGfm from '../markdownLinks'
 import {
   Activity,
   Braces,

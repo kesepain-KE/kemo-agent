@@ -17,7 +17,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import remarkGfm from '../markdownLinks'
 import { useOutletContext } from 'react-router-dom'
 import {
   deleteSkill,

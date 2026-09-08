@@ -11,6 +11,35 @@
   margin-bottom: 0;
 }
 
+.markdownBody a {
+  color: var(--brand);
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.14em;
+}
+
+.markdownBody a:visited {
+  color: var(--brand);
+}
+
+.markdownBody a:hover {
+  color: var(--brand-2);
+  text-decoration-color: currentColor;
+}
+
+.markdownBody a:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.markdownBody a:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  background: var(--brand-soft);
+}
+
 .markdownBody img {
   display: block;
   max-width: 100%;

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Camera, Download, Eye, FilePenLine, Globe2, Pencil, Save, UserRound } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import remarkGfm from '../markdownLinks'
 import { useOutletContext } from 'react-router-dom'
 import {
   ApiError,

@@ -147,6 +147,96 @@ describe('MarkdownMessage', () => {
     expect(container.querySelector('a[href^="javascript:"]')).not.toBeInTheDocument()
   })
 
+  it.each([false, true])('stops bare URLs at adjacent Chinese punctuation (streaming=%s)', (streaming) => {
+    const { container } = render(
+      <MarkdownMessage
+        content={'（启动后 http://127.0.0.1:3000）手动配置 OAuth/凭据；另见 https://example.com/path，继续操作；或访问 www.example.com）查看说明。'}
+        streaming={streaming}
+      />,
+    )
+
+    const links = container.querySelectorAll('a')
+    expect(links).toHaveLength(3)
+    expect(links[0].textContent).toBe('http://127.0.0.1:3000')
+    expect(links[0]).toHaveAttribute('href', 'http://127.0.0.1:3000')
+    expect(links[0].nextSibling?.textContent).toBe('）手动配置')
+    expect(links[1].textContent).toBe('https://example.com/path')
+    expect(links[1]).toHaveAttribute('href', 'https://example.com/path')
+    expect(links[1].nextSibling?.textContent).toBe('，继续操作；或访问')
+    expect(links[2].textContent).toBe('www.example.com')
+    expect(links[2]).toHaveAttribute('href', 'http://www.example.com')
+    expect(links[2].nextSibling?.textContent).toBe('）查看说明。')
+    expect(container).toHaveTextContent('）手动配置 OAuth/凭据；另见')
+    expect(container).toHaveTextContent('，继续操作；或访问')
+    expect(container).toHaveTextContent('）查看说明。')
+  })
+
+  it('does not rewrite explicit Markdown links or angle-bracket autolinks', () => {
+    const { container } = render(
+      <MarkdownMessage content={'[地址）说明](https://example.com) <https://example.com/a，b>'} />,
+    )
+
+    expect(screen.getByRole('link', { name: '地址）说明' })).toHaveAttribute('href', 'https://example.com')
+    expect(screen.getByRole('link', { name: 'https://example.com/a，b' })).toBeInTheDocument()
+    expect(container.querySelectorAll('a')).toHaveLength(2)
+  })
+
+  it('keeps later bare URLs clickable when Chinese prose contains no whitespace', () => {
+    const { container } = render(
+      <MarkdownMessage content={'官网：https://a.example，文档：https://b.example）完成。'} />,
+    )
+
+    const links = container.querySelectorAll('a')
+    expect(links).toHaveLength(2)
+    expect(links[0].textContent).toBe('https://a.example')
+    expect(links[0]).toHaveAttribute('href', 'https://a.example')
+    expect(links[0].nextSibling?.textContent).toBe('，文档：')
+    expect(links[1].textContent).toBe('https://b.example')
+    expect(links[1]).toHaveAttribute('href', 'https://b.example')
+    expect(links[1].nextSibling?.textContent).toBe('）完成。')
+  })
+
+  it.each([
+    '（', '）',
+    '［', '］',
+    '｛', '｝',
+    '《', '》',
+    '〈', '〉',
+    '【', '】',
+    '「', '」',
+    '『', '』',
+    '〔', '〕',
+    '〖', '〗',
+    '〘', '〙',
+    '〚', '〛',
+    '“', '”',
+    '‘', '’',
+  ])('stops bare URLs before the Chinese delimiter %s', (delimiter) => {
+    const { container } = render(
+      <MarkdownMessage content={`https://example.com${delimiter}说明`} />,
+    )
+
+    const links = container.querySelectorAll('a')
+    expect(links).toHaveLength(1)
+    expect(links[0].textContent).toBe('https://example.com')
+    expect(links[0]).toHaveAttribute('href', 'https://example.com')
+    expect(links[0].nextSibling?.textContent).toBe(`${delimiter}说明`)
+  })
+
+  it.each([
+    'https://a.example，正文nothttps://evil.example）完成。',
+    'https://a.example，正文showww.example）完成。',
+    'https://a.example，说明：https://）完成。',
+    'https://a.example，版本：www.）完成。',
+  ])('does not promote embedded or incomplete text to a later link: %s', (content) => {
+    const { container } = render(<MarkdownMessage content={content} />)
+
+    const links = container.querySelectorAll('a')
+    expect(links).toHaveLength(1)
+    expect(links[0].textContent).toBe('https://a.example')
+    expect(links[0]).toHaveAttribute('href', 'https://a.example')
+  })
+
   it('does not automatically load external markdown images', () => {
     render(<MarkdownMessage content={'![tracking pixel](https://example.com/track.png)'} />)
 
