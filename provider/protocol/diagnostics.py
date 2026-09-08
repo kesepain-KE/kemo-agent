@@ -23,6 +23,83 @@ _MAX_DIAGNOSTIC_NODES = 2048
 _MAX_DIAGNOSTIC_COLLECTION_ITEMS = 512
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 _SAFE_FINISH_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$")
+_NON_RETRYABLE_INCOMPLETE_REASONS = frozenset(
+    {
+        "cancel",
+        "cancelled",
+        "canceled",
+        "content_filter",
+        "content_filtered",
+        "length",
+        "max_completion_tokens",
+        "max_output_length",
+        "max_output_tokens",
+        "max_tokens",
+        "output_truncated",
+        "policy_violation",
+        "safety",
+        "safety_filter",
+        "user_cancelled",
+    }
+)
+_NON_RETRYABLE_INCOMPLETE_CATEGORIES = frozenset(
+    {
+        "auth_error",
+        "authorization_error",
+        "capability_error",
+        "cancelled",
+        "content_filter",
+        "content_filtered",
+        "context_length_exceeded",
+        "gateway_protocol_error",
+        "idempotency_conflict",
+        "invalid_request",
+        "output_truncated",
+        "protocol_error",
+        "request_validation_error",
+        "validation_error",
+    }
+)
+_NON_RETRYABLE_INCOMPLETE_CODES = frozenset(
+    {
+        "bad_request",
+        "context_length_exceeded",
+        "forbidden",
+        "idempotency_conflict",
+        "invalid_api_key",
+        "invalid_argument",
+        "invalid_request",
+        "not_found",
+        "request_too_large",
+        "unauthorized",
+    }
+)
+_RETRYABLE_INCOMPLETE_REASONS = frozenset(
+    {
+        "connection_error",
+        "empty_output",
+        "gateway_error",
+        "network_error",
+        "provider_timeout",
+        "stream_interrupted",
+        "timeout",
+        "transport_error",
+        "upstream_error",
+    }
+)
+_RETRYABLE_INCOMPLETE_CATEGORIES = frozenset(
+    {
+        "connection_error",
+        "gateway_error",
+        "network_error",
+        "provider_incomplete",
+        "timeout",
+        "transport_error",
+        "upstream_error",
+    }
+)
+_NON_RETRYABLE_PROVIDER_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+_RETRYABLE_PROVIDER_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _SENSITIVE_KEYS = frozenset(
     {
         "api_key",
@@ -197,6 +274,97 @@ def _safe_identifier(value: Any) -> str:
     if not text or not _SAFE_IDENTIFIER_RE.fullmatch(text):
         return ""
     return text
+
+
+def _safe_nonnegative_int(value: Any, *, maximum: int) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 0:
+        return None
+    return min(parsed, maximum)
+
+
+def incomplete_retry_metadata(
+    value: Any,
+    *,
+    fallback_retryable: bool | None = None,
+    fallback_category: Any = "",
+    fallback_code: Any = "",
+    fallback_status_code: Any = None,
+) -> dict[str, Any]:
+    """Project extensible incomplete details into one safe retry decision.
+
+    Output limits, policy filters and cancellation are deterministic for an
+    unchanged request and therefore override an erroneous ``retryable=true``.
+    Unknown incomplete reasons keep the runtime's historical bounded-retry
+    behaviour unless an enclosing structured Provider error declares a
+    fallback decision.
+    """
+
+    source = value if isinstance(value, dict) else {}
+    reason = _safe_identifier(source.get("reason")).casefold() or "incomplete"
+    finish_reason = _safe_identifier(source.get("finish_reason")).casefold()
+    declared_category = _safe_identifier(
+        source.get("category") or source.get("type")
+    ).casefold()
+    fallback_category_name = _safe_identifier(fallback_category).casefold()
+    category = declared_category or fallback_category_name
+    fallback_error_code = _safe_identifier(fallback_code).casefold()
+    status_code = None
+    for key in ("status_code", "provider_status"):
+        status_code = _safe_nonnegative_int(source.get(key), maximum=999)
+        if status_code is not None:
+            break
+    fallback_status = _safe_nonnegative_int(fallback_status_code, maximum=999)
+    if status_code is None:
+        status_code = fallback_status
+    retry_after_ms = _safe_nonnegative_int(
+        source.get("retry_after_ms"),
+        maximum=120_000,
+    )
+
+    deterministic = (
+        reason in _NON_RETRYABLE_INCOMPLETE_REASONS
+        or finish_reason in _NON_RETRYABLE_INCOMPLETE_REASONS
+        or declared_category in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+    )
+    deterministic_fallback = (
+        fallback_status in _NON_RETRYABLE_PROVIDER_STATUSES
+        or fallback_category_name in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+        or fallback_error_code in _NON_RETRYABLE_INCOMPLETE_CODES
+    )
+    declared = source.get("retryable")
+    if deterministic or deterministic_fallback:
+        retryable = False
+    elif isinstance(declared, bool):
+        retryable = declared
+    elif isinstance(fallback_retryable, bool):
+        retryable = fallback_retryable
+    elif status_code in _RETRYABLE_PROVIDER_STATUSES:
+        retryable = True
+    elif (
+        reason in _RETRYABLE_INCOMPLETE_REASONS
+        or category in _RETRYABLE_INCOMPLETE_CATEGORIES
+    ):
+        retryable = True
+    else:
+        retryable = True
+
+    result: dict[str, Any] = {
+        "reason": reason,
+        "retryable": retryable,
+    }
+    if category:
+        result["category"] = category
+    if status_code is not None:
+        result["status_code"] = status_code
+    if retry_after_ms is not None:
+        result["retry_after_ms"] = retry_after_ms
+    return result
 
 
 def safe_parse_error(value: Any) -> dict[str, Any]:
@@ -513,6 +681,7 @@ def safe_provider_body(value: Any) -> Any:
 
 
 __all__ = [
+    "incomplete_retry_metadata",
     "invalid_tool_call_diagnostic",
     "redact_diagnostic_text",
     "safe_invalid_tool_details",

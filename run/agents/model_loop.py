@@ -55,6 +55,7 @@ def run_model(
     execute_tool = _runner.execute_tool
     field = _runner.field
     invalid_tool_name = _runner.invalid_tool_name
+    incomplete_retry_metadata = _runner.incomplete_retry_metadata
     json = _runner.json
     provider_request_slot = _runner.provider_request_slot
     resolve_agent_provider_config = _runner.resolve_agent_provider_config
@@ -326,21 +327,51 @@ def run_model(
                     declared = provider_error.details.get("retryable")
                     if isinstance(declared, bool):
                         retryable = declared
+                category = provider_error.type or "provider_error"
+                code = provider_error.code
+                status_code = provider_error.provider_status
+                retry_after_ms = provider_error.retry_after_ms
+                if response.status == ResponseStatus.INCOMPLETE:
+                    incomplete = incomplete_retry_metadata(
+                        response.incomplete_details,
+                        fallback_retryable=retryable,
+                        fallback_category=provider_error.type,
+                        fallback_code=provider_error.code,
+                        fallback_status_code=provider_error.provider_status,
+                    )
+                    retryable = incomplete["retryable"]
+                    category = str(incomplete.get("category") or category)
+                    code = code or str(incomplete["reason"])
+                    status_code = incomplete.get("status_code", status_code)
+                    retry_after_ms = incomplete.get(
+                        "retry_after_ms",
+                        retry_after_ms,
+                    )
+                elif response.status == ResponseStatus.CANCELLED:
+                    retryable = False
                 raise AgentProviderError(
                     f"子代理 Provider 响应失败：{message}",
-                    category=provider_error.type or "provider_error",
-                    code=provider_error.code,
-                    status_code=provider_error.provider_status,
+                    category=category,
+                    code=code,
+                    status_code=status_code,
                     retryable=retryable,
-                    retry_after_ms=provider_error.retry_after_ms,
+                    retry_after_ms=retry_after_ms,
+                )
+            if response.status == ResponseStatus.INCOMPLETE:
+                incomplete = incomplete_retry_metadata(response.incomplete_details)
+                raise AgentProviderError(
+                    f"子代理 Provider 响应未完整结束：{incomplete['reason']}",
+                    category=str(
+                        incomplete.get("category") or "provider_incomplete"
+                    ),
+                    code=str(incomplete["reason"]),
+                    status_code=incomplete.get("status_code"),
+                    retryable=incomplete["retryable"],
+                    retry_after_ms=incomplete.get("retry_after_ms"),
                 )
             raise AgentProviderError(
                 f"子代理 Provider 响应失败：{response.status}",
-                category=(
-                    "provider_incomplete"
-                    if response.status == ResponseStatus.INCOMPLETE
-                    else "provider_error"
-                ),
+                category="provider_error",
                 retryable=response.status != ResponseStatus.CANCELLED,
             )
         normalized_output = _response_items_for_next_request(response.output)
