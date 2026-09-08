@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 from events import RunEvent
 from provider.protocol.diagnostics import (
+    incomplete_retry_metadata,
     redact_diagnostic_text,
     sanitize_provider_diagnostic,
 )
@@ -335,8 +336,26 @@ def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
 
 
 def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
-    if response.error is not None:
-        return protocol_error(response.error)
+    if response.status == ResponseStatus.CANCELLED:
+        base_error = (
+            protocol_error(response.error)
+            if response.error is not None
+            else {}
+        )
+        return {
+            **base_error,
+            "message": str(
+                base_error.get("message") or "Provider 已取消本次响应"
+            ),
+            "exception_type": str(
+                base_error.get("exception_type") or "ProviderResponseCancelled"
+            ),
+            "phase": "provider",
+            "status": str(response.status),
+            "stop_reason": "provider_cancelled",
+            "cancelled": True,
+            "retryable": False,
+        }
     if response.status == ResponseStatus.INCOMPLETE:
         details = sanitize_provider_diagnostic(
             copy.deepcopy(response.incomplete_details or {}),
@@ -344,23 +363,49 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
         )
         if not isinstance(details, dict):
             details = {}
-        reason = str(details.get("reason") or "incomplete")
-        return {
-            "message": f"Provider 输出未完整结束：{reason}",
-            "exception_type": "ProviderResponseIncomplete",
+        base_error = (
+            protocol_error(response.error)
+            if response.error is not None
+            else {}
+        )
+        base_retryable = base_error.get("retryable")
+        retry = incomplete_retry_metadata(
+            details,
+            fallback_retryable=(
+                base_retryable if isinstance(base_retryable, bool) else None
+            ),
+            fallback_category=(
+                base_error.get("category") or base_error.get("type") or ""
+            ),
+            fallback_code=base_error.get("code"),
+            fallback_status_code=(
+                base_error.get("status_code")
+                if base_error.get("status_code") is not None
+                else base_error.get("provider_status")
+            ),
+        )
+        reason = str(retry["reason"])
+        error = {
+            **base_error,
+            "message": str(
+                base_error.get("message")
+                or f"Provider 输出未完整结束：{reason}"
+            ),
+            "exception_type": str(
+                base_error.get("exception_type") or "ProviderResponseIncomplete"
+            ),
             "phase": "provider",
             "status": str(response.status),
             "stop_reason": reason,
             "incomplete_details": details,
+            "retryable": retry["retryable"],
         }
-    if response.status == ResponseStatus.CANCELLED:
-        return {
-            "message": "Provider 已取消本次响应",
-            "exception_type": "ProviderResponseCancelled",
-            "phase": "provider",
-            "status": str(response.status),
-            "stop_reason": "provider_cancelled",
-        }
+        for field in ("category", "status_code", "retry_after_ms"):
+            if field in retry:
+                error[field] = retry[field]
+        return error
+    if response.error is not None:
+        return protocol_error(response.error)
     return protocol_error(response.error)
 
 

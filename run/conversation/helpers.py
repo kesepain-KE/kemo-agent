@@ -279,6 +279,9 @@ def _retry_error_is_eligible(
     nested_details = error.get("details")
     if isinstance(nested_details, dict):
         containers.append(nested_details)
+    incomplete_details = error.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        containers.append(incomplete_details)
     for container in containers:
         declared = container.get("retryable")
         if isinstance(declared, bool):
@@ -333,6 +336,9 @@ def _failure_requires_immediate_commit(error: Any) -> bool:
     details = error.get("details")
     if isinstance(details, dict):
         containers.append(details)
+    incomplete_details = error.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        containers.append(incomplete_details)
     for container in containers:
         if isinstance(container.get("retryable"), bool):
             return container["retryable"] is False
@@ -360,6 +366,12 @@ def _retry_reason(event: RunEvent) -> str:
     error = event.error if isinstance(event.error, dict) else {}
     raw = str(
         (event.metadata or {}).get("stop_reason")
+        or error.get("stop_reason")
+        or (
+            error.get("incomplete_details", {}).get("reason")
+            if isinstance(error.get("incomplete_details"), dict)
+            else ""
+        )
         or error.get("code")
         or error.get("exception_type")
         or "run_error"

@@ -18,6 +18,10 @@ from run.conversation.provider_loop import (
     ProviderLoopState,
     run_provider_loop as _run_provider_loop,
 )
+from run.conversation.loop_cleanup import (
+    cleanup_run_registration,
+    terminal_failure_events,
+)
 
 def iter_request_events_impl(
     request: dict[str, Any],
@@ -958,63 +962,27 @@ def iter_request_events_impl(
         except (KeyboardInterrupt, GeneratorExit):
             raise
         except BaseException as exc:
-            if terminal_committer is not None and not round_state.finalized:
-                if cancel_event is not None and cancel_event.is_set():
-                    yield terminal_committer.commit_cancelled_round()
-                else:
-                    defer_failure_commit = bool(
-                        request.get("_defer_failure_commit", False)
-                    )
-                    terminal_event = terminal_committer.commit_failed_round(
-                        exc,
-                        reason=(
-                            "provider_context_recovery_failed"
-                            if isinstance(exc, ContextLengthExceededError)
-                            else "runtime_exception"
-                        ),
-                        persist=(
-                            not defer_failure_commit
-                            or _failure_requires_immediate_commit(exc)
-                        ),
-                    )
-                    yield _committed_failure_event(
-                        error_event(
-                            exc,
-                            phase=(
-                                "provider"
-                                if isinstance(exc, ContextLengthExceededError)
-                                else "run"
-                            ),
-                        ),
-                        terminal_event,
-                    )
-            else:
-                yield error_event(exc, phase="run")
+            yield from terminal_failure_events(
+                exc,
+                terminal_committer=terminal_committer,
+                round_state=round_state,
+                cancel_event=cancel_event,
+                request=request,
+                context_length_error_type=ContextLengthExceededError,
+                failure_requires_immediate_commit=_failure_requires_immediate_commit,
+                committed_failure_event=_committed_failure_event,
+                error_event=error_event,
+            )
         finally:
-            if (
-                cancel_event is not None
-                and cancel_event.is_set()
-                and not round_state.finalized
-                and terminal_committer is not None
-            ):
-                try:
-                    terminal_committer.commit_cancelled_round()
-                except Exception:
-                    pass
-            if round_state.history_run_registered:
-                try:
-                    update_run_state(
-                        base,
-                        user,
-                        source,
-                        session_id,
-                        run_state=(
-                            "running"
-                            if request.get("_defer_failure_commit")
-                            and not round_state.finalized
-                            else "idle"
-                        ),
-                        run_id=run_id or None,
-                    )
-                except Exception:
-                    pass
+            cleanup_run_registration(
+                terminal_committer=terminal_committer,
+                round_state=round_state,
+                cancel_event=cancel_event,
+                request=request,
+                update_run_state=update_run_state,
+                base=base,
+                user=user,
+                source=source,
+                session_id=session_id,
+                run_id=run_id,
+            )

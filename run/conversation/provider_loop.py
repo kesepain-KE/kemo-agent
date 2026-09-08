@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from run.conversation.tool_batch import ToolBatchContext, execute_tool_batch
+
 
 @dataclass(slots=True)
 class ProviderLoopState:
@@ -894,305 +896,28 @@ def run_provider_loop(state: ProviderLoopState):
             _close_guidance(guidance_channel)
             completed = True
             break
-        assistant_text = "".join(iteration_text)
-        iteration_reasoning_text = "".join(iteration_reasoning)
-        messages.append(
-            _assistant_tool_message(
-                assistant_text,
-                calls,
-                reasoning=iteration_reasoning_text,
-                native_reasoning=_response_reasoning_item(
-                    provider_response,
-                    streamed_content=iteration_reasoning_text,
-                ),
-            )
-        )
-        retryable_tool_failure: dict[str, Any] | None = None
-        for call_index, call in enumerate(calls):
-            if len(tool_records) >= max_tool_calls:
-                _close_guidance(guidance_channel)
-                yield commit_terminal_round(
-                    status="limited",
-                    reason="max_tool_iterations",
-                    marker=(
-                        f"[本轮工具调用已达到最大次数 {max_tool_calls}，"
-                        "本轮已停止]"
-                    ),
-                    pending_message=(
-                        "工具调用因本轮达到最大工具调用次数而未执行"
-                    ),
-                    pending_exception_type="ToolCallLimitExceeded",
-                )
-                return
-            if cancel_event is not None and cancel_event.is_set():
-                flush_iteration_observed()
-                yield commit_cancelled_round()
-                return
-            signature = tool_call_signature(call.name, call.arguments)
-            reuse_allowed = _tool_result_reuse_allowed(
-                call.name,
-                call.arguments,
-            )
-            identical_call_count = identical_calls.record(
-                call.name, call.arguments
-            )
-            duplicate = False
-            tool_started = time.monotonic()
-            if identical_calls.is_blocked(identical_call_count):
-                result_payload = {
-                    "ok": False,
-                    "error": {
-                        "message": (
-                            f"工具 {call.name} 使用完全相同参数连续调用已达到"
-                            f"上限 {identical_call_limit} 次"
-                        ),
-                        "exception_type": (
-                            "ConsecutiveIdenticalToolCallLimitExceeded"
-                        ),
-                        "limit": identical_call_limit,
-                        "consecutive_identical_calls": identical_call_count,
-                        "instruction": (
-                            "请修改参数、改用其他工具或根据已有结果继续任务"
-                        ),
-                    },
-                }
-                status = "identical_call_blocked"
-            elif failures.is_unavailable(call.name):
-                result_payload = {
-                    "ok": False,
-                    "error": {
-                        "message": (
-                            f"工具 {call.name} 已连续失败 {failure_limit} 次，"
-                            "本轮暂时不可用；请更换工具或调整方案"
-                        ),
-                        "exception_type": "ToolTemporarilyUnavailable",
-                        "consecutive_failures": failure_limit,
-                        "temporarily_unavailable": True,
-                    },
-                }
-                status = "temporarily_unavailable"
-            else:
-                blocked_result = blocked_recovery.get(signature)
-                duplicate = reuse_allowed and signature in seen_calls
-                if blocked_result is not None:
-                    result_payload = copy.deepcopy(
-                        blocked_result.get("result")
-                    )
-                    status = "retry_reuse_blocked"
-                    duplicate = True
-                elif duplicate:
-                    result_payload = copy.deepcopy(seen_calls[signature])
-                    status = "duplicate_reused"
-                else:
-                    try:
-                        definition = registry.get(call.name)
-                        result = execute_tool(
-                            definition,
-                            call.arguments,
-                            context={
-                                "root": str(base),
-                                "user": user,
-                                "source": source,
-                                "session_id": session_id,
-                                "window": window_path.name,
-                                "tool_timeout": tool_timeout,
-                                "agent_timeout": agent_timeout,
-                                "transport_registry": request.get(
-                                    "_transport_registry"
-                                ),
-                                "task_plan_id": request.get("_task_plan_id"),
-                                "task_plan_step_id": request.get("_task_plan_step_id"),
-                                "task_plan_mode": request.get("_task_plan_mode"),
-                                "knowledge_scopes": list(
-                                    source_policy.direct_knowledge_scopes()
-                                ),
-                                "uploaded_files": copy.deepcopy(
-                                    uploaded_descriptors
-                                ),
-                            },
-                            timeout=tool_timeout,
-                            cancel_event=cancel_event,
-                        )
-                        result_payload = {"ok": True, "result": result}
-                        status = "completed"
-                    except BaseException as exc:
-                        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
-                            raise
-                        cancelled_tool = isinstance(exc, ToolCancelledError)
-                        oversized_result = isinstance(
-                            exc, ToolResultTooLargeError
-                        )
-                        result_payload = {
-                            "ok": False,
-                            "error": {
-                                **_tool_error_payload(exc),
-                                **({"cancelled": True} if cancelled_tool else {}),
-                            },
-                        }
-                        status = (
-                            "cancelled"
-                            if cancelled_tool
-                            else (
-                                "result_too_large"
-                                if oversized_result
-                                else "failed"
-                            )
-                        )
-                        if bool(getattr(exc, "still_running", False)):
-                            failures.unavailable.add(call.name)
-                            status = "timed_out_running"
-                    if result_payload.get("ok") is True:
-                        if reuse_allowed:
-                            seen_calls[signature] = copy.deepcopy(result_payload)
-                        else:
-                            seen_calls.pop(signature, None)
-                    else:
-                        seen_calls.pop(signature, None)
-                failure_count = failures.record(
-                    call.name,
-                    succeeded=(
-                        bool(result_payload.get("ok"))
-                        or status == "result_too_large"
-                    ),
-                )
-                if failure_count >= failure_limit:
-                    result_payload["error"].update(
-                        {
-                            "consecutive_failures": failure_count,
-                            "temporarily_unavailable": True,
-                            "instruction": (
-                                "请更换工具或调整方案，不要继续重试该工具"
-                            ),
-                        }
-                    )
-            elapsed_ms = max(0, round((time.monotonic() - tool_started) * 1000))
-            record = {
-                "id": call.id,
-                "name": call.name,
-                "arguments": call.arguments,
-                "status": status,
-                "duplicate": duplicate,
-                "consecutive_identical_calls": identical_call_count,
-                "result": result_payload,
-                "iteration": iteration,
-                "elapsed_ms": elapsed_ms,
-            }
-            tool_records.append(record)
-            pending_tool_calls.pop(call.id, None)
-            yield RunEvent(
-                type="tool_call_result",
-                tool_call_id=call.id,
-                tool_name=call.name,
-                arguments=call.arguments,
-                result=result_payload,
-                metadata={
-                    "status": status,
-                    "duplicate": duplicate,
-                    "consecutive_identical_calls": identical_call_count,
+        batch_result = yield from execute_tool_batch(
+            ToolBatchContext(
+                shared=state.values,
+                runtime={
+                    "calls": calls,
                     "iteration": iteration,
-                    "elapsed_ms": elapsed_ms,
+                    "iteration_text": iteration_text,
+                    "iteration_reasoning": iteration_reasoning,
+                    "provider_response": provider_response,
+                    "seen_calls": seen_calls,
+                    "blocked_recovery": blocked_recovery,
+                    "flush_iteration_observed": flush_iteration_observed,
+                    "guidance_channel": guidance_channel,
+                    "task_plan_boundary": task_plan_boundary,
                 },
             )
-            tool_value = result_payload.get("result")
-            tool_artifacts = (
-                tool_value.get("artifacts")
-                if isinstance(tool_value, dict)
-                else None
-            )
-            if isinstance(tool_artifacts, list):
-                for artifact in tool_artifacts:
-                    if isinstance(artifact, dict):
-                        yield RunEvent(
-                            type="media_output",
-                            tool_call_id=call.id,
-                            tool_name=call.name,
-                            result=copy.deepcopy(artifact),
-                            metadata={
-                                "artifact": copy.deepcopy(artifact),
-                                "source": "tool_result",
-                            },
-                        )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": _json_result(result_payload),
-                }
-            )
-            if (
-                defer_failure_commit
-                and retryable_tool_failure is None
-                and _tool_failure_is_retryable(result_payload, status)
-            ):
-                retryable_tool_failure = {
-                    "tool_name": call.name,
-                    "error": copy.deepcopy(result_payload.get("error") or {}),
-                    "status": status,
-                }
-            if request.get("_task_plan_mode") is None:
-                task_plan_boundary = detect_task_plan_creation_boundary(
-                    tool_name=call.name,
-                    arguments=call.arguments,
-                    result_payload=result_payload,
-                )
-            if task_plan_boundary is not None:
-                for pending_call in calls[call_index + 1 :]:
-                    pending_payload = {
-                        "ok": False,
-                        "error": {
-                            "message": (
-                                "任务计划已创建，后续工具必须等待批准或由任务计划执行器处理"
-                            ),
-                            "exception_type": "TaskPlanCreationBoundary",
-                            "plan_id": task_plan_boundary.plan_id,
-                        },
-                    }
-                    pending_record = {
-                        "id": pending_call.id,
-                        "name": pending_call.name,
-                        "arguments": pending_call.arguments,
-                        "status": "not_executed",
-                        "duplicate": False,
-                        "consecutive_identical_calls": 0,
-                        "result": pending_payload,
-                        "iteration": iteration,
-                        "elapsed_ms": 0,
-                    }
-                    tool_records.append(pending_record)
-                    pending_tool_calls.pop(pending_call.id, None)
-                    yield RunEvent(
-                        type="tool_call_result",
-                        tool_call_id=pending_call.id,
-                        tool_name=pending_call.name,
-                        arguments=pending_call.arguments,
-                        result=pending_payload,
-                        metadata={
-                            "status": "not_executed",
-                            "duplicate": False,
-                            "consecutive_identical_calls": 0,
-                            "iteration": iteration,
-                            "elapsed_ms": 0,
-                            "plan_id": task_plan_boundary.plan_id,
-                        },
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": pending_call.id,
-                            "name": pending_call.name,
-                            "content": _json_result(pending_payload),
-                        }
-                    )
-                boundary_text = task_plan_boundary.message
-                prefix = "\n\n" if all_text else ""
-                visible_boundary_text = f"{prefix}{boundary_text}"
-                all_text.append(visible_boundary_text)
-                observed_text.append(visible_boundary_text)
-                yield RunEvent(type="text_delta", content=visible_boundary_text)
-                _close_guidance(guidance_channel)
-                completed = True
-                break
+        )
+        task_plan_boundary = batch_result.task_plan_boundary
+        retryable_tool_failure = batch_result.retryable_tool_failure
+        completed = batch_result.completed
+        if batch_result.stop:
+            return
         if task_plan_boundary is not None:
             break
         pending_guidance = _drain_guidance(guidance_channel)
