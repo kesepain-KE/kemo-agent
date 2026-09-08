@@ -187,7 +187,10 @@ class KemoGraphExpandTests(unittest.TestCase):
         graph.save_config(config)
 
         def reports_source_as_link(path: Path) -> bool:
-            return Path(path) == self.source.resolve()
+            try:
+                return os.path.samefile(path, self.source)
+            except (OSError, ValueError):
+                return False
 
         with patch.object(
             registry,
@@ -311,13 +314,20 @@ class KemoGraphExpandTests(unittest.TestCase):
         original_lstat = sync.os.lstat
         original_stat_call = sync.os.stat
 
+        def is_tracked(path: Path) -> bool:
+            candidate = Path(path)
+            return (
+                candidate.name == source_file.name
+                and candidate.parent.name == source_file.parent.name
+            )
+
         def fail_tracked(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
+            if is_tracked(path):
                 raise PermissionError("temporary read failure")
             return original_lstat(path, *args, **kwargs)
 
         def fail_tracked_stat(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
+            if is_tracked(path):
                 raise PermissionError("temporary read failure")
             return original_stat_call(path, *args, **kwargs)
 

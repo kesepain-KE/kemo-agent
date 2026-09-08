@@ -1843,9 +1843,10 @@ class ShellPluginTests(unittest.TestCase):
             )
             self.assertTrue(direct["ok"])
             self.assertEqual(
-                observed[-1],
-                ("zsh", portable, os.environ.get("ComSpec", ""), root),
+                observed[-1][:3],
+                ("zsh", portable, os.environ.get("ComSpec", "")),
             )
+            self.assertTrue(os.path.samefile(observed[-1][3], root))
 
             session_id = "portable-shell-session"
             run_shell(
