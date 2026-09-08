@@ -1861,7 +1861,7 @@ class ShellPluginTests(unittest.TestCase):
             )
             self.assertTrue(session_result["ok"])
             self.assertEqual(observed[-1][0:2], ("fish", portable))
-            self.assertEqual(observed[-1][3], root)
+            self.assertTrue(os.path.samefile(observed[-1][3], root))
 
     def test_shell_lookup_respects_empty_path_and_validates_comspec(self) -> None:
         with patch("plugins.shell.tool.shutil.which", return_value=None) as located:
