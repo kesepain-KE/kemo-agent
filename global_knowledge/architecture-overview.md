@@ -271,6 +271,8 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 
 感知和拓展等模块使用 `run/extensions/` 的 stdin/stdout JSON 协议在独立 Python 子进程中
 执行。运行时限制路径、重定向、输出捕获、超时和取消，并使用模块锁避免同一模块并发写状态。
+子进程使用安全基础环境和模块目录自己的 `.env`，不继承框架 Provider/Web 凭据；每次调用
+单独构造环境映射，不修改主进程，也不会让并发模块互相覆盖配置。
 
 这不是操作系统级安全沙箱。模块仍必须是可信本地代码。
 
@@ -305,6 +307,20 @@ web/app.py
 
 路由层不应重新实现历史、记忆或模块业务规则。核心数据仍由 `run/` 和对应 Store 管理。
 
+### Markdown 渲染维护边界
+
+网页中的聊天正文、知识、技能、记忆、智能体规则、感知、拓展和运行状态预览都使用
+ReactMarkdown。所有入口必须从 `web/frontend/src/markdownLinks.ts` 导入兼容版 `remarkGfm`；
+除该共享模块外，业务组件不能直接导入第三方 `remark-gfm`。共享模块保留 GFM 行为，同时修正
+以 `http://`、`https://` 或 `www.` 开头的裸链接紧邻中文标点或界定符时把后续正文吞进 URL 的问题。显式
+`[标签](地址)`、`<地址>`、图片、行内代码和代码块不会被改写。
+
+聊天正文的危险协议过滤、外链安全属性、外部图片策略和链接样式继续由
+`web/frontend/src/components/Chat/MarkdownMessage.tsx` 及其 CSS 模块负责。长链接必须换行；
+鼠标点击可以隐藏浏览器默认黑框，但键盘 `focus-visible` 必须保留清晰的主题焦点。修改共享
+Markdown 规则后，至少运行前端定向测试、完整 `npm test` 和 `npm run build`，并验证中文边界、
+连续多个裸链接、显式链接、危险协议以及流式/完成态一致性。
+
 ## 更新与重启
 
 根目录 `update.py` 只保留兼容启动，实际更新逻辑位于 `update/` 包，并按 core、agents、plugins、
@@ -328,6 +344,7 @@ Web 重启由受保护接口启动 `restart.py` 辅助进程：等待旧进程�
 | 接入外部消息 | `external-message-route-creation.md` |
 | 修改存储、写盘或运行日志 | `storage-and-persistence.md` |
 | 修改配置 | `configuration-reference.md` |
+| 修改 Web 页面或 Markdown 渲染 | 本文“Web 分层” |
 
 修改任何核心链路后，应先运行相关定向测试，再运行完整 `python -m pytest -q`。创建或实质修改
 子代理、拓展、消息、感知、技能或用户包时，还必须运行 `tests/template_tests/<kind>/` 对应

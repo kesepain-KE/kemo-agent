@@ -199,8 +199,14 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 元数据，不等于 kemo-agent 权限。全局 `input_data.md` 仅展示公共库；私有 Library ID
 和绝对路径只能通过带调用用户上下文的 `kemo_graph libraries` 获取。
 
-`store_root` 与 `source_roots` 必须分离，不能相同或互相嵌套；路径本身及父路径不能包含
-符号链接或目录联接。这样可以避免扫描派生数据库、路径逃逸和 Store 自我导入。
+注册或替换配置时，`store_root` 与 `source_roots` 必须分离，不能相同或互相嵌套；路径
+本身及父路径不能包含符号链接或目录联接。这样可以避免扫描派生数据库、路径逃逸和 Store
+自我导入。
+
+新配置仍严格要求 `source_roots` 存在。已保存来源因移动磁盘、网络盘或挂载点暂时离线时，
+注册表保持可读并把对应路径标为不可用；`scan` / `sync` 不计算删除、不访问 Store、也不
+推进该库游标。管理员恢复目录或提交完整新配置后才能继续，框架不会因一次不可用自动删除
+注册项。
 
 ### 本地目录摘要
 
@@ -212,9 +218,11 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 - 推进同步游标；
 - 调用 LLM、Embedding 或 Rerank。
 
-目录摘要包含 Library ID、名称、类型、绝对 Store/服务位置、文档来源和上次已知状态。
-状态不是实时轮询结果。注册配置签名与快照不一致时显示“未检查”，避免同一 ID 改绑后
-展示旧 Store 状态。
+目录摘要包含 Library ID、名称、类型、绝对 Store/服务位置、文档来源、上次已知文档统计
+和上次已知状态。统计使用最近一次成功 `status` 快照中的活动/总数以及文档失败、处理中、
+待处理计数，并标出每个库的统计时间。只检查部分库不会清除其他库缓存；本次单库检查失败
+会保留旧成功统计，同时显示当前错误。生成 Prompt 不会再次联网。注册配置签名与快照不一致
+时显示“未检查”，避免同一 ID 改绑后展示旧 Store 状态。
 
 ### 手动操作
 
@@ -226,7 +234,7 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 | `initialize` | 联网写入 | 幂等创建 portable Store |
 | `scan` | 本地扫盘 | 计算已注册来源的增删改，不写 Store |
 | `sync` | 联网写入 | 导入哈希变化文件；默认不传播删除、不 ingest |
-| `ingest` | 联网高成本 | 逐库构建 Graph/RAG |
+| `ingest` | 联网高成本 | 逐库构建 Graph/RAG；可用 `paths` 精确重试 failed 文档 |
 | `query` | 联网只读 | graph/rag/hybrid/answer/global 查询 |
 | `upload` | 联网写入 | 上传 Markdown，保持 pending |
 | `import_file` | 联网写入 | 管理员明确指定本地文件，multipart 转换导入，默认保持 pending |
@@ -256,24 +264,32 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 `scan` / `sync` 只处理管理员注册的 `source_roots`：
 
 - 递归枚举 kemo-graph 支持的文档格式；
-- 跳过隐藏目录、符号链接、目录联接和任何 `kemo-graph-storage`；
+- 跳过隐藏目录和任何 `kemo-graph-storage`；非隐藏的符号链接、目录联接或 Windows
+  重解析点会让当前库扫描失败关闭，不能把链接目标当成普通来源继续同步；
 - 单文件上限 50 MiB；
 - 使用 SHA-256 判断正文是否变化；
 - 来源消失时只标记待确认，默认不传播删除。
+- 注册的来源根目录本身不可用时返回 `source_unavailable`，不把整棵目录当作来源删除。
+- 任一子目录或受支持文件无法可靠读取、逃逸注册根目录，或在扫描期间发生身份/内容变化时，
+  本次扫描整体按不完整失败，不计算删除、不执行后续 Store 操作，也不把未确认变化写入游标。
 
 游标位于 `data/library_sync_state.json`，只保存文件指纹、kemo-graph `source_id`、派生相对
 路径、Store ID 和注册配置签名，不复制文档正文。
 
 同步语义：
 
-1. 每个 portable 库先幂等调用 `/stores/initialize`。
-2. 新增或修改文件逐项调用 `/stores/import-path`，固定
-   `ingest_after_import=false`。
-3. 单文件失败不写入新哈希，下次手动同步仍会重试；成功文件可独立提交。
+1. 每个 portable 库先完成本地扫描和完整快照复核，再幂等调用 `/stores/initialize`。
+2. 新增或修改文件在调用 `/stores/import-path` 前重新核对文件身份与 SHA-256，固定
+   `ingest_after_import=false`，并把扫描哈希作为 `expected_origin_hash` 交给 sidecar。支持该合同的
+   sidecar 会用同一份私有快照完成哈希与转换；成功响应仍必须返回匹配的 `origin_hash`、有效
+   `source_id` 和安全的 `relative_path`，否则不能推进该文件游标。
+3. 单文件失败不写入新哈希，下次手动同步仍会重试；已经由 `origin_hash` 确认成功的旧快照可独立
+   写入检查点。若原文件随后变化，下一次扫描仍会把它识别为 `modified`。
 4. 删除只有在用户确认并传 `confirm_deletions=true` 时才调用批量删除。
-5. HTTP 200 仍必须检查批量删除返回的 `failed/documents/failures`；只有成功删除的来源才从
-   游标移除，失败项保留并继续报告。
+5. HTTP 200 仍必须完整检查批量删除返回的 `requested/deleted/failed/documents/failures`，计数、
+   明细和请求的 `source_id` 必须一致；只有明确成功删除的来源才从游标移除，失败项保留并继续报告。
 6. `sync` 永远不自动调用 ingest。
+7. `source_roots` 任一项不可用时，不计算变化、不推进游标，也不允许传播删除。
 
 推荐维护流程：
 
@@ -309,13 +325,20 @@ scan → 展示新增/修改/缺失项 → 用户确认 → sync
 - `import_file.path` 仅在管理员明确发起文件导入时使用，不得把对话中任意路径静默转成上传操作。
 - `documents delete` 必须携带 `confirm="delete"`；来源批量删除默认关闭。
 - ingest 必须检查 HTTP 200 内的 `result.failed/details`，`failed>0` 仍是失败。
+- ingest 省略 `paths` 时只处理普通待整理文档；指定非空 Markdown 路径数组时可精确整理或
+  重试 failed 文档。路径仍由 kemo-graph 校验，不能借此指定 Store 外文件。
 - `409 PROCESSING` 先通过 `status/jobs` 观察，不能盲目清库、改表或并发重试。
 - `403 STORE_ACCESS_DENIED` 检查 kemo-graph allowed roots、绝对路径和进程权限。
 - `422`、内容冲突和注册表错误必须先修正，不能自动重试。
+- Expand 整次自动重试只开放给内置 `global:kemo_graph` 的 `query` 与 `status`；所有失败项都必须
+  明确声明可重试。`sync`、`ingest`、上传、导入和删除等有副作用操作不做整次盲重放。
+- `/stores/import-path` 使用 `expected_origin_hash` 绑定框架扫描版本；kemo-graph sidecar 从已打开的
+  原文件句柄复制私有快照，哈希、转换和转换后复核都针对该快照。原绝对路径只作为稳定来源身份，
+  因此既有 `source_id` 和 Markdown 相对路径不变。旧 sidecar 不认识该字段时同步会安全失败，部署时
+  必须配套更新 kemo-graph，不能退回无预期哈希的写入。
 - kemo-agent 更新器保留历史部署中知识目录内的 `kemo-graph-storage/`，并清除旧自动维护
   脚本与旧派生状态；任意外部绝对路径 Store 本来就不在更新器覆盖范围内。
 - Web 三层知识库枚举和 CRUD 始终屏蔽 `kemo-graph-storage/`，避免把派生数据误当权威知识。
 
 停用或更新 kemo-agent 都不会删除外部 Store。真正删除 Store、全量重建、节点/关系级删除
 仍属于 kemo-graph 项目的独立运维边界，不由本外挂隐式执行。
-
