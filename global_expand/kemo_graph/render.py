@@ -15,6 +15,7 @@ from registry import (
     atomic_text,
     library_signature,
     load_config,
+    unavailable_source_roots,
 )
 
 
@@ -42,30 +43,73 @@ def _monotonic_timestamp(previous: Any, candidate: str) -> str:
     return previous_text if previous_value >= candidate_value else candidate
 
 
-def _status_map() -> tuple[dict[str, dict[str, Any]], str]:
+def _status_map() -> tuple[dict[str, dict[str, Any]], str, str]:
     from registry import STATUS_PATH
 
     if not STATUS_PATH.is_file():
-        return {}, ""
+        return {}, "", ""
     try:
         value = json.loads(STATUS_PATH.read_text("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return {}, ""
+        return {}, "", ""
     if not isinstance(value, dict):
-        return {}, ""
+        return {}, "", ""
     rows = value.get("libraries")
     mapping = {
         str(item.get("id")): item
         for item in rows
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     } if isinstance(rows, list) else {}
-    return mapping, str(value.get("generated_at") or "")
+    return (
+        mapping,
+        str(value.get("generated_at") or ""),
+        str(value.get("base_url") or ""),
+    )
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _known_document_summary(status: dict[str, Any]) -> str:
+    result = status.get("result")
+    sources = result.get("sources") if isinstance(result, dict) else None
+    active = _nonnegative_int(sources.get("active")) if isinstance(sources, dict) else None
+    total = _nonnegative_int(sources.get("total")) if isinstance(sources, dict) else None
+    checked_at = str(status.get("checked_at") or "")
+    timing_label = "检查于"
+    if active is None or total is None:
+        last_success = status.get("last_success")
+        if not isinstance(last_success, dict):
+            return "未检查"
+        active = _nonnegative_int(last_success.get("active"))
+        total = _nonnegative_int(last_success.get("total"))
+        if active is None or total is None:
+            return "未检查"
+        failed = _nonnegative_int(last_success.get("failed")) or 0
+        processing = _nonnegative_int(last_success.get("processing")) or 0
+        pending = _nonnegative_int(last_success.get("pending")) or 0
+        checked_at = str(last_success.get("checked_at") or "")
+        timing_label = "上次成功于"
+    else:
+        failed = _nonnegative_int(status.get("document_failures")) or 0
+        processing = _nonnegative_int(status.get("document_processing")) or 0
+        pending = _nonnegative_int(status.get("document_pending")) or 0
+    summary = (
+        f"活动 {active} / 总计 {total}；失败 {failed}；"
+        f"处理中 {processing}；待处理 {pending}"
+    )
+    return f"{summary}；{timing_label} {checked_at}" if checked_at else summary
 
 
 def catalog_markdown(config: GraphConfig | None) -> str:
     if config is None:
         return "# Kemo Graph 外挂文档站\n\n当前未激活；不会影响本地知识库、记忆或正常对话。\n"
-    status_by_id, checked_at = _status_map()
+    status_by_id, checked_at, status_base_url = _status_map()
+    if status_base_url != config.base_url:
+        status_by_id, checked_at = {}, ""
     # This file is a global Prompt source shared by all users.  Never publish
     # user-restricted Library IDs or absolute paths here; callers discover
     # their authorized private libraries through the context-aware plugin.
@@ -88,8 +132,8 @@ def catalog_markdown(config: GraphConfig | None) -> str:
         ])
         return "\n".join(lines) + "\n"
     lines.extend([
-        "| Library ID | 名称 | 类型 | Store/服务位置 | 文档来源 | 上次已知状态 |",
-        "|---|---|---|---|---|---|",
+        "| Library ID | 名称 | 类型 | Store/服务位置 | 文档来源 | 文档统计（上次已知） | 上次已知状态 |",
+        "|---|---|---|---|---|---|---|",
     ])
     for library in enabled[:20]:
         status = status_by_id.get(library.id, {})
@@ -97,14 +141,30 @@ def catalog_markdown(config: GraphConfig | None) -> str:
             status = {}
         known = str(status.get("status") or "未检查")
         store = library.store_root or "kemo-graph 内置库"
-        sources = "<br>".join(library.source_roots) if library.source_roots else "由上传接口管理"
-        cells = [library.id, library.display_name, library.kind, store, sources, known]
+        unavailable = set(unavailable_source_roots(library))
+        sources = (
+            "<br>".join(
+                f"{path}（当前不可用）" if path in unavailable else path
+                for path in library.source_roots
+            )
+            if library.source_roots
+            else "由上传接口管理"
+        )
+        cells = [
+            library.id,
+            library.display_name,
+            library.kind,
+            store,
+            sources,
+            _known_document_summary(status),
+            known,
+        ]
         lines.append("| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |")
     if len(enabled) > 20:
         lines.extend(["", f"> 另有 {len(enabled) - 20} 个库未展开，请调用 `kemo_graph libraries` 查看。"])
     lines.extend([
         "",
-        f"上次手动联网检查：{checked_at or '从未检查'}。该状态不是实时轮询结果。",
+        f"本地状态快照最近写入：{checked_at or '从未检查'}。各库统计时间见表格；该状态不是实时轮询结果。",
         "",
         "仅当用户明确要求查询此外挂文档站时，先按 Library ID 选择库，再调用 "
         "`expand_call(scope=\"global\", module=\"kemo_graph\", command=\"query\")`。",

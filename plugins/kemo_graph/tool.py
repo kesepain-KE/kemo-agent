@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,65 @@ _OPERATIONS = {
     "jobs",
     "deactivate",
 }
+_MAX_INGEST_PATHS = 1000
+_MAX_INGEST_PATH_CHARS = 4096
+_MAX_INGEST_PATH_TOTAL_CHARS = 200_000
+
+
+def _source_root_available(value: str) -> bool:
+    path = Path(value)
+    if not path.is_absolute():
+        return False
+    current = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                return False
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if (
+                reparse_flag
+                and getattr(metadata, "st_file_attributes", 0) & reparse_flag
+            ):
+                return False
+            isjunction = getattr(os.path, "isjunction", None)
+            if isjunction and isjunction(current):
+                return False
+        return path.is_dir()
+    except (OSError, ValueError):
+        return False
+
+
+def _normalize_ingest_paths(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError("paths 必须是非空字符串数组")
+    if len(value) > _MAX_INGEST_PATHS:
+        raise ValueError(f"paths 最多允许 {_MAX_INGEST_PATHS} 项")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"paths[{index}] 必须是非空字符串")
+        path = item.strip()
+        if len(path) > _MAX_INGEST_PATH_CHARS:
+            raise ValueError(
+                f"paths[{index}] 超过 {_MAX_INGEST_PATH_CHARS} 字符"
+            )
+        # Keep the guide and operation contracts identical: repeated entries
+        # still count toward the submitted payload bound before deduplication.
+        total_chars += len(path)
+        if total_chars > _MAX_INGEST_PATH_TOTAL_CHARS:
+            raise ValueError(
+                f"paths 总长度超过 {_MAX_INGEST_PATH_TOTAL_CHARS} 字符"
+            )
+        if path not in seen:
+            seen.add(path)
+            normalized.append(path)
+    return normalized
 
 
 def _configuration(root: Path, user: str) -> dict[str, Any]:
@@ -83,13 +144,28 @@ def _configuration(root: Path, user: str) -> dict[str, Any]:
             )
             if "*" not in allowed and user not in allowed:
                 continue
+            raw_sources = item.get("source_roots", [])
+            source_roots = (
+                [
+                    candidate.strip()
+                    for candidate in raw_sources
+                    if isinstance(candidate, str) and candidate.strip()
+                ]
+                if isinstance(raw_sources, list)
+                else []
+            )
             rows.append({
                 "id": str(item.get("id") or ""),
                 "display_name": str(item.get("display_name") or ""),
                 "kind": str(item.get("kind") or "portable"),
                 "enabled": item.get("enabled", True) is True,
                 "store_root": item.get("store_root"),
-                "source_roots": item.get("source_roots", []),
+                "source_roots": source_roots,
+                "unavailable_source_roots": [
+                    candidate
+                    for candidate in source_roots
+                    if not _source_root_available(candidate)
+                ],
                 "scope": item.get("scope"),
                 "owner_id": item.get("owner_id"),
                 "allowed_users": allowed,
@@ -110,6 +186,7 @@ def _operation_guide(
     *,
     caller_user: str,
     library_ids: list[str] | None,
+    paths: list[str] | None,
     query: str,
     mode: str,
     filename: str,
@@ -145,6 +222,9 @@ def _operation_guide(
         if len(selected) != 1:
             raise ValueError("ingest 每次必须且只能选择一个 library_id")
         params["mode"] = mode if mode in {"graph", "rag", "both"} else "both"
+        normalized_paths = _normalize_ingest_paths(paths)
+        if normalized_paths is not None:
+            params["paths"] = normalized_paths
     elif operation == "upload":
         if len(selected) != 1 or not filename.strip() or not content.strip():
             raise ValueError("upload 需要一个 library_id、filename 和 content")
@@ -227,6 +307,7 @@ def run(
     action: str,
     operation: str = "",
     library_ids: list[str] | None = None,
+    paths: list[str] | None = None,
     query: str = "",
     mode: str = "",
     filename: str = "",
@@ -306,6 +387,7 @@ def run(
                 normalized_operation,
                 caller_user=user,
                 library_ids=library_ids,
+                paths=paths,
                 query=query,
                 mode=str(mode or "").strip().casefold(),
                 filename=filename,

@@ -9,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from registry import GraphConfig
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_RETRY_AFTER_MS = 120_000
 
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -25,15 +28,106 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _error_payload(body: bytes) -> tuple[str, str]:
+def _bounded_int(value: Any, *, minimum: int, maximum: int) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < minimum:
+        return None
+    return min(parsed, maximum)
+
+
+def _error_details(value: Any) -> dict[str, Any]:
+    error = value.get("error") if isinstance(value, dict) else None
+    if not isinstance(error, dict):
+        return {"code": "HTTP_ERROR", "message": ""}
+    details = error.get("details")
+    sources = [error, details] if isinstance(details, dict) else [error]
+    result: dict[str, Any] = {
+        "code": str(
+            error.get("code")
+            or (details.get("code") if isinstance(details, dict) else None)
+            or "HTTP_ERROR"
+        )[:128],
+        "message": str(
+            error.get("message")
+            or (details.get("message") if isinstance(details, dict) else None)
+            or ""
+        )[:500],
+    }
+    for source in sources:
+        category = source.get("category") or source.get("type")
+        if isinstance(category, str) and category.strip():
+            result["category"] = category.strip()[:160]
+            break
+    for source in sources:
+        if "status_code" not in source:
+            continue
+        status_code = _bounded_int(
+            source.get("status_code"),
+            minimum=100,
+            maximum=599,
+        )
+        if status_code is not None:
+            result["status_code"] = status_code
+        break
+    for source in sources:
+        if "retryable" in source:
+            # A malformed declaration must never become an opt-in to replay.
+            result["retryable"] = source.get("retryable") is True
+            break
+    for source in sources:
+        if "retry_after_ms" not in source:
+            continue
+        retry_after_ms = _bounded_int(
+            source.get("retry_after_ms"),
+            minimum=0,
+            maximum=MAX_RETRY_AFTER_MS,
+        )
+        if retry_after_ms is not None:
+            result["retry_after_ms"] = retry_after_ms
+        break
+    return result
+
+
+def _error_payload(body: bytes) -> dict[str, Any]:
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
-        return "HTTP_ERROR", ""
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if not isinstance(error, dict):
-        return "HTTP_ERROR", ""
-    return str(error.get("code") or "HTTP_ERROR"), str(error.get("message") or "")
+        return {"code": "HTTP_ERROR", "message": ""}
+    return _error_details(payload)
+
+
+def _retry_after_ms(headers: Any) -> int | None:
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdecimal():
+        seconds = _bounded_int(
+            text,
+            minimum=0,
+            maximum=MAX_RETRY_AFTER_MS // 1000,
+        )
+        return seconds * 1000 if seconds is not None else None
+    try:
+        retry_at = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    delay_ms = max(
+        0,
+        round((retry_at - datetime.now(timezone.utc)).total_seconds() * 1000),
+    )
+    return min(delay_ms, MAX_RETRY_AFTER_MS)
 
 
 def _request_url(
@@ -62,11 +156,14 @@ def _decode_response(body: bytes) -> Any:
     if not isinstance(value, dict) or not isinstance(value.get("ok"), bool):
         raise GraphExpandError("kemo-graph 响应不符合统一包络")
     if not value["ok"]:
-        error = value.get("error") if isinstance(value.get("error"), dict) else {}
+        error = _error_details(value)
         raise GraphAPIError(
-            200,
+            error.get("status_code") or 200,
             str(error.get("code") or "UNKNOWN"),
             str(error.get("message") or ""),
+            category=error.get("category"),
+            retryable=error.get("retryable"),
+            retry_after_ms=error.get("retry_after_ms"),
         )
     return value.get("data")
 
@@ -88,12 +185,48 @@ def _perform_request(
             body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raw = exc.read(8192)
-        code, message = _error_payload(raw)
-        raise GraphAPIError(exc.code, code, message or str(exc.reason)) from exc
+        error = _error_payload(raw)
+        retry_after_ms = _retry_after_ms(exc.headers)
+        if retry_after_ms is None:
+            retry_after_ms = error.get("retry_after_ms")
+        raise GraphAPIError(
+            exc.code,
+            str(error.get("code") or "HTTP_ERROR"),
+            str(error.get("message") or str(exc.reason)),
+            category=error.get("category"),
+            retryable=error.get("retryable"),
+            retry_after_ms=retry_after_ms,
+        ) from exc
     except urllib.error.URLError as exc:
-        raise GraphExpandError(f"无法连接 kemo-graph：{type(exc.reason).__name__}") from exc
+        if isinstance(exc.reason, (ssl.CertificateError, ssl.SSLError)):
+            raise GraphExpandError(
+                "kemo-graph TLS 证书或握手校验失败",
+                category="tls_error",
+                retryable=False,
+            ) from exc
+        if isinstance(exc.reason, TimeoutError):
+            raise GraphExpandError(
+                "连接 kemo-graph 超时",
+                category="connection_error",
+                retryable=True,
+            ) from exc
+        raise GraphExpandError(
+            f"无法连接 kemo-graph：{type(exc.reason).__name__}",
+            category="connection_error",
+            retryable=True,
+        ) from exc
     except TimeoutError as exc:
-        raise GraphExpandError("连接 kemo-graph 超时") from exc
+        raise GraphExpandError(
+            "连接 kemo-graph 超时",
+            category="timeout",
+            retryable=True,
+        ) from exc
+    except ConnectionError as exc:
+        raise GraphExpandError(
+            "连接 kemo-graph 中断",
+            category="connection_error",
+            retryable=True,
+        ) from exc
     return _decode_response(body)
 
 

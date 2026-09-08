@@ -15,7 +15,7 @@ Kemo Graph 外挂文档站引导插件。它只读取本地注册表并生成规
 5. 同一轮默认合并为一次 `query`；“继续、下一步、重来”等短指令不得自行触发新查询。
 6. 普通检索优先 `hybrid`，让主智能体根据 Graph 与 RAG 证据回答。只有用户明确要求 kemo-graph 自行生成回答时才使用 `answer`。
 7. 更新流程固定为 `scan → 用户确认 → sync → ingest → status`。`sync` 不自动 ingest，删除默认不传播。
-8. `ingest` 是长耗时、高成本操作，每次只能选择一个 Library ID。
+8. `ingest` 是长耗时、高成本操作，每次只能选择一个 Library ID。省略 `paths` 时整理普通待处理文档；只有需要精确重试失败文档时才传入状态结果中的 Markdown 路径数组。
 9. `upload` 只上传 Markdown 正文；`import_file` 上传 PDF、Office、EPUB 等受支持文件。两者默认只产生待整理文档，不隐式 ingest。
 10. kemo-graph 或网关不可用只会令外挂操作失败，不影响主智能体本地知识、记忆和正常对话。
 
@@ -51,6 +51,13 @@ Kemo Graph 外挂文档站引导插件。它只读取本地注册表并生成规
         "type": "array",
         "items": {"type": "string"},
         "maxItems": 100
+      },
+      "paths": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "minItems": 1,
+        "maxItems": 1000,
+        "description": "仅用于 ingest：精确整理或重试的 Markdown 路径；省略时处理普通待处理项"
       },
       "query": {"type": "string"},
       "mode": {

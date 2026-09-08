@@ -24,6 +24,7 @@ from registry import (
     LAST_RUN_PATH,
     atomic_json,
     config_from_mapping,
+    configured_admin_users,
     configuration_status,
     load_config,
     save_config,
@@ -63,8 +64,13 @@ def execute(
         try:
             current = load_config()
         except GraphExpandError:
-            if caller_user is not None:
-                raise
+            if (
+                caller_user is not None
+                and caller_user not in configured_admin_users()
+            ):
+                raise PermissionError(
+                    "当前注册表无效，只有原 admin_users 可以提交完整配置修复"
+                ) from None
             current = None
         if current is not None:
             _require_admin(current, caller_user, "activate")

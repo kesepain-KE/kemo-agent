@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from client import MAX_UPLOAD_BYTES, api_request, api_upload_file, verify_service
-from errors import GraphExpandError
+from errors import GraphExpandError, error_metadata
 from registry import (
     GraphConfig,
     GraphLibrary,
@@ -54,6 +54,9 @@ SUPPORTED_IMPORT_SUFFIXES = frozenset(
         ".markdown",
     }
 )
+MAX_INGEST_PATHS = 1000
+MAX_INGEST_PATH_CHARS = 4096
+MAX_INGEST_PATH_TOTAL_CHARS = 200_000
 
 
 def _result(data: Any) -> dict[str, Any]:
@@ -68,6 +71,37 @@ def _count(value: dict[str, Any], *path: str) -> int:
     for key in path:
         current = current.get(key) if isinstance(current, dict) else None
     return int(current) if isinstance(current, int) and not isinstance(current, bool) else 0
+
+
+def _ingest_paths(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise GraphExpandError("paths 必须是非空的字符串数组")
+    if len(value) > MAX_INGEST_PATHS:
+        raise GraphExpandError(f"paths 最多允许 {MAX_INGEST_PATHS} 项")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise GraphExpandError(f"paths[{index}] 必须是非空字符串")
+        path = item.strip()
+        if len(path) > MAX_INGEST_PATH_CHARS:
+            raise GraphExpandError(
+                f"paths[{index}] 超过 {MAX_INGEST_PATH_CHARS} 字符"
+            )
+        # Bound the submitted payload before deduplication so repeated values
+        # cannot bypass the aggregate work limit.
+        total_chars += len(path)
+        if total_chars > MAX_INGEST_PATH_TOTAL_CHARS:
+            raise GraphExpandError(
+                f"paths 总长度超过 {MAX_INGEST_PATH_TOTAL_CHARS} 字符"
+            )
+        if path not in seen:
+            seen.add(path)
+            normalized.append(path)
+    return normalized
 
 
 def _portable_document_health(
@@ -168,6 +202,89 @@ def _library_status(
     return status, pending_graph, pending_rag
 
 
+def _load_status_snapshot() -> dict[str, Any]:
+    if not STATUS_PATH.is_file():
+        return {}
+    try:
+        value = json.loads(STATUS_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict) or not isinstance(value.get("libraries"), list):
+        return {}
+    return value
+
+
+def _status_rows_by_id(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = snapshot.get("libraries")
+    return {
+        str(row.get("id")): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    } if isinstance(rows, list) else {}
+
+
+def _status_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "libraries": len(rows),
+        "connected": sum(bool(row.get("connected")) for row in rows),
+        "ready": sum(row.get("status") == "ready" for row in rows),
+        "empty": sum(row.get("status") == "empty" for row in rows),
+        "not_initialized": sum(
+            row.get("status") == "not_initialized" for row in rows
+        ),
+        "pending": sum(
+            row.get("status") in {"pending", "processing"} for row in rows
+        ),
+        "failed": sum(row.get("status") in {"degraded", "error"} for row in rows),
+    }
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _last_success_summary(
+    row: dict[str, Any],
+    *,
+    fallback_checked_at: str,
+) -> dict[str, Any] | None:
+    previous = row.get("last_success")
+    if isinstance(previous, dict):
+        active = _nonnegative_int(previous.get("active"))
+        total = _nonnegative_int(previous.get("total"))
+        if active is not None and total is not None:
+            return {
+                "checked_at": str(previous.get("checked_at") or fallback_checked_at),
+                "status": str(previous.get("status") or "unknown"),
+                "active": active,
+                "total": total,
+                "failed": _nonnegative_int(previous.get("failed")) or 0,
+                "processing": _nonnegative_int(previous.get("processing")) or 0,
+                "pending": _nonnegative_int(previous.get("pending")) or 0,
+            }
+    if row.get("connected") is not True:
+        return None
+    result = row.get("result")
+    sources = result.get("sources") if isinstance(result, dict) else None
+    if not isinstance(sources, dict):
+        return None
+    active = _nonnegative_int(sources.get("active"))
+    total = _nonnegative_int(sources.get("total"))
+    if active is None or total is None:
+        return None
+    return {
+        "checked_at": str(row.get("checked_at") or fallback_checked_at),
+        "status": str(row.get("status") or "unknown"),
+        "active": active,
+        "total": total,
+        "failed": _nonnegative_int(row.get("document_failures")) or 0,
+        "processing": _nonnegative_int(row.get("document_processing")) or 0,
+        "pending": _nonnegative_int(row.get("document_pending")) or 0,
+    }
+
+
 def status_libraries(
     config: GraphConfig,
     arguments: dict[str, Any],
@@ -175,6 +292,11 @@ def status_libraries(
     caller_user: str | None = None,
 ) -> dict[str, Any]:
     service = verify_service(config)
+    previous_snapshot = _load_status_snapshot()
+    previous_rows = _status_rows_by_id(previous_snapshot)
+    if previous_snapshot.get("base_url") != config.base_url:
+        previous_rows = {}
+    previous_generated_at = str(previous_snapshot.get("generated_at") or "")
     libraries = resolve_libraries(
         config,
         arguments.get("library_ids"),
@@ -231,30 +353,63 @@ def status_libraries(
                 "result": result,
             })
         except Exception as exc:
-            rows.append({
+            row = {
                 **library.public_dict(),
                 "registry_signature": library_signature(library),
                 "connected": False,
                 "status": "error",
                 "error": str(exc),
-            })
+                **error_metadata(exc),
+            }
+            previous = previous_rows.get(library.id)
+            if (
+                isinstance(previous, dict)
+                and previous.get("registry_signature") == library_signature(library)
+            ):
+                last_success = _last_success_summary(
+                    previous,
+                    fallback_checked_at=previous_generated_at,
+                )
+                if last_success is not None:
+                    row["last_success"] = last_success
+            rows.append(row)
+    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    for row in rows:
+        row["checked_at"] = checked_at
     snapshot = {
         "schema_version": 2,
         "object": "kemo.graph_sidecar_status",
-        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "generated_at": checked_at,
         "base_url": config.base_url,
-        "summary": {
-            "libraries": len(rows),
-            "connected": sum(bool(row.get("connected")) for row in rows),
-            "ready": sum(row.get("status") == "ready" for row in rows),
-            "empty": sum(row.get("status") == "empty" for row in rows),
-            "not_initialized": sum(row.get("status") == "not_initialized" for row in rows),
-            "pending": sum(row.get("status") in {"pending", "processing"} for row in rows),
-            "failed": sum(row.get("status") in {"degraded", "error"} for row in rows),
-        },
+        "summary": _status_summary(rows),
         "libraries": rows,
     }
-    atomic_json(STATUS_PATH, snapshot)
+    configured = {library.id: library for library in config.libraries}
+    persisted_by_id: dict[str, dict[str, Any]] = {}
+    for library_id, previous in previous_rows.items():
+        library = configured.get(library_id)
+        if (
+            library is None
+            or previous.get("registry_signature") != library_signature(library)
+        ):
+            continue
+        preserved = dict(previous)
+        preserved.setdefault("checked_at", previous_generated_at)
+        persisted_by_id[library_id] = preserved
+    persisted_by_id.update({str(row["id"]): row for row in rows})
+    persisted_rows = [
+        persisted_by_id[library.id]
+        for library in config.libraries
+        if library.id in persisted_by_id
+    ]
+    atomic_json(
+        STATUS_PATH,
+        {
+            **snapshot,
+            "summary": _status_summary(persisted_rows),
+            "libraries": persisted_rows,
+        },
+    )
     return {"ok": all(row.get("status") != "error" for row in rows), **snapshot}
 
 
@@ -283,7 +438,12 @@ def initialize_libraries(
             })
             rows.append({"library_id": library.id, "ok": True, "data": data})
         except Exception as exc:
-            rows.append({"library_id": library.id, "ok": False, "error": str(exc)})
+            rows.append({
+                "library_id": library.id,
+                "ok": False,
+                "error": str(exc),
+                **error_metadata(exc),
+            })
     return {"ok": all(row["ok"] for row in rows), "libraries": rows}
 
 
@@ -428,7 +588,10 @@ def ingest_library(
     if mode not in {"graph", "rag", "both"}:
         raise GraphExpandError("mode 只允许 graph、rag、both")
     library = libraries[0]
-    payload: dict[str, Any] = {"paths": None, "mode": mode}
+    payload: dict[str, Any] = {
+        "paths": _ingest_paths(arguments.get("paths")),
+        "mode": mode,
+    }
     endpoint = "/ingest"
     if library.kind == "portable":
         endpoint = "/stores/ingest"

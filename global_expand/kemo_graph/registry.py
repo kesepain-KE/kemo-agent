@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import urllib.parse
 import uuid
 from dataclasses import dataclass
@@ -197,11 +198,17 @@ def normalized_base_url(value: Any, *, allow_remote: bool) -> str:
 
 def _is_link(path: Path) -> bool:
     try:
-        if path.is_symlink():
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            return True
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if reparse_flag and getattr(metadata, "st_file_attributes", 0) & reparse_flag:
             return True
         isjunction = getattr(os.path, "isjunction", None)
         return bool(isjunction and isjunction(path))
-    except OSError:
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
         return True
 
 
@@ -214,13 +221,27 @@ def _has_link_component(path: Path) -> bool:
     return False
 
 
-def _absolute_directory(value: Any, *, field: str) -> Path:
+def _absolute_directory(
+    value: Any,
+    *,
+    field: str,
+    require_exists: bool = True,
+) -> Path:
     raw = str(value or "").strip()
     if not raw:
         raise GraphExpandError(f"{field} 不能为空")
     candidate = Path(raw)
     if not candidate.is_absolute():
         raise GraphExpandError(f"{field} 必须是绝对路径")
+    if not require_exists:
+        # Saved source roots are already normalized when first registered.  Do
+        # not follow or reject a path that has since disappeared or become a
+        # link: runtime availability checks must report it as unavailable
+        # without ever traversing the replacement target.
+        try:
+            return Path(os.path.abspath(candidate))
+        except (OSError, ValueError) as exc:
+            raise GraphExpandError(f"{field} 不是有效绝对路径：{raw}") from exc
     if _has_link_component(candidate):
         raise GraphExpandError(f"{field} 及其父路径不能包含符号链接或目录联接")
     try:
@@ -230,6 +251,25 @@ def _absolute_directory(value: Any, *, field: str) -> Path:
     if not resolved.is_dir():
         raise GraphExpandError(f"{field} 必须是已存在目录")
     return resolved
+
+
+def unavailable_source_roots(library: GraphLibrary) -> list[str]:
+    """Return registered source roots that are currently unsafe or unavailable."""
+
+    unavailable: list[str] = []
+    for root_text in library.source_roots:
+        root = Path(root_text)
+        try:
+            available = (
+                root.is_absolute()
+                and not _has_link_component(root)
+                and root.is_dir()
+            )
+        except (OSError, ValueError):
+            available = False
+        if not available:
+            unavailable.append(root_text)
+    return unavailable
 
 
 def _is_nested(left: Path, right: Path) -> bool:
@@ -245,6 +285,7 @@ def _library_from_mapping(
     *,
     index: int,
     default_users: tuple[str, ...],
+    require_source_roots_exist: bool,
 ) -> GraphLibrary:
     if not isinstance(value, dict):
         raise GraphExpandError(f"libraries[{index}] 必须是对象")
@@ -318,6 +359,7 @@ def _library_from_mapping(
         source = _absolute_directory(
             raw_source,
             field=f"libraries[{index}].source_roots[{source_index}]",
+            require_exists=require_source_roots_exist,
         )
         if source == store_root or _is_nested(source, store_root) or _is_nested(store_root, source):
             raise GraphExpandError("store_root 与 source_roots 不能相同或互相嵌套")
@@ -343,7 +385,11 @@ def _library_from_mapping(
     )
 
 
-def config_from_mapping(value: dict[str, Any]) -> GraphConfig:
+def config_from_mapping(
+    value: dict[str, Any],
+    *,
+    require_source_roots_exist: bool = True,
+) -> GraphConfig:
     if not isinstance(value, dict):
         raise GraphExpandError("知识图谱拓展配置必须是 JSON 对象")
     unknown = sorted(
@@ -376,7 +422,12 @@ def config_from_mapping(value: dict[str, Any]) -> GraphConfig:
     if len(raw_libraries) > 100:
         raise GraphExpandError("libraries 最多允许 100 项")
     libraries = tuple(
-        _library_from_mapping(item, index=index, default_users=admin_users)
+        _library_from_mapping(
+            item,
+            index=index,
+            default_users=admin_users,
+            require_source_roots_exist=require_source_roots_exist,
+        )
         for index, item in enumerate(raw_libraries)
     )
     ids = [library.id for library in libraries]
@@ -445,7 +496,32 @@ def load_config() -> GraphConfig | None:
         value = json.loads(CONFIG_PATH.read_text("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise GraphExpandError("graph_config.json 无法读取或不是有效 JSON") from exc
-    return config_from_mapping(value)
+    # Registration is strict, but an already registered source may be a
+    # temporarily disconnected drive or mount.  Keep the registry readable so
+    # an administrator can inspect and repair it; scan/sync enforce runtime
+    # availability before calculating any deletion diff.
+    return config_from_mapping(value, require_source_roots_exist=False)
+
+
+def configured_admin_users() -> tuple[str, ...]:
+    """Read only the administrator ACL from a path-invalid saved registry."""
+
+    if not CONFIG_PATH.is_file():
+        return ()
+    try:
+        value = json.loads(CONFIG_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(value, dict):
+        return ()
+    try:
+        return _user_list(
+            value.get("admin_users"),
+            field="admin_users",
+            allow_wildcard=False,
+        )
+    except GraphExpandError:
+        return ()
 
 
 def save_config(config: GraphConfig) -> None:
@@ -489,7 +565,10 @@ def configuration_status(caller_user: str | None = None) -> dict[str, Any]:
         "timeout_seconds": config.timeout_seconds,
         "ingest_timeout_seconds": config.ingest_timeout_seconds,
         "libraries": [
-            library.public_dict()
+            {
+                **library.public_dict(),
+                "unavailable_source_roots": unavailable_source_roots(library),
+            }
             for library in config.libraries
             if library.allows(caller_user)
         ],

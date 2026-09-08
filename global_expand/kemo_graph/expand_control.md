@@ -34,9 +34,12 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 | `service_default` | kemo-graph 项目自带文档库 | `id`、`display_name` |
 | `portable` | 在管理员指定绝对位置创建或挂载独立 Store | `id`、`display_name`、`store_root`，可选 `source_roots/scope/owner_id` |
 
-`store_root` 与每个 `source_root` 必须是已存在的绝对目录，不能包含符号链接或目录联接，
+注册或替换配置时，`store_root` 与每个 `source_root` 必须是已存在的绝对目录，不能包含符号链接或目录联接，
 也不能相同或互相嵌套。`store_root` 是图谱数据库位置；`source_roots` 是显式同步的原始
 文档目录，两者不是同一个概念。扫描会忽略隐藏目录和任何 `kemo-graph-storage`。
+新配置仍严格要求目录存在；已经保存的 `source_root` 暂时离线时会标为不可用。此时
+`scan` / `sync` 不计算删除、不访问 Store、也不推进同步游标，必须由管理员恢复目录或
+提交完整新配置显式移除该来源，框架不会自动删除注册项。
 
 远程服务只有在 `allow_remote=true` 时允许，并且非回环地址必须使用 HTTPS。kemo-graph
 当前没有由本拓展管理的应用层凭据，跨主机部署仍必须由操作者提供外层鉴权、TLS 和审计。
@@ -53,7 +56,8 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 
 - `status`：手动检查服务和选定库，写入最近状态快照。只有来源无 pending、活动文档无
   processing/failed 且 FAISS 健康时才是 `ready`；空库显示 `empty`，未初始化显示
-  `not_initialized`。
+  `not_initialized`。只检查部分库不会清掉其他库的缓存；单库检查失败会保留与当前注册
+  配置签名一致的最近成功统计，并同时记录本次错误与两个时间。
 - `query`：按 `library_ids` 查询，默认 `mode=hybrid`。一个 portable 库走单 Store，多个
   portable 库走 federated；内置库走 kemo-graph 默认查询端点。跨库部分失败会显式返回
   `partial=true` 和警告，不会静默伪装成全量成功。结果超过 14,000 字符时写成 artifact，
@@ -68,7 +72,9 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 - `sync`：幂等初始化后，仅导入已注册 `source_roots` 中哈希发生变化的文档。默认
   `confirm_deletions=false`，不传播源文件删除，也不自动 ingest。
 - `ingest`：每次必须选择一个 Library ID，`mode` 只允许 `graph/rag/both`。这是可能调用
-  LLM、Embedding 和 Rerank 的长耗时、高成本操作，完成后应再次手动 `status`。
+  LLM、Embedding 和 Rerank 的长耗时、高成本操作。省略 `paths` 时处理普通待整理项；
+  指定非空 Markdown 路径数组时精确整理这些文档，也可重试已标记 failed 的文档。完成后
+  应再次手动 `status`。
 - `upload`：向一个库上传 Markdown，上传后保持待整理，不隐式 ingest。
 - `import_file`：向一个库上传本地文件并转换导入。需要一个 Library ID 和经过管理员核对的
   绝对普通文件路径 `path`；拒绝符号链接、不支持的扩展名和超过 50 MB 的文件。支持 PDF、
@@ -111,6 +117,10 @@ configuration_status → 用户明确选择 Library ID 和文件 → import_file
   同一 ID 改绑 Store 或来源路径时不会复用旧文件游标。
 - 单文件导入失败时不提交该文件的新哈希，下次手动 `sync` 会继续重试；成功文件可以独立
   提交，避免整批重复转换。
+- `source_roots` 任一项不可用时，`scan` / `sync` 返回 `source_unavailable`，不会把整棵
+  来源树误判为删除，也不会推进该库游标。
+- 子目录或受支持文件发生权限、I/O 或扫描中变化时，本次扫描按不完整失败处理；不会计算
+  删除、访问 Store 或写入游标，待来源稳定后重新执行。
 - 批量删除必须检查 HTTP 200 内的 `failed/documents/failures`，仅删除成功项从游标移除。
 - ingest 必须检查 HTTP 200 内的 `result.failed/details`；`failed>0` 视为失败。
 - `409 PROCESSING` 表示库仍在构建。先用 `status/jobs` 观察，不能盲目清库、改表或并发
