@@ -308,22 +308,12 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.paths["SYNC_STATE_PATH"].parent.mkdir(parents=True, exist_ok=True)
         self.paths["SYNC_STATE_PATH"].write_text(json.dumps(state), "utf-8")
         previous_state = self.paths["SYNC_STATE_PATH"].read_bytes()
-        original_lstat = sync.os.lstat
-        original_stat_call = sync.os.stat
-
-        def fail_tracked(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
-                raise PermissionError("temporary read failure")
-            return original_lstat(path, *args, **kwargs)
-
-        def fail_tracked_stat(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
-                raise PermissionError("temporary read failure")
-            return original_stat_call(path, *args, **kwargs)
-
         with (
-            patch.object(sync.os, "lstat", side_effect=fail_tracked),
-            patch.object(sync.os, "stat", side_effect=fail_tracked_stat),
+            patch.object(
+                sync,
+                "_library_files",
+                side_effect=PermissionError("temporary read failure"),
+            ),
             patch.object(sync, "api_request") as request,
         ):
             result = sync.sync_libraries(
