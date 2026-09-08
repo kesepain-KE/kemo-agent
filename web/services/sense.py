@@ -13,6 +13,7 @@ import uuid
 
 from run.config import load_config, read_json_object, system_update_rate
 from run.context import estimate_text_tokens
+from run.extensions import ModuleRuntimeError, module_subprocess_environment
 from run.infra import hidden_subprocess_kwargs
 from run.config import INJECTION_MODE, parse_prompt_settings
 from run.config import load_prompt_source_registry
@@ -191,10 +192,15 @@ class SenseServiceMixin:
                 errors="replace",
                 timeout=120,
                 check=False,
+                env=module_subprocess_environment(target),
                 **hidden_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             raise WebServiceError(f"感知模块更新超时：{logical_name}") from exc
+        except ModuleRuntimeError as exc:
+            raise WebServiceError(
+                f"感知模块环境无效：{logical_name}（{exc}）"
+            ) from exc
         except OSError as exc:
             raise WebServiceError(f"感知模块更新入口执行失败：{logical_name}") from exc
         if completed.returncode != 0:
