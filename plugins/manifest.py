@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,16 +13,12 @@ from run.config import (
     natural_path_key,
     parse_skill_descriptor,
     read_required_text,
+    scan_markdown_structure,
 )
 
 
 class PluginManifestError(RuntimeError):
     pass
-
-
-_SECONDARY_HEADING = re.compile(r"^##\s+")
-_TOOL_HEADING = re.compile(r"^##\s+Tool\s*$", re.IGNORECASE)
-_JSON_FENCE = re.compile(r"```json\s*\n(.*?)\n```", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,22 +33,39 @@ class PluginManifest:
 
 def _tool_block(text: str, path: Path) -> dict[str, Any]:
     lines = text.splitlines()
-    headings = [index for index, line in enumerate(lines) if _TOOL_HEADING.fullmatch(line.strip())]
+    structure = scan_markdown_structure(text)
+    headings = [
+        heading.line
+        for heading in structure.headings
+        if heading.level == 2 and heading.text.casefold() == "tool"
+    ]
     if not headings:
         raise PluginManifestError(f"插件 SKILL.md 缺少 ## Tool：{path}")
     if len(headings) != 1:
         raise PluginManifestError(f"每个插件只能声明一个 ## Tool：{path}")
     start = headings[0] + 1
-    end = len(lines)
-    for index in range(start, len(lines)):
-        if _SECONDARY_HEADING.match(lines[index].strip()):
-            end = index
-            break
-    matched = _JSON_FENCE.search("\n".join(lines[start:end]))
-    if matched is None:
+    end = min(
+        (
+            heading.line
+            for heading in structure.headings
+            if heading.line >= start and heading.level == 2
+        ),
+        default=len(lines),
+    )
+    matches = [
+        fence
+        for fence in structure.fences
+        if start <= fence.start_line < end
+        and fence.info.casefold().split(maxsplit=1)[:1] == ["json"]
+    ]
+    if not matches:
         raise PluginManifestError(f"插件 ## Tool 缺少 JSON 代码块：{path}")
+    if len(matches) != 1:
+        raise PluginManifestError(f"插件 ## Tool 只能包含一个 JSON 代码块：{path}")
+    if not matches[0].closed:
+        raise PluginManifestError(f"插件 ## Tool 的 JSON 代码块未闭合：{path}")
     try:
-        raw = json.loads(matched.group(1))
+        raw = json.loads(matches[0].content)
     except json.JSONDecodeError as exc:
         raise PluginManifestError(f"插件工具 JSON 无效：{path}（{exc}）") from exc
     if not isinstance(raw, dict):

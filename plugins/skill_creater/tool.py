@@ -9,14 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from run.memory import contains_sensitive_credential
-from run.config import validate_user_name
+from run.config import scan_markdown_structure, validate_user_name
 
 
 _INVALID_NAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$")
-_SECONDARY_HEADING_RE = re.compile(r"^##\s+")
-_TOOL_HEADING_RE = re.compile(r"^##\s+Tool\s*$", re.IGNORECASE)
-_JSON_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.IGNORECASE | re.DOTALL)
 _SCOPES = frozenset({"agent_create", "user_create", "shared"})
 _ACTIONS = frozenset({"list", "get", "validate", "create", "update", "delete"})
 _MAX_CONTENT_CHARS = 500_000
@@ -107,31 +103,42 @@ def _read_text(path: Path) -> str:
 def _validate_content(content: str) -> list[str]:
     errors: list[str] = []
     lines = content.splitlines()
-    non_empty = [line.strip() for line in lines if line.strip()]
-    title_lines = [line.strip() for line in lines if _TITLE_RE.fullmatch(line.strip())]
-    if not non_empty or not _TITLE_RE.fullmatch(non_empty[0]):
-        errors.append("第一个非空行必须是一级标题（# 技能名）")
-    if len(title_lines) > 1:
-        errors.append("SKILL.md 只能包含一个一级标题")
+    structure = scan_markdown_structure(content)
+    if not any(heading.level == 1 for heading in structure.headings):
+        errors.append("SKILL.md 必须包含一级标题（# 技能名）")
 
-    tool_headings = [index for index, line in enumerate(lines) if _TOOL_HEADING_RE.fullmatch(line.strip())]
+    tool_headings = [
+        heading.line
+        for heading in structure.headings
+        if heading.level == 2 and heading.text.casefold() == "tool"
+    ]
     if len(tool_headings) > 1:
         errors.append("SKILL.md 只能包含一个 ## Tool")
     elif tool_headings:
         start = tool_headings[0] + 1
-        end = len(lines)
-        for index in range(start, len(lines)):
-            if _SECONDARY_HEADING_RE.match(lines[index].strip()):
-                end = index
-                break
-        matches = list(_JSON_FENCE_RE.finditer("\n".join(lines[start:end])))
+        end = min(
+            (
+                heading.line
+                for heading in structure.headings
+                if heading.line >= start and heading.level == 2
+            ),
+            default=len(lines),
+        )
+        matches = [
+            fence
+            for fence in structure.fences
+            if start <= fence.start_line < end
+            and fence.info.casefold().split(maxsplit=1)[:1] == ["json"]
+        ]
         if not matches:
             errors.append("## Tool 下缺少 JSON 代码块")
         elif len(matches) > 1:
             errors.append("## Tool 下只能包含一个 JSON 代码块")
+        elif not matches[0].closed:
+            errors.append("## Tool 下的 JSON 代码块未闭合")
         else:
             try:
-                tool_schema = json.loads(matches[0].group(1))
+                tool_schema = json.loads(matches[0].content)
             except json.JSONDecodeError as exc:
                 errors.append(f"Tool JSON 无效：{exc}")
             else:
@@ -153,11 +160,13 @@ def _run_list(root: Path, user: str, scope: str) -> dict[str, Any]:
             continue
         title = path.name
         try:
-            for line in _read_text(skill_file).splitlines():
-                matched = _TITLE_RE.fullmatch(line.strip())
-                if matched:
-                    title = matched.group(1).strip()
-                    break
+            structure = scan_markdown_structure(_read_text(skill_file))
+            heading = next(
+                (item for item in structure.headings if item.level == 1),
+                None,
+            )
+            if heading is not None:
+                title = heading.text
         except OSError:
             pass
         skills.append({"name": path.name, "title": title})
