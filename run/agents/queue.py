@@ -179,7 +179,10 @@ class AgentScheduler:
         excess = len(terminal) - _MAX_RETAINED_TERMINAL_TASKS
         if excess <= 0:
             return
-        terminal.sort(key=lambda task: (task.finished_at or task.created_at, task.id))
+        # Python's sort is stable, so equal clock values retain the insertion
+        # order from _tasks.  Do not use the random task id as a tie-breaker:
+        # Windows clocks can assign the same timestamp to many fast tasks.
+        terminal.sort(key=lambda task: task.finished_at or task.created_at)
         for task in terminal[:excess]:
             self._tasks.pop(task.id, None)
 

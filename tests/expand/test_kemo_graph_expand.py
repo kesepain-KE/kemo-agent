@@ -187,7 +187,10 @@ class KemoGraphExpandTests(unittest.TestCase):
         graph.save_config(config)
 
         def reports_source_as_link(path: Path) -> bool:
-            return Path(path) == self.source.resolve()
+            try:
+                return os.path.samefile(path, self.source)
+            except (OSError, ValueError):
+                return False
 
         with patch.object(
             registry,
@@ -310,14 +313,33 @@ class KemoGraphExpandTests(unittest.TestCase):
         previous_state = self.paths["SYNC_STATE_PATH"].read_bytes()
         original_lstat = sync.os.lstat
         original_stat_call = sync.os.stat
+        source_metadata = original_lstat(source_file)
+        source_identity = (
+            int(getattr(source_metadata, "st_dev", 0) or 0),
+            int(getattr(source_metadata, "st_ino", 0) or 0),
+        )
+        source_resolved = source_file.resolve(strict=True)
+
+        def is_tracked(path: Path) -> bool:
+            try:
+                metadata = original_lstat(path)
+                current_identity = (
+                    int(getattr(metadata, "st_dev", 0) or 0),
+                    int(getattr(metadata, "st_ino", 0) or 0),
+                )
+                if all(source_identity) and all(current_identity):
+                    return current_identity == source_identity
+                return Path(path).resolve(strict=True) == source_resolved
+            except (OSError, ValueError):
+                return False
 
         def fail_tracked(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
+            if is_tracked(path):
                 raise PermissionError("temporary read failure")
             return original_lstat(path, *args, **kwargs)
 
         def fail_tracked_stat(path: Path, *args, **kwargs):
-            if Path(path) == source_file:
+            if is_tracked(path):
                 raise PermissionError("temporary read failure")
             return original_stat_call(path, *args, **kwargs)
 
