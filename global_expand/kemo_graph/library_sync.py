@@ -129,7 +129,7 @@ def _metadata_is_link(path: Path, metadata: os.stat_result) -> bool:
 
 def _safe_lstat(path: Path, *, expected_kind: str | None = None) -> os.stat_result:
     try:
-        metadata = path.lstat()
+        metadata = os.lstat(path)
     except (OSError, ValueError) as exc:
         raise _SnapshotInvalidated(f"扫描路径不存在或无法访问：{path}") from exc
     if _metadata_is_link(path, metadata):
