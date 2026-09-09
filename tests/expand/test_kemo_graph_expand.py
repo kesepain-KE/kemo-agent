@@ -313,15 +313,23 @@ class KemoGraphExpandTests(unittest.TestCase):
         previous_state = self.paths["SYNC_STATE_PATH"].read_bytes()
         original_lstat = sync.os.lstat
         original_stat_call = sync.os.stat
+        source_metadata = original_lstat(source_file)
         source_identity = (
-            original_lstat(source_file).st_dev,
-            original_lstat(source_file).st_ino,
+            int(getattr(source_metadata, "st_dev", 0) or 0),
+            int(getattr(source_metadata, "st_ino", 0) or 0),
         )
+        source_resolved = source_file.resolve(strict=True)
 
         def is_tracked(path: Path) -> bool:
             try:
                 metadata = original_lstat(path)
-                return (metadata.st_dev, metadata.st_ino) == source_identity
+                current_identity = (
+                    int(getattr(metadata, "st_dev", 0) or 0),
+                    int(getattr(metadata, "st_ino", 0) or 0),
+                )
+                if all(source_identity) and all(current_identity):
+                    return current_identity == source_identity
+                return Path(path).resolve(strict=True) == source_resolved
             except (OSError, ValueError):
                 return False
 
