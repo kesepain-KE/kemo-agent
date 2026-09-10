@@ -105,7 +105,14 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Chat Completions 兼容链路
 
-Chat Bridge 支持现代 `message.tool_calls[]` 和旧式单个 `message.function_call`，流式参数按调用索引拼接。参数规则如下：
+Chat Bridge 支持现代 `message.tool_calls[]` 和旧式单个 `message.function_call`。流式聚合遵守以下身份与参数规则：
+
+- `tool_calls[].id` 与 `function.name` 只在首帧赋值：兼容服务每帧重复下发完整 `id`/`name` 不会被拼成 `call_xxxcall_xxx`；官方把长名拆成多帧（如 `history_` + `search`）时由 `arguments` 分片拼接承担语义。
+- `tool_calls[].index` 允许 null、字符串或负数等宽松取值（`_safe_call_index`），非法时回退到帧内枚举位置，不再使整条流中断。
+- `function.arguments` 通常是字符串分片，按序拼接；部分兼容服务直接下发完整 JSON 对象，此时整体采纳并忽略重复对象（`_merge_tool_arguments`）。
+- 流结束发布 `tool_call_start` 时透传 `raw_arguments` 原文，供多轮工具循环按原文回放，避免重序列化损失。
+
+参数规则如下：
 
 - JSON 对象：可执行；
 - 缺省或空参数：兼容为 `{}`；
@@ -127,6 +134,39 @@ Chat Bridge 支持现代 `message.tool_calls[]` 和旧式单个 `message.functio
 普通兼容 Provider 仍可实时转发文本和完整工具事件。官方 Chat HTTP 传输会把已知 `finish_reason` 附在工具事件上，使截断调用在发布前即可被拦截；即使第三方内部适配器到最后才给出不完整终态，对话运行时也会在实际执行工具前收到终态错误并停止。
 
 标准 SSE 以 `[DONE]` 收束。为兼容部分实现，已经出现明确 `finish_reason` 后的干净 EOF 也可以结束；没有两者的 EOF、半个 JSON 帧或连接异常仍是 `stream_interrupted`。
+
+#### Chat 请求净化
+
+Chat 是最小兼容传输，不向上游强制注入非标准字段：
+
+- 不注入 `reasoning_effort` / `reasoning_enabled`（多家兼容服务会因未知字段拒绝请求）；chat 模式的推理能力声明为 `supported=False`（`chat_bridge.py`），运行时按 `chat_reasoning_disabled` 跳过推理档位选择；
+- 不注入 `stream_options.include_usage`：usage 依赖上游自愿返回，缺失时按输出文本估算 completion tokens；
+- 工具终态携带的 `finish_reason` 附着在工具事件上，截断调用在发布前即可被拦截。
+
+#### Chat 有界输出前网络恢复
+
+Chat 传输层执行严格的 2 次尝试预算（`_MAX_CHAT_ATTEMPTS=2`），重试只发生在**零输出**边界：
+
+- 可重试：建连失败、读取超时、429、5xx；等待采用小随机退避，`Retry-After` 存在时采用（上限 10 秒）；
+- 不可重试：401、403、409、400（400 仅在错误信息明确表示"tools 不受支持"时进入工具降级路径，见下）；
+- 已产出任何文本、思考或工具分片后中断（`stream_interrupted`），一律不重放——用户已见内容不得重复，已缓冲但未发布的工具分片也不构成重试障碍；
+- 重试预算耗尽后错误被标记 `retryable=False`（`retryable_declared=True`），防止外层运行时把同一失败放大成额外的重试循环。
+
+#### 工具不支持自动降级
+
+上游 400 且错误信息匹配"tools/function calling 不受支持"类短语（`_TOOLS_UNSUPPORTED_PHRASES`）时，Chat 传输层剥离 `tools`、`tool_choice`、`parallel_tool_calls`、`functions`、`function_call` 全部工具字段重试一次：
+
+- 降级只发生一次；第二次请求再失败即按最终错误结束，不会反复降级或循环重试；
+- 普通 400（模型名错误、参数 schema 错误等）不触发降级，立即失败；
+- 降级请求与原请求的 `messages` 和 `model` 完全一致，只有工具字段被移除。
+
+#### 流式 JSON 响应降级
+
+部分兼容服务对 `stream=true` 请求返回 `application/json` 而非 SSE。Chat 传输层按 Content-Type 识别后直接按非流式响应解析并合成事件序列（`response_format=json_fallback`），不重发请求。
+
+#### Chat 取消边界（当前限制）
+
+`cancel_event` 契约已在传输层就绪，但主运行时对 Chat 模式尚未传递该参数，流式读取期间的取消只能等待读取超时。这是已知边界，不是缺陷回退。
 
 ### Kemo 原生链路
 
@@ -186,7 +226,7 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 相关测试位于：
 
 - `tests/config/test_config_provider.py`：真实 Chat HTTP/SSE 拼接、截断参数、干净 EOF；
-- `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播；
+- `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播，以及 Chat 传输层重试矩阵（零输出重试、已输出不重放、429 Retry-After、401/403/409/400 零重试、工具降级一次性、JSON 响应降级、id/name 幂等聚合、完整 JSON 对象参数、截断工具不可执行）；
 - `tests/cron/test_task_plan.py`：非成功主运行终态与暂停原因；
 - `tests/core/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。
 

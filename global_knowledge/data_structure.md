@@ -73,7 +73,7 @@ kemo-agent/
 |------|------|
 | `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同 |
 | `builtin-expansions.md` | 内置 Kemo 网关状态拓展和 Kemo Graph 外挂文档站边界 |
-| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、SSE 续传和取消边界 |
+| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、SSE 续传和取消边界；含 Chat 兼容传输的宽容聚合、请求净化与有界输出前重试 |
 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
 | `storage-and-persistence.md` | 历史、记忆、运行状态、日志和高频写盘规则 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |

@@ -299,7 +299,7 @@ Kemo Graph 不属于用户配置合同。是否能看到目录摘要由普通 `e
 | `api_key_env` | string | 环境变量名，kemo 默认 `KEMO_API_KEY`，chat 默认 `OPENAI_API_KEY` |
 | `model` | string | 主对话模型名 |
 | `stream` | bool | 是否流式输出，默认 true |
-| `reasoning_effort` | string | 保存的逻辑思考档位。`chat` 协议固定使用 `minimal`、`low`、`medium`、`high`、`max`，缺失、`none` 或非法值回退为 `medium`；`kemo` 协议完全采用当前模型能力声明中有序的 `reasoning.efforts`，不限制档位名称或数量，并永久过滤表示关闭思考的 `none`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
+| `reasoning_effort` | string | 保存的逻辑思考档位。`chat` 模式下仅为保存值，运行时不向上游提交 reasoning 字段（chat 传输声明推理能力为不支持）；`kemo` 协议完全采用当前模型能力声明中有序的 `reasoning.efforts`，不限制档位名称或数量，并永久过滤表示关闭思考的 `none`。已保存值失效时按 `medium` → 声明首项回退；模型不支持推理或能力不可用且无缓存时，运行请求省略 `reasoning` |
 | `input_modalities` | string[] | 主模型已确认支持的输入模态；必须含 `text`。Chat 只可增加 `image`；Kemo 还可增加 `audio`、`video`、`file` |
 
 Provider 单次请求超时默认 120 秒，可通过用户配置 `provider.timeout` 覆盖（`chat` 与 `kemo` 模式一致）；`headers` 配置项会被忽略，不再接受。
@@ -680,7 +680,7 @@ Kemo Graph 不改变上述顺序、字符预算或本地来源选择：知识索
 
 ### Provider 类型
 
-- `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。
+- `chat`：通过正式 Chat Bridge 访问 `/v1/chat/completions`。保证 Kemo 内部文本/工具循环，并支持标准 `image_url` 图片输入；不提供音视频、媒体输出、Provider State 或 SSE 恢复。作为最小兼容传输，它内置请求净化（不注入 `reasoning_effort`/`reasoning_enabled`/`stream_options`）、宽容的流式工具聚合（重复 id/name 幂等、宽松 index、完整 JSON 对象参数）、2 次预算的零输出网络恢复、工具不支持时一次性降级和纯 JSON 响应自动解析；完整行为见 `global_knowledge/provider-reliability.md` 的 Chat 章节。
 - `kemo`：通过原生 Kemo Provider，提供 Asset、最大程度多模态、统一 Usage、Provider State、查询取消和流恢复。LLM、Embedding 和 Rerank 的瞬时建连/读取错误，以及统一终态前断流，最多进行 3 次网络尝试并始终复用同一正文与 `request_id`；SSE 在线路上只通过最后完整事件的 `Last-Event-ID` 续传，本地延续 `sequence` 校验并拒绝拼接不同 `response_id`。
 - 两种模式在一次 Run 开始前固定；任何错误都不得触发跨协议自动回退。
 - Chat Bridge 同时解析现代 `tool_calls` 和旧式单个 `function_call`。标准 `[DONE]` 仍受支持；兼容服务在已经给出明确 `finish_reason` 后干净关闭 HTTP 流也视为正常结束，但无终态标记的 EOF 仍是传输中断。
