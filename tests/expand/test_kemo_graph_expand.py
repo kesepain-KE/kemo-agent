@@ -187,7 +187,10 @@ class KemoGraphExpandTests(unittest.TestCase):
         graph.save_config(config)
 
         def reports_source_as_link(path: Path) -> bool:
-            return Path(path) == self.source.resolve()
+            try:
+                return os.path.samefile(path, self.source)
+            except (OSError, ValueError):
+                return False
 
         with patch.object(
             registry,
@@ -308,12 +311,41 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.paths["SYNC_STATE_PATH"].parent.mkdir(parents=True, exist_ok=True)
         self.paths["SYNC_STATE_PATH"].write_text(json.dumps(state), "utf-8")
         previous_state = self.paths["SYNC_STATE_PATH"].read_bytes()
+        original_lstat = sync.os.lstat
+        original_stat_call = sync.os.stat
+        source_metadata = original_lstat(source_file)
+        source_identity = (
+            int(getattr(source_metadata, "st_dev", 0) or 0),
+            int(getattr(source_metadata, "st_ino", 0) or 0),
+        )
+        source_resolved = source_file.resolve(strict=True)
+
+        def is_tracked(path: Path) -> bool:
+            try:
+                metadata = original_lstat(path)
+                current_identity = (
+                    int(getattr(metadata, "st_dev", 0) or 0),
+                    int(getattr(metadata, "st_ino", 0) or 0),
+                )
+                if all(source_identity) and all(current_identity):
+                    return current_identity == source_identity
+                return Path(path).resolve(strict=True) == source_resolved
+            except (OSError, ValueError):
+                return False
+
+        def fail_tracked(path: Path, *args, **kwargs):
+            if is_tracked(path):
+                raise PermissionError("temporary read failure")
+            return original_lstat(path, *args, **kwargs)
+
+        def fail_tracked_stat(path: Path, *args, **kwargs):
+            if is_tracked(path):
+                raise PermissionError("temporary read failure")
+            return original_stat_call(path, *args, **kwargs)
+
         with (
-            patch.object(
-                sync,
-                "_library_files",
-                side_effect=PermissionError("temporary read failure"),
-            ),
+            patch.object(sync.os, "lstat", side_effect=fail_tracked),
+            patch.object(sync.os, "stat", side_effect=fail_tracked_stat),
             patch.object(sync, "api_request") as request,
         ):
             result = sync.sync_libraries(
