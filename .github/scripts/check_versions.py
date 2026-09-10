@@ -90,6 +90,26 @@ def main(argv: list[str] | None = None) -> int:
     if f'"version": "{version}"' not in version_guide:
         errors.append(f"版本与更新模块文档未展示根版本 {version}")
 
+    agents_manual = (ROOT / "agents.md").read_text(encoding="utf-8")
+    manual_version = re.search(r"当前稳定版本：`kemo-agent ([0-9][^`]+)`", agents_manual)
+    if not manual_version:
+        errors.append("agents.md 运行手册缺少「当前稳定版本：`kemo-agent x.y.z`」标注")
+    elif manual_version.group(1) != version:
+        errors.append(
+            "agents.md 运行手册稳定版本不一致："
+            f"{manual_version.group(1)!r} != {version!r}"
+        )
+    else:
+        summary_span = agents_manual[manual_version.end():]
+        next_heading = summary_span.find("\n## ")
+        summary = summary_span[: next_heading if next_heading >= 0 else len(summary_span)]
+        highlights = {
+            "1.2.7": "Chat 兼容传输链路",
+        }
+        marker = highlights.get(version)
+        if marker and marker not in summary:
+            errors.append(f"agents.md 运行手册版本摘要未包含 {version} 的重点「{marker}」")
+
     tag = args.tag.strip()
     if not tag and os.getenv("GITHUB_REF_TYPE") == "tag":
         tag = os.getenv("GITHUB_REF_NAME", "").strip()
