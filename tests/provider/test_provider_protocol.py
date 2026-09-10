@@ -22,7 +22,7 @@ from provider.adapters.compat import (
     kemo_response_to_chat,
 )
 from provider.adapters.gateway import KemoGatewayAdapter
-from provider.openai_chat import _error_detail
+from provider.openai_chat import OpenAIChatTransport, _error_detail
 from provider.protocol.diagnostics import (
     incomplete_retry_metadata,
     safe_provider_body,
@@ -141,9 +141,19 @@ def make_response(
 
 
 class FakeHTTPResponse:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        content_type: str | None = None,
+    ) -> None:
         self._stream = io.BytesIO(payload)
         self.closed = False
+        self.headers = (
+            {"Content-Type": content_type}
+            if content_type is not None
+            else {}
+        )
 
     def read(self) -> bytes:
         return self._stream.read()
@@ -1536,6 +1546,366 @@ class UnifiedProtocolTests(unittest.TestCase):
             )
             self.assertEqual(call.arguments, {})
             self.assertEqual(call.parse_error["kind"], expected_kind)
+
+    @staticmethod
+    def _chat_transport() -> OpenAIChatTransport:
+        return OpenAIChatTransport(
+            {
+                "base_url": "https://chat.test/v1",
+                "api_key": "offline-test-key",
+                "model": "gateway/test",
+            }
+        )
+
+    @staticmethod
+    def _chat_request(*, tools: bool = False) -> ChatRequest:
+        return ChatRequest(
+            model="gateway/test",
+            messages=[{"role": "user", "content": "hello"}],
+            stream=True,
+            tools=(
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ]
+                if tools
+                else None
+            ),
+            extra={
+                "reasoning_effort": "medium",
+                "reasoning_enabled": True,
+            },
+        )
+
+    def test_chat_transport_never_forces_reasoning_fields(self) -> None:
+        captured: list[dict[str, object]] = []
+        response = {
+            "id": "chat-text",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {"content": "hello"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            captured.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse(json.dumps(response).encode("utf-8"))
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            result = self._chat_transport().chat(self._chat_request())
+
+        self.assertEqual(result.text, "hello")
+        self.assertEqual(len(captured), 1)
+        self.assertNotIn("reasoning_effort", captured[0])
+        self.assertNotIn("reasoning_enabled", captured[0])
+
+    def test_chat_stream_accepts_explicit_json_response_without_resending(self) -> None:
+        captured: list[dict[str, object]] = []
+        response = {
+            "id": "chat-json-fallback",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "brief thought",
+                        "content": "plain JSON reply",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "total_tokens": 7,
+            },
+        }
+
+        def open_request(request, **_kwargs):
+            captured.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse(
+                json.dumps(response).encode("utf-8"),
+                content_type="application/json; charset=utf-8",
+            )
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            events = list(self._chat_transport().chat_stream(self._chat_request()))
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(
+            [event.type for event in events],
+            ["reasoning_delta", "text_delta", "usage", "done"],
+        )
+        self.assertEqual(events[1].content, "plain JSON reply")
+        self.assertEqual(events[-1].metadata["finish_reason"], "stop")
+        self.assertEqual(events[-1].metadata["response_format"], "json_fallback")
+
+    def test_chat_stream_keeps_standard_sse_and_terminal_eof_boundaries(self) -> None:
+        def frame(content: str, finish_reason: str | None = None) -> str:
+            choice: dict[str, object] = {"delta": {"content": content}}
+            if finish_reason is not None:
+                choice["finish_reason"] = finish_reason
+            return "data: " + json.dumps({"choices": [choice]}) + "\n\n"
+
+        standard = (frame("hel") + frame("lo", "stop") + "data: [DONE]\n\n").encode()
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(
+                standard,
+                content_type="text/event-stream",
+            ),
+        ):
+            standard_events = list(
+                self._chat_transport().chat_stream(self._chat_request())
+            )
+        self.assertEqual(
+            "".join(event.content for event in standard_events if event.type == "text_delta"),
+            "hello",
+        )
+        self.assertTrue(standard_events[-1].metadata["done_marker_received"])
+
+        clean_eof = frame("complete", "stop").encode()
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(
+                clean_eof,
+                content_type="text/event-stream",
+            ),
+        ):
+            eof_events = list(self._chat_transport().chat_stream(self._chat_request()))
+        self.assertEqual(eof_events[-1].type, "done")
+        self.assertFalse(eof_events[-1].metadata["done_marker_received"])
+
+        interrupted = frame("partial").encode()
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(
+                interrupted,
+                content_type="text/event-stream",
+            ),
+        ):
+            with self.assertRaises(ProviderError) as caught:
+                list(self._chat_transport().chat_stream(self._chat_request()))
+        self.assertEqual(caught.exception.category, "stream_interrupted")
+
+    def test_chat_stream_tool_fragments_are_idempotent_and_accept_dict_arguments(
+        self,
+    ) -> None:
+        frames = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": {"query": "hello"},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": {"query": "hello"},
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        payload = "".join(
+            f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+            for frame in frames
+        ) + "data: [DONE]\n\n"
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(
+                payload.encode("utf-8"),
+                content_type="text/event-stream",
+            ),
+        ):
+            events = list(
+                self._chat_transport().chat_stream(self._chat_request(tools=True))
+            )
+
+        calls = [event for event in events if event.type == "tool_call_start"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].tool_call_id, "call_1")
+        self.assertEqual(calls[0].tool_name, "search")
+        self.assertEqual(calls[0].arguments, {"query": "hello"})
+        self.assertEqual(calls[0].metadata["raw_arguments"], '{"query": "hello"}')
+
+    def test_chat_stream_truncated_tool_is_incomplete_and_never_executable(self) -> None:
+        frame = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_partial",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": '{"query":"unfinished',
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        }
+        payload = f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(
+                payload,
+                content_type="text/event-stream",
+            ),
+        ):
+            legacy_events = list(
+                self._chat_transport().chat_stream(self._chat_request(tools=True))
+            )
+        converted = list(
+            chat_stream_to_protocol(legacy_events, make_request(stream=True))
+        )
+        self.assertFalse(
+            any(
+                event.type == StreamEventType.TOOL_CALL_COMPLETED
+                for event in converted
+            )
+        )
+        self.assertEqual(converted[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
+
+    def test_chat_tools_unsupported_retries_once_without_tool_fields(self) -> None:
+        requests: list[dict[str, object]] = []
+        success = {
+            "id": "chat-fallback",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {"content": "plain text fallback"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            if len(requests) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    400,
+                    "bad request",
+                    hdrs={},
+                    fp=io.BytesIO(
+                        b'{"error":{"message":"unknown parameter: tools"}}'
+                    ),
+                )
+            return FakeHTTPResponse(
+                json.dumps(success).encode("utf-8"),
+                content_type="application/json",
+            )
+
+        request = self._chat_request(tools=True)
+        request.extra.update(
+            {
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+            }
+        )
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            events = list(self._chat_transport().chat_stream(request))
+
+        self.assertEqual(len(requests), 2)
+        self.assertIn("tools", requests[0])
+        for key in ("tools", "tool_choice", "parallel_tool_calls"):
+            self.assertNotIn(key, requests[1])
+        self.assertEqual(requests[0]["messages"], requests[1]["messages"])
+        self.assertEqual(requests[0]["model"], requests[1]["model"])
+        self.assertEqual(
+            [event.content for event in events if event.type == "text_delta"],
+            ["plain text fallback"],
+        )
+        self.assertEqual(len([event for event in events if event.type == "done"]), 1)
+
+    def test_chat_plain_http_400_does_not_drop_tools_or_retry(self) -> None:
+        for message in (
+            "invalid model",
+            "tools[0] parameters are invalid",
+            "schema type in tools[0] is unsupported",
+        ):
+            with self.subTest(message=message):
+                requests: list[dict[str, object]] = []
+
+                def open_request(request, **_kwargs):
+                    requests.append(json.loads(request.data.decode("utf-8")))
+                    body = json.dumps({"error": {"message": message}}).encode()
+                    raise urllib.error.HTTPError(
+                        request.full_url,
+                        400,
+                        "bad request",
+                        hdrs={},
+                        fp=io.BytesIO(body),
+                    )
+
+                with patch("urllib.request.urlopen", side_effect=open_request):
+                    with self.assertRaises(ProviderError):
+                        list(
+                            self._chat_transport().chat_stream(
+                                self._chat_request(tools=True)
+                            )
+                        )
+                self.assertEqual(len(requests), 1)
+
+    def test_chat_tools_fallback_is_never_repeated(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                hdrs={},
+                fp=io.BytesIO(
+                    b'{"error":{"message":"function calling is not supported"}}'
+                ),
+            )
+
+        request = self._chat_request(tools=True)
+        request.stream = False
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError):
+                self._chat_transport().chat(request)
+
+        self.assertEqual(len(requests), 2)
+        self.assertIn("tools", requests[0])
+        self.assertNotIn("tools", requests[1])
 
 
 if __name__ == "__main__":

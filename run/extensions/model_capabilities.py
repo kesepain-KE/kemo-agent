@@ -190,7 +190,7 @@ def resolve_reasoning_selection(
     provider_type = str(runtime_provider.get("type") or "").strip().casefold()
     configured = runtime_provider.get("reasoning_effort")
     if provider_type == "chat":
-        return ReasoningSelection(True, str(configured or "medium"), "chat_legacy")
+        return ReasoningSelection(False, None, "chat_reasoning_disabled")
     if provider_type != "kemo":
         return ReasoningSelection(False, None, "unsupported_provider")
     lookup = lookup_model_capabilities(

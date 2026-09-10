@@ -30,6 +30,28 @@ from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_TOOL_PAYLOAD_KEYS = frozenset({
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "functions",
+    "function_call",
+})
+_TOOLS_UNSUPPORTED_PHRASES = (
+    "tools are not supported",
+    "tools is not supported",
+    "tools not supported",
+    "tool calling is not supported",
+    "tool calling not supported",
+    "function calling is not supported",
+    "function calling not supported",
+    "unsupported parameter: tools",
+    "unknown parameter: tools",
+    "unrecognized parameter: tools",
+    "unknown argument: tools",
+    "unrecognized request argument: tools",
+    "unrecognized request argument supplied: tools",
+)
 
 
 def _error_detail(data: Any, fallback: str) -> tuple[str, str]:
@@ -68,6 +90,78 @@ def _parse_arguments(
 ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
     parsed = parse_tool_arguments(value)
     return parsed.arguments, parsed.arguments_raw, parsed.parse_error
+
+
+def _safe_call_index(value: Any, fallback: int) -> int:
+    if isinstance(value, (bool, float)):
+        return fallback
+    if isinstance(value, str) and not value.strip().lstrip("-").isdigit():
+        return fallback
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return index if index >= 0 else fallback
+
+
+def _merge_tool_arguments(part: dict[str, Any], value: Any) -> None:
+    """Merge standard string fragments and tolerate one complete JSON object."""
+
+    if value is None:
+        return
+    already_seen = bool(part.get("arguments_seen"))
+    part["arguments_seen"] = True
+    if isinstance(value, dict):
+        # A dict from a compatible endpoint is a complete argument object, not
+        # a textual delta.  Keep the first object if the service repeats it.
+        if not already_seen:
+            part["arguments"] = json.dumps(value, ensure_ascii=False)
+            part["arguments_object"] = True
+        return
+    if part.get("arguments_object"):
+        return
+    fragment = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=False, default=str)
+    )
+    part["arguments"] = str(part.get("arguments") or "") + fragment
+
+
+def _tools_are_explicitly_unsupported(message: str) -> bool:
+    normalized = str(message or "").strip().casefold()
+    normalized = normalized.translate(
+        str.maketrans({"'": "", '"': "", "`": ""})
+    )
+    return any(phrase in normalized for phrase in _TOOLS_UNSUPPORTED_PHRASES)
+
+
+def _response_content_type(response: Any) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        get_content_type = getattr(headers, "get_content_type", None)
+        if callable(get_content_type):
+            try:
+                return str(get_content_type() or "").strip().casefold()
+            except (AttributeError, TypeError, ValueError):
+                pass
+        get_header = getattr(headers, "get", None)
+        if callable(get_header):
+            try:
+                value = get_header("Content-Type")
+                if value:
+                    return str(value).split(";", 1)[0].strip().casefold()
+            except (AttributeError, TypeError, ValueError):
+                pass
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        try:
+            value = getheader("Content-Type")
+            if value:
+                return str(value).split(";", 1)[0].strip().casefold()
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return ""
 
 
 def _estimate_tokens(text: str) -> int:
@@ -120,6 +214,8 @@ class OpenAIChatTransport:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 body = raw.decode("utf-8", errors="replace")[:1000]
             message, category = _error_detail(body, f"HTTP {exc.code}")
+            if exc.code == 400 and _tools_are_explicitly_unsupported(message):
+                category = "tools_unsupported"
             safe_body = safe_provider_body(body)
             if exc.code in {401, 403}:
                 raise ProviderAuthError(
@@ -154,12 +250,46 @@ class OpenAIChatTransport:
         payload = request.to_payload()
         payload["model"] = request.model or self.model
         payload["stream"] = stream
+        # Chat is a minimum-compatibility transport.  There is currently no
+        # reliable opt-in that distinguishes user intent from the historical
+        # default effort, so vendor reasoning fields are never forced.
+        payload.pop("reasoning_effort", None)
+        payload.pop("reasoning_enabled", None)
         if stream:
             options = payload.get("stream_options")
             if not isinstance(options, dict):
                 options = {}
             payload["stream_options"] = {**options, "include_usage": True}
         return payload
+
+    def _request(
+        self,
+        payload: dict[str, Any],
+        *,
+        stream: bool,
+    ) -> urllib.request.Request:
+        return urllib.request.Request(
+            self._url(),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=self._headers(stream=stream),
+            method="POST",
+        )
+
+    def _open_payload(self, payload: dict[str, Any], *, stream: bool):
+        current = dict(payload)
+        try:
+            return self._open(self._request(current, stream=stream))
+        except ProviderError as exc:
+            if exc.category != "tools_unsupported" or not current.get("tools"):
+                raise
+        # The first request failed before any model output was available.
+        # Retry exactly once as plain text and let any second failure surface.
+        fallback = {
+            key: value
+            for key, value in current.items()
+            if key not in _TOOL_PAYLOAD_KEYS
+        }
+        return self._open(self._request(fallback, stream=stream))
 
     def _usage(self, raw: Any, request: ChatRequest, output: str) -> Usage:
         if isinstance(raw, dict) and raw:
@@ -191,13 +321,56 @@ class OpenAIChatTransport:
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         payload = self._payload(request, stream=False)
-        raw_request = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        http_request = urllib.request.Request(
-            self._url(), data=raw_request, headers=self._headers(stream=False), method="POST"
-        )
-        with self._open(http_request) as response:
+        with self._open_payload(payload, stream=False) as response:
             data = _decode_json(response.read(), "Chat Completions")
         return self._response(data, request)
+
+    def _response_events(
+        self,
+        response: ChatResponse,
+        *,
+        done_marker_received: bool,
+        response_format: str,
+    ) -> Iterable[RunEvent]:
+        if response.reasoning:
+            yield RunEvent(type="reasoning_delta", content=response.reasoning)
+        if response.text:
+            yield RunEvent(type="text_delta", content=response.text)
+        for index, call in enumerate(response.tool_calls):
+            metadata: dict[str, Any] = {
+                "index": index,
+                "parse_error": (
+                    safe_parse_error(call.parse_error) if call.parse_error else None
+                ),
+                "arguments_diagnostic": (
+                    tool_arguments_diagnostic(call.arguments_raw)
+                    if call.parse_error
+                    else None
+                ),
+                "finish_reason": response.finish_reason,
+            }
+            if call.arguments_raw is not None:
+                metadata["raw_arguments"] = call.arguments_raw
+            yield RunEvent(
+                type="tool_call_start",
+                tool_call_id=call.id or f"tool-call-{index}",
+                tool_name=call.name,
+                arguments=call.arguments,
+                metadata=metadata,
+            )
+        usage = response.usage.to_dict()
+        yield RunEvent(type="usage", usage=usage)
+        yield RunEvent(
+            type="done",
+            usage=usage,
+            metadata={
+                "finish_reason": response.finish_reason,
+                "done_marker_received": done_marker_received,
+                "model": response.model,
+                "response_id": response.response_id,
+                "response_format": response_format,
+            },
+        )
 
     def _response(self, data: dict[str, Any], request: ChatRequest) -> ChatResponse:
         choices = data.get("choices")
@@ -249,13 +422,7 @@ class OpenAIChatTransport:
 
     def chat_stream(self, request: ChatRequest) -> Iterable[RunEvent]:
         payload = self._payload(request, stream=True)
-        http_request = urllib.request.Request(
-            self._url(),
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers=self._headers(stream=True),
-            method="POST",
-        )
-        response = self._open(http_request)
+        response = self._open_payload(payload, stream=True)
         text_parts: list[str] = []
         tool_parts: dict[int, dict[str, Any]] = {}
         final_usage: Usage | None = None
@@ -264,6 +431,16 @@ class OpenAIChatTransport:
         response_model = request.model or self.model
         response_id = ""
         try:
+            content_type = _response_content_type(response)
+            if content_type == "application/json" or content_type.endswith("+json"):
+                data = _decode_json(response.read(), "Chat Completions stream fallback")
+                parsed = self._response(data, request)
+                yield from self._response_events(
+                    parsed,
+                    done_marker_received=False,
+                    response_format="json_fallback",
+                )
+                return
             while True:
                 try:
                     raw_line = response.readline()
@@ -322,36 +499,31 @@ class OpenAIChatTransport:
                     for position, raw_call in enumerate(delta.get("tool_calls") or []):
                         if not isinstance(raw_call, dict):
                             continue
-                        index = int(raw_call.get("index", position))
+                        index = _safe_call_index(raw_call.get("index"), position)
                         part = tool_parts.setdefault(index, {"id": "", "name": ""})
-                        if raw_call.get("id"):
-                            part["id"] += str(raw_call["id"])
+                        if raw_call.get("id") and not part["id"]:
+                            part["id"] = str(raw_call["id"])
                         function = (
                             raw_call.get("function")
                             if isinstance(raw_call.get("function"), dict)
                             else {}
                         )
-                        if function.get("name"):
-                            part["name"] += str(function["name"])
+                        if function.get("name") and not part["name"]:
+                            part["name"] = str(function["name"])
                         if "arguments" in function:
-                            part["arguments_seen"] = True
-                        if function.get("arguments") is not None:
-                            part["arguments"] = str(part.get("arguments") or "") + str(
-                                function["arguments"]
-                            )
+                            _merge_tool_arguments(part, function.get("arguments"))
                     legacy_function = delta.get("function_call")
                     if isinstance(legacy_function, dict):
                         part = tool_parts.setdefault(
                             0,
                             {"id": "function-call-0", "name": ""},
                         )
-                        if legacy_function.get("name"):
-                            part["name"] += str(legacy_function["name"])
+                        if legacy_function.get("name") and not part["name"]:
+                            part["name"] = str(legacy_function["name"])
                         if "arguments" in legacy_function:
-                            part["arguments_seen"] = True
-                        if legacy_function.get("arguments") is not None:
-                            part["arguments"] = str(part.get("arguments") or "") + str(
-                                legacy_function["arguments"]
+                            _merge_tool_arguments(
+                                part,
+                                legacy_function.get("arguments"),
                             )
             # A few OpenAI-compatible services close the HTTP body cleanly after
             # the final choice instead of sending the optional literal [DONE].
@@ -375,6 +547,11 @@ class OpenAIChatTransport:
                     arguments=arguments,
                     metadata={
                         "index": index,
+                        **(
+                            {"raw_arguments": arguments_raw}
+                            if arguments_raw is not None
+                            else {}
+                        ),
                         "parse_error": (
                             safe_parse_error(parse_error) if parse_error else None
                         ),

@@ -516,7 +516,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
 
-    def test_runner_keeps_chat_reasoning_chain_without_capability_lookup(self) -> None:
+    def test_runner_disables_chat_reasoning_without_capability_lookup(self) -> None:
         provider = MockProvider()
         config = {
             **self.config,
@@ -538,7 +538,11 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.capability_calls, [])
-        self.assertEqual(provider.requests[0].reasoning.effort, "high")
+        self.assertIsNone(provider.requests[0].reasoning)
+        self.assertNotIn(
+            "reasoning_effort",
+            provider.requests[0].provider_options,
+        )
 
     def test_runner_rewrites_reused_response_and_tool_ids_across_iterations(self) -> None:
         class ReusedResponseIdProvider(MockProvider):

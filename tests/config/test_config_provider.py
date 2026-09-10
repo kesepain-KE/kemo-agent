@@ -14,6 +14,8 @@ from provider.protocol.enums import MessageRole, ResponseStatus, StreamEventType
 from provider.protocol.models import (
     KemoRequest,
     MessageItem,
+    ModelCapabilities,
+    ReasoningConfig,
     ToolCallItem,
     text_from_content,
 )
@@ -26,6 +28,10 @@ from run.config import (
     resolve_capability_model,
 )
 from run.history import commit_window, get_or_create_window, load_window
+from run.extensions.model_capabilities import (
+    clear_model_capability_cache,
+    resolve_reasoning_selection,
+)
 
 
 class MockChatHandler(BaseHTTPRequestHandler):
@@ -83,7 +89,7 @@ class MockChatHandler(BaseHTTPRequestHandler):
                                             "index": 0,
                                             "id": "call-1",
                                             "function": {
-                                                "name": "history_",
+                                                "name": "history_search",
                                                 "arguments": '{"query":"hel',
                                             },
                                         }
@@ -100,8 +106,9 @@ class MockChatHandler(BaseHTTPRequestHandler):
                                     "tool_calls": [
                                         {
                                             "index": 0,
+                                            "id": "call-1",
                                             "function": {
-                                                "name": "search",
+                                                "name": "history_search",
                                                 "arguments": 'lo","limit":2}',
                                             },
                                         }
@@ -507,6 +514,69 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(request["authorization"], "Bearer test-key")
 
+    def test_chat_bridge_disables_reasoning_without_changing_kemo_selection(self) -> None:
+        chat = create_provider(self.config("chat"))
+        request = self.request().model_copy(
+            update={
+                "reasoning": ReasoningConfig(
+                    enabled=True,
+                    effort="high",
+                    return_mode="content",
+                    context="auto",
+                ),
+                "provider_options": {
+                    "reasoning_effort": "high",
+                    "reasoning_enabled": True,
+                },
+            }
+        )
+        response = chat.create(request)
+        self.assertEqual(response.status, ResponseStatus.COMPLETED)
+        sent = MockChatHandler.requests[-1]["body"]
+        self.assertNotIn("reasoning_effort", sent)
+        self.assertNotIn("reasoning_enabled", sent)
+        self.assertFalse(chat.capabilities(request.model).reasoning.supported)
+        self.assertEqual(chat.capabilities(request.model).reasoning.efforts, [])
+        chat_selection = resolve_reasoning_selection(
+            {},
+            {
+                "type": "chat",
+                "model": request.model,
+                "reasoning_effort": "high",
+            },
+            chat,
+        )
+        self.assertFalse(chat_selection.enabled)
+        self.assertIsNone(chat_selection.effort)
+        self.assertEqual(chat_selection.status, "chat_reasoning_disabled")
+
+        class KemoCapabilities:
+            def capabilities(self, model: str) -> ModelCapabilities:
+                return ModelCapabilities(
+                    model=model,
+                    reasoning={
+                        "supported": True,
+                        "efforts": ["medium", "high"],
+                    },
+                )
+
+        runtime = {
+            "type": "kemo",
+            "base_url": "https://gateway.test/v1",
+            "api_key": "test-key",
+            "model": "reasoning-model",
+            "reasoning_effort": "high",
+        }
+        clear_model_capability_cache(runtime)
+        selection = resolve_reasoning_selection(
+            {},
+            runtime,
+            KemoCapabilities(),
+        )
+        self.assertTrue(selection.enabled)
+        self.assertEqual(selection.effort, "high")
+        self.assertEqual(selection.status, "enabled")
+
     def test_chat_missing_usage_is_marked_estimated(self) -> None:
         provider = create_provider(self.config("chat", model="no-usage"))
         response = provider.create(self.request("no-usage"))
@@ -546,7 +616,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(calls[0].call_id, "call-1")
         self.assertEqual(calls[0].name, "history_search")
         self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
-        self.assertIsNone(calls[0].arguments_raw)
+        self.assertEqual(calls[0].arguments_raw, '{"query":"hello","limit":2}')
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_truncated_chat_tool_arguments_are_never_published(self) -> None:
