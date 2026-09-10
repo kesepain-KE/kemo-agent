@@ -97,6 +97,37 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 “可以考虑”“例如”“建议”默认属于非强制建议；“必须”“先”“然后”“只允许”“不要”“完成后暂停”属于明确路径约束。
 
+### 全局知识库联动（引导式知识契约）
+
+本手册只承载高频、稳定、操作性的规则；领域细节的权威来源是 `global_knowledge/` 的专题文档。
+两者按“手册引导 → 知识库权威”联动：
+
+- **手册职责**：告诉智能体什么场景该去读哪份文档。手册正文不复制知识库细节，只保留判断入口和关键红线。
+- **知识库职责**：专题文档是唯一权威正文。行为变更时只改知识库对应文档和本节引导条目，不在手册正文重复展开。
+- **动态发现**：知识库主索引（`global_knowledge/data_structure.md`）按 Prompt 拼接顺序自动注入；需要正文时用文件工具按本节引导的路径显式读取。
+- **联动纪律**：新增或实质修改框架行为时，必须同步 ①知识库专题文档 ②本节引导条目 ③主索引检索关键词。三者缺一即文档债。
+
+### 按场景引导索引
+
+| 场景 | 权威文档（global_knowledge/） |
+|------|------|
+| Provider 网络重试、SSE 续传、Chat 兼容链路行为、工具调用完整性 | `provider-reliability.md` |
+| 配置字段、环境变量、优先级与默认值 | `configuration-reference.md` |
+| 开发工具插件 | `plugin-development.md` |
+| 创建技能、子代理、感知、拓展或外部代理 | `module-development.md` |
+| 创建消息平台适配 | `external-message-route-creation.md` |
+| 整体架构、请求生命周期、并发模型 | `architecture-overview.md` |
+| 历史、记忆、日志与持久化 | `storage-and-persistence.md` |
+| 三层知识库与用户目录骨架 | `knowledge-and-user-data.md` |
+| 任务计划与定时任务 | `task-automation.md` |
+| 长任务模式状态机 | `long-task-runtime.md` |
+| 版本与更新边界 | `version-and-update-modules.md` |
+| 模块创建后验收 | `module-template-validation.md` |
+| 内置拓展（网关状态、Kemo Graph） | `builtin-expansions.md` |
+| 开源协议 | `open-source-license.md` |
+
+场景未覆盖时，先读主索引 `global_knowledge/data_structure.md` 按关键词检索，再读对应专题文档；不得凭记忆猜测未注入的行为细节。
+
 ---
 
 ## 3. 资源位置
