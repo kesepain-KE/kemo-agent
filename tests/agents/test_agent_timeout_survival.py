@@ -608,6 +608,16 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             scheduler.wait(task_id, 2)
             task_ids.append(task_id)
 
+        # Terminal retention pruning is a background-side effect; allow the
+        # final prune to become visible instead of asserting synchronously
+        # (CI runners occasionally still observe the earliest task).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                scheduler.get(task_ids[0])
+            except AgentTaskNotFoundError:
+                break
+            time.sleep(0.05)
         with self.assertRaises(AgentTaskNotFoundError):
             scheduler.get(task_ids[0])
         self.assertLessEqual(len(scheduler._tasks), 256)
