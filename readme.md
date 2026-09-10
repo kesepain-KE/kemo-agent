@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.6-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.7-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,19 +204,19 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.6`
+当前版本：`1.2.7`
 
-### 1.2.6 更新
+### 1.2.7 更新
 
-这是一次运行环境、外挂同步和跨平台工具的稳定性更新。
+这是一次 Chat 兼容链路加固、传输可靠性与跨平台 CI 稳定性更新。
 
-- Expand 和 Sense 子进程改用隔离环境。模块从自己的 `.env` 读取专用配置，不再继承框架的 Provider 或 Web 密钥。
-- Shell 可明确选择 `cmd`、PowerShell、bash、zsh、fish 等解释器；自动模式按平台和命令语法选择，默认不加载个人启动配置，也不会弹出可见终端。
-- 主智能体和子智能体统一判断可重试的 Provider 故障；诊断内容经过递归脱敏和长度限制，不能把原始密钥或过大响应写入历史。
-- 技能和插件的 Markdown 解析会忽略代码块中的标题示例，减少正常说明文件被误判为合同错误的情况。
-- Kemo Graph 外挂补齐目录不可用保护、状态时间与文档数量、失败文档精确重试、批量删除结果核对和更严格的路径扫描。
-- kemo-agent 同步本地文件时发送扫描得到的 `expected_origin_hash`；配套 kemo-graph 会从同一个私有快照完成哈希和转换，源文件中途变化时安全拒绝，不推进同步游标。
-- 网页 Markdown 的裸链接在中文标点前正确结束，长链接可以换行，并保留键盘操作所需的焦点提示。
+- Chat Compatibles 流式工具调用聚合加固：重复 `id`/`name` 帧幂等处理，不再拼出重复标识；`index` 允许宽松取值并在非法时安全回退，不再中断整条流；兼容服务直接下发完整 JSON 对象参数时整体采纳；`raw_arguments` 原文透传供多轮工具循环回放。
+- Chat 传输层请求净化：不再向上游强制注入 `reasoning_effort`、`reasoning_enabled` 与 `stream_options.include_usage`，多家兼容服务不再因未知字段拒绝请求；chat 模式推理能力声明修正为不支持。
+- Chat 有界输出前网络恢复：零输出时最多 2 次尝试，尊重 `Retry-After`（上限 10 秒）；401/403/409/400 立即失败零重试；已产出文本、思考或工具分片后永不重放；重试预算耗尽标记终态防止外层放大。
+- Chat 工具不支持自动降级：上游明确报告 tools 不受支持时剥离全部工具字段重试一次，降级绝不重复；普通 400 不触发降级。
+- Chat 流式请求收到纯 JSON 响应时按 Content-Type 自动降级解析，不重发请求。
+- 修复子智能体终态任务清理排序：不再用随机任务 id 作为并列裁决键，Windows 时钟同戳场景下清理顺序回归稳定。
+- Windows CI 稳定性修复：路径比较改用 `samefile`、文件身份识别不再依赖 `st_dev`/`st_ino`、后台清理断言等待生效、kemo graph 同步测试改为确定性失败注入。
 
 ### 1.2.5 更新
 

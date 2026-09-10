@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.6-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.7-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,19 +204,19 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.6`
+Current version: `1.2.7`
 
-### 1.2.6 update
+### 1.2.7 update
 
-This release improves runtime isolation, external knowledge synchronization, and cross-platform tools.
+This release hardens the Chat Completions compatibility transport, improves transfer reliability, and stabilizes CI on Windows runners.
 
-- Expand and Sense subprocesses now use isolated environments. A module reads its own `.env` and no longer inherits Provider or Web secrets from the framework.
-- Shell can explicitly select cmd, PowerShell, bash, zsh, or fish. Auto mode chooses from the platform and command syntax, avoids personal startup files by default, and does not open a visible terminal.
-- Main-agent and subagent Provider failures use the same retry classification. Diagnostic payloads are recursively sanitized and size-bounded before they can enter history.
-- Skill and plugin Markdown parsing ignores heading examples inside code blocks, reducing false contract failures for valid documentation.
-- The Kemo Graph integration now protects unavailable source roots, reports status age and document counts, supports targeted retry of failed documents, validates batch-delete results, and scans paths more strictly.
-- During local-file synchronization, kemo-agent sends the scanned `expected_origin_hash`. A matching kemo-graph release hashes and converts one private snapshot, rejecting a file that changes before commit without advancing the sync cursor.
-- Bare Web Markdown links now stop before adjacent Chinese punctuation, long links wrap, and keyboard focus remains visible.
+- Streaming tool-call aggregation in the Chat transport is now idempotent: repeated `id`/`name` frames no longer produce duplicated identifiers; malformed `index` values fall back safely instead of aborting the stream; a complete JSON arguments object from a compatible service is adopted as-is; `raw_arguments` is forwarded for faithful multi-round tool loops.
+- The Chat transport no longer injects `reasoning_effort`, `reasoning_enabled`, or `stream_options.include_usage` into upstream requests; several OpenAI-compatible services rejected those fields. The Chat provider now declares reasoning as unsupported.
+- Bounded pre-output network recovery: at most 2 attempts, only while nothing has been emitted; `Retry-After` is honored up to 10 seconds; 401/403/409/400 fail immediately with zero retries; after any text, reasoning, or tool fragment the stream never replays; an exhausted budget is marked final so the outer runtime cannot multiply retries.
+- Explicit tool-unsupported fallback: when a 400 error clearly states that tools are not supported, the transport strips all tool fields and retries exactly once; plain 400 errors never trigger the fallback.
+- A streaming request that receives a plain JSON response is parsed via a Content-Type fallback without resending the request.
+- Terminal subagent-task pruning no longer uses the random task id as a tie-breaker, keeping cleanup order stable when Windows clocks assign identical timestamps.
+- Windows CI stability fixes: path comparisons use `samefile`, file-identity checks no longer depend on `st_dev`/`st_ino`, background-pruning assertions wait for visibility, and the kemo-graph sync test injects failures deterministically.
 
 ### 1.2.5 update
 
