@@ -128,6 +128,14 @@ kemo-agent 是一个事件驱动的多用户智能体框架。核心运行流程
 
 场景未覆盖时，先读主索引 `global_knowledge/data_structure.md` 按关键词检索，再读对应专题文档；不得凭记忆猜测未注入的行为细节。
 
+### 推送与版本发布联动
+
+按用户推送工作流（技能 `user_create/push-workflow`）执行发布时，遵守本手册对应条目：
+
+- 升级版本前先运行 `.github/scripts/check_versions.py`——版本面覆盖 `version.json`、`cli.py`、`web/frontend/package*.json`、README 徽章和全局知识文档，漏改任何一处 CI 都会失败。
+- `release_check.py` 超时至少 3600 秒；任何阶段报错必须停止推送并报告位置与原因。
+- 发布顺序：版本号提交 → release_check 全过 → 更新 obsidian 知识图谱（`开发临时目录/`，不推送）→ 推送 main → 打 tag 并等 CI/Security 全绿 → `gh release create` → 最后更新 kemo-agent-doc（含侧边栏入口）。
+
 ---
 
 ## 3. 资源位置
