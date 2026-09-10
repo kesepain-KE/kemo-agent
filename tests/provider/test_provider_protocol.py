@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import hashlib
+import http.client
 import json
 import os
 import tempfile
@@ -169,6 +170,16 @@ class FakeHTTPResponse:
 
     def __exit__(self, *_args) -> None:
         self.close()
+
+
+class InterruptedHTTPResponse(FakeHTTPResponse):
+    def __init__(self, payload: bytes = b"") -> None:
+        super().__init__(payload, content_type="text/event-stream")
+
+    def readline(self) -> bytes:
+        if self._stream.tell() < len(self._stream.getvalue()):
+            return super().readline()
+        raise http.client.RemoteDisconnected("test stream disconnected")
 
 
 class NativeProvider:
@@ -1639,6 +1650,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             events = list(self._chat_transport().chat_stream(self._chat_request()))
 
         self.assertEqual(len(captured), 1)
+        self.assertNotIn("stream_options", captured[0])
         self.assertEqual(
             [event.type for event in events],
             ["reasoning_delta", "text_delta", "usage", "done"],
@@ -1906,6 +1918,220 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertIn("tools", requests[0])
         self.assertNotIn("tools", requests[1])
+
+    def test_chat_connection_failure_retries_once_and_can_recover(self) -> None:
+        requests: list[dict[str, object]] = []
+        success = {
+            "id": "chat-network-recovered",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {"content": "recovered"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            if len(requests) == 1:
+                raise urllib.error.URLError(ConnectionRefusedError("offline"))
+            return FakeHTTPResponse(json.dumps(success).encode("utf-8"))
+
+        with (
+            patch("urllib.request.urlopen", side_effect=open_request),
+            patch("provider.openai_chat.time.sleep") as sleep,
+        ):
+            response = self._chat_transport().chat(self._chat_request())
+
+        self.assertEqual(response.text, "recovered")
+        self.assertEqual(len(requests), 2)
+        sleep.assert_called_once()
+
+    def test_chat_connection_failure_stops_after_second_attempt(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            raise urllib.error.URLError(ConnectionResetError("reset"))
+
+        with (
+            patch("urllib.request.urlopen", side_effect=open_request),
+            patch("provider.openai_chat.time.sleep"),
+        ):
+            with self.assertRaises(ProviderError) as caught:
+                self._chat_transport().chat(self._chat_request())
+
+        self.assertEqual(caught.exception.category, "connection_error")
+        self.assertFalse(caught.exception.retryable)
+        self.assertTrue(caught.exception.retryable_declared)
+        self.assertEqual(caught.exception.attempt_count, 2)
+        self.assertEqual(len(requests), 2)
+
+    def test_chat_http_429_retries_once_and_honors_bounded_retry_after(self) -> None:
+        requests: list[dict[str, object]] = []
+        success = {
+            "id": "chat-rate-recovered",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {"content": "available"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            if len(requests) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    429,
+                    "rate limited",
+                    hdrs={"Retry-After": "99"},
+                    fp=io.BytesIO(
+                        b'{"error":{"message":"rate limited"}}'
+                    ),
+                )
+            return FakeHTTPResponse(json.dumps(success).encode("utf-8"))
+
+        with (
+            patch("urllib.request.urlopen", side_effect=open_request),
+            patch("provider.openai_chat.time.sleep") as sleep,
+        ):
+            response = self._chat_transport().chat(self._chat_request())
+
+        self.assertEqual(response.text, "available")
+        self.assertEqual(len(requests), 2)
+        sleep.assert_called_once_with(10.0)
+
+    def test_chat_http_final_statuses_are_not_network_retried(self) -> None:
+        for status in (400, 401, 403, 409):
+            with self.subTest(status=status):
+                requests: list[dict[str, object]] = []
+
+                def open_request(request, **_kwargs):
+                    requests.append(json.loads(request.data.decode("utf-8")))
+                    raise urllib.error.HTTPError(
+                        request.full_url,
+                        status,
+                        "final error",
+                        hdrs={},
+                        fp=io.BytesIO(
+                            b'{"error":{"message":"invalid model"}}'
+                        ),
+                    )
+
+                with patch("urllib.request.urlopen", side_effect=open_request):
+                    with self.assertRaises(ProviderError):
+                        self._chat_transport().chat(self._chat_request())
+                self.assertEqual(len(requests), 1)
+
+    @staticmethod
+    def _successful_sse(text: str = "recovered") -> FakeHTTPResponse:
+        frame = {
+            "id": "chat-stream-recovered",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "delta": {"content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        payload = f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
+        return FakeHTTPResponse(payload, content_type="text/event-stream")
+
+    def test_chat_stream_zero_output_disconnect_retries_once(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            if len(requests) == 1:
+                return InterruptedHTTPResponse()
+            return self._successful_sse()
+
+        with (
+            patch("urllib.request.urlopen", side_effect=open_request),
+            patch("provider.openai_chat.time.sleep"),
+        ):
+            events = list(self._chat_transport().chat_stream(self._chat_request()))
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            [event.content for event in events if event.type == "text_delta"],
+            ["recovered"],
+        )
+        self.assertEqual(events[-1].type, "done")
+
+    def test_chat_stream_never_replays_after_text_output(self) -> None:
+        requests: list[dict[str, object]] = []
+        frame = {"choices": [{"delta": {"content": "hello"}}]}
+        payload = f"data: {json.dumps(frame)}\n\n".encode()
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return InterruptedHTTPResponse(payload)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                list(self._chat_transport().chat_stream(self._chat_request()))
+
+        self.assertEqual(caught.exception.category, "stream_interrupted")
+        self.assertEqual(len(requests), 1)
+
+    def test_chat_stream_never_replays_after_reasoning_output(self) -> None:
+        requests: list[dict[str, object]] = []
+        frame = {"choices": [{"delta": {"reasoning_content": "thinking"}}]}
+        payload = f"data: {json.dumps(frame)}\n\n".encode()
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return InterruptedHTTPResponse(payload)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                list(self._chat_transport().chat_stream(self._chat_request()))
+
+        self.assertEqual(caught.exception.category, "stream_interrupted")
+        self.assertEqual(len(requests), 1)
+
+    def test_chat_stream_never_replays_after_tool_fragment(self) -> None:
+        requests: list[dict[str, object]] = []
+        frame = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_partial",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": '{"query":',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        payload = f"data: {json.dumps(frame)}\n\n".encode()
+
+        def open_request(request, **_kwargs):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return InterruptedHTTPResponse(payload)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                list(
+                    self._chat_transport().chat_stream(
+                        self._chat_request(tools=True)
+                    )
+                )
+
+        self.assertEqual(caught.exception.category, "stream_interrupted")
+        self.assertEqual(len(requests), 1)
 
 
 if __name__ == "__main__":
