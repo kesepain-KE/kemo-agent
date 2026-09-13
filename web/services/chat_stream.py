@@ -114,6 +114,7 @@ def stream_chat(
             # 在 asyncio.to_thread 工作线程之间跳转。
     output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
     consumer_closed = threading.Event()
+    progress_closed = threading.Event()
 
     def put(value: RunEvent | BaseException | object) -> bool:
         if isinstance(value, RunEvent):
@@ -147,6 +148,7 @@ def stream_chat(
             )
         )
         if terminal_value:
+            progress_closed.set()
             # Close the current mailbox before publishing the terminal
             # value.  Otherwise a control request that races with a final
             # SSE event could be acknowledged as accepted and then be
@@ -164,6 +166,28 @@ def stream_chat(
             except queue.Full:
                 continue
 
+    def subagent_event(event: RunEvent) -> None:
+        if progress_closed.is_set() or consumer_closed.is_set():
+            return
+        metadata = event.metadata or {}
+        if metadata.get("parent_run_id") and metadata["parent_run_id"] != active.run_id:
+            return
+        if metadata.get("phase") != "subagent":
+            return
+        # Progress is UI-only: never forward prompts, reasoning, tool arguments,
+        # results, errors or arbitrary provider metadata from a child agent.
+        safe = {"phase": "subagent"}
+        for key in ("agent", "task_id", "status", "tool_name"):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                safe[key] = value[:160]
+        for key in ("iteration", "tool_count", "next_attempt"):
+            value = metadata.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                safe[key] = max(0, value)
+        put(RunEvent(type="subagent_progress", tool_call_id=event.tool_call_id, metadata=safe))
+
+    request["_subagent_event_callback"] = subagent_event
     worker = threading.Thread(
         target=_run_source_impl,
         kwargs={

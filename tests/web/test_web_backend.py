@@ -374,6 +374,81 @@ class WebBackendTests(unittest.TestCase):
                     )
                 self.assertEqual(failed.status_code, status)
 
+    def test_file_sorting_precedes_pagination_in_all_areas(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        specs = [
+            ("z.txt", 3, 10), ("a.txt", 9, 30), ("b.txt", 1, 20),
+            ("c.txt", 5, 40), ("d.txt", 5, 40), ("e.txt", 2, 50),
+            ("f.txt", 8, 60), ("g.txt", 4, 70),
+        ]
+        for scope in ("file_upload", "download", "tmp"):
+            directory = root / "tmp" if scope == "tmp" else root / "users/alice" / scope
+            directory.mkdir(parents=True, exist_ok=True)
+            for name, size, modified in specs:
+                target = directory / name
+                target.write_bytes(b"x" * size)
+                os.utime(target, (1700000000 + modified, 1700000000 + modified))
+            listing = service.tmp_files if scope == "tmp" else lambda **kw: service.files("alice", scope, **kw)
+            for field, index in (("name", 0), ("size", 1), ("updated_at", 2)):
+                for order in ("asc", "desc"):
+                    with self.subTest(scope=scope, field=field, order=order):
+                        expected = sorted(specs, key=lambda item: item[0])
+                        expected.sort(key=lambda item: item[index], reverse=order == "desc")
+                        first = listing(sort_by=field, sort_order=order)
+                        second = listing(sort_by=field, sort_order=order, page=2)
+                        self.assertEqual(
+                            [item["name"] for item in first["entries"] + second["entries"]],
+                            [item[0] for item in expected],
+                        )
+                        self.assertEqual(first["pagination"]["total_items"], 8)
+                        self.assertEqual(first["sort_by"], field)
+                        self.assertEqual(first["sort_order"], order)
+
+    def test_file_sorting_hydrates_directories_and_sorts_recursive_search(self) -> None:
+        _, root = self.make_root()
+        base = root / "users/alice/file_upload"
+        for name, size, modified in (("a-folder", 1, 10), ("z-folder", 9, 30)):
+            folder = base / name
+            folder.mkdir(parents=True, exist_ok=True)
+            child = folder / "target.txt"
+            child.write_bytes(b"x" * size)
+            os.utime(child, (1700000000 + modified, 1700000000 + modified))
+            os.utime(folder, (1700000000, 1700000000))
+        (base / "large.txt").write_bytes(b"x" * 100)
+        service = WebRunService(root)
+        for field in ("size", "updated_at"):
+            with self.subTest(field=field):
+                first = service.files("alice", "file_upload", sort_by=field, sort_order="desc", page_size=1)
+                self.assertEqual(first["entries"][0]["name"], "z-folder")
+                self.assertEqual(first["entries"][0]["size"], 9)
+                self.assertEqual(first["entries"][0]["updated_at"], 1700000030)
+                self.assertEqual(first["entries"][0]["child_count"], 1)
+                found = service.files("alice", "file_upload", search="target", sort_by=field, sort_order="desc", page_size=1)
+                self.assertEqual(found["entries"][0]["relative_path"], "z-folder/target.txt")
+                self.assertEqual(found["pagination"]["total_items"], 2)
+        nested = service.files("alice", "file_upload", path="a-folder", sort_by="size")
+        self.assertEqual(nested["entries"][0]["relative_path"], "a-folder/target.txt")
+
+    def test_file_sorting_api_parameters_and_validation(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        app = create_app(service=service)
+        for endpoint in ("/api/users/alice/files/file_upload", "/api/users/alice/files/download", "/api/tmp"):
+            with self.subTest(endpoint=endpoint):
+                response = self.request(app, "GET", endpoint + "?sort_by=size&sort_order=desc")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["sort_by"], "size")
+                self.assertEqual(response.json()["sort_order"], "desc")
+                for query in ("sort_by=invalid", "sort_order=invalid"):
+                    # The app normalizes FastAPI validation failures to HTTP 400.
+                    self.assertEqual(self.request(app, "GET", endpoint + "?" + query).status_code, 400)
+        for options in ({"sort_by": "invalid"}, {"sort_order": "invalid"}):
+            with self.assertRaises(WebServiceError):
+                service.tmp_files(**options)
+            with self.assertRaises(WebServiceError):
+                service.files("alice", "file_upload", **options)
+
     def test_file_space_lists_six_items_per_page_for_all_areas(self) -> None:
         _, root = self.make_root()
         upload_root = root / "users" / "alice" / "file_upload"
@@ -4542,6 +4617,45 @@ class WebBackendTests(unittest.TestCase):
                 '{"runtime": true}',
             )
 
+    def test_important_memory_lifecycle_read_and_write_preserve_invalidity(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config/global_config.json").write_text('{"schema_version": 1}', "utf-8")
+        service = WebRunService(root)
+        app = create_app(service=service)
+        store = MemoryStore(root, "alice", {})
+        store.create_fragment("seven_days", "source.md", "source fact")
+        store.set_important_view_sources(["source.md"])
+        saved = service.update_important_memory("alice", "old profile")
+        self.assertEqual(saved["lifecycle"]["status"], "valid")
+        store.edit_fragment("seven_days", "source.md", "changed fact")
+        endpoint = "/api/users/alice/memory/important"
+        response = self.request(app, "GET", endpoint)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["lifecycle"]["reason_codes"], ["source_changed"])
+        self.assertFalse(response.json()["lifecycle"]["prompt_eligible"])
+        self.assertEqual(response.json()["content"], "old profile")
+        updated = self.request(app, "PUT", endpoint, json={"content": "manual edit"})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["lifecycle"]["status"], "invalid")
+        self.assertEqual(updated.json()["content"], "manual edit")
+        store.set_important_view_sources(["source.md"])
+        self.assertEqual(service.important_memory("alice")["lifecycle"]["status"], "valid")
+
+    def test_important_memory_lifecycle_distinguishes_empty_legacy_and_disabled(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config/global_config.json").write_text('{"schema_version": 1}', "utf-8")
+        service = WebRunService(root)
+        legacy = service.update_important_memory("alice", "legacy profile")
+        self.assertEqual(legacy["lifecycle"]["status"], "untracked")
+        with patch("web.services.memory.load_config", return_value={"memory": {"important_memory_max_chars": 0}}):
+            disabled = service.important_memory("alice")["lifecycle"]
+        self.assertEqual(disabled["status"], "untracked")
+        self.assertFalse(disabled["prompt_eligible"])
+        (root / "users/alice/memory_temporary_important.md").write_text(" \n", "utf-8")
+        self.assertEqual(service.important_memory("alice")["lifecycle"]["status"], "empty")
+
     def test_important_memory_write_uses_output_limit_not_prompt_budget(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -5713,7 +5827,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_source["health"], "正常")
         self.assertEqual(runtime_source["value_preview"], "runtime")
         self.assertEqual(runtime_source["collected_markdown"], "runtime")
-        self.assertEqual(runtime_source["injected_markdown"], "[runtime]\nruntime")
+        self.assertTrue(runtime_source["injected_markdown"].startswith("[runtime]\n"))
+        self.assertIn("runtime", runtime_source["injected_markdown"])
         self.assertTrue(runtime_source["whitelisted"])
         self.assertEqual(runtime_source["update_interval"], "每 12 秒")
         self.assertEqual(runtime_source["update_interval_seconds"], 12)
@@ -5727,7 +5842,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("sense.json", broken_source["error"])
         self.assertNotIn("must not be injected", sense.text)
         self.assertNotIn('"project"', sense.text)
-        self.assertEqual(sense.json()["injection"]["content"], "[runtime]\nruntime")
+        injection_content = sense.json()["injection"]["content"]
+        self.assertTrue(injection_content.startswith("[runtime]\n"))
+        self.assertIn("global_sense/runtime/sense.md", injection_content)
+        self.assertIn("runtime", injection_content)
 
         refreshed = self.request(app, "POST", "/api/users/alice/sense/runtime/refresh")
         self.assertEqual(refreshed.status_code, 200)

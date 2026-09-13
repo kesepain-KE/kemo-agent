@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
-import time
 from typing import Any
 
 from run.agents import discover_agents
@@ -27,25 +25,10 @@ class OverviewServiceMixin:
         normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id) if session_id else ""
         key = (name, normalized_source, normalized_session)
-        now = time.monotonic()
-        with self._overview_cache_lock:
-            cached = self._overview_cache.get(key)
-            if cached is not None and now - cached[0] < 0.5:
-                return copy.deepcopy(cached[1])
-        result = self._build_overview(
-            name,
-            session_id=normalized_session,
-            source=normalized_source,
-        )
-        with self._overview_cache_lock:
-            self._overview_cache[key] = (time.monotonic(), copy.deepcopy(result))
-            if len(self._overview_cache) > 32:
-                oldest = min(
-                    self._overview_cache,
-                    key=lambda item: self._overview_cache[item][0],
-                )
-                self._overview_cache.pop(oldest, None)
-        return result
+        return self._overview_cache.get_or_load(
+            key, lambda: self._build_overview(name, session_id=normalized_session, source=normalized_source),
+            owner=name, ttl=0.5,
+        )[0]
 
     def _summary_cache_status(
         self,

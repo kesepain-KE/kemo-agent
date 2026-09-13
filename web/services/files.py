@@ -197,6 +197,8 @@ class FileServiceMixin(SoundServiceMixin):
         search: str = "",
         page: int = 1,
         page_size: int = 6,
+        sort_by: str = "name",
+        sort_order: str = "asc",
     ) -> dict[str, Any]:
         name, normalized_scope, directory = self._file_scope_root(user, scope)
         return {
@@ -209,6 +211,8 @@ class FileServiceMixin(SoundServiceMixin):
                 search=search,
                 page=page,
                 page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
             ),
         }
 
@@ -616,6 +620,8 @@ class FileServiceMixin(SoundServiceMixin):
         search: str = "",
         page: int = 1,
         page_size: int = 6,
+        sort_by: str = "name",
+        sort_order: str = "asc",
     ) -> dict[str, Any]:
         directory = self.root / "tmp"
         return {
@@ -626,6 +632,8 @@ class FileServiceMixin(SoundServiceMixin):
                 search=search,
                 page=page,
                 page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
             ),
         }
 

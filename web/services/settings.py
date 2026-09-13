@@ -26,6 +26,7 @@ from run.config import (
     load_config,
     provider_runtime_config,
     read_json_object,
+    cron_history_retention_days,
 )
 from run.extensions import (
     clear_model_capability_cache,
@@ -139,6 +140,7 @@ _CONFIG_SOURCE_PATHS = (
     "task_plan.auto_accept",
     "task_plan.max_steps",
     "cron.enabled",
+    "cron.history_retention_days",
     "provider_runtime.max_concurrent_requests",
     "provider_runtime.request_semaphore_timeout",
     "web.max_concurrent_chats",
@@ -236,7 +238,7 @@ class SettingsServiceMixin:
         return {
             dotted: (
                 "user"
-                if self._has_path(user_config, dotted)
+                if dotted != "cron.history_retention_days" and self._has_path(user_config, dotted)
                 else "global"
                 if (
                     dotted.split(".", 1)[0] not in USER_ONLY_SECTIONS
@@ -261,6 +263,7 @@ class SettingsServiceMixin:
     def global_config(self) -> dict[str, Any]:
         path = self.root / "config" / "global_config.json"
         config = read_json_object(path)
+        config.setdefault("cron", {})["history_retention_days"] = cron_history_retention_days(config)
         redacted, redacted_paths = _redact_config(config)
         return {
             "scope": "global",
@@ -281,6 +284,13 @@ class SettingsServiceMixin:
             raise InvalidRequestError("不能把脱敏占位符 *** 写回配置")
         current = read_json_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
+        if user is None:
+            try:
+                cron_history_retention_days(updated)
+            except ConfigError as exc:
+                raise InvalidRequestError(str(exc)) from None
+        elif isinstance(changes.get("cron"), dict) and "history_retention_days" in changes["cron"]:
+            raise InvalidRequestError("定时任务历史保留天数仅支持全局配置")
         encoded = (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         previous = path.read_bytes() if path.is_file() else None
         _atomic_write(path, encoded)

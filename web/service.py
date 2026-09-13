@@ -32,6 +32,10 @@ from run.history import (
     find_window,
     load_window,
     queue_memory_extraction,
+    touch_web_session_lease,
+    cleanup_empty_web_sessions as cleanup_empty_history_sessions,
+    inspect_stale_web_sessions,
+    WEB_STARTUP_INSPECTION_DELAY_SECONDS,
 )
 from run.history import (
     close_session as close_index_session,
@@ -245,6 +249,7 @@ class WebRunService(
         message_transport_remover: Callable[[str, str], None] | None = None,
         plan_waker: Callable[[], None] | None = None,
         summary_waker: Callable[[], None] | None = None,
+        memory_waker: Callable[[], None] | None = None,
         router_ref: Any | None = None,
         version_manifest_fetcher: Callable[[str, float], dict[str, Any]] = _fetch_remote_version_manifest,
     ) -> None:
@@ -256,6 +261,10 @@ class WebRunService(
         self.message_transport_remover = message_transport_remover
         self.plan_waker = plan_waker
         self.summary_waker = summary_waker
+        self.memory_waker = memory_waker
+        self.startup_inspection_delay_seconds = WEB_STARTUP_INSPECTION_DELAY_SECONDS
+        self._startup_inspection_lock = threading.Lock()
+        self._startup_inspection_result: dict[str, Any] = {'state': 'pending', 'users': {}}
         self._router_ref = router_ref
         self.version_manifest_fetcher = version_manifest_fetcher
         self._active_runs: dict[str, ActiveRun] = {}
@@ -268,10 +277,8 @@ class WebRunService(
         self._skill_upload_lock = threading.RLock()
         self._version_check_lock = threading.Lock()
         self._version_check_cache: tuple[float, dict[str, Any]] | None = None
-        self._overview_cache_lock = threading.RLock()
-        self._overview_cache: dict[
-            tuple[str, str, str], tuple[float, dict[str, Any]]
-        ] = {}
+        from run.infra import BoundedReadCache
+        self._overview_cache = BoundedReadCache(max_entries=32, max_bytes=8 * 1024 * 1024, per_owner=4)
         self._kemo_catalog_lock = threading.RLock()
         self._kemo_catalog_cache: dict[
             tuple[str, str, str], tuple[float, Any]
@@ -399,9 +406,14 @@ class WebRunService(
         source: str,
         session_id: str,
         client_id: str,
+        *, require_existing: bool = False,
     ) -> int:
         if not client_id:
             return 0
+        if source == 'web':
+            exists = touch_web_session_lease(self.root, user, session_id, client_id)
+            if require_existing and not exists:
+                return 0
         self._prune_session_leases_locked()
         clients = self._session_leases.setdefault((user, source, session_id), {})
         clients[client_id] = time.monotonic()
@@ -423,6 +435,8 @@ class WebRunService(
             self._session_leases[key] = clients
             return len(clients)
         self._session_leases.pop(key, None)
+        # Durable presence expires naturally within 90s: refresh/BFCache and
+        # out-of-order unload requests must not erase a newer heartbeat.
         return 0
 
     def session_lease(
@@ -439,8 +453,10 @@ class WebRunService(
         normalized_client = self.require_client_id(client_id, optional=False)
         with self._active_runs_lock:
             clients = self._touch_session_lease_locked(
-                name, normalized_source, normalized_session, normalized_client
+                name, normalized_source, normalized_session, normalized_client, require_existing=True,
             )
+            if normalized_source == 'web' and not clients:
+                raise NotFoundError('对话不存在或空对话已离线清理，请新建对话')
         return {
             "user": name,
             "source": normalized_source,
@@ -474,6 +490,92 @@ class WebRunService(
             "active_clients": remaining,
             "released": True,
         }
+
+    def cleanup_empty_web_sessions(self, stop: threading.Event | None = None) -> int:
+        """Low-frequency bounded sweep, also when every browser is closed."""
+        from run.infra import record_runtime_event
+
+        deleted = 0
+        for user in list_users(self.root):
+            if stop is not None and stop.is_set():
+                break
+            try:
+                self.require_user(user)
+                with self._active_runs_lock:
+                    self._prune_session_leases_locked()
+                    protected = {sid for (name, source, sid) in self._session_leases if name == user and source == 'web'}
+                    protected.update(run.session_id for run in self._active_runs.values() if run.user == user and run.source == 'web')
+                    result = cleanup_empty_history_sessions(self.root, user, protected_sessions=protected, limit=100)
+                deleted += len(result['deleted_sessions'])
+                if result['deleted_sessions']:
+                    self._overview_cache.invalidate(lambda key: key[0] == user)
+            except Exception as exc:
+                record_runtime_event(self.root, user, category='backend', name='empty_web_cleanup', status='failed', error_type=type(exc).__name__)
+        return deleted
+
+    def inspect_conversation_spaces_on_startup(
+        self, stop: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run one bounded-page startup audit without executing an agent here."""
+        from run.infra import record_runtime_event
+
+        outcome: dict[str, Any] = {'state': 'running', 'users': {}, 'queued_memory': 0,
+                                   'deleted_sessions': 0, 'errors': 0}
+        with self._startup_inspection_lock:
+            self._startup_inspection_result = copy.deepcopy(outcome)
+        for user in list_users(self.root):
+            if stop is not None and stop.is_set():
+                outcome['state'] = 'stopped'
+                break
+            try:
+                self.require_user(user)
+                with self._active_runs_lock:
+                    self._prune_session_leases_locked()
+                    protected = {
+                        session_id
+                        for (owner, source, session_id), clients in self._session_leases.items()
+                        if owner == user and source == 'web' and clients
+                    }
+                    protected.update(
+                        active.session_id for active in self._active_runs.values()
+                        if active.user == user and active.source == 'web'
+                    )
+                result = inspect_stale_web_sessions(
+                    self.root,
+                    user,
+                    protected_sessions=protected,
+                    stop=stop,
+                    queue_memory=self._queue_memory_extraction,
+                )
+                outcome['users'][user] = result
+                outcome['queued_memory'] += int(result['queued_memory_count'])
+                outcome['deleted_sessions'] += int(result['deleted_count'])
+                outcome['errors'] += int(result['error_count'])
+                if result['deleted_count'] or result['closed_count']:
+                    self._overview_cache.invalidate(lambda key, owner=user: key[0] == owner)
+                record_runtime_event(
+                    self.root, user, category='backend', name='startup_session_inspection',
+                    status='failed' if result['error_count'] else 'success',
+                    error_type='SessionInspectionError' if result['error_count'] else '',
+                )
+            except Exception as exc:
+                outcome['errors'] += 1
+                outcome['users'][user] = {'error': type(exc).__name__}
+                record_runtime_event(
+                    self.root, user, category='backend', name='startup_session_inspection',
+                    status='failed', error_type=type(exc).__name__,
+                )
+        if outcome['state'] == 'running':
+            outcome['state'] = 'completed'
+        if outcome['queued_memory'] and self.memory_waker is not None:
+            try:
+                self.memory_waker()
+            except Exception as exc:
+                outcome['errors'] += 1
+                outcome['wake_error'] = type(exc).__name__
+        with self._startup_inspection_lock:
+            self._startup_inspection_result = copy.deepcopy(outcome)
+        return outcome
 
     def require_session_title(self, title: Any) -> str:
         if not isinstance(title, str):
@@ -621,7 +723,7 @@ class WebRunService(
             "【任务计划连续执行】\n"
             f"计划 ID：{normalized_plan_id}\n"
             f"起始步骤：{next_description}\n\n"
-            "这是用户批准后的单轮连续执行，不是新的用户提问。完整活跃计划已注入系统提示词。\n"
+            "这是用户批准后的连续执行，不是新的用户提问。完整活跃计划已注入系统提示词。\n"
             "请严格按依赖顺序逐步执行：每次只执行一个步骤；成功后立即调用 "
             "task_plan(action=\"step_done\") 并写入结果摘要，失败时调用 step_fail。\n"
             "step_done 返回 completed_step、progress、next_step 和 plan_status。"

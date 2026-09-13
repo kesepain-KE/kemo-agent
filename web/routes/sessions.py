@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, Query
 
@@ -99,7 +99,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         body: SessionClientBody,
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return backend.session_lease(user, session_id, body.client_id, source=source)
+        return await asyncio.to_thread(backend.session_lease, user, session_id, body.client_id, source=source)
 
     @app.post("/api/users/{user}/sessions/{session_id}/lease/release")
     async def release_session_lease(
@@ -232,6 +232,17 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
         return backend.overview(user, session_id=session_id, source=source)
+
+    @app.get("/api/users/{user}/runtime/logs")
+    async def runtime_logs(
+        user: str,
+        category: Literal["all", "backend", "threads", "terminal", "message"] = "all",
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.runtime_logs, user, category=category,
+                                       page=page, page_size=page_size, refresh=refresh)
 
     @app.get("/api/users/{user}/runtime/status")
     async def runtime_status(

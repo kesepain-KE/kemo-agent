@@ -56,6 +56,8 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         search: str = Query(default="", max_length=200),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=6, ge=1, le=100),
+        sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
+        sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
     ) -> dict[str, Any]:
         return backend.files(
             user,
@@ -64,6 +66,8 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
             search=search,
             page=page,
             page_size=page_size,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
     @app.post("/api/users/{user}/files/{scope}/upload")
@@ -306,12 +310,16 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         search: str = Query(default="", max_length=200),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=6, ge=1, le=100),
+        sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
+        sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
     ) -> dict[str, Any]:
         return backend.tmp_files(
             path=path,
             search=search,
             page=page,
             page_size=page_size,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
     @app.post("/api/tmp/upload")
@@ -363,6 +371,5 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.delete("/api/tmp/all")
     async def delete_all_tmp_files() -> dict[str, Any]:
         return backend.delete_all_tmp_files()
-
 
 

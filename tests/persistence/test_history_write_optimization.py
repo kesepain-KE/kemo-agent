@@ -353,7 +353,7 @@ def test_schema_v3_migrates_legacy_partition_blobs_without_losing_rounds(
             "SELECT COUNT(*) FROM history_rounds "
             "WHERE window_kind='archive' AND window_name='conv_write'"
         ).fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     assert compact["storage"] == "history_messages"
     assert count == 2
     assert round_count == 1

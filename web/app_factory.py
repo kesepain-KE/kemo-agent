@@ -1,6 +1,7 @@
 """FastAPI application assembly extracted from :mod:`web.app`."""
 
 from __future__ import annotations
+from contextlib import asynccontextmanager
 
 def create_app(
     *,
@@ -110,7 +111,46 @@ def create_app(
     base = (root or project_root()).resolve()
     backend = service or WebRunService(base)
     frontend_dist = (base / "web" / "frontend" / "dist").resolve()
-    app = FastAPI(title="kemo-agent Web API", version="2")
+    @asynccontextmanager
+    async def lifespan(_app):
+        stop = threading.Event()
+
+        def sweep():
+            try:
+                delay = max(0.0, float(getattr(backend, 'startup_inspection_delay_seconds', 90.0)))
+            except (TypeError, ValueError):
+                delay = 90.0
+            if stop.wait(delay):
+                return
+            try:
+                inspector = getattr(backend, 'inspect_conversation_spaces_on_startup', None)
+                if callable(inspector):
+                    inspector(stop)
+                else:
+                    backend.cleanup_empty_web_sessions(stop)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('Startup Web session inspection unavailable')
+            while not stop.wait(60):
+                try:
+                    backend.cleanup_empty_web_sessions(stop)
+                except Exception:
+                    # A failed directory enumeration must not kill maintenance.
+                    import logging
+                    logging.getLogger(__name__).warning('Empty Web session cleanup unavailable')
+
+        worker = None
+        if callable(getattr(backend, 'cleanup_empty_web_sessions', None)):
+            worker = threading.Thread(target=sweep, name='web-empty-session-cleanup', daemon=True)
+            worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if worker is not None:
+                await asyncio.to_thread(worker.join, 5)
+
+    app = FastAPI(title="kemo-agent Web API", version="2", lifespan=lifespan)
     app.state.web_service = backend
     configured_auth = auth_config or WebAuthConfig()
     authenticator = WebAuthenticator(configured_auth)
@@ -451,4 +491,3 @@ def create_app(
         return FileResponse(index)
 
     return app
-

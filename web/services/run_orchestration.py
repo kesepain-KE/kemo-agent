@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from run.tasks import PlanError, PlanStore
+
 def run_source(
     service: Any,
     *,
@@ -43,6 +45,23 @@ def run_source(
     current_request = request
     current_run_id = normalized_run_id
     run_index = 0
+
+    def plan_continuation_status() -> str | None:
+        """Only a live, conversation-owned foreground plan may continue."""
+        if not task_plan_id:
+            return None
+        if request.get("_task_plan_mode") != "agent_managed":
+            return "unavailable"
+        try:
+            plan = PlanStore(service.root, name).read(task_plan_id)
+        except PlanError:
+            return "unavailable"
+        if (
+            plan.get("source") != normalized_source
+            or plan.get("session_id") != normalized_session
+        ):
+            return "unavailable"
+        return str(plan.get("status") or "unavailable")
 
     def state_snapshot() -> dict[str, Any]:
         try:
@@ -152,6 +171,38 @@ def run_source(
             metadata=metadata,
         )
 
+    def user_cancelled_terminal_event() -> RunEvent:
+        """Build the one terminal event for an accepted Run cancellation."""
+
+        state = state_snapshot()
+        metadata: dict[str, Any] = {
+            "status": "cancelled",
+            "cancelled": True,
+            "committed": False,
+            "stop_reason": "user_emergency_stop",
+        }
+        if state.get("task_id") and state.get("status") in {
+            "running",
+            "pausing",
+            "cancelling",
+        }:
+            state = finish_long_task(
+                service.root,
+                name,
+                normalized_source,
+                normalized_session,
+                status="cancelled",
+                stop_reason="user_emergency_stop",
+            )
+            metadata.update(
+                long_task_event_metadata(
+                    state,
+                    terminal=True,
+                    continuation=run_index > 0,
+                )
+            )
+        return RunEvent(type="done", metadata=metadata)
+
     try:
         # Keep the complete logical task under the same session lock.
         # The single-Run engine takes the same RLock re-entrantly;
@@ -161,48 +212,30 @@ def run_source(
         ):
             while run_index < MAX_LONG_TASK_RUNS:
                 if cancel_event.is_set():
-                    state = state_snapshot()
-                    if state.get("task_id") and state.get("status") in {
-                        "running",
-                        "pausing",
-                        "cancelling",
-                    }:
-                        state = finish_long_task(
-                            service.root,
-                            name,
-                            normalized_source,
-                            normalized_session,
-                            status="cancelled",
-                            stop_reason="user_emergency_stop",
-                        )
-                        put(
-                            RunEvent(
-                                type="done",
-                                metadata={
-                                    "status": "cancelled",
-                                    "cancelled": True,
-                                    "stop_reason": "user_emergency_stop",
-                                    **long_task_event_metadata(
-                                        state,
-                                        terminal=True,
-                                        continuation=run_index > 0,
-                                    ),
-                                },
-                            )
-                        )
-                    else:
-                        put(
-                            RunEvent(
-                                type="done",
-                                metadata={
-                                    "status": "cancelled",
-                                    "cancelled": True,
-                                    "committed": False,
-                                    "stop_reason": "user_emergency_stop",
-                                },
-                            )
-                        )
+                    put(user_cancelled_terminal_event())
                     return
+                # A user can pause/cancel the plan while its continuation
+                # hand-off is being published. Re-read durable state before
+                # starting another model request; never re-claim the plan.
+                if run_index > 0 and task_plan_id:
+                    plan_status = plan_continuation_status()
+                    if plan_status != "running":
+                        final_status = (
+                            plan_status
+                            if plan_status in {"completed", "paused", "failed", "cancelled"}
+                            else "paused"
+                        )
+                        state = finish_long_task(
+                            service.root, name, normalized_source, normalized_session,
+                            status=final_status,
+                            stop_reason=f"task_plan_{plan_status}",
+                        )
+                        put(enrich_terminal(
+                            RunEvent(type="done", metadata={"committed": False}),
+                            state, status=final_status,
+                            stop_reason=f"task_plan_{plan_status}",
+                        ))
+                        return
                 terminal_event: RunEvent | None = None
                 # Give each event source an isolated request envelope.
                 # Custom transports and plugins receive a mutable dict;
@@ -273,6 +306,13 @@ def run_source(
                             if not put(event):
                                 return
                             return
+                        if cancel_event.is_set():
+                            # put() intentionally drops non-terminal events
+                            # after cancellation.  Convert that race into the
+                            # same explicit terminal used by the loop boundary
+                            # instead of silently ending the SSE stream.
+                            terminal_event = user_cancelled_terminal_event()
+                            break
                         if not put(event):
                             return
                 finally:
@@ -285,6 +325,9 @@ def run_source(
                     iterator = None
 
                 if terminal_event is None:
+                    if cancel_event.is_set():
+                        put(user_cancelled_terminal_event())
+                        return
                     state, was_active = settle_abandoned_long_task(
                         stop_reason="missing_terminal_event",
                         error_code="LONG_TASK_MISSING_TERMINAL",
@@ -303,11 +346,13 @@ def run_source(
                 stats = terminal_run_stats(terminal_event)
                 state = state_snapshot()
                 limited = is_continuable_terminal(terminal_event.metadata)
+                plan_status = plan_continuation_status() if limited else None
                 can_continue = (
                     limited
-                    and not task_plan_id
+                    and plan_status in {None, "running"}
                     and not cancel_event.is_set()
                     and bool(state.get("enabled"))
+                    and not state.get("cancel_requested")
                     and state.get("status") not in {"pausing", "cancelling"}
                 )
                 if can_continue:
@@ -452,6 +497,8 @@ def run_source(
                         or terminal_status == "cancelled"
                         else "failed"
                         if terminal_status in {"failed", "error"}
+                        else plan_status
+                        if plan_status in {"completed", "paused", "failed", "cancelled"}
                         else "paused"
                         if limited
                         else "completed"
@@ -542,5 +589,3 @@ def run_source(
                 if value is active:
                     service._active_runs.pop(key, None)
         put(_WORKER_DONE)
-
-

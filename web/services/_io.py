@@ -9,6 +9,7 @@ import uuid
 
 from web.constants import TEXT_DOCUMENT_MAX_CHARS
 from web.errors import InvalidRequestError
+from run.infra import invalidate_source_cache
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -20,6 +21,7 @@ def atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        invalidate_source_cache(path)
     finally:
         if temporary.exists():
             temporary.unlink()

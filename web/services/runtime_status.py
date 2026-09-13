@@ -112,6 +112,12 @@ def _provider_response_time(response: dict[str, Any]) -> datetime | None:
 
 
 class RuntimeStatusServiceMixin:
+    def runtime_logs(self, user: str, *, category: str = "all", page: int = 1,
+                     page_size: int = 25, refresh: bool = False) -> dict[str, Any]:
+        from web.services.runtime_logs import runtime_logs
+        return runtime_logs(self, user, category=category, page=page,
+                            page_size=page_size, refresh=refresh)
+
     def _current_context_status(
         self,
         user: str,
