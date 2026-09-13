@@ -266,6 +266,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `true` | 是否启用 cron 调度器 |
+| `history_retention_days` | int | `7` | `agent` 模式定时任务生成的历史对话保留天数，范围 0–3650；`0` 表示永久保留。该字段只接受全局配置，用户配置不能覆盖 |
 | `poll_interval` | int | `30` | 任务轮询间隔（秒）。运行时会自动取它与 `sense_update_rate`、`expand_update_rate` 的最小值，保证短周期任务按时被扫描 |
 | `avoid_congestion` | bool | `true` | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | `0.2` | 拥塞阈值比例。当 Provider 可用槽位低于此比例时，推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避 |
@@ -656,9 +657,12 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `enabled` | bool | true | 是否启用 cron 调度器 |
+| `history_retention_days` | int | 7 | 只读继承全局值，用户配置不能覆盖；0 表示永久保留 |
 | `poll_interval` | int | 30 | 任务轮询间隔（秒） |
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
+
+`cron.history_retention_days` 是本段的例外：即使旧用户配置残留同名值，运行时也始终采用全局配置。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认 7 天。整数之外、负数或超过 3650 的值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。
 
 ---
 

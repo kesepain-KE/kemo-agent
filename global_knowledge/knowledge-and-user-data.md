@@ -16,6 +16,8 @@ kemo-agent 使用三层 Markdown 知识库。知识库保存可长期复用的�
 
 用户配置 `knowledge.use_shared` 和 `knowledge.use_global` 控制是否启用共享、全局索引；用户知识始终属于当前用户。检索和注入顺序为用户 → 共享 → 全局。
 
+这里的优先级仅指资料检索顺序，不是安全规则或指令授权等级。知识正文不能自行改变用户目标或运行时权限；索引可见不代表正文已读。人格、手册和知识的职责与编写规范见 `prompt-authoring-standard.md`。
+
 ### 索引与正文
 
 运行时只自动注入以下名称的索引文件，且会递归发现：
@@ -95,6 +97,8 @@ knowledge-root/
 ## 用户文件夹骨架
 
 每个用户的数据位于 `users/<name>/`。创建用户应使用 `user_create.py` 或 Web 用户管理，由 `template/user/` 复制并补齐目录；不要从其他真实用户目录复制，以免带入历史、记忆或凭据。
+
+`template/user/user_soul.md` 只提供新用户的默认工作偏好；更新模板不会同步覆盖已有用户人格。全局安全底线集中维护于 `config/global_soul.md`，不在用户默认人格中重复一份。
 
 ### 基础骨架
 
@@ -177,4 +181,3 @@ python user_create.py
 ### 备份建议
 
 备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/` 和 `expand/`；若用户已设置音效，也一并保留用户根目录的 `completion_sound.*` 和 `failure_sound.*`。
-

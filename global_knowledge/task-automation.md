@@ -78,6 +78,16 @@ RuntimeHost 重启时会把被中断的 `running` 用户任务恢复为 `enabled
 
 用户任务和系统任务的执行记录都只写入结构化运行日志数据库 `runtime/logs.sqlite3`。日志记录只保存受限结果摘要和错误信息，不保存完整提示词。
 
+### 定时任务历史对话生命周期
+
+`exec_mode=agent` 的任务使用 `background:cron:<task_id>` 作为独立历史来源。每次执行结束时，历史会话登记 `cron_finished_at`；全局 `cron.history_retention_days` 控制从这次结束时间开始的保留期，默认 7 天，范围 0–3650，`0` 表示永久保留。该字段只能写在 `config/global_config.json`，旧用户配置中的同名值不会覆盖全局策略。
+
+RuntimeHost 的 Maintenance 每 5 分钟读取一次全局配置，并按用户最多清理 100 个已到期会话。到期边界按 UTC 实时时长计算，恰好达到保留期即可清理；旧会话没有 `cron_finished_at` 时，保守使用会话最近更新时间。无效或无法解析的时间不会触发删除。关闭 `runtime_host.enable_background_scheduler` 时，定时任务和此维护清理都会暂停。
+
+清理只匹配大小写准确且任务 ID 非空的 `background:cron:<task_id>`：普通 Web/CLI 对话、外部消息、任务计划、其他后台来源以及别的用户均不受影响。运行中的会话、正在执行记忆提取或历史摘要的会话会跳过；候选在会话锁和 SQLite 写事务中再次校验，删除 session、active binding、archive/runtime window、消息、轮次和上下文摘要，并保留删除栅栏防止旧 Run 迟到复写。重复任务若固定复用同一逻辑会话 ID，下一次正式启动会清除逻辑栅栏并写入新的物理窗口，旧窗口仍不可复活。
+
+网页入口位于“配置 → 运行限制 → 调度与超时 → 定时任务历史保留天数”，使用现有全局配置读取和修改 API。缩短天数会在后续维护扫描中清理已经越过新期限的历史，删除不可撤销；不会删除 Cron 任务定义、结构化执行日志、附件、下载文件或消息队列。
+
 ### 创建质量要求
 
 - `prompt` 必须包含目标、输入来源、输出去向和失败时行为。
@@ -194,7 +204,7 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 
 计划批准后有两种执行形态：
 
-1. Web 前台执行：在当前对话中连续运行；每步完成后主智能体调用 `task_plan step_done`，读取返回的 `progress` 和 `next_step`，同一轮继续下一步，用户可以看到工具与文本输出。
+1. Web/App 前台执行：在当前对话中连续运行；每步完成后主智能体调用 `task_plan step_done`，读取返回的 `progress` 和 `next_step` 继续下一步，用户可以看到工具与文本输出。当前会话显式开启长任务模式时，仍处于 `running` 的计划可在单 Run 工具次数上限后跨 Run 继续，保持同一计划与已完成步骤，不重新领取或批准；中间 Run 不触发计划暂停。完整续跑、取消与交接边界见 `long-task-runtime.md`。
 2. 后台执行器：一次只运行一个步骤，步骤状态由框架维护；控制提示会明确禁止再次调用 `step_done/step_fail`。
 
 两种形态不能混用步骤写入责任。运行中暂停表示在安全边界停止；取消则进入不可继续的 `cancelled` 终态。
@@ -225,4 +235,3 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 不能通过只读接口返回。这个输出脱敏是持久化前校验的第二道保护，不能用来允许新计划保存凭据。
 
 数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`，并用 `task_plan_revisions` 保存不可改写的修订历史。大型参数、结果和错误通过 `task_plan_revision_blobs` 按计划内 SHA-256 去重，读取时透明还原；旧版明文 JSON 和压缩快照继续兼容。创建、修改、revision 与大型字段引用在同一事务提交，任一步失败都会整体回滚。启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。
-

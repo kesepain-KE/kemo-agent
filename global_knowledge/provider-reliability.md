@@ -86,6 +86,32 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 这组单元测试验证客户端状态机，不替代真实 Nginx/CDN、丢包、网关进程崩溃和磁盘故障测试。发布前应同时运行 Agent 与网关两侧的传输稳定性测试。
 
+### Kemo 1.0 共享契约 Fixture
+
+Agent 与网关在各自仓库维护同一份脱敏线协议 Fixture：
+`tests/contracts/kemo_v1/fixtures/manifest.json` 和 `wire.json` 必须逐字节一致。Fixture 覆盖文本、
+动态推理档位、多轮工具结果、多模态、能力与模型目录、Asset、Usage、Embedding、Rerank、统一终态
+以及 SSE 顺序和去重。两端测试只依赖本仓库生产代码，不互相导入 Python 模块，避免把兼容测试
+变成跨仓库运行时耦合。
+
+在 kemo-agent 中运行：
+
+```powershell
+python -m tests.contracts.kemo_v1 -q
+python -m tests.contracts.kemo_v1 --peer-root E:\code\kemo-adapter-api -q
+```
+
+第二条命令中的路径按实际目录调整。Fixture 是 Kemo 1.0 的共同最小线路合同，不要求两端内部
+类型完全相同：`ProviderStreamEvent.run_id/run_sequence` 是 Agent 运行态字段，不是网关必填线路字段；
+Asset 和 Item 的可空时间字段用于接收网关明确返回的 `null`。Agent 的扩展模型可以宽容读取同一
+主版本的新增字段，但正常发出的请求、协议 Header、共享 Fixture 与当前网关路由均使用精确 `1.0`。
+ID、Token 计量、媒体 SHA-256、工具对应关系、终态和 SSE 顺序仍按严格合同验证。
+
+修改共享 Fixture 时，必须同时更新两边 `manifest.json` 的 SHA-256/计数和
+`fixture_loader.py` 的 `EXPECTED_WIRE_SHA256`，随后从两个仓库各运行一次单入口和镜像核对。
+不得以缩减无效用例、降低 Schema 校验或维护两套不同样例处理失败。该套件不替代真实 HTTP
+反向代理、进程崩溃、磁盘故障和上游 Provider 验收。
+
 ---
 
 ## Provider 工具调用完整性与终态边界
