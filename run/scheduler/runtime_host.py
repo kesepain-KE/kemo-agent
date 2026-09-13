@@ -39,6 +39,7 @@ from run.scheduler.maintenance import MaintenanceScheduler
 from run.tasks import TaskPlanScheduler
 from run.tools import ToolRegistry, discover_tools
 from run.config import list_users
+from run.infra import record_runtime_event
 
 
 _HOST_STATES = frozenset({"stopped", "starting", "running", "stopping", "failed"})
@@ -570,11 +571,20 @@ class RuntimeHost:
     ) -> None:
         with self._lock:
             item = self._components.get(key)
+            changed = item is None or item.state != state
             if item is None:
                 item = ComponentStatus(key, "component")
                 self._components[key] = item
             item.state = state
             item.last_error = self._error_payload(exc) if exc is not None else None
+        if changed or exc is not None:
+            component_kind = key.split(":", 1)[0]
+            if component_kind not in {"router", "background", "cron", "maintenance", "history_summaries", "task_plans", "transport", "message_plugin"}:
+                component_kind = "component"
+            record_runtime_event(
+                self.root, "__system__", category="backend", name="runtime_" + component_kind,
+                status=state, error_type=type(exc).__name__ if exc is not None else "",
+            )
 
 
 def build_host(

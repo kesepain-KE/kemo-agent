@@ -391,6 +391,8 @@ def commit_terminal_windows(
                 if isinstance(active_key, str) and active_key.strip()
                 else None
             )
+            if source.startswith("background:cron:") and source != "background:cron:" and run_state != "running":
+                record["cron_finished_at"] = timestamp
             stored_data = save_window_bundle(
                 [
                 (archive_directory, stored_archive, _SUMMARY_UNCHANGED),

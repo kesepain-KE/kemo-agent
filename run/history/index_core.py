@@ -718,6 +718,7 @@ def update_run_state(
     session_generation: str = "",
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
+        cron_run = source.startswith("background:cron:") and source != "background:cron:"
         record = read_registry_record(root, user, source, session_id)
         if not isinstance(record, dict):
             if directory is None:
@@ -733,11 +734,21 @@ def update_run_state(
                     "session_generation": str(session_generation or "").strip(),
                 },
             )
+        if cron_run and run_state == "running":
+            # A recurring task may intentionally reuse a logical session after
+            # its prior history expired. Renew the lease and clear that prior
+            # completion timestamp before cleanup can select it again.
+            record.pop("cron_finished_at", None)
+        elif cron_run and record.get("run_state") == "running" and run_state != "running":
+            record["cron_finished_at"] = _now()
         record["run_state"] = run_state
         record["run_state_updated_at"] = _now()
         if run_id:
             record["last_run_id"] = run_id
-        return upsert_registry_record(root, user, record, updated_at=_now())
+        return upsert_registry_record(
+            root, user, record, updated_at=_now(),
+            allow_deleted_reuse=cron_run and run_state == "running",
+        )
 
 
 def update_memory_state(

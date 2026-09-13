@@ -34,7 +34,7 @@ class SystemCronLease:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.path = self.root / "runtime" / ".system-cron.lock"
-        self._root_key = str(self.root).casefold()
+        self._root_key = os.path.normcase(str(self.root))
         self._handle: Any | None = None
 
     @property
@@ -92,7 +92,7 @@ class SystemCronLease:
 
 
 def _key(root: Path, user: str, system: bool, task_id: str) -> tuple[str, str, bool, str]:
-    return (str(root.resolve()).casefold(), str(user), bool(system), str(task_id))
+    return (os.path.normcase(str(root.resolve())), str(user), bool(system), str(task_id))
 
 
 def overlay_cron_runtime(
@@ -156,7 +156,7 @@ def runtime_checkpoint_due(state: dict[str, Any], interval_seconds: float) -> bo
 
 
 def pending_cron_runtime(root: Path) -> list[dict[str, Any]]:
-    normalized_root = str(root.resolve()).casefold()
+    normalized_root = os.path.normcase(str(root.resolve()))
     with _LOCK:
         return [
             copy.deepcopy(state)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import re
@@ -14,6 +13,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from run.scheduler.runtime_state import clear_cron_runtime, overlay_cron_runtime
+from run.infra import BoundedReadCache
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -34,27 +34,23 @@ _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
-_LIST_CACHE: dict[
-    tuple[str, str],
-    tuple[tuple[tuple[str, int, int], ...], tuple[dict[str, Any], ...]],
-] = {}
-_LIST_CACHE_GUARD = threading.Lock()
+_LIST_CACHE = BoundedReadCache(max_entries=128, max_bytes=8 * 1024 * 1024, per_owner=1)
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
-    key = (str(root.resolve()).casefold(), user)
+    key = (os.path.normcase(str(root.resolve())), user)
     with _STORE_LOCKS_GUARD:
         return _STORE_LOCKS.setdefault(key, threading.RLock())
 
 
-def _task_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
-    signature: list[tuple[str, int, int]] = []
+def _task_signature(paths: list[Path]) -> tuple[tuple, ...]:
+    signature: list[tuple] = []
     for path in paths:
         try:
             stat = path.stat()
         except OSError:
             continue
-        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+        signature.append((path.name, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino, stat.st_mode))
     return tuple(signature)
 
 
@@ -93,6 +89,7 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
         os.replace(tmp, path)
+        _LIST_CACHE.invalidate(lambda key: key[0] == os.path.normcase(str(path.parent.resolve())))
     except OSError:
         if tmp.exists():
             try:
@@ -313,7 +310,7 @@ class CronStore:
             task,
         )
 
-    def _load(self, path: Path, *, migrate: bool = True) -> dict[str, Any]:
+    def _load(self, path: Path, *, migrate: bool = True, include_runtime: bool = True) -> dict[str, Any]:
         try:
             data = json.loads(path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -322,14 +319,14 @@ class CronStore:
             raise CronError(f"任务文件损坏：{path.stem}（根节点不是对象）")
         try:
             _validate_task(data, system=self._system)
-            return self._with_runtime(data)
+            return self._with_runtime(data) if include_runtime else data
         except CronValidationError:
             if not migrate:
                 raise
         migrated = _migrate_task(data, fallback_user=self.user)
         _validate_task(migrated, system=self._system)
         _atomic_write(path, migrated)
-        return self._with_runtime(migrated)
+        return self._with_runtime(migrated) if include_runtime else migrated
 
     def create(self, task: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -358,22 +355,20 @@ class CronStore:
             pattern = "*.json" if self._system else "cron_*.json"
             paths = sorted(self._dir.glob(pattern), key=lambda item: item.name)
             signature = _task_signature(paths)
-            cache_key = (str(self._dir.resolve()).casefold(), pattern)
-            with _LIST_CACHE_GUARD:
-                cached = _LIST_CACHE.get(cache_key)
-                if cached is not None and cached[0] == signature:
-                    return [self._with_runtime(item) for item in cached[1]]
-            tasks: list[dict[str, Any]] = []
-            for path in paths:
-                try:
-                    tasks.append(self._load(path))
-                except (CronError, CronValidationError):
-                    continue
-            with _LIST_CACHE_GUARD:
-                _LIST_CACHE[cache_key] = (
-                    _task_signature(paths),
-                    tuple(copy.deepcopy(tasks)),
-                )
+            cache_key = (os.path.normcase(str(self._dir.resolve())), pattern)
+
+            def load_definitions() -> list[dict[str, Any]]:
+                tasks: list[dict[str, Any]] = []
+                for path in paths:
+                    try:
+                        tasks.append(self._load(path, include_runtime=False))
+                    except (CronError, CronValidationError):
+                        continue
+                return tasks
+
+            tasks, _ = _LIST_CACHE.get_or_load(
+                cache_key, load_definitions, owner=cache_key, ttl=30, version=signature,
+            )
             return [self._with_runtime(item) for item in tasks]
 
     def update(
@@ -403,6 +398,7 @@ class CronStore:
             if not path.exists():
                 return False
             path.unlink()
+            _LIST_CACHE.invalidate(lambda key: key[0] == os.path.normcase(str(self._dir.resolve())))
             clear_cron_runtime(self.root, self.user, self._system, task_id)
             return True
 

@@ -28,7 +28,7 @@ from run.history.session_api import (
     session_messages,
 )
 
-_DOMAIN_MODULES = ("index", "store", "summary_scheduler")
+_DOMAIN_MODULES = ("index", "store", "summary_scheduler", "retention", "web_lifecycle")
 
 
 def __getattr__(name: str):

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from run.infra import cached_read_text
 
 from provider.protocol.models import (
     normalize_kemo_reasoning_effort,
@@ -49,6 +50,17 @@ SYSTEM_UPDATE_RATE_KEYS = frozenset({"sense_update_rate", "expand_update_rate"})
 
 class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
+
+
+def cron_history_retention_days(config: dict[str, Any]) -> int:
+    """Global-only cleanup policy. Invalid values fail closed, never delete data."""
+    cron = config.get("cron", {})
+    if not isinstance(cron, dict):
+        raise ConfigError("cron 必须是对象")
+    value = cron.get("history_retention_days", 7)
+    if type(value) is not int or not 0 <= value <= 3650:
+        raise ConfigError("cron.history_retention_days 必须是 0 到 3650 的整数；0 表示永久保留")
+    return value
 
 
 def dotenv_values(
@@ -146,7 +158,7 @@ def project_root() -> Path:
 
 def read_json_object(path: Path, *, allow_empty: bool = False) -> dict[str, Any]:
     try:
-        text = path.read_text("utf-8")
+        text = cached_read_text(path, "utf-8")
     except FileNotFoundError:
         if allow_empty:
             return {}
@@ -190,6 +202,9 @@ def merge_user_config(
         if key not in USER_ONLY_SECTIONS
     }
     merged = deep_merge(global_defaults, user_config)
+    retention_days = cron_history_retention_days(global_config)
+    if isinstance(merged.get("cron", {}), dict):
+        merged.setdefault("cron", {})["history_retention_days"] = retention_days
     for section in USER_ONLY_SECTIONS:
         if section in user_config:
             merged[section] = copy.deepcopy(user_config[section])

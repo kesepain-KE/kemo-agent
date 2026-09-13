@@ -822,50 +822,57 @@ def rename_windows(
 
 def delete_session_windows(root: Path, user: str, source: str, session_id: str) -> int:
     with connection(root, user, write=True) as database:
-        database.execute(
-            """
-            INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
-            VALUES(?, ?, datetime('now'))
-            ON CONFLICT(source, session_id) DO UPDATE SET
-                deleted_at=excluded.deleted_at
-            """,
-            (str(source), str(session_id)),
+        return _delete_session_windows(database, source, session_id)
+
+
+def _delete_session_windows(database: sqlite3.Connection, source: str, session_id: str) -> int:
+    """Shared transaction body for manual deletion and lifecycle cleanup."""
+    if source == 'web':
+        database.execute('DELETE FROM history_web_leases WHERE session_id=?', (session_id,))
+    database.execute(
+        """
+        INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
+        VALUES(?, ?, datetime('now'))
+        ON CONFLICT(source, session_id) DO UPDATE SET
+            deleted_at=excluded.deleted_at
+        """,
+        (str(source), str(session_id)),
+    )
+    windows = database.execute(
+        "SELECT window_kind, window_name, data_json FROM history_windows "
+        "WHERE source=? AND session_id=?",
+        (source, session_id),
+    ).fetchall()
+    for row in windows:
+        stored_data = _object(row["data_json"], {})
+        _remember_deleted_window(
+            database,
+            kind=str(row["window_kind"]),
+            name=str(row["window_name"]),
+            source=source,
+            session_id=session_id,
+            session_generation=(
+                str(stored_data.get("session_generation") or "")
+                if isinstance(stored_data, dict)
+                else ""
+            ),
         )
-        windows = database.execute(
-            "SELECT window_kind, window_name, data_json FROM history_windows "
-            "WHERE source=? AND session_id=?",
-            (source, session_id),
-        ).fetchall()
-        for row in windows:
-            stored_data = _object(row["data_json"], {})
-            _remember_deleted_window(
-                database,
-                kind=str(row["window_kind"]),
-                name=str(row["window_name"]),
-                source=source,
-                session_id=session_id,
-                session_generation=(
-                    str(stored_data.get("session_generation") or "")
-                    if isinstance(stored_data, dict)
-                    else ""
-                ),
-            )
-        database.executemany(
-            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
-            [(row["window_kind"], row["window_name"]) for row in windows],
-        )
-        database.execute(
-            "DELETE FROM history_context_summaries WHERE source=? AND session_id=?",
-            (source, session_id),
-        )
-        database.execute(
-            "DELETE FROM history_messages WHERE source=? AND session_id=?",
-            (source, session_id),
-        )
-        result = database.execute(
-            "DELETE FROM history_windows WHERE source=? AND session_id=?",
-            (source, session_id),
-        )
+    database.executemany(
+        "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
+        [(row["window_kind"], row["window_name"]) for row in windows],
+    )
+    database.execute(
+        "DELETE FROM history_context_summaries WHERE source=? AND session_id=?",
+        (source, session_id),
+    )
+    database.execute(
+        "DELETE FROM history_messages WHERE source=? AND session_id=?",
+        (source, session_id),
+    )
+    result = database.execute(
+        "DELETE FROM history_windows WHERE source=? AND session_id=?",
+        (source, session_id),
+    )
     return result.rowcount
 
 

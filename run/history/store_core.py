@@ -19,7 +19,7 @@ from run.config import user_dir
 
 
 HISTORY_DB_FILENAME = "history.sqlite3"
-HISTORY_SCHEMA_VERSION = 5
+HISTORY_SCHEMA_VERSION = 6
 _SUMMARY_UNSET = object()
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
@@ -271,6 +271,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             session_id TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS history_web_leases (
+            session_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            PRIMARY KEY (session_id, client_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_web_leases_expiry
+            ON history_web_leases(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_history_empty_web_sessions
+            ON history_sessions(source, rounds, updated_at, session_id);
 
         -- A deleted session must remain fenced off long enough to reject
         -- terminal commits that were already in flight when the user deleted

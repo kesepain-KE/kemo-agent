@@ -43,12 +43,14 @@ from run.memory import memory_round_payload
 from run.long_task import semantic_user_text
 from run.conversation import session_lock
 from run.tools import ToolRegistry, discover_tools
-from run.config import list_users
+from run.config import list_users, read_json_object, cron_history_retention_days
+from run.history import cleanup_cron_history
 from run.scheduler.memory_recovery import recover_pending_memory as _recover_pending_memory_impl
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
+CRON_HISTORY_CLEANUP_INTERVAL = timedelta(minutes=5)
 MEMORY_RECOVERY_ROUNDS_PER_SCAN = 10
 HISTORY_SUMMARY_CHUNK_TOKENS = 24_000
 HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 10_000
@@ -254,9 +256,11 @@ class MaintenanceScheduler:
             max(1, int(value)) for value in summary_retry_delays
         ) or (30,)
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._next_context_review: dict[str, datetime] = {}
+        self._next_cron_history_cleanup: dict[str, datetime] = {}
         self._last_results: dict[str, Any] = {}
 
     @property
@@ -269,6 +273,7 @@ class MaintenanceScheduler:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
+            self._wake_event.clear()
             self._thread = threading.Thread(
                 target=self._run_loop,
                 name="system-maintenance",
@@ -278,6 +283,7 @@ class MaintenanceScheduler:
 
     def stop(self, *, timeout: float = 10.0) -> None:
         self._stop_event.set()
+        self._wake_event.set()
         with self._lock:
             thread = self._thread
         if thread is not None and thread.is_alive():
@@ -294,6 +300,10 @@ class MaintenanceScheduler:
                     json.dumps(self._last_results, ensure_ascii=False, default=str)
                 ),
             }
+
+    def wake(self) -> None:
+        """Promptly recheck durable queues without running work on the caller."""
+        self._wake_event.set()
 
     def scan_once(
         self,
@@ -327,9 +337,18 @@ class MaintenanceScheduler:
         *,
         force: bool,
     ) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "memory_recovery": self._recover_pending_memory(user),
-        }
+        result: dict[str, Any] = {}
+        if force or current >= self._next_cron_history_cleanup.get(user, current):
+            try:
+                global_config = read_json_object(self.root / "config" / "global_config.json")
+                result["cron_history_cleanup"] = cleanup_cron_history(
+                    self.root, user, retention_days=cron_history_retention_days(global_config), now=current,
+                )
+            except Exception as exc:
+                self._report_error(f"cron_history_cleanup:{user}", exc)
+                result["cron_history_cleanup"] = {"error": type(exc).__name__}
+            self._next_cron_history_cleanup[user] = current + CRON_HISTORY_CLEANUP_INTERVAL
+        result["memory_recovery"] = self._recover_pending_memory(user)
         if self.history_summary_enabled:
             result["history_summary"] = self.process_next_summary(user)
 
@@ -618,4 +637,5 @@ class MaintenanceScheduler:
                 self.scan_once()
             except Exception as exc:
                 self._report_error("maintenance", exc)
-            self._stop_event.wait(self.poll_interval)
+            self._wake_event.wait(self.poll_interval)
+            self._wake_event.clear()
