@@ -815,50 +815,77 @@ class SqliteMemoryStore:
     def list_items(self) -> list[dict[str, Any]]:
         return self.load_all()
 
-    def load_important_view_sources(self) -> frozenset[str]:
+    def _important_view_snapshot(
+        self, *, now: datetime | None = None,
+    ) -> tuple[dict[str, Any], list[sqlite3.Row]]:
+        api = _memory_api()
+        current = now or api.utc_now()
         with connection(self.root, self.user) as database:
+            # Count and source rows must describe the same read-only snapshot.
+            database.execute("BEGIN")
             count_row = database.execute(
                 "SELECT value FROM memory_meta WHERE key='important_view_count'"
             ).fetchone()
             rows = database.execute(
                 """
-                SELECT fragment.filename, fragment.tier, fragment.content_hash,
+                SELECT fragment.id, fragment.filename, fragment.tier,
+                       fragment.content_hash, fragment.expires_at,
                        source.content_hash AS expected_hash
                 FROM memory_important_sources AS source
-                JOIN memory_fragments AS fragment ON fragment.id=source.fragment_id
+                LEFT JOIN memory_fragments AS fragment ON fragment.id=source.fragment_id
                 ORDER BY fragment.filename_key
                 """
             ).fetchall()
-        expected_count = int(count_row["value"]) if count_row is not None else 0
-        if len(rows) != expected_count:
-            return frozenset()
-        if any(
-            str(row["tier"]) == "permanent"
-            or str(row["content_hash"]) != str(row["expected_hash"])
-            for row in rows
-        ):
+        if count_row is None:
+            # Preserve legacy/manual files, but never claim verified provenance.
+            return {
+                "status": "untracked", "is_current": True,
+                "reason_codes": ["sources_untracked"],
+                "reason": "未记录来源，暂无法校验有效性。",
+            }, rows
+        reasons: dict[str, str] = {}
+        try:
+            expected_count = int(count_row["value"])
+            if expected_count < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            expected_count = len(rows)
+            reasons["invalid_metadata"] = "来源记录异常"
+        if len(rows) > expected_count:
+            reasons["invalid_metadata"] = "来源记录异常"
+        if len(rows) < expected_count or any(row["id"] is None for row in rows):
+            reasons["source_missing"] = "来源记忆已删除或清理"
+        for row in rows:
+            if row["id"] is None:
+                continue
+            if str(row["tier"]) == "permanent":
+                reasons["source_promoted"] = "来源已转为长期记忆"
+            elif (expires_at := api.parse_time(row["expires_at"])) is None:
+                reasons["invalid_metadata"] = "来源记录异常"
+            elif expires_at <= current:
+                reasons["source_expired"] = "来源记忆已到期"
+            if str(row["content_hash"]) != str(row["expected_hash"]):
+                reasons["source_changed"] = "来源内容已更新"
+        return {
+            "status": "invalid" if reasons else "valid",
+            "is_current": not reasons,
+            "reason_codes": list(reasons),
+            "reason": "；".join(reasons.values()) + "。" if reasons else "来源校验通过。",
+        }, rows
+
+    def important_view_status(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Explain eligibility without exposing source content or changing weights."""
+        status, _ = self._important_view_snapshot(now=now)
+        return status
+
+    def load_important_view_sources(self) -> frozenset[str]:
+        status, rows = self._important_view_snapshot()
+        if status["status"] != "valid":
             return frozenset()
         return frozenset(str(row["filename"]) for row in rows)
 
     def important_view_is_current(self) -> bool:
-        with connection(self.root, self.user) as database:
-            count_row = database.execute(
-                "SELECT value FROM memory_meta WHERE key='important_view_count'"
-            ).fetchone()
-            mismatch = database.execute(
-                """
-                SELECT COUNT(*) FROM memory_important_sources AS source
-                LEFT JOIN memory_fragments AS fragment ON fragment.id=source.fragment_id
-                WHERE fragment.id IS NULL OR fragment.tier='permanent'
-                   OR fragment.content_hash != source.content_hash
-                """
-            ).fetchone()[0]
-            actual = database.execute(
-                "SELECT COUNT(*) FROM memory_important_sources"
-            ).fetchone()[0]
-        if count_row is None:
-            return True
-        return int(actual) == int(count_row["value"]) and int(mismatch) == 0
+        return bool(self.important_view_status()["is_current"])
 
     def set_important_view_sources(
         self,

@@ -167,10 +167,22 @@ class MemoryServiceMixin:
         if not path.is_file():
             raise NotFoundError("临时重要记忆不存在")
         content = path.read_text("utf-8")
+        config = load_config(name, self.root)
+        lifecycle = MemoryStore(self.root, name, config).important_view_status()
+        if not content.strip():
+            lifecycle = {
+                "status": "empty", "is_current": False,
+                "reason_codes": ["empty_content"], "reason": "当前没有记忆内容。",
+            }
+        lifecycle["prompt_eligible"] = bool(
+            lifecycle["is_current"]
+            and int((config.get("memory") or {}).get("important_memory_max_chars", 20000)) > 0
+        )
         return {
             "user": name,
             "path": f"users/{name}/memory_temporary_important.md",
             "content": content,
+            "lifecycle": lifecycle,
             "size": len(content.encode()),
             "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             .astimezone(ZoneInfo("Asia/Shanghai"))
@@ -195,13 +207,5 @@ class MemoryServiceMixin:
             raise InvalidRequestError("临时重要记忆包含疑似敏感凭据，已拒绝写入")
         path = self.root / "users" / name / "memory_temporary_important.md"
         _atomic_write(path, text.encode("utf-8"))
-        return {
-            "user": name,
-            "path": f"users/{name}/memory_temporary_important.md",
-            "content": text,
-            "size": len(text.encode()),
-            "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-            .astimezone(ZoneInfo("Asia/Shanghai"))
-            .isoformat(),
-            "updated": True,
-        }
+        # Editing the view does not rebuild its source provenance or revive it.
+        return {**self.important_memory(name), "updated": True}
