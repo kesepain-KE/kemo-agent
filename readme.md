@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.7-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.8-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -204,7 +204,19 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.2.7`
+当前版本：`1.2.8`
+
+### 1.2.8 更新
+
+这是一次多用户 Web 工作区与运行可靠性更新。
+
+- 任务计划在达到单轮工具上限后可以跨 Run 连续执行，暂停、取消、失败和完成状态不会被续跑逻辑覆盖。
+- 子代理进度悬浮在对应的 `subagent_dispatch` 工具卡片下方；消息跟进队列支持本轮引导、排序、取消和失败重试。
+- 统一感知、拓展、插件、技能、操作手册、人格与全局知识库的 Prompt 和定义规范。
+- 文件空间支持按名称、最新日期和大小排序；临时重要记忆在失效后保留内容并显示简短失效原因。
+- 系统状态增加全部、后端日志、后端线程、终端日志和消息日志分类，并使用带 TTL/LRU/配额的进程内读取缓存降低磁盘压力。
+- 定时任务历史对话默认保留 7 天并可通过全局配置调整；多用户 Web 工作区支持新建用户标签页和启动对话空间巡检。
+- 修复暂停/停止请求跨长任务续跑时的发送按钮状态竞态，并统一发布版本与项目知识库说明。
 
 ### 1.2.7 更新
 

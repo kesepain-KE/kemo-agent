@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         next_heading = summary_span.find("\n## ")
         summary = summary_span[: next_heading if next_heading >= 0 else len(summary_span)]
         highlights = {
+            "1.2.8": "多用户 Web 工作区与运行可靠性",
             "1.2.7": "Chat 兼容传输链路",
         }
         marker = highlights.get(version)

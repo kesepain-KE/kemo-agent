@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.7-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.8-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,19 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.7`
+Current version: `1.2.8`
+
+### 1.2.8 update
+
+This release focuses on multi-user Web workspaces and runtime reliability.
+
+- Task plans now continue across Run boundaries after a per-round tool limit, while pause, cancel, failure, and completion states remain authoritative.
+- Subagent progress is shown beneath the matching `subagent_dispatch` tool card; the follow-up queue supports next-turn guidance, ordering, cancellation, and retry.
+- Prompt and definition standards are aligned across Sense, Expand, Plugin, Skill, manuals, personas, and the global knowledge base.
+- Files can be sorted by name, newest update, or size; expired temporary important memories remain visible with a short invalidation reason.
+- System status exposes all, backend, thread, terminal, and message log views, backed by bounded TTL/LRU/quota read caching to reduce disk pressure.
+- Scheduled-task conversation history defaults to seven days and is globally configurable; multi-user Web workspaces support new user tabs and startup conversation-space inspection.
+- Stop/pause races across long-task handoffs no longer leave the send controls locked, and the public version and project knowledge documentation are synchronized.
 
 ### 1.2.7 update
 
