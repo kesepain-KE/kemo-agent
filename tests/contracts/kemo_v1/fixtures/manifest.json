@@ -1,0 +1,11 @@
+{
+  "fixture_set": "kemo-1.0-wire-2026-09-13",
+  "protocol_version": "1.0",
+  "wire_sha256": "1c250d8b777547fa942b658e919672a736821f6580f8df2688f5876d6c15c96f",
+  "counts": {
+    "valid_cases": 15,
+    "invalid_cases": 20,
+    "valid_streams": 2,
+    "invalid_streams": 4
+  }
+}

@@ -23,7 +23,30 @@
 
 ```powershell
 python -m pytest tests -q
+python -m tests.contracts.kemo_v1 -q
 python -m pytest tests/template_tests -q
 ```
 
 发布前还应运行项目的完整 `开发临时目录/release_check.py`；该脚本只负责编排，不承载业务断言。
+
+## Kemo 1.0 共享契约
+
+`tests/contracts/kemo_v1` 是 kemo-agent 与 kemo-adapter-api 共用的离线线协议基准。两个仓库镜像
+相同的 `fixtures/manifest.json` 和 `fixtures/wire.json`，但分别调用自己的生产协议模型、序列化器、
+SSE 解析器和顺序守卫；不从另一仓库导入代码，也不访问真实网关或 Provider。
+
+只验证当前 Agent：
+
+```powershell
+python -m tests.contracts.kemo_v1 -q
+```
+
+同时检出网关时，再核对镜像文件：
+
+```powershell
+python -m tests.contracts.kemo_v1 --peer-root E:\code\kemo-adapter-api -q
+```
+
+路径应替换为本机实际位置。修改 Kemo 请求、响应、能力声明、Asset、工具、多模态、Usage、
+Embedding、Rerank 或 SSE 时，必须同步两边 Fixture、清单摘要和固定摘要；不能靠删除用例、放宽
+Schema 或只修改一端让测试变绿。

@@ -1,0 +1,491 @@
+{
+  "fixture_set": "kemo-1.0-wire-2026-09-13",
+  "protocol_version": "1.0",
+  "documents": {
+    "request_text": {
+      "protocol_version": "1.0",
+      "request_id": "req_fixture_text",
+      "attempt": 1,
+      "model": "fixture-text-model",
+      "stream": false,
+      "system_prompt": "fixture system",
+      "reasoning": {
+        "enabled": true,
+        "effort": "adaptive-high",
+        "return": "summary",
+        "context": "current_turn"
+      },
+      "generation": {
+        "max_output_tokens": 128,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stop": ["<END>"],
+        "parallel_tool_calls": false
+      },
+      "output": {"modalities": ["text"]},
+      "tools": [],
+      "input": [
+        {
+          "id": "msg_fixture_user",
+          "type": "message",
+          "role": "user",
+          "status": "completed",
+          "created_at": null,
+          "content": [
+            {"type": "text", "text": "检查 Kemo 1.0", "language": "zh-CN"},
+            {"type": "json", "data": {"fixture": true}, "schema_name": "fixture-input"}
+          ],
+          "metadata": {"round": 1},
+          "extensions": {}
+        }
+      ],
+      "provider_options": {"fixture_mode": true},
+      "metadata": {"fixture": "text"},
+      "extensions": {"trace": {"enabled": false}}
+    },
+    "request_tool_followup": {
+      "protocol_version": "1.0",
+      "request_id": "req_fixture_tool",
+      "parent_request_id": "req_fixture_text",
+      "attempt": 2,
+      "model": "fixture-tool-model",
+      "stream": true,
+      "system_prompt": "fixture system",
+      "generation": {"max_output_tokens": 96, "parallel_tool_calls": true},
+      "output": {"modalities": ["text"]},
+      "tools": [
+        {
+          "type": "function",
+          "name": "fixture_lookup",
+          "description": "读取离线 Fixture",
+          "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+          },
+          "strict": false,
+          "permission": "fixture:read",
+          "metadata": {"fixture": true},
+          "extensions": {}
+        }
+      ],
+      "input": [
+        {
+          "id": "msg_tool_user",
+          "type": "message",
+          "role": "user",
+          "status": "completed",
+          "content": [{"type": "text", "text": "查找兼容结果"}],
+          "metadata": {},
+          "extensions": {}
+        },
+        {
+          "id": "tool_call_fixture",
+          "type": "tool_call",
+          "call_id": "call_fixture_lookup",
+          "name": "fixture_lookup",
+          "arguments": {"query": "kemo"},
+          "arguments_raw": "{\"query\":\"kemo\"}",
+          "status": "completed",
+          "metadata": {},
+          "extensions": {}
+        },
+        {
+          "id": "tool_result_fixture",
+          "type": "tool_result",
+          "call_id": "call_fixture_lookup",
+          "name": "fixture_lookup",
+          "is_error": false,
+          "status": "completed",
+          "content": [{"type": "text", "text": "兼容"}],
+          "metadata": {},
+          "extensions": {}
+        }
+      ],
+      "provider_options": {},
+      "metadata": {"fixture": "tool-followup"},
+      "extensions": {}
+    },
+    "request_multimodal": {
+      "protocol_version": "1.0",
+      "request_id": "req_fixture_media",
+      "attempt": 1,
+      "model": "fixture-multimodal-model",
+      "stream": false,
+      "system_prompt": "fixture media system",
+      "generation": {"max_output_tokens": 64, "parallel_tool_calls": false},
+      "output": {
+        "modalities": ["text", "image", "audio", "video", "file"],
+        "image": {"format": "png", "size": "1024x1024"},
+        "audio": {"format": "wav", "voice": "fixture"},
+        "video": {"format": "mp4", "duration_seconds": 3.0},
+        "file": {"filename": "fixture.txt", "mime_type": "text/plain"}
+      },
+      "tools": [],
+      "input": [
+        {
+          "id": "msg_fixture_media",
+          "type": "message",
+          "role": "user",
+          "status": "completed",
+          "content": [
+            {"type": "text", "text": "分析全部媒体"},
+            {"type": "image", "asset_id": "asset_fixture_image", "mime_type": "image/png", "checksum_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "detail": "high"},
+            {"type": "audio", "asset_id": "asset_fixture_audio", "mime_type": "audio/wav", "checksum_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "duration_ms": 1200},
+            {"type": "video", "asset_id": "asset_fixture_video", "mime_type": "video/mp4", "checksum_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "duration_ms": 3000},
+            {"type": "file", "asset_id": "asset_fixture_file", "mime_type": "text/plain", "checksum_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "filename": "fixture.txt"}
+          ],
+          "metadata": {},
+          "extensions": {}
+        }
+      ],
+      "provider_options": {},
+      "metadata": {"capability": "conversation"},
+      "extensions": {}
+    },
+    "response_completed": {
+      "protocol_version": "1.0",
+      "id": "resp_fixture_text",
+      "request_id": "req_fixture_text",
+      "object": "kemo.response",
+      "status": "completed",
+      "model": "fixture-text-model",
+      "output": [
+        {
+          "id": "reasoning_fixture",
+          "type": "reasoning",
+          "status": "completed",
+          "created_at": null,
+          "summary": "完成兼容检查",
+          "token_count": 2,
+          "metadata": {},
+          "extensions": {}
+        },
+        {
+          "id": "msg_fixture_answer",
+          "type": "message",
+          "role": "assistant",
+          "phase": "final_answer",
+          "status": "completed",
+          "created_at": "2026-09-13T00:00:01Z",
+          "content": [{"type": "text", "text": "Kemo 1.0 compatible"}],
+          "metadata": {},
+          "extensions": {}
+        }
+      ],
+      "usage": {
+        "input_tokens": 12,
+        "cached_input_tokens": 4,
+        "output_tokens": 6,
+        "reasoning_tokens": 2,
+        "visible_output_tokens": 4,
+        "total_tokens": 18,
+        "measurement": {"mode": "provider", "exact": true, "exact_fields": ["input_tokens", "output_tokens", "total_tokens"], "estimated_fields": ["reasoning_tokens"]},
+        "media": {"input_images": 0, "output_images": 0},
+        "stages": [
+          {
+            "stage": "generation",
+            "provider": "fixture",
+            "model": "fixture-upstream",
+            "input_tokens": 12,
+            "cached_input_tokens": 4,
+            "output_tokens": 6,
+            "reasoning_tokens": 2,
+            "total_tokens": 18,
+            "measurement": {"mode": "provider", "exact": true, "exact_fields": ["total_tokens"], "estimated_fields": []},
+            "media": {},
+            "metadata": {"fixture": true},
+            "extensions": {}
+          }
+        ],
+        "provider_raw": {"fixture_usage": true}
+      },
+      "provider_response_id": "upstream_fixture_text",
+      "metadata": {"fixture": true},
+      "extensions": {}
+    },
+    "response_requires_action": {
+      "protocol_version": "1.0",
+      "id": "resp_fixture_tool",
+      "request_id": "req_fixture_tool",
+      "object": "kemo.response",
+      "status": "requires_action",
+      "model": "fixture-tool-model",
+      "output": [
+        {
+          "id": "tool_call_response_fixture",
+          "type": "tool_call",
+          "call_id": "call_response_fixture",
+          "name": "fixture_lookup",
+          "arguments": {"query": "wire"},
+          "arguments_raw": "{\"query\":\"wire\"}",
+          "status": "completed",
+          "metadata": {},
+          "extensions": {}
+        }
+      ],
+      "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+      "metadata": {},
+      "extensions": {}
+    },
+    "response_failed": {
+      "protocol_version": "1.0",
+      "id": "resp_fixture_failed",
+      "request_id": "req_fixture_failed",
+      "object": "kemo.response",
+      "status": "failed",
+      "model": "fixture-text-model",
+      "output": [],
+      "usage": {},
+      "error": {
+        "type": "provider_error",
+        "code": "FIXTURE_FAILURE",
+        "message": "离线失败 Fixture",
+        "retryable": true,
+        "retry_after_ms": 250,
+        "provider_status": 503,
+        "provider_request_id": "provider_fixture_failed",
+        "details": {"fixture": true}
+      },
+      "metadata": {},
+      "extensions": {}
+    },
+    "capability_llm": {
+      "model": "fixture-llm",
+      "task": "llm",
+      "input_modalities": ["text", "image", "audio", "video", "file"],
+      "output_modalities": ["text", "image", "audio", "video", "file"],
+      "streaming": true,
+      "reasoning": {"supported": true, "efforts": ["minimal", "low", "medium", "high", "max", "adaptive-high"], "summary": true, "persisted_state": true},
+      "tools": {"function_calling": true, "parallel_calls": true, "multimodal_results": true},
+      "structured_output": true,
+      "metadata": {"provider_id": "fixture", "upstream_model": "llm"},
+      "extensions": {
+        "operations": {
+          "conversation": {"supported": true},
+          "vision": {"supported": true},
+          "image_generation": {"supported": true},
+          "image_edit": {"supported": true},
+          "audio_transcription": {"supported": true},
+          "speech_generation": {"supported": true},
+          "speech_to_speech": {"supported": true},
+          "video_understanding": {"supported": true},
+          "video_generation": {"supported": true}
+        },
+        "reasoning_effort_map": {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "max": "high", "adaptive-high": "auto"}
+      }
+    },
+    "capability_embedding": {
+      "model": "fixture-embedding",
+      "task": "embedding",
+      "input_modalities": ["text"],
+      "output_modalities": ["embedding"],
+      "streaming": false,
+      "reasoning": {"supported": false, "efforts": [], "summary": false, "persisted_state": false},
+      "tools": {"function_calling": false, "parallel_calls": false, "multimodal_results": false},
+      "structured_output": false,
+      "embedding": {"input_types": ["query", "document"], "default_dimensions": 3, "supported_dimensions": [3, 6], "max_batch_size": 8, "max_input_tokens_per_item": 2048, "normalization": "always"},
+      "metadata": {"provider_id": "fixture", "upstream_model": "embedding"},
+      "extensions": {}
+    },
+    "capability_rerank": {
+      "model": "fixture-rerank",
+      "task": "rerank",
+      "input_modalities": ["text"],
+      "output_modalities": ["score"],
+      "streaming": false,
+      "reasoning": {"supported": false, "efforts": [], "summary": false, "persisted_state": false},
+      "tools": {"function_calling": false, "parallel_calls": false, "multimodal_results": false},
+      "structured_output": false,
+      "rerank": {"max_documents": 32, "max_query_tokens": 512, "max_document_tokens": 1024, "supports_return_documents": true, "score_semantics": "higher_is_more_relevant"},
+      "metadata": {"provider_id": "fixture", "upstream_model": "rerank"},
+      "extensions": {}
+    },
+    "model_catalog": {
+      "protocol_version": "1.0",
+      "object": "kemo.model_list",
+      "count": 3,
+      "data": [
+        {"id": "fixture-llm", "object": "kemo.model", "provider_id": "fixture", "provider_model": "llm", "task": "llm", "capabilities_available": true, "capabilities_url": "/model/capabilities?model=fixture-llm"},
+        {"id": "fixture-embedding", "object": "kemo.model", "provider_id": "fixture", "provider_model": "embedding", "task": "embedding", "capabilities_available": true, "capabilities_url": "/model/capabilities?model=fixture-embedding"},
+        {"id": "fixture-rerank", "object": "kemo.model", "provider_id": "fixture", "provider_model": "rerank", "task": "rerank", "capabilities_available": true, "capabilities_url": "/model/capabilities?model=fixture-rerank"}
+      ]
+    },
+    "embedding_request": {
+      "protocol_version": "1.0",
+      "request_id": "req_fixture_embedding",
+      "model": "fixture-embedding",
+      "input_type": "document",
+      "inputs": [
+        {"id": "doc_fixture_a", "text": "第一个文档", "metadata": {"order": 1}},
+        {"id": "doc_fixture_b", "text": "第二个文档", "metadata": {"order": 2}}
+      ],
+      "dimensions": 3,
+      "normalize": true,
+      "provider_options": {},
+      "metadata": {"fixture": true},
+      "extensions": {}
+    },
+    "embedding_response": {
+      "protocol_version": "1.0",
+      "object": "kemo.embedding_list",
+      "request_id": "req_fixture_embedding",
+      "model": "fixture-embedding",
+      "model_version": "fixture-1",
+      "vector_space_id": "fixture:3:normalized",
+      "dimensions": 3,
+      "data": [
+        {"id": "doc_fixture_a", "index": 0, "vector": [1.0, 0.0, 0.0]},
+        {"id": "doc_fixture_b", "index": 1, "vector": [0.0, 1.0, 0.0]}
+      ],
+      "usage": {"input_tokens": 6, "total_tokens": 6},
+      "provider_response_id": "upstream_fixture_embedding",
+      "metadata": {},
+      "extensions": {}
+    },
+    "rerank_request": {
+      "protocol_version": "1.0",
+      "request_id": "req_fixture_rerank",
+      "model": "fixture-rerank",
+      "query": "哪个文档更相关",
+      "documents": [
+        {"id": "rank_fixture_a", "text": "相关文档", "metadata": {"order": 1}},
+        {"id": "rank_fixture_b", "text": "无关文档", "metadata": {"order": 2}}
+      ],
+      "top_n": 2,
+      "return_documents": true,
+      "provider_options": {},
+      "metadata": {},
+      "extensions": {}
+    },
+    "rerank_response": {
+      "protocol_version": "1.0",
+      "object": "kemo.rerank",
+      "request_id": "req_fixture_rerank",
+      "model": "fixture-rerank",
+      "model_version": "fixture-1",
+      "score_semantics": "higher_is_more_relevant",
+      "results": [
+        {"rank": 1, "document_id": "rank_fixture_a", "index": 0, "relevance_score": 0.9, "document": {"id": "rank_fixture_a", "text": "相关文档", "metadata": {"order": 1}}},
+        {"rank": 2, "document_id": "rank_fixture_b", "index": 1, "relevance_score": 0.1, "document": {"id": "rank_fixture_b", "text": "无关文档", "metadata": {"order": 2}}}
+      ],
+      "usage": {"input_tokens": 8, "total_tokens": 8},
+      "provider_response_id": "upstream_fixture_rerank",
+      "metadata": {},
+      "extensions": {}
+    },
+    "asset_descriptor": {
+      "protocol_version": "1.0",
+      "id": "asset_fixture_output",
+      "object": "kemo.asset",
+      "status": "ready",
+      "purpose": "output",
+      "filename": "fixture.png",
+      "mime_type": "image/png",
+      "size": 128,
+      "checksum_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "created_at": "2026-09-13T00:00:00Z",
+      "expires_at": "2026-09-14T00:00:00Z",
+      "metadata": {"fixture": true},
+      "extensions": {}
+    },
+    "sse_text_created": {"type": "response.created", "event_id": "evt_fixture_text_0", "sequence": 0, "request_id": "req_fixture_text", "response_id": "resp_fixture_text", "timestamp": "2026-09-13T00:00:00Z", "data": {}},
+    "sse_text_delta": {"type": "output_text.delta", "event_id": "evt_fixture_text_1", "sequence": 1, "request_id": "req_fixture_text", "response_id": "resp_fixture_text", "timestamp": "2026-09-13T00:00:00.100000Z", "item_id": "msg_fixture_answer", "content_index": 0, "delta": "Kemo 1.0 compatible", "data": {}},
+    "sse_text_usage": {"type": "usage.updated", "event_id": "evt_fixture_text_2", "sequence": 2, "request_id": "req_fixture_text", "response_id": "resp_fixture_text", "timestamp": "2026-09-13T00:00:00.200000Z", "usage": {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18}, "data": {}},
+    "sse_text_completed": {
+      "type": "response.completed",
+      "event_id": "evt_fixture_text_3",
+      "sequence": 3,
+      "request_id": "req_fixture_text",
+      "response_id": "resp_fixture_text",
+      "timestamp": "2026-09-13T00:00:01Z",
+      "response": {
+        "protocol_version": "1.0",
+        "id": "resp_fixture_text",
+        "request_id": "req_fixture_text",
+        "object": "kemo.response",
+        "status": "completed",
+        "model": "fixture-text-model",
+        "output": [{"id": "msg_fixture_answer", "type": "message", "role": "assistant", "phase": "final_answer", "status": "completed", "content": [{"type": "text", "text": "Kemo 1.0 compatible"}], "metadata": {}, "extensions": {}}],
+        "usage": {"input_tokens": 12, "output_tokens": 6, "total_tokens": 18},
+        "metadata": {},
+        "extensions": {}
+      },
+      "data": {}
+    },
+    "sse_tool_created": {"type": "response.created", "event_id": "evt_fixture_tool_0", "sequence": 0, "request_id": "req_fixture_tool", "response_id": "resp_fixture_tool", "timestamp": "2026-09-13T00:01:00Z", "data": {}},
+    "sse_tool_arguments": {"type": "tool_call.arguments.delta", "event_id": "evt_fixture_tool_1", "sequence": 1, "request_id": "req_fixture_tool", "response_id": "resp_fixture_tool", "timestamp": "2026-09-13T00:01:00.100000Z", "item_id": "tool_call_response_fixture", "call_id": "call_response_fixture", "name": "fixture_lookup", "delta": "{\"query\":\"wire\"}", "data": {}},
+    "sse_tool_completed": {"type": "tool_call.completed", "event_id": "evt_fixture_tool_2", "sequence": 2, "request_id": "req_fixture_tool", "response_id": "resp_fixture_tool", "timestamp": "2026-09-13T00:01:00.200000Z", "item_id": "tool_call_response_fixture", "call_id": "call_response_fixture", "name": "fixture_lookup", "item": {"id": "tool_call_response_fixture", "type": "tool_call", "call_id": "call_response_fixture", "name": "fixture_lookup", "arguments": {"query": "wire"}, "arguments_raw": "{\"query\":\"wire\"}", "status": "completed", "metadata": {}, "extensions": {}}, "data": {}},
+    "sse_tool_terminal": {
+      "type": "response.completed",
+      "event_id": "evt_fixture_tool_3",
+      "sequence": 3,
+      "request_id": "req_fixture_tool",
+      "response_id": "resp_fixture_tool",
+      "timestamp": "2026-09-13T00:01:01Z",
+      "response": {
+        "protocol_version": "1.0",
+        "id": "resp_fixture_tool",
+        "request_id": "req_fixture_tool",
+        "object": "kemo.response",
+        "status": "requires_action",
+        "model": "fixture-tool-model",
+        "output": [{"id": "tool_call_response_fixture", "type": "tool_call", "call_id": "call_response_fixture", "name": "fixture_lookup", "arguments": {"query": "wire"}, "arguments_raw": "{\"query\":\"wire\"}", "status": "completed", "metadata": {}, "extensions": {}}],
+        "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+        "metadata": {},
+        "extensions": {}
+      },
+      "data": {}
+    }
+  },
+  "valid_cases": [
+    {"id": "request.text.dynamic-reasoning", "model": "KemoRequest", "document": "request_text"},
+    {"id": "request.tool.followup", "model": "KemoRequest", "document": "request_tool_followup"},
+    {"id": "request.multimodal.assets", "model": "KemoRequest", "document": "request_multimodal"},
+    {"id": "response.completed.null-created-at", "model": "KemoResponse", "document": "response_completed"},
+    {"id": "response.requires-action", "model": "KemoResponse", "document": "response_requires_action"},
+    {"id": "response.failed.retry", "model": "KemoResponse", "document": "response_failed"},
+    {"id": "capability.llm.full", "model": "ModelCapabilities", "document": "capability_llm"},
+    {"id": "capability.embedding", "model": "ModelCapabilities", "document": "capability_embedding"},
+    {"id": "capability.rerank", "model": "ModelCapabilities", "document": "capability_rerank"},
+    {"id": "catalog.models", "model": "ModelCatalogResponse", "document": "model_catalog"},
+    {"id": "embedding.request", "model": "EmbeddingRequest", "document": "embedding_request"},
+    {"id": "embedding.response", "model": "EmbeddingResponse", "document": "embedding_response"},
+    {"id": "rerank.request", "model": "RerankRequest", "document": "rerank_request"},
+    {"id": "rerank.response", "model": "RerankResponse", "document": "rerank_response"},
+    {"id": "asset.ready", "model": "AssetDescriptor", "document": "asset_descriptor"}
+  ],
+  "invalid_cases": [
+    {"id": "invalid.request.duplicate-item-id", "model": "KemoRequest", "document": "request_tool_followup", "mutations": [{"op": "set", "path": ["input", 2, "id"], "value": "tool_call_fixture"}]},
+    {"id": "invalid.request.orphan-tool-result", "model": "KemoRequest", "document": "request_tool_followup", "mutations": [{"op": "delete", "path": ["input", 1]}]},
+    {"id": "invalid.request.tool-name-mismatch", "model": "KemoRequest", "document": "request_tool_followup", "mutations": [{"op": "set", "path": ["input", 2, "name"], "value": "other_tool"}]},
+    {"id": "invalid.request.unstable-id", "model": "KemoRequest", "document": "request_text", "mutations": [{"op": "set", "path": ["request_id"], "value": "bad request id"}]},
+    {"id": "invalid.request.protocol-major", "model": "KemoRequest", "document": "request_text", "mutations": [{"op": "set", "path": ["protocol_version"], "value": "2.0"}]},
+    {"id": "invalid.request.reasoning-control", "model": "KemoRequest", "document": "request_text", "mutations": [{"op": "set", "path": ["reasoning", "effort"], "value": "\u0001bad"}]},
+    {"id": "invalid.response.negative-usage", "model": "KemoResponse", "document": "response_completed", "mutations": [{"op": "set", "path": ["usage", "input_tokens"], "value": -1}]},
+    {"id": "invalid.response.completed-empty", "model": "KemoResponse", "document": "response_completed", "mutations": [{"op": "set", "path": ["output"], "value": []}]},
+    {"id": "invalid.response.failed-without-error", "model": "KemoResponse", "document": "response_failed", "mutations": [{"op": "delete", "path": ["error"]}]},
+    {"id": "invalid.response.protocol-major", "model": "KemoResponse", "document": "response_completed", "mutations": [{"op": "set", "path": ["protocol_version"], "value": "2.0"}]},
+    {"id": "invalid.capability.unsupported-efforts", "model": "ModelCapabilities", "document": "capability_llm", "mutations": [{"op": "set", "path": ["reasoning", "supported"], "value": false}]},
+    {"id": "invalid.capability.duplicate-effort", "model": "ModelCapabilities", "document": "capability_llm", "mutations": [{"op": "set", "path": ["reasoning", "efforts"], "value": ["low", "low"]}]},
+    {"id": "invalid.capability.vision-without-image", "model": "ModelCapabilities", "document": "capability_llm", "mutations": [{"op": "set", "path": ["input_modalities"], "value": ["text", "audio", "video", "file"]}]},
+    {"id": "invalid.request.media-checksum", "model": "KemoRequest", "document": "request_multimodal", "mutations": [{"op": "set", "path": ["input", 0, "content", 1, "checksum_sha256"], "value": "not-a-checksum"}]},
+    {"id": "invalid.sse.timestamp", "model": "SSEEvent", "document": "sse_text_created", "mutations": [{"op": "set", "path": ["timestamp"], "value": "not-a-datetime"}]},
+    {"id": "invalid.sse.text-without-index", "model": "SSEEvent", "document": "sse_text_delta", "mutations": [{"op": "delete", "path": ["content_index"]}]},
+    {"id": "invalid.embedding.duplicate-id", "model": "EmbeddingRequest", "document": "embedding_request", "mutations": [{"op": "set", "path": ["inputs", 1, "id"], "value": "doc_fixture_a"}]},
+    {"id": "invalid.rerank.top-n", "model": "RerankRequest", "document": "rerank_request", "mutations": [{"op": "set", "path": ["top_n"], "value": 3}]},
+    {"id": "invalid.asset.checksum", "model": "AssetDescriptor", "document": "asset_descriptor", "mutations": [{"op": "set", "path": ["checksum_sha256"], "value": "bad"}]},
+    {"id": "invalid.asset.protocol-major", "model": "AssetDescriptor", "document": "asset_descriptor", "mutations": [{"op": "set", "path": ["protocol_version"], "value": "2.0"}]}
+  ],
+  "valid_streams": [
+    {"id": "stream.text.completed", "events": ["sse_text_created", "sse_text_delta", "sse_text_usage", "sse_text_completed"], "accepted_sequences": [0, 1, 2, 3]},
+    {"id": "stream.tool.duplicate-replay", "events": ["sse_tool_created", "sse_tool_arguments", "sse_tool_arguments", "sse_tool_completed", "sse_tool_terminal"], "accepted_sequences": [0, 1, 2, 3]}
+  ],
+  "invalid_streams": [
+    {"id": "invalid.stream.sequence-gap", "events": ["sse_text_created", {"document": "sse_text_completed", "mutations": [{"op": "set", "path": ["sequence"], "value": 2}]}]},
+    {"id": "invalid.stream.after-terminal", "events": ["sse_text_created", {"document": "sse_text_completed", "mutations": [{"op": "set", "path": ["sequence"], "value": 1}]}, {"document": "sse_text_delta", "mutations": [{"op": "set", "path": ["sequence"], "value": 2}, {"op": "set", "path": ["event_id"], "value": "evt_fixture_after_terminal"}]}]},
+    {"id": "invalid.stream.response-switch", "events": ["sse_text_created", {"document": "sse_text_delta", "mutations": [{"op": "set", "path": ["response_id"], "value": "resp_fixture_other"}]}]},
+    {"id": "invalid.stream.no-terminal", "events": ["sse_text_created", "sse_text_delta"]}
+  ]
+}
