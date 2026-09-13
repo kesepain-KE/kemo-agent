@@ -21,17 +21,40 @@ export function reduceSubagentProgress(items: ChatItem[], event: RunEvent): Chat
   const status = start ? 'started' : String(event.metadata?.status || '')
   if (terminalStatuses.has(status)) return remove()
   if (!liveStatuses.has(status)) return items
-  const previous = items.find((item): item is Extract<ChatItem, { kind: 'subagent_progress' }> => item.kind === 'subagent_progress' && item.callId === callId)
+  const progress = items.filter((item): item is Extract<ChatItem, { kind: 'subagent_progress' }> => item.kind === 'subagent_progress' && item.callId === callId)
+  const previous = progress.at(-1)
   const count = (key: string, fallback = 0) => {
     const value = event.metadata?.[key]
     return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback
   }
-  const item: ChatItem = {
-    id: `subagent_progress_${callId}`, kind: 'subagent_progress', callId,
+
+  const record = (id: string, iteration: number, toolName: string): ChatItem => ({
+    id, kind: 'subagent_progress', callId,
     agent: String(start ? event.arguments?.agent || '子代理' : event.metadata?.agent || previous?.agent || '子代理'),
-    status, iteration: count('iteration', previous?.iteration),
-    toolName: status === 'tool_running' ? String(event.metadata?.tool_name || '') : '',
+    status, iteration, toolName,
     toolCount: count('tool_count', previous?.toolCount), nextAttempt: count('next_attempt'),
+  })
+
+  // Keep an invisible pending record until the subagent reports an actual tool.
+  // The UI deliberately renders only tool-name rows, so it never exposes dispatch
+  // arguments or intermediary status text before a numbered tool row.
+  if (start) {
+    return progress.length ? items : [...items, record(`subagent_progress_${callId}`, 0, '')]
   }
-  return previous ? items.map((value) => value.id === previous.id ? item : value) : [...items, item]
+
+  if (status !== 'tool_running') {
+    return progress.length ? items : [...items, record(`subagent_progress_${callId}`, 0, '')]
+  }
+
+  const iteration = Math.max(1, count('iteration', previous?.iteration || 1))
+  const toolName = String(event.metadata?.tool_name || '工具')
+  const existingRound = progress.find((item) => item.iteration === iteration && item.toolName)
+  const pending = progress.find((item) => !item.toolName)
+  const next = record(existingRound?.id || pending?.id || `subagent_progress_${callId}_${iteration}`, iteration, toolName)
+
+  if (existingRound || pending) {
+    const replaceId = existingRound?.id || pending!.id
+    return items.map((item) => item.id === replaceId ? next : item)
+  }
+  return [...items, next]
 }

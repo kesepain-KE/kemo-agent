@@ -1732,18 +1732,26 @@ label > input[type="search"]::-webkit-search-results-decoration {
   background: var(--surface-elevated);
 }
 .assistant-turn-content > .tool-call,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call,
 .assistant-turn-content > .task-plan-record {
   width: min(100%, 880px);
   max-width: 100%;
   margin: 0;
 }
-.assistant-turn-content > .tool-call {
+.assistant-turn-content > [data-subagent-call-id] {
+  width: min(100%, 880px);
+  max-width: 100%;
+  margin: 0;
+}
+.assistant-turn-content > .tool-call,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface-elevated);
   box-shadow: var(--shadow-soft);
 }
-.assistant-turn-content > .tool-call .tool-call-head {
+.assistant-turn-content > .tool-call .tool-call-head,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-head {
   min-height: 42px;
   padding: 6px 9px;
   grid-template-columns: 28px minmax(0, 1fr) minmax(0, 50%) auto;
@@ -1765,19 +1773,22 @@ label > input[type="search"]::-webkit-search-results-decoration {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-turn-content > .tool-call .tool-call-icon {
+.assistant-turn-content > .tool-call .tool-call-icon,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-icon {
   width: 28px;
   height: 28px;
   border-radius: 8px;
   background: var(--brand-soft);
 }
-.assistant-turn-content > .tool-call .tool-call-meta {
+.assistant-turn-content > .tool-call .tool-call-meta,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-meta {
   display: grid;
   grid-template-columns: 4.75rem 18px 22px;
   align-items: center;
   gap: 6px;
 }
-.assistant-turn-content > .tool-call .tool-call-status {
+.assistant-turn-content > .tool-call .tool-call-status,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-status {
   width: 22px;
   height: 22px;
   padding: 0;
@@ -1787,13 +1798,20 @@ label > input[type="search"]::-webkit-search-results-decoration {
   background: transparent;
   font-size: 0;
 }
-.assistant-turn-content > .tool-call .tool-call-status.success { color: var(--green); }
-.assistant-turn-content > .tool-call .tool-call-status.running { background: var(--brand-soft); color: var(--brand); }
-.assistant-turn-content > .tool-call .tool-call-status.error { background: var(--red-soft); color: var(--red); }
-.assistant-turn-content > .tool-call .tool-elapsed { width: 4.75rem; text-align: right; white-space: nowrap; }
-.assistant-turn-content > .tool-call .tool-call-chevron { justify-self: center; }
-.assistant-turn-content > .tool-call .tool-call-status { justify-self: end; }
-.assistant-turn-content > .tool-call .tool-call-grid { grid-template-columns: 1fr; }
+.assistant-turn-content > .tool-call .tool-call-status.success,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-status.success { color: var(--green); }
+.assistant-turn-content > .tool-call .tool-call-status.running,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-status.running { background: var(--brand-soft); color: var(--brand); }
+.assistant-turn-content > .tool-call .tool-call-status.error,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-status.error { background: var(--red-soft); color: var(--red); }
+.assistant-turn-content > .tool-call .tool-elapsed,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-elapsed { width: 4.75rem; text-align: right; white-space: nowrap; }
+.assistant-turn-content > .tool-call .tool-call-chevron,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-chevron { justify-self: center; }
+.assistant-turn-content > .tool-call .tool-call-status,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-status { justify-self: end; }
+.assistant-turn-content > .tool-call .tool-call-grid,
+.assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-grid { grid-template-columns: 1fr; }
 
 /* The prototype originally hard-coded the expanded tool payload surface to
    #fbfbfd. That leaks a white sheet into the dark theme even though the code
@@ -1893,7 +1911,8 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .assistant-turn-copy:disabled { cursor: default; opacity: .5; }
 @media (max-width: 780px) {
   .composer-guidance-preview { margin-bottom: 7px; }
-  .assistant-turn-content > .tool-call .tool-call-head { grid-template-columns: 28px minmax(0, 1fr) minmax(0, 38%) auto; }
+  .assistant-turn-content > .tool-call .tool-call-head,
+  .assistant-turn-content > [data-subagent-call-id] > .tool-call .tool-call-head { grid-template-columns: 28px minmax(0, 1fr) minmax(0, 38%) auto; }
 }
 .chat-follow-output {
   position: sticky;

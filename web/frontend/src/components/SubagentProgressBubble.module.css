@@ -1,12 +1,69 @@
-.anchor { position: relative; min-width: 0; }
-.stack { position: relative; width: fit-content; max-width: calc(100% - 12px); margin: 8px 0 12px 12px; display: grid; gap: 6px; }
-.bubble { position: relative; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); box-shadow: 0 6px 20px rgba(24, 31, 50, .1); }
-.bubble::before { content: ''; position: absolute; top: -5px; left: 18px; width: 8px; height: 8px; background: var(--surface-elevated); border-left: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); border-top: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); transform: rotate(45deg); }
-.icon { width: 20px; height: 20px; flex-shrink: 0; color: var(--brand); }
-.copy { min-width: 0; flex: 1; }
-.copy strong { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: .8rem; overflow-wrap: anywhere; }
-.copy strong span { color: var(--muted); font-size: .65rem; font-weight: 400; }
-.copy p { margin: 3px 0 0; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
-.spinner { width: 16px; height: 16px; flex-shrink: 0; color: var(--brand); animation: subagent-spin 1.2s linear infinite; }
+.anchor {
+  position: relative;
+  width: min(100%, 880px);
+  min-width: 0;
+}
+
+.anchor :global(.tool-call) { width: 100%; min-width: 0; }
+
+.stack {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: calc(100% + 14px);
+  /* Side card is 30% narrower than the original one-sixth viewport rail. */
+  width: calc((100vw / 6) * .7);
+  width: calc((100dvw / 6) * .7);
+  min-width: 0;
+  min-height: 44px;
+  /* Six 30px rows, five 6px gaps, 12px padding, and 2px border. */
+  max-height: 224px;
+  box-sizing: border-box;
+  padding: 6px;
+  display: grid;
+  grid-auto-rows: 30px;
+  align-content: start;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-elevated) 94%, var(--brand-soft));
+  box-shadow: var(--shadow-soft);
+  scrollbar-width: thin;
+}
+
+.bubble {
+  min-width: 0;
+  height: 30px;
+  min-height: 30px;
+  max-height: 30px;
+  padding: 0 7px;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-2);
+}
+
+.icon { width: 14px; height: 14px; color: var(--brand); }
+.round { min-width: 0; overflow: hidden; color: var(--text-2); font-size: .5625rem; font-weight: 750; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+.spinner { width: 14px; height: 14px; color: var(--brand); animation: subagent-spin 1.2s linear infinite; }
+.spinnerPlaceholder { width: 14px; height: 14px; }
+
 @keyframes subagent-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1180px) {
+  .stack {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: min(100%, 420px);
+    margin: 6px 0 0 auto;
+    max-height: 224px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
