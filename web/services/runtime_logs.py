@@ -51,16 +51,14 @@ def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 
 
     counts = {key: len(rows) if key == "all" else sum(row["category"] == key for row in rows)
               for key in CATEGORIES}
-    selected = sorted(
-        (row for row in rows if category == "all" or row["category"] == category),
-        key=order,
-        reverse=category != "terminal",
-    )
-    total = len(selected)
     if category == "terminal":
-        # A terminal is a chronological, append-only view.  Keep a bounded
-        # tail so the browser never has to re-render the entire in-memory
-        # diagnostic buffer every two seconds.
+        # A terminal is a chronological, append-only view: the in-memory
+        # snapshot already preserves arrival order, and timestamps tie at low
+        # clock resolution, so keep arrival order instead of re-sorting (which
+        # would shuffle same-instant lines).  Keep a bounded tail so the
+        # browser never re-renders the entire in-memory buffer every 2s.
+        selected = [row for row in rows if row["category"] == "terminal"]
+        total = len(selected)
         selected = selected[-TERMINAL_LIVE_WINDOW:]
         displayed = len(selected)
         return {
@@ -70,6 +68,12 @@ def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 
                            "total_pages": 1, "has_previous": False, "has_next": False},
             "cache": {"hit": hit, "ttl_seconds": CACHE_TTL_SECONDS}, "source_errors": errors,
         }
+    selected = sorted(
+        (row for row in rows if category == "all" or row["category"] == category),
+        key=order,
+        reverse=True,
+    )
+    total = len(selected)
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
     return {
