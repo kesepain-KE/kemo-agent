@@ -465,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
         root,
         runtime_status_provider=host.status if host is not None else None,
         summary_waker=host.history_summaries.wake if host is not None else None,
+        memory_waker=(
+            getattr(host.maintenance, "wake", None) if host is not None else None
+        ),
         message_health_checker=host.check_message_transport if host is not None else None,
         message_transport_remover=host.remove_message_transport if host is not None else None,
         plan_waker=host.task_plans.wake if host is not None else None,
