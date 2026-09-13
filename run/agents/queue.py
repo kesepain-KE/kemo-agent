@@ -321,6 +321,8 @@ class AgentScheduler:
         )
 
     def _emit(self, task: AgentTask, status: str, **detail: Any) -> None:
+        if status == "queued" and task.status != "queued":
+            return
         callback = task.event_callback or self.event_callback
         if callback is None:
             return
@@ -680,6 +682,7 @@ class AgentScheduler:
                     task.started_at = datetime.now(timezone.utc).isoformat()
                     self._last_activity = time.monotonic()
                 try:
+                    self._emit(task, "running")
                     # 每个用户拥有独立 AgentScheduler；仅对声明 background_serial
                     # 的本地代理串行执行，桥接/同步任务使用自己的模块锁。
                     with (self._serial_lock if task.serial else nullcontext()):
@@ -771,6 +774,9 @@ class AgentScheduler:
                     ):
                         self._watch_detached_completion(task, detached_future)
                 finally:
-                    task.done_event.set()
+                    try:
+                        self._emit(task, task.status)
+                    finally:
+                        task.done_event.set()
             finally:
                 self._queue.task_done()

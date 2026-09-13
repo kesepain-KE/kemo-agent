@@ -344,6 +344,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(result.metadata["retry_attempts"], 2)
+        events = [event for event in events if event.type != "subagent_progress"]
         self.assertEqual(
             [event.metadata["status"] for event in events],
             ["started", "retrying", "completed"],
@@ -383,6 +384,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.retry_attempts, 5)
         self.assertEqual(raised.exception.retry_max_attempts, 5)
         self.assertFalse(raised.exception.retryable)
+        events = [event for event in events if event.type != "subagent_progress"]
         self.assertEqual(
             [event.metadata["status"] for event in events],
             ["started", "retrying", "retrying", "retrying", "retrying", "failed"],
@@ -1057,7 +1059,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 source="web",
                 session_id="session-a",
             )
-        self.assertEqual([event.metadata["status"] for event in events], ["started", "completed"])
+        self.assertEqual([event.metadata["status"] for event in events], ["started", "model_request", "validating", "completed"])
+        self.assertEqual(events[1].metadata["iteration"], 1)
         self.assertTrue(all(event.metadata["phase"] == "subagent" for event in events))
         self.assertTrue(all(event.metadata["source"] == "web" for event in events))
         self.assertTrue(all(event.metadata["session_id"] == "session-a" for event in events))

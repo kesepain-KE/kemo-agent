@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
+
+
+def _subagent_callback(request: dict[str, Any], call_id: str):
+    callback = request.get("_subagent_event_callback")
+    if not callable(callback):
+        return None
+    return lambda event: callback(replace(
+        event, tool_call_id=call_id,
+        metadata={**event.metadata, "parent_run_id": request.get("run_id")},
+    ))
 
 
 @dataclass(slots=True)
@@ -186,6 +196,10 @@ def execute_tool_batch(context: ToolBatchContext):
                             "task_plan_id": request.get("_task_plan_id"),
                             "task_plan_step_id": request.get("_task_plan_step_id"),
                             "task_plan_mode": request.get("_task_plan_mode"),
+                            "event_callback": (
+                                _subagent_callback(request, call.id)
+                                if call.name == "subagent_dispatch" else None
+                            ),
                             "knowledge_scopes": list(
                                 source_policy.direct_knowledge_scopes()
                             ),

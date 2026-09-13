@@ -173,6 +173,14 @@ def run_model(
         if value.get("replay_policy") == "blocked"
     }
     tool_argument_retry_count = 0
+    def progress(status: str, **detail: Any) -> None:
+        if context.event_callback is not None:
+            context.event_callback(_runner.RunEvent(type="subagent_progress", metadata={
+                "phase": "subagent", "agent": definition.name,
+                "task_id": context.task_id, "source": context.source,
+                "session_id": context.session_id, "status": status, **detail,
+            }))
+
     for iteration in range(1, max_provider_iterations + 1):
         if context.cancel_event.is_set():
             raise AgentCancelledError(f"子代理 {definition.name} 已取消")
@@ -209,6 +217,7 @@ def run_model(
                 else system
             )
             try:
+                progress("model_request", iteration=iteration)
                 with provider_request_slot(
                     agent_runner.config,
                     cancel_event=context.cancel_event,
@@ -488,6 +497,8 @@ def run_model(
                 else:
                     try:
                         tool = context.tool_registry.get(call.name)
+                        progress("tool_running", iteration=iteration, tool_name=call.name,
+                                 tool_count=len(tool_records) + 1)
                         value = execute_tool(
                             tool,
                             call.arguments,
@@ -608,6 +619,7 @@ def run_model(
             raise retryable_tool_failure
     else:
         raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
+    progress("validating", iteration=iteration)
     if final_data is None:
         try:
             data = _parse_json_object(final_text)

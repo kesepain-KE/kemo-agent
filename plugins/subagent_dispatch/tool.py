@@ -224,6 +224,10 @@ def run(
     root = Path(context["root"]).resolve()
     user = str(context["user"])
     scope_source, scope_session = _scope(context)
+    event_options = (
+        {"event_callback": context["event_callback"]}
+        if callable(context.get("event_callback")) else {}
+    )
     public = {definition.name: definition for definition in _public(root, user)}
     if action == "list":
         agents = [
@@ -302,6 +306,7 @@ def run(
                     ),
                     timeout=execution_timeout,
                     timeout_survival_seconds=survival,
+                    **event_options,
                     source=scope_source,
                     session_id=scope_session,
                 )
@@ -365,6 +370,7 @@ def run(
                 timeout=timeout,
                 timeout_survival_seconds=_detached_survival_seconds(config),
                 result_handler=persist_result if agent == "task_plan" else None,
+                **event_options,
                 allow_sync=True,
                 config=config,
                 source=scope_source,
@@ -403,6 +409,7 @@ def run(
             agent,
             payload,
             **submit_kwargs,
+            **event_options,
             source=scope_source,
             session_id=scope_session,
         )
