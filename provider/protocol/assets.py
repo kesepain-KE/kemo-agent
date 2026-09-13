@@ -9,7 +9,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from provider.protocol.errors import AssetNotFoundError
-from provider.protocol.models import MediaSource
+from provider.protocol.models import MediaSource, validate_kemo_protocol_version
 
 
 class AssetDescriptor(BaseModel):
@@ -38,6 +38,11 @@ class AssetDescriptor(BaseModel):
         if not value.startswith("asset_") or len(value) > 128:
             raise ValueError("Asset id 必须使用 asset_ 前缀且不超过 128 字符")
         return value
+
+    @field_validator("protocol_version")
+    @classmethod
+    def validate_protocol_version(cls, value: str) -> str:
+        return validate_kemo_protocol_version(value)
 
     @field_validator("checksum_sha256")
     @classmethod

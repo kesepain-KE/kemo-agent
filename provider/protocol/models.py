@@ -22,9 +22,11 @@ from provider.protocol.enums import (
 PROTOCOL_VERSION = "1.0"
 SUPPORTED_PROTOCOL_MAJOR = 1
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 USER_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "max"})
 DEFAULT_REASONING_EFFORT = "medium"
 _MAX_REASONING_EFFORT_LENGTH = 64
+_PROTOCOL_VERSION_RE = re.compile(r"^(\d+)\.(\d+)$")
 
 
 def _identifier(prefix: str) -> str:
@@ -55,6 +57,18 @@ def normalize_kemo_reasoning_effort(value: Any) -> str:
 
     effort = _dynamic_reasoning_effort(value)
     return effort or DEFAULT_REASONING_EFFORT
+
+
+def validate_kemo_protocol_version(value: Any) -> str:
+    """Accept forward-compatible Kemo 1.x payloads and reject other majors."""
+
+    normalized = str(value or "").strip()
+    match = _PROTOCOL_VERSION_RE.fullmatch(normalized)
+    if match is None:
+        raise ValueError("protocol_version 必须是 MAJOR.MINOR")
+    if int(match.group(1)) != SUPPORTED_PROTOCOL_MAJOR:
+        raise ValueError(f"不支持的协议主版本：{normalized}")
+    return normalized
 
 
 class ProtocolModel(BaseModel):
@@ -118,6 +132,11 @@ class AssetContent(ProtocolModel):
     def validate_reference(self) -> "AssetContent":
         if not self.asset_id and self.source is None:
             raise ValueError("媒体内容至少需要 asset_id 或 source")
+        if self.checksum_sha256 is not None:
+            checksum = self.checksum_sha256.strip().casefold()
+            if not _SHA256_RE.fullmatch(checksum):
+                raise ValueError("checksum_sha256 必须是 64 位十六进制 SHA-256")
+            self.checksum_sha256 = checksum
         return self
 
 
@@ -662,13 +681,7 @@ class KemoRequest(ExtensionModel):
     @field_validator("protocol_version")
     @classmethod
     def validate_protocol_version(cls, value: str) -> str:
-        try:
-            major = int(value.split(".", 1)[0])
-        except (TypeError, ValueError) as exc:
-            raise ValueError("protocol_version 必须是 MAJOR.MINOR") from exc
-        if major != SUPPORTED_PROTOCOL_MAJOR:
-            raise ValueError(f"不支持的协议主版本：{value}")
-        return value
+        return validate_kemo_protocol_version(value)
 
     @field_validator("request_id", "parent_request_id")
     @classmethod
@@ -749,6 +762,11 @@ class KemoResponse(ExtensionModel):
     # consumer must not narrow it to the old ``IncompleteDetails`` shape.
     incomplete_details: dict[str, Any] | None = None
     provider_response_id: str | None = None
+
+    @field_validator("protocol_version")
+    @classmethod
+    def validate_protocol_version(cls, value: str) -> str:
+        return validate_kemo_protocol_version(value)
 
     @model_validator(mode="after")
     def validate_status(self) -> "KemoResponse":
