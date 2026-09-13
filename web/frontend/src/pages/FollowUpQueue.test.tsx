@@ -10,9 +10,11 @@ function message(id: string, status: PendingNextTurnMessage['status'] = 'queued'
 }
 
 describe('FollowUpQueue', () => {
-  it('显示全部气泡，只有点气泡内本轮引导才提交指定消息', () => {
+  it('不显示队列标题说明，只有点气泡内本轮引导才提交指定消息', () => {
     const onGuide = vi.fn()
     render(<FollowUpQueue user="alice" messages={[message('a'), message('b')]} canGuide onGuide={onGuide} onRemove={vi.fn()} onRetry={vi.fn()} onReorder={vi.fn()} />)
+    expect(screen.queryByText('消息跟进')).not.toBeInTheDocument()
+    expect(screen.queryByText('按顺序发送 · 可拖动排序')).not.toBeInTheDocument()
     expect(onGuide).not.toHaveBeenCalled()
     const row = screen.getByRole('article', { name: '消息跟进 2' })
     fireEvent.click(within(row).getByRole('button', { name: '本轮引导' }))
@@ -39,17 +41,18 @@ describe('FollowUpQueue', () => {
     ])
   })
 
-  it('发送中和提交引导中的条目不能移动、取消或重复提交', () => {
+  it('发送中的条目保持锁定，正在提交本轮引导的条目从队列消失', () => {
     const queue = [message('a', 'sending'), message('b'), message('c', 'guiding')]
     expect(reorderFollowUps(queue, 'b', 'a')).toBe(queue)
     expect(reorderFollowUps(queue, 'b', 'c')).toBe(queue)
     expect(reorderFollowUps(queue, 'missing', 'b')).toBe(queue)
     render(<FollowUpQueue user="alice" messages={queue} canGuide onGuide={vi.fn()} onRemove={vi.fn()} onRetry={vi.fn()} onReorder={vi.fn()} />)
-    for (const position of [1, 3]) {
-      const row = screen.getByRole('article', { name: `消息跟进 ${position}` })
-      expect(within(row).getByRole('button', { name: '本轮引导' })).toBeDisabled()
-      expect(within(row).getByRole('button', { name: '取消' })).toBeDisabled()
-    }
+    expect(screen.getAllByRole('article')).toHaveLength(2)
+    expect(screen.queryByText('跟进-c')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在提交本轮引导')).not.toBeInTheDocument()
+    const sending = screen.getByRole('article', { name: '消息跟进 1' })
+    expect(within(sending).getByRole('button', { name: '本轮引导' })).toBeDisabled()
+    expect(within(sending).getByRole('button', { name: '取消' })).toBeDisabled()
   })
 
   it('停止期间不提供本轮引导，失败条目可重试或取消', () => {

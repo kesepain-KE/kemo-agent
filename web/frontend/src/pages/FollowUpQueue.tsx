@@ -13,12 +13,15 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
   onRetry: (id: string) => void
   onReorder: (id: string, targetId: string) => void
 }) {
-  if (!messages.length) return null
+  // A message that is being submitted as current-round guidance is no longer
+  // a follow-up item.  Keep it in the state queue until the request settles
+  // so a failed submission can be restored, but do not render it here.
+  const visibleMessages = messages.filter((message) => message.status !== 'guiding')
+  if (!visibleMessages.length) return null
   const locked = (message: PendingNextTurnMessage) => ['sending', 'guiding'].includes(message.status)
   return <section className={styles.queue} aria-label="消息跟进队列">
-    <header><strong>消息跟进</strong><span>按顺序发送 · 可拖动排序</span></header>
     <ol>
-      {messages.map((message, index) => <li key={message.id} data-follow-up-id={message.id}
+      {visibleMessages.map((message, index) => <li key={message.id} data-follow-up-id={message.id}
         onDragOver={(event) => { if (!locked(message)) event.preventDefault() }}
         onDrop={(event) => {
           event.preventDefault()
@@ -41,8 +44,8 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
           </div> : null}
           {message.error ? <small role="alert">{message.error}</small> : null}
           <div className={styles.actions}>
-            <button type="button" onClick={() => onReorder(message.id, messages[index - 1].id)} disabled={locked(message) || index === 0 || locked(messages[index - 1])} aria-label={`上移消息跟进 ${index + 1}`}><ArrowUp aria-hidden="true" />上移</button>
-            <button type="button" onClick={() => onReorder(message.id, messages[index + 1].id)} disabled={locked(message) || index === messages.length - 1 || locked(messages[index + 1])} aria-label={`下移消息跟进 ${index + 1}`}><ArrowDown aria-hidden="true" />下移</button>
+            <button type="button" onClick={() => onReorder(message.id, visibleMessages[index - 1].id)} disabled={locked(message) || index === 0 || locked(visibleMessages[index - 1])} aria-label={`上移消息跟进 ${index + 1}`}><ArrowUp aria-hidden="true" />上移</button>
+            <button type="button" onClick={() => onReorder(message.id, visibleMessages[index + 1].id)} disabled={locked(message) || index === visibleMessages.length - 1 || locked(visibleMessages[index + 1])} aria-label={`下移消息跟进 ${index + 1}`}><ArrowDown aria-hidden="true" />下移</button>
             <span className={styles.spacer} />
             {canGuide ? <button type="button" className={styles.guide} disabled={locked(message)} onClick={() => onGuide(message)}>本轮引导</button> : null}
             {message.status === 'error' ? <button type="button" onClick={() => onRetry(message.id)}>重新发送</button> : null}

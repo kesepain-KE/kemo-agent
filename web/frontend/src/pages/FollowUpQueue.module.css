@@ -1,6 +1,4 @@
 .queue { width: min(var(--conversation-width, 1120px), 100%); margin: 0 auto 10px; }
-.queue header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: .8rem; color: var(--text); }
-.queue header span { font-size: .7rem; color: var(--muted); }
 .queue ol { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
 .queue li { min-width: 0; }
 .bubble { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); }

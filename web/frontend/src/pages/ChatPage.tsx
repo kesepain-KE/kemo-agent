@@ -699,7 +699,7 @@ export function ChatPage() {
     : undefined
   const followUpQueue = liveRun?.nextTurnQueue ?? []
   const guidancePreviewItem: GuidanceDisplayItem | undefined = latestRunningGuidance
-    && !followUpQueue.some((message) => message.id === latestRunningGuidance.id)
+    && !followUpQueue.some((message) => message.id === latestRunningGuidance.id && message.status !== 'guiding')
     ? latestRunningGuidance : undefined
   const regenerateLastResponse = async () => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
