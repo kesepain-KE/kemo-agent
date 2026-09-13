@@ -214,7 +214,7 @@ export function ExpandPage() {
   return <ModuleFrame
     kicker="Expand Modules / Hot Reload"
     title="拓展"
-    description="拓展模块保留数据采集与系统提示词注入能力，并可按操作文档操纵外部系统；全局层、共享层由当前用户白名单控制。"
+    description="拓展连接设备、外部服务或配套工程，状态注入与调用能力可独立开启，也支持只读连接。操作前按需读取说明，采集快照不代表本次操作成功；全局层、共享层受当前用户白名单控制。"
     actions={<>
       <RefreshActionButton pending={query.isFetching} label="刷新拓展数据" pendingLabel="刷新中…" onClick={() => { void query.refetch() }} />
       <div className={styles.addControl} ref={addRef}>

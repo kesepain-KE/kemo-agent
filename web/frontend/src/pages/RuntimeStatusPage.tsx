@@ -1,12 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from '../markdownLinks'
 import {
   Activity,
   Braces,
   Check,
-  Clock3,
   Copy,
   Database,
   Gauge,
@@ -23,6 +22,7 @@ import type { ShellOutletContext } from '../components/AppShell'
 import { EmptyPanel, formatDateTime, ModuleError, ModuleFrame } from '../components/ModuleUi'
 import type { RuntimeHealth, RuntimeStatusResponse } from '../types/api'
 import styles from './RuntimeStatusPage.module.css'
+import { RuntimeLogsPanel } from './RuntimeLogsPanel'
 
 const sectionLabels: Record<string, string> = {
   user_soul: '用户人格',
@@ -136,7 +136,7 @@ export function RuntimeStatusPage() {
     queryKey: ['runtime-status', user, sessionId, activeTab],
     queryFn: () => getRuntimeStatus(user, sessionId, ['summary', activeTab]),
     enabled: Boolean(user),
-    placeholderData: keepPreviousData,
+    placeholderData: (previous) => previous?.user === user ? previous : undefined,
     staleTime: 10_000,
   })
 
@@ -284,7 +284,7 @@ function RuntimeDashboard({
       {!sectionPending && activeTab === 'maintenance' ? <div className={styles.maintenanceGrid}>
         <MemoryPanel data={data} />
         <TaskPanel data={data} />
-        <SystemCronPanel data={data} />
+        <RuntimeLogsPanel user={data.user} />
       </div> : null}
     </section>
   </div>
@@ -419,13 +419,6 @@ function TaskPanel({ data }: { data: RuntimeStatusResponse }) {
   return <CompactPanel icon={<TimerReset size={16} />} title="当前定时任务与任务计划" detail={`${data.tasks.items.length} 个当前项目`}>
     {data.tasks.items.map((item) => <div className={styles.taskRow} key={`${item.kind}:${item.id}`}><span><strong>{item.title}</strong><small>{item.kind === 'plan' ? '任务计划' : '定时任务'} · {item.trigger}</small></span><time>{item.next_run_at ? formatDateTime(item.next_run_at) : '—'}</time><StatusPill tone={statusTone(item.status)}>{stateLabel(item.status)}</StatusPill></div>)}
     {!data.tasks.items.length ? <CompactEmpty title="没有当前任务" description="当前没有等待、运行或暂停的计划与定时任务。" icon={<TimerReset size={18} />} /> : null}
-  </CompactPanel>
-}
-
-function SystemCronPanel({ data }: { data: RuntimeStatusResponse }) {
-  return <CompactPanel icon={<Clock3 size={16} />} title="系统及定时任务执行记录" detail={`cron/task_cron_system · ${data.system_cron.tracking === 'execution_log' ? '精确日志' : '任务状态记录'}`}>
-    {data.system_cron.executions.map((item) => <div className={styles.cronRow} key={item.id}><span><strong>{item.title}</strong><small>{item.task_id}</small></span><time>{formatDateTime(item.executed_at)}</time><span>{item.duration_ms ? `${(item.duration_ms / 1000).toFixed(2)}s` : '—'}</span><StatusPill tone={statusTone(item.status)}>{stateLabel(item.status)}</StatusPill></div>)}
-    {!data.system_cron.executions.length ? <CompactEmpty title="尚无系统任务记录" description="系统任务执行后会在这里显示执行时间与结果。" icon={<Clock3 size={18} />} /> : null}
   </CompactPanel>
 }
 

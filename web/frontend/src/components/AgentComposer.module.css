@@ -182,7 +182,7 @@
 
 @media (max-width: 900px) {
   .footer { align-items: flex-start; flex-direction: column; gap: .9rem; }
-  .actions { width: 100%; }
+  .actions { width: 100%; flex-wrap: wrap; }
   .stat { margin-right: auto; }
 }
 

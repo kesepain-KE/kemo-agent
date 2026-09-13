@@ -211,6 +211,12 @@ export const handlers = [
     runtime_host: { state: 'unmanaged', components: {} },
     active_plan: null, activities: [],
   })),
+  http.get('/api/users/:user/runtime/logs', ({ params, request }) => HttpResponse.json({
+    user: params.user, category: new URL(request.url).searchParams.get('category') || 'all',
+    entries: [], counts: { all: 0, backend: 0, threads: 0, terminal: 0, message: 0 },
+    generated_at: '2026-09-13T00:00:00Z', source_errors: [], cache: { hit: false, ttl_seconds: 5 },
+    pagination: { page: 1, page_size: 25, total_items: 0, total_pages: 1, has_previous: false, has_next: false },
+  })),
   http.get('/api/users/kesepain/runtime/status', ({ request }) => HttpResponse.json({
     schema_version: 1,
     generated_at: '2026-07-21T14:30:00+08:00',
@@ -383,7 +389,7 @@ export const handlers = [
       provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },
       web: { max_concurrent_chats: 3, max_pending_chats: 5, pending_chat_timeout: 30 },
       message: { max_workers: 8, max_queued_messages: 20 },
-      cron: { poll_interval: 30, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
+      cron: { poll_interval: 30, history_retention_days: 7, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
       agent_runtime: { default_timeout: 600, queue_maxsize: 50 },
     },
     redacted_paths: [],

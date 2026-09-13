@@ -176,7 +176,7 @@ export function SensePage() {
   return <ModuleFrame
     kicker="System Capability / Global Sense"
     title="感知"
-    description="全局感知模块通过标准 Markdown 数据文件热加载；模块负责采集信息并注入系统提示词，当前用户配置中的白名单决定最终启用范围。"
+    description="感知提供周期性、可共享的只读环境观测，不执行外部操控。框架按注入开关与白名单读取 Markdown 快照；健康状态和更新时间用于判断数据可信度，不保证此刻仍然有效。"
     actions={<>
       <RefreshActionButton pending={query.isFetching} label="重新读取" pendingLabel="读取中…" onClick={() => { void query.refetch() }} />
       <button className="module-btn primary" type="button" onClick={() => setGuideOpen((current) => !current)}>

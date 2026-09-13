@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, LogOut, Settings, UserRound, Users } from 'lucide-react'
+import { Check, LogOut, Settings, UserRound, Users, ExternalLink } from 'lucide-react'
 import styles from './UserProfileCard.module.css'
 
 export interface UserProfileOption {
@@ -22,6 +22,7 @@ export interface UserProfileCardProps {
   onOpenUserSwitch?: () => void
   onOpenSettings?: () => void
   onLogout?: () => void
+  newUserTabHref?: string
 }
 
 function initialFor(username: string) {
@@ -50,6 +51,7 @@ export function UserProfileCard({
   onOpenUserSwitch,
   onOpenSettings,
   onLogout,
+  newUserTabHref,
 }: UserProfileCardProps) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -105,6 +107,7 @@ export function UserProfileCard({
           <Check size={15} aria-hidden="true" />
         </div>
         <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenProfile)}><UserRound size={16} /><span>用户资料</span></button>
+        {newUserTabHref && <a className={styles.menuItem} role="menuitem" href={newUserTabHref} target="_blank" rel="noopener noreferrer" onClick={() => setIsOpen(false)}><ExternalLink size={16} /><span>新建此用户标签页</span></a>}
         <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenUserSwitch)}><Users size={16} /><span>切换用户</span></button>
         <button type="button" className={styles.menuItem} role="menuitem" onClick={() => runAndClose(onOpenSettings)}><Settings size={16} /><span>用户设置</span></button>
 

@@ -126,7 +126,7 @@ const MarkdownMessage = lazy(async () => ({
 }))
 
 export function ChatPage() {
-  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, setChatRunning: setRunning, chatRunId: activeRunId, chatRunSessionId, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   // AppShell resolves controls for the displayed conversation.  Keep the
   // session check as a defensive guard for an in-flight route transition.
   const running = Boolean(
@@ -168,7 +168,6 @@ export function ChatPage() {
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
   const [planMutationNotices, setPlanMutationNotices] = useState<Record<string, string>>({})
   const [showFollowOutput, setShowFollowOutput] = useState(false)
-  const [stopping, setStopping] = useState(false)
   const [runRetryNotice, setRunRetryNotice] = useState<RunRetryNotice | null>(null)
   const [runErrorNotice, setRunErrorNotice] = useState<RunErrorNotice | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -180,6 +179,8 @@ export function ChatPage() {
   const completionSoundRunIdsRef = useRef(new Set<string>())
   const failureSoundRunIdsRef = useRef(new Set<string>())
   const consumingNextTurnRef = useRef(false)
+  const guidingFollowUpsRef = useRef(new Set<string>())
+  const { reorderNextTurnMessages } = useOutletContext<ShellOutletContext>()
   const locallyCommittedSessionRef = useRef('')
   const undoneRoundBaselineRef = useRef<{
     sessionId: string
@@ -323,7 +324,6 @@ export function ChatPage() {
     setConversationBusy('')
     setConversationFeedback(null)
     setLongTaskBusy(false)
-    setStopping(false)
     setPlanOverrides({})
     setPlanMutationNotices({})
     setRunRetryNotice(null)
@@ -386,7 +386,7 @@ export function ChatPage() {
     setNextTurnMessageStatus(user, liveSessionId, pending.id, 'sending')
     void send(pending.content, {
       sessionId: liveSessionId,
-      historyUserMessages: pending.historyUserMessages,
+      historyUserMessages: Math.max(pending.historyUserMessages, persistedUserMessages, liveRun?.historyUserMessages ?? 0),
       uploadedFiles: pending.uploadedFiles,
       internalNextTurn: true,
       userMessageId: `next_turn_${pending.id}`,
@@ -464,7 +464,7 @@ export function ChatPage() {
   }
   const newConversation = async () => {
     const previousDraftKey = draftKey
-    abortChatRun(user, liveSessionId, effectiveRunId)
+    abortChatRun(user, liveSessionId, effectiveRunId, chatRunToken)
     await createNewSession()
     clearDraft(previousDraftKey)
     if (liveSessionId) clearChatRun(user, liveSessionId)
@@ -627,45 +627,40 @@ export function ChatPage() {
     window.setTimeout(() => setCopiedItem((current) => current === id ? '' : current), 1200)
   }
 
-  const sendGuidance = async () => {
-    const guidance = draft.trim()
+  const queueFollowUp = () => {
+    const content = draft.trim()
     const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
-    if ((!guidance && !uploadedFiles.length) || !user || !running || !effectiveRunId || uploading) return
+    if ((!content && !uploadedFiles.length) || !user || uploading) return
+    if (!running && !stopping) {
+      void send(content, { uploadedFiles })
+      return
+    }
+    if (!liveSessionId) return
+    queueNextTurnMessage(user, liveSessionId, {
+      id: eventId('follow_up'), content, uploadedFiles,
+      historyUserMessages: Math.max(persistedUserMessages, (liveRun?.historyUserMessages ?? persistedUserMessages) + 1),
+      status: 'queued',
+    })
+    setDraft('')
+    if (uploadedFiles.length) setDraftUploads(draftKey, (current) => removeSubmittedUploads(current, uploadedFiles))
+  }
+
+  const sendGuidance = async (message: PendingNextTurnMessage) => {
+    if (!user || !running || stopping || !effectiveRunId || !liveSessionId || !['queued', 'error'].includes(message.status)) return
     const targetUser = user
     const targetSession = liveSessionId
     const targetRunId = effectiveRunId
-    if (!targetSession) return
-    const id = eventId('guidance')
+    const id = message.id
+    const claimKey = `${targetUser}\u0000${targetSession}\u0000${id}`
+    if (guidingFollowUpsRef.current.has(claimKey)) return
+    guidingFollowUpsRef.current.add(claimKey)
+    const guidance = message.content
+    const uploadedFiles = message.uploadedFiles ?? []
     const attachments = uploadedFiles.map(pendingInputAttachment)
     const displayText = guidance || `附件引导：${uploadedFiles.map((file) => file.name).join('、')}`
-    const clearSubmittedInput = () => {
-      setDraft('')
-      if (uploadedFiles.length) {
-        setDraftUploads(draftKey, (current) => removeSubmittedUploads(current, uploadedFiles))
-      }
-    }
-    const queueForNextTurn = () => {
-      if (!targetSession) return false
-      setLiveItems((current) => current.filter((item) => item.id !== id))
-      const message: PendingNextTurnMessage = {
-        id,
-        content: guidance,
-        uploadedFiles,
-        historyUserMessages: Math.max(
-          persistedUserMessages,
-          (liveRun?.historyUserMessages ?? persistedUserMessages) + 1,
-        ),
-        status: 'queued',
-      }
-      queueNextTurnMessage(targetUser, targetSession, message)
-      clearSubmittedInput()
-      return true
-    }
-    if (stopping) {
-      queueForNextTurn()
-      return
-    }
-    setLiveItems((current) => [...current, {
+    const removePendingGuidance = () => updateChatRunItems(targetUser, targetSession, (current) => current.filter((item) => item.id !== id))
+    setNextTurnMessageStatus(targetUser, targetSession, id, 'guiding')
+    updateChatRunItems(targetUser, targetSession, (current) => [...current, {
       id,
       kind: 'guidance',
       guidanceId: id,
@@ -673,7 +668,6 @@ export function ChatPage() {
       attachments,
       status: 'queued',
     }])
-    clearSubmittedInput()
     try {
       const result = await submitGuidance(targetUser, targetRunId, guidance, {
         sessionId: targetSession,
@@ -681,16 +675,20 @@ export function ChatPage() {
         uploadedFiles: uploadedFiles.map((file) => file.path),
       })
       if (result.status === 'queued_next_turn') {
-        queueForNextTurn()
+        removePendingGuidance()
+        setNextTurnMessageStatus(targetUser, targetSession, id, 'queued')
       } else {
-        clearSubmittedInput()
+        removeNextTurnMessage(targetUser, targetSession, id)
       }
     } catch (error) {
+      removePendingGuidance()
       if (error instanceof ApiError && error.status === 404) {
-        if (queueForNextTurn()) return
+        setNextTurnMessageStatus(targetUser, targetSession, id, 'queued')
+      } else {
+        setNextTurnMessageStatus(targetUser, targetSession, id, 'error', error instanceof Error ? error.message : '本轮引导提交失败')
       }
-      setLiveItems((current) => current.map((item) => item.kind === 'guidance' && item.id === id ? { ...item, status: 'error' } : item))
-      setLiveItems((current) => [...current, { id: eventId('error'), kind: 'error', content: error instanceof Error ? error.message : '运行中引导提交失败' }])
+    } finally {
+      guidingFollowUpsRef.current.delete(claimKey)
     }
   }
 
@@ -699,19 +697,10 @@ export function ChatPage() {
   const latestRunningGuidance = running
     ? [...visibleLiveItems].reverse().find((item): item is GuidanceItem => item.kind === 'guidance' && !item.finalized)
     : undefined
-  const pendingNextTurn = [...(liveRun?.nextTurnQueue ?? [])]
-    .reverse()
-    .find((item) => item.status === 'queued' || item.status === 'error')
-  const guidancePreviewItem: GuidanceDisplayItem | undefined = pendingNextTurn
-    ? {
-      id: pendingNextTurn.id,
-      kind: 'guidance',
-      content: pendingNextTurn.content,
-      guidanceId: pendingNextTurn.id,
-      attachments: pendingNextTurn.uploadedFiles?.map(pendingInputAttachment),
-      status: pendingNextTurn.status === 'error' ? 'next_turn_error' : 'next_turn',
-    }
-    : latestRunningGuidance
+  const followUpQueue = liveRun?.nextTurnQueue ?? []
+  const guidancePreviewItem: GuidanceDisplayItem | undefined = latestRunningGuidance
+    && !followUpQueue.some((message) => message.id === latestRunningGuidance.id)
+    ? latestRunningGuidance : undefined
   const regenerateLastResponse = async () => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
     const prompt = lastUserMessage.content
@@ -789,14 +778,14 @@ export function ChatPage() {
     const targetSession = liveSessionId
     const targetRunId = effectiveRunId
     if (!targetUser || !targetSession || !targetRunId || stopping) return
-    setStopping(true)
+    setStopping(true, targetUser, targetSession, targetRunId, chatRunToken)
     const longTaskActive = ['running', 'pausing', 'cancelling'].includes(String(longTaskQuery.data?.long_task.status || ''))
-    await executeStopRequest(
+    const accepted = await executeStopRequest(
       () => longTaskActive
         ? cancelSessionLongTask(targetUser, targetSession)
         : cancelRun(targetUser, targetRunId, targetSession),
       (error) => {
-        abortChatRun(targetUser, targetSession, targetRunId)
+        abortChatRun(targetUser, targetSession, targetRunId, chatRunToken)
         const message = error instanceof Error
           ? `紧急停止请求失败：${error.message}`
           : '紧急停止请求失败，已断开当前响应'
@@ -811,6 +800,7 @@ export function ChatPage() {
         ])
       },
     )
+    if (!accepted) setStopping(false, targetUser, targetSession, targetRunId, chatRunToken)
   }
   const toggleLongTask = async () => {
     if (!user || !sessionId || longTaskBusy) return
@@ -827,12 +817,16 @@ export function ChatPage() {
   }
   const stopLongTask = async () => {
     if (!user || !sessionId || longTaskBusy) return
+    const targetUser = user
+    const targetSession = sessionId
+    const targetRunId = effectiveRunId
     setLongTaskBusy(true)
+    if (running && targetRunId) setStopping(true, targetUser, targetSession, targetRunId, chatRunToken)
     try {
-      const response = await cancelSessionLongTask(user, sessionId)
-      queryClient.setQueryData(['long-task', user, sessionId], response)
-      setStopping(true)
+      const response = await cancelSessionLongTask(targetUser, targetSession)
+      queryClient.setQueryData(['long-task', targetUser, targetSession], response)
     } catch (error) {
+      if (targetRunId) setStopping(false, targetUser, targetSession, targetRunId, chatRunToken)
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '停止长任务失败' })
     } finally {
       setLongTaskBusy(false)
@@ -942,7 +936,7 @@ export function ChatPage() {
     setCapabilityDrawerOpen(false)
   }
   const conversationItems = archiveTerminalPlansInConversation(
-    items.filter((item) => item.kind !== 'context_compression'),
+    items.filter((item) => item.kind !== 'context_compression' && item.kind !== 'subagent_progress'),
     [
       ...persistedPlans
         .filter((plan) => plan.session_id === sessionId)
@@ -962,7 +956,7 @@ export function ChatPage() {
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
     activeCompression, longTaskQuery, longTaskBusy, stopLongTask, composerPlanDockRef, collapsedPlans,
-    planActions, guidancePreviewItem, pendingNextTurn, liveSessionId, removeNextTurnMessage,
+    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,

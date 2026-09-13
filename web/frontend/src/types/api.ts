@@ -33,6 +33,7 @@ export type RunEventType =
   | 'guidance_applied'
   | 'context_compression'
   | 'long_task_update'
+  | 'subagent_progress'
   | 'usage'
   | 'retrying'
   | 'error'
@@ -772,7 +773,16 @@ export interface MemoryItemResponse {
   last_weight_date?: string | null
 }
 
+export interface ImportantMemoryLifecycle {
+  status: 'valid' | 'invalid' | 'untracked' | 'empty'
+  is_current: boolean
+  reason_codes: string[]
+  reason: string
+  prompt_eligible: boolean
+}
+
 export interface ImportantMemoryResponse {
+  lifecycle?: ImportantMemoryLifecycle
   user: string
   path: string
   content: string
@@ -898,6 +908,8 @@ export interface OverviewResponse {
   activities: ActivitySummary[]
 }
 
+export type { RuntimeLogCategory, RuntimeLogEntry, RuntimeLogsResponse } from './api/runtimeLogTypes'
+
 export interface ApiErrorPayload {
   error?: {
     code?: string
@@ -907,6 +919,7 @@ export interface ApiErrorPayload {
 }
 
 export type ChatItem =
+  | { id: string; kind: 'subagent_progress'; callId: string; agent: string; status: string; iteration: number; toolName: string; toolCount: number; nextAttempt: number }
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string }
   | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; roundsBefore: number; roundsRemoved: number; roundsRemaining: number; memoryMode: string; memoryStatus: string; content: string }

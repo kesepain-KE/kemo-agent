@@ -328,11 +328,10 @@ return async (
     if (restoreDraftAfterFailure && promptOverride === undefined && prompt) {
       setDraftText(finalDraftKey, (current: any) => current || prompt)
     }
-    finishChatRun(user, activeSession, committed)
+    finishChatRun(targetUser, activeSession, committed, activeRunIdForScope)
     setChatAbortController(null, targetUser, activeSession, activeRunIdForScope)
-    setActiveRunId('', targetUser, activeSession, activeRunIdForScope)
+    setStopping(false, targetUser, activeSession, activeRunIdForScope)
     setRunning(false, targetUser, activeSession, activeRunIdForScope)
-    if (isCurrentConversation(targetUser, activeSession)) setStopping(false)
     void queryClient.invalidateQueries({ queryKey: ['long-task', user, activeSession] })
   }
   return committed
@@ -581,11 +580,10 @@ const executePlan = async (plan: PlanSummary) => {
     await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
   } finally {
     deltaBatcher.dispose()
-    finishChatRun(user, activeSession, committed)
+    finishChatRun(targetUser, activeSession, committed, runId)
     setChatAbortController(null, targetUser, activeSession, runId)
-    setActiveRunId('', targetUser, activeSession, runId)
+    setStopping(false, targetUser, activeSession, runId)
     setRunning(false, targetUser, activeSession, runId)
-    if (isCurrentConversation(targetUser, activeSession)) setStopping(false)
   }
 }
 

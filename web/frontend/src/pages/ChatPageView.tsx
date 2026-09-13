@@ -5,6 +5,7 @@ import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
 import { LongTaskBubble } from '../components/LongTaskBubble'
+import { SubagentToolCard } from '../components/SubagentProgressBubble'
 import { statusLabel } from '../components/ModuleUi'
 import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
@@ -29,6 +30,7 @@ import {
   UserMessageAvatar,
 } from './chatPresentation'
 import { HISTORY_PAGE_SIZE, shouldShowLongTaskBubble } from './chatRunSupport'
+import { FollowUpQueue } from './FollowUpQueue'
 
 const MarkdownMessage = lazy(async () => ({
   default: (await import('../components/Chat/MarkdownMessage')).MarkdownMessage,
@@ -55,7 +57,7 @@ export function ChatPageView(props: ChatPageViewProps) {
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
     activeCompression, longTaskQuery, longTaskBusy, stopLongTask, composerPlanDockRef, collapsedPlans,
-    planActions, guidancePreviewItem, pendingNextTurn, liveSessionId, removeNextTurnMessage,
+    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,
@@ -166,7 +168,7 @@ return (
               <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
               <div className="assistant-turn-content">
                 {block.items.map((item) => {
-                  if (item.kind === 'context_compression') return null
+                  if (item.kind === 'context_compression' || item.kind === 'subagent_progress') return null
                   if (item.kind === 'long_task_boundary') return <div className="long-task-boundary" key={item.id}>长任务自动续跑 · 第 {item.continuation + 1} Run</div>
                   if (item.kind === 'retry_boundary') {
                     return <div className={`retry-boundary ${item.phase}`} key={item.id}>
@@ -177,7 +179,9 @@ return (
                   }
                   if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
                   if (item.kind === 'execution_marker') return null
-                  if (item.kind === 'tool') return <ToolCallCard key={item.id} item={item} />
+                  if (item.kind === 'tool') return item.name === 'subagent_dispatch'
+                    ? <SubagentToolCard key={item.id} item={item} progress={liveItems} running={running} />
+                    : <ToolCallCard key={item.id} item={item} />
                   if (item.kind === 'media') return <MediaArtifactCard key={item.id} user={user} artifact={item.artifact} />
                   if (item.kind === 'usage') return null
                   if (item.kind === 'task_plan') return null
@@ -254,10 +258,15 @@ return (
           />
         </div>
       ) : null}
-      {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" onCancel={pendingNextTurn?.status === 'error' && liveSessionId ? () => removeNextTurnMessage(user, liveSessionId, pendingNextTurn.id) : undefined} onRetry={pendingNextTurn?.status === 'error' && liveSessionId ? () => setNextTurnMessageStatus(user, liveSessionId, pendingNextTurn.id, 'queued') : undefined} /></div> : null}
+      <FollowUpQueue user={user} messages={followUpQueue} canGuide={running && !stopping}
+        onGuide={(message) => { void sendGuidance(message) }}
+        onRemove={(id) => removeNextTurnMessage(user, liveSessionId, id)}
+        onRetry={(id) => setNextTurnMessageStatus(user, liveSessionId, id, 'queued')}
+        onReorder={(id, targetId) => reorderNextTurnMessages(user, liveSessionId, id, targetId)} />
+      {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" /></div> : null}
       <AgentComposer
         value={draft}
-        placeholder={user ? stopping ? '输入下一轮消息；将在当前任务停止后自动发送…' : running ? '输入运行中引导；将在下一个 Provider/工具边界生效…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+        placeholder={user ? running ? '回车加入消息跟进；可排序，或在气泡内选择本轮引导…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
         currentRound={currentRound}
         totalRounds={totalRounds}
         roundLimit={roundLimit}
@@ -312,7 +321,8 @@ return (
         }}
         onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value: boolean) => !value)}
-        onSubmit={() => { if (running) void sendGuidance(); else void send(undefined, { uploadedFiles: pendingUploads }) }}
+        onSubmit={() => { if (running || stopping) queueFollowUp(); else void send(undefined, { uploadedFiles: pendingUploads }) }}
+        onNextTurn={queueFollowUp}
         onStop={() => { void stopCurrentRun() }}
       />
     </div>

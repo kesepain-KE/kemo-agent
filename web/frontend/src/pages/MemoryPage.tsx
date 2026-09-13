@@ -10,6 +10,7 @@ import type { ShellOutletContext } from '../components/AppShell'
 import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton } from '../components/ModuleUi'
 import styles from './MemoryPage.module.css'
+import { ImportantMemoryStatus, importantMemoryStatusLabel } from './ImportantMemoryStatus'
 
 type MemoryTier = 'seven_days' | 'one_month' | 'half_year' | 'important' | 'permanent'
 type MemorySort = 'newest' | 'oldest' | 'weight'
@@ -92,10 +93,11 @@ function toRows(summary: MemorySummaryResponse | undefined, important: Important
   return rows
 }
 
-function StatCard({ tier, count, active, onClick }: { tier: MemoryTier; count: number; active: boolean; onClick: () => void }) {
+function StatCard({ tier, count, active, onClick, status }: { tier: MemoryTier; count: number; active: boolean; onClick: () => void; status?: string }) {
   return <button type="button" className={`${styles.statCard} ${active ? styles.statCardActive : ''}`} onClick={onClick}>
     <span className={styles.statTop}><strong>{TIER_LABELS[tier]}</strong><span className={styles.statIcon}>{tier === 'important' ? <FileText size={18} /> : tier === 'permanent' ? <Brain size={18} /> : <CalendarDays size={18} />}</span></span>
     <span className={styles.statCount}>{count}<small>{tier === 'important' ? '文件' : '片段'}</small></span>
+    {status && <span className={`${styles.lifecycleBadge} ${status === '已失效' ? styles.lifecycleInvalid : ''}`}>{status}</span>}
   </button>
 }
 
@@ -167,14 +169,17 @@ export function MemoryPage() {
   const [pendingDelete, setPendingDelete] = useState<MemoryRow | null>(null)
 
   const summary = useQuery({ queryKey: ['memory-summary', user], queryFn: () => getMemorySummary(user), enabled: Boolean(user) })
-  const important = useQuery({ queryKey: ['memory-important', user], queryFn: () => getImportantMemory(user), enabled: Boolean(user), retry: false })
+  const important = useQuery({ queryKey: ['memory-important', user], queryFn: () => getImportantMemory(user), enabled: Boolean(user), retry: false, refetchInterval: 15000 })
   const rows = useMemo(() => toRows(summary.data, important.data), [summary.data, important.data])
   const importantRow = rows.find((row) => row.tier === 'important')
   const selected = activeTier === 'important' ? importantRow : rows.find((row) => row.key === selectedKey)
   const selectedRegular = Boolean(selected && selected.tier !== 'important')
   const item = useQuery({ queryKey: ['memory-item', user, selected?.tier, selected?.filename], queryFn: () => getMemoryItem(user, selected!.tier, selected!.filename), enabled: Boolean(user && selectedRegular && selected) })
   const detailContent = selected?.tier === 'important' ? important.data?.content : item.data?.content
-  const activeSelectionKey = selected?.key || ''
+  const activeSelectionKey = selected ? `${user}:${selected.key}` : ''
+  const loadedSelection = useRef('')
+  const editorState = useRef({ draft, original })
+  editorState.current = { draft, original }
 
   useEffect(() => {
     setDraft('')
@@ -182,7 +187,8 @@ export function MemoryPage() {
     setPreviewing(false)
   }, [activeSelectionKey])
   useEffect(() => {
-    if (detailContent !== undefined && activeSelectionKey) {
+    if (detailContent !== undefined && activeSelectionKey && (loadedSelection.current !== activeSelectionKey || editorState.current.draft === editorState.current.original)) {
+      loadedSelection.current = activeSelectionKey
       setDraft(detailContent)
       setOriginal(detailContent)
     }
@@ -205,7 +211,7 @@ export function MemoryPage() {
     if (!WEIGHTED_TIERS.has(activeTier) && sort === 'weight') setSort('newest')
   }, [activeTier, sort])
 
-  const reload = () => { void summary.refetch(); void important.refetch(); if (selected) void item.refetch() }
+  const reload = () => { void summary.refetch(); void important.refetch(); if (selectedRegular) void item.refetch() }
   const invalidateMemory = async () => {
     await client.invalidateQueries({ queryKey: ['memory-summary', user] })
     await client.invalidateQueries({ queryKey: ['memory-important', user] })
@@ -248,11 +254,11 @@ export function MemoryPage() {
     <div className={styles.createControl}><button type="button" className="module-btn primary" onClick={() => setCreateOpen((value) => !value)}><Plus size={15} />新建记忆</button>{createOpen && <div className={styles.createPopover}><div className={styles.popoverHead}><strong>新增长期记忆</strong><button type="button" aria-label="关闭新建记忆" onClick={() => setCreateOpen(false)}><X size={15} /></button></div><p>新建记忆只能保存至长期记忆栏。</p><textarea value={newContent} maxLength={10000} placeholder="请输入要长期保存的记忆内容……" onChange={(event) => setNewContent(event.target.value)} /><small>{newContent.length} / 10000</small><div className={styles.popoverActions}><button type="button" className="module-btn" onClick={() => { setCreateOpen(false); setNewContent('') }}>取消</button><button type="button" className="module-btn primary" disabled={!newContent.trim() || create.isPending} onClick={() => create.mutate()}>{create.isPending ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}保存</button></div></div>}</div>
   </div>}>
     {summary.isError && <ModuleError message="记忆读取失败，请检查运行服务状态。" />}
-    <div className={styles.statGrid}>{TABS.map((tier) => <StatCard key={tier} tier={tier} count={counts[tier]} active={activeTier === tier} onClick={() => setActiveTier(tier)} />)}</div>
+    <div className={styles.statGrid}>{TABS.map((tier) => <StatCard key={tier} tier={tier} count={counts[tier]} active={activeTier === tier} onClick={() => setActiveTier(tier)} status={tier === 'important' && (important.data || important.isError) ? importantMemoryStatusLabel(important.data?.lifecycle, important.isError) : undefined} />)}</div>
     <div className={styles.tabsBar}>{TABS.map((tier) => <button type="button" key={tier} className={activeTier === tier ? styles.tabActive : ''} onClick={() => setActiveTier(tier)}>{TIER_LABELS[tier]}</button>)}</div>
     <div className={`${styles.workspace} ${activeTier === 'important' ? styles.workspaceSingle : ''}`}>
       {activeTier !== 'important' && <section className={styles.listPanel}><div className={styles.panelHeading}><div><strong>{TIER_LABELS[activeTier]}</strong><span>{WEIGHTED_TIERS.has(activeTier) ? '编辑后权重 +1，每天最多增加一次。' : '手动创建并长期保存的稳定记忆。'}</span></div><span className={styles.panelCount}>{visibleRows.length}</span></div><div className={styles.toolbar}><label className={styles.search}><Search size={15} /><input value={queryText} placeholder="搜索当前记忆栏……" onChange={(event) => setQueryText(event.target.value)} /></label><MemorySortSelect value={sort} allowWeight={WEIGHTED_TIERS.has(activeTier)} onChange={setSort} /></div><div className={styles.rows}>{pagedRows.length ? pagedRows.map((row) => <article key={row.key} className={`${styles.row} ${selectedKey === row.key ? styles.rowSelected : ''}`} onClick={() => setSelectedKey(row.key)}><span className={styles.rowDot} /><div className={styles.rowCopy}><strong>{row.title}</strong><span>{row.preview || row.filename}</span></div><div className={styles.rowMeta}>{WEIGHTED_TIERS.has(row.tier) && <span className={styles.weight}>权重 {row.weight}</span>}<small>{formatUpdated(row.updatedAt)}</small><button type="button" onClick={(event) => { event.stopPropagation(); setSelectedKey(row.key) }}>编辑</button><button type="button" onClick={(event) => { event.stopPropagation(); setPendingDelete(row) }}>删除</button></div></article>) : <EmptyPanel title="当前记忆栏暂无内容" description="可以切换其他记忆栏或重新读取数据。" icon={<Brain size={22} />} />}</div><div className={styles.pagination}><div><button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={14} /></button><b>{page} / {totalPages}</b><button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}><ChevronRight size={14} /></button></div></div></section>}
-      <aside className={styles.editorPanel}><div className={styles.editorHeading}><div><strong>编辑查看</strong><span>{selected ? selected.title : activeTier === 'important' ? '临时重要记忆文件' : '选择一条记忆'}</span></div>{selected && activeTier !== 'important' && <button type="button" aria-label="关闭编辑查看" onClick={() => setSelectedKey('')}><X size={16} /></button>}</div>{!selected ? <div className={styles.editorEmpty}><Brain size={42} /><strong>{activeTier === 'important' ? '临时重要记忆文件不可用' : '选择一条记忆'}</strong><span>{activeTier === 'important' ? '请重新读取数据或检查记忆文件状态。' : '点击左侧记忆后在此处查看和编辑。'}</span></div> : <><div className={styles.metadata}><span>记忆类型：<b>{TIER_LABELS[selected.tier]}</b></span><span>创建时间：<b>{formatUpdated(selected.createdAt)}</b></span><span>内容更新：<b>{formatUpdated(selected.updatedAt)}</b></span>{selected.lastUsedAt && <span>最近使用：<b>{formatUpdated(selected.lastUsedAt)}</b></span>}{WEIGHTED_TIERS.has(selected.tier) && <span>当前权重：<b>{item.data?.weight ?? selected.weight}</b></span>}</div>{WEIGHTED_TIERS.has(selected.tier) && <div className={styles.weightNotice}><Brain size={14} />{weightToday ? '该记忆今天已经因编辑增加过权重，再次保存不会继续增加。' : '保存编辑后权重 +1，同一条记忆每天最多增加一次。'}</div>}<div className={styles.editorToolbar}><button type="button" className={previewing ? styles.previewActive : ''} onClick={() => setPreviewing((value) => !value)}>{previewing ? <><FileText size={14} />返回编辑</> : <><Eye size={14} />Markdown 预览</>}</button>{changed && <small>有未保存修改</small>}</div><div className={styles.editorBody}>{loadingDetail ? <div className={styles.editorLoading}>正在读取记忆内容…</div> : previewing ? <article className={styles.markdown}><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article> : <textarea value={draft} spellCheck={false} placeholder="输入记忆内容……" onChange={(event) => setDraft(event.target.value)} />}</div><div className={styles.editorActions}><button type="button" className="module-btn" disabled={!changed || save.isPending} onClick={() => setDraft(original)}><RotateCcw size={14} />恢复</button>{selected.tier !== 'important' && <button type="button" className="module-btn danger" disabled={save.isPending || remove.isPending} onClick={() => setPendingDelete(selected)}><Trash2 size={14} />删除此记忆</button>}<button type="button" className="module-btn primary" disabled={!changed || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}保存编辑</button></div>{save.isError && <ModuleError message={String(save.error)} />}</>}</aside>
+      <aside className={styles.editorPanel}><div className={styles.editorHeading}><div><strong>编辑查看</strong><span>{selected ? selected.title : activeTier === 'important' ? '临时重要记忆文件' : '选择一条记忆'}</span></div>{selected && activeTier !== 'important' && <button type="button" aria-label="关闭编辑查看" onClick={() => setSelectedKey('')}><X size={16} /></button>}</div>{activeTier === 'important' && (important.data || important.isError) && <ImportantMemoryStatus lifecycle={important.data?.lifecycle} failed={important.isError} />}{!selected ? <div className={styles.editorEmpty}><Brain size={42} /><strong>{activeTier === 'important' ? '临时重要记忆文件不可用' : '选择一条记忆'}</strong><span>{activeTier === 'important' ? '请重新读取数据或检查记忆文件状态。' : '点击左侧记忆后在此处查看和编辑。'}</span></div> : <><div className={styles.metadata}><span>记忆类型：<b>{TIER_LABELS[selected.tier]}</b></span><span>创建时间：<b>{formatUpdated(selected.createdAt)}</b></span><span>内容更新：<b>{formatUpdated(selected.updatedAt)}</b></span>{selected.lastUsedAt && <span>最近使用：<b>{formatUpdated(selected.lastUsedAt)}</b></span>}{WEIGHTED_TIERS.has(selected.tier) && <span>当前权重：<b>{item.data?.weight ?? selected.weight}</b></span>}</div>{WEIGHTED_TIERS.has(selected.tier) && <div className={styles.weightNotice}><Brain size={14} />{weightToday ? '该记忆今天已经因编辑增加过权重，再次保存不会继续增加。' : '保存编辑后权重 +1，同一条记忆每天最多增加一次。'}</div>}<div className={styles.editorToolbar}><button type="button" className={previewing ? styles.previewActive : ''} onClick={() => setPreviewing((value) => !value)}>{previewing ? <><FileText size={14} />返回编辑</> : <><Eye size={14} />Markdown 预览</>}</button>{changed && <small>有未保存修改</small>}</div><div className={styles.editorBody}>{loadingDetail ? <div className={styles.editorLoading}>正在读取记忆内容…</div> : previewing ? <article className={styles.markdown}><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article> : <textarea value={draft} spellCheck={false} placeholder="输入记忆内容……" onChange={(event) => setDraft(event.target.value)} />}</div><div className={styles.editorActions}><button type="button" className="module-btn" disabled={!changed || save.isPending} onClick={() => setDraft(original)}><RotateCcw size={14} />恢复</button>{selected.tier !== 'important' && <button type="button" className="module-btn danger" disabled={save.isPending || remove.isPending} onClick={() => setPendingDelete(selected)}><Trash2 size={14} />删除此记忆</button>}<button type="button" className="module-btn primary" disabled={!changed || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}保存编辑</button></div>{save.isError && <ModuleError message={String(save.error)} />}</>}</aside>
     </div>
     <GlobalConfirmDialog
       open={Boolean(pendingDelete)}

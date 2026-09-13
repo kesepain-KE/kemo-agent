@@ -1,0 +1,12 @@
+.anchor { position: relative; min-width: 0; }
+.stack { position: relative; width: fit-content; max-width: calc(100% - 12px); margin: 8px 0 12px 12px; display: grid; gap: 6px; }
+.bubble { position: relative; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); box-shadow: 0 6px 20px rgba(24, 31, 50, .1); }
+.bubble::before { content: ''; position: absolute; top: -5px; left: 18px; width: 8px; height: 8px; background: var(--surface-elevated); border-left: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); border-top: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); transform: rotate(45deg); }
+.icon { width: 20px; height: 20px; flex-shrink: 0; color: var(--brand); }
+.copy { min-width: 0; flex: 1; }
+.copy strong { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: .8rem; overflow-wrap: anywhere; }
+.copy strong span { color: var(--muted); font-size: .65rem; font-weight: 400; }
+.copy p { margin: 3px 0 0; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
+.spinner { width: 16px; height: 16px; flex-shrink: 0; color: var(--brand); animation: subagent-spin 1.2s linear infinite; }
+@keyframes subagent-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

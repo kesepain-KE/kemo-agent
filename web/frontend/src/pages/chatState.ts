@@ -1,6 +1,7 @@
 import { taskPlanFromSummary } from '../components/TaskPlanBubble'
 import type { UserMessageMarker } from '../components/UserMessageNavigator'
 import { randomUUID } from '../randomId'
+import { reduceSubagentProgress } from './subagentProgress'
 import type { ChatItem, HistoryResponse, InputAttachment, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 
 const HISTORY_PAGE_SIZE = 20
@@ -163,6 +164,7 @@ export function resetCurrentRoundItemsForRetry(
   failedAttempt = 1,
   nextAttempt = failedAttempt + 1,
 ) {
+  items = items.filter((item) => item.kind !== 'subagent_progress')
   const roundStart = currentRoundStartIndex(items)
   const prefix = items.slice(0, roundStart)
   const currentAttempt = items.slice(roundStart)
@@ -219,6 +221,7 @@ export function finalizeCurrentRoundItems(
   items: ChatItem[],
   toolError: Record<string, unknown>,
 ) {
+  items = items.filter((item) => item.kind !== 'subagent_progress')
   const roundStart = currentRoundStartIndex(items)
   return items.map((item, index) => {
     if (index < roundStart) return item
@@ -272,6 +275,8 @@ function insertCurrentRoundItem(
 }
 
 export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
+  items = reduceSubagentProgress(items, event)
+  if (event.type === 'subagent_progress') return items
   if (event.type === 'context_compression') {
     const runId = String(event.metadata?.run_id || '')
     const rawStatus = String(event.metadata?.status || 'started')

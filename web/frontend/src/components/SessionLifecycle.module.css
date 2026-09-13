@@ -1,0 +1,52 @@
+.notice {
+  position: absolute;
+  z-index: 30;
+  top: 12px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: .8125rem;
+  line-height: 1.6;
+  box-shadow: 0 4px 20px #0001;
+}
+
+.pending {
+  display: flex;
+  min-height: 180px;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.notice button,
+.pending button {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--brand);
+  background: var(--brand-soft);
+  cursor: pointer;
+}
+
+.notice button:focus-visible,
+.pending button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .notice { align-items: flex-start; flex-direction: column; }
+}

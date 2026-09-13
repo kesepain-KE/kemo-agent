@@ -18,6 +18,21 @@ import {
 } from './client'
 
 describe('parseSseFrames', () => {
+  it('subagent progress 在工具完成前透传且不终止 SSE', async () => {
+    server.use(http.post('/api/chat', () => new HttpResponse(
+      'event: subagent_progress\ndata: {"type":"subagent_progress","tool_call_id":"call-a","metadata":{"status":"tool_running","iteration":2,"tool_name":"file"}}\n\n'
+      + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"call-a","result":{"ok":true}}\n\n'
+      + 'event: done\ndata: {"type":"done"}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )))
+    const events: string[] = []
+    await streamChat({ user: 'kesepain', sessionId: 's1', prompt: '执行', runId: 'run_progress', onEvent: (event) => {
+      events.push(event.type)
+      if (event.type === 'subagent_progress') expect(event).toMatchObject({ tool_call_id: 'call-a', metadata: { iteration: 2, tool_name: 'file' } })
+    } })
+    expect(events).toEqual(['subagent_progress', 'tool_call_result', 'done'])
+  })
+
   it('保留跨块残片并解析完整事件', () => {
     const first = parseSseFrames('event: text_delta\ndata: {"type":"text_')
     expect(first.frames).toEqual([])

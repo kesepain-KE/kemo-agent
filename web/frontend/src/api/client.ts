@@ -16,6 +16,8 @@ import type {
   ExpandScope,
   FileDeleteResponse,
   FileMutationResponse,
+  FileSortBy,
+  FileSortOrder,
   HistoryResponse,
   ImportantMemoryResponse,
   KnowledgeDocumentResponse,
@@ -37,6 +39,8 @@ import type {
   PlanRevisionsResponse,
   PlanRollbackResponse,
   RuntimeStatusResponse,
+  RuntimeLogCategory,
+  RuntimeLogsResponse,
   SenseResponse,
   SessionDeleteAllResponse,
   SessionDeleteResponse,
@@ -333,6 +337,13 @@ export async function getRuntimeStatus(
   if (sections.length) query.set('sections', sections.join(','))
   const suffix = query.size ? `?${query.toString()}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${suffix}`)
+}
+
+export async function getRuntimeLogs(
+  user: string, category: RuntimeLogCategory = 'all', page = 1, refresh = false,
+): Promise<RuntimeLogsResponse> {
+  const query = new URLSearchParams({ category, page: String(page), page_size: '25', refresh: String(refresh) })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/logs?${query}`)
 }
 
 export async function getTasks(user: string, sessionId = ''): Promise<TasksResponse> {
@@ -657,8 +668,10 @@ export async function getUserFiles(
   search = '',
   page = 1,
   pageSize = 6,
+  sortBy: FileSortBy = 'name',
+  sortOrder: FileSortOrder = 'asc',
 ): Promise<UserFilesResponse> {
-  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize) })
+  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize), sort_by: sortBy, sort_order: sortOrder })
   return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}?${query.toString()}`)
 }
 
@@ -755,8 +768,8 @@ export async function createUserDirectory(user: string, scope: 'file_upload' | '
   return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/directory?path=${encodeURIComponent(path)}`, { method: 'POST' })
 }
 
-export async function getTmpFiles(path = '', search = '', page = 1, pageSize = 6): Promise<TmpFilesResponse> {
-  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize) })
+export async function getTmpFiles(path = '', search = '', page = 1, pageSize = 6, sortBy: FileSortBy = 'name', sortOrder: FileSortOrder = 'asc'): Promise<TmpFilesResponse> {
+  const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize), sort_by: sortBy, sort_order: sortOrder })
   return requestJson(`/api/tmp?${query.toString()}`)
 }
 

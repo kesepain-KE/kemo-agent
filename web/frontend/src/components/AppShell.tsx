@@ -54,8 +54,11 @@ import {
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
+import { ApiError } from '../api/transport'
+import { reorderFollowUps } from './followUpQueue'
 import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
+import lifecycleStyles from './SessionLifecycle.module.css'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
 import type { PendingUploadedFile } from '../store/chatDrafts'
@@ -97,7 +100,9 @@ interface ChatRunControl {
   user: string
   sessionId: string
   runId: string
+  logicalRunId: string
   running: boolean
+  stopping: boolean
   controller: AbortController | null
 }
 
@@ -115,6 +120,9 @@ export function AppShell() {
   const [rememberedUser, setRememberedUser] = useState(readLastActiveUser)
   const user = resolveCurrentUser(params.get('user') || '', rememberedUser, usersQuery.data?.users)
   const sessionId = params.get('session') || ''
+  const newUserTab = params.get('new_session') === '1' && !sessionId
+  const [sessionLifecycleNotice, setSessionLifecycleNotice] = useState('')
+  useEffect(() => setSessionLifecycleNotice(''), [user])
   const sessionsQuery = useQuery({
     queryKey: ['sessions', user],
     queryFn: () => getSessions(user),
@@ -124,10 +132,13 @@ export function AppShell() {
     (session) => (session.source || 'web') === 'web',
   )
   const activeSessionQuery = useQuery({
-    queryKey: ['active-session', user, clientId],
-    queryFn: () => getActiveSession(user, clientId),
+    queryKey: ['active-session', user, clientId, newUserTab ? 'new-tab' : 'restore'],
+    queryFn: () => newUserTab ? createSession(user, clientId) : getActiveSession(user, clientId),
     enabled: Boolean(user) && !sessionId && !sessionTransitioning,
-    staleTime: 0,
+    staleTime: newUserTab ? Infinity : 0,
+    retry: newUserTab ? false : undefined,
+    refetchOnWindowFocus: !newUserTab,
+    refetchOnReconnect: !newUserTab,
   })
   const overviewQuery = useQuery({
     queryKey: ['overview', user, sessionId],
@@ -206,11 +217,14 @@ export function AppShell() {
   }
   const currentChatRunControl = getCurrentChatRunControl()
   const chatRunning = Boolean(currentChatRunControl?.running)
+  const chatStopping = Boolean(currentChatRunControl?.stopping)
   const chatRunId = currentChatRunControl?.runId || ''
   const chatRunSessionId = currentChatRunControl?.sessionId || ''
+  const chatRunToken = currentChatRunControl?.logicalRunId || ''
 
   const beginChatRun = useCallback((runUser: string, runSessionId: string, runId: string, historyUserMessages: number) => {
     const key = chatRunKey(runUser, runSessionId)
+    const current = chatRunControlsRef.current.get(key)
     setChatRuns((current) => ({
       ...current,
       [key]: {
@@ -221,6 +235,14 @@ export function AppShell() {
         nextTurnQueue: current[key]?.nextTurnQueue ?? [],
       },
     }))
+    const logicalRunId = current?.running ? current.logicalRunId : runId
+    chatRunControlsRef.current.set(key, {
+      user: runUser, sessionId: runSessionId, runId, logicalRunId,
+      running: true, stopping: current?.running ? current.stopping : false,
+      controller: current?.running ? current.controller : null,
+    })
+    if (!sessionIdRef.current && userRef.current === runUser) chatDraftRunKeysRef.current.set(runUser, key)
+    bumpChatControlRevision()
   }, [])
 
   const updateChatRunItems = useCallback((runUser: string, runSessionId: string, updater: ChatItemsUpdater) => {
@@ -265,12 +287,25 @@ export function AppShell() {
     })
   }, [])
 
-  const finishChatRun = useCallback((runUser: string, runSessionId: string, committed: boolean) => {
+  const finishChatRun = useCallback((runUser: string, runSessionId: string, committed: boolean, expectedRunId = '') => {
     const key = chatRunKey(runUser, runSessionId)
     setChatRuns((current) => {
       const existing = current[key]
       if (!existing) return current
+      // A late terminal callback from an older Run must not seal the
+      // snapshot that a continuation or a newer send has already claimed.
+      if (expectedRunId && existing.runId !== expectedRunId) return current
       return { ...current, [key]: { ...existing, phase: committed ? 'awaiting_history' : 'idle' } }
+    })
+  }, [])
+
+  const reorderNextTurnMessages = useCallback((runUser: string, runSessionId: string, messageId: string, targetId: string) => {
+    const key = chatRunKey(runUser, runSessionId)
+    setChatRuns((current) => {
+      const existing = current[key]
+      if (!existing) return current
+      const nextTurnQueue = reorderFollowUps(existing.nextTurnQueue, messageId, targetId)
+      return nextTurnQueue === existing.nextTurnQueue ? current : { ...current, [key]: { ...existing, nextTurnQueue } }
     })
   }, [])
 
@@ -405,7 +440,9 @@ export function AppShell() {
     const key = chatRunKey(scope.user, scope.sessionId)
     const current = chatRunControlsRef.current.get(key)
     if (!running) {
-      if (!current || (scope.runId && current.runId && current.runId !== scope.runId)) return
+      // Compare-and-set by Run ID.  Do not let a late stop/finally callback
+      // clear the control belonging to a continuation or a newer Run.
+      if (!current || (scope.runId && current.runId !== scope.runId)) return
       chatRunControlsRef.current.delete(key)
       if (chatDraftRunKeysRef.current.get(scope.user) === key) {
         chatDraftRunKeysRef.current.delete(scope.user)
@@ -413,12 +450,15 @@ export function AppShell() {
       bumpChatControlRevision()
       return
     }
+    const sameRun = Boolean(current && (!scope.runId || current.runId === scope.runId))
     chatRunControlsRef.current.set(key, {
       user: scope.user,
       sessionId: scope.sessionId,
       runId: scope.runId || current?.runId || '',
+      logicalRunId: current?.logicalRunId || scope.runId,
       running: true,
-      controller: current?.controller || null,
+      stopping: sameRun ? current?.stopping ?? false : false,
+      controller: sameRun ? current?.controller || null : null,
     })
     if (!sessionIdRef.current && userRef.current === scope.user) {
       chatDraftRunKeysRef.current.set(scope.user, key)
@@ -437,11 +477,14 @@ export function AppShell() {
       bumpChatControlRevision()
       return
     }
+    if (expectedRunId && (!current || current.runId !== expectedRunId)) return
     chatRunControlsRef.current.set(key, {
       user: scope.user,
       sessionId: scope.sessionId,
       runId,
+      logicalRunId: current?.logicalRunId || runId,
       running: current?.running ?? true,
+      stopping: current?.stopping ?? false,
       controller: current?.controller || null,
     })
     bumpChatControlRevision()
@@ -462,7 +505,9 @@ export function AppShell() {
         user: scope.user,
         sessionId: scope.sessionId,
         runId: runId || current?.runId || '',
+        logicalRunId: current?.logicalRunId || runId,
         running: current?.running ?? true,
+        stopping: current?.stopping ?? false,
         controller,
       })
       bumpChatControlRevision()
@@ -473,7 +518,20 @@ export function AppShell() {
     bumpChatControlRevision()
   }
 
-  const abortChatRun = (runUser?: string, runSessionId?: string, runId?: string) => {
+  const setChatStopping = (stopping: boolean, runUser?: string, runSessionId?: string, runId = '', logicalRunId = '') => {
+    const scope = resolveRunScope(runUser, runSessionId, runId)
+    if (!scope.user || !scope.sessionId) return
+    const key = chatRunKey(scope.user, scope.sessionId)
+    const current = chatRunControlsRef.current.get(key)
+    // Stopping is part of the Run control rather than page-local state.  A
+    // delayed pause/cancel response may only update the Run it targeted.
+    if (!current || (scope.runId && current.runId !== scope.runId && current.logicalRunId !== logicalRunId)) return
+    if (current.stopping === stopping) return
+    chatRunControlsRef.current.set(key, { ...current, stopping })
+    bumpChatControlRevision()
+  }
+
+  const abortChatRun = (runUser?: string, runSessionId?: string, runId?: string, logicalRunId = '') => {
     const current = runUser === undefined && runSessionId === undefined && runId === undefined
       ? getCurrentChatRunControl()
       : (() => {
@@ -481,12 +539,13 @@ export function AppShell() {
           if (!scope.user || !scope.sessionId) return undefined
           return chatRunControlsRef.current.get(chatRunKey(scope.user, scope.sessionId))
         })()
-    if (!current || (runId && current.runId !== runId)) return
+    if (!current || (runId && current.runId !== runId && current.logicalRunId !== logicalRunId)) return
     current.controller?.abort()
   }
 
   const setSessionId = (nextSession: string) => {
     const next = new URLSearchParams(params)
+    if (nextSession) next.delete('new_session')
     if (nextSession) next.set('session', nextSession)
     else next.delete('session')
     if (nextSession) setSessionTransitioning(false)
@@ -518,21 +577,46 @@ export function AppShell() {
         && candidate.session_id === active
       )),
     )
-    if (!sessionId && !sessionTransitioning && !chatRunning && active && listed) setSessionId(active)
-  }, [activeSessionQuery.data?.session?.session_id, chatRunning, sessionId, sessionTransitioning, sessionsQuery.data?.sessions])
+    if (!sessionId && !sessionTransitioning && !chatRunning && active && (listed || newUserTab)) {
+      if (newUserTab) {
+        const next = new URLSearchParams(params)
+        next.delete('new_session')
+        next.set('user', user)
+        next.set('session', active)
+        setParams(next, { replace: true })
+        void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+      } else setSessionId(active)
+    }
+  }, [activeSessionQuery.data?.session?.session_id, chatRunning, sessionId, sessionTransitioning, sessionsQuery.data?.sessions, newUserTab])
 
   useEffect(() => {
     if (!user || !sessionId) return
     let disposed = false
     const touch = () => {
-      if (!disposed) void touchSessionLease(user, sessionId, clientId).catch(() => undefined)
+      if (!disposed) void touchSessionLease(user, sessionId, clientId).catch((error: unknown) => {
+        if (disposed || !(error instanceof ApiError) || error.status !== 404) return
+        setSessionLifecycleNotice('此空对话已在离线期间清理，或已被删除。请创建新对话；已有对话数据不会因离线被清理。')
+        queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
+        void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+        setSessionTransitioning(true)
+        setSessionId('')
+      })
     }
+    const release = () => { void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined) }
     touch()
     const heartbeat = window.setInterval(touch, 15_000)
+    window.addEventListener('pagehide', release)
+    window.addEventListener('pageshow', touch)
+    window.addEventListener('online', touch)
+    document.addEventListener('visibilitychange', touch)
     return () => {
       disposed = true
       window.clearInterval(heartbeat)
-      void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined)
+      window.removeEventListener('pagehide', release)
+      window.removeEventListener('pageshow', touch)
+      window.removeEventListener('online', touch)
+      document.removeEventListener('visibilitychange', touch)
+      release()
     }
   }, [clientId, sessionId, user])
 
@@ -816,6 +900,7 @@ export function AppShell() {
           switchingDisabled={chatRunning}
           switchingDisabledReason="当前对话正在运行，结束或停止后才能切换用户"
           onSelectUser={setUser}
+          newUserTabHref={user ? `/chat?${new URLSearchParams({ user, new_session: '1' }).toString()}` : undefined}
           onOpenProfile={() => navigate(withContext('/profile'))}
           onOpenUserSwitch={() => navigate(settingsPath('users'))}
           onOpenSettings={() => navigate(settingsPath('provider'))}
@@ -851,7 +936,12 @@ export function AppShell() {
             <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
           </div>
         </header>
-          <section className="content"><Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, setChatRunning, chatRunId, chatRunSessionId, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} /></section>
+          <section className="content">
+            {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>知道了</button></div>}
+            {newUserTab ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
+              {activeSessionQuery.isError ? <>创建独立对话失败，请重试。<button onClick={() => { void activeSessionQuery.refetch() }}>重试创建对话</button></> : '正在为此用户创建独立对话…'}
+            </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} />}
+          </section>
       </main>
 
       <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>

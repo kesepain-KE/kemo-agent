@@ -3,6 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { UserProfileCard } from './UserProfileCard'
 
 describe('UserProfileCard', () => {
+  it('当前运行禁止切换用户时仍允许新建此用户标签页', () => {
+    render(<UserProfileCard username="alice" switchingDisabled users={[{ username: 'bob' }]} newUserTabHref="/chat?user=alice&new_session=1" />)
+    fireEvent.click(screen.getByRole('button', { name: '切换当前用户' }))
+    expect(screen.getByRole('menuitem', { name: /bob/ })).toBeDisabled()
+    const newTab = screen.getByRole('menuitem', { name: '新建此用户标签页' })
+    expect(newTab).not.toHaveAttribute('aria-disabled', 'true')
+    expect(newTab).toHaveAttribute('href', '/chat?user=alice&new_session=1')
+  })
   it('展示用户信息并可打开和关闭菜单', () => {
     render(<UserProfileCard username="kesepain" userPath="users/kesepain" onOpenProfile={() => undefined} onOpenSettings={() => undefined} />)
     const trigger = screen.getByRole('button', { name: '切换当前用户' })

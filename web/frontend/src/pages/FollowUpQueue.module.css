@@ -1,0 +1,18 @@
+.queue { width: min(var(--conversation-width, 1120px), 100%); margin: 0 auto 10px; }
+.queue header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: .8rem; color: var(--text); }
+.queue header span { font-size: .7rem; color: var(--muted); }
+.queue ol { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
+.queue li { min-width: 0; }
+.bubble { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); }
+.heading { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: .75rem; }
+.heading span { margin-left: auto; color: var(--muted); font-size: .7rem; }
+.bubble p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+.bubble small { color: var(--red); overflow-wrap: anywhere; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.queue button { display: inline-flex; align-items: center; gap: 3px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text-2); font-size: .7rem; cursor: pointer; }
+.queue button svg { width: 13px; height: 13px; }
+.queue button:disabled { opacity: .4; cursor: not-allowed; }
+.queue button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.queue .drag { padding: 3px; cursor: grab; border-color: transparent; background: transparent; }
+.queue .guide { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 30%, var(--line)); }
+.spacer { flex: 1; }

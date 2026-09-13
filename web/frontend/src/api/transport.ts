@@ -56,6 +56,7 @@ export const runEventSchema = z
       'guidance_applied',
       'context_compression',
       'long_task_update',
+      'subagent_progress',
       'usage',
       'retrying',
       'error',

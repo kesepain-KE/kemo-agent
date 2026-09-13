@@ -129,6 +129,8 @@
   transition: background .15s ease, color .15s ease, transform .15s ease;
 }
 .menuItem {
+  box-sizing: border-box;
+  text-decoration: none;
   min-height: 40px;
   padding: 0 10px;
   display: flex;

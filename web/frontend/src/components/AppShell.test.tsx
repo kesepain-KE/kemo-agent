@@ -18,6 +18,67 @@ afterEach(() => {
 })
 
 describe('AppShell user persistence', () => {
+  it('新建此用户标签页保留原页面，并通过安全新标签链接请求独立对话', async () => {
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByRole('button', { name: '切换当前用户' }))
+    const link = screen.getByRole('menuitem', { name: '新建此用户标签页' })
+    expect(link).toHaveAttribute('href', '/chat?user=kesepain&new_session=1')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(app.getSearch()).toBe('?user=kesepain&session=s1')
+  })
+
+  it('新标签页只创建独立对话，不恢复用户已有会话，成功后清除创建标记', async () => {
+    let creates = 0
+    let restores = 0
+    server.use(
+      http.post('/api/users/kesepain/sessions', async () => {
+        creates += 1
+        await delay(30)
+        return HttpResponse.json({ user: 'kesepain', created: true, session: { session_id: 'fresh_tab', rounds: 0 } })
+      }),
+      http.get('/api/users/kesepain/sessions/active', () => {
+        restores += 1
+        return HttpResponse.json({ user: 'kesepain', session: { session_id: 's1', rounds: 2 } })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&new_session=1')
+    expect(screen.queryByRole('textbox', { name: '消息内容' })).not.toBeInTheDocument()
+    await waitFor(() => expect(app.getSearch()).toBe('?user=kesepain&session=fresh_tab'))
+    expect(creates).toBe(1)
+    expect(restores).toBe(0)
+  })
+
+  it('新标签创建失败不自动重试或退回旧对话，提供显式重试', async () => {
+    let creates = 0
+    server.use(http.post('/api/users/kesepain/sessions', () => {
+      creates += 1
+      return creates === 1
+        ? HttpResponse.json({ error: { message: 'test' } }, { status: 500 })
+        : HttpResponse.json({ user: 'kesepain', created: true, session: { session_id: 'retry_tab', rounds: 0 } })
+    }))
+    const app = renderApp('/chat?user=kesepain&new_session=1')
+    fireEvent.click(await screen.findByRole('button', { name: '重试创建对话' }))
+    await waitFor(() => expect(app.getSearch()).toBe('?user=kesepain&session=retry_tab'))
+    expect(creates).toBe(2)
+  })
+
+  it('空对话离线清理后恢复网页会解除绑定并解释原因', async () => {
+    let creates = 0
+    server.use(
+      http.post('/api/users/kesepain/sessions/gone/lease', () => HttpResponse.json({ error: { message: 'gone' } }, { status: 404 })),
+      http.post('/api/users/kesepain/sessions', () => {
+        creates += 1
+        return HttpResponse.json({ user: 'kesepain', created: true, session: { session_id: 'must_not_create', rounds: 0 } })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&session=gone')
+    await screen.findByText(/此空对话已在离线期间清理/)
+    await waitFor(() => expect(new URLSearchParams(app.getSearch()).has('session')).toBe(false))
+    await delay(30)
+    expect(creates).toBe(0)
+  })
+
   it('把注入策略状态码稳定映射为三个只读状态', () => {
     expect(injectionPolicyPresentation('round').label).toBe('按轮注入')
     expect(injectionPolicyPresentation('realtime').label).toBe('实时注入')
@@ -357,6 +418,71 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('link', { name: /^配置$/ }))
     fireEvent.click(await screen.findByRole('button', { name: '用户切换 ›' }))
     expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
+  })
+
+  it('长任务取消响应晚于 SSE 终态时不会重新锁死发送按钮', async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>
+    let releaseCancel!: () => void
+    let markCancelStarted!: () => void
+    const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve })
+    const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve })
+    let chatRequests = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      if (chatRequests === 1) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { firstStreamController = controller },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response(
+        'event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    }))
+    const longTaskState = (status: string) => ({
+      enabled: status === 'running', status, task_id: 'long_task_pause_race', original_prompt: '暂停竞态测试',
+      started_at: '2026-09-13T08:00:00+08:00', updated_at: '2026-09-13T08:01:00+08:00', finished_at: '',
+      run_count: 1, continuation_count: 0, total_tool_calls: 1, total_provider_requests: 1,
+      active_elapsed_ms: 1000, usage: {}, current_run_id: status === 'running' ? 'server-run' : '',
+      last_stop_reason: status === 'cancelled' ? 'user_emergency_stop' : '', cancel_requested: status === 'cancelled', last_error: null,
+    })
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/long-task', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1', long_task: longTaskState('running'),
+      })),
+      http.post('/api/users/kesepain/sessions/s1/long-task/cancel', async () => {
+        markCancelStarted()
+        await cancelGate
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: 's1', long_task: longTaskState('cancelled'),
+        })
+      }),
+    )
+
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '开始长任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatRequests).toBe(1))
+    fireEvent.click(await screen.findByRole('button', { name: '停止长任务' }))
+    await cancelStarted
+
+    firstStreamController.enqueue(new TextEncoder().encode(
+      'event: done\ndata: {"type":"done","metadata":{"committed":false,"status":"cancelled","cancelled":true}}\n\n',
+    ))
+    firstStreamController.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+
+    releaseCancel()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '正在停止…' })).not.toBeInTheDocument())
+    fireEvent.change(composer, { target: { value: '暂停后继续发送' } })
+    const sendButton = screen.getByRole('button', { name: '发送' })
+    expect(sendButton).toBeEnabled()
+    fireEvent.click(sendButton)
+    await waitFor(() => expect(chatRequests).toBe(2))
   })
 
   it('不同会话并行运行时保留各自的停止控制器', async () => {
@@ -1151,6 +1277,46 @@ describe('AppShell navigation', () => {
     expect(screen.queryByText(welcomeText)).not.toBeInTheDocument()
   })
 
+  it('消息跟进默认不引导，排序后按队列顺序自动发送下一轮', async () => {
+    let firstController!: ReadableStreamDefaultController<Uint8Array>
+    const prompts: string[] = []
+    let guidanceRequests = 0
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    server.use(http.post('/api/runs/:runId/guidance', () => {
+      guidanceRequests += 1
+      return HttpResponse.json({ status: 'accepted_current_run' })
+    }))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      prompts.push(String(JSON.parse(String(init?.body || '{}')).prompt || ''))
+      if (prompts.length === 1) return new Response(new ReadableStream<Uint8Array>({ start(controller) { firstController = controller } }), { headers: { 'Content-Type': 'text/event-stream' } })
+      return new Response('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '当前任务' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(prompts).toEqual(['当前任务']))
+    for (const text of ['跟进A', '跟进B']) {
+      fireEvent.change(composer, { target: { value: text } })
+      fireEvent.keyDown(composer, { key: 'Enter' })
+    }
+    fireEvent.change(composer, { target: { value: '跟进C' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
+    expect(screen.getAllByRole('article', { name: /^消息跟进 \d+$/ })).toHaveLength(3)
+    expect(guidanceRequests).toBe(0)
+    expect(prompts).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '上移消息跟进 3' }))
+    fireEvent.click(screen.getByRole('button', { name: '上移消息跟进 2' }))
+    expect(screen.getByRole('article', { name: '消息跟进 1' })).toHaveTextContent('跟进C')
+    firstController.enqueue(new TextEncoder().encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
+    firstController.close()
+    await waitFor(() => expect(prompts).toEqual(['当前任务', '跟进C', '跟进A', '跟进B']))
+    await waitFor(() => expect(screen.queryByLabelText('消息跟进队列')).not.toBeInTheDocument())
+    expect(guidanceRequests).toBe(0)
+  })
+
   it('运行中只在输入框上方展示最新引导并在结束后归档到 Token 统计下方', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let markChatStarted!: () => void
@@ -1176,7 +1342,8 @@ describe('AppShell navigation', () => {
     await chatStarted
 
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '先检查目录' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     const firstCurrent = await screen.findByText('正在引导')
     const firstCard = firstCurrent.closest('article')!
     const guidancePreview = firstCard.closest('.composer-guidance-preview')!
@@ -1189,8 +1356,9 @@ describe('AppShell navigation', () => {
     expect(await screen.findByText('智能体已读取该引导并继续运行')).toBeInTheDocument()
 
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '结果放入临时区' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
-    expect(await screen.findByText('结果放入临时区')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
+    await waitFor(() => expect(screen.getByText('结果放入临时区')).toBeInTheDocument())
     expect(screen.queryByText('先检查目录')).not.toBeInTheDocument()
 
     streamController.enqueue(encoder.encode('event: guidance_applied\ndata: {"type":"guidance_applied","metadata":{"guidance":["结果放入临时区"]}}\n\n'))
@@ -1249,9 +1417,10 @@ describe('AppShell navigation', () => {
       new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
     ] } })
     expect(await screen.findByText(/已上传 voice\.mp3/)).toBeInTheDocument()
-    const sendGuidance = screen.getByRole('button', { name: '发送引导' })
+    const sendGuidance = screen.getByRole('button', { name: '消息跟进' })
     expect(sendGuidance).toBeEnabled()
     fireEvent.click(sendGuidance)
+    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
 
     await waitFor(() => expect(guidanceBody).toMatchObject({
       guidance: '',
@@ -1260,7 +1429,7 @@ describe('AppShell navigation', () => {
     expect(screen.queryByLabelText('待发送附件：voice.mp3')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('待发送附件：clip.mp4')).not.toBeInTheDocument()
     releaseGuidance()
-    expect(await screen.findByText('voice.mp3')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('voice.mp3')).toBeInTheDocument())
     expect(screen.getByText('clip.mp4')).toBeInTheDocument()
     expect(screen.getByRole('img', { name: '音频缩略图' })).toBeInTheDocument()
     expect(screen.getByRole('img', { name: '视频缩略图' })).toBeInTheDocument()
@@ -1372,7 +1541,8 @@ describe('AppShell navigation', () => {
     fireEvent.change(fileInput!, { target: { files: [new File(['audio'], 'queued.mp3', { type: 'audio/mpeg' })] } })
     expect(await screen.findByText(/已上传 queued\.mp3/)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '作为第二轮继续处理' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     expect(await screen.findByText('已排队到下一轮')).toBeInTheDocument()
     expect(screen.getByText('作为第二轮继续处理')).toBeInTheDocument()
 
@@ -1417,7 +1587,8 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(chatRequestCount).toBe(1))
 
     fireEvent.change(composer, { target: { value: '你给修一下网关' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     firstStreamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
     firstStreamController.close()
 
@@ -1743,6 +1914,7 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('spinbutton', { name: '单轮最大工具调用数' })).toHaveValue(80)
     expect(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' })).toHaveValue(8)
     expect(screen.getByRole('spinbutton', { name: '工具参数异常重试次数' })).toHaveValue(2)
+    expect(screen.getByRole('spinbutton', { name: '定时任务历史保留天数' })).toHaveValue(7)
     expect(screen.getByRole('switch', { name: 'Cron 自动退避' })).toBeChecked()
     expect(screen.getByRole('slider', { name: '退避触发阈值' })).toHaveValue('0.2')
 
@@ -1750,6 +1922,7 @@ describe('AppShell navigation', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Web 排队槽位上限' }), { target: { value: '7' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: '单个工具最大连续使用上限' }), { target: { value: '9' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: '工具参数异常重试次数' }), { target: { value: '3' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: '定时任务历史保留天数' }), { target: { value: '14' } })
     fireEvent.click(screen.getByRole('button', { name: '保存运行限制' }))
     await waitFor(() => expect(captured.globalChanges).toBeDefined())
 
@@ -1760,6 +1933,8 @@ describe('AppShell navigation', () => {
     expect(web.max_pending_chats).toBe(7)
     expect(tools.consecutive_identical_call_limit).toBe(9)
     expect(tools.invalid_tool_arguments_retries).toBe(3)
+    const cron = captured.globalChanges?.cron as Record<string, unknown>
+    expect(cron.history_retention_days).toBe(14)
   })
 
   it('拓展与感知支持不注入、按轮注入和实时注入三种用户策略', async () => {

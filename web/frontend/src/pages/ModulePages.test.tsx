@@ -369,6 +369,38 @@ describe('V16 module pages', () => {
     expect(screen.queryByRole('button', { name: /删除此记忆/ })).not.toBeInTheDocument()
   })
 
+  it('临时重要记忆失效时展示原因，刷新生命周期不覆盖未保存编辑', async () => {
+    let invalid = false
+    let content = 'old profile'
+    server.use(http.get('/api/users/kesepain/memory/important', () => HttpResponse.json({
+      user: 'kesepain', path: 'users/kesepain/memory_temporary_important.md',
+      content, size: content.length, updated_at: '2026-09-13T11:00:00+08:00',
+      lifecycle: {
+        status: invalid ? 'invalid' : 'valid', is_current: !invalid,
+        reason_codes: invalid ? ['source_changed'] : [],
+        reason: invalid ? '来源内容已更新。' : '来源校验通过。', prompt_eligible: !invalid,
+      },
+    })))
+    renderPage('memory')
+    fireEvent.click(await screen.findByRole('button', { name: '临时重要记忆' }))
+    const editor = await screen.findByPlaceholderText('输入记忆内容……')
+    await waitFor(() => expect(editor).toHaveValue('old profile'))
+    expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('有效')
+    fireEvent.change(editor, { target: { value: 'unsaved draft' } })
+    invalid = true
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('已失效'))
+    expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('来源内容已更新。')
+    expect(screen.getAllByText('已失效')).toHaveLength(2)
+    expect(editor).toHaveValue('unsaved draft')
+    invalid = false
+    content = 'rebuilt profile'
+    fireEvent.click(screen.getByRole('button', { name: '重新读取' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('来源校验通过'))
+    expect(screen.queryByText('已失效')).not.toBeInTheDocument()
+    expect(editor).toHaveValue('unsaved draft')
+  })
+
   it('记忆排序使用主题气泡并在不支持权重的层级自动回退', async () => {
     server.use(http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({
       user: 'kesepain',
@@ -438,6 +470,7 @@ describe('V16 module pages', () => {
   it('技能页展示五类库存、查看面板和按归属区分的操作', async () => {
     renderPage('skills')
     expect(await screen.findByRole('heading', { name: '工具与技能' })).toBeInTheDocument()
+    expect(screen.getByText(/插件提供可调用工具；技能提供可复用的任务方法/)).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'clock' })).toBeInTheDocument()
     expect(screen.getAllByText('基础插件').length).toBeGreaterThan(0)
     expect(screen.getByRole('tab', { name: '共享技能' })).toBeInTheDocument()
@@ -486,6 +519,7 @@ describe('V16 module pages', () => {
   it('感知页默认展示全局注入，选择模块后展示采集与注入详情', async () => {
     renderPage('sense')
     expect(await screen.findByRole('heading', { name: '感知' })).toBeInTheDocument()
+    expect(screen.getByText(/感知提供周期性、可共享的只读环境观测，不执行外部操控/)).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: '运行时感知' })).toBeInTheDocument()
     expect(screen.getByText('全局感知注入预览')).toBeInTheDocument()
     expect(screen.getByText('全部注入 Markdown')).toBeInTheDocument()
@@ -527,8 +561,8 @@ describe('V16 module pages', () => {
 
     fireEvent.click(sectionTabs.getByRole('tab', { name: '调度与维护' }))
     expect(await screen.findByText('今日记忆更新与升级')).toBeInTheDocument()
-    expect(screen.getByText('系统及定时任务执行记录')).toBeInTheDocument()
-    expect(screen.getByText('记忆碎片到期晋升检查')).toBeInTheDocument()
+    expect(screen.getByText('执行记录日志')).toBeInTheDocument()
+    expect(screen.getByRole('tablist', { name: '执行记录分类' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '对话轮次，打开系统提示词上下文预览栏目' }))
     expect(sectionTabs.getByRole('tab', { name: '系统提示词上下文预览' })).toHaveAttribute('aria-selected', 'true')
@@ -851,13 +885,17 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('已删除 1 个全局临时文件')).toBeInTheDocument()
   })
 
-  it('文件空间固定每页六项并通过接口切换页面', async () => {
+  it('文件空间固定每页六项，排序通过接口执行并重置分页', async () => {
     const requestedPages: number[] = []
+    const requestedSorts: string[] = []
     server.use(http.get('/api/users/kesepain/files/file_upload', ({ request }) => {
       const params = new URL(request.url).searchParams
       const page = Number(params.get('page') ?? 1)
       const pageSize = Number(params.get('page_size') ?? 6)
       requestedPages.push(page)
+      const sortBy = params.get('sort_by') ?? 'name'
+      const sortOrder = params.get('sort_order') ?? 'asc'
+      requestedSorts.push(`${sortBy}:${sortOrder}:${page}`)
       const allEntries = Array.from({ length: 8 }, (_, index) => ({
         type: 'file' as const,
         name: `page-file-${index + 1}.txt`,
@@ -868,6 +906,7 @@ describe('V16 module pages', () => {
         extension: '.txt',
         child_count: 0,
       }))
+      if (sortOrder === 'desc') allEntries.reverse()
       const entries = allEntries.slice((page - 1) * pageSize, page * pageSize)
       return HttpResponse.json({
         user: 'kesepain',
@@ -898,6 +937,41 @@ describe('V16 module pages', () => {
     expect(screen.getByText('2 / 2')).toBeInTheDocument()
     expect(requestedPages).toContain(1)
     expect(requestedPages).toContain(2)
+    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'updated_at' } })
+    expect((await screen.findAllByText('page-file-8.txt')).length).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeInTheDocument())
+    expect(requestedSorts).toContain('updated_at:desc:1')
+    expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('最新在前')
+    expect(screen.queryByText('page-file-1.txt')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'size' } })
+    await waitFor(() => expect(requestedSorts).toContain('size:desc:1'))
+    expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('从大到小')
+    fireEvent.click(screen.getByRole('button', { name: '切换文件排序方向' }))
+    expect((await screen.findAllByText('page-file-1.txt')).length).toBeGreaterThan(0)
+    expect(requestedSorts).toContain('size:asc:1')
+    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'name' } })
+    expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('名称升序')
+    const scopedRequests: string[] = []
+    for (const endpoint of ['/api/users/kesepain/files/download', '/api/tmp']) {
+      server.use(http.get(endpoint, ({ request }) => {
+        const params = new URL(request.url).searchParams
+        scopedRequests.push(`${endpoint}:${params.get('sort_by')}:${params.get('sort_order')}:${params.get('search')}:${params.get('page')}`)
+        return HttpResponse.json({
+          root: endpoint === '/api/tmp' ? 'tmp' : 'users/kesepain/download',
+          summary: { total_files: 0, total_dirs: 0, total_size: 0 },
+          entries: [], path: '', search: params.get('search') ?? '',
+          pagination: { page: 1, page_size: 6, total_items: 0, total_pages: 1, has_previous: false, has_next: false },
+        })
+      }))
+    }
+    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'size' } })
+    fireEvent.click(screen.getByRole('tab', { name: /智能体产物/ }))
+    await waitFor(() => expect(scopedRequests).toContain('/api/users/kesepain/files/download:size:desc::1'))
+    fireEvent.click(screen.getByRole('tab', { name: /全局临时/ }))
+    await waitFor(() => expect(scopedRequests).toContain('/api/tmp:size:desc::1'))
+    fireEvent.click(screen.getByRole('button', { name: '在当前区域搜索' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索全局临时' }), { target: { value: 'report' } })
+    await waitFor(() => expect(scopedRequests).toContain('/api/tmp:size:desc:report:1'))
   })
 
   it('文件空间在详情中预览媒体并隐藏超限文件的预览入口', async () => {
@@ -1024,6 +1098,7 @@ describe('V16 module pages', () => {
   it('拓展页面展示真实模块详情、操作文档与白名单控制', async () => {
     renderPage('expand')
     expect(await screen.findByRole('heading', { name: '拓展' })).toBeInTheDocument()
+    expect(screen.getByText(/状态注入与调用能力可独立开启，也支持只读连接/)).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: '智能灯光控制', level: 2 })).toBeInTheDocument()
     expect(screen.getAllByText('控制客厅与卧室的智能灯组。').length).toBeGreaterThan(0)
     expect(screen.getAllByText(/客厅已开启/).length).toBe(2)

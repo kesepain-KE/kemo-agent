@@ -25,6 +25,24 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
 }
 
 describe('AgentComposer', () => {
+  it('运行中 Enter 默认消息跟进，下一轮发送是独立按钮且输入框没有本轮引导', () => {
+    const onSubmit = vi.fn()
+    const onNextTurn = vi.fn()
+    const { rerender, props } = renderComposer({ value: '跟进任务', running: true, onSubmit, onNextTurn })
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(onNextTurn).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
+    expect(onNextTurn).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('button', { name: '本轮引导' })).not.toBeInTheDocument()
+    rerender(<AgentComposer {...props} uploading />)
+    expect(screen.getByRole('button', { name: '下一轮发送' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '消息跟进' })).toBeDisabled()
+  })
+
   it('展示真实轮次并支持 Enter 发送、Shift+Enter 换行', () => {
     const onSubmit = vi.fn()
     renderComposer({ value: '检查状态', currentRound: 8, totalRounds: 44, roundLimit: 30, onSubmit })
@@ -39,12 +57,12 @@ describe('AgentComposer', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
-  it('运行中保留发送引导和停止能力，未接入的上传按钮保持禁用', () => {
+  it('运行中保留消息跟进和停止能力，未接入的上传按钮保持禁用', () => {
     const onSubmit = vi.fn()
     const onStop = vi.fn()
     renderComposer({ value: '补充要求', running: true, onSubmit, onStop })
     expect(screen.getByRole('button', { name: '上传文件' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '发送引导' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
     fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
     expect(onSubmit).toHaveBeenCalledTimes(1)
     expect(onStop).toHaveBeenCalledTimes(1)
@@ -62,7 +80,7 @@ describe('AgentComposer', () => {
   it('停止过渡期间把新文本作为下一轮提交，不会误投给旧运行', () => {
     const onSubmit = vi.fn()
     renderComposer({ value: '停止后继续处理', running: true, stopping: true, onSubmit, onStop: vi.fn() })
-    const submit = screen.getByRole('button', { name: '发送下一轮' })
+    const submit = screen.getByRole('button', { name: '消息跟进' })
     expect(submit).toBeEnabled()
     fireEvent.click(submit)
     expect(onSubmit).toHaveBeenCalledOnce()
@@ -127,7 +145,7 @@ describe('AgentComposer', () => {
     const onSubmit = vi.fn()
     renderComposer({ running: true, pendingFileCount: 1, onSubmit })
 
-    const button = screen.getByRole('button', { name: '发送引导' })
+    const button = screen.getByRole('button', { name: '消息跟进' })
     expect(button).toBeEnabled()
     fireEvent.click(button)
     expect(onSubmit).toHaveBeenCalledOnce()

@@ -54,7 +54,7 @@ import {
   ModuleFrame,
   RefreshActionButton,
 } from '../components/ModuleUi'
-import type { FileListEntry } from '../types/api'
+import type { FileListEntry, FileSortBy, FileSortOrder } from '../types/api'
 import styles from './FilesPage.module.css'
 
 type FileArea = 'file_upload' | 'download' | 'tmp'
@@ -404,6 +404,8 @@ export function FilesPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [page, setPage] = useState(1)
+  const [sortBy, setSortBy] = useState<FileSortBy>('name')
+  const [sortOrder, setSortOrder] = useState<FileSortOrder>('asc')
   const [selectedPath, setSelectedPath] = useState('')
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set())
   const [notice, setNotice] = useState('')
@@ -413,13 +415,13 @@ export function FilesPage() {
 
   const normalizedSearch = searchQuery.trim()
   const userFilesQuery = useQuery({
-    queryKey: ['user-files', user, area, currentPath, normalizedSearch, page],
-    queryFn: () => getUserFiles(user, area as UserFileArea, currentPath, normalizedSearch, page, FILES_PER_PAGE),
+    queryKey: ['user-files', user, area, currentPath, normalizedSearch, page, sortBy, sortOrder],
+    queryFn: () => getUserFiles(user, area as UserFileArea, currentPath, normalizedSearch, page, FILES_PER_PAGE, sortBy, sortOrder),
     enabled: Boolean(user) && area !== 'tmp',
   })
   const tmpFilesQuery = useQuery({
-    queryKey: ['tmp-files', currentPath, normalizedSearch, page],
-    queryFn: () => getTmpFiles(currentPath, normalizedSearch, page, FILES_PER_PAGE),
+    queryKey: ['tmp-files', currentPath, normalizedSearch, page, sortBy, sortOrder],
+    queryFn: () => getTmpFiles(currentPath, normalizedSearch, page, FILES_PER_PAGE, sortBy, sortOrder),
     enabled: area === 'tmp',
   })
   const activeQuery = area === 'tmp' ? tmpFilesQuery : userFilesQuery
@@ -511,6 +513,16 @@ export function FilesPage() {
     setDeleteRequest(null)
     setRenameTarget(null)
     setNotice('')
+  }
+
+  const changeSorting = (nextBy: FileSortBy, nextOrder: FileSortOrder) => {
+    setSortBy(nextBy)
+    setSortOrder(nextOrder)
+    setPage(1)
+    setSelectedPath('')
+    setSelectedPaths(new Set())
+    setDeleteRequest(null)
+    setRenameTarget(null)
   }
 
   const enterDirectory = (path: string) => {
@@ -647,6 +659,20 @@ export function FilesPage() {
             <button className="module-btn" type="button" onClick={() => setSearchOpen(true)}><Search size={15} />在当前区域搜索</button>
           )}
           <RefreshActionButton pending={activeQuery.isFetching} label="刷新文件统计" pendingLabel="刷新中…" onClick={() => { void refreshFiles() }} />
+          <label className={styles.sortControl}>
+            <span>排序</span>
+            <select aria-label="文件排序方式" value={sortBy} onChange={(event) => {
+              const next = event.target.value as FileSortBy
+              changeSorting(next, next === 'name' ? 'asc' : 'desc')
+            }}>
+              <option value="name">按名称</option>
+              <option value="updated_at">按最新日期</option>
+              <option value="size">按大小</option>
+            </select>
+          </label>
+          <button className="module-btn" type="button" aria-label="切换文件排序方向" onClick={() => changeSorting(sortBy, sortOrder === 'asc' ? 'desc' : 'asc')}>
+            {sortBy === 'updated_at' ? (sortOrder === 'desc' ? '最新在前 ↓' : '最早在前 ↑') : sortBy === 'size' ? (sortOrder === 'desc' ? '从大到小 ↓' : '从小到大 ↑') : (sortOrder === 'asc' ? '名称升序 ↑' : '名称降序 ↓')}
+          </button>
           <button
             className="module-btn primary"
             type="button"

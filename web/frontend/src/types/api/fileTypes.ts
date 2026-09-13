@@ -1,3 +1,6 @@
+export type FileSortBy = 'name' | 'updated_at' | 'size'
+export type FileSortOrder = 'asc' | 'desc'
+
 export interface FileListEntry {
   type: 'directory' | 'file'
   name: string
@@ -30,6 +33,8 @@ export interface FileListResponseBase {
   entries: FileListEntry[]
   path: string
   search: string
+  sort_by?: FileSortBy
+  sort_order?: FileSortOrder
   pagination: FileListPagination
 }
 

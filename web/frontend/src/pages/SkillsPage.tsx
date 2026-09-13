@@ -185,7 +185,7 @@ export function SkillsPage() {
           <header className={styles.header}>
             <div>
               <div className={styles.titleRow}><h2>工具与技能</h2><span>{user || '未选择用户'}</span></div>
-              <p>统一查看基础插件、共享技能与两类用户技能；可用范围由当前用户的插件和共享技能白名单控制。</p>
+              <p>插件提供可调用工具；技能提供可复用的任务方法，不会自动执行脚本或注册工具。主智能体先读取发现摘要，再按需读取完整说明；插件和共享技能受当前用户白名单控制。</p>
             </div>
             <div className={styles.headerActions}>
               <RefreshActionButton pending={skillsQuery.isFetching} label="刷新技能库" pendingLabel="刷新中…" iconSize={16} className={styles.refreshButton} onClick={() => { void refresh() }} />

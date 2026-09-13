@@ -26,6 +26,7 @@ export interface AgentComposerProps {
   onOpenCommands: () => void
   onToggleConversationMenu: () => void
   onSubmit: () => void
+  onNextTurn?: () => void
   onStop?: () => void
 }
 
@@ -51,6 +52,7 @@ export function AgentComposer({
   onOpenCommands,
   onToggleConversationMenu,
   onSubmit,
+  onNextTurn,
   onStop,
 }: AgentComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -170,9 +172,12 @@ export function AgentComposer({
             {conversationMenu}
           </div>
 
+          {running && onNextTurn ? <button type="button" className={styles.actionButton} disabled={!canSubmit} onClick={() => { if (canSubmit) onNextTurn() }}>
+            <span>下一轮发送</span>
+          </button> : null}
           <button type="button" className={`${styles.sendButton} ${running ? styles.guidance : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
             <Send aria-hidden="true" />
-            <span>{stopping ? '发送下一轮' : running ? '发送引导' : '发送'}</span>
+            <span>{running ? '消息跟进' : '发送'}</span>
           </button>
           {running && onStop ? (
             <button type="button" className={styles.stopButton} onClick={onStop} aria-label="停止生成" disabled={stopping}>
