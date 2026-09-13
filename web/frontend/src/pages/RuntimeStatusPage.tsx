@@ -284,7 +284,7 @@ function RuntimeDashboard({
       {!sectionPending && activeTab === 'maintenance' ? <div className={styles.maintenanceGrid}>
         <MemoryPanel data={data} />
         <TaskPanel data={data} />
-        <RuntimeLogsPanel user={data.user} />
+        <RuntimeLogsPanel user={data.user} className={styles.runtimeLogPanel} />
       </div> : null}
     </section>
   </div>

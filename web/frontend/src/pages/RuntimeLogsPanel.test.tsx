@@ -53,6 +53,20 @@ describe('执行记录分类日志', () => {
     expect(await screen.findByText(/日志读取失败，请刷新重试/)).toBeInTheDocument()
   })
 
+  it('终端日志以只读终端输出展示，不复用普通日志卡片', async () => {
+    mount()
+    fireEvent.click(screen.getByRole('tab', { name: '终端日志' }))
+    expect(await screen.findByRole('region', { name: 'kemo-agent 启动终端只读输出' })).toBeInTheDocument()
+    expect(screen.getByText('kemo-agent 启动终端')).toBeInTheDocument()
+    expect(screen.getByText('只读')).toBeInTheDocument()
+    expect(screen.getByText('ERR')).toBeInTheDocument()
+    expect(screen.getByText('alice-terminal-1')).toBeInTheDocument()
+    expect(screen.queryByText('发生时间')).not.toBeInTheDocument()
+    expect(screen.getByText('当前载入 1 行 · 1 行标准错误')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上一页' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '下一页' })).not.toBeInTheDocument()
+  })
+
   it('切换用户立即清除旧记录并复位分类，不展示上个用户的缓存', async () => {
     const view = mount()
     expect(await screen.findByText('alice-all-1')).toBeInTheDocument()

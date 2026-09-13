@@ -5,6 +5,7 @@
 }
 
 .runtimeView :global(.module-header) { min-height: 54px; align-items: center; margin-bottom: 10px; }
+.runtimeView :global(.module-inner) { width: min(1600px, 100%); }
 .runtimeView :global(.module-kicker) { display: none; }
 .runtimeView :global(.module-heading h2) { font-size: 1.45rem; }
 .runtimeView :global(.module-heading p) { margin-top: 4px; line-height: 1.4; }
@@ -140,7 +141,7 @@
 .maintenanceGrid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .maintenanceGrid .compactPanel { height: 520px; }
 .maintenanceGrid .compactBody { height: 462px; padding: 12px; }
-.maintenanceGrid > .compactPanel:last-child { grid-column: 1 / -1; width: 100%; }
+.runtimeLogPanel { grid-column: 1 / -1; width: 100%; }
 
 .panelHeader { min-height: 55px; display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--runtime-border); }
 .panelHeader > span:nth-child(2) { min-width: 0; flex: 1; }
@@ -312,7 +313,7 @@
 @media (max-width: 560px) {
   .summaryGrid { grid-template-columns: 1fr; }
   .maintenanceGrid { grid-template-columns: 1fr; }
-  .maintenanceGrid > .compactPanel:last-child { grid-column: auto; }
+  .runtimeLogPanel { grid-column: auto; }
   .tokenMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tokenMetrics > span { border-right: 0; border-bottom: 1px solid var(--runtime-border); }
   .apiGrid { grid-template-columns: 1fr; }
