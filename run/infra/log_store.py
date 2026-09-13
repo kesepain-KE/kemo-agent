@@ -13,6 +13,8 @@ import threading
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
+from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
+
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 LOG_DB_RELATIVE = Path("runtime") / "logs.sqlite3"
@@ -231,6 +233,7 @@ class LogStore:
                     ),
                 )
             self._prune(connection)
+        invalidate_runtime_log_cache(self.root)
 
     def list_cron(self, user: str, *, limit: int = 1000) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -253,6 +256,39 @@ class LogStore:
                 "source": "execution_log",
             })
         return result
+
+    def runtime_log_records(self, user: str) -> list[dict[str, Any]]:
+        """Small indexed projection, excluding result bodies and message content."""
+        with self._connection() as connection:
+            # Seek each owner separately so a large history never needs sorting
+            # in full for the IN(user, system) merge.
+            cron = []
+            for owner in dict.fromkeys((user, "__system__")):
+                cron.extend(connection.execute(
+                    """SELECT event_key, occurred_at, task_id, status, duration_ms, occurred_at_ms, id
+                       FROM cron_execution_logs WHERE user=?
+                       ORDER BY occurred_at_ms DESC, id DESC LIMIT 200""", (owner,),
+                ).fetchall())
+            cron = sorted(cron, key=lambda row: (row["occurred_at_ms"], row["id"]), reverse=True)[:200]
+            messages = connection.execute(
+                """SELECT event_key, occurred_at, platform, direction, kind, success
+                   FROM message_route_logs WHERE user=?
+                   ORDER BY occurred_at_ms DESC, id DESC LIMIT 200""", (user,),
+            ).fetchall()
+        return [
+            {"id": "cron:" + row["event_key"], "category": "backend",
+             "title": diagnostic_identifier(row["task_id"]), "occurred_at": row["occurred_at"],
+             "status": diagnostic_identifier(row["status"]), "duration_ms": row["duration_ms"],
+             "detail": "系统/定时任务执行记录（高频成功记录可能已聚合）", "source": "sqlite"}
+            for row in cron
+        ] + [
+            {"id": "message:" + row["event_key"], "category": "message",
+             "title": diagnostic_identifier(row["platform"]) + " 消息",
+             "occurred_at": row["occurred_at"], "status": "success" if row["success"] else "failed",
+             "duration_ms": None, "detail": diagnostic_identifier(row["direction"]) + " · " + diagnostic_identifier(row["kind"]),
+             "source": "sqlite"}
+            for row in messages
+        ]
 
     def append_message_entries(self, entries: list[dict[str, Any]]) -> None:
         if not entries:
@@ -286,6 +322,7 @@ class LogStore:
                     ),
                 )
             self._prune(connection)
+        invalidate_runtime_log_cache(self.root)
 
     def list_messages(self, machine_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -326,6 +363,7 @@ class LogStore:
                 "DELETE FROM message_route_logs WHERE machine_id = ? AND user = ?",
                 (machine_id, user),
             )
+        invalidate_runtime_log_cache(self.root)
         return max(0, int(cursor.rowcount or 0))
 
     def delete_message_route_state(self, machine_id: str, *, user: str) -> bool:

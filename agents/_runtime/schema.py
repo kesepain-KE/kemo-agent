@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from run.config import natural_path_key
+from run.infra import cached_read_text
 
 
 AGENT_SCHEMA_VERSION = 2
@@ -166,7 +167,7 @@ def _load_package_schemas(directory: Path) -> tuple[dict[str, Any], dict[str, An
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text("utf-8-sig"))
+        raw = json.loads(cached_read_text(path, "utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AgentManifestError(f"{label}不可读：{path}（{exc}）") from exc
     if not isinstance(raw, dict):
@@ -321,7 +322,7 @@ def _read_agent_timeout(root: Path) -> float:
     try:
         config_path = root / "config" / "global_config.json"
         if config_path.is_file():
-            config = json.loads(config_path.read_text("utf-8-sig"))
+            config = json.loads(cached_read_text(config_path, "utf-8-sig"))
             value = (config.get("agent_runtime") or {}).get("default_timeout", 600)
             timeout = float(value)
             if timeout > 0:
@@ -340,7 +341,7 @@ def _same_directory_file(value: Any, *, field: str, path: Path) -> str:
 
 def _read_required_package_text(path: Path, *, label: str) -> str:
     try:
-        content = path.read_text("utf-8-sig").strip()
+        content = cached_read_text(path, "utf-8-sig").strip()
     except (OSError, UnicodeError) as exc:
         raise AgentManifestError(f"{label}不可读：{path}（{exc}）") from exc
     if not content:
@@ -492,7 +493,7 @@ def _load_legacy_manifest(path: Path, *, source: Literal["builtin", "user"], roo
         raise AgentManifestError(f"instruction 必须是清单同目录文件名：{path}")
     instruction_path = path.parent / instruction_file
     try:
-        instruction = instruction_path.read_text("utf-8-sig").strip()
+        instruction = cached_read_text(instruction_path, "utf-8-sig").strip()
     except OSError as exc:
         raise AgentManifestError(f"子代理指令不可读：{instruction_path}（{exc}）") from exc
     if not instruction:

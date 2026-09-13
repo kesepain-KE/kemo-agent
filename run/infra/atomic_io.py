@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import time
 from typing import Iterable
+from run.infra.read_cache import invalidate_source_cache
 
 
 ATOMIC_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2)
@@ -26,6 +27,7 @@ def replace_with_retry(
     for attempt in range(len(delays) + 1):
         try:
             os.replace(source, target)
+            invalidate_source_cache(target)
             return
         except OSError as exc:
             transient = (
@@ -36,4 +38,3 @@ def replace_with_retry(
             if not transient or attempt >= len(delays):
                 raise
             time.sleep(delays[attempt])
-

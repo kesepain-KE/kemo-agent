@@ -1,6 +1,7 @@
 """Shared, dependency-light runtime infrastructure."""
 
 from importlib import import_module as _import_module
+from run.infra.read_cache import BoundedReadCache, cached_read_text, invalidate_source_cache
 
 from run.infra.atomic_io import replace_with_retry
 from run.infra.errors import ContextLengthExceededError, EngineError
@@ -14,6 +15,9 @@ from run.infra.process_utils import (
 )
 
 __all__ = [
+    "BoundedReadCache",
+    "cached_read_text",
+    "invalidate_source_cache",
     "ContextLengthExceededError",
     "EngineError",
     "cancellable_subprocess_kwargs",
@@ -30,7 +34,7 @@ __all__ = [
     "visible_subprocess_kwargs",
 ]
 
-_LAZY_MODULES = ("log_store", "process_execution", "cli", "process_identity")
+_LAZY_MODULES = ("runtime_diagnostics", "log_store", "process_execution", "cli", "process_identity")
 
 
 def __getattr__(name: str):

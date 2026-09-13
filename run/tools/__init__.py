@@ -557,7 +557,7 @@ def _execute_tool_process(
         call.close()
 
 
-def execute_tool(
+def _execute_tool_impl(
     tool: ToolDefinition,
     arguments: dict[str, Any],
     *,
@@ -642,6 +642,52 @@ def execute_tool(
     finally:
         if future.done():
             release_execution(execution_id)
+
+
+def execute_tool(
+    tool: ToolDefinition,
+    arguments: dict[str, Any],
+    *,
+    context: dict[str, Any],
+    timeout: float,
+    cancel_event: threading.Event | None = None,
+) -> Any:
+    """Observe execution without copying arguments, output or exception messages."""
+    started = time.monotonic()
+    status, error_type, exit_code = "success", "", None
+    try:
+        result = _execute_tool_impl(
+            tool, arguments, context=context, timeout=timeout, cancel_event=cancel_event,
+        )
+        if isinstance(result, dict):
+            reported = result.get("status")
+            if reported in ("queued", "pending", "starting", "running", "cancelling"):
+                status = "running"
+            elif reported in ("cancelled", "stopped"):
+                status = "cancelled"
+            elif reported in ("failed", "error", "timeout", "timed_out", "interrupted") or result.get("ok") is False:
+                status = "failed"
+            if type(result.get("exit_code")) is int:
+                exit_code = result["exit_code"]
+                if exit_code != 0 and status == "success":
+                    status = "failed"
+        return result
+    except BaseException as exc:
+        status = "cancelled" if isinstance(exc, (ToolCancelledError, KeyboardInterrupt, asyncio.CancelledError)) else "failed"
+        error_type = type(exc).__name__
+        raise
+    finally:
+        try:
+            if context.get("root") and context.get("user"):
+                from run.infra import record_runtime_event
+                record_runtime_event(
+                    Path(context["root"]), str(context["user"]),
+                    category="terminal" if tool.name == "shell" else "backend",
+                    name=tool.name, status=status, error_type=error_type,
+                    exit_code=exit_code, duration_ms=int((time.monotonic() - started) * 1000),
+                )
+        except Exception:
+            pass  # Diagnostics must not mask a tool result or its original exception.
 
 
 _DOMAIN_MODULES = (
