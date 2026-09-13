@@ -48,6 +48,18 @@ def continuation_request(
         next_request[key] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
     next_request["run_id"] = run_id
     next_request["prompt"] = LONG_TASK_CONTINUATION_PROMPT
+    if request.get("_task_plan_id") and request.get("_task_plan_mode") == "agent_managed":
+        next_request["prompt"] += (
+            "\n\n【任务计划连续执行】\n"
+            f"计划 ID：{request['_task_plan_id']}\n"
+            "继续用户已经批准的同一计划，先读取系统提示词中的最新计划状态和上一轮工具结果。"
+            "只执行尚未完成的步骤，严格遵守依赖关系，不重复已成功的操作。"
+            "每步成功后调用 task_plan(action=\"step_done\") 写回结果，失败时调用 step_fail；"
+            "根据返回的 progress、next_step 和 plan_status 继续。"
+            "若上轮操作已成功但尚未写回步骤结果，先核对并补记，不重新执行操作。"
+            "仅在 plan_status=running 时执行；completed、paused、failed、cancelled 或需要批准时停止。"
+            "不得创建或编辑新的计划，不得自行批准、恢复或重置步骤。"
+        )
     next_request["content"] = []
     next_request["uploaded_files"] = []
     next_request["_long_task_continuation"] = True
