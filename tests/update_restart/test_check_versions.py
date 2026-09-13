@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -14,8 +15,21 @@ if str(SCRIPTS) not in sys.path:
 import check_versions  # noqa: E402
 
 
-def run_check(root: Path, *argv: str) -> tuple[int, str]:
-    with mock.patch.object(check_versions, "ROOT", root):
+def run_check(
+    root: Path, *argv: str, env: dict[str, str] | None = None
+) -> tuple[int, str]:
+    """Check a fixture tree, isolated from the caller's own CI tag context.
+
+    发布工作流会在 tag 上导出 GITHUB_REF_TYPE/GITHUB_REF_NAME；如果让它们泄漏进
+    fixture，检查器会把当前发布的标签和 fixture 里的示例版本作比较。
+    """
+
+    environment = {"GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main"}
+    if env:
+        environment.update(env)
+    with mock.patch.object(check_versions, "ROOT", root), mock.patch.dict(
+        os.environ, environment
+    ):
         buffer = io.StringIO()
         with mock.patch.object(sys, "stdout", buffer), mock.patch.object(
             sys, "stderr", buffer
@@ -123,6 +137,21 @@ class CheckVersionsTests(unittest.TestCase):
             root = Path(temporary)
             build_release_tree(root)
             code, output = run_check(root, "--tag", "v1.2.6")
+            self.assertEqual(code, 1)
+            self.assertIn("发布标签", output)
+
+
+    def test_tag_environment_must_match_the_fixture_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_release_tree(root)
+            code, output = run_check(
+                root, env={"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v1.2.7"}
+            )
+            self.assertEqual(code, 0, output)
+            code, output = run_check(
+                root, env={"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v1.2.8"}
+            )
             self.assertEqual(code, 1)
             self.assertIn("发布标签", output)
 
