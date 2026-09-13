@@ -682,7 +682,7 @@ def execute_tool(
                 from run.infra import record_runtime_event
                 record_runtime_event(
                     Path(context["root"]), str(context["user"]),
-                    category="terminal" if tool.name == "shell" else "backend",
+                    category="backend",
                     name=tool.name, status=status, error_type=error_type,
                     exit_code=exit_code, duration_ms=int((time.monotonic() - started) * 1000),
                 )

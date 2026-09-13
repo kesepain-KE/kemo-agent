@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from run.config import load_dotenv, project_root
+from run.infra import install_terminal_capture, restore_terminal_capture
 from run.scheduler import build_host
 from run.config import ensure_user, list_users, user_template_dir
 from web.auth import WebAuthConfig, WebAuthConfigError
@@ -371,8 +372,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
     root = project_root().resolve()
+    capture_installed = install_terminal_capture(root)
+    try:
+        return _run_main(argv, root)
+    finally:
+        if capture_installed:
+            restore_terminal_capture()
+
+
+def _run_main(argv: list[str] | None, root: Path) -> int:
+    args = build_parser().parse_args(argv)
 
         # 1. 加载 .env 并打印版本信息
     load_dotenv(root / ".env")

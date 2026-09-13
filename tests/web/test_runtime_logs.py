@@ -46,12 +46,11 @@ class RuntimeLogTests(unittest.TestCase):
 
     def test_categories_scope_projection_and_validation(self):
         self.cron(); self.cron('bob', 'bob-only'); self.cron('__system__', 'global-job'); self.message()
-        diagnostics.record_runtime_event(self.root, 'alice', category='terminal', name='shell', status='success')
-        diagnostics.record_runtime_event(self.root, 'bob', category='terminal', name='bob-shell', status='failed')
-        diagnostics.record_runtime_event(self.root / 'other', 'alice', category='terminal', name='other-root', status='failed')
+        diagnostics.record_terminal_output(self.root, 'Web 后端 → http://127.0.0.1:1357')
+        diagnostics.record_terminal_output(self.root / 'other', 'other-root terminal output')
         result = self.backend.runtime_logs('alice')
         serialized = json.dumps(result)
-        for secret in ('secret-output', 'secret-error', 'secret-message', 'private-chat', 'private-file', 'private-machine', 'bob-only', 'bob-shell', 'other-root'):
+        for secret in ('secret-output', 'secret-error', 'secret-message', 'private-chat', 'private-file', 'private-machine', 'bob-only', 'other-root'):
             self.assertNotIn(secret, serialized)
         self.assertIn('global-job', serialized)
         for category in ('backend', 'threads', 'terminal', 'message'):
@@ -98,7 +97,7 @@ class RuntimeLogTests(unittest.TestCase):
     def test_memory_bound_expiry_and_no_disk_write(self):
         with patch.object(diagnostics.time, 'monotonic', return_value=100):
             for index in range(diagnostics.MAX_EVENTS + 3):
-                diagnostics.record_runtime_event(self.root, 'alice', category='terminal', name=f'job{index}', status='success')
+                diagnostics.record_terminal_output(self.root, f'启动终端第 {index} 行')
             rows = diagnostics.runtime_event_snapshot(self.root, 'alice')
             self.assertEqual(len(rows), diagnostics.MAX_EVENTS)
             self.assertFalse((self.root / 'runtime').exists())
@@ -106,6 +105,70 @@ class RuntimeLogTests(unittest.TestCase):
             self.assertNotEqual(diagnostics.runtime_event_snapshot(self.root, 'alice')[0]['title'], 'mutated')
         with patch.object(diagnostics.time, 'monotonic', return_value=3701):
             self.assertEqual(diagnostics.runtime_event_snapshot(self.root, 'alice'), [])
+
+    def test_terminal_logs_capture_startup_console_not_shell_and_redact_secrets(self):
+        diagnostics.record_terminal_output(
+            self.root,
+            'Web 后端 → http://127.0.0.1:1357?token=super-secret',
+        )
+        diagnostics.record_terminal_output(
+            self.root,
+            'ERROR: Authorization Bearer very-private-value',
+            stream='stderr',
+        )
+        result = self.backend.runtime_logs('alice', category='terminal', refresh=True)
+        bob_result = self.backend.runtime_logs('bob', category='terminal', refresh=True)
+        self.assertEqual(len(result['entries']), 2)
+        stderr_entry = next(entry for entry in result['entries'] if entry['detail'] == '启动终端 · 标准错误')
+        self.assertEqual(stderr_entry['category'], 'terminal')
+        self.assertEqual(stderr_entry['source'], 'memory')
+        self.assertEqual(stderr_entry['status'], 'error')
+        self.assertNotIn('super-secret', json.dumps(result))
+        self.assertNotIn('very-private-value', json.dumps(result))
+        self.assertEqual(result['entries'], bob_result['entries'])
+
+    def test_terminal_capture_mirrors_visible_start_web_output(self):
+        original_stdout, original_stderr = __import__('sys').stdout, __import__('sys').stderr
+        diagnostics.restore_terminal_capture()
+        try:
+            self.assertTrue(diagnostics.install_terminal_capture(self.root))
+            print('RuntimeHost 已启动 | transports=无')
+            __import__('sys').stdout.flush()
+        finally:
+            diagnostics.restore_terminal_capture()
+        self.assertIs(__import__('sys').stdout, original_stdout)
+        self.assertIs(__import__('sys').stderr, original_stderr)
+        terminal = self.backend.runtime_logs('alice', category='terminal', refresh=True)
+        self.assertIn('RuntimeHost 已启动 | transports=无', [entry['title'] for entry in terminal['entries']])
+
+    def test_terminal_omits_decorative_startup_banner_borders(self):
+        for text in ('┌────────────┐', '│  kemo-agent  1.2.8  │', '└────────────┘'):
+            diagnostics.record_terminal_output(self.root, text)
+        terminal = self.backend.runtime_logs('alice', category='terminal', refresh=True)
+        self.assertEqual([entry['title'] for entry in terminal['entries']], ['kemo-agent  1.2.8'])
+
+    def test_terminal_is_chronological_unpaginated_output(self):
+        for text in ('first terminal line', 'second terminal line', 'third terminal line'):
+            diagnostics.record_terminal_output(self.root, text)
+        result = self.backend.runtime_logs('alice', category='terminal', page=99, page_size=1, refresh=True)
+        self.assertEqual([entry['title'] for entry in result['entries']], [
+            'first terminal line', 'second terminal line', 'third terminal line',
+        ])
+        self.assertEqual(result['pagination'], {
+            'page': 1, 'page_size': 3, 'total_items': 3, 'total_pages': 1,
+            'has_previous': False, 'has_next': False,
+        })
+
+    def test_terminal_returns_only_bounded_live_tail(self):
+        from web.services.runtime_logs import TERMINAL_LIVE_WINDOW
+        for index in range(TERMINAL_LIVE_WINDOW + 5):
+            diagnostics.record_terminal_output(self.root, f'terminal line {index}')
+        result = self.backend.runtime_logs('alice', category='terminal', refresh=True)
+        self.assertEqual(result['pagination']['total_items'], TERMINAL_LIVE_WINDOW + 5)
+        self.assertEqual(result['pagination']['page_size'], TERMINAL_LIVE_WINDOW)
+        self.assertEqual(len(result['entries']), TERMINAL_LIVE_WINDOW)
+        self.assertEqual(result['entries'][0]['title'], 'terminal line 5')
+        self.assertEqual(result['entries'][-1]['title'], f'terminal line {TERMINAL_LIVE_WINDOW + 4}')
 
     def test_source_failure_is_visible_and_not_cached(self):
         with patch.object(LogStore, 'runtime_log_records', side_effect=RuntimeError('private-db-path')) as read:
@@ -142,6 +205,7 @@ class RuntimeLogTests(unittest.TestCase):
                 tool._callable = lambda: returned
                 self.assertIs(execute_tool(tool, {}, context=context, timeout=1), returned)
                 row = diagnostics.runtime_event_snapshot(self.root, 'alice')[-1]
+                self.assertEqual(row['category'], 'backend')
                 self.assertEqual(row['status'], status)
                 self.assertNotIn('private-output', json.dumps(row))
         failure = ValueError('private-exception')

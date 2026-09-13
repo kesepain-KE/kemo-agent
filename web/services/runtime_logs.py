@@ -11,6 +11,7 @@ from run.infra import (
 from web.constants import _BEIJING
 
 CATEGORIES = ("all", "backend", "threads", "terminal", "message")
+TERMINAL_LIVE_WINDOW = 300
 
 
 def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 1,
@@ -50,9 +51,25 @@ def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 
 
     counts = {key: len(rows) if key == "all" else sum(row["category"] == key for row in rows)
               for key in CATEGORIES}
-    selected = sorted((row for row in rows if category == "all" or row["category"] == category),
-                      key=order, reverse=True)
+    selected = sorted(
+        (row for row in rows if category == "all" or row["category"] == category),
+        key=order,
+        reverse=category != "terminal",
+    )
     total = len(selected)
+    if category == "terminal":
+        # A terminal is a chronological, append-only view.  Keep a bounded
+        # tail so the browser never has to re-render the entire in-memory
+        # diagnostic buffer every two seconds.
+        selected = selected[-TERMINAL_LIVE_WINDOW:]
+        displayed = len(selected)
+        return {
+            "user": user, "category": category, "entries": selected,
+            "counts": counts, "generated_at": now,
+            "pagination": {"page": 1, "page_size": max(1, displayed), "total_items": total,
+                           "total_pages": 1, "has_previous": False, "has_next": False},
+            "cache": {"hit": hit, "ttl_seconds": CACHE_TTL_SECONDS}, "source_errors": errors,
+        }
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
     return {
