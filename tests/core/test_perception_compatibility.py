@@ -86,7 +86,9 @@ class PerceptionCompatibilityTests(unittest.TestCase):
             registry.add_perception(root / "global_sense")
             selection = registry.select_perception(max_chars=1000)
 
-            self.assertEqual(selection.text, "[sensor]\nSENSOR_DATA")
+            self.assertTrue(selection.text.startswith("[sensor]\n"))
+            self.assertIn("SENSOR_DATA", selection.text)
+            self.assertIn("global_sense/sensor/sense.md", selection.text)
             diagnostics = registry.selection_diagnostics()["perception"]["global"]
             self.assertEqual(diagnostics["scan_errors"], [])
 

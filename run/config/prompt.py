@@ -216,7 +216,11 @@ def _descriptor_section(
     offsets: list[int] = []
     used = 0
     for descriptor in values:
-        piece = f"### {descriptor.title}"
+        piece = (
+            f"### {descriptor.title}\n"
+            f"来源（{descriptor.scope}）：`{descriptor.relative_path}`\n"
+            "以下为发现摘要；匹配当前任务时，先按来源路径读取完整说明，再使用已有获准工具执行。"
+        )
         if descriptor.description:
             piece += f"\n{descriptor.description}"
         offsets.append(used + (2 if pieces else 0))
