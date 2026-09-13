@@ -1,28 +1,119 @@
-.sortControl {
+.sortSelect {
+  position: relative;
+  min-width: 0;
+}
+
+.sortTrigger {
+  min-height: 30px;
+  max-width: 100%;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  min-height: 36px;
-  max-width: 100%;
-  padding: 0 9px;
+  gap: 5px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
+  outline: 0;
   background: var(--surface);
   color: var(--muted);
-  font-size: .75rem;
-}
-
-.sortControl select {
-  min-width: 0;
-  padding: 6px 0;
-  border: 0;
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
+  font: 500 .625rem/1 inherit;
+  white-space: nowrap;
   cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, box-shadow .14s ease, background .14s ease;
 }
 
-.sortControl select:focus-visible {
+.sortTrigger strong {
+  overflow: hidden;
+  color: var(--text);
+  font: 700 .625rem/1 inherit;
+  text-overflow: ellipsis;
+}
+
+.sortTrigger svg { flex: 0 0 auto; color: var(--brand); transition: transform .14s ease; }
+.sortSelectOpen .sortTrigger { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 52%, var(--surface)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); }
+.sortSelectOpen .sortTrigger svg { transform: rotate(180deg); }
+.sortTrigger:hover { border-color: var(--brand-line); color: var(--brand); }
+.sortTrigger:focus-visible { border-color: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 15%, transparent); }
+
+.sortPopover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  right: 0;
+  width: max-content;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--brand-line) 80%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-elevated) 97%, transparent);
+  box-shadow: var(--shadow-float);
+  backdrop-filter: blur(16px);
+  animation: sortPopoverIn .14s ease-out;
+}
+
+.sortPopover button {
+  width: 100%;
+  min-height: 35px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  outline: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: 650 .6875rem/1.25 inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+
+.sortPopover button:hover,
+.sortPopover button:focus-visible { background: var(--surface-hover); color: var(--text); }
+.sortPopover button.sortOptionActive { background: var(--brand-soft); color: var(--brand); }
+.sortPopover svg { flex: 0 0 auto; }
+
+@keyframes sortPopoverIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.fileHeaderActions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.sortOrderButton {
+  min-height: 30px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: .625rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+
+.sortOrderButton:hover {
+  border-color: var(--brand-line);
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.sortOrderButton:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
@@ -301,7 +392,7 @@
 .fileRow.withCheckbox { grid-template-columns: 24px minmax(230px, 1fr) 70px 118px 100px minmax(150px, auto); }
 
 .fileHeader {
-  min-height: 37px;
+  min-height: 43px;
   padding: 0 11px;
   border: 0;
   border-bottom: 1px solid var(--line);

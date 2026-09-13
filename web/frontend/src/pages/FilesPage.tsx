@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Archive,
   Braces,
+  Check,
   CheckSquare,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clipboard,
@@ -103,6 +105,12 @@ const archiveExtensions = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.bz2',
 const codeExtensions = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.json', '.yaml', '.yml', '.css', '.scss', '.html', '.xml', '.sh', '.ps1'])
 const documentExtensions = new Set(['.md', '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.log'])
 const FILES_PER_PAGE = 6
+const FILE_SORT_OPTIONS: FileSortBy[] = ['name', 'updated_at', 'size']
+const FILE_SORT_LABELS: Record<FileSortBy, string> = {
+  name: '按名称',
+  updated_at: '按最新日期',
+  size: '按大小',
+}
 const MEDIA_PREVIEW_LIMITS = {
   image: 10 * 1024 * 1024,
   audio: 100 * 1024 * 1024,
@@ -176,6 +184,66 @@ function formatMediaTime(value: number): string {
   const minutes = Math.floor(wholeSeconds / 60)
   const seconds = wholeSeconds % 60
   return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function FileSortSelect({ value, onChange }: { value: FileSortBy; onChange: (value: FileSortBy) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const listboxId = useId()
+
+  useEffect(() => {
+    if (!open) return
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeFromOutside)
+    document.addEventListener('keydown', closeFromKeyboard)
+    return () => {
+      document.removeEventListener('pointerdown', closeFromOutside)
+      document.removeEventListener('keydown', closeFromKeyboard)
+    }
+  }, [open])
+
+  return (
+    <div ref={rootRef} className={`${styles.sortSelect} ${open ? styles.sortSelectOpen : ''}`}>
+      <button
+        type="button"
+        className={styles.sortTrigger}
+        aria-label="文件排序方式"
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>排序</span>
+        <strong>{FILE_SORT_LABELS[value]}</strong>
+        <ChevronDown size={14} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className={styles.sortPopover} id={listboxId} role="listbox" aria-label="文件排序选项">
+          {FILE_SORT_OPTIONS.map((option) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={option === value}
+              key={option}
+              className={option === value ? styles.sortOptionActive : ''}
+              onClick={() => {
+                onChange(option)
+                setOpen(false)
+              }}
+            >
+              <span>{FILE_SORT_LABELS[option]}</span>
+              {option === value && <Check size={14} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function ThemedAudioPlayer({ src, name, downloadUrl }: { src: string; name: string; downloadUrl: string }) {
@@ -659,20 +727,6 @@ export function FilesPage() {
             <button className="module-btn" type="button" onClick={() => setSearchOpen(true)}><Search size={15} />在当前区域搜索</button>
           )}
           <RefreshActionButton pending={activeQuery.isFetching} label="刷新文件统计" pendingLabel="刷新中…" onClick={() => { void refreshFiles() }} />
-          <label className={styles.sortControl}>
-            <span>排序</span>
-            <select aria-label="文件排序方式" value={sortBy} onChange={(event) => {
-              const next = event.target.value as FileSortBy
-              changeSorting(next, next === 'name' ? 'asc' : 'desc')
-            }}>
-              <option value="name">按名称</option>
-              <option value="updated_at">按最新日期</option>
-              <option value="size">按大小</option>
-            </select>
-          </label>
-          <button className="module-btn" type="button" aria-label="切换文件排序方向" onClick={() => changeSorting(sortBy, sortOrder === 'asc' ? 'desc' : 'asc')}>
-            {sortBy === 'updated_at' ? (sortOrder === 'desc' ? '最新在前 ↓' : '最早在前 ↑') : sortBy === 'size' ? (sortOrder === 'desc' ? '从大到小 ↓' : '从小到大 ↑') : (sortOrder === 'asc' ? '名称升序 ↑' : '名称降序 ↓')}
-          </button>
           <button
             className="module-btn primary"
             type="button"
@@ -750,7 +804,13 @@ export function FilesPage() {
 
           <div className={`${styles.fileHeader} ${styles.withCheckbox}`}>
             <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label={`选择当前页全部${areaLabels[area].label}文件`} disabled={!visibleFilePaths.length} />
-            <span>名称与相对路径</span><span>类型</span><span>修改时间</span><span>大小</span><span>操作</span>
+            <span>名称与相对路径</span><span>类型</span><span>修改时间</span><span>大小</span>
+            <div className={styles.fileHeaderActions} aria-label="文件列表排序">
+              <FileSortSelect value={sortBy} onChange={(next) => changeSorting(next, next === 'name' ? 'asc' : 'desc')} />
+              <button className={styles.sortOrderButton} type="button" aria-label="切换文件排序方向" onClick={() => changeSorting(sortBy, sortOrder === 'asc' ? 'desc' : 'asc')}>
+                {sortBy === 'updated_at' ? (sortOrder === 'desc' ? '最新在前 ↓' : '最早在前 ↑') : sortBy === 'size' ? (sortOrder === 'desc' ? '从大到小 ↓' : '从小到大 ↑') : (sortOrder === 'asc' ? '名称升序 ↑' : '名称降序 ↓')}
+              </button>
+            </div>
           </div>
 
           {activeQuery.isLoading ? (

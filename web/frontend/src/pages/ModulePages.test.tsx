@@ -888,6 +888,10 @@ describe('V16 module pages', () => {
   it('文件空间固定每页六项，排序通过接口执行并重置分页', async () => {
     const requestedPages: number[] = []
     const requestedSorts: string[] = []
+    const selectFileSort = (label: string) => {
+      fireEvent.click(screen.getByRole('button', { name: '文件排序方式' }))
+      fireEvent.click(screen.getByRole('option', { name: label }))
+    }
     server.use(http.get('/api/users/kesepain/files/file_upload', ({ request }) => {
       const params = new URL(request.url).searchParams
       const page = Number(params.get('page') ?? 1)
@@ -931,25 +935,29 @@ describe('V16 module pages', () => {
     expect((await screen.findAllByText('page-file-1.txt')).length).toBeGreaterThan(0)
     expect(screen.queryByText('page-file-7.txt')).not.toBeInTheDocument()
     expect(screen.getByText('1 / 2')).toBeInTheDocument()
+    const sortTools = screen.getByLabelText('文件列表排序')
+    expect(sortTools.closest('[class*="fileHeader"]')).toBeInTheDocument()
+    expect(sortTools).toContainElement(screen.getByRole('button', { name: '文件排序方式' }))
+    expect(sortTools).toContainElement(screen.getByRole('button', { name: '切换文件排序方向' }))
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
     expect((await screen.findAllByText('page-file-7.txt')).length).toBeGreaterThan(0)
     expect(screen.queryByText('page-file-1.txt')).not.toBeInTheDocument()
     expect(screen.getByText('2 / 2')).toBeInTheDocument()
     expect(requestedPages).toContain(1)
     expect(requestedPages).toContain(2)
-    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'updated_at' } })
+    selectFileSort('按最新日期')
     expect((await screen.findAllByText('page-file-8.txt')).length).toBeGreaterThan(0)
     await waitFor(() => expect(screen.getByText('1 / 2')).toBeInTheDocument())
     expect(requestedSorts).toContain('updated_at:desc:1')
     expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('最新在前')
     expect(screen.queryByText('page-file-1.txt')).not.toBeInTheDocument()
-    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'size' } })
+    selectFileSort('按大小')
     await waitFor(() => expect(requestedSorts).toContain('size:desc:1'))
     expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('从大到小')
     fireEvent.click(screen.getByRole('button', { name: '切换文件排序方向' }))
     expect((await screen.findAllByText('page-file-1.txt')).length).toBeGreaterThan(0)
     expect(requestedSorts).toContain('size:asc:1')
-    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'name' } })
+    selectFileSort('按名称')
     expect(screen.getByRole('button', { name: '切换文件排序方向' })).toHaveTextContent('名称升序')
     const scopedRequests: string[] = []
     for (const endpoint of ['/api/users/kesepain/files/download', '/api/tmp']) {
@@ -964,7 +972,7 @@ describe('V16 module pages', () => {
         })
       }))
     }
-    fireEvent.change(screen.getByRole('combobox', { name: '文件排序方式' }), { target: { value: 'size' } })
+    selectFileSort('按大小')
     fireEvent.click(screen.getByRole('tab', { name: /智能体产物/ }))
     await waitFor(() => expect(scopedRequests).toContain('/api/users/kesepain/files/download:size:desc::1'))
     fireEvent.click(screen.getByRole('tab', { name: /全局临时/ }))
