@@ -26,6 +26,7 @@ DATA_DIR = BASE_DIR / "data"
 STATUS_PATH = DATA_DIR / "library_status.json"
 SYNC_STATE_PATH = DATA_DIR / "library_sync_state.json"
 QUERY_ARTIFACT_DIR = BASE_DIR / "artifacts" / "queries"
+GRAPH_ARTIFACT_DIR = BASE_DIR / "artifacts" / "graph"
 
 LIBRARY_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 LIBRARY_KINDS = frozenset({"portable", "service_default"})

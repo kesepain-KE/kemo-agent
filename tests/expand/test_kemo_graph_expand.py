@@ -1012,6 +1012,193 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertTrue(self.paths["SYNC_STATE_PATH"].exists())
         self.assertTrue(marker.exists())
 
+    def test_new_graph_admin_and_document_organization_operations(self) -> None:
+        portable = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
+        calls: list[tuple[str, dict | None, dict]] = []
+
+        def request(_config, path, payload=None, **kwargs):
+            calls.append((path, payload, kwargs))
+            return {"result": {"ok": True}}
+
+        with patch.object(operations, "api_request", side_effect=request):
+            graph_result = operations.graph_operation(
+                portable,
+                {"library_ids": ["project_docs"], "action": "visualization_meta"},
+                caller_user="alice",
+            )
+            self.assertTrue(graph_result["ok"])
+            self.assertEqual(calls[-1][0], "/stores/graph/visualization/meta")
+            self.assertEqual(calls[-1][1], {"store_root": str(self.store.resolve())})
+
+            projects = operations.project_operation(
+                portable,
+                {"library_ids": ["project_docs"], "action": "create", "name": "research"},
+                caller_user=None,
+            )
+            self.assertTrue(projects["ok"])
+            self.assertEqual(calls[-1][0], "/stores/projects/create")
+            self.assertEqual(calls[-1][1]["name"], "research")
+
+            moved = operations.document_operation(
+                portable,
+                {
+                    "library_ids": ["project_docs"],
+                    "action": "move",
+                    "source_id": "source-1",
+                    "filename": "renamed",
+                    "project": "research",
+                },
+                caller_user="alice",
+            )
+            self.assertTrue(moved["ok"])
+            self.assertEqual(calls[-1][0], "/stores/documents/location")
+            self.assertNotIn("store_root", {
+                "source_id": calls[-1][1]["source_id"],
+                "filename": calls[-1][1]["filename"],
+                "project": calls[-1][1]["project"],
+            })
+
+            batch = operations.document_operation(
+                portable,
+                {
+                    "library_ids": ["project_docs"],
+                    "action": "move",
+                    "source_ids": ["source-1", "source-2"],
+                    "project": "",
+                },
+                caller_user="alice",
+            )
+            self.assertTrue(batch["ok"])
+            self.assertEqual(calls[-1][0], "/stores/documents/move-batch")
+
+        with self.assertRaises(PermissionError):
+            operations.entity_operation(
+                portable,
+                {
+                    "library_ids": ["project_docs"],
+                    "kind": "node",
+                    "action": "delete",
+                    "node_id": "node-1",
+                },
+                caller_user="bob",
+            )
+        with self.assertRaises(PermissionError):
+            operations.cache_operation(
+                portable,
+                {"library_ids": ["project_docs"], "action": "clear"},
+                caller_user="bob",
+            )
+        with self.assertRaises(PermissionError):
+            operations.maintenance_operation(
+                portable,
+                {"library_ids": ["project_docs"], "action": "summarize"},
+                caller_user="bob",
+            )
+
+    def test_service_default_routes_and_force_cleanup_contract(self) -> None:
+        config = graph.config_from_mapping({
+            "schema_version": 2,
+            "base_url": "http://127.0.0.1:8000/api/v1",
+            "admin_users": ["alice"],
+            "libraries": [{
+                "id": "kemo_graph_builtin",
+                "kind": "service_default",
+                "display_name": "内置文档库",
+                "allowed_users": ["alice"],
+            }],
+        })
+        calls: list[tuple[str, dict | None, dict]] = []
+
+        def request(_config, path, payload=None, **kwargs):
+            calls.append((path, payload, kwargs))
+            return {"result": {}}
+
+        with patch.object(operations, "api_request", side_effect=request):
+            operations.project_operation(
+                config,
+                {"library_ids": ["kemo_graph_builtin"], "action": "list"},
+                caller_user="alice",
+            )
+            self.assertEqual(calls[-1], ("/projects", None, {"method": "GET"}))
+            operations.document_operation(
+                config,
+                {
+                    "library_ids": ["kemo_graph_builtin"],
+                    "action": "move",
+                    "source_id": "source/1",
+                    "project": "",
+                },
+                caller_user="alice",
+            )
+            self.assertEqual(calls[-1][0], "/documents/source%2F1/location")
+            self.assertEqual(calls[-1][2]["method"], "PATCH")
+            cleanup = operations.maintenance_operation(
+                config,
+                {
+                    "library_ids": ["kemo_graph_builtin"],
+                    "action": "cleanup_recycle",
+                    "force": True,
+                },
+                caller_user=None,
+            )
+            self.assertEqual(calls[-1][0], "/maintenance/recycle")
+            self.assertEqual(calls[-1][2]["method"], "DELETE")
+            self.assertIn("同步执行", cleanup["note"])
+
+    def test_eml_and_plugin_guides_cover_new_surface(self) -> None:
+        self.assertIn(".eml", operations.SUPPORTED_IMPORT_SUFFIXES)
+        self.assertIn(".eml", sync.SUPPORTED_EXTENSIONS)
+        config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
+        graph.save_config(config)
+        context = {"root": str(self.root), "user": "alice"}
+        graph_call = graph_guide(
+            "operation_guide",
+            operation="graph",
+            library_ids=["project_docs"],
+            graph_action="neighborhood",
+            node_id="node-1",
+            depth=4,
+            context=context,
+        )
+        self.assertEqual(graph_call["arguments"]["params"]["action"], "neighborhood")
+        self.assertEqual(graph_call["arguments"]["params"]["depth"], 4)
+        self.assertEqual(graph_call["arguments"]["params"]["limit"], 2000)
+        logs = graph_guide(
+            "operation_guide",
+            operation="logs",
+            context=context,
+        )
+        self.assertEqual(logs["arguments"]["params"]["limit"], 200)
+        filtered = graph_guide(
+            "operation_guide",
+            operation="documents",
+            library_ids=["project_docs"],
+            document_action="list",
+            project="research",
+            search="guide",
+            graph_status="ready",
+            rag_status="pending",
+            include_summary=True,
+            context=context,
+        )
+        params = filtered["arguments"]["params"]
+        self.assertEqual(params["project"], "research")
+        self.assertEqual(params["search"], "guide")
+        self.assertTrue(params["include_summary"])
+        project = graph_guide(
+            "operation_guide",
+            operation="projects",
+            library_ids=["project_docs"],
+            project_action="create",
+            name="research",
+            context=context,
+        )
+        self.assertEqual(project["arguments"]["params"], {
+            "library_ids": ["project_docs"],
+            "action": "create",
+            "name": "research",
+        })
+
     def test_plugin_uses_library_ids_and_generates_document_operations(self) -> None:
         config = graph.config_from_mapping(self.portable_mapping(source_roots=[]))
         graph.save_config(config)

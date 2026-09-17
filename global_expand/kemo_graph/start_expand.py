@@ -10,13 +10,21 @@ from typing import Any
 from errors import GraphExpandError
 from library_sync import scan_libraries, sync_libraries
 from operations import (
+    cache_operation,
+    config_read,
     document_operation,
+    entity_operation,
+    graph_operation,
     import_file,
     ingest_library,
     initialize_libraries,
     jobs_operation,
+    logs_operation,
+    maintenance_operation,
+    project_operation,
     query_libraries,
     status_libraries,
+    update_status,
     upload_markdown,
 )
 from registry import (
@@ -148,7 +156,7 @@ def execute(
     elif normalized == "documents":
         config = _active_config()
         document_action = str(arguments.get("action") or "list").strip().casefold()
-        if document_action in {"update", "delete"}:
+        if document_action in {"update", "delete", "move"}:
             _require_admin(config, caller_user, f"documents.{document_action}")
         result = document_operation(
             config,
@@ -157,6 +165,54 @@ def execute(
         )
     elif normalized == "jobs":
         result = jobs_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "projects":
+        result = project_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "graph":
+        result = graph_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "entities":
+        result = entity_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "cache":
+        result = cache_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "maintenance":
+        result = maintenance_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "logs":
+        result = logs_operation(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "config":
+        result = config_read(
+            _active_config(),
+            arguments,
+            caller_user=caller_user,
+        )
+    elif normalized == "update_status":
+        result = update_status(
             _active_config(),
             arguments,
             caller_user=caller_user,

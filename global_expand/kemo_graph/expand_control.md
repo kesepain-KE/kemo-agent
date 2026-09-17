@@ -63,7 +63,14 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
   `partial=true` 和警告，不会静默伪装成全量成功。结果超过 14,000 字符时写成 artifact，
   避免撑爆主上下文。
 - `documents`：列出或读取文档；更新和删除属于写操作，见下文确认规则。
-- `jobs`：查看单个 portable Store 的维护任务。
+- `jobs`：查看单个 portable Store 或内置库的维护任务。
+- `graph`：读取完整图谱、GPU 可视化分页元数据/节点/关系，或确定性节点邻域。大结果超过
+  14,000 字符时写入 artifact，不直接塞入主上下文。
+- `entities get`：读取单个节点或关系详情。
+- `cache list/show`：列出或查看检索缓存。
+- `projects list`：列出所选库的项目文件夹。
+- `logs` / `config` / `update_status`：读取服务端全局运行日志、脱敏配置镜像和更新状态；
+  这些信息不按 Library 隔离，只允许 `admin_users` 调用。
 
 ### 显式写操作
 
@@ -78,12 +85,27 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 - `upload`：向一个库上传 Markdown，上传后保持待整理，不隐式 ingest。
 - `import_file`：向一个库上传本地文件并转换导入。需要一个 Library ID 和经过管理员核对的
   绝对普通文件路径 `path`；拒绝符号链接、不支持的扩展名和超过 50 MB 的文件。支持 PDF、
-  DOCX、PPTX、XLSX、EPUB、HTML、RTF、Markdown、文本及常见结构化文本格式。默认
+  DOCX、PPTX、XLSX、EPUB、HTML、RTF、EML、Markdown、文本及常见结构化文本格式。默认
   `ingest_after_import=false`，只有用户明确要求立即整理时才能设为 `true`。
 - `documents update`：需要 `source_id + content`，可附带 `expected_content_hash` 做并发保护。
 - `documents delete`：需要 `source_id + confirm="delete"`。
+- `documents move`：移动或重命名单篇文档，也可批量移动到已存在项目。portable 与内置库
+  均支持；经 `/stores/sources/sync` 写入、带 `source_uri` 的上游权威文档必须回到上游修改。
+- `projects create`：在所选知识库创建一级项目文件夹。
+- `entities delete`：删除单个节点或关系，必须先读取详情并获得用户明确确认。
+- `cache clear`：清理所选库检索缓存，必须先获得用户明确确认。
+- `maintenance`：支持 `summarize`、`organize_graph`、`cleanup_recycle`。内置库的
+  `organize_graph` 返回后台作业句柄，portable Store 同步执行；`cleanup_recycle force=true`
+  会永久删除回收站内容，必须再次向用户确认。
 - `deactivate`：删除本地激活配置并停止 Prompt 注入；保留同步游标、状态快照和全部外部
   Store，绝不删除用户图谱数据。
+
+portable 与内置库复用同一业务门面，但 HTTP 形态不同：portable 一律调用 `/stores/*`，
+使用 `POST` 并把 `store_root` 放在请求体；内置库按各端点使用路径参数、查询参数和
+`GET/PATCH/DELETE`。调用方只传稳定 `library_id`，不能自行拼接 Store 路径。
+
+本拓展不提供 `rebuild-knowledge-base`、`rebuild-all`、`update/apply`、`system/restart` 或
+配置写入能力；这些操作仍属于 kemo-graph 独立运维边界。
 
 ## 推荐流程
 
@@ -103,6 +125,24 @@ scan → 向用户展示新增/修改/缺失项 → 用户确认 → sync → in
 
 ```text
 configuration_status → 用户明确选择 Library ID 和文件 → import_file → documents/status
+```
+
+图谱结构排查：
+
+```text
+status → graph(action=visualization_meta) → graph(action=neighborhood)
+```
+
+服务配置与日志排查：
+
+```text
+logs → config
+```
+
+项目整理：
+
+```text
+projects list/create → documents move → documents list(project=...)
 ```
 
 `import_file` 与 `upload` 的区别：`upload` 直接提交已经存在的 Markdown 正文；

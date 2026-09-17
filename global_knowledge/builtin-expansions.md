@@ -92,7 +92,7 @@ expand_call(
 
 ## Kemo Graph 外挂文档站
 
-> 最后核对：2026-08-06
+> 最后核对：2026-09-16
 
 Kemo Graph 在 kemo-agent 中的定位是“侧载超级文档站”，不是框架知识库、记忆系统或
 System Prompt 的替代层。
@@ -237,9 +237,15 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 | `ingest` | 联网高成本 | 逐库构建 Graph/RAG；可用 `paths` 精确重试 failed 文档 |
 | `query` | 联网只读 | graph/rag/hybrid/answer/global 查询 |
 | `upload` | 联网写入 | 上传 Markdown，保持 pending |
-| `import_file` | 联网写入 | 管理员明确指定本地文件，multipart 转换导入，默认保持 pending |
-| `documents` | 联网读写 | list/content/update/delete |
-| `jobs` | 联网只读 | 查看 portable Store 维护任务 |
+| `import_file` | 联网写入 | 管理员明确指定本地文件，multipart 转换导入，默认保持 pending；含 `.eml` |
+| `documents` | 联网读写 | list/content/update/delete/move，支持项目和状态过滤 |
+| `projects` | 联网读写 | 列出或创建内置库/portable Store 的一级项目目录 |
+| `jobs` | 联网只读 | 查看 portable Store 或内置库维护任务 |
+| `graph` | 联网只读 | 完整图谱、可视化分页或节点邻域；大结果写入 artifact |
+| `entities` | 联网读写 | 获取或删除单个节点/关系；删除仅管理员可执行 |
+| `cache` | 联网读写 | 检索缓存 list/show/clear；clear 仅管理员可执行 |
+| `maintenance` | 联网写入 | 节点群总结、图谱整理或回收站清理，仅管理员可执行 |
+| `logs` / `config` / `update_status` | 联网只读 | 服务端全局信息，仅管理员可读取 |
 | `deactivate` | 本地写入 | 关闭激活配置，保留游标、状态和外部 Store |
 
 只有用户明确要求查询、使用、更新或维护此外挂文档站时才允许执行。普通问答不自动查询；
@@ -251,7 +257,7 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 `import_file` 与 `upload` 的边界不同：
 
 - `upload` 发送已经存在的 Markdown 正文；
-- `import_file` 发送本地 PDF、Office、EPUB、HTML、RTF、文本或结构化文本文件，由
+- `import_file` 发送本地 PDF、Office、EPUB、HTML、RTF、EML、文本或结构化文本文件，由
   kemo-graph 转换为规范 Markdown；
 - `library_ids` 仍必须来自注册表，portable Store 的 `store_root` 由拓展读取，并作为
   multipart 表单字段发送，不进入 URL；
@@ -324,6 +330,10 @@ scan → 展示新增/修改/缺失项 → 用户确认 → sync
 - 对话输入不能直接指定 `store_root` 或 `source_root`；只能选择注册的 Library ID。
 - `import_file.path` 仅在管理员明确发起文件导入时使用，不得把对话中任意路径静默转成上传操作。
 - `documents delete` 必须携带 `confirm="delete"`；来源批量删除默认关闭。
+- `documents move` 与 `projects create` 只调整 Store 内 Markdown 的组织位置，不移动原始来源；
+  经 `/stores/sources/sync` 写入、带 `source_uri` 的上游权威记录必须回到上游修改。
+- `entities delete`、`cache clear` 和所有 `maintenance` 操作只允许管理员执行；永久清理与删除前
+  必须获得用户明确确认。
 - ingest 必须检查 HTTP 200 内的 `result.failed/details`，`failed>0` 仍是失败。
 - ingest 省略 `paths` 时只处理普通待整理文档；指定非空 Markdown 路径数组时可精确整理或
   重试 failed 文档。路径仍由 kemo-graph 校验，不能借此指定 Store 外文件。

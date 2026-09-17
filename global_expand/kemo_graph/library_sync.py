@@ -25,6 +25,7 @@ from registry import (
 
 SUPPORTED_EXTENSIONS = frozenset({
     ".pdf", ".docx", ".pptx", ".xlsx", ".xlsm", ".xls", ".epub", ".rtf",
+    ".eml",
     ".md", ".markdown", ".txt", ".log", ".html", ".htm", ".rst", ".csv",
     ".tsv", ".json", ".jsonl", ".ndjson", ".yaml", ".yml", ".xml",
 })

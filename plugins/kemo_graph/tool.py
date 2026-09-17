@@ -24,6 +24,14 @@ _OPERATIONS = {
     "import_file",
     "documents",
     "jobs",
+    "graph",
+    "entities",
+    "cache",
+    "maintenance",
+    "logs",
+    "config",
+    "update_status",
+    "projects",
     "deactivate",
 }
 _MAX_INGEST_PATHS = 1000
@@ -195,10 +203,41 @@ def _operation_guide(
     ingest_after_import: bool,
     document_action: str,
     source_id: str,
+    source_ids: list[str] | None,
     expected_content_hash: str,
+    expected_relative_path: str,
     confirm_deletions: bool,
     job_id: str,
-    limit: int,
+    limit: int | None,
+    graph_action: str,
+    entity_kind: str,
+    entity_action: str,
+    cache_action: str,
+    maintenance_action: str,
+    log_category: str,
+    log_date: str,
+    node_id: str,
+    edge_id: str,
+    cache_key: str,
+    stale_only: bool,
+    page: int,
+    page_size: int | None,
+    expected_revision: str,
+    depth: int,
+    direction: str,
+    edge_limit: int,
+    nodes_page: int | None,
+    nodes_page_size: int,
+    use_llm: bool,
+    summarize: bool,
+    force: bool,
+    project: str | None,
+    search: str,
+    graph_status: str,
+    rag_status: str,
+    include_summary: bool,
+    project_action: str,
+    name: str,
 ) -> dict[str, Any]:
     if operation not in _OPERATIONS:
         raise ValueError("operation_guide 需要合法 operation")
@@ -242,10 +281,23 @@ def _operation_guide(
         if len(selected) != 1:
             raise ValueError("documents 每次必须且只能选择一个 library_id")
         normalized_action = document_action.strip().casefold() or "list"
-        if normalized_action not in {"list", "content", "update", "delete"}:
-            raise ValueError("document_action 只允许 list、content、update、delete")
+        if normalized_action not in {"list", "content", "update", "delete", "move"}:
+            raise ValueError("document_action 只允许 list、content、update、delete、move")
         params["action"] = normalized_action
-        if normalized_action != "list":
+        if normalized_action == "list":
+            params["page"] = page if isinstance(page, int) and page >= 1 else 1
+            params["page_size"] = page_size if isinstance(page_size, int) and 1 <= page_size <= 100 else 20
+            if project is not None:
+                params["project"] = project
+            if search.strip():
+                params["search"] = search.strip()
+            if graph_status.strip():
+                params["graph_status"] = graph_status.strip()
+            if rag_status.strip():
+                params["rag_status"] = rag_status.strip()
+            if include_summary:
+                params["include_summary"] = True
+        elif normalized_action != "move":
             if not source_id.strip():
                 raise ValueError(f"documents.{normalized_action} 需要 source_id")
             params["source_id"] = source_id.strip()
@@ -255,6 +307,35 @@ def _operation_guide(
                 params["expected_content_hash"] = expected_content_hash.strip()
         if normalized_action == "delete":
             params["confirm"] = "delete"
+        if normalized_action == "move":
+            normalized_source_ids = list(
+                dict.fromkeys(
+                    item.strip()
+                    for item in (source_ids or [])
+                    if isinstance(item, str) and item.strip()
+                )
+            )
+            has_single = bool(source_id.strip())
+            has_batch = bool(normalized_source_ids)
+            if has_single == has_batch:
+                raise ValueError("documents.move 需要 source_id 或 source_ids，且二者只能提供一个")
+            if has_batch:
+                if len(normalized_source_ids) > 1000:
+                    raise ValueError("source_ids 最多允许 1000 项")
+                if filename.strip() or expected_relative_path.strip():
+                    raise ValueError("批量移动不支持 filename 或 expected_relative_path")
+                params["source_ids"] = normalized_source_ids
+                params["project"] = project if project is not None else ""
+            else:
+                if project is None and not filename.strip():
+                    raise ValueError("单篇移动至少需要 filename 或 project")
+                params["source_id"] = source_id.strip()
+                if filename.strip():
+                    params["filename"] = filename.strip()
+                if project is not None:
+                    params["project"] = project
+                if expected_relative_path.strip():
+                    params["expected_relative_path"] = expected_relative_path.strip()
     elif operation == "jobs":
         if len(selected) != 1:
             raise ValueError("jobs 每次必须且只能选择一个 library_id")
@@ -262,6 +343,95 @@ def _operation_guide(
             params["job_id"] = job_id.strip()
         else:
             params["limit"] = limit if isinstance(limit, int) and 1 <= limit <= 1000 else 100
+    elif operation == "graph":
+        if len(selected) != 1:
+            raise ValueError("graph 每次必须且只能选择一个 library_id")
+        action = graph_action.strip().casefold() or "full"
+        allowed = {"full", "visualization_meta", "visualization_nodes", "visualization_edges", "neighborhood"}
+        if action not in allowed:
+            raise ValueError("graph_action 不合法")
+        params["action"] = action
+        if action in {"visualization_nodes", "visualization_edges"}:
+            params["page"] = page if isinstance(page, int) and page >= 1 else 1
+            maximum = 5000 if action.endswith("nodes") else 10000
+            default_size = 1000 if action.endswith("nodes") else 2000
+            params["page_size"] = page_size if isinstance(page_size, int) and 1 <= page_size <= maximum else default_size
+        if action == "full":
+            if nodes_page is not None:
+                params["nodes_page"] = nodes_page
+            params["nodes_page_size"] = nodes_page_size
+        if action == "neighborhood":
+            if not node_id.strip():
+                raise ValueError("graph.neighborhood 需要 node_id")
+            params.update({
+                "node_id": node_id.strip(),
+                "depth": depth,
+                "direction": direction,
+                "limit": limit if isinstance(limit, int) and 1 <= limit <= 10000 else 2000,
+                "edge_limit": edge_limit,
+            })
+        if expected_revision.strip():
+            params["expected_revision"] = expected_revision.strip()
+    elif operation == "entities":
+        if len(selected) != 1:
+            raise ValueError("entities 每次必须且只能选择一个 library_id")
+        kind = entity_kind.strip().casefold()
+        action = entity_action.strip().casefold() or "get"
+        if kind not in {"node", "relation"} or action not in {"get", "delete"}:
+            raise ValueError("entities 需要合法的 entity_kind 与 entity_action")
+        params.update({"kind": kind, "action": action})
+        identifier = node_id.strip() if kind == "node" else edge_id.strip()
+        if not identifier:
+            raise ValueError("entities 缺少对应的 node_id 或 edge_id")
+        params["node_id" if kind == "node" else "edge_id"] = identifier
+    elif operation == "cache":
+        if len(selected) != 1:
+            raise ValueError("cache 每次必须且只能选择一个 library_id")
+        action = cache_action.strip().casefold() or "list"
+        if action not in {"list", "show", "clear"}:
+            raise ValueError("cache_action 只允许 list、show、clear")
+        params["action"] = action
+        if action == "list":
+            params.update({
+                "page": page,
+                "page_size": page_size if isinstance(page_size, int) and 1 <= page_size <= 100 else 20,
+            })
+        elif action == "show":
+            if not cache_key.strip():
+                raise ValueError("cache.show 需要 cache_key")
+            params["cache_key"] = cache_key.strip()
+        else:
+            params["stale_only"] = stale_only
+    elif operation == "maintenance":
+        if len(selected) != 1:
+            raise ValueError("maintenance 每次必须且只能选择一个 library_id")
+        action = maintenance_action.strip().casefold().replace("-", "_") or "summarize"
+        if action not in {"summarize", "organize_graph", "cleanup_recycle"}:
+            raise ValueError("maintenance_action 不合法")
+        params.update({"action": action, "use_llm": use_llm, "summarize": summarize, "force": force})
+    elif operation == "logs":
+        category = log_category.strip().casefold() or "internal"
+        if category not in {"internal", "query", "terminal"}:
+            raise ValueError("log_category 只允许 internal、query、terminal")
+        params.update({
+            "category": category,
+            "limit": limit if isinstance(limit, int) and 1 <= limit <= 500 else 200,
+        })
+        if log_date.strip():
+            params["date"] = log_date.strip()
+    elif operation in {"config", "update_status"}:
+        params = {}
+    elif operation == "projects":
+        if len(selected) != 1:
+            raise ValueError("projects 每次必须且只能选择一个 library_id")
+        action = project_action.strip().casefold() or "list"
+        if action not in {"list", "create"}:
+            raise ValueError("project_action 只允许 list、create")
+        params["action"] = action
+        if action == "create":
+            if not name.strip() or len(name.strip()) > 160:
+                raise ValueError("projects.create 需要 1..160 字符的 name")
+            params["name"] = name.strip()
     elif operation == "activate":
         params = {
             "schema_version": 2,
@@ -292,6 +462,18 @@ def _operation_guide(
             "将管理员明确指定的本地文件上传到所选 Library；默认只转换导入，"
             "不立即 ingest。支持格式和 50 MB 上限仍由两端共同校验。"
         )
+    elif operation in {"graph", "config", "logs"}:
+        warning = "仅在用户明确要求读取对应图谱结构、配置镜像或运行日志时调用。"
+    elif operation == "maintenance":
+        warning = "维护与永久清理属于受控写操作；cleanup_recycle force=true 执行前必须再次确认。"
+    elif operation == "entities" and entity_action.strip().casefold() == "delete":
+        warning = "节点或关系删除会修改知识图谱，必须先获得用户明确确认。"
+    elif operation == "cache" and cache_action.strip().casefold() == "clear":
+        warning = "检索缓存清理属于写操作，必须先获得用户明确确认。"
+    elif operation == "projects" and project_action.strip().casefold() == "create":
+        warning = "将在所选知识库创建项目文件夹。"
+    elif operation == "documents" and document_action.strip().casefold() == "move":
+        warning = "移动或重命名只改变 Store 内 Markdown 位置；上游源文件后续同步仍可能按来源规则重建。"
     arguments: dict[str, Any] = {
         "scope": "global",
         "module": "kemo_graph",
@@ -316,10 +498,41 @@ def run(
     ingest_after_import: bool = False,
     document_action: str = "",
     source_id: str = "",
+    source_ids: list[str] | None = None,
     expected_content_hash: str = "",
+    expected_relative_path: str = "",
     confirm_deletions: bool = False,
     job_id: str = "",
-    limit: int = 100,
+    limit: int | None = None,
+    graph_action: str = "",
+    entity_kind: str = "",
+    entity_action: str = "",
+    cache_action: str = "",
+    maintenance_action: str = "",
+    log_category: str = "",
+    log_date: str = "",
+    node_id: str = "",
+    edge_id: str = "",
+    cache_key: str = "",
+    stale_only: bool = False,
+    page: int = 1,
+    page_size: int | None = None,
+    expected_revision: str = "",
+    depth: int = 2,
+    direction: str = "both",
+    edge_limit: int = 10000,
+    nodes_page: int | None = None,
+    nodes_page_size: int = 100,
+    use_llm: bool = True,
+    summarize: bool = True,
+    force: bool = False,
+    project: str | None = None,
+    search: str = "",
+    graph_status: str = "",
+    rag_status: str = "",
+    include_summary: bool = False,
+    project_action: str = "",
+    name: str = "",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -374,13 +587,27 @@ def run(
             "ingest",
             "upload",
             "import_file",
+            "maintenance",
             "deactivate",
         } or (
             normalized_operation == "documents"
-            and document_action.strip().casefold() in {"update", "delete"}
+            and document_action.strip().casefold() in {"update", "delete", "move"}
+        ) or (
+            normalized_operation == "entities"
+            and entity_action.strip().casefold() == "delete"
+        ) or (
+            normalized_operation == "cache"
+            and cache_action.strip().casefold() == "clear"
+        ) or (
+            normalized_operation == "projects"
+            and project_action.strip().casefold() == "create"
         )
         if mutating and not configuration.get("caller_is_admin", False):
             raise PermissionError("只有 Kemo Graph admin_users 可以生成写操作调用")
+        if normalized_operation in {"logs", "config", "update_status"} and not configuration.get(
+            "caller_is_admin", False
+        ):
+            raise PermissionError("只有 Kemo Graph admin_users 可以读取服务端全局信息")
         return {
             "ok": True,
             **_operation_guide(
@@ -396,10 +623,41 @@ def run(
                 ingest_after_import=ingest_after_import,
                 document_action=document_action,
                 source_id=source_id,
+                source_ids=source_ids,
                 expected_content_hash=expected_content_hash,
+                expected_relative_path=expected_relative_path,
                 confirm_deletions=confirm_deletions,
                 job_id=job_id,
                 limit=limit,
+                graph_action=graph_action,
+                entity_kind=entity_kind,
+                entity_action=entity_action,
+                cache_action=cache_action,
+                maintenance_action=maintenance_action,
+                log_category=log_category,
+                log_date=log_date,
+                node_id=node_id,
+                edge_id=edge_id,
+                cache_key=cache_key,
+                stale_only=stale_only,
+                page=page,
+                page_size=page_size,
+                expected_revision=expected_revision,
+                depth=depth,
+                direction=direction,
+                edge_limit=edge_limit,
+                nodes_page=nodes_page,
+                nodes_page_size=nodes_page_size,
+                use_llm=use_llm,
+                summarize=summarize,
+                force=force,
+                project=project,
+                search=search,
+                graph_status=graph_status,
+                rag_status=rag_status,
+                include_summary=include_summary,
+                project_action=project_action,
+                name=name,
             ),
         }
     raise ValueError(f"不支持的 action：{action}")
