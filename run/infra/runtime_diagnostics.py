@@ -73,13 +73,15 @@ def record_terminal_output(root: Path, text: Any, *, stream: str = "stdout") -> 
         line = _terminal_text(text)
         if not line:
             return
-        source = "标准错误" if stream == "stderr" else "标准输出"
+        normalized_stream = "stderr" if stream == "stderr" else "stdout"
+        source = "标准错误" if normalized_stream == "stderr" else "标准输出"
         entry = {
             "id": "console:" + uuid.uuid4().hex,
             "category": "terminal",
             "title": line,
             "occurred_at": datetime.now(timezone.utc).isoformat(),
-            "status": "error" if stream == "stderr" else "recorded",
+            "status": "error" if normalized_stream == "stderr" else "recorded",
+            "stream": normalized_stream,
             "duration_ms": None,
             "detail": f"启动终端 · {source}",
             "source": "memory",

@@ -10,6 +10,7 @@ export interface RuntimeLogEntry {
   exit_code?: number | null
   detail: string
   source: 'sqlite' | 'memory' | 'snapshot'
+  stream?: 'stdout' | 'stderr'
 }
 
 export interface RuntimeLogsResponse {
@@ -19,6 +20,14 @@ export interface RuntimeLogsResponse {
   counts: Record<RuntimeLogCategory, number>
   generated_at: string
   pagination: { page: number; page_size: number; total_items: number; total_pages: number; has_previous: boolean; has_next: boolean }
+  terminal?: {
+    window_size: number
+    loaded_items: number
+    stdout_items: number
+    stderr_items: number
+    process_local: boolean
+    retention_seconds: number
+  } | null
   cache: { hit: boolean; ttl_seconds: number }
   source_errors: string[]
 }

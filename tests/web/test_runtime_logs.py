@@ -120,9 +120,17 @@ class RuntimeLogTests(unittest.TestCase):
         bob_result = self.backend.runtime_logs('bob', category='terminal', refresh=True)
         self.assertEqual(len(result['entries']), 2)
         stderr_entry = next(entry for entry in result['entries'] if entry['detail'] == '启动终端 · 标准错误')
+        stdout_entry = next(entry for entry in result['entries'] if entry['detail'] == '启动终端 · 标准输出')
         self.assertEqual(stderr_entry['category'], 'terminal')
         self.assertEqual(stderr_entry['source'], 'memory')
         self.assertEqual(stderr_entry['status'], 'error')
+        self.assertEqual(stderr_entry['stream'], 'stderr')
+        self.assertEqual(stdout_entry['stream'], 'stdout')
+        self.assertEqual(result['terminal']['stdout_items'], 1)
+        self.assertEqual(result['terminal']['stderr_items'], 1)
+        self.assertEqual(result['terminal']['loaded_items'], 2)
+        self.assertEqual(result['terminal']['window_size'], 300)
+        self.assertTrue(result['terminal']['process_local'])
         self.assertNotIn('super-secret', json.dumps(result))
         self.assertNotIn('very-private-value', json.dumps(result))
         self.assertEqual(result['entries'], bob_result['entries'])
@@ -158,6 +166,8 @@ class RuntimeLogTests(unittest.TestCase):
             'page': 1, 'page_size': 3, 'total_items': 3, 'total_pages': 1,
             'has_previous': False, 'has_next': False,
         })
+        self.assertEqual(result['terminal']['stdout_items'], 3)
+        self.assertEqual(result['terminal']['stderr_items'], 0)
 
     def test_terminal_returns_only_bounded_live_tail(self):
         from web.services.runtime_logs import TERMINAL_LIVE_WINDOW

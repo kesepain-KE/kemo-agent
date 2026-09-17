@@ -5,7 +5,7 @@
 }
 
 .runtimeView :global(.module-header) { min-height: 54px; align-items: center; margin-bottom: 10px; }
-.runtimeView :global(.module-inner) { width: min(1600px, 100%); }
+.runtimeView :global(.module-inner) { width: min(1840px, 100%); }
 .runtimeView :global(.module-kicker) { display: none; }
 .runtimeView :global(.module-heading h2) { font-size: 1.45rem; }
 .runtimeView :global(.module-heading p) { margin-top: 4px; line-height: 1.4; }
@@ -20,7 +20,7 @@
 }
 
 .generatedAt time { margin-left: auto; }
-.userBadge { padding: 5px 9px; border-radius: 999px; color: var(--ink); background: var(--surface-2); font-weight: 700; }
+.userBadge { padding: 5px 9px; border-radius: 999px; color: var(--text); background: var(--surface-2); font-weight: 700; }
 
 .summaryGrid {
   display: grid;
@@ -93,8 +93,6 @@
 .progress { height: 5px; display: block; margin-top: 10px; overflow: hidden; border-radius: 99px; background: var(--surface-2); }
 .progress i { height: 100%; display: block; border-radius: inherit; background: var(--brand); }
 
-.tokenHeadline { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
-.tokenHeadline > span { min-width: 0; }
 .sparkline { width: 82px; height: 38px; flex: none; overflow: visible; }
 .sparkline polyline { fill: none; stroke: var(--brand); stroke-width: 2.3; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -125,7 +123,7 @@
   font-weight: 750;
   white-space: nowrap;
 }
-.sectionTabs button:hover { color: var(--ink); background: color-mix(in srgb, var(--surface) 70%, transparent); }
+.sectionTabs button:hover { color: var(--text); background: color-mix(in srgb, var(--surface) 70%, transparent); }
 .sectionTabs button:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent); outline-offset: -2px; }
 .sectionTabs .activeSectionTab { color: var(--brand); background: var(--surface); box-shadow: 0 3px 12px rgba(35, 39, 52, .06); }
 
@@ -141,7 +139,12 @@
 .maintenanceGrid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .maintenanceGrid .compactPanel { height: 520px; }
 .maintenanceGrid .compactBody { height: 462px; padding: 12px; }
-.runtimeLogPanel { grid-column: 1 / -1; width: 100%; }
+.runtimeLogPanel {
+  width: min(1840px, calc(100vw - 92px));
+  max-width: none;
+  grid-column: 1 / -1;
+  justify-self: center;
+}
 
 .panelHeader { min-height: 55px; display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--runtime-border); }
 .panelHeader > span:nth-child(2) { min-width: 0; flex: 1; }
@@ -254,36 +257,28 @@
 .compactEmpty { height: 100%; min-height: 0; display: flex; padding-top: 8px; }
 .compactEmpty > :global(.empty-panel) { min-height: 0; flex: 1; }
 .memoryRow,
-.taskRow,
-.cronRow { min-height: 72px; margin-bottom: 9px; padding: 11px 12px; display: grid; align-items: center; gap: 12px; border: 1px solid var(--runtime-border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-soft); font-size: 9px; }
-.memoryRow:last-child, .taskRow:last-child, .cronRow:last-child { margin-bottom: 0; }
+.taskRow { min-height: 72px; margin-bottom: 9px; padding: 11px 12px; display: grid; align-items: center; gap: 12px; border: 1px solid var(--runtime-border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-soft); font-size: 9px; }
+.memoryRow:last-child, .taskRow:last-child { margin-bottom: 0; }
 .memoryRow { grid-template-columns: minmax(0, 1fr) 92px auto; }
 .taskRow { grid-template-columns: minmax(0, 1fr) 92px auto; }
-.cronRow { grid-template-columns: minmax(0, 1fr) 92px 58px auto; }
 .routeRow { min-height: 76px; margin-top: 10px; padding: 11px 12px; display: grid; grid-template-columns: minmax(0, 1fr) 72px auto; align-items: center; gap: 12px; border: 1px solid var(--runtime-border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-soft); }
 .routeMetric strong { margin-top: 5px; color: var(--text); font-size: 10px; }
 .memoryRow > span:first-child,
 .taskRow > span:first-child,
-.cronRow > span:first-child,
 .routeRow > span:first-child { min-width: 0; }
 .memoryRow strong,
 .memoryRow small,
 .taskRow strong,
 .taskRow small,
-.cronRow strong,
-.cronRow small,
 .routeRow strong,
 .routeRow small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .memoryRow strong,
-.taskRow strong,
-.cronRow strong { font-size: 11px; }
+.taskRow strong { font-size: 11px; }
 .memoryRow small,
-.taskRow small,
-.cronRow small { margin-top: 5px; color: var(--muted); font-size: 9px; }
+.taskRow small { margin-top: 5px; color: var(--muted); font-size: 9px; }
 .memoryRow time,
-.taskRow time,
-.cronRow time { color: var(--muted); font-size: 9px; }
-.memoryRow .statusPill, .taskRow .statusPill, .cronRow .statusPill { min-height: 27px; padding: 0 10px; font-size: 9px; }
+.taskRow time { color: var(--muted); font-size: 9px; }
+.memoryRow .statusPill, .taskRow .statusPill { min-height: 27px; padding: 0 10px; font-size: 9px; }
 .maintenanceGrid .compactEmpty { padding-top: 0; }
 .maintenanceGrid .compactEmpty > :global(.empty-panel) { border: 1px solid var(--runtime-border); border-radius: 14px; background: color-mix(in srgb, var(--surface-2) 42%, var(--surface)); }
 
@@ -314,6 +309,7 @@
   .summaryGrid { grid-template-columns: 1fr; }
   .maintenanceGrid { grid-template-columns: 1fr; }
   .runtimeLogPanel { grid-column: auto; }
+  .runtimeLogPanel { width: 100%; }
   .tokenMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tokenMetrics > span { border-right: 0; border-bottom: 1px solid var(--runtime-border); }
   .apiGrid { grid-template-columns: 1fr; }

@@ -9,6 +9,7 @@ import {
   LockKeyhole,
   MemoryStick,
   MessageSquareText,
+  RadioTower,
   RefreshCw,
   ScanLine,
   ServerCog,
@@ -90,12 +91,23 @@ function StatCard({ icon, label, value, detail, tone = 'default' }: {
   </article>
 }
 
-function TerminalOutput({ entries }: { entries: RuntimeLogEntry[] }) {
+function TerminalOutput({ entries, summary }: {
+  entries: RuntimeLogEntry[]
+  summary?: {
+    window_size: number
+    loaded_items: number
+    stdout_items: number
+    stderr_items: number
+    process_local: boolean
+    retention_seconds: number
+  } | null
+}) {
   const screenRef = useRef<HTMLDivElement>(null)
   const previousLastId = useRef('')
   const [following, setFollowing] = useState(true)
   const [unseenCount, setUnseenCount] = useState(0)
-  const stderrCount = entries.filter((entry) => entry.status === 'error' || entry.status === 'failed').length
+  const stderrCount = summary?.stderr_items ?? entries.filter((entry) => entry.stream === 'stderr' || entry.status === 'error' || entry.status === 'failed').length
+  const stdoutCount = summary?.stdout_items ?? Math.max(0, entries.length - stderrCount)
   const lastEntryId = entries.at(-1)?.id || ''
 
   useEffect(() => {
@@ -119,14 +131,21 @@ function TerminalOutput({ entries }: { entries: RuntimeLogEntry[] }) {
     if (atBottom) setUnseenCount(0)
   }
 
-  return <section className={styles.terminalConsole} aria-label="kemo-agent 启动终端只读输出">
+  return <section className={styles.terminalWorkspace} aria-label="kemo-agent 启动终端只读输出">
+    <div className={styles.terminalSummary} aria-label="终端采集摘要">
+      <article><span className={styles.terminalMetricIcon}><RadioTower size={17} /></span><span><small>采集状态</small><strong>实时接收</strong><em>仅当前 Web 进程</em></span></article>
+      <article><span className={styles.terminalMetricIcon}><TerminalSquare size={17} /></span><span><small>载入窗口</small><strong>{summary?.loaded_items ?? entries.length} / {summary?.window_size ?? 300}</strong><em>按原始顺序展示</em></span></article>
+      <article><span className={`${styles.terminalMetricIcon} ${styles.stdoutMetric}`}><ScanLine size={17} /></span><span><small>标准输出</small><strong>{stdoutCount}</strong><em>启动与运行信息</em></span></article>
+      <article><span className={`${styles.terminalMetricIcon} ${styles.stderrMetric}`}><AlertTriangle size={17} /></span><span><small>标准错误</small><strong>{stderrCount}</strong><em>错误与警告输出</em></span></article>
+    </div>
+    <div className={styles.terminalConsole}>
     <header className={styles.terminalHeader}>
-      <div><span className={styles.terminalIcon}><TerminalSquare size={18} /></span><span><strong>kemo-agent 启动终端</strong><small>最近 300 行窗口 · 从底部动态出现</small></span></div>
+      <div><span className={styles.terminalIcon}><TerminalSquare size={18} /></span><span><strong>kemo-agent 启动终端</strong><small>最近 {summary?.window_size ?? 300} 行内存窗口 · 新输出从底部出现</small></span></div>
       <span className={styles.readOnlyBadge}><LockKeyhole size={12} />只读</span>
     </header>
     <div className={styles.terminalScreen} ref={screenRef} role="log" aria-label="启动终端输出内容" onScroll={handleScroll}>
       {entries.map((entry) => {
-        const isError = entry.status === 'error' || entry.status === 'failed'
+        const isError = entry.stream === 'stderr' || entry.status === 'error' || entry.status === 'failed'
         return <div className={`${styles.terminalLine} ${isError ? styles.terminalErrorLine : ''}`} key={entry.id}>
           <time dateTime={entry.occurred_at}>{formatTerminalTime(entry.occurred_at)}</time>
           <span className={isError ? styles.stderr : styles.stdout}>{isError ? 'ERR' : 'OUT'}</span>
@@ -139,6 +158,7 @@ function TerminalOutput({ entries }: { entries: RuntimeLogEntry[] }) {
       <span><i />{following ? '实时跟随最新输出' : `已暂停跟随${unseenCount ? ` · 底部有 ${unseenCount} 条新输出` : ''}`}</span>
       <span>当前载入 {entries.length} 行 · {stderrCount} 行标准错误</span>
     </footer>
+    </div>
   </section>
 }
 
@@ -204,7 +224,7 @@ function LogView({ user, className }: { user: string; className: string }) {
 
     <div id="runtime-log-records" role="tabpanel" aria-label={selectedCategory.label} aria-busy={query.isFetching} className={`${styles.body} ${category === 'terminal' ? styles.terminalBody : ''}`}>
       {query.isPending ? <p className={styles.empty}>正在读取日志…</p> : null}
-      {data && category === 'terminal' ? <TerminalOutput entries={data.entries} /> : null}
+      {data && category === 'terminal' ? <TerminalOutput entries={data.entries} summary={data.terminal} /> : null}
       {data?.entries.map((entry) => {
         if (category === 'terminal') return null
         const EntryIcon = categoryIcons[entry.category]

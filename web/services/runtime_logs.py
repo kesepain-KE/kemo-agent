@@ -61,11 +61,25 @@ def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 
         total = len(selected)
         selected = selected[-TERMINAL_LIVE_WINDOW:]
         displayed = len(selected)
+        stderr_count = sum(
+            row.get("stream") == "stderr"
+            or (not row.get("stream") and row.get("status") in {"error", "failed"})
+            for row in selected
+        )
+        stdout_count = max(0, displayed - stderr_count)
         return {
             "user": user, "category": category, "entries": selected,
             "counts": counts, "generated_at": now,
             "pagination": {"page": 1, "page_size": max(1, displayed), "total_items": total,
                            "total_pages": 1, "has_previous": False, "has_next": False},
+            "terminal": {
+                "window_size": TERMINAL_LIVE_WINDOW,
+                "loaded_items": displayed,
+                "stdout_items": stdout_count,
+                "stderr_items": stderr_count,
+                "process_local": True,
+                "retention_seconds": 3600,
+            },
             "cache": {"hit": hit, "ttl_seconds": CACHE_TTL_SECONDS}, "source_errors": errors,
         }
     selected = sorted(
@@ -81,5 +95,6 @@ def runtime_logs(backend: Any, user: str, *, category: str = "all", page: int = 
         "counts": counts, "generated_at": now,
         "pagination": {"page": page, "page_size": page_size, "total_items": total,
                        "total_pages": pages, "has_previous": page > 1, "has_next": page < pages},
+        "terminal": None,
         "cache": {"hit": hit, "ttl_seconds": CACHE_TTL_SECONDS}, "source_errors": errors,
     }

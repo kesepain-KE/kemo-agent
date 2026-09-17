@@ -389,7 +389,7 @@ export const handlers = [
       provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },
       web: { max_concurrent_chats: 3, max_pending_chats: 5, pending_chat_timeout: 30 },
       message: { max_workers: 8, max_queued_messages: 20 },
-      cron: { poll_interval: 30, history_retention_days: 7, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
+      cron: { poll_interval: 30, history_retention_days: 7, session_idle_close_seconds: 86400, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
       agent_runtime: { default_timeout: 600, queue_maxsize: 50 },
     },
     redacted_paths: [],

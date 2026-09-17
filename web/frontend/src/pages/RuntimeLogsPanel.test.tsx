@@ -15,6 +15,7 @@ function response(user = 'alice', category: RuntimeLogCategory = 'all', page = 1
       title: `${user}-${category}-${page}`, occurred_at: '2026-09-13T00:00:00Z', status: 'failed',
       duration_ms: 12, exit_code: 1, detail: '简短状态说明', source: category === 'threads' ? 'snapshot' : 'memory' }],
     pagination: { page, page_size: 25, total_items: 26, total_pages: 2, has_previous: page > 1, has_next: page < 2 },
+    terminal: category === 'terminal' ? { window_size: 300, loaded_items: 1, stdout_items: 0, stderr_items: 1, process_local: true, retention_seconds: 3600 } : null,
   }
 }
 function mount(user = 'alice') {
@@ -63,6 +64,8 @@ describe('执行记录分类日志', () => {
     expect(screen.getByText('alice-terminal-1')).toBeInTheDocument()
     expect(screen.queryByText('发生时间')).not.toBeInTheDocument()
     expect(screen.getByText('当前载入 1 行 · 1 行标准错误')).toBeInTheDocument()
+    expect(screen.getByText('1 / 300')).toBeInTheDocument()
+    expect(screen.getByText('实时接收')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '上一页' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '下一页' })).not.toBeInTheDocument()
   })

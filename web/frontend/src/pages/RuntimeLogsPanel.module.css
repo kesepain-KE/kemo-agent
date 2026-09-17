@@ -4,7 +4,8 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--log-border);
-  border-radius: 20px;
+  width: 100%;
+  border-radius: 16px;
   background: var(--surface);
   box-shadow: 0 18px 48px rgba(35, 39, 52, .065);
 }
@@ -61,7 +62,7 @@
   border: 1px solid var(--log-border);
   border-radius: 10px;
   padding: 8px 11px;
-  color: var(--ink);
+  color: var(--text);
   background: var(--surface);
   cursor: pointer;
   font: inherit;
@@ -148,12 +149,12 @@
 .categoryNotice p { min-width: 0; margin: 0; }
 .categoryNotice strong,
 .categoryNotice span { display: block; }
-.categoryNotice strong { color: var(--ink); font-size: 10px; }
+.categoryNotice strong { color: var(--text); font-size: 10px; }
 .categoryNotice span { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .notice_terminal { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 22%, var(--log-border)); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface)); }
 
 .body {
-  max-height: 610px;
+  max-height: 720px;
   display: grid;
   gap: 9px;
   overflow: auto;
@@ -162,22 +163,67 @@
   scrollbar-width: thin;
 }
 .terminalBody {
-  min-height: 520px;
+  min-height: 690px;
   display: block;
   overflow: hidden;
   padding: 0;
   background: var(--surface);
 }
+.terminalWorkspace {
+  height: 690px;
+  min-height: 620px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--surface-2) 38%, var(--surface));
+}
+.terminalSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.terminalSummary article {
+  min-width: 0;
+  min-height: 82px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 13px;
+  border: 1px solid var(--log-border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(35, 39, 52, .04);
+}
+.terminalSummary article > span:last-child { min-width: 0; }
+.terminalSummary small,
+.terminalSummary strong,
+.terminalSummary em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminalSummary small { color: var(--muted); font-size: 9px; }
+.terminalSummary strong { margin-top: 4px; color: var(--text); font-size: 15px; }
+.terminalSummary em { margin-top: 4px; color: var(--muted); font-size: 8px; font-style: normal; }
+.terminalMetricIcon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand-soft) 72%, var(--surface));
+}
+.stdoutMetric { color: var(--green); background: color-mix(in srgb, var(--green) 9%, var(--surface)); }
+.stderrMetric { color: var(--red); background: color-mix(in srgb, var(--red) 9%, var(--surface)); }
 .terminalConsole {
-  height: 610px;
-  min-height: 520px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  color: var(--ink);
-  background:
-    radial-gradient(circle at 12% -42%, color-mix(in srgb, var(--brand) 16%, transparent), transparent 42%),
-    linear-gradient(145deg, color-mix(in srgb, var(--brand-soft) 44%, var(--surface)), var(--surface) 62%);
+  color: var(--text);
+  border: 1px solid var(--log-border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(35, 39, 52, .05);
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 .terminalHeader {
@@ -195,10 +241,10 @@
 .terminalIcon { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--log-border)); border-radius: 9px; color: var(--brand); background: color-mix(in srgb, var(--brand-soft) 72%, var(--surface)); }
 .terminalHeader strong,
 .terminalHeader small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.terminalHeader strong { color: var(--ink); font-size: 12px; }
+.terminalHeader strong { color: var(--text); font-size: 12px; }
 .terminalHeader small { margin-top: 4px; color: var(--muted); font-size: 9px; }
 .readOnlyBadge { min-height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--log-border); border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--surface-2) 72%, var(--surface)); font-family: inherit; font-size: 9px; font-weight: 700; white-space: nowrap; }
-.terminalScreen { min-height: 0; flex: 1; overflow: auto; padding: 11px 0; background: color-mix(in srgb, var(--surface-2) 35%, var(--surface)); scrollbar-color: color-mix(in srgb, var(--brand) 38%, var(--line)) transparent; scrollbar-width: thin; }
+.terminalScreen { min-height: 0; flex: 1; overflow: auto; padding: 11px 0; background: color-mix(in srgb, var(--surface-2) 38%, var(--surface)); scrollbar-color: color-mix(in srgb, var(--brand) 38%, var(--line)) transparent; scrollbar-width: thin; }
 .terminalScreen::-webkit-scrollbar { width: 8px; height: 8px; }
 .terminalScreen::-webkit-scrollbar-thumb { border: 2px solid var(--surface-2); border-radius: 99px; background: color-mix(in srgb, var(--brand) 38%, var(--line)); }
 .terminalLine { min-width: max-content; display: grid; grid-template-columns: 82px 34px minmax(0, 1fr); align-items: baseline; gap: 10px; min-height: 28px; padding: 5px 16px; color: var(--text); font-size: 11px; line-height: 18px; }
@@ -211,7 +257,7 @@
 .terminalLine .stdout { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .terminalEmpty { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 70px 24px; color: var(--muted); text-align: center; font-family: inherit; }
 .terminalEmpty svg { color: var(--brand); }
-.terminalEmpty strong { color: var(--ink); font-size: 12px; }
+.terminalEmpty strong { color: var(--text); font-size: 12px; }
 .terminalEmpty span { max-width: 420px; font-size: 10px; line-height: 1.6; }
 .terminalFooter { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-top: 1px solid var(--log-border); color: var(--muted); background: color-mix(in srgb, var(--surface-2) 72%, var(--surface)); font-size: 9px; }
 .terminalFooter span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -221,14 +267,14 @@
   position: relative;
   min-width: 0;
   display: grid;
-  grid-template-columns: 40px minmax(156px, .85fr) minmax(130px, .7fr) minmax(168px, 1.05fr) minmax(132px, .72fr) minmax(0, .88fr) auto;
+  grid-template-columns: 42px minmax(190px, 1.1fr) minmax(150px, .75fr) minmax(190px, 1fr) minmax(150px, .75fr) minmax(180px, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 62px;
-  padding: 6px 12px 6px 14px;
+  min-height: 76px;
+  padding: 10px 14px;
   overflow: hidden;
   border: 1px solid var(--log-border);
-  border-radius: 15px;
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: 0 7px 18px rgba(35, 39, 52, .035);
   transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
@@ -242,7 +288,7 @@
 .identity { min-width: 0; }
 .identity strong,
 .identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.identity strong { display: block; overflow: hidden; color: var(--ink); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.identity strong { display: block; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .identity small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .status {
   min-height: 25px;
@@ -267,7 +313,7 @@
 }
 .metadata > span {
   min-width: 0;
-  min-height: 42px;
+  min-height: 48px;
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-content: center;
@@ -281,7 +327,7 @@
 .metadata small,
 .metadata strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metadata small { color: var(--muted); font-size: 8px; }
-.metadata strong { margin-top: 2px; color: var(--ink); font-size: 9px; font-weight: 650; }
+.metadata strong { margin-top: 2px; color: var(--text); font-size: 9px; font-weight: 650; }
 .detail { min-width: 0; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 
 .error { margin: 10px 16px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 22%, transparent); border-radius: 11px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--surface)); font-size: 11px; }
@@ -290,7 +336,7 @@
 .footer > div { min-width: 0; }
 .footer strong,
 .footer span { display: block; }
-.footer strong { color: var(--ink); font-size: 11px; }
+.footer strong { color: var(--text); font-size: 11px; }
 .footer span { margin-top: 4px; color: var(--muted); font-size: 9px; }
 .footer nav { display: flex; gap: 7px; }
 .retention { margin: 0; padding: 9px 16px 12px; border-top: 1px solid color-mix(in srgb, var(--log-border) 62%, transparent); color: var(--muted); background: color-mix(in srgb, var(--surface-2) 40%, var(--surface)); font-size: 9px; line-height: 1.55; }
@@ -301,6 +347,7 @@
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail { display: none; }
   .logCard { grid-template-columns: 40px minmax(145px, .85fr) minmax(120px, .72fr) minmax(150px, 1fr) minmax(125px, .72fr) auto; }
+  .terminalSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
@@ -313,7 +360,7 @@
   .detail { grid-column: 2; }
   .status { position: absolute; top: 10px; right: 10px; }
   .body { max-height: 720px; }
-  .terminalConsole { height: 620px; }
+  .terminalWorkspace { height: 760px; }
   .terminalLine { grid-template-columns: 72px 31px minmax(0, 1fr); gap: 7px; padding: 5px 11px; font-size: 10px; }
   .terminalHeader { padding-right: 11px; padding-left: 11px; }
   .terminalFooter { align-items: flex-start; flex-direction: column; gap: 4px; padding-right: 11px; padding-left: 11px; }
@@ -325,4 +372,6 @@
   .footer { align-items: flex-start; flex-direction: column; }
   .footer nav { width: 100%; }
   .footer nav button { flex: 1; }
+  .terminalSummary { grid-template-columns: 1fr; }
+  .terminalWorkspace { height: 900px; padding: 10px; }
 }
