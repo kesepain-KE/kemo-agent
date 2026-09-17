@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.8-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.9-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,21 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.8`
+Current version: `1.2.9`
+
+### 1.2.9 update
+
+This release focuses on memory evolution, session lifecycle and write reliability.
+
+- Memory fragments are now split into two granularity classes: profile and trait memories may merge and update within the same dimension, while facts and rules stay as minimal fragments. The criterion is whether a fragment still stands on its own after being separated. Extraction counts independent facts rather than conversation rounds, and the per-round ceiling is raised.
+- When a promotion would exceed the granularity ceiling of the target tier, the fragment is split into several children inside a single transaction: children inherit the original expiry, start with zero weight, produce no weighting events, and any invalid child rolls the whole batch back while keeping the source. Fragment merging now only happens between updated versions of the same fact, and a merge never crosses the ceiling, which prevents endless split-and-merge cycles.
+- When a user actively creates or edits a skill, related memories are surfaced with a prompt asking whether to merge; memories are kept by default. Background skill creation stays silent.
+- CLI exit and Cron task finalisation now close their sessions and register memory extraction. Previously only Web, App and external message routes closed sessions, so CLI and Cron conversations hung forever and never reached memory.
+- A new idle session sweep system task closes sessions untouched for more than a day. Running, queued, locked sessions and those holding a Web lease are skipped, and memory extraction is always queued before closing.
+- The runtime workspace now lives in a bounded in-process cache; each round commits only to the archive. A missing cache entry is rebuilt on demand from the archive tail, and cross-process writes invalidate stale entries through a version fence. Long conversations no longer rewrite the full body every round, which removes quadratic disk writes.
+- Window trimming now detects the shifted case where the old tail becomes the new prefix, deleting only the dropped head and appending the new tail, and falls back to a full table rebuild when the shift cannot be identified safely.
+- Fixed fragment misalignment in the Web expand and perception injection preview. The preview used to assemble its own fragment and slice with a cumulative cursor, which was shorter than the real fragment by the framework header lines, so every block after the first rendered the tail of its predecessor. Fragment positions now come from the authoritative side and the preview only looks them up by identifier.
+- The runtime log panel moved to a card layout and expands its available width on wide screens. Terminal logs became a summary card plus read-only console with a responsive layout. Terminal log entries now separate standard output from standard error and add loading window and item counts while staying redacted.
 
 ### 1.2.8 update
 

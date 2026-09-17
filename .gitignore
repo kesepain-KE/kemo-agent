@@ -94,3 +94,4 @@ shared_skills/*
 # Message outbound — keep empty folder only
 message/out/*
 !message/out/.gitkeep
+*.bak.*
