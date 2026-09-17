@@ -46,7 +46,7 @@ kemo-agent/
   → 人格、子代理、插件、技能、知识索引、记忆、计划、拓展、感知拼接
   → Provider 与工具循环
   → 运行中引导在安全边界追加文本或多模态资产
-  → 用户级 SQLite archive 完整归档 + runtime 可裁剪上下文窗口
+  → 用户级 SQLite archive 完整归档 + 有界进程内 runtime 上下文工作区
   → 记忆、计划和后台维护管线
 ```
 
@@ -73,10 +73,10 @@ kemo-agent/
 |------|------|
 | `prompt-authoring-standard.md` | 提示词分层、全局/用户默认人格、操作手册、知识索引、插件提示词规范、技能/拓展/感知定义、按需读取来源、健康快照与数据/指令边界 |
 | `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同 |
-| `builtin-expansions.md` | 内置 Kemo 网关状态拓展和 Kemo Graph 外挂文档站边界 |
+| `builtin-expansions.md` | 内置 Kemo 网关状态拓展；Kemo Graph 图谱/实体/缓存/日志/维护/项目与文档组织边界 |
 | `provider-reliability.md` | Provider 工具调用完整性、网络恢复、SSE 续传和取消边界；含 Kemo 1.0 双仓库共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与有界输出前重试 |
 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
-| `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；临时重要记忆生命周期；Cron 历史默认 7 天保留；Web 启动一次性旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
+| `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存、跨进程版本校验和尾部重建；记忆碎片粒度分类（A 类画像可合并 / B 类事实最小碎片）；晋升时超限必拆（A 类 1000 字、B 类 100 字，不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；Cron 历史默认 7 天保留；Web 启动一次性旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
 | `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
 | `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级；`cron.history_retention_days` 及全局配置 API |
@@ -84,7 +84,8 @@ kemo-agent/
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
 | `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南 |
-| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、消息跟进队列与本轮引导/下一轮发送、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复 |
+| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、会话生命周期兜底扫描 |
+| `frontend-conventions.md` | Web 前端样式组织约定与调试经验：CSS Module 与主题变量、变量链断裂（别名宿主未挂载导致声明整条失效）、投影被父容器裁切、滚动条、改样式后的验证步骤、文案与 DOM 契约 |
 | `project-introduction.md` | 项目定位、核心能力、部署与使用入口 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 

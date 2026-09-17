@@ -9,13 +9,13 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "schema_version": 1,
   "components": {
-    "core": {"version": "1.2.8"},
-    "agents": {"version": "1.2.8"},
-    "plugins": {"version": "1.2.8"},
-    "web": {"version": "1.2.8"}
+    "core": {"version": "1.2.9"},
+    "agents": {"version": "1.2.9"},
+    "plugins": {"version": "1.2.9"},
+    "web": {"version": "1.2.9"}
   }
 }
 ```

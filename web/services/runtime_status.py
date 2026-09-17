@@ -5,23 +5,29 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from provider.protocol.models import (
+from provider.protocol.models import (  # noqa: F401 - runtime_status_aggregate facade
     normalize_kemo_reasoning_effort,
     normalize_reasoning_effort,
 )
-from run.config import load_config
+from run.config import load_config  # noqa: F401 - runtime_status_aggregate facade
 from run.context import (
     ContextPolicy,
     build_context_snapshot,
-    estimate_text_tokens,
+    estimate_text_tokens,  # noqa: F401 - runtime_status_aggregate facade
     select_context,
 )
 from run.context import build_summary_message, read_summary_cache
 from run.scheduler import CronStore
-from run.history import empty_window, find_window, load_window, runtime_window_path
-from run.history import list_windows as list_history_windows, window_exists
+from run.history import (
+    empty_window,
+    find_window,
+    load_runtime_window,
+    load_window,
+    runtime_window_path,
+)
+from run.history import list_windows as list_history_windows
 from run.infra import LogStore
-from run.memory import MemoryStore
+from run.memory import MemoryStore  # noqa: F401 - runtime_status_aggregate facade
 from run.config import build_prompt_bundle
 from run.tools import apply_runtime_tool_policy, discover_tools
 from web.constants import _BEIJING
@@ -173,12 +179,14 @@ class RuntimeStatusServiceMixin:
             )
             runtime_window = archive
             calculation_source = "new_session_recalculated"
-            if selected and window_exists(runtime_path):
-                runtime_window = load_window(runtime_path)
-                calculation_source = "runtime_recalculated"
-            elif selected:
-                calculation_source = "archive_recalculated"
             policy = ContextPolicy.from_config(config)
+            if selected:
+                runtime_path, runtime_window = load_runtime_window(
+                    directory,
+                    archive,
+                    max_rounds=policy.max_rounds,
+                )
+                calculation_source = "runtime_recalculated"
             if prompt_bundle is None:
                 prompt_bundle = build_prompt_bundle(
                     self.root,
