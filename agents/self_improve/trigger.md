@@ -42,7 +42,7 @@
   2. 汇总候选后只调用一次 memory_manage `search_many tier=all` 批量搜索匹配；每项使用 2～4 个空格分隔的核心关键词，不提交完整句子。单批超过 20 个查询时分批，禁止逐候选、逐层串行搜索
   3. 命中: 依据 `match_score`、`matched_terms` 和返回正文核对语义；确认同一事实后复制已有文件名返回同名 upsert 候选，由 MemoryStore 依据 last_weight_date 每天最多+1。单个公共词命中不得直接复用
   4. 未命中: seven_days 创建新碎片，weight=0
-  5. 每个 upsert 必须携带 `durable=true` 与 `evidence`；单轮最多 2 条，批量最多 5 条
+  5. 每个 upsert 必须携带 `durable=true` 与 `evidence`；**条数按独立事实计算，不按对话轮数折算**。一个事实一条碎片，识别出几个事实就返回几条，禁止为满足条数上限而把不同事实合并进同一文件。单轮上限 6 条，单批上限由 `memory.extraction_max_candidates_per_batch` 控制
   6. 没有合格信息时返回空 candidates[]
 
 权重规则: 仅本模式依据用户原文命中可加权，每天最多+1，通过 last_weight_date（日期字符串）比较。Prompt 注入、查看和检索不加权。
@@ -59,10 +59,16 @@
 输入: { trigger: "memory_promotion", promotions: [{from_tier, to_tier, filename, ...}] }
 
 流程:
+  通用前置（两种路径都执行）:
+    0. 超限检查：正文超出类型上限（A 类画像 1000 字 / B 类事实 100 字）时，先产出拆分决策再晋升。
+       按 A 类子主题、B 类独立事实拆成多条；不设总纲；就地留在目标档位；
+       子碎片继承 expires_at 与 tier_entered_at；权重按新档位归零；不产生加权事件；只给决策。
+
   7d→30d / 30d→180d:
     1. 按目标层分组，通过 memory_manage `search_many tier=<目标层> include_content=true` 批量查询相似碎片；禁止调用 list/get 或扫描整层
-    2. 相似 → 返回 merged_with + 完整融合 content；无相似 → merged_with=null
-    3. cron 根据决策在 SQLite 事务内更新或融合表行，来源删除，目标 weight=0，重设 expires_at
+    2. **仅当命中的是同一事实的更新版时才融合**（例："生活费 1500→2000"）；主题相近但事实不同的碎片各自独立成条，不融合 → merged_with=null
+    3. **融合结果永不跨越上限**（A 类 1000 字 / B 类 100 字）；到上限即停止合并，稳定在「多条、各自达标」，避免拆了又合的震荡
+    4. cron 根据决策在 SQLite 事务内更新、融合或按拆分创建多条表行；拆分时来源删除，目标 weight=0，并继承源 expires_at 与 tier_entered_at
 
   180d→permanent:
     1. 判断是否为工作记忆

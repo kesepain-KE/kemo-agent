@@ -17,6 +17,7 @@ from cron.scheduler import (
 from plugins.skill_creater.tool import run as run_skill_creater
 from run.agents import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore, normalize_memory_filename
+from run.memory.store import connection as memory_connection
 from tests.support.memory_db import update_fragment_metadata
 from run.memory import extract_compressed_round_memory
 
@@ -416,6 +417,131 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             store.get_entry("one_month", target)["content"],
             "merged semantic fact",
         )
+
+    def test_due_scan_atomically_splits_oversized_promotion(self) -> None:
+        now = datetime(2026, 9, 16, tzinfo=timezone.utc)
+        source = self._seed(
+            "one_month",
+            "oversized-profile",
+            content="甲" * 1500,
+            weight=10,
+            expires_at=now,
+        )
+        store = MemoryStore(self.root, "alice", CONFIG)
+        before = store.get_entry("one_month", source)
+        with memory_connection(self.root, "alice", write=True) as database:
+            source_row = database.execute(
+                "SELECT id FROM memory_fragments WHERE filename_key=?",
+                (source.casefold(),),
+            ).fetchone()
+            database.execute(
+                "INSERT INTO memory_weight_events(fragment_id, evidence_date, reason, created_at) "
+                "VALUES(?, ?, ?, ?)",
+                (int(source_row["id"]), "2026-09-16", "test", now.isoformat()),
+            )
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": "one_month",
+                            "to_tier": "half_year",
+                            "filename": source,
+                            "merged_with": "ignored-because-split.md",
+                            "split_into": [
+                                {"filename": "用户身份与背景", "content": "甲" * 800},
+                                {"filename": "用户审美与偏好", "content": "乙" * 700},
+                            ],
+                        }
+                    ]
+                )
+
+        with patch("cron.review_due.AgentRunner", Runner), self.assertLogs(
+            "cron.review_due", level="WARNING"
+        ):
+            result = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+
+        self.assertEqual(result["applied"], [source])
+        self.assertEqual(result["promotions"][0]["split_count"], 2)
+        self.assertIsNone(store.get_entry("one_month", source))
+        children = store.load_tier("half_year")
+        self.assertEqual(len(children), 2)
+        self.assertTrue(all(item["weight"] == 0 for item in children))
+        self.assertTrue(
+            all(item["expires_at"] == before["expires_at"] for item in children)
+        )
+        self.assertTrue(
+            all(
+                item["tier_entered_at"] == before["tier_entered_at"]
+                for item in children
+            )
+        )
+        with memory_connection(self.root, "alice") as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM memory_weight_events").fetchone()[0],
+                0,
+            )
+
+    def test_split_promotion_suffixes_conflicts_without_overwrite(self) -> None:
+        now = datetime(2026, 9, 16, tzinfo=timezone.utc)
+        source = self._seed(
+            "one_month", "source-profile", content="source", weight=10, expires_at=now
+        )
+        existing = self._seed(
+            "half_year", "用户身份与背景", content="keep me", weight=1,
+            expires_at=now + timedelta(days=1),
+        )
+        store = MemoryStore(self.root, "alice", CONFIG)
+        location = store.locate_in_tier("one_month", source)
+
+        created = store._split_promote_location(
+            location,
+            "half_year",
+            now,
+            [
+                {"filename": "用户身份与背景", "content": "new identity"},
+                {"filename": "用户身份与背景", "content": "new preference"},
+            ],
+        )
+
+        self.assertEqual(
+            created,
+            ["用户身份与背景-2.md", "用户身份与背景-3.md"],
+        )
+        self.assertEqual(store.get_entry("half_year", existing)["content"], "keep me")
+        self.assertIsNone(store.get_entry("one_month", source))
+
+    def test_split_promotion_rolls_back_entire_batch_on_invalid_child(self) -> None:
+        now = datetime(2026, 9, 16, tzinfo=timezone.utc)
+        source = self._seed(
+            "one_month", "rollback-source", content="source", weight=10, expires_at=now
+        )
+        store = MemoryStore(self.root, "alice", CONFIG)
+        before = store.get_entry("one_month", source)
+        location = store.locate_in_tier("one_month", source)
+
+        with self.assertRaisesRegex(Exception, "内容不能为空"):
+            store._split_promote_location(
+                location,
+                "half_year",
+                now,
+                [
+                    {"filename": "valid-child", "content": "valid"},
+                    {"filename": "invalid-child", "content": ""},
+                ],
+            )
+
+        self.assertEqual(store.get_entry("one_month", source), before)
+        self.assertEqual(store.load_tier("half_year"), [])
 
     def test_promotion_system_task_registration_is_idempotent(self) -> None:
         first = ensure_memory_promotion_task(self.root)

@@ -30,7 +30,7 @@
     "extraction_mode": "compression_only",
     "recovery_max_rounds_per_scan": 10,
     "extraction_batch_rounds": 5,
-    "extraction_max_candidates_per_batch": 10,
+    "extraction_max_candidates_per_batch": 30,
     "temporary_injection_limits": {
       "half_year": 100,
       "one_month": 200,
@@ -69,6 +69,7 @@
   "cron": {
     "enabled": true,
     "history_retention_days": 7,
+    "session_idle_close_seconds": 86400,
     "poll_interval": 30,
     "avoid_congestion": true,
     "congestion_threshold_ratio": 0.2

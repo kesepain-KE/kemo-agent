@@ -484,6 +484,98 @@ class SqliteMemoryStore:
                 target_filename=target_filename,
             )
 
+    def _split_promote_location(
+        self,
+        location: Any,
+        target_tier: str,
+        current: datetime,
+        split_into: list[dict[str, Any]],
+    ) -> list[str]:
+        """Atomically replace one promoted fragment with several child rows.
+
+        A split is a structural rewrite of the same memory rather than a new
+        lifecycle.  Child rows therefore inherit the source expiry and tier
+        entry timestamps, start at weight zero, and receive no weight events.
+        Every child is validated before the source row is removed; any later
+        SQLite or validation failure rolls the whole write transaction back.
+        """
+        api = _memory_api()
+        if target_tier not in api.TIERS:
+            raise api.MemoryError(f"未知记忆档位：{target_tier}")
+        if not isinstance(split_into, list) or not split_into:
+            raise api.MemoryError("拆分晋升至少需要一个子碎片")
+
+        with self._lock, connection(self.root, self.user, write=True) as database:
+            row = self._row_by_filename(
+                database, location.filename, tier=location.tier
+            )
+            if row is None:
+                raise api.MemoryError(f"晋升来源不存在：{location.filename}")
+            if str(row["tier"]) == "permanent":
+                raise api.MemoryError("永久记忆不能继续晋升")
+
+            source_id = int(row["id"])
+            reserved_keys = {
+                str(item["filename_key"])
+                for item in database.execute(
+                    "SELECT filename_key FROM memory_fragments WHERE id!=?",
+                    (source_id,),
+                ).fetchall()
+            }
+            prepared: list[tuple[str, str]] = []
+
+            def unique_name(raw_name: Any) -> str:
+                requested = api.normalize_memory_filename(raw_name)
+                stem = requested[:-3]
+                candidate = requested
+                index = 2
+                while _filename_key(candidate) in reserved_keys:
+                    suffix = f"-{index}"
+                    candidate = api.normalize_memory_filename(
+                        f"{stem[: max(1, api.FILENAME_MAX_CHARS - len(suffix))]}{suffix}"
+                    )
+                    index += 1
+                reserved_keys.add(_filename_key(candidate))
+                return candidate
+
+            for child in split_into:
+                if not isinstance(child, dict):
+                    raise api.MemoryError("拆分晋升的子碎片必须是对象")
+                filename = unique_name(child.get("filename"))
+                content = api._normalise_text(child.get("content"))
+                if not content:
+                    raise api.MemoryError("拆分晋升的子碎片内容不能为空")
+                if api.contains_sensitive_credential(content):
+                    raise api.MemoryError("拆分晋升的子碎片包含疑似敏感凭据")
+                prepared.append((filename, content))
+
+            # Delete only after every child has passed validation.  The
+            # foreign-key cascade also removes the source's old weight events.
+            database.execute("DELETE FROM memory_fragments WHERE id=?", (source_id,))
+            for filename, content in prepared:
+                database.execute(
+                    """
+                    INSERT INTO memory_fragments(
+                        filename, filename_key, tier, content, content_hash,
+                        weight, created_at, content_updated_at, last_used_at,
+                        last_weight_date, tier_entered_at, expires_at
+                    ) VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        filename,
+                        _filename_key(filename),
+                        target_tier,
+                        content,
+                        _hash(content),
+                        row["created_at"],
+                        api.iso(current),
+                        row["last_used_at"],
+                        row["tier_entered_at"],
+                        row["expires_at"],
+                    ),
+                )
+            return [filename for filename, _content in prepared]
+
     def _load_operation(
         self, database: sqlite3.Connection, operation_id: str
     ) -> dict[str, Any] | None:

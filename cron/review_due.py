@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ class MemoryPromotionError(RuntimeError):
 PROMOTION_BATCH_SIZE = 20
 PERMANENT_PROMOTION_BATCH_SIZE = 8
 MAX_CONSECUTIVE_BATCH_FAILURES = 2
+_LOGGER = logging.getLogger(__name__)
 
 
 def _promotion_batches(
@@ -56,7 +58,7 @@ def _promotion_batches(
 def _promotion_summary(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    return {
+    summary = {
         key: value.get(key)
         for key in (
             "from_tier",
@@ -67,6 +69,9 @@ def _promotion_summary(value: Any) -> dict[str, Any] | None:
         )
         if key in value
     }
+    split_into = value.get("split_into")
+    summary["split_count"] = len(split_into) if isinstance(split_into, list) else 0
+    return summary
 
 
 def scan_and_promote(
@@ -208,8 +213,22 @@ def scan_and_promote(
                 if location is None:
                     batch_applied.append(requested["filename"])
                     continue
+                split_into = decision.get("split_into")
                 merged_with = decision.get("merged_with")
-                if merged_with:
+                if isinstance(split_into, list) and split_into:
+                    if merged_with:
+                        _LOGGER.warning(
+                            "Memory promotion decision contains both split_into and "
+                            "merged_with; split_into takes precedence for %s",
+                            requested["filename"],
+                        )
+                    store._split_promote_location(
+                        location,
+                        requested["to_tier"],
+                        current,
+                        split_into,
+                    )
+                elif merged_with:
                     merged_content = decision.get("content")
                     if (
                         not isinstance(merged_content, str)

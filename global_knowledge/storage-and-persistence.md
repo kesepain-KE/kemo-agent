@@ -10,19 +10,25 @@
 
 | 表 | 职责 |
 |---|---|
-| `history_windows` | archive 完整归档与 runtime 可裁剪上下文窗口；保留 think、tool、items、data 的逻辑边界，runtime 仍内含完整 text 工作区 |
+| `history_windows` | archive 完整权威归档；旧版 runtime 行仅作为兼容快照保留，不再在每轮终态重写 |
 | `history_sessions` | 会话卡片、生命周期、运行态、摘要与记忆任务状态 |
 | `history_active_sessions` | Web、CLI 和外部消息入口的活跃会话绑定 |
 | `history_web_leases` | schema v6 新增；每用户数据库内按 session/client 存放浏览器在线到期时间，供跨 Web 进程安全判断空会话离线 |
 | `history_deleted_sessions` | 已删除会话的持久删除栅栏，阻止迟到 Run 重新写入 |
 | `history_deleted_windows` | 已删除物理窗口的 tombstone，阻止迟到 Run 复用旧窗口名；正常新窗口仍可使用当前会话 generation |
 | `history_messages` | archive 用户/助手正文的唯一权威逐消息存储，用于还原正文、分页和内容搜索；避免与 archive `text_json` 重复保存 |
-| `history_rounds` | archive/runtime 的逐轮思考、工具、Item 与用量指标；正常提交只追加新轮，压缩或编辑旧轮次才重建 |
-| `history_context_summaries` | runtime 窗口的增量上下文压缩摘要、覆盖轮次与记忆提取元数据 |
+| `history_rounds` | archive 的逐轮思考、工具、Item 与用量指标；兼容旧 runtime 快照行，正常提交只追加 archive 新轮 |
+| `history_context_summaries` | 独立于 runtime 行的增量上下文压缩摘要、覆盖轮次与记忆提取元数据 |
 | `message_processed_messages` | 外部消息的领取、终态和错误；用于跨重启幂等 |
 | `history_meta` | schema 与注册表修订元数据 |
 
-数据库启用 WAL、外键检查、5 秒 busy timeout 和 `synchronous=NORMAL`。schema v3 会把旧 archive `text_json` 正文迁移到 `history_messages`，并把 archive/runtime 的 `round_metrics`、think、tool、items 大分区迁移到 `history_rounds`；schema v4 增加 `history_deleted_sessions` 删除栅栏；schema v5 增加 `history_deleted_windows` 物理窗口 tombstone。窗口 JSON 列只保留小型存储引用。正常追加一轮时只插入新增消息后缀和一个新增 round 行；只有删除、裁剪或编辑旧轮次时才重建对应窗口的增量行。每轮终态的 archive、runtime、上下文摘要、会话索引和活跃绑定在同一个 SQLite 事务中提交，不存在跨表半提交状态；archive 与 runtime 的逻辑路径仍由运行时作为稳定标识使用，但不代表磁盘目录真实存在。
+数据库启用 WAL、外键检查、5 秒 busy timeout 和 `synchronous=NORMAL`。schema v3 会把旧 archive `text_json` 正文迁移到 `history_messages`，并把 archive/runtime 的 `round_metrics`、think、tool、items 大分区迁移到 `history_rounds`；schema v4 增加 `history_deleted_sessions` 删除栅栏；schema v5 增加 `history_deleted_windows` 物理窗口 tombstone。窗口 JSON 列只保留小型存储引用。正常追加一轮时只插入 archive 的新增消息后缀和一个新增 round 行；只有删除、撤回或编辑旧轮次时才重建对应 archive 增量行。每轮终态的 archive、上下文摘要、会话索引和活跃绑定仍在同一个 SQLite 事务中提交；事务成功后才更新进程内 runtime 工作区。archive 与 runtime 的逻辑路径继续作为稳定标识使用，但 runtime 路径默认只标识缓存键和摘要归属，不要求存在对应磁盘行。
+
+### Runtime 工作区内存缓存
+
+runtime 工作区是 archive 最近轮次的派生视图，不再作为每轮持久化主副本。进程内缓存最多保留 64 个窗口、单项最多 8 MiB，使用 LRU 淘汰，所有读取返回深拷贝。缓存版本由 archive 的 `updated_at + rounds` 组成；Web、CLI 或 Cron 其他进程提交新 archive 后，版本不匹配会立即丢弃旧缓存并从数据库重建，不能仅因内存中存在条目就继续使用。
+
+加载顺序为：匹配版本的进程缓存 → 带匹配 archive 版本的旧磁盘 runtime 快照 → 直接从 archive SQL 表只读取最近 `agents.max_rounds` 轮。尾部重建会把绝对轮号转换为 runtime 本地 `1..N`，并在 `context.round_offset` 保存前置轮数，不会为重建加载完整长会话。旧 runtime 行不主动删除，也不再逐轮更新；版本不匹配时自然忽略。清空、删除、批量删除、重命名、底层窗口删除和 Cron 生命周期清理都会失效相关缓存，删除栅栏仍可阻止迟到 Run 从内存复活会话。
 
 ### 性能边界
 
@@ -91,13 +97,26 @@ Web 应用 lifespan 管理一个独立生命周期线程。每次 Web 后端启�
 模型；任务会一直保留，直到带 MaintenanceScheduler 的 RuntimeHost 可用。此边界避免 Web 清理线程绕过
 统一模型并发、取消、凭据和记忆幂等规则。
 
+### 非 Web 会话的生命周期兜底
+
+CLI 在单次请求、交互退出、KeyboardInterrupt 或处理异常后，都会 best-effort 地先登记
+`queue_memory_extraction`，再调用 `close_session`；收尾异常被隔离，不改变 CLI 原始退出码。Cron 的
+`exec_mode=agent` 主智能体任务在 `handle_request` 返回或抛错后执行相同收尾，来源固定为
+`background:cron:<task_id>`；`subagent` 与 `function` 分支不创建伪造的主会话。
+
+RuntimeHost 每小时调度系统任务 `session_lifecycle_sweep`，默认处理闲置超过 24 小时的所有来源会话，
+单轮最多 50 个。`cron.session_idle_close_seconds` 只能在全局配置中覆盖阈值（最小 3600 秒）；运行/排队/
+停止中的会话、未过期 `history_web_leases` 保护的 Web 会话、无法确认租约状态或无法取得会话锁的会话
+都会跳过。扫描只关闭逻辑会话并写入记忆提取队列，不删除 archive/runtime 窗口、消息或历史索引；每个
+候选的异常单独记录，后续候选继续执行。
+
 ### 运维规则
 
 - 不直接编辑数据库或把 JSON 文件放入 history 目录尝试恢复历史。
 - 删除会话必须同时清理 session、window、message 和 active 记录，应调用框架 API。框架会额外留下短小的 `history_deleted_sessions` 栅栏，防止删除发生时已经在运行的旧 Run 迟到提交；只有显式重新预留同一逻辑 ID 时才会清除栅栏。
 - 运行中备份使用 SQLite backup API 或先完整停止框架；只复制 `history.sqlite3` 而漏掉 `-wal` 可能得到不完整快照。
 - schema v3/v4/v5 迁移释放的旧 JSON 页会先进入 SQLite freelist 并被后续写入复用；为避免升级时长时间独占数据库，框架不会自动执行 `VACUUM`。确需立即缩小物理文件时，应停止框架、完成备份后再由运维显式执行。
-- 上下文摘要不是历史正文，但与 runtime 窗口裁剪必须在同一事务提交；不要重新创建 `context_summary.json`。
+- 上下文摘要不是历史正文；终态提交时与 archive 和会话索引在同一事务更新，runtime 内存工作区只在事务成功后切换。不要重新创建 `context_summary.json`。
 - schema 不兼容时应明确失败或执行专用迁移，禁止静默混读两套历史格式。
 
 ### 定时任务历史的自动清理
@@ -141,6 +160,48 @@ Maintenance 每个用户、每个五分钟窗口最多处理 100 个候选。只
 - 永久层不累计权重且无到期时间，普通非明确候选不能覆盖永久正文。
 
 Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为只读操作，不写加权事件。只有保存、手动压缩、Token 超限压缩等用户对话历史整理管线能提供临时记忆加权证据。
+
+### 碎片粒度与分类
+
+`self_improve` 判定单条记忆的粒度时先分两类，再决定该条能否合并。
+
+**唯一判据**：拆开后单条还能独立理解吗？跨条目的关系会不会断？
+
+| 类型 | 适用 | 粒度规则 |
+|---|---|---|
+| **A 类：画像与特征** | 描述“用户是谁”的长期特征：人格、精神状态、审美偏好、经济状况、学习与技能、项目与工作方式、环境与设备 | 按维度组织，**同一维度内可随对话持续合并更新**，单文件 ≤ 1000 字（与融合硬上限一致），**跨维度禁止合并** |
+| **B 类：事实与规则** | 具体决定、规则、参数、约定和结论 | 一个事实一条碎片，正文 ≤ 100 字（确需上下文可放宽到 150 字） |
+
+A 类的维度表。命中关键词**只用于维度归类，不用于判定能否合并**：
+
+| 维度 | 参考关键词 |
+|---|---|
+| 身份与背景 | 身份、年龄、学历、家庭、所在地、作息 |
+| 人格与精神结构 | 人格、精神状态、心本、灵宝、自我认知、哲学观 |
+| 审美与偏好 | 喜欢、不喜欢、审美、风格、口味、忌讳 |
+| 经济状况 | 生活费、消费、成本、订阅、余额 |
+| 学习与技能 | 学习、掌握、进度、教程、新手 |
+| 项目与工作方式 | 项目、架构偏好、工作方式、流程 |
+| 环境与设备 | 环境、设备、工具链、硬件、系统 |
+
+出现表中没有的新维度时新建独立文件，不得塞进已有维度。B 类文件名只覆盖该事实，禁止「xxx 汇总」「xxx 总览」式容器标题。
+
+#### 晋升时超限拆分
+
+记忆晋升不是把碎片内容简单累加搬运，而是让它以合适粒度进入新档位。碎片晋升前检查正文长度，**超出该类型上限（A 类 1000 字 / B 类 100 字）时必须先拆开再存进目标档位**：
+
+- A 类按维度内**子主题**拆，**不设总纲**（同层内后续会重新融合，不必预留汇总位）；B 类按**独立事实**拆，一个事实一条。
+- 子碎片**就地留在目标档位**，不跨层移动；需要换层时由用户主动调整。
+- 继承源碎片的 `expires_at` 与 `tier_entered_at`，**不重算时效**——拆分是同一份记忆的切分，不是新记忆。
+- 权重按新档位规则从 0 起算（与直接晋升一致）；拆分本身**不产生加权事件**。
+- `split_into` 与 `merged_with` 同时出现时优先执行拆分并记录告警。子碎片文件名继续受全局 `filename_key` 唯一约束；已有同名不会被覆盖，而是按 `-2`、`-3` 后缀生成可用名称。
+- **防震荡**：拆分后同层内允许再次融合，但融合结果**永不跨越上限**；到上限即停止合并，稳定在「多条、各自达标」。
+- 只返回决策，多条落盘由 cron 在同一事务内完成。
+- 该拆分挂在**晋升链路**（action=`memory_promotion`）上，不并入热画像任务 `daily_consolidate`。
+
+**计数口径**：提取按独立事实计数，不按对话轮数折算 —— 一轮中识别出几个事实就产出几条候选，单轮上限 6 条，单批总量受 `memory.extraction_max_candidates_per_batch` 约束。晋升融合只在同一事实的更新版之间进行（如“生活费 1500→2000”）；主题相近但事实不同的碎片各自独立成条，不得融合。
+
+文件名提示词建议 ≤ 20 字符，运行时字段上限 `FILENAME_MAX_CHARS` 为 50；两者刻意不对称，为 LLM 输出不稳定留余量，不得强行对齐。
 
 ### 搜索命中与每日加权
 
@@ -323,8 +384,9 @@ Prompt 注入、Web 浏览、`memory_manage` 搜索和用户主动查看均为�
 ### 对话与记忆
 
 - archive 正文由 `history_messages` 唯一保存；逐轮的思考、工具、Item 与指标由 `history_rounds` 保存。schema v3 会自动迁移旧窗口 JSON，不丢失消息或轮次分区；schema v4 会创建删除会话栅栏，schema v5 会创建物理窗口 tombstone，不需要人工改库。
-- 正常提交新一轮只追加新增消息后缀和一个 round 行；编辑、撤回、裁剪旧正文或压缩 runtime 时才显式重建对应窗口的增量行。
-- 一轮终态的 archive、runtime、上下文摘要、会话索引与活跃绑定在同一个 SQLite 事务中提交。任一部分失败会整体回滚。
+- 正常提交新一轮只追加 archive 的新增消息后缀和一个 round 行；编辑或撤回旧正文才显式重建对应 archive 增量行。兼容 runtime 快照若被显式重写，裁剪位移会复用至少 80% 的旧行，只迁移保留尾部并追加新尾行。
+- 一轮终态的 archive、上下文摘要、会话索引与活跃绑定在同一个 SQLite 事务中提交。任一持久化部分失败会整体回滚；runtime 缓存只在事务成功后更新。
+- 普通终态已经写入 `run_state=idle` 时，清理阶段重复设置相同状态和相同 Run ID 会直接返回，不再产生第二次会话索引写事务；Cron 完成时间和租约分支不参与该短路。
 - 记忆完成、失败、排队等状态只更新 archive `data_json` 和会话索引，不重写消息、思考、工具与 Item 大分区。
 
 ### 不进入内存延迟的边界
