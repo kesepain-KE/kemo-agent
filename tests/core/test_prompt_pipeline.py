@@ -1258,6 +1258,56 @@ class PromptPipelineTests(unittest.TestCase):
             status["control_file"], "global_expand/light/expand_control.md"
         )
 
+    def test_expand_piece_spans_align_for_multiple_modules_in_same_scope(self) -> None:
+        """同一 scope 下多个模块必须各自对齐。
+
+        旧实现用累加游标自行拼片段，第 2 块起会落后并渲染出前一块的尾部；
+        本用例刻意放两个同 scope 模块，单个模块时旧实现也会"碰巧正确"。
+        """
+        _, root, _ = self.make_root()
+        self.write_expand_module(root, "global", "alpha", input_text="ALPHA_STATE")
+        self.write_expand_module(root, "global", "beta", input_text="BETA_STATE")
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_expand(max_chars=20000)
+
+        self.assertEqual(
+            [piece.key for piece in selection.pieces],
+            ["global:alpha", "global:beta"],
+        )
+        for piece in selection.pieces:
+            fragment = selection.fragment(piece.key)
+            self.assertTrue(fragment.startswith(f"[{piece.key}]\n"))
+            self.assertEqual(fragment, selection.text[piece.start:piece.end])
+        # 相邻块不重叠，且第二块起点紧接第一块终点加分隔符
+        first, second = selection.pieces
+        self.assertEqual(second.start, first.end + 2)
+        # 按顺序拼接可还原全文
+        self.assertEqual(
+            "\n\n".join(selection.fragment(p.key) for p in selection.pieces),
+            selection.text,
+        )
+        # 未注入的 key 返回空串
+        self.assertEqual(selection.fragment("global:missing"), "")
+
+    def test_expand_piece_spans_clamp_at_truncation_and_empty_budget(self) -> None:
+        _, root, _ = self.make_root()
+        self.write_expand_module(root, "global", "alpha", input_text="A" * 400)
+        self.write_expand_module(root, "global", "beta", input_text="B" * 400)
+        registry = load_prompt_source_registry(root, "alice")
+
+        truncated = registry.select_expand(max_chars=300)
+        self.assertTrue(truncated.truncated)
+        self.assertGreaterEqual(len(truncated.pieces), 1)
+        for piece in truncated.pieces:
+            self.assertLess(piece.start, len(truncated.text))
+            self.assertLessEqual(piece.end, len(truncated.text))
+        # 被截断的最后一块必须 clamp 到文本末尾，而不是越界或错位
+        self.assertEqual(truncated.pieces[-1].end, len(truncated.text))
+
+        empty = registry.select_expand(max_chars=0)
+        self.assertEqual(empty.text, "")
+        self.assertEqual(empty.pieces, ())
+
     def test_expand_switches_health_and_missing_control_file_are_independent(
         self,
     ) -> None:
@@ -1384,6 +1434,27 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("SECRET_HELPER", selection.text)
         self.assertNotIn("SECRET", selection.text)
         self.assertNotIn("ROOT", selection.text)
+
+    def test_perception_piece_spans_align_for_multiple_active_modules(self) -> None:
+        """感知侧同理：多个 active 模块必须各自对齐，第 2 块起不再错位。"""
+        _, root, _ = self.make_root()
+        self.write_sense_module(root, "sensors", "SENSORS_STATE")
+        self.write_sense_module(root, "cameras", "CAMERAS_STATE")
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_perception(max_chars=20000)
+
+        keys = [piece.key for piece in selection.pieces]
+        self.assertIn("sensors", keys)
+        self.assertIn("cameras", keys)
+        for piece in selection.pieces:
+            fragment = selection.fragment(piece.key)
+            self.assertTrue(fragment.startswith(f"[{piece.key}]\n"))
+            self.assertEqual(fragment, selection.text[piece.start:piece.end])
+        self.assertEqual(
+            "\n\n".join(selection.fragment(p.key) for p in selection.pieces),
+            selection.text,
+        )
+        self.assertEqual(selection.fragment("missing"), "")
 
     def test_perception_invalid_manifests_are_reported_and_skipped(self) -> None:
         _, root, _ = self.make_root()

@@ -17,6 +17,7 @@ from run.config.markdown import scan_markdown_structure
 from run.config.prompt_models import (
     ExpandMeta,
     ExpandSelection,
+    InjectedPiece,
     PerceptionSelection,
     SenseMeta,
     SkillDescriptor,
@@ -711,6 +712,7 @@ class PromptSourceRegistry:
         pieces: list[str] = []
         module_files: list[list[str]] = []
         offsets: list[int] = []
+        piece_keys: list[str] = []
         used = 0
         for scope, module, module_dir, meta in candidates:
             if max_chars == 0:
@@ -764,6 +766,7 @@ class PromptSourceRegistry:
             offsets.append(used + (2 if pieces else 0))
             pieces.append(piece)
             module_files.append(files)
+            piece_keys.append(f"{scope}:{module}")
             used += len(piece) + (2 if len(pieces) > 1 else 0)
         full_text = "\n\n".join(pieces)
         text, truncated = truncate_chars(full_text, max_chars)
@@ -773,6 +776,14 @@ class PromptSourceRegistry:
             for files in module_files[:injected_count]
             for path in files
         )
+        pieces_spans = tuple(
+            InjectedPiece(
+                key=piece_keys[index],
+                start=offsets[index],
+                end=min(offsets[index] + len(pieces[index]), len(text)),
+            )
+            for index in range(injected_count)
+        )
         return ExpandSelection(
             text,
             source_files,
@@ -781,6 +792,7 @@ class PromptSourceRegistry:
             len(pieces),
             injected_count,
             truncated,
+            pieces_spans,
         )
 
     def perception_inventory(
@@ -870,6 +882,7 @@ class PromptSourceRegistry:
         paths: list[Path] = []
         pieces: list[str] = []
         offsets: list[int] = []
+        piece_keys: list[str] = []
         used = 0
         discovered_modules: list[str] = []
         selected_modules: list[str] = []
@@ -919,6 +932,7 @@ class PromptSourceRegistry:
             offsets.append(used + (2 if pieces else 0))
             pieces.append(piece)
             paths.append(meta.data_md_path)
+            piece_keys.append(module.name)
             used += len(piece) + (2 if len(pieces) > 1 else 0)
         configured = [] if allow_modules is None else [
             item for item in allow_modules if item != "*"
@@ -941,6 +955,14 @@ class PromptSourceRegistry:
         full_text = "\n\n".join(pieces)
         text, truncated = truncate_chars(full_text, max_chars)
         injected_count = sum(offset < len(text) for offset in offsets)
+        pieces_spans = tuple(
+            InjectedPiece(
+                key=piece_keys[index],
+                start=offsets[index],
+                end=min(offsets[index] + len(pieces[index]), len(text)),
+            )
+            for index in range(injected_count)
+        )
         return PerceptionSelection(
             text=text,
             source_files=tuple(relative_path(path, self.root) for path in paths[:injected_count]),
@@ -949,6 +971,7 @@ class PromptSourceRegistry:
             original_items=len(pieces),
             injected_items=injected_count,
             truncated=truncated,
+            pieces=pieces_spans,
         )
 
     def selection_diagnostics(self) -> dict[str, Any]:

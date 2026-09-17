@@ -320,8 +320,6 @@ class MessageExpandServiceMixin:
         }
         expands: list[dict[str, Any]] = []
         scope_counts: dict[str, int] = {}
-        injection_cursor = 0
-        has_injection_piece = False
         for scope in ("global", "shared", "user"):
             directory = scope_roots[scope]
             scope_diagnostics = diagnostics.get(scope) or {}
@@ -371,23 +369,13 @@ class MessageExpandServiceMixin:
                 control_injection, control_operation = self._expand_control_sections(
                     control_document
                 )
-                module_piece = self._expand_prompt_piece(
-                    scope=scope,
-                    module_name=module_name,
-                    health=health,
-                    collected_markdown=collected_markdown,
-                    control_injection=control_injection,
-                ) if valid and module_name in selected else ""
-                injected_markdown = ""
-                if module_piece:
-                    piece_start = injection_cursor + (2 if has_injection_piece else 0)
-                    piece_end = piece_start + len(module_piece)
-                    if piece_start < len(selection.text):
-                        injected_markdown = selection.text[
-                            piece_start:min(piece_end, len(selection.text))
-                        ]
-                    injection_cursor = piece_end
-                    has_injection_piece = True
+                # 片段在真实注入文本中的位置由权威侧（prompt_sources）给出，
+                # 预览侧只按 key 取值，不再自己拼片段、不再自己算累加游标。
+                injected_markdown = (
+                    selection.fragment(f"{scope}:{module_name}")
+                    if valid and module_name in selected
+                    else ""
+                )
                 updated_at = max(
                     (float(item.get("updated_at") or 0) for item in files),
                     default=0.0,
@@ -508,31 +496,6 @@ class MessageExpandServiceMixin:
         )
         operation = content[operation_match.end():].strip() if operation_match else ""
         return injection, operation
-
-    @staticmethod
-    def _expand_prompt_piece(
-        *,
-        scope: str,
-        module_name: str,
-        health: dict[str, Any],
-        collected_markdown: str,
-        control_injection: str,
-    ) -> str:
-        parts: list[str] = []
-        if (
-            health.get("open_input")
-            and health.get("input_health") == "正常"
-            and collected_markdown
-        ):
-            parts.append(f"## 数据采集\n{collected_markdown}")
-        if health.get("open_control") and control_injection:
-            parts.append(
-                "## 操控能力\n"
-                f"{control_injection}\n\n"
-                f"调用入口：使用 `expand_call`，传入 `scope={scope}`、"
-                f"`module={module_name}`，具体命令和参数按需读取操作层。"
-            )
-        return f"[{scope}:{module_name}]\n" + "\n\n".join(parts) if parts else ""
 
     def _expand_module_directory(
         self, user: Any, scope: Any, module_name: Any

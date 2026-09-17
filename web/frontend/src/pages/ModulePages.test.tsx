@@ -390,8 +390,8 @@ describe('V16 module pages', () => {
     invalid = true
     fireEvent.click(screen.getByRole('button', { name: '重新读取' }))
     await waitFor(() => expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('已失效'))
-    expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('来源内容已更新。')
-    expect(screen.getAllByText('已失效')).toHaveLength(2)
+    expect(screen.getByRole('status', { name: '临时重要记忆生命周期' })).toHaveTextContent('来源内容已更新')
+    expect(screen.getAllByText('已失效')).toHaveLength(1)
     expect(editor).toHaveValue('unsaved draft')
     invalid = false
     content = 'rebuilt profile'

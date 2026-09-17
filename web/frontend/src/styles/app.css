@@ -609,7 +609,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 
 /* Web authentication gate. */
 .auth-screen { min-height: 100vh; padding: 32px 18px; display: grid; place-items: center; background: radial-gradient(circle at 50% 0%, var(--brand-soft), transparent 42%), var(--bg); color: var(--text); }
-.auth-panel { width: min(760px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 24px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(18px); }
+.auth-panel { width: min(760px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 24px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-panel); backdrop-filter: blur(18px); }
 .auth-brand { display: flex; align-items: center; gap: 11px; }
 .auth-brand > span:last-child, .auth-method-title > span { min-width: 0; }
 .auth-brand strong, .auth-brand small, .auth-method-title strong, .auth-method-title small { display: block; }
@@ -638,7 +638,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .auth-error { border: 1px solid color-mix(in srgb, var(--red) 30%, var(--line)); background: var(--red-soft); color: var(--red); }
 .auth-progress { display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line)); background: var(--brand-soft); color: var(--brand); }
 .auth-foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: .6875rem; text-align: center; }
-.auth-state { min-width: min(420px, calc(100vw - 36px)); padding: 28px; display: grid; justify-items: center; gap: 10px; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); box-shadow: var(--shadow-lg); text-align: center; }
+.auth-state { min-width: min(420px, calc(100vw - 36px)); padding: 28px; display: grid; justify-items: center; gap: 10px; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); box-shadow: var(--shadow-panel); text-align: center; }
 .auth-state span { color: var(--muted); font-size: .75rem; }
 .auth-state button { min-height: 38px; padding: 0 14px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); border-radius: var(--radius-control-lg); background: var(--surface-2); color: var(--text); cursor: pointer; }
 .role-logout { width: calc(100% - 20px); min-height: 36px; margin: 8px 10px 3px; padding: 0 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-2); color: var(--muted); font-size: .75rem; cursor: pointer; }
@@ -758,7 +758,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .pending-attachment-preview img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .pending-attachment-file-icon.audio { color: #8b5cf6; }
 .pending-attachment-file-icon.video { color: #0ea5e9; }
-.pending-attachment-file-icon.file { color: var(--text-muted); }
+.pending-attachment-file-icon.file { color: var(--muted); }
 .pending-attachment-preview:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 30%, transparent); outline-offset: 2px; }
 .pending-attachment-copy { min-width: 0; display: grid; gap: 5px; }
 .pending-attachment-copy strong,
@@ -832,15 +832,22 @@ label > input[type="search"]::-webkit-search-results-decoration {
 }
 .chat-view.welcome-mode .chat-scroll {
   flex: 1 1 0;
-  overflow: hidden;
+  /* 与 .welcome 同理：welcome 模式内容填满、不滚动，不需要裁切；
+     一旦裁切，贴底卡片向外的投影会被齐边切成直角（即「方形阴影」）。 */
+  overflow: visible;
   padding-bottom: 0;
+  /* 首页内容填满且不滚动，外壳圆角由 .content 负责；此处若保留 25px 圆角，
+     贴底卡片的 22px 圆角会落进裁剪弧线内，叠出「双层圆角」。 */
+  border-radius: 0;
 }
 .chat-view.welcome-mode .welcome {
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* 不能裁切：卡片宽度与容器相等，向外的 box-shadow 会被齐边切成直角，
+     看起来像「方形阴影 / 多余的边框」。内容由 flex 压缩控制，不会溢出。 */
+  overflow: visible;
 }
 .chat-view.welcome-mode .welcome-top,
 .chat-view.welcome-mode .active-task-card,
@@ -1014,7 +1021,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 }
 .user-attachment-icon.audio { color: #8b5cf6; }
 .user-attachment-icon.video { color: #0ea5e9; }
-.user-attachment-icon.file { color: var(--text-muted); }
+.user-attachment-icon.file { color: var(--muted); }
 .user-attachment-copy {
   min-width: 0;
   display: grid;
@@ -1027,7 +1034,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   white-space: nowrap;
 }
 .user-attachment-copy strong { font-size: .78rem; }
-.user-attachment-copy small { color: var(--text-muted); font-size: .67rem; }
+.user-attachment-copy small { color: var(--muted); font-size: .67rem; }
 .user-attachment-card > button {
   min-height: 30px;
   display: inline-flex;
@@ -1044,7 +1051,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   background: color-mix(in srgb, var(--surface-elevated) 78%, var(--surface-3));
   box-shadow: none;
 }
-.user-attachment-card.unavailable .user-attachment-icon { color: var(--text-muted); }
+.user-attachment-card.unavailable .user-attachment-icon { color: var(--muted); }
 .bubble p { margin-bottom: .45em; }
 .bubble h1,
 .bubble h2,
@@ -2176,7 +2183,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .route-error-icon { color: var(--danger); }
 .route-error-card strong { font-size: 1.05rem; }
 .route-error-card p { margin: 7px 0; overflow-wrap: anywhere; }
-.route-error-card small { color: var(--text-muted); }
+.route-error-card small { color: var(--muted); }
 .route-error-card button {
   grid-column: 2;
   justify-self: start;
@@ -2230,7 +2237,7 @@ label > input[type="search"]::-webkit-search-results-decoration {
   white-space: nowrap;
 }
 
-.media-artifact-meta small { color: var(--text-muted); }
+.media-artifact-meta small { color: var(--muted); }
 .media-artifact-meta a {
   display: inline-flex;
   flex: 0 0 auto;

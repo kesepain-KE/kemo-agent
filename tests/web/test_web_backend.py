@@ -20,6 +20,7 @@ from PIL import Image
 from unittest.mock import patch
 
 from events import RunEvent
+from run.context import estimate_text_tokens
 from agents._runtime.user_packages import create_user_agent_package
 from provider.protocol.models import ModelCapabilities, ModelCatalogResponse
 from provider.schema import ProviderError
@@ -30,6 +31,7 @@ from run.config import load_config
 from run.history import (
     commit_window,
     empty_window,
+    load_runtime_window,
     load_window,
     runtime_window_path,
     synthesize_items,
@@ -2861,8 +2863,11 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(
             response.json()["content"], [{"type": "text", "text": "retry me"}]
         )
-        for path in (archive_path, runtime_path):
-            rolled_back = load_window(path)
+        rolled_back_windows = [
+            load_window(archive_path),
+            load_runtime_window(archive_path, load_window(archive_path))[1],
+        ]
+        for rolled_back in rolled_back_windows:
             self.assertEqual(rolled_back["data"]["rounds"], 1)
             self.assertEqual(
                 rolled_back["text"]["messages"],
@@ -5731,6 +5736,30 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(lights["whitelisted"])
         self.assertTrue(lights["open_control"])
 
+        # 注入预览必须逐块对齐真实注入文本。旧实现用累加游标自行拼片段，
+        # 其片段比真实片段少框架头部行，第 2 块起会渲染出前一块的尾部。
+        # 这里对全部已注入模块逐一校验，而不是只看第一个。
+        injected_expands = [
+            item for item in expand_items.values() if item["injected_markdown"]
+        ]
+        self.assertGreaterEqual(len(injected_expands), 2)
+        expand_injection_content = expands.json()["injection"]["content"]
+        for item in injected_expands:
+            self.assertTrue(
+                item["injected_markdown"].startswith(f"[{item['id']}]\n"),
+                item["id"],
+            )
+            self.assertEqual(
+                item["injected_tokens"],
+                estimate_text_tokens(item["injected_markdown"]),
+            )
+            self.assertGreater(item["injected_tokens"], 0)
+            self.assertIn(item["injected_markdown"], expand_injection_content)
+        self.assertEqual(
+            expand_injection_content,
+            "\n\n".join(item["injected_markdown"] for item in injected_expands),
+        )
+
         refreshed_expand = self.request(
             app, "POST", "/api/users/alice/expand/global/lights/refresh"
         )
@@ -5846,6 +5875,26 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(injection_content.startswith("[runtime]\n"))
         self.assertIn("global_sense/runtime/sense.md", injection_content)
         self.assertIn("runtime", injection_content)
+
+        # 感知预览同样必须逐块对齐；多块场景由 test_prompt_pipeline 覆盖，
+        # 这里校验 API 层的片段-正文一致性与未注入模块的空片段语义。
+        injected_sources = [
+            item for item in sense.json()["sources"] if item["injected_markdown"]
+        ]
+        self.assertGreaterEqual(len(injected_sources), 1)
+        for item in injected_sources:
+            self.assertTrue(
+                item["injected_markdown"].startswith(f"[{item['id']}]\n"),
+                item["id"],
+            )
+            self.assertIn(item["injected_markdown"], injection_content)
+            self.assertEqual(
+                item["injected_tokens"],
+                estimate_text_tokens(item["injected_markdown"]),
+            )
+        for item in sense.json()["sources"]:
+            if item["status"] != "active":
+                self.assertEqual(item["injected_markdown"], "")
 
         refreshed = self.request(app, "POST", "/api/users/alice/sense/runtime/refresh")
         self.assertEqual(refreshed.status_code, 200)

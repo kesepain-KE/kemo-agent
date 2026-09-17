@@ -76,11 +76,16 @@
 .editorPanel { display: flex; flex-direction: column; min-height: 600px; }
 .metadata { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: .68rem; }
 .metadata b { color: var(--text-2); }
-.lifecycleBadge { align-self: flex-start; display: inline-block; padding: 3px 8px; border-radius: 7px; background: var(--memory-soft); color: var(--memory-brand); font-size: .68rem; }
 .lifecycleNotice { display: flex; align-items: flex-start; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--memory-soft); color: var(--text-2); font-size: .75rem; line-height: 1.6; overflow-wrap: anywhere; }
 .lifecycleNotice strong { flex-shrink: 0; }
 .lifecycleNotice small { display: block; color: var(--muted); font-size: .68rem; }
 .lifecycleInvalid { color: var(--danger, #c2413b); background: color-mix(in srgb, var(--danger, #c2413b) 9%, var(--surface)); }
+.editorHeading > div:first-child { flex-shrink: 0; }
+.lifecycleInline { flex-shrink: 1; min-width: 0; max-width: 58%; margin: 0; padding: 10px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--memory-brand) 28%, var(--memory-line)); border-radius: 9px; background: color-mix(in srgb, var(--memory-brand) 6%, var(--surface-elevated)); color: var(--memory-brand); font-size: .72rem; line-height: 1.4; }
+.lifecycleInline strong { display: inline; color: inherit; font-size: .72rem; font-weight: 700; flex-shrink: 0; }
+.lifecycleInline span { display: block; min-width: 0; margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--memory-brand) 76%, var(--text-2)); font-size: .72rem; }
+.lifecycleInlineInvalid { border-color: color-mix(in srgb, var(--danger, #c2413b) 38%, var(--memory-line)); background: color-mix(in srgb, var(--danger, #c2413b) 7%, var(--surface-elevated)); color: var(--danger, #c2413b); }
+.lifecycleInlineInvalid span { color: color-mix(in srgb, var(--danger, #c2413b) 80%, var(--text-2)); }
 .weightNotice { padding: 8px 14px; display: flex; align-items: center; gap: 7px; background: var(--memory-soft); color: var(--memory-brand); font-size: .68rem; line-height: 1.4; }
 .editorToolbar { min-height: 48px; padding: 7px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
 .editorToolbar button { min-height: 32px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--muted); font-size: .7rem; cursor: pointer; }

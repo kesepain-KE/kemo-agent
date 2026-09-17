@@ -46,19 +46,15 @@ class SenseServiceMixin:
         )
         injected_files = set(selection.source_files)
         sources: list[dict[str, Any]] = []
-        injection_cursor = 0
-        has_injection_piece = False
         for item in inventory:
             collected_markdown = self._sense_markdown(item)
-            injected_markdown = ""
-            if item["active"] and collected_markdown:
-                piece = f"[{item['name']}]\n{collected_markdown}"
-                piece_start = injection_cursor + (2 if has_injection_piece else 0)
-                piece_end = piece_start + len(piece)
-                if piece_start < len(selection.text):
-                    injected_markdown = selection.text[piece_start:min(piece_end, len(selection.text))]
-                injection_cursor = piece_end
-                has_injection_piece = True
+            # 片段在真实注入文本中的位置由权威侧（prompt_sources）给出，
+            # 预览侧只按 key 取值，不再自己拼片段、不再自己算累加游标。
+            injected_markdown = (
+                selection.fragment(item["name"])
+                if item["active"] and collected_markdown
+                else ""
+            )
             sources.append({
                 "id": item["name"],
                 "name": item["name"],

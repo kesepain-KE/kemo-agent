@@ -16,6 +16,15 @@ class SkillDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class InjectedPiece:
+    """一段已进入注入文本的片段在最终文本中的位置（左闭右开，已按截断裁剪）。"""
+
+    key: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExpandSelection:
     text: str
     source_files: tuple[str, ...]
@@ -24,6 +33,14 @@ class ExpandSelection:
     original_items: int
     injected_items: int
     truncated: bool
+    pieces: tuple[InjectedPiece, ...] = ()
+
+    def fragment(self, key: str) -> str:
+        """按 key 取回该模块在注入文本中的片段；未注入时返回空串。"""
+        for piece in self.pieces:
+            if piece.key == key:
+                return self.text[piece.start:piece.end]
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +52,14 @@ class PerceptionSelection:
     original_items: int
     injected_items: int
     truncated: bool
+    pieces: tuple[InjectedPiece, ...] = ()
+
+    def fragment(self, key: str) -> str:
+        """按 key 取回该模块在注入文本中的片段；未注入时返回空串。"""
+        for piece in self.pieces:
+            if piece.key == key:
+                return self.text[piece.start:piece.end]
+        return ""
 
 
 @dataclass(frozen=True, slots=True)

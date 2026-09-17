@@ -817,6 +817,7 @@ textarea:focus-visible,
   --brand-soft:rgba(102,95,238,.105);
   --brand-soft-2:rgba(102,95,238,.055);
   --brand-line:rgba(102,95,238,.28);
+  --on-brand:#ffffff;
   --green:#168b68;
   --green-soft:#e8f6f1;
   --amber:#a66d18;
@@ -861,6 +862,7 @@ textarea:focus-visible,
   --brand-soft:rgba(145,138,255,.155);
   --brand-soft-2:rgba(145,138,255,.075);
   --brand-line:rgba(145,138,255,.36);
+  --on-brand:#12131a;
   --green:#55c99a;
   --green-soft:rgba(85,201,154,.12);
   --amber:#e2ae58;

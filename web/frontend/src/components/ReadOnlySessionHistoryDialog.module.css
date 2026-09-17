@@ -44,7 +44,7 @@
 .summary small { color: var(--brand); font-size: .62rem; font-weight: 750; }
 .summary p { max-height: 88px; margin: 5px 0 0; overflow: auto; color: var(--text-2); font-size: .72rem; line-height: 1.65; white-space: pre-wrap; }
 
-.messages { min-height: 0; display: flex; flex-direction: column; gap: 9px; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-1); }
+.messages { min-height: 0; display: flex; flex-direction: column; gap: 9px; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-2); }
 .message { align-self: flex-start; width: min(88%, 720px); padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-elevated); }
 .role_user { align-self: flex-end; border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 52%, var(--surface-elevated)); }
 .message small { color: var(--muted-2); font-size: .6rem; font-weight: 720; }
