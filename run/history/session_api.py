@@ -8,6 +8,7 @@ import shutil
 from typing import Any
 
 from run.config import user_dir
+from run.history import runtime_cache
 from run.history.commit_ops import commit_window, patch_archive_metadata
 from run.history.history_models import HistoryError, _lock, _now, _window_name, empty_window
 from run.history.index import (
@@ -170,7 +171,11 @@ def get_or_create_window(
     directory, window, is_new = prepare_window(root, user, source, session_id)
     if is_new:
         commit_window(directory, window)
-        commit_window(runtime_window_path(directory), copy.deepcopy(window))
+        runtime_cache.store(
+            runtime_window_path(directory),
+            copy.deepcopy(window),
+            version=runtime_cache.archive_version(window),
+        )
     return directory, window
 
 
@@ -287,12 +292,16 @@ def rename_session(
 ) -> int:
     """Persist a display title without changing chronological ordering."""
 
+    directories = _matching_windows(root, user, source, session_id)
     changed_windows = rename_windows(root, user, source, session_id, title)
+    for directory in directories:
+        runtime_cache.drop(runtime_window_path(directory))
     indexed = update_index_title(root, user, source, session_id, title)
     return max(changed_windows, 1 if indexed is not None else 0)
 
 
 def _remove_window_cache(directory: Path) -> None:
+    runtime_cache.drop(runtime_window_path(directory))
     for candidate in (runtime_window_path(directory), directory):
         if candidate.is_dir():
             with _lock(candidate):
@@ -332,8 +341,13 @@ def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
         session_id,
         session_generation=str((indexed or {}).get("session_generation") or ""),
     )
+    runtime_cache.drop(runtime_window_path(directory))
     commit_window(directory, window)
-    commit_window(runtime_window_path(directory), copy.deepcopy(window))
+    runtime_cache.store(
+        runtime_window_path(directory),
+        copy.deepcopy(window),
+        version=runtime_cache.archive_version(window),
+    )
     return directory
 
 

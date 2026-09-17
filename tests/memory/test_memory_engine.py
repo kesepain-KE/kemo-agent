@@ -11,7 +11,7 @@ from unittest.mock import patch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
-from run.history import find_window, load_window
+from run.history import find_window, load_runtime_window, load_window
 from run.memory import (
     analyze_memory_batch_resilient,
     memory_batch_operation_id,
@@ -247,7 +247,15 @@ class MemoryEngineTests(unittest.TestCase):
             str(windows[0]["window_name"]),
             kind="runtime",
         )
-        self.assertTrue(window_exists(runtime))
+        self.assertFalse(window_exists(runtime))
+        archive = window_path(
+            root,
+            "alice",
+            str(windows[0]["window_name"]),
+            kind="archive",
+        )
+        _runtime_path, workspace = load_runtime_window(archive)
+        self.assertEqual(workspace["data"]["rounds"], 1)
 
     def test_terminal_bundle_does_not_need_redundant_memory_index_update(self) -> None:
         root = self.root()

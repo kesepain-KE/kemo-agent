@@ -19,8 +19,8 @@ from provider.protocol.models import (
 )
 from run.engine import handle_request
 from run.extensions import describe_uploaded_asset
-from run.history import find_window, load_window, runtime_window_path
-from run.history import delete_window
+from run.history import find_window, load_runtime_window, load_window, runtime_window_path
+import run.history.runtime_cache as runtime_cache
 
 
 class MockProvider:
@@ -157,7 +157,9 @@ class EngineAndCLITests(unittest.TestCase):
             assert archive_path is not None
             temp_path = runtime_window_path(archive_path)
             archive = load_window(archive_path)
-            temp = load_window(temp_path)
+            _temp_path, temp = load_runtime_window(
+                archive_path, archive, max_rounds=2
+            )
 
             self.assertEqual(archive["data"]["rounds"], 4)
             self.assertEqual(len(archive["text"]["messages"]), 8)
@@ -174,12 +176,12 @@ class EngineAndCLITests(unittest.TestCase):
             )
             self.assertEqual(temp["data"]["context"]["round_offset"], 2)
 
-            self.assertTrue(delete_window(temp_path))
+            runtime_cache.clear()
             request["prompt"] = "round-5"
             handle_request(request, root=root, provider_factory=factory)
 
         archive = load_window(archive_path)
-        temp = load_window(temp_path)
+        _temp_path, temp = load_runtime_window(archive_path, archive, max_rounds=2)
         self.assertEqual(archive["data"]["rounds"], 5)
         self.assertEqual(len(archive["text"]["messages"]), 10)
         self.assertEqual(

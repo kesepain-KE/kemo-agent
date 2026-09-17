@@ -18,6 +18,7 @@ from run.history.store_core import (
     connection,
 )
 from run.history.registry_store import _upsert_session_row
+from run.history.message_store import _ROUND_INSERT_SQL, _sync_archive_messages
 
 _SUMMARY_UNSET = object()
 
@@ -40,9 +41,6 @@ def window_path(
 ) -> Path:
     base = user_dir(user, root) / "history"
     return (base / "temp" / window_name) if kind == "runtime" else (base / window_name)
-
-
-from run.history.message_store import _ROUND_INSERT_SQL, _sync_archive_messages
 
 
 def _safe_round_number(value: Any) -> int:
@@ -121,6 +119,102 @@ def _window_round_rows(
     ]
 
 
+def _scrub_local_rounds(value: Any) -> Any:
+    """Remove workspace-local round numbering for shifted-row comparison."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): (0 if str(key) == "round" else _scrub_local_rounds(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_local_rounds(item) for item in value]
+    return value
+
+
+def _round_payload_signature(values: Iterable[Any]) -> tuple[str, ...]:
+    rendered: list[str] = []
+    for raw in values:
+        text = str(raw or "")
+        if not text:
+            rendered.append("")
+            continue
+        parsed = _object(text, None)
+        rendered.append(
+            _json(_scrub_local_rounds(parsed)) if parsed is not None else text
+        )
+    return tuple(rendered)
+
+
+def _shifted_round_overlap(
+    existing: list[sqlite3.Row], candidates: list[tuple[Any, ...]]
+) -> int:
+    maximum = min(len(existing), len(candidates))
+    for overlap in range(maximum, 0, -1):
+        if all(
+            _round_payload_signature(
+                (row["think_json"], row["tool_json"], row["items_json"], row["metric_json"])
+            )
+            == _round_payload_signature(candidate[3:7])
+            for row, candidate in zip(existing[-overlap:], candidates[:overlap])
+        ):
+            return overlap
+    return 0
+
+
+def _rewrite_shifted_rounds(
+    database: sqlite3.Connection,
+    *,
+    window_kind: str,
+    window_name: str,
+    existing: list[sqlite3.Row],
+    candidates: list[tuple[Any, ...]],
+) -> bool:
+    """Reuse a shifted workspace suffix instead of delete/reinsert-all.
+
+    Runtime trimming renumbers the retained tail to local rounds ``1..N``.
+    Move the retained rows through temporary negative keys, then update their
+    local round metadata and append only the genuinely new suffix.  The caller
+    already owns the SQLite transaction, so any failure rolls back atomically.
+    """
+
+    overlap = _shifted_round_overlap(existing, candidates)
+    if not candidates or overlap * 5 < len(candidates) * 4:
+        return False
+    retained = list(zip(existing[-overlap:], candidates[:overlap]))
+    for index, (row, _candidate) in enumerate(retained, start=1):
+        database.execute(
+            "UPDATE history_rounds SET round_number=? "
+            "WHERE window_kind=? AND window_name=? AND round_number=?",
+            (-index, window_kind, window_name, int(row["round_number"])),
+        )
+    database.execute(
+        "DELETE FROM history_rounds WHERE window_kind=? AND window_name=? AND round_number>=0",
+        (window_kind, window_name),
+    )
+    for index, (_row, candidate) in enumerate(retained, start=1):
+        database.execute(
+            """
+            UPDATE history_rounds SET round_number=?, think_json=?, tool_json=?,
+                items_json=?, metric_json=?
+            WHERE window_kind=? AND window_name=? AND round_number=?
+            """,
+            (
+                int(candidate[2]),
+                candidate[3],
+                candidate[4],
+                candidate[5],
+                candidate[6],
+                window_kind,
+                window_name,
+                -index,
+            ),
+        )
+    if overlap < len(candidates):
+        database.executemany(_ROUND_INSERT_SQL, candidates[overlap:])
+    return True
+
+
 def _sync_window_rounds(
     database: sqlite3.Connection,
     *,
@@ -160,6 +254,14 @@ def _sync_window_rounds(
                 prefix_matches = False
                 break
     if not prefix_matches:
+        if _rewrite_shifted_rounds(
+            database,
+            window_kind=window_kind,
+            window_name=window_name,
+            existing=existing,
+            candidates=candidates,
+        ):
+            return
         database.execute(
             "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
             (window_kind, window_name),
@@ -474,6 +576,9 @@ def save_window_bundle(
     session_record: dict[str, Any] | None = None,
     active_updates: dict[str, dict[str, str] | None] | None = None,
     conditional_active_updates: dict[str, dict[str, str] | None] | None = None,
+    context_summary_updates: list[
+        tuple[str, str, str, dict[str, Any] | None]
+    ] | None = None,
     updated_at: str = "",
 ) -> list[dict[str, Any]]:
     if not entries:
@@ -493,6 +598,14 @@ def save_window_bundle(
                     window=window,
                     summary_cache=summary_cache,
                 )
+            )
+        for window_name, source, session_id, cache in context_summary_updates or []:
+            _store_context_summary(
+                database,
+                window_name=str(window_name),
+                source=str(source),
+                session_id=str(session_id),
+                cache=copy.deepcopy(cache) if isinstance(cache, dict) else None,
             )
         _write_registry_state(
             database,
@@ -607,18 +720,31 @@ def patch_window_data(
     return rendered
 
 
-def load_window(directory: Path) -> dict[str, Any] | None:
+def load_window(
+    directory: Path,
+    *,
+    tail_rounds: int | None = None,
+) -> dict[str, Any] | None:
     root, user, kind, name = window_location(directory)
     with connection(root, user) as database:
         row = database.execute(
             """
-            SELECT data_json, text_json, think_json, tool_json, items_json
+            SELECT rounds, data_json, text_json, think_json, tool_json, items_json
             FROM history_windows WHERE window_kind=? AND window_name=?
             """,
             (kind, name),
         ).fetchone()
+        lower_round = 0
+        if row is not None and tail_rounds is not None:
+            lower_round = max(1, int(row["rounds"] or 0) - max(1, int(tail_rounds)) + 1)
         message_rows = (
             database.execute(
+                "SELECT message_json FROM history_messages "
+                "WHERE window_name=? AND round_number>=? ORDER BY message_index",
+                (name, lower_round),
+            ).fetchall()
+            if row is not None and kind == "archive" and tail_rounds is not None
+            else database.execute(
                 "SELECT message_json FROM history_messages "
                 "WHERE window_name=? ORDER BY message_index",
                 (name,),
@@ -628,6 +754,16 @@ def load_window(directory: Path) -> dict[str, Any] | None:
         )
         round_rows = (
             database.execute(
+                """
+                SELECT round_number, think_json, tool_json, items_json, metric_json
+                FROM history_rounds WHERE window_kind=? AND window_name=?
+                    AND round_number>=?
+                ORDER BY round_number
+                """,
+                (kind, name, lower_round),
+            ).fetchall()
+            if row is not None and tail_rounds is not None
+            else database.execute(
                 """
                 SELECT round_number, think_json, tool_json, items_json, metric_json
                 FROM history_rounds WHERE window_kind=? AND window_name=?
@@ -752,7 +888,6 @@ def delete_window(directory: Path) -> bool:
             database.execute(
                 "DELETE FROM history_messages WHERE window_name=?", (name,)
             )
-        else:
             database.execute(
                 "DELETE FROM history_context_summaries WHERE window_name=?",
                 (name,),
@@ -761,6 +896,9 @@ def delete_window(directory: Path) -> bool:
             "DELETE FROM history_windows WHERE window_kind=? AND window_name=?",
             (kind, name),
         )
+    from run.history import runtime_cache
+
+    runtime_cache.drop(window_path(root, user, name, kind="runtime"))
     return result.rowcount > 0
 
 
@@ -817,6 +955,9 @@ def rename_windows(
                 """,
                 (title, _json(data), row["window_kind"], row["window_name"]),
             )
+    from run.history import runtime_cache
+
+    runtime_cache.drop_session(root, user, source, session_id)
     return len(rows)
 
 
@@ -873,6 +1014,14 @@ def _delete_session_windows(database: sqlite3.Connection, source: str, session_i
         "DELETE FROM history_windows WHERE source=? AND session_id=?",
         (source, session_id),
     )
+    from run.history import runtime_cache
+
+    database_file = Path(
+        str(database.execute("PRAGMA database_list").fetchone()["file"])
+    ).resolve()
+    runtime_cache.drop_session(
+        database_file.parents[3], database_file.parent.parent.name, source, session_id
+    )
     return result.rowcount
 
 
@@ -927,4 +1076,7 @@ def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]
         result = database.execute(
             "DELETE FROM history_windows WHERE source=?", (source,)
         )
+    from run.history import runtime_cache
+
+    runtime_cache.drop_source(root, user, source)
     return session_count, result.rowcount

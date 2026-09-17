@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+# The extracted main loop resolves these imports through this module at runtime so
+# existing monkeypatch and dependency-injection targets remain compatible.
+# ruff: noqa: F401
+
 import asyncio
 import copy
 import json
@@ -58,7 +62,6 @@ from run.history import (
     _trim_to_max_rounds,
     append_round_items,
     commit_terminal_windows,
-    commit_window,
     load_window,
     load_runtime_window,
     prepare_window,
@@ -66,6 +69,7 @@ from run.history import (
     queue_memory_extraction,
 )
 from run.history import update_run_state
+from run.history import runtime_cache
 from run.conversation.guidance import GuidanceInput, normalize_guidance
 from run.conversation.guidance_runtime import prepare_guidance
 from run.memory import (
@@ -181,15 +185,18 @@ def _commit_verified_manual_compression(
     expected_rounds: int,
     expected_round_offset: int,
 ) -> None:
-    """Commit temp compaction and roll both artifacts back if verification fails."""
+    """Commit manual compaction to cache and roll back if verification fails."""
 
+    archive_path = runtime_path.parent.parent / runtime_path.name
+    archive = load_window(archive_path)
+    version = runtime_cache.archive_version(archive)
     try:
-        commit_window(
-            runtime_path,
-            compacted_window,
-            summary_cache=summary_cache,
-        )
-        stored = load_window(runtime_path)
+        restore_summary_cache(runtime_path, summary_cache)
+        if not runtime_cache.store(runtime_path, compacted_window, version=version):
+            raise EngineError("上下文压缩缓存超过运行时容量限制")
+        stored = runtime_cache.load(runtime_path, version=version)
+        if stored is None:
+            raise EngineError("上下文压缩缓存写入后不可读取")
         stored_data = stored.get("data") or {}
         stored_context = stored_data.get("context") or {}
         actual_rounds = int(stored_data.get("rounds") or 0)
@@ -233,11 +240,8 @@ def _commit_verified_manual_compression(
     except BaseException:
         rollback_errors: list[str] = []
         try:
-            commit_window(
-                runtime_path,
-                original_window,
-                summary_cache=previous_summary_cache,
-            )
+            restore_summary_cache(runtime_path, previous_summary_cache)
+            runtime_cache.store(runtime_path, original_window, version=version)
         except BaseException as exc:
             rollback_errors.append(f"运行窗口与摘要回滚失败：{exc}")
         if rollback_errors:

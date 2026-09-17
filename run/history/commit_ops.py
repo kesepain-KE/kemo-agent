@@ -25,11 +25,13 @@ from run.history.index import (
     find_record as find_index_record,
     upsert_window as upsert_index_window,
 )
+from run.history import runtime_cache
 from run.history.store import (
     load_window as load_stored_window,
     patch_window_data,
     save_window,
     save_window_bundle,
+    window_exists,
 )
 
 
@@ -324,7 +326,14 @@ def commit_terminal_windows(
     run_state: str = "idle",
     active_key: str | None = None,
 ) -> None:
-    """Commit both terminal windows and the session row in one transaction."""
+    """Commit the authoritative archive and cache the derived runtime tail.
+
+    Runtime messages and round partitions are derivable from the archive, so
+    writing their full workspace after every round only amplifies SQLite I/O.
+    The archive, session row and context-summary update remain one transaction;
+    the in-process runtime cache is populated only after that transaction
+    succeeds and is fenced by the committed archive version.
+    """
 
     directories = sorted(
         (archive_directory, runtime_directory), key=lambda value: str(value.resolve())
@@ -394,24 +403,37 @@ def commit_terminal_windows(
             if source.startswith("background:cron:") and source != "background:cron:" and run_state != "running":
                 record["cron_finished_at"] = timestamp
             stored_data = save_window_bundle(
-                [
-                (archive_directory, stored_archive, _SUMMARY_UNCHANGED),
-                (runtime_directory, stored_runtime, summary_cache),
-                ],
+                [(archive_directory, stored_archive, _SUMMARY_UNCHANGED)],
                 session_record=record,
                 conditional_active_updates=active_updates,
+                context_summary_updates=[
+                    (runtime_directory.name, source, session_id, summary_cache)
+                ],
                 updated_at=timestamp,
             )
-            for target, data in (
-                (archive_window, stored_data[0]),
-                (runtime_window, stored_data[1]),
-            ):
+            for target, data in ((archive_window, stored_data[0]),):
                 current = target.get("data")
                 if isinstance(current, dict):
                     current.clear()
                     current.update(data)
                 else:
                     target["data"] = data
+            runtime_current = runtime_window.get("data")
+            if isinstance(runtime_current, dict):
+                runtime_current.clear()
+                runtime_current.update(stored_runtime["data"])
+            else:
+                runtime_window["data"] = stored_runtime["data"]
+            if window_exists(archive_directory):
+                runtime_cache.store(
+                    runtime_directory,
+                    stored_runtime,
+                    version=runtime_cache.archive_version(stored_data[0]),
+                )
+            else:
+                # A late writer fenced by a session/window tombstone must not
+                # resurrect its workspace from process memory.
+                runtime_cache.drop(runtime_directory)
 
 
 def patch_archive_metadata(
@@ -428,6 +450,15 @@ def patch_archive_metadata(
         current = window.setdefault("data", {})
         if not isinstance(current, dict):
             raise HistoryError("历史窗口 data 分区无效")
+        runtime_directory = directory.parent / "temp" / directory.name
+        cached_runtime = runtime_cache.load(
+            runtime_directory,
+            version=runtime_cache.archive_version(current),
+        )
+        try:
+            previous_rounds = max(0, int(current.get("rounds") or 0))
+        except (TypeError, ValueError):
+            previous_rounds = -1
         data = {
             key: copy.deepcopy(value)
             for key, value in current.items()
@@ -480,4 +511,24 @@ def patch_archive_metadata(
             stored = fresh["data"]
         current.clear()
         current.update(stored)
+        try:
+            stored_rounds = max(0, int(stored.get("rounds") or 0))
+        except (TypeError, ValueError):
+            stored_rounds = -2
+        if cached_runtime is not None and stored_rounds == previous_rounds:
+            cached_data = cached_runtime.setdefault("data", {})
+            if isinstance(cached_data, dict):
+                for key, value in metadata_updates.items():
+                    cached_data[key] = copy.deepcopy(value)
+                for key in metadata_removals:
+                    cached_data.pop(key, None)
+                cached_data["updated_at"] = stored.get("updated_at")
+                cached_data["complete"] = True
+            runtime_cache.store(
+                runtime_directory,
+                cached_runtime,
+                version=runtime_cache.archive_version(stored),
+            )
+        else:
+            runtime_cache.drop(runtime_directory)
         return stored

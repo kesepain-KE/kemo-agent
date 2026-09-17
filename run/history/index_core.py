@@ -8,7 +8,7 @@ transcripts and this registry share the per-user history database.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import copy
 import hashlib
 import os
@@ -18,10 +18,8 @@ import uuid
 from typing import Any, Iterator
 
 from run.history.store import (
-    claim_registry_record,
     database_path as history_database_path,
     list_windows as list_stored_windows,
-    query_session_records,
     read_active_binding,
     read_latest_registry_record,
     read_registry,
@@ -720,7 +718,8 @@ def update_run_state(
     with index_lock(root, user):
         cron_run = source.startswith("background:cron:") and source != "background:cron:"
         record = read_registry_record(root, user, source, session_id)
-        if not isinstance(record, dict):
+        existing_record = isinstance(record, dict)
+        if not existing_record:
             if directory is None:
                 return None
             record = _record_from_data(
@@ -734,19 +733,33 @@ def update_run_state(
                     "session_generation": str(session_generation or "").strip(),
                 },
             )
+        previous_state = str(record.get("run_state") or "")
+        previous_run_id = str(record.get("last_run_id") or "")
+        if (
+            existing_record
+            and previous_state == run_state
+            and (not run_id or previous_run_id == run_id)
+            and not cron_run
+        ):
+            # Terminal commit already persisted the common idle transition.
+            # Avoid another registry transaction from loop cleanup when neither
+            # state nor run identity changed. Cron runs are excluded because
+            # their lease/completion timestamps must still be refreshed.
+            return record
+        timestamp = _now()
         if cron_run and run_state == "running":
             # A recurring task may intentionally reuse a logical session after
             # its prior history expired. Renew the lease and clear that prior
             # completion timestamp before cleanup can select it again.
             record.pop("cron_finished_at", None)
         elif cron_run and record.get("run_state") == "running" and run_state != "running":
-            record["cron_finished_at"] = _now()
+            record["cron_finished_at"] = timestamp
         record["run_state"] = run_state
-        record["run_state_updated_at"] = _now()
+        record["run_state_updated_at"] = timestamp
         if run_id:
             record["last_run_id"] = run_id
         return upsert_registry_record(
-            root, user, record, updated_at=_now(),
+            root, user, record, updated_at=timestamp,
             allow_deleted_reuse=cron_run and run_state == "running",
         )
 

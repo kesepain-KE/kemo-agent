@@ -1,4 +1,9 @@
-"""Context-summary persistence for runtime history windows."""
+"""Context-summary persistence keyed by the logical runtime window name.
+
+The archive row is authoritative.  Runtime workspaces may exist only in the
+process cache, so summary visibility is fenced by the matching archive row and
+its deletion tombstone rather than by a physical runtime row.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +33,7 @@ def read_context_summary(runtime_path: Path) -> dict[str, Any] | None:
             WHERE window_name=?
               AND EXISTS (
                   SELECT 1 FROM history_windows
-                  WHERE window_kind='runtime' AND window_name=?
+                  WHERE window_kind='archive' AND window_name=?
               )
             """,
             (name, name),
@@ -53,13 +58,13 @@ def write_context_summary(runtime_path: Path, cache: dict[str, Any] | None) -> N
         window = database.execute(
             """
             SELECT source, session_id FROM history_windows
-            WHERE window_kind='runtime' AND window_name=?
+            WHERE window_kind='archive' AND window_name=?
             LIMIT 1
             """,
             (name,),
         ).fetchone()
         if window is None or _deleted_window_exists(
-            database, kind="runtime", name=name
+            database, kind="archive", name=name
         ):
             # A summary worker can finish after its runtime window was deleted.
             # Do not create an orphan cache that could be observed by a later
@@ -84,7 +89,7 @@ def context_summary_exists(runtime_path: Path) -> bool:
                 WHERE window_name=?
                   AND EXISTS (
                       SELECT 1 FROM history_windows
-                      WHERE window_kind='runtime' AND window_name=?
+                      WHERE window_kind='archive' AND window_name=?
                   )
                 """,
                 (name, name),

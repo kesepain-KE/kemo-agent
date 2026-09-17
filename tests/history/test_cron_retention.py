@@ -66,7 +66,7 @@ class CronHistoryRetentionTests(unittest.TestCase):
         protected_file.parent.mkdir(); protected_file.write_text('keep', encoding='utf-8')
         result = cleanup_cron_history(self.root, 'alice', now=self.now)
         self.assertEqual(result['deleted_sessions'], 1)
-        self.assertEqual(result['deleted_windows'], 2)
+        self.assertEqual(result['deleted_windows'], 1)
         self.assertFalse(window_exists(old))
         self.assertTrue(all(window_exists(path) for path in [recent, bob, *others]))
         self.assertTrue(protected_file.exists())
@@ -74,7 +74,7 @@ class CronHistoryRetentionTests(unittest.TestCase):
             for table in ('history_sessions', 'history_active_sessions', 'history_windows', 'history_messages', 'history_context_summaries'):
                 self.assertEqual(database.execute(f'SELECT COUNT(*) FROM {table} WHERE session_id=?', ('old',)).fetchone()[0], 0)
             self.assertEqual(database.execute('SELECT COUNT(*) FROM history_rounds WHERE window_name=?', (old.name,)).fetchone()[0], 0)
-            self.assertEqual(database.execute('SELECT COUNT(*) FROM history_deleted_windows WHERE session_id=?', ('old',)).fetchone()[0], 2)
+            self.assertEqual(database.execute('SELECT COUNT(*) FROM history_deleted_windows WHERE session_id=?', ('old',)).fetchone()[0], 1)
         # Delayed terminal writers must not recreate expired sessions/windows.
         commit_terminal_windows(old, window, runtime_window_path(old), runtime)
         self.assertFalse(window_exists(old))

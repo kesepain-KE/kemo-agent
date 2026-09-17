@@ -8,14 +8,18 @@ from typing import Any
 
 from run.history.commit_ops import commit_window
 from run.history.history_models import HistoryError, ITEMS_SCHEMA_VERSION, _lock, synthesize_items
-from run.history.store import delete_window as delete_stored_window
+from run.history import runtime_cache
 from run.history.store import load_window as load_stored_window
 from run.history.store import window_exists
 
 
-def load_window(directory: Path) -> dict[str, Any]:
+def load_window(
+    directory: Path,
+    *,
+    tail_rounds: int | None = None,
+) -> dict[str, Any]:
     with _lock(directory):
-        window = load_stored_window(directory)
+        window = load_stored_window(directory, tail_rounds=tail_rounds)
         if window is None:
             raise HistoryError(f"历史窗口不存在：{directory}")
         data = window.get("data")
@@ -243,11 +247,12 @@ def undo_last_round(
 
         archive_next = _remove_last_round(archive_original, current_round)
         runtime_original: dict[str, Any] | None = None
-        if window_exists(runtime_directory):
-            try:
-                runtime_original = load_window(runtime_directory)
-            except HistoryError:
-                runtime_original = None
+        try:
+            _runtime_path, runtime_original = load_runtime_window(
+                directory, archive_original
+            )
+        except HistoryError:
+            runtime_original = None
         if runtime_original is not None:
             local_round = int((runtime_original.get("data") or {}).get("rounds", 0))
             context = (runtime_original.get("data") or {}).get("context") or {}
@@ -266,14 +271,22 @@ def undo_last_round(
 
         try:
             commit_window(directory, archive_next)
-            commit_window(runtime_directory, runtime_next)
+            runtime_cache.store(
+                runtime_directory,
+                runtime_next,
+                version=runtime_cache.archive_version(archive_next),
+            )
         except BaseException:
             try:
                 commit_window(directory, archive_original)
                 if runtime_original is not None:
-                    commit_window(runtime_directory, runtime_original)
+                    runtime_cache.store(
+                        runtime_directory,
+                        runtime_original,
+                        version=runtime_cache.archive_version(archive_original),
+                    )
                 else:
-                    delete_stored_window(runtime_directory)
+                    runtime_cache.drop(runtime_directory)
             except BaseException:
                 pass
             raise
@@ -373,27 +386,125 @@ def _trim_to_max_rounds(window: dict[str, Any], max_rounds: int) -> dict[str, An
     return result
 
 
+def _rebase_archive_tail(
+    window: dict[str, Any],
+    *,
+    max_rounds: int,
+) -> dict[str, Any]:
+    """Convert an SQL-loaded archive tail to a local runtime workspace."""
+
+    result = copy.deepcopy(window)
+    data = result.setdefault("data", {})
+    try:
+        archive_rounds = max(0, int(data.get("rounds") or 0))
+    except (TypeError, ValueError):
+        archive_rounds = 0
+    local_rounds = min(archive_rounds, max(0, int(max_rounds)))
+    offset = max(0, archive_rounds - local_rounds)
+
+    for message in (result.get("text") or {}).get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict) or "round" not in metadata:
+            continue
+        number = _local_round(metadata.get("round"), offset)
+        if number is not None:
+            message["metadata"] = {**metadata, "round": number}
+    for section in ("think", "tool"):
+        for item in (result.get(section) or {}).get("rounds", []):
+            if not isinstance(item, dict):
+                continue
+            number = _local_round(item.get("round"), offset)
+            if number is not None:
+                item["round"] = number
+    for item in (result.get("items") or {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        number = _local_round(metadata.get("round"), offset)
+        if number is not None:
+            item["metadata"] = {**metadata, "round": number}
+    for metric in data.get("round_metrics", []):
+        if not isinstance(metric, dict):
+            continue
+        number = _local_round(metric.get("round"), offset)
+        if number is not None:
+            metric["round"] = number
+    data["rounds"] = local_rounds
+    data["context"] = {
+        "round_offset": offset,
+        "workspace_rounds": local_rounds,
+    }
+    return result
+
+
+def _workspace_covers(
+    window: dict[str, Any],
+    *,
+    archive_rounds: int,
+    max_rounds: int,
+) -> bool:
+    try:
+        data = window.get("data") or {}
+        local_rounds = max(0, int(data.get("rounds") or 0))
+        context = data.get("context") if isinstance(data.get("context"), dict) else {}
+        round_offset = max(0, int(context.get("round_offset") or 0))
+    except (TypeError, ValueError):
+        return False
+    if round_offset + local_rounds >= max(0, archive_rounds):
+        return True
+    return local_rounds >= min(max(0, archive_rounds), max(0, max_rounds))
+
+
 def load_runtime_window(
     archive_directory: Path,
     archive_window: dict[str, Any] | None = None,
     *,
     max_rounds: int = 80,
 ) -> tuple[Path, dict[str, Any]]:
-    from run.history.session_api import find_window
     """Load temp workspace; restore only recent rounds when it is unavailable."""
 
     runtime_directory = runtime_window_path(archive_directory)
+    source = archive_window
+    if source is None:
+        source = load_window(archive_directory, tail_rounds=max_rounds)
+    version = runtime_cache.archive_version(source)
+    try:
+        archive_rounds = max(0, int((source.get("data") or {}).get("rounds") or 0))
+    except (TypeError, ValueError):
+        archive_rounds = 0
+
+    cached = runtime_cache.load(runtime_directory, version=version)
+    if cached is not None and _workspace_covers(
+        cached, archive_rounds=archive_rounds, max_rounds=max_rounds
+    ):
+        return runtime_directory, _trim_to_max_rounds(cached, max_rounds)
+    if cached is not None:
+        runtime_cache.drop(runtime_directory)
+
     if window_exists(runtime_directory):
         try:
-            return runtime_directory, _trim_to_max_rounds(
-                load_window(runtime_directory), max_rounds
-            )
+            snapshot = load_window(runtime_directory)
+            snapshot_version = str(
+                (snapshot.get("data") or {}).get("archive_version") or ""
+            ) or runtime_cache.archive_version(snapshot)
+            if snapshot_version == version and _workspace_covers(
+                snapshot, archive_rounds=archive_rounds, max_rounds=max_rounds
+            ):
+                rendered = _trim_to_max_rounds(snapshot, max_rounds)
+                runtime_cache.store(runtime_directory, rendered, version=version)
+                return runtime_directory, rendered
         except HistoryError:
             # A damaged temp workspace must never make the archive unusable.
             pass
-    source = (
-        archive_window if archive_window is not None else load_window(archive_directory)
-    )
-    restored = copy.deepcopy(source)
-    restored.setdefault("data", {}).pop("context", None)
-    return runtime_directory, _trim_to_max_rounds(restored, max_rounds)
+    if archive_window is None:
+        restored = _rebase_archive_tail(source, max_rounds=max_rounds)
+    else:
+        restored = copy.deepcopy(source)
+        restored.setdefault("data", {}).pop("context", None)
+        restored = _trim_to_max_rounds(restored, max_rounds)
+    runtime_cache.store(runtime_directory, restored, version=version)
+    return runtime_directory, copy.deepcopy(restored)

@@ -29,6 +29,7 @@ from run.history import (
     runtime_window_path,
     synthesize_items,
 )
+import run.history.runtime_cache as runtime_cache
 
 
 def make_window(rounds: int, *, chars: int = 8, with_tools: bool = False) -> dict:
@@ -860,6 +861,7 @@ class ContextLifecycleTests(unittest.TestCase):
             {"content": "compressed", "compressed": True}
         )
         runtime["tool"]["rounds"][0].update({"calls": [], "compressed": True})
+        runtime["data"]["archive_version"] = runtime_cache.archive_version(archive)
         commit_window(runtime_window_path(archive_path), runtime)
 
         reloaded_archive = load_window(archive_path)

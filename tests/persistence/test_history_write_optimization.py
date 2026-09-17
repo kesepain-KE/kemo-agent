@@ -7,14 +7,19 @@ from pathlib import Path
 
 import pytest
 
+from run.context import read_summary_cache
 from run.history import (
+    _trim_to_max_rounds,
+    clear_session,
     commit_terminal_windows,
     delete_session,
     empty_window,
     find_window,
+    load_runtime_window,
     load_window,
     patch_archive_metadata,
     runtime_window_path,
+    update_run_state,
 )
 from run.history import (
     _configure,
@@ -25,6 +30,7 @@ from run.history import (
     read_registry_record,
     save_window,
 )
+import run.history.runtime_cache as runtime_cache
 
 
 def test_late_terminal_commit_does_not_overwrite_newer_active_session(tmp_path: Path) -> None:
@@ -184,7 +190,7 @@ def test_archive_edit_uses_explicit_rebuild_fallback(tmp_path: Path) -> None:
     assert load_window(archive)["text"]["messages"][0]["content"] == "edited"
 
 
-def test_terminal_bundle_rolls_back_both_windows_together(tmp_path: Path) -> None:
+def test_terminal_commit_does_not_write_runtime_window(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     runtime = runtime_window_path(archive)
     # Initialize the database before installing the failure trigger.
@@ -202,20 +208,249 @@ def test_terminal_bundle_rolls_back_both_windows_together(tmp_path: Path) -> Non
     archive_window = empty_window("alice", "web", "conv_write")
     _append_round(archive_window, 1)
     runtime_window = copy.deepcopy(archive_window)
-    with pytest.raises(sqlite3.IntegrityError, match="runtime rejected"):
-        commit_terminal_windows(
-            archive,
-            archive_window,
-            runtime,
-            runtime_window,
-        )
+    commit_terminal_windows(
+        archive,
+        archive_window,
+        runtime,
+        runtime_window,
+    )
     with sqlite3.connect(db_path) as database:
         assert database.execute(
             "SELECT COUNT(*) FROM history_windows WHERE window_name='conv_write'"
+        ).fetchone()[0] == 1
+        assert database.execute(
+            "SELECT COUNT(*) FROM history_windows "
+            "WHERE window_kind='runtime' AND window_name='conv_write'"
         ).fetchone()[0] == 0
         assert database.execute(
             "SELECT COUNT(*) FROM history_sessions WHERE session_id='conv_write'"
+        ).fetchone()[0] == 1
+    _path, cached = load_runtime_window(archive, archive_window)
+    assert cached["text"]["messages"] == runtime_window["text"]["messages"]
+
+
+def test_legacy_runtime_snapshot_is_not_rewritten_per_round(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    legacy = empty_window("alice", "web", "conv_write")
+    _append_round(legacy, 1)
+    save_window(runtime, copy.deepcopy(legacy))
+    db_path = database_path(tmp_path, "alice")
+    with sqlite3.connect(db_path) as database:
+        before = database.execute(
+            "SELECT text_json, updated_at FROM history_windows "
+            "WHERE window_kind='runtime' AND window_name='conv_write'"
+        ).fetchone()
+        database.executescript(
+            """
+            CREATE TABLE runtime_write_audit(kind TEXT NOT NULL);
+            CREATE TRIGGER audit_runtime_update AFTER UPDATE ON history_windows
+            WHEN NEW.window_kind='runtime' AND NEW.window_name='conv_write'
+            BEGIN INSERT INTO runtime_write_audit(kind) VALUES('update'); END;
+            """
+        )
+    archive_window = empty_window("alice", "web", "conv_write")
+    _append_round(archive_window, 1)
+    commit_terminal_windows(
+        archive, archive_window, runtime, copy.deepcopy(archive_window)
+    )
+    _append_round(archive_window, 2)
+    commit_terminal_windows(
+        archive, archive_window, runtime, copy.deepcopy(archive_window)
+    )
+    with sqlite3.connect(db_path) as database:
+        after = database.execute(
+            "SELECT text_json, updated_at FROM history_windows "
+            "WHERE window_kind='runtime' AND window_name='conv_write'"
+        ).fetchone()
+        writes = database.execute(
+            "SELECT COUNT(*) FROM runtime_write_audit"
+        ).fetchone()[0]
+    assert after == before
+    assert writes == 0
+
+
+def test_terminal_commit_persists_summary_without_runtime_row(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    window = empty_window("alice", "web", "conv_write")
+    _append_round(window, 1)
+    summary = {
+        "schema_version": 3,
+        "source_hash": "summary-hash",
+        "previous_source_hash": None,
+        "covered_rounds": [1],
+        "covered_through_round": 1,
+        "created_at": "2026-09-16T00:00:00+00:00",
+        "summary": {"narrative": "compressed"},
+        "memory_extractions": [],
+    }
+    commit_terminal_windows(
+        archive,
+        window,
+        runtime,
+        copy.deepcopy(window),
+        summary_cache=summary,
+    )
+    assert read_summary_cache(runtime)["source_hash"] == "summary-hash"
+    with sqlite3.connect(database_path(tmp_path, "alice")) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM history_windows WHERE window_kind='runtime'"
         ).fetchone()[0] == 0
+
+
+def test_runtime_cache_is_deep_copied_and_lru_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cache.clear()
+    monkeypatch.setattr(runtime_cache, "MAX_ENTRIES", 2)
+    windows = []
+    for index in range(3):
+        path = runtime_window_path(_archive(tmp_path, session_id=f"conv-{index}"))
+        window = empty_window("alice", "web", f"conv-{index}")
+        window["data"]["updated_at"] = f"2026-09-16T00:00:0{index}+00:00"
+        runtime_cache.store(
+            path, window, version=runtime_cache.archive_version(window)
+        )
+        windows.append((path, window))
+    assert runtime_cache.stats()["entries"] == 2
+    assert runtime_cache.load(
+        windows[0][0], version=runtime_cache.archive_version(windows[0][1])
+    ) is None
+    loaded = runtime_cache.load(
+        windows[2][0], version=runtime_cache.archive_version(windows[2][1])
+    )
+    loaded["data"]["title"] = "mutated"
+    reloaded = runtime_cache.load(
+        windows[2][0], version=runtime_cache.archive_version(windows[2][1])
+    )
+    assert reloaded["data"].get("title") != "mutated"
+
+
+def test_runtime_cache_invalidates_after_clear_and_delete(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    window = empty_window("alice", "web", "conv_write")
+    _append_round(window, 1)
+    commit_terminal_windows(archive, window, runtime, copy.deepcopy(window))
+    assert runtime_cache.stats()["entries"] >= 1
+
+    clear_session(tmp_path, "alice", "web", "conv_write")
+    _path, cleared = load_runtime_window(archive)
+    assert cleared["data"]["rounds"] == 0
+    assert cleared["text"]["messages"] == []
+
+    delete_session(tmp_path, "alice", "web", "conv_write")
+    assert runtime_cache.load(
+        runtime,
+        version=runtime_cache.archive_version(cleared),
+    ) is None
+
+
+def test_runtime_cache_version_change_rebuilds_cross_process_archive(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    first = empty_window("alice", "web", "conv_write")
+    _append_round(first, 1)
+    commit_terminal_windows(archive, first, runtime, copy.deepcopy(first))
+
+    external = load_window(archive)
+    _append_round(external, 2)
+    save_window(archive, external)
+
+    _path, rebuilt = load_runtime_window(archive, max_rounds=80)
+    assert rebuilt["data"]["rounds"] == 2
+    assert rebuilt["text"]["messages"][-1]["content"] == "answer-2"
+
+
+def test_runtime_rebuild_reads_only_archive_tail_and_rebases_rounds(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    window = empty_window("alice", "web", "conv_write")
+    for number in range(1, 101):
+        _append_round(window, number)
+    save_window(archive, window)
+
+    _path, rebuilt = load_runtime_window(archive, max_rounds=10)
+
+    assert rebuilt["data"]["rounds"] == 10
+    assert rebuilt["data"]["context"]["round_offset"] == 90
+    assert [item["round"] for item in rebuilt["think"]["rounds"]] == list(
+        range(1, 11)
+    )
+    assert rebuilt["text"]["messages"][0]["content"] == "question-91"
+    assert rebuilt["text"]["messages"][-1]["content"] == "answer-100"
+
+
+def test_same_idle_run_state_skips_registry_write(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    window = empty_window("alice", "web", "conv_write")
+    _append_round(window, 1)
+    commit_terminal_windows(archive, window, runtime, copy.deepcopy(window))
+    db_path = database_path(tmp_path, "alice")
+    with sqlite3.connect(db_path) as database:
+        database.executescript(
+            """
+            CREATE TABLE state_write_audit(kind TEXT NOT NULL);
+            CREATE TRIGGER audit_state_update AFTER UPDATE ON history_sessions
+            WHEN NEW.session_id='conv_write'
+            BEGIN INSERT INTO state_write_audit(kind) VALUES('update'); END;
+            """
+        )
+    update_run_state(
+        tmp_path,
+        "alice",
+        "web",
+        "conv_write",
+        run_state="idle",
+    )
+    with sqlite3.connect(db_path) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM state_write_audit"
+        ).fetchone()[0] == 0
+
+
+def test_trimmed_runtime_round_rows_use_shifted_incremental_rewrite(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(tmp_path)
+    runtime = runtime_window_path(archive)
+    full = empty_window("alice", "web", "conv_write")
+    for number in range(1, 11):
+        _append_round(full, number)
+    save_window(runtime, copy.deepcopy(full))
+    db_path = database_path(tmp_path, "alice")
+    with sqlite3.connect(db_path) as database:
+        database.executescript(
+            """
+            CREATE TABLE shifted_round_audit(kind TEXT NOT NULL);
+            CREATE TRIGGER audit_shifted_round_insert AFTER INSERT ON history_rounds
+            WHEN NEW.window_kind='runtime' AND NEW.window_name='conv_write'
+            BEGIN INSERT INTO shifted_round_audit(kind) VALUES('insert'); END;
+            CREATE TRIGGER audit_shifted_round_delete AFTER DELETE ON history_rounds
+            WHEN OLD.window_kind='runtime' AND OLD.window_name='conv_write'
+            BEGIN INSERT INTO shifted_round_audit(kind) VALUES('delete'); END;
+            """
+        )
+    _append_round(full, 11)
+    shifted = _trim_to_max_rounds(full, 10)
+    save_window(runtime, shifted)
+    with sqlite3.connect(db_path) as database:
+        audit = dict(
+            database.execute(
+                "SELECT kind, COUNT(*) FROM shifted_round_audit GROUP BY kind"
+            ).fetchall()
+        )
+        round_numbers = [
+            row[0]
+            for row in database.execute(
+                "SELECT round_number FROM history_rounds "
+                "WHERE window_kind='runtime' AND window_name='conv_write' "
+                "ORDER BY round_number"
+            ).fetchall()
+        ]
+    assert audit == {"delete": 1, "insert": 1}
+    assert round_numbers == list(range(1, 11))
 
 
 def test_memory_metadata_patch_does_not_touch_transcript_rows(tmp_path: Path) -> None:
