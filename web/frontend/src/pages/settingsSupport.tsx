@@ -32,7 +32,7 @@ export interface GlobalConfigDraft {
   provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number }
   web: { max_concurrent_chats: number; max_pending_chats: number; pending_chat_timeout: number }
   message: { max_workers: number; max_queued_messages: number }
-  cron: { poll_interval: number; history_retention_days: number; avoid_congestion: boolean; congestion_threshold_ratio: number }
+  cron: { poll_interval: number; history_retention_days: number; session_idle_close_seconds: number; avoid_congestion: boolean; congestion_threshold_ratio: number }
   agent_runtime: { default_timeout: number; queue_maxsize: number }
 }
 
@@ -243,6 +243,7 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
     },
     cron: {
       history_retention_days: numberValue(cron.history_retention_days, 7),
+      session_idle_close_seconds: numberValue(cron.session_idle_close_seconds, 86400),
       poll_interval: numberValue(cron.poll_interval, 30),
       avoid_congestion: booleanValue(cron.avoid_congestion, true),
       congestion_threshold_ratio: numberValue(cron.congestion_threshold_ratio, 0.2),

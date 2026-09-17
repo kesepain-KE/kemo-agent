@@ -21,6 +21,7 @@ from cron.scheduler import (
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
     ensure_perception_task,
+    ensure_session_sweep_task,
 )
 from cron.service import generate_cron_task
 from run.scheduler import CronStore, CronValidationError, normalize_task
@@ -241,7 +242,9 @@ class ExecutorTests(unittest.TestCase):
     def test_agent_mode_enters_handle_request(self) -> None:
         task = self._create()
         transport_registry = object()
-        with patch("cron.executor.handle_request", return_value={"text": "ok"}) as handled:
+        with patch("cron.executor.handle_request", return_value={"text": "ok"}) as handled, \
+             patch("cron.executor.queue_memory_extraction") as queued, \
+             patch("cron.executor.close_session") as closed:
             result = execute_cron_task(
                 root=self.root, user="alice", task_id=task["task_id"], config={},
                 transport_registry=transport_registry,
@@ -253,6 +256,48 @@ class ExecutorTests(unittest.TestCase):
         self.assertIs(request["_transport_registry"], transport_registry)
         self.assertEqual(result["status"], "enabled")
         self.assertTrue(result["latest_run_at"].endswith("+08:00"))
+        session_id = request["session_id"]
+        queued.assert_called_once_with(
+            self.root, "alice", request["source"], session_id, reason="cron_session_closed"
+        )
+        closed.assert_called_once_with(self.root, "alice", request["source"], session_id)
+
+    def test_session_sweep_system_task_uses_configured_idle_threshold(self) -> None:
+        with patch("run.scheduler.session_sweep.sweep_idle_sessions", return_value={"closed": 0}) as sweep:
+            result = execute_cron_task(
+                root=self.root,
+                user="alice",
+                task_id="session_lifecycle_sweep",
+                config={"cron": {"session_idle_close_seconds": 7200}},
+                system_task={
+                    "task_id": "session_lifecycle_sweep",
+                    "exec_mode": "system",
+                    "action": "session_lifecycle_sweep",
+                },
+            )
+        self.assertEqual(result, {"closed": 0})
+        sweep.assert_called_once_with(self.root, "alice", idle_seconds=7200)
+
+    def test_session_sweep_system_task_rejects_too_small_or_invalid_threshold(self) -> None:
+        with patch("run.scheduler.session_sweep.sweep_idle_sessions", return_value={}) as sweep:
+            execute_cron_task(
+                root=self.root, user="alice", task_id="session_lifecycle_sweep",
+                config={"cron": {"session_idle_close_seconds": 1}},
+                system_task={"exec_mode": "system", "action": "session_lifecycle_sweep"},
+            )
+            execute_cron_task(
+                root=self.root, user="alice", task_id="session_lifecycle_sweep",
+                config={"cron": {"session_idle_close_seconds": "bad"}},
+                system_task={"exec_mode": "system", "action": "session_lifecycle_sweep"},
+            )
+        self.assertEqual(sweep.call_args_list[0].kwargs["idle_seconds"], 3600)
+        self.assertEqual(sweep.call_args_list[1].kwargs["idle_seconds"], 86400)
+
+    def test_session_sweep_task_is_registered(self) -> None:
+        task = ensure_session_sweep_task(self.root)
+        self.assertEqual(task["task_id"], "session_lifecycle_sweep")
+        self.assertEqual(task["action"], "session_lifecycle_sweep")
+        self.assertEqual(task["interval_seconds"], 3600)
 
     def test_once_completes_and_failure_has_no_result_fields(self) -> None:
         once = self._create("once")
@@ -271,6 +316,30 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertNotIn("last_error", failed)
         self.assertNotIn("last_result", failed)
+
+    def test_failed_agent_task_still_closes_background_session(self) -> None:
+        recurring = self._create()
+        with patch("cron.executor.handle_request", side_effect=RuntimeError("boom")) as handled, \
+             patch("cron.executor.queue_memory_extraction") as queued, \
+             patch("cron.executor.close_session") as closed:
+            failed = execute_cron_task(
+                root=self.root,
+                user="alice",
+                task_id=recurring["task_id"],
+                config={},
+            )
+        request = handled.call_args.args[0]
+        queued.assert_called_once_with(
+            self.root,
+            "alice",
+            request["source"],
+            request["session_id"],
+            reason="cron_session_closed",
+        )
+        closed.assert_called_once_with(
+            self.root, "alice", request["source"], request["session_id"]
+        )
+        self.assertEqual(failed["status"], "failed")
 
     def test_cancel_before_run_reverts_claim(self) -> None:
         task = self._create()

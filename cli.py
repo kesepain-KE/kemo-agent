@@ -20,13 +20,33 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.2.8"
+VERSION = "1.2.9"
 DEFAULT_SOURCE = "cli"
 DEFAULT_SESSION = "default"
 
 
 class CLIError(RuntimeError):
     """A user-facing CLI error."""
+
+
+def _close_cli_session(root: Path, user: str, source: str, session_id: str) -> None:
+    """Best-effort close hook; cleanup must never alter the CLI exit code."""
+    if not str(session_id or "").strip():
+        return
+    # The desktop CLI may intentionally attach to the shared Web interactive
+    # space.  That space is owned by Web leases and must not be closed merely
+    # because this CLI process exits.  Only CLI-like sources use this hook.
+    normalized_source = str(source or "").strip()
+    if normalized_source in {"web", "app"} or normalized_source.startswith("message:"):
+        return
+    try:
+        from run.history import close_session, queue_memory_extraction
+        try:
+            queue_memory_extraction(root, user, source, session_id)
+        finally:
+            close_session(root, user, source, session_id)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,7 +815,7 @@ def run_interactive(
     stream_handler: Callable[[dict[str, str]], Any] | None = None,
     show_reasoning: bool = False,
     root: Path | None = None,
-) -> None:
+) -> str:
     error_stream = stderr or sys.stderr
     base = (root or _project_root()).resolve()
     if getattr(stdin, "isatty", lambda: False)():
@@ -838,14 +858,14 @@ def run_interactive(
             line = stdin.readline()
         except KeyboardInterrupt:
             print(file=stdout)
-            return
+            return session_id
         if line == "":
-            return
+            return session_id
         prompt = line.strip()
         if not prompt:
             continue
         if prompt.lower() in {"/exit", "/quit"}:
-            return
+            return session_id
         if prompt.startswith("/"):
             handled, session_id = _interactive_command(
                 prompt, root=base, user=user, source=source,
@@ -904,33 +924,36 @@ def main(
         active_handler = handler or resolve_handler()
         active_stream_handler = None if args.no_stream or handler is not None else resolve_stream_handler()
 
-        if prompt is None:
-            run_interactive(
-                active_handler,
-                user,
-                source,
-                session_id,
-                args.output,
-                input_stream,
-                output_stream,
-                stderr=error_stream,
-                stream_handler=active_stream_handler,
-                show_reasoning=args.show_reasoning,
-                root=root,
-            )
-        else:
-            run_single(
-                active_handler,
-                user,
-                prompt,
-                source,
-                session_id,
-                args.output,
-                output_stream,
-                stderr=error_stream,
-                stream_handler=active_stream_handler,
-                show_reasoning=args.show_reasoning,
-            )
+        try:
+            if prompt is None:
+                session_id = run_interactive(
+                    active_handler,
+                    user,
+                    source,
+                    session_id,
+                    args.output,
+                    input_stream,
+                    output_stream,
+                    stderr=error_stream,
+                    stream_handler=active_stream_handler,
+                    show_reasoning=args.show_reasoning,
+                    root=root,
+                )
+            else:
+                run_single(
+                    active_handler,
+                    user,
+                    prompt,
+                    source,
+                    session_id,
+                    args.output,
+                    output_stream,
+                    stderr=error_stream,
+                    stream_handler=active_stream_handler,
+                    show_reasoning=args.show_reasoning,
+                )
+        finally:
+            _close_cli_session((root or _project_root()).resolve(), user, source, session_id)
         return 0
     except KeyboardInterrupt:
         print("已取消。", file=error_stream)

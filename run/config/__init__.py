@@ -63,6 +63,17 @@ def cron_history_retention_days(config: dict[str, Any]) -> int:
     return value
 
 
+def cron_session_idle_close_seconds(config: dict[str, Any]) -> int:
+    """Global-only idle-session fallback threshold."""
+    cron = config.get("cron", {})
+    if not isinstance(cron, dict):
+        raise ConfigError("cron 必须是对象")
+    value = cron.get("session_idle_close_seconds", 24 * 3600)
+    if type(value) is not int or value < 3600:
+        raise ConfigError("cron.session_idle_close_seconds 必须是至少 3600 秒的整数")
+    return value
+
+
 def dotenv_values(
     path: Path,
     *,
@@ -203,8 +214,10 @@ def merge_user_config(
     }
     merged = deep_merge(global_defaults, user_config)
     retention_days = cron_history_retention_days(global_config)
+    idle_close_seconds = cron_session_idle_close_seconds(global_config)
     if isinstance(merged.get("cron", {}), dict):
         merged.setdefault("cron", {})["history_retention_days"] = retention_days
+        merged.setdefault("cron", {})["session_idle_close_seconds"] = idle_close_seconds
     for section in USER_ONLY_SECTIONS:
         if section in user_config:
             merged[section] = copy.deepcopy(user_config[section])

@@ -11,6 +11,7 @@ from cron.scheduler import (
     CronScheduler,
     cleanup_old_system_tasks,
     ensure_expand_task,
+    ensure_session_sweep_task,
     ensure_memory_maintenance_tasks,
     ensure_memory_promotion_task,
     ensure_perception_task,
@@ -356,6 +357,7 @@ class RuntimeHost:
                 ensure_memory_promotion_task(self.root)
                 ensure_perception_task(self.root, self.config)
                 ensure_expand_task(self.root, self.config)
+                ensure_session_sweep_task(self.root)
 
             self._set_component("router", "starting")
             self.router.start()

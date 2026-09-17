@@ -33,6 +33,10 @@ MEMORY_DAILY_TASK_ID = "memory_daily_consolidate"
 MEMORY_PROMOTION_TASK_ID = "memory_promotion"
 PERCEPTION_TASK_ID = "perception_update"
 EXPAND_TASK_ID = "expand_update"
+SESSION_SWEEP_TASK_ID = "session_lifecycle_sweep"
+SESSION_SWEEP_SYSTEM_KEY = SESSION_SWEEP_TASK_ID
+SESSION_SWEEP_INTERVAL_SECONDS = 3600
+SESSION_IDLE_CLOSE_SECONDS = 24 * 3600
 # 仅保留旧导入名，持久化 schema 已不再包含 system_key。
 MEMORY_PERIODIC_SYSTEM_KEY = MEMORY_PERIODIC_TASK_ID
 MEMORY_DAILY_SYSTEM_KEY = MEMORY_DAILY_TASK_ID
@@ -43,6 +47,7 @@ _DAILY_TITLE = "临时重要记忆每日整理"
 _PROMOTION_TITLE = "记忆碎片到期晋升检查"
 _PERCEPTION_TITLE = "全局感知模块数据采集"
 _EXPAND_TITLE = "拓展模块数据采集"
+_SESSION_SWEEP_TITLE = "对话生命周期兜底巡检"
 _SINGLETON_SYSTEM_ACTIONS = frozenset({"perception_update"})
 _NO_BACKOFF_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
 _AGGREGATED_SYSTEM_ACTIONS = frozenset(
@@ -259,6 +264,17 @@ def _expand_spec(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _session_sweep_spec() -> dict[str, Any]:
+    return {
+        "task_id": SESSION_SWEEP_TASK_ID,
+        "title": _SESSION_SWEEP_TITLE,
+        "type": "recurring",
+        "interval_seconds": SESSION_SWEEP_INTERVAL_SECONDS,
+        "exec_mode": "system",
+        "action": "session_lifecycle_sweep",
+    }
+
+
 def _same_schedule(task: dict[str, Any], spec: dict[str, Any]) -> bool:
     if task.get("type") != spec["type"]:
         return False
@@ -392,6 +408,18 @@ def ensure_expand_task(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     store = CronStore(root, "__system__", system=True)
     tasks = store.list_tasks()
     spec = _expand_spec(config)
+    return _reconcile_system_task(
+        store,
+        next((task for task in tasks if task.get("task_id") == spec["task_id"]), None),
+        spec=spec,
+        now=datetime.now(BEIJING),
+    )
+
+
+def ensure_session_sweep_task(root: Path) -> dict[str, Any]:
+    store = CronStore(root, "__system__", system=True)
+    tasks = store.list_tasks()
+    spec = _session_sweep_spec()
     return _reconcile_system_task(
         store,
         next((task for task in tasks if task.get("task_id") == spec["task_id"]), None),

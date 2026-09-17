@@ -461,12 +461,13 @@ export function SettingsPage() {
 
   const saveRuntime = () => {
     if (!userDraft || !globalDraft) return
-    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
+    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.cron.session_idle_close_seconds, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
     const nonnegativeIntegers = [globalDraft.tools.invalid_tool_arguments_retries, globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
     let validation = positiveIntegers.every((value) => Number.isInteger(value) && value > 0) ? '' : '超时、轮询和并发上限必须为大于 0 的整数。'
     if (!validation && !nonnegativeIntegers.every((value) => Number.isInteger(value) && value >= 0)) validation = '队列与等待槽上限必须为大于等于 0 的整数。'
     if (!validation && (globalDraft.cron.congestion_threshold_ratio <= 0 || globalDraft.cron.congestion_threshold_ratio > 1)) validation = 'Cron 退避阈值必须大于 0 且不超过 1。'
     if (!validation && (!Number.isInteger(globalDraft.cron.history_retention_days) || globalDraft.cron.history_retention_days < 0 || globalDraft.cron.history_retention_days > 3650)) validation = '定时任务历史保留天数必须是 0 到 3650 的整数；0 表示永久保留。'
+    if (!validation && (!Number.isInteger(globalDraft.cron.session_idle_close_seconds) || globalDraft.cron.session_idle_close_seconds < 3600)) validation = '闲置会话兜底阈值必须是至少 3600 秒的整数。'
     submit({
       label: '保存运行限制',
       userChanges: { task_plan: userDraft.task_plan },
@@ -796,6 +797,7 @@ export function SettingsPage() {
           <article className="setting-section">
             <div className="setting-section-head"><strong>调度与超时</strong><span>控制 Cron 扫描频率和子代理默认执行期限。</span></div>
             <SettingRow title="定时任务历史保留天数" description="默认保留 7 天；填 0 则永久保留。仅清理定时任务历史，缩短天数会删除过期记录且无法恢复。" source="global" control={<NumberInput label="定时任务历史保留天数" value={globalDraft.cron.history_retention_days} min={0} max={3650} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, history_retention_days: value } })} />} />
+            <SettingRow title="闲置会话兜底阈值（秒）" description="默认 24 小时；超过阈值的离线会话进入记忆队列并关闭，最小 3600 秒。" source="global" control={<NumberInput label="闲置会话兜底阈值" value={globalDraft.cron.session_idle_close_seconds} min={3600} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, session_idle_close_seconds: value } })} />} />
             <SettingRow title="Cron 轮询间隔（秒）" description="统一后台调度器检查到期任务的频率" source="global" control={<NumberInput label="Cron 轮询间隔" value={globalDraft.cron.poll_interval} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, poll_interval: value } })} />} />
             <SettingRow title="代理默认超时（秒）" description="未单独声明超时时，子代理使用的默认期限" source="global" control={<NumberInput label="代理默认超时" value={globalDraft.agent_runtime.default_timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { ...globalDraft.agent_runtime, default_timeout: value } })} />} />
           </article>

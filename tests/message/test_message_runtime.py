@@ -973,6 +973,7 @@ class HostTests(unittest.TestCase):
                 "memory_periodic_scan",
                 "memory_promotion",
                 "perception_update",
+                "session_lifecycle_sweep",
             },
         )
         host.stop()

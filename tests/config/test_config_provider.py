@@ -22,6 +22,7 @@ from provider.protocol.models import (
 from provider.schema import ProviderAuthError, ProviderError
 from run.config import (
     ConfigError,
+    cron_session_idle_close_seconds,
     load_config,
     load_dotenv,
     provider_runtime_config,
@@ -260,6 +261,17 @@ class ServerMixin:
 
 
 class ConfigAndHistoryTests(unittest.TestCase):
+    def test_session_idle_close_threshold_is_global_and_bounded(self) -> None:
+        self.assertEqual(cron_session_idle_close_seconds({}), 86400)
+        self.assertEqual(
+            cron_session_idle_close_seconds({"cron": {"session_idle_close_seconds": 7200}}),
+            7200,
+        )
+        with self.assertRaises(ConfigError):
+            cron_session_idle_close_seconds({"cron": {"session_idle_close_seconds": 3599}})
+        with self.assertRaises(ConfigError):
+            cron_session_idle_close_seconds({"cron": {"session_idle_close_seconds": "bad"}})
+
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

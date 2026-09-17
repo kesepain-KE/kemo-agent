@@ -1,6 +1,13 @@
 """Cron, maintenance and runtime-host scheduling domain."""
 
-_DOMAIN_MODULES = ("cron_store", "runtime_state", "log_aggregator", "maintenance", "runtime_host")
+_DOMAIN_MODULES = (
+    "cron_store",
+    "runtime_state",
+    "log_aggregator",
+    "maintenance",
+    "runtime_host",
+    "session_sweep",
+)
 
 
 def __getattr__(name: str):

@@ -14,7 +14,7 @@ from run.agents import AgentRunner
 from run.config import load_config
 from run.scheduler import CronError, CronStore, CronValidationError, now_beijing
 from run.engine import handle_request
-from run.history import new_conversation_id
+from run.history import close_session, new_conversation_id, queue_memory_extraction
 from run.extensions import record_expand_runtime
 from run.extensions import (
     module_update_timeout as _module_update_timeout,
@@ -141,6 +141,8 @@ def _execute_claimed_task(
         return _revert_claim(store, task_id)
 
     failed = False
+    background_session_id = ""
+    background_source = f"background:cron:{task_id}"
     try:
         exec_mode = task.get("exec_mode", "agent")
         if exec_mode == "subagent":
@@ -172,18 +174,30 @@ def _execute_claimed_task(
             request_payload: dict[str, Any] = {
                 "user": task["user"],
                 "prompt": task["prompt"],
-                "source": f"background:cron:{task_id}",
+                "source": background_source,
                 "session_id": background_session_id,
             }
             if transport_registry is not None:
                 request_payload["_transport_registry"] = transport_registry
-            handle_request(
-                request_payload,
-                root=root,
-                provider_factory=provider_factory,
-                tool_registry_factory=tool_registry_factory,
-                cancel_event=cancel_event,
-            )
+            try:
+                handle_request(
+                    request_payload,
+                    root=root,
+                    provider_factory=provider_factory,
+                    tool_registry_factory=tool_registry_factory,
+                    cancel_event=cancel_event,
+                )
+            finally:
+                try:
+                    try:
+                        queue_memory_extraction(
+                            root, task["user"], background_source, background_session_id,
+                            reason="cron_session_closed",
+                        )
+                    finally:
+                        close_session(root, task["user"], background_source, background_session_id)
+                except Exception:
+                    pass
     except Exception:
         failed = True
     return _finish_task(store, task, failed=failed)
@@ -245,6 +259,23 @@ def _execute_memory_review(
     if isinstance(update, dict):
         response["memory_update"] = update
     return response
+
+
+def _execute_session_sweep(
+    root: Path,
+    user: str,
+    *,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    from run.scheduler import SESSION_IDLE_CLOSE_SECONDS, sweep_idle_sessions
+
+    cron_config = config.get("cron") if isinstance(config.get("cron"), dict) else {}
+    raw_idle = cron_config.get("session_idle_close_seconds") if isinstance(cron_config, dict) else None
+    try:
+        idle_seconds = max(3600, int(raw_idle)) if raw_idle is not None else SESSION_IDLE_CLOSE_SECONDS
+    except (TypeError, ValueError):
+        idle_seconds = SESSION_IDLE_CLOSE_SECONDS
+    return sweep_idle_sessions(root, user, idle_seconds=idle_seconds)
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -620,6 +651,8 @@ def _execute_system_task(
             config=config,
             cancel_event=cancel_event,
         )
+    if action == "session_lifecycle_sweep":
+        return _execute_session_sweep(root, user, config=config)
     raise CronValidationError(f"未注册的系统 cron 动作：{action}")
 
 

@@ -141,6 +141,7 @@ _CONFIG_SOURCE_PATHS = (
     "task_plan.max_steps",
     "cron.enabled",
     "cron.history_retention_days",
+    "cron.session_idle_close_seconds",
     "provider_runtime.max_concurrent_requests",
     "provider_runtime.request_semaphore_timeout",
     "web.max_concurrent_chats",

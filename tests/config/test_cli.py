@@ -252,6 +252,68 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("provider unavailable", stderr.getvalue())
 
+    def test_session_close_hook_runs_after_success_and_failure(self) -> None:
+        root = Path(self.make_root("kesepain").name)
+        with patch("cli._close_cli_session") as close:
+            code = cli.main(
+                ["--prompt", "hello", "--source", "cli-test", "--session", "one"],
+                handler=lambda _: "ok",
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                root=root,
+            )
+        self.assertEqual(code, 0)
+        close.assert_called_once_with(root.resolve(), "kesepain", "cli-test", "one")
+
+        def fail(_: dict[str, str]) -> str:
+            raise RuntimeError("broken")
+
+        with patch("cli._close_cli_session") as close:
+            code = cli.main(
+                ["--prompt", "hello", "--source", "cli-test", "--session", "two"],
+                handler=fail,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                root=root,
+            )
+        self.assertEqual(code, 1)
+        close.assert_called_once_with(root.resolve(), "kesepain", "cli-test", "two")
+
+    def test_interactive_exit_closes_the_last_selected_session(self) -> None:
+        root = Path(self.make_root("kesepain").name)
+        with patch(
+            "cli._interactive_command",
+            side_effect=[(True, "selected-session")],
+        ), patch("cli._close_cli_session") as close:
+            code = cli.main(
+                ["--interactive", "--source", "cli-test", "--session", "initial"],
+                handler=lambda _: "ok",
+                stdin=io.StringIO("/use selected-session\n/exit\n"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                root=root,
+            )
+        self.assertEqual(code, 0)
+        close.assert_called_once_with(
+            root.resolve(), "kesepain", "cli-test", "selected-session"
+        )
+
+    def test_close_hook_failure_never_changes_cli_exit_code(self) -> None:
+        root = Path(self.make_root("kesepain").name)
+        with patch(
+            "run.history.queue_memory_extraction",
+            side_effect=RuntimeError("cleanup failed"),
+        ), patch("run.history.close_session") as closed:
+            code = cli.main(
+                ["--prompt", "hello", "--source", "cli-test", "--session", "one"],
+                handler=lambda _: "ok",
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                root=root,
+            )
+        self.assertEqual(code, 0)
+        closed.assert_called_once()
+
     def test_rejects_conflicting_input_sources(self) -> None:
         root = Path(self.make_root("kesepain").name)
         stderr = io.StringIO()
