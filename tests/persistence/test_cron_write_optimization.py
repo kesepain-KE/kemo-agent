@@ -182,6 +182,27 @@ def test_high_frequency_noop_is_aggregated_but_partial_failure_is_immediate() ->
         assert rows[1]["result"]["aggregated"] is True
 
 
+def test_repeated_identical_partial_results_are_aggregated_after_first_record() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        scheduler = CronScheduler(root, config={"task_cron_system": {"success_log_flush_seconds": 3600}})
+        for _ in range(20):
+            scheduler._record_system_execution(
+                action="expand_update", user="__system__", task_id="expand_update",
+                executed_at=datetime.now(BEIJING), duration_ms=2,
+                result={"status": "partial", "failed": ["global/kemo_app"]},
+            )
+        rows = LogStore(root).list_cron("__system__")
+        assert len(rows) == 1
+        assert rows[0]["status"] == "partial"
+        scheduler.flush_persistence()
+        rows = LogStore(root).list_cron("__system__")
+        assert len(rows) == 2
+        aggregate = rows[0]
+        assert aggregate["result"]["aggregated"] is True
+        assert aggregate["result"]["runs"] == 19
+
+
 def test_system_schedule_advances_in_memory_until_explicit_flush() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

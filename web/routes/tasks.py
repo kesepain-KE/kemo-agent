@@ -117,6 +117,10 @@ def register_task_routes(app: FastAPI, backend: WebRunService) -> None:
     async def create_cron(user: str, body: dict[str, Any]) -> dict[str, Any]:
         return backend.create_cron(user, body)
 
+    @app.get("/api/users/{user}/tasks/crons/{task_id}")
+    async def get_cron(user: str, task_id: str) -> dict[str, Any]:
+        return backend.get_cron(user, task_id)
+
     @app.put("/api/users/{user}/tasks/crons/{task_id}")
     async def update_cron(
         user: str,

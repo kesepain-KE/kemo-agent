@@ -105,13 +105,27 @@ export interface CronTaskSummary {
   title: string
   user_defined: boolean
   status: string
-  type: 'daily' | 'once' | 'recurring'
+  type: 'daily' | 'weekly' | 'monthly' | 'once' | 'recurring'
   time?: string
+  times?: string[]
+  weekdays?: number[]
+  month_days?: number[]
   interval_seconds?: number
+  start_date?: string
+  end_date?: string
+  max_runs?: number
+  successful_runs?: number
   next_run_at: string
   latest_run_at: string
   created_at: string
   last_state: 'failed' | 'completed' | 'never' | string
+  exec_mode?: string
+  prompt?: string
+}
+
+export interface CronTaskDetailResponse {
+  user: string
+  cron_task: CronTaskSummary
 }
 
 export interface TasksResponse {
@@ -126,11 +140,14 @@ export interface TasksResponse {
   cron_tasks: CronTaskSummary[]
   executions: Array<{
     kind: 'plan_step' | 'cron' | string
+    user_defined?: boolean
     task_id: string
     title: string
     status: string
     updated_at: string
     result?: unknown
     error?: unknown
+    record_id?: string
+    duration_ms?: number
   }>
 }

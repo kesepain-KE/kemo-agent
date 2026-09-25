@@ -151,9 +151,13 @@ def build_overview(
     enabled_tools = _nonnegative_int(skill_catalog.get("enabled"))
 
     active_statuses = {"running", "approved", "paused"}
-    active_plan = next(
-        (item for item in task_data["plans"] if item["status"] in active_statuses),
-        None,
+    active_plan = (
+        next(
+            (item for item in task_data["plans"] if item["status"] in active_statuses),
+            None,
+        )
+        if selected_directory is not None
+        else None
     )
     activities = []
     for session in sessions[:4]:
@@ -325,6 +329,3 @@ def build_overview(
         "active_plan": active_plan,
         "activities": activities[:6],
     }
-
-
-

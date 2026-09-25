@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -21,7 +21,8 @@ TASK_ID_RE = re.compile(r"^cron_[0-9a-f]{8}$")
 TASK_STATUSES = frozenset({
     "enabled", "paused", "running", "completed", "failed", "cancelled",
 })
-TASK_TYPES = frozenset({"once", "daily", "recurring"})
+TASK_TYPES = frozenset({"once", "daily", "weekly", "monthly", "recurring"})
+MAX_USER_TASKS = 100
 SYSTEM_EXEC_MODE = "system"
 EXEC_MODES = frozenset({"agent", "subagent", "function", SYSTEM_EXEC_MODE})
 SYSTEM_TASK_IDS = frozenset({
@@ -31,6 +32,7 @@ SYSTEM_TASK_IDS = frozenset({
 })
 SYSTEM_TASK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
@@ -119,6 +121,39 @@ def _beijing_iso(value: Any, *, field: str, allow_empty: bool = False) -> str:
     return parsed.astimezone(BEIJING).isoformat()
 
 
+def _calendar_date(value: Any, *, field: str) -> str:
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str) or not _DATE_RE.fullmatch(value):
+        raise CronValidationError(f"{field} 必须是 YYYY-MM-DD")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise CronValidationError(f"{field} 不是有效日期：{value!r}") from exc
+    return value
+
+
+def _clock_values(data: dict[str, Any]) -> tuple[str, ...]:
+    has_time = "time" in data
+    has_times = "times" in data
+    if has_time == has_times:
+        raise CronValidationError("daily/weekly/monthly 任务必须且只能包含 time 或 times")
+    values = [data.get("time")] if has_time else data.get("times")
+    if not isinstance(values, list) or not values or len(values) > 24:
+        raise CronValidationError("times 必须包含 1 到 24 个 HH:MM 时间")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not _TIME_RE.fullmatch(value):
+            raise CronValidationError(f"时间必须使用 HH:MM：{value!r}")
+        hour, minute = (int(part) for part in value.split(":"))
+        if hour > 23 or minute > 59:
+            raise CronValidationError(f"时间超出有效范围：{value!r}")
+        normalized.append(value)
+    if normalized != sorted(set(normalized)):
+        raise CronValidationError("times 必须升序且不能重复")
+    return tuple(normalized)
+
+
 def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
     if not isinstance(data, dict):
         raise CronValidationError("任务必须是 JSON 对象")
@@ -155,19 +190,53 @@ def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
         interval = data.get("interval_seconds")
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
             raise CronValidationError("recurring 任务需要 interval_seconds >= 1")
-        if "time" in data:
-            raise CronValidationError("recurring 任务不能包含 time")
-    elif task_type == "daily":
-        time_str = data.get("time")
-        if not isinstance(time_str, str) or not _TIME_RE.fullmatch(time_str):
-            raise CronValidationError(f"daily 任务需要有效的 time（HH:MM）：{time_str!r}")
-        hour, minute = (int(part) for part in time_str.split(":"))
-        if hour > 23 or minute > 59:
-            raise CronValidationError(f"daily 任务 time 超出有效范围：{time_str!r}")
+        if any(field in data for field in ("time", "times", "weekdays", "month_days")):
+            raise CronValidationError("recurring 任务不能包含日历调度字段")
+    elif task_type in {"daily", "weekly", "monthly"}:
+        _clock_values(data)
         if "interval_seconds" in data:
-            raise CronValidationError("daily 任务不能包含 interval_seconds")
-    elif "interval_seconds" in data or "time" in data:
-        raise CronValidationError("once 任务不能包含 interval_seconds 或 time")
+            raise CronValidationError(f"{task_type} 任务不能包含 interval_seconds")
+        if task_type == "weekly":
+            weekdays = data.get("weekdays")
+            if not isinstance(weekdays, list) or not weekdays or len(weekdays) > 7:
+                raise CronValidationError("weekly 任务需要非空 weekdays")
+            if any(isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 7 for item in weekdays):
+                raise CronValidationError("weekdays 只能包含 1 到 7")
+            if weekdays != sorted(set(weekdays)):
+                raise CronValidationError("weekdays 必须升序且不能重复")
+        elif "weekdays" in data:
+            raise CronValidationError(f"{task_type} 任务不能包含 weekdays")
+        if task_type == "monthly":
+            month_days = data.get("month_days")
+            if not isinstance(month_days, list) or not month_days or len(month_days) > 31:
+                raise CronValidationError("monthly 任务需要非空 month_days")
+            if any(isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 31 for item in month_days):
+                raise CronValidationError("month_days 只能包含 1 到 31")
+            if month_days != sorted(set(month_days)):
+                raise CronValidationError("month_days 必须升序且不能重复")
+        elif "month_days" in data:
+            raise CronValidationError(f"{task_type} 任务不能包含 month_days")
+    elif any(field in data for field in ("interval_seconds", "time", "times", "weekdays", "month_days")):
+        raise CronValidationError("once 任务不能包含重复调度字段")
+
+    start_date = _calendar_date(data.get("start_date"), field="start_date")
+    end_date = _calendar_date(data.get("end_date"), field="end_date")
+    if start_date and end_date and start_date > end_date:
+        raise CronValidationError("start_date 不能晚于 end_date")
+    max_runs = data.get("max_runs")
+    if max_runs is not None and (isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1):
+        raise CronValidationError("max_runs 必须是 >= 1 的整数")
+    successful_runs = data.get("successful_runs", 0)
+    if isinstance(successful_runs, bool) or not isinstance(successful_runs, int) or successful_runs < 0:
+        raise CronValidationError("successful_runs 必须是 >= 0 的整数")
+    if max_runs is not None and successful_runs > max_runs:
+        raise CronValidationError("successful_runs 不能大于 max_runs")
+    if (
+        max_runs is not None
+        and successful_runs >= max_runs
+        and status in {"enabled", "paused", "failed"}
+    ):
+        raise CronValidationError("达到 max_runs 的任务必须是 completed 状态")
 
     next_run = data.get("next_run_at")
     allow_empty_next = status in {"completed", "cancelled"}
@@ -188,14 +257,18 @@ def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
     allowed = {
         "task_id", "title", "prompt", "user", "type", "next_run_at",
         "latest_run_at", "status", "created_at",
-        "exec_mode",
+        "exec_mode", "start_date", "end_date", "max_runs", "successful_runs",
     }
     if system_mode:
         allowed.add("action")
     if task_type == "recurring":
         allowed.add("interval_seconds")
-    elif task_type == "daily":
-        allowed.add("time")
+    elif task_type in {"daily", "weekly", "monthly"}:
+        allowed.add("time" if "time" in data else "times")
+        if task_type == "weekly":
+            allowed.add("weekdays")
+        elif task_type == "monthly":
+            allowed.add("month_days")
     unknown = set(data) - allowed
     if unknown:
         raise CronValidationError(f"任务包含已废弃或未知字段：{', '.join(sorted(unknown))}")
@@ -210,6 +283,13 @@ def normalize_task(
     type: str,
     interval_seconds: int | None = None,
     time: str | None = None,
+    times: list[str] | None = None,
+    weekdays: list[int] | None = None,
+    month_days: list[int] | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    max_runs: int | None = None,
+    successful_runs: int = 0,
     next_run_at: str = "",
     latest_run_at: str = "",
     status: str = "enabled",
@@ -219,6 +299,19 @@ def normalize_task(
 ) -> dict[str, Any]:
     """构造仅包含精简 schema 字段的任务。"""
     now = now_beijing()
+    if (
+        max_runs is not None
+        and successful_runs == max_runs
+        and status in {"enabled", "paused", "failed"}
+    ):
+        status = "completed"
+        next_run_at = ""
+    if (
+        type == "once"
+        and status not in {"completed", "cancelled"}
+        and (not isinstance(next_run_at, str) or not next_run_at.strip())
+    ):
+        raise CronValidationError("once 任务需要 next_run_at")
     task: dict[str, Any] = {
         "task_id": task_id or _generate_task_id(),
         "title": title.strip() if isinstance(title, str) else title,
@@ -238,13 +331,27 @@ def normalize_task(
         "status": status,
         "created_at": _beijing_iso(created_at or now, field="created_at"),
         "exec_mode": exec_mode,
+        "successful_runs": successful_runs,
     }
+    if start_date:
+        task["start_date"] = start_date
+    if end_date:
+        task["end_date"] = end_date
+    if max_runs is not None:
+        task["max_runs"] = max_runs
     if exec_mode == SYSTEM_EXEC_MODE:
         task["action"] = action or ""
     if type == "recurring":
         task["interval_seconds"] = 60 if interval_seconds is None else interval_seconds
-    elif type == "daily":
-        task["time"] = time or "00:00"
+    elif type in {"daily", "weekly", "monthly"}:
+        if times:
+            task["times"] = sorted(set(times))
+        else:
+            task["time"] = time or "00:00"
+        if type == "weekly":
+            task["weekdays"] = sorted(set(weekdays or [1]))
+        elif type == "monthly":
+            task["month_days"] = sorted(set(month_days or [1]))
     _validate_task(task)
     return task
 
@@ -259,6 +366,9 @@ def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]
     created_at = data.get("created_at") or now_beijing()
     interval = data.get("interval_seconds", schedule.get("interval_seconds"))
     time_value = data.get("time", schedule.get("time"))
+    times = data.get("times")
+    weekdays = data.get("weekdays")
+    month_days = data.get("month_days")
     old_system = bool(data.get("system_key")) or data.get("exec_mode") == SYSTEM_EXEC_MODE
     return normalize_task(
         task_id=data.get("task_id"),
@@ -268,6 +378,13 @@ def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]
         type=task_type,
         interval_seconds=interval,
         time=time_value,
+        times=times if isinstance(times, list) else None,
+        weekdays=weekdays if isinstance(weekdays, list) else None,
+        month_days=month_days if isinstance(month_days, list) else None,
+        start_date=str(data.get("start_date") or ""),
+        end_date=str(data.get("end_date") or ""),
+        max_runs=data.get("max_runs") if isinstance(data.get("max_runs"), int) else None,
+        successful_runs=int(data.get("successful_runs", data.get("run_count")) or 0),
         next_run_at=str(next_run_at),
         latest_run_at=str(latest_run_at),
         status=status,
@@ -332,6 +449,8 @@ class CronStore:
         with self._lock:
             _validate_task(task, system=self._system)
             self._dir.mkdir(parents=True, exist_ok=True)
+            if not self._system and len(tuple(self._dir.glob("cron_*.json"))) >= MAX_USER_TASKS:
+                raise CronConflictError(f"每个用户最多创建 {MAX_USER_TASKS} 个定时任务")
             path = self._path(task["task_id"])
             if path.exists():
                 raise CronConflictError(f"定时任务已存在：{task['task_id']}")

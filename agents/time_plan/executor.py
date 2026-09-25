@@ -5,7 +5,7 @@ from typing import Any
 from run.agents import AgentOutputError, AgentRunResult
 
 VALID_ACTIONS = frozenset({"create", "edit", "delete"})
-VALID_TYPES = frozenset({"recurring", "daily", "once"})
+VALID_TYPES = frozenset({"recurring", "daily", "weekly", "monthly", "once"})
 
 REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "create": frozenset({"action", "user_request", "current_time_beijing"}),
@@ -49,10 +49,39 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
             raise AgentOutputError(
                 f"time_plan recurring 的 interval_seconds 必须 ≥ 60，收到 {interval!r}"
             )
-    elif task_type == "daily":
+    elif task_type in {"daily", "weekly", "monthly"}:
         time_str = result.data.get("time")
-        if not isinstance(time_str, str) or len(time_str) != 5 or time_str[2] != ":":
-            raise AgentOutputError(f"time_plan daily 的 time 格式必须是 HH:MM，收到 {time_str!r}")
+        times = result.data.get("times")
+        valid_time = isinstance(time_str, str) and len(time_str) == 5 and time_str[2] == ":"
+        valid_times = isinstance(times, list) and bool(times) and all(
+            isinstance(item, str) and len(item) == 5 and item[2] == ":" for item in times
+        )
+        if valid_time == valid_times:
+            raise AgentOutputError(f"time_plan {task_type} 必须且只能输出有效的 time 或 times")
+        if task_type == "weekly":
+            weekdays = result.data.get("weekdays")
+            if not isinstance(weekdays, list) or not weekdays or any(
+                isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 7
+                for item in weekdays
+            ):
+                raise AgentOutputError("time_plan weekly 需要 1 到 7 的 weekdays")
+        if task_type == "monthly":
+            month_days = result.data.get("month_days")
+            if not isinstance(month_days, list) or not month_days or any(
+                isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 31
+                for item in month_days
+            ):
+                raise AgentOutputError("time_plan monthly 需要 1 到 31 的 month_days")
+
+    start_date = result.data.get("start_date")
+    end_date = result.data.get("end_date")
+    if start_date and (not isinstance(start_date, str) or len(start_date) != 10):
+        raise AgentOutputError("time_plan start_date 必须是 YYYY-MM-DD")
+    if end_date and (not isinstance(end_date, str) or len(end_date) != 10):
+        raise AgentOutputError("time_plan end_date 必须是 YYYY-MM-DD")
+    max_runs = result.data.get("max_runs")
+    if max_runs not in (None, 0) and (isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1):
+        raise AgentOutputError("time_plan max_runs 必须是 >= 1 的整数")
 
     if not result.data.get("prompt"):
         raise AgentOutputError("time_plan 输出缺少 prompt")

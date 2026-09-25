@@ -23,8 +23,8 @@ from cron.scheduler import (
     ensure_perception_task,
     ensure_session_sweep_task,
 )
-from cron.service import generate_cron_task
-from run.scheduler import CronStore, CronValidationError, normalize_task
+from cron.service import edit_cron_task, generate_cron_task
+from run.scheduler import CronConflictError, CronStore, CronValidationError, normalize_task
 from run.infra import LogStore
 
 
@@ -57,7 +57,7 @@ class CronStoreTests(unittest.TestCase):
             {
                 "task_id", "title", "prompt", "user", "type",
                 "interval_seconds", "next_run_at", "latest_run_at",
-                "status", "created_at", "exec_mode",
+                "status", "created_at", "exec_mode", "successful_runs",
             },
         )
         self.assertTrue(created["created_at"].endswith("+08:00"))
@@ -73,6 +73,15 @@ class CronStoreTests(unittest.TestCase):
     def test_type_specific_fields_are_enforced(self) -> None:
         with self.assertRaises(CronValidationError):
             self._task(interval_seconds=0)
+        with self.assertRaisesRegex(CronValidationError, "once 任务需要 next_run_at"):
+            normalize_task(
+                title="once", prompt="x", user="alice", type="once",
+            )
+        completed_once = normalize_task(
+            title="once", prompt="x", user="alice", type="once",
+            status="completed",
+        )
+        self.assertEqual(completed_once["next_run_at"], "")
         with self.assertRaises(CronValidationError):
             normalize_task(
                 title="daily", prompt="x", user="alice", type="daily",
@@ -119,6 +128,7 @@ class CronStoreTests(unittest.TestCase):
         self.assertEqual(migrated["time"], "09:00")
         self.assertEqual(migrated["next_run_at"], "2026-07-20T09:00:00+08:00")
         self.assertEqual(migrated["latest_run_at"], "2026-07-19T09:00:00+08:00")
+        self.assertEqual(migrated["successful_runs"], 2)
         self.assertEqual(migrated["exec_mode"], "agent")
         self.assertNotIn("system_key", migrated)
         self.assertNotIn("schedule", migrated)
@@ -159,6 +169,17 @@ class CronStoreTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "enabled")
         self.assertTrue(recovered["next_run_at"].endswith("+08:00"))
 
+    def test_user_task_count_has_a_hard_limit(self) -> None:
+        with patch("run.scheduler.cron_store.MAX_USER_TASKS", 1):
+            self.store.create(self._task())
+            with self.assertRaises(CronConflictError):
+                self.store.create(self._task())
+
+    def test_run_limit_reached_normalizes_to_completed(self) -> None:
+        task = self._task(max_runs=2, successful_runs=2)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["next_run_at"], "")
+
 
 class ScheduleTests(unittest.TestCase):
     def test_recurring_and_daily_are_beijing(self) -> None:
@@ -180,6 +201,37 @@ class ScheduleTests(unittest.TestCase):
     def test_once_converts_old_utc_value(self) -> None:
         result = compute_next_run({"type": "once", "next_run_at": "2026-07-20T01:00:00Z"})
         self.assertEqual(result, "2026-07-20T09:00:00+08:00")
+
+    def test_weekly_monthly_multiple_times_and_active_range(self) -> None:
+        after = datetime(2026, 9, 25, 10, 0, tzinfo=BEIJING)  # Friday
+        self.assertEqual(
+            compute_next_run(
+                {"type": "weekly", "weekdays": [1, 5], "times": ["09:00", "20:00"]},
+                after=after,
+            ),
+            "2026-09-25T20:00:00+08:00",
+        )
+        self.assertEqual(
+            compute_next_run(
+                {"type": "monthly", "month_days": [31], "time": "09:00"},
+                after=datetime(2026, 9, 30, 10, 0, tzinfo=BEIJING),
+            ),
+            "2026-10-31T09:00:00+08:00",
+        )
+        self.assertEqual(
+            compute_next_run(
+                {"type": "daily", "time": "09:00", "start_date": "2026-12-02", "end_date": "2026-12-12"},
+                after=after,
+            ),
+            "2026-12-02T09:00:00+08:00",
+        )
+        self.assertEqual(
+            compute_next_run(
+                {"type": "daily", "time": "09:00", "end_date": "2026-09-25"},
+                after=after,
+            ),
+            "",
+        )
 
     def test_is_due_compares_aware_times(self) -> None:
         now = datetime(2026, 7, 20, 9, 0, tzinfo=BEIJING)
@@ -217,6 +269,42 @@ class CronServiceTests(unittest.TestCase):
         self.assertEqual(task["exec_mode"], "agent")
         self.assertNotIn("system_key", task)
         self.assertNotIn("schedule", task)
+
+    def test_edit_can_replace_multiple_times_with_one_time(self) -> None:
+        existing = normalize_task(
+            title="weekly",
+            prompt="do it",
+            user="alice",
+            type="weekly",
+            times=["09:00", "20:00"],
+            weekdays=[1, 5],
+            next_run_at="2026-09-25T20:00:00+08:00",
+        )
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data):
+                return SimpleNamespace(data={
+                    "action": "edit",
+                    "title": "weekly",
+                    "prompt": "do it",
+                    "type": "weekly",
+                    "time": "12:30",
+                    "weekdays": [1, 5],
+                })
+
+        with tempfile.TemporaryDirectory() as directory, patch("cron.service.AgentRunner", Runner):
+            task = edit_cron_task(
+                root=Path(directory),
+                user="alice",
+                task=existing,
+                edit_request="改成中午十二点半",
+                config={},
+            )
+        self.assertEqual(task["time"], "12:30")
+        self.assertNotIn("times", task)
 
 
 class ExecutorTests(unittest.TestCase):
@@ -299,7 +387,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(task["action"], "session_lifecycle_sweep")
         self.assertEqual(task["interval_seconds"], 3600)
 
-    def test_once_completes_and_failure_has_no_result_fields(self) -> None:
+    def test_once_completes_and_failure_has_safe_error(self) -> None:
         once = self._create("once")
         with patch("cron.executor.handle_request", return_value={"text": "ok"}):
             completed = execute_cron_task(
@@ -314,6 +402,8 @@ class ExecutorTests(unittest.TestCase):
                 root=self.root, user="alice", task_id=recurring["task_id"], config={},
             )
         self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["_execution_error"]["type"], "RuntimeError")
+        self.assertEqual(failed["_execution_error"]["message"], "boom")
         self.assertNotIn("last_error", failed)
         self.assertNotIn("last_result", failed)
 
@@ -340,6 +430,17 @@ class ExecutorTests(unittest.TestCase):
             self.root, "alice", request["source"], request["session_id"]
         )
         self.assertEqual(failed["status"], "failed")
+
+    def test_success_count_limit_completes_repeating_task(self) -> None:
+        task = self._create(max_runs=2)
+        with patch("cron.executor.handle_request", return_value={"text": "ok"}):
+            first = execute_cron_task(root=self.root, user="alice", task_id=task["task_id"], config={})
+            second = execute_cron_task(root=self.root, user="alice", task_id=task["task_id"], config={})
+        self.assertEqual(first["status"], "enabled")
+        self.assertEqual(first["successful_runs"], 1)
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(second["successful_runs"], 2)
+        self.assertEqual(second["next_run_at"], "")
 
     def test_cancel_before_run_reverts_claim(self) -> None:
         task = self._create()
@@ -854,6 +955,19 @@ class SchedulerTests(unittest.TestCase):
             execute.call_args.kwargs["transport_registry"],
             transport_registry,
         )
+
+    def test_scan_does_not_retry_failed_user_task(self) -> None:
+        store = CronStore(self.root, "alice")
+        task = store.create(normalize_task(
+            title="failed", prompt="run", user="alice", type="recurring",
+            interval_seconds=60, status="failed",
+            next_run_at=(datetime.now(BEIJING) - timedelta(seconds=1)).isoformat(),
+        ))
+        with patch("cron.scheduler.execute_cron_task") as execute:
+            count = CronScheduler(self.root).scan_once()
+        self.assertEqual(count, 0)
+        execute.assert_not_called()
+        self.assertEqual(store.read(task["task_id"])["status"], "failed")
 
     def test_scan_system_task_runs_for_every_user_then_advances_once(self) -> None:
         for user in ("alice", "bob"):

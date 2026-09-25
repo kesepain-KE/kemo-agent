@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.task_time.tool import run
+from run.infra import LogStore
 from run.scheduler import CronStore
 
 
@@ -101,6 +102,44 @@ class TaskTimePluginOptimizationTests(unittest.TestCase):
             self.assertTrue(run("delete", task_id=task_id, context=context)["deleted"])
             self.assertFalse(run("get", task_id=task_id, context=context)["ok"])
 
+    def test_weekly_range_count_and_execution_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root)
+            created = run(
+                "create", title="weekly", prompt="检查状态", type="weekly",
+                weekdays=[1, 5], times=["09:00", "20:00"],
+                start_date="2026-10-01", end_date="2026-12-31", max_runs=3,
+                context=context,
+            )["task"]
+            self.assertEqual(created["weekdays"], [1, 5])
+            self.assertEqual(created["times"], ["09:00", "20:00"])
+            self.assertEqual(created["max_runs"], 3)
+            LogStore(root).append_cron({
+                "executed_at": "2026-10-02T09:00:00+08:00", "user": "alice",
+                "task_id": created["task_id"], "status": "failed", "duration_ms": 10,
+                "result": {}, "error": {"type": "RuntimeError", "message": "boom"},
+            })
+            with patch.object(LogStore, "list_cron", side_effect=AssertionError("history 不应扫描用户全部记录")):
+                history = run("history", task_id=created["task_id"], history_limit=5, context=context)
+            self.assertEqual(history["runs"][0]["status"], "failed")
+            self.assertEqual(history["runs"][0]["error"]["message"], "boom")
+
+            updated = run(
+                "update",
+                task_id=created["task_id"],
+                time="12:30",
+                start_date="",
+                end_date="",
+                clear_max_runs=True,
+                context=context,
+            )["task"]
+            self.assertEqual(updated["time"], "12:30")
+            self.assertNotIn("times", updated)
+            self.assertNotIn("start_date", updated)
+            self.assertNotIn("end_date", updated)
+            self.assertNotIn("max_runs", updated)
+
     def test_context_query_and_action_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -119,12 +158,15 @@ class TaskTimePluginOptimizationTests(unittest.TestCase):
             root=PROJECT_ROOT,
         )
         schema = manifest.tool["input_schema"]
-        self.assertEqual(manifest.tool["version"], "2.1.0")
+        self.assertEqual(manifest.tool["version"], "2.2.0")
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),
-            {"list", "get", "create", "update", "delete"},
+            {"list", "get", "history", "create", "update", "delete"},
         )
         self.assertEqual(schema["properties"]["interval_seconds"]["minimum"], 60)
+        self.assertIn("weekly", schema["properties"]["type"]["enum"])
+        self.assertIn("monthly", schema["properties"]["type"]["enum"])
+        self.assertIn("history", schema["properties"]["action"]["enum"])
         self.assertIn("query", schema["properties"])
 
         skill_text = (PROJECT_ROOT / "plugins" / "task_time" / "SKILL.md").read_text("utf-8")

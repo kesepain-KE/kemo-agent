@@ -2,7 +2,7 @@
 
 - **名称**: time_plan
 - **触发**: 主智能体判断用户请求涉及定时任务时调用（`allowed_callers: ["main_agent"]`）
-- **职责**: 将自然语言定时要求解析为结构化定时任务草案（recurring / daily / once）
+- **职责**: 将自然语言定时要求解析为结构化定时任务草案（recurring / daily / weekly / monthly / once）
 - **模型**: default
 - **工具**: get_current_time（获取北京时间）
 
@@ -32,6 +32,24 @@
 - `time` 格式 `HH:MM`，时区固定 `Asia/Shanghai`
 - 用于"每天 N 点"
 
+### weekly — 每周指定星期
+
+```json
+{ "type": "weekly", "weekdays": [1, 3, 5], "time": "09:00" }
+```
+
+- `weekdays` 使用 ISO 星期：1=周一、7=周日
+- “工作日”解释为周一至周五，不代表法定调休日历
+
+### monthly — 每月指定日期
+
+```json
+{ "type": "monthly", "month_days": [1, 15], "time": "09:00" }
+```
+
+- 29/30/31 在当月不存在时跳过，不自动回退到月末
+- daily / weekly / monthly 可用 `times` 输出多个时刻；`time` 与 `times` 必须且只能输出一个
+
 ### once — 单次执行
 
 ```json
@@ -58,9 +76,15 @@
   "action": "create | edit | delete | skip",
   "title": "任务标题",
   "prompt": "自包含执行提示词",
-  "type": "recurring | daily | once",
+  "type": "recurring | daily | weekly | monthly | once",
   "interval_seconds": 3600,
   "time": "02:00",
+  "times": ["08:00", "20:00"],
+  "weekdays": [1, 3, 5],
+  "month_days": [1, 15],
+  "start_date": "2026-12-02",
+  "end_date": "2026-12-12",
+  "max_runs": 10,
   "next_run_at": "2026-07-21T02:00:00+08:00",
   "message": "skip 原因"
 }
@@ -74,6 +98,8 @@
 - 执行 prompt 必须自包含（cron 执行时无上下文）
 - `next_run_at` 由 `compute_next_run()` 确定性覆盖，子代理输出为参考
 - `interval_seconds` 最小 60 秒
+- 生效区间使用北京时间日期，首尾包含；不要把日期范围只写进 prompt
+- “执行 N 次”输出 `max_runs`，达到后由调度器自动完成
 - 无法解析返回 `action=skip`
 - 继承主会话上下文
 

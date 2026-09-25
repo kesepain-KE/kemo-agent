@@ -17,7 +17,7 @@
 
 ---
 
-## 二、支持的三种类型
+## 二、支持的五种类型
 
 ### recurring（重复间隔）
 
@@ -40,6 +40,32 @@
   "time": "02:00"
 }
 ```
+
+`daily` 也可使用 `times` 表示多个时刻。
+
+### weekly（每周指定星期）
+
+```json
+{
+  "type": "weekly",
+  "weekdays": [1, 3, 5],
+  "time": "09:00"
+}
+```
+
+ISO 星期 1=周一、7=周日；“工作日”默认周一至周五。
+
+### monthly（每月指定日期）
+
+```json
+{
+  "type": "monthly",
+  "month_days": [1, 15],
+  "times": ["08:00", "20:00"]
+}
+```
+
+当月不存在 29/30/31 时跳过，不回退到月末。
 
 ### once（单次执行）
 
@@ -73,16 +99,24 @@
   "action": "create | edit | delete | skip",
   "title": "任务标题",
   "prompt": "执行时发给智能体的自包含提示词",
-  "type": "recurring | daily | once",
+  "type": "recurring | daily | weekly | monthly | once",
   "interval_seconds": 3600,
   "time": "02:00",
+  "times": ["08:00", "20:00"],
+  "weekdays": [1, 3, 5],
+  "month_days": [1, 15],
+  "start_date": "2026-12-02",
+  "end_date": "2026-12-12",
+  "max_runs": 10,
   "next_run_at": "2026-07-21T02:00:00+08:00",
   "message": "skip 时的原因"
 }
 ```
 
 - `interval_seconds` 仅 recurring 时输出
-- `time` 仅 daily 时输出
+- `time` / `times` 用于 daily / weekly / monthly，二者必须且只能输出一个
+- `weekdays` 仅 weekly 输出；`month_days` 仅 monthly 输出
+- 日期区间必须输出为调度字段，不能只写进 prompt
 - `next_run_at` 由 `cron/schedule.py` 的 `compute_next_run()` 确定性计算（非 LLM），子代理可输出建议值，但以计算值为准
 
 ---

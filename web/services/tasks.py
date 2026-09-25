@@ -15,6 +15,7 @@ from run.scheduler import (
     normalize_task,
 )
 from run.history import find_record as find_index_record
+from run.infra import LogStore
 from run.tasks import _normalized_key, cancel_plan, pause_plan
 from run.memory import contains_sensitive_credential
 from run.tasks import (
@@ -166,13 +167,36 @@ class TaskServiceMixin:
             "created_at": str(task.get("created_at") or ""),
         }
         if task.get("type") == "daily":
-            summary["time"] = str(task.get("time") or "")
+            if isinstance(task.get("times"), list):
+                summary["times"] = list(task["times"])
+            else:
+                summary["time"] = str(task.get("time") or "")
+        elif task.get("type") in {"weekly", "monthly"}:
+            if isinstance(task.get("times"), list):
+                summary["times"] = list(task["times"])
+            else:
+                summary["time"] = str(task.get("time") or "")
+            if task.get("type") == "weekly":
+                summary["weekdays"] = list(task.get("weekdays") or [])
+            else:
+                summary["month_days"] = list(task.get("month_days") or [])
         elif task.get("type") == "recurring":
             summary["interval_seconds"] = int(task.get("interval_seconds") or 0)
+        for field in ("start_date", "end_date", "max_runs", "successful_runs"):
+            if task.get(field) not in (None, ""):
+                summary[field] = task[field]
         summary["last_state"] = (
             "never" if not task.get("latest_run_at") else str(task.get("status") or "completed")
         )
         return summary
+
+    @classmethod
+    def _cron_detail(cls, task: dict[str, Any]) -> dict[str, Any]:
+        detail = cls._cron_summary(task)
+        detail["exec_mode"] = str(task.get("exec_mode") or "agent")
+        if detail["user_defined"]:
+            detail["prompt"] = _redact_plan_revision(str(task.get("prompt") or ""))
+        return detail
 
     def tasks(
         self,
@@ -217,19 +241,33 @@ class TaskServiceMixin:
                         "error": _redact_plan_revision(step.get("error")),
                     }
                 )
-        for task in crons:
-            if task.get("latest_run_at"):
-                executions.append(
-                    {
-                        "kind": "cron",
-                        "task_id": task["task_id"],
-                        "title": task.get("title", ""),
-                        "status": task.get("last_state", task.get("status", "")),
-                        "updated_at": task.get("latest_run_at", ""),
-                        "result": None,
-                        "error": _redact_plan_revision(task.get("last_error")),
-                    }
-                )
+        cron_titles = {str(task.get("task_id") or ""): str(task.get("title") or "") for task in crons}
+        system_cron_ids = {
+            str(task.get("task_id") or "")
+            for task in CronStore(self.root, "__system__", system=True).list_tasks()
+            if str(task.get("task_id") or "")
+        }
+        log_store = LogStore(self.root)
+        cron_records = log_store.list_cron(
+            name,
+            limit=100,
+            exclude_task_ids=system_cron_ids,
+        )
+        for record in cron_records:
+            executions.append(
+                {
+                    "kind": "cron",
+                    "user_defined": True,
+                    "task_id": str(record.get("task_id") or ""),
+                    "record_id": str(record.get("id") or ""),
+                    "title": cron_titles.get(str(record.get("task_id") or ""), str(record.get("task_id") or "定时任务")),
+                    "status": str(record.get("status") or "unknown"),
+                    "updated_at": str(record.get("executed_at") or ""),
+                    "duration_ms": int(record.get("duration_ms") or 0),
+                    "result": _redact_plan_revision(record.get("result")),
+                    "error": _redact_plan_revision(record.get("error")),
+                }
+            )
         executions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return {
             "user": name,
@@ -634,19 +672,56 @@ class TaskServiceMixin:
             "type",
             "interval_seconds",
             "time",
+            "times",
+            "weekdays",
+            "month_days",
+            "start_date",
+            "end_date",
+            "max_runs",
             "next_run_at",
             "status",
         }
         source.update({key: value for key, value in payload.items() if key in allowed})
+        if "time" in payload:
+            source.pop("times", None)
+        if "times" in payload:
+            source.pop("time", None)
         task_type = source.get("type")
+        if "type" in payload:
+            previous_type = current.get("type") if current else None
+            if task_type != "recurring":
+                source.pop("interval_seconds", None)
+            if task_type not in {"daily", "weekly", "monthly"}:
+                source.pop("time", None)
+                source.pop("times", None)
+            if task_type != "weekly":
+                source.pop("weekdays", None)
+            if task_type != "monthly":
+                source.pop("month_days", None)
+            if current is not None and previous_type != task_type and task_type == "once":
+                source.pop("start_date", None)
+                source.pop("end_date", None)
+                source.pop("max_runs", None)
         interval = source.get("interval_seconds")
         if task_type == "recurring" and (
             isinstance(interval, bool) or not isinstance(interval, int) or interval < 60
         ):
             raise InvalidRequestError("recurring interval_seconds 必须是 ≥ 60 的整数")
+        max_runs = source.get("max_runs")
+        if max_runs is not None and (
+            isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1
+        ):
+            raise InvalidRequestError("max_runs 必须是 ≥ 1 的整数或 null")
         try:
-            if task_type in {"daily", "recurring"}:
+            terminal_once_without_time = (
+                task_type == "once"
+                and source.get("status") in {"completed", "cancelled"}
+                and not str(source.get("next_run_at") or "").strip()
+            )
+            if task_type in {"once", "daily", "weekly", "monthly", "recurring"} and not terminal_once_without_time:
                 source["next_run_at"] = compute_next_run(source)
+                if not source["next_run_at"]:
+                    raise CronError("调度范围内已经没有可执行时间")
             return normalize_task(
                 task_id=source.get("task_id"),
                 title=source.get("title", ""),
@@ -655,6 +730,13 @@ class TaskServiceMixin:
                 type=task_type,
                 interval_seconds=interval,
                 time=source.get("time"),
+                times=source.get("times") if isinstance(source.get("times"), list) else None,
+                weekdays=source.get("weekdays") if isinstance(source.get("weekdays"), list) else None,
+                month_days=source.get("month_days") if isinstance(source.get("month_days"), list) else None,
+                start_date=str(source.get("start_date") or ""),
+                end_date=str(source.get("end_date") or ""),
+                max_runs=max_runs,
+                successful_runs=int(source.get("successful_runs") or 0),
                 next_run_at=source.get("next_run_at", ""),
                 latest_run_at=source.get("latest_run_at", ""),
                 status=source.get("status", "enabled"),
@@ -676,6 +758,14 @@ class TaskServiceMixin:
         except CronError as exc:
             raise InvalidRequestError(str(exc)) from None
         return {"user": name, "cron_task": self._cron_summary(stored), "updated": True}
+
+    def get_cron(self, user: Any, task_id: Any) -> dict[str, Any]:
+        name = self.require_user(user)
+        try:
+            task = CronStore(self.root, name).read(str(task_id))
+        except CronNotFoundError as exc:
+            raise NotFoundError(str(exc)) from None
+        return {"user": name, "cron_task": self._cron_detail(task)}
 
     def update_cron(self, user: Any, task_id: Any, payload: Any) -> dict[str, Any]:
         name = self.require_user(user)
