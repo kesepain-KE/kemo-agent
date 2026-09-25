@@ -24,6 +24,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         query: str = Query(default=""),
         limit: int = Query(default=50, ge=1, le=100),
         before: str = Query(default=""),
+        archive_date: str = Query(default="", alias="date"),
     ) -> dict[str, Any]:
         return backend.sessions(
             user,
@@ -31,6 +32,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
             query=query,
             limit=limit,
             before=before,
+            archive_date=archive_date,
         )
 
     @app.delete("/api/users/{user}/sessions")

@@ -9,7 +9,8 @@
 3. **角色过滤**：用户问“我上次说过什么”时使用 `role=user`；问“你之前怎么回答的”时使用 `role=assistant`。
 4. **上下文按需获取**：需要还原对话脉络时传入 `context_messages`，一般取 2–3；只确认是否提到某个词时保持默认值 0。
 5. **搜索精度**：搜索 `AI` 等缩写且不希望命中 `main`、`email` 时，使用 `match_mode=word`。只有用户明确需要模式匹配时才启用 `regex=true`。
-6. **控制返回规模**：先使用较小的 `limit` 和 `max_snippet`。`truncated=true` 表示还有命中结果，可结合更窄的日期、角色或关键词继续搜索。
+6. **优先限定会话范围**：已知入口或会话时传入 `source`、`session_id`，避免扫描无关归档。该过滤只匹配已提交的 archive 消息，不会读取 runtime 缓存、未完成 Run、思考记录或工具日志。
+7. **控制返回规模并分页**：先使用较小的 `limit`、`max_snippet` 与 `context_messages`。结果同时受 `page_char_limit` 限制；`has_more=true` 时把 `next_offset` 传给下一次调用。`page_limited_by_chars=true` 表示本页因字符预算提前结束，但仍可正常续页。
 
 ## 参数说明
 
@@ -24,6 +25,11 @@
 | `regex` | boolean | false | 将 query 作为正则表达式处理，并忽略 `match_mode` |
 | `max_snippet` | integer | 500 | 每条匹配片段的字符上限（1–5000，包含省略号） |
 | `context_messages` | integer | 0 | 匹配消息前后各取 N 条上下文（0–20） |
+| `max_context_chars` | integer | 1000 | 每条上下文消息的文本上限（50–5000），超出时追加省略号 |
+| `offset` | integer | 0 | 搜索结果分页偏移；下一页使用返回的 `next_offset` |
+| `page_char_limit` | integer | 80000 | 单页匹配项的序列化字符预算（1000–90000），与 limit 共同限制返回规模 |
+| `source` | string | 无 | 精确过滤对话来源，如 `web`、`app`、`cli`、`cron` |
+| `session_id` | string | 无 | 精确过滤逻辑会话 ID；可与 source 组合使用 |
 
 ## 返回字段
 
@@ -32,7 +38,10 @@
 | `query` | 原始搜索词 |
 | `matches` | 匹配结果数组 |
 | `total_matches` | 实际命中总数，包含被 limit 截断的结果 |
-| `truncated` | `total_matches > limit` 时为 true |
+| `truncated` | 兼容字段，与 `has_more` 同义；受 limit、offset 与字符预算共同影响 |
+| `offset` / `next_offset` / `has_more` | 当前页偏移、下一页偏移与是否还有后续命中 |
+| `page_char_limit` / `page_limited_by_chars` | 单页字符预算及是否因预算提前结束 |
+| `filters` | 实际使用的 source 与 session_id 精确过滤条件 |
 | `time_range` | 实际使用的 since 与 until |
 | `window` | 匹配所在的历史窗口目录名 |
 | `source` | 对话来源，如 web、cli、cron |
@@ -103,12 +112,43 @@
         "maximum": 20,
         "default": 0,
         "description": "匹配消息前后各取 N 条上下文"
+      },
+      "max_context_chars": {
+        "type": "integer",
+        "minimum": 50,
+        "maximum": 5000,
+        "default": 1000,
+        "description": "每条上下文消息的最大字符数，超出时追加省略号"
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000,
+        "default": 0,
+        "description": "匹配结果分页偏移；下一页使用 next_offset"
+      },
+      "page_char_limit": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 90000,
+        "default": 80000,
+        "description": "单页匹配项的序列化字符预算"
+      },
+      "source": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "精确过滤对话来源"
+      },
+      "session_id": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "精确过滤逻辑会话 ID"
       }
     },
     "required": ["query"],
     "additionalProperties": false
   },
-  "version": "1.1.1",
+  "version": "1.2.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

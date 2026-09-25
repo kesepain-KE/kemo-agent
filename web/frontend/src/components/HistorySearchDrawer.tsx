@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, History, LoaderCircle, MessageSquareText, RotateCcw, Search, Trash2, X } from 'lucide-react'
+import {
+  AlertTriangle,
+  CalendarDays,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  History,
+  LoaderCircle,
+  MessageSquareText,
+  RotateCcw,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react'
 import type { SessionSummary } from '../types/api'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import { formatDateTime } from './ModuleUi'
@@ -20,7 +33,9 @@ export interface HistorySearchDrawerProps {
   chatRunning?: boolean
   switchingSessionId?: string
   actionError?: string
+  selectedDate?: string
   onClose: () => void
+  onDateChange?: (date: string) => void
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void> | void
   onDeleteAllSessions: () => Promise<void> | void
@@ -36,6 +51,58 @@ interface SummaryPreview {
   placement: 'above' | 'below'
 }
 
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
+
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function dateValue(year: number, month: number, day: number): string {
+  return `${year}-${padDatePart(month + 1)}-${padDatePart(day)}`
+}
+
+function shanghaiDateValue(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+
+function monthFromDate(value: string): { year: number; month: number } {
+  const [year, month] = value.split('-').map(Number)
+  return {
+    year: Number.isFinite(year) ? year : 1970,
+    month: Number.isFinite(month) ? month - 1 : 0,
+  }
+}
+
+function archiveDateLabel(value: string): string {
+  if (!value) return ''
+  const [year, month, day] = value.split('-').map(Number)
+  return `${year}年${month}月${day}日`
+}
+
+function monthGrid(year: number, month: number) {
+  const firstWeekday = (new Date(Date.UTC(year, month, 1)).getUTCDay() + 6) % 7
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(Date.UTC(year, month, index - firstWeekday + 1))
+    const itemYear = date.getUTCFullYear()
+    const itemMonth = date.getUTCMonth()
+    const day = date.getUTCDate()
+    return {
+      year: itemYear,
+      month: itemMonth,
+      day,
+      value: dateValue(itemYear, itemMonth, day),
+      inMonth: itemMonth === month,
+    }
+  })
+}
+
 export function HistorySearchDrawer({
   user = '',
   open,
@@ -48,7 +115,9 @@ export function HistorySearchDrawer({
   chatRunning = false,
   switchingSessionId = '',
   actionError = '',
+  selectedDate = '',
   onClose,
+  onDateChange = () => undefined,
   onSelectSession,
   onDeleteSession,
   onDeleteAllSessions,
@@ -64,20 +133,39 @@ export function HistorySearchDrawer({
   const [mutationError, setMutationError] = useState('')
   const [summaryPreview, setSummaryPreview] = useState<SummaryPreview | null>(null)
   const [readOnlySession, setReadOnlySession] = useState<SessionSummary | null>(null)
+  const [calendarOpen, setCalendarOpen] = useState(false)
+  const todayDate = shanghaiDateValue()
+  const [visibleMonth, setVisibleMonth] = useState(() => monthFromDate(selectedDate || todayDate))
   const searchRef = useRef<HTMLInputElement>(null)
   const normalizedQuery = query.trim().toLocaleLowerCase()
+  const orderedSessions = useMemo(
+    () => [...sessions].sort((left, right) => {
+      const leftTime = Date.parse(left.updated_at) || 0
+      const rightTime = Date.parse(right.updated_at) || 0
+      if (leftTime !== rightTime) return rightTime - leftTime
+      const sessionIdOrder = right.session_id.localeCompare(left.session_id)
+      if (sessionIdOrder) return sessionIdOrder
+      return (right.source || 'web').localeCompare(left.source || 'web')
+    }),
+    [sessions],
+  )
   const filteredSessions = useMemo(
     () => normalizedQuery
-      ? sessions.filter((session) => [
+      ? orderedSessions.filter((session) => [
           sessionDisplayName(session),
           session.summary || '',
           session.session_id,
           session.source || 'web',
           session.bound_platform || '',
         ].join(' ').toLocaleLowerCase().includes(normalizedQuery))
-      : sessions,
-    [normalizedQuery, sessions],
+      : orderedSessions,
+    [normalizedQuery, orderedSessions],
   )
+  const calendarDays = useMemo(
+    () => monthGrid(visibleMonth.year, visibleMonth.month),
+    [visibleMonth],
+  )
+  const selectedDateText = archiveDateLabel(selectedDate)
 
   useEffect(() => {
     if (open) requestAnimationFrame(() => searchRef.current?.focus())
@@ -91,8 +179,13 @@ export function HistorySearchDrawer({
       setMutationError('')
       setSummaryPreview(null)
       setReadOnlySession(null)
+      setCalendarOpen(false)
     }
   }, [open])
+
+  useEffect(() => {
+    if (selectedDate) setVisibleMonth(monthFromDate(selectedDate))
+  }, [selectedDate])
 
   useEffect(() => {
     setSummaryPreview(null)
@@ -107,7 +200,24 @@ export function HistorySearchDrawer({
     setPendingSessionId('')
     setDeleteSessionId('')
     setDeleteAllOpen(false)
+    setCalendarOpen(false)
     onClose()
+  }
+  const moveCalendarMonth = (offset: number) => {
+    setVisibleMonth((current) => {
+      const next = new Date(Date.UTC(current.year, current.month + offset, 1))
+      return { year: next.getUTCFullYear(), month: next.getUTCMonth() }
+    })
+  }
+  const chooseArchiveDate = (value: string) => {
+    if (value > todayDate) return
+    onDateChange(value)
+    setCalendarOpen(false)
+  }
+  const clearArchiveDate = () => {
+    onDateChange('')
+    setVisibleMonth(monthFromDate(todayDate))
+    setCalendarOpen(false)
   }
   const confirmSwitch = () => {
     if (!pendingSessionId || chatRunning || switchingSessionId) return
@@ -185,7 +295,7 @@ export function HistorySearchDrawer({
       <div className="drawer-head">
         <div className="context-drawer-heading">
           <strong>历史对话</strong>
-          <span>{sessions.length} 条跨渠道对话 · Web 可切换，其他渠道只读查看</span>
+          <span>{sessions.length} 条跨渠道对话 · Web 可切换，定时任务与其他渠道只读查看</span>
         </div>
         <button className="icon-btn" type="button" onClick={closeDrawer} aria-label="关闭历史对话"><X size={17} /></button>
       </div>
@@ -202,8 +312,53 @@ export function HistorySearchDrawer({
           {query && <button type="button" onClick={() => setQuery('')} aria-label="清空历史搜索"><X size={15} /></button>}
         </label>
 
+        <section className={styles.dateFilter} aria-label="历史归档日期筛选">
+          <button
+            type="button"
+            className={`${styles.dateFilterToggle} ${selectedDate ? styles.dateFilterActive : ''}`}
+            aria-label="按日期筛选历史归档"
+            aria-expanded={calendarOpen}
+            onClick={() => setCalendarOpen((value) => !value)}
+          >
+            <CalendarDays size={17} />
+            <span>
+              <strong>{selectedDateText || '选择归档日期'}</strong>
+              <small>{selectedDate ? '正在查看该自然日的历史对话' : '按上海自然日筛选历史归档'}</small>
+            </span>
+            <ChevronDown className={calendarOpen ? styles.dateFilterChevronOpen : ''} size={17} />
+          </button>
+          {calendarOpen && <div className={styles.calendar} role="dialog" aria-label="选择历史归档日期">
+            <header className={styles.calendarHeader}>
+              <button type="button" onClick={() => moveCalendarMonth(-1)} aria-label="上一个月"><ChevronLeft size={18} /></button>
+              <strong>{visibleMonth.year}年{visibleMonth.month + 1}月</strong>
+              <button type="button" onClick={() => moveCalendarMonth(1)} aria-label="下一个月"><ChevronRight size={18} /></button>
+            </header>
+            <div className={styles.calendarGrid}>
+              {WEEKDAY_LABELS.map((label) => <span key={label} className={styles.weekday}>{label}</span>)}
+              {calendarDays.map((item) => {
+                const selected = item.value === selectedDate
+                const today = item.value === todayDate
+                const future = item.value > todayDate
+                return <button
+                  key={item.value}
+                  type="button"
+                  className={`${styles.calendarDay} ${!item.inMonth ? styles.calendarDayOutside : ''} ${today ? styles.calendarDayToday : ''} ${selected ? styles.calendarDaySelected : ''}`}
+                  disabled={future}
+                  aria-label={`${item.year}年${item.month + 1}月${item.day}日`}
+                  aria-pressed={selected}
+                  onClick={() => chooseArchiveDate(item.value)}
+                >{item.day}</button>
+              })}
+            </div>
+            <footer className={styles.calendarFooter}>
+              <button type="button" onClick={clearArchiveDate}>清除</button>
+              <button type="button" onClick={() => chooseArchiveDate(todayDate)}>今天</button>
+            </footer>
+          </div>}
+        </section>
+
         <div className={styles.actionBar}>
-          <span>{sessions.length} 条历史对话 · {webSessions.length} 条 Web{appSessions.length ? ` · ${appSessions.length} 条 APP` : ''}</span>
+          <span>{selectedDateText ? `${selectedDateText} · ` : ''}{sessions.length} 条历史对话 · {webSessions.length} 条 Web{appSessions.length ? ` · ${appSessions.length} 条 APP` : ''}</span>
           <button
             type="button"
             disabled={loading || error || webSessions.length === 0 || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
@@ -244,9 +399,11 @@ export function HistorySearchDrawer({
               ? '网页版'
               : source === 'app'
                 ? 'APP版'
-                : source === 'cli'
-                  ? 'CLI'
-                  : source.startsWith('message:')
+                  : source === 'cli'
+                    ? 'CLI'
+                    : source.startsWith('background:cron:')
+                      ? '定时任务'
+                    : source.startsWith('message:')
                     ? session.bound_platform || source.slice(8) || '外部消息'
                     : source
             const memoryStatus = session.memory_status || 'unknown'
@@ -329,8 +486,8 @@ export function HistorySearchDrawer({
           </button>}
           {!loading && !error && filteredSessions.length === 0 && <div className={styles.empty}>
             <Search size={22} />
-            <strong>{sessions.length === 0 ? '暂无历史对话' : '没有匹配的对话'}</strong>
-            <span>{sessions.length === 0 ? 'Web、CLI 或外部消息完成对话后会在这里生成历史记录。' : '请尝试输入其他对话名称或渠道。'}</span>
+            <strong>{sessions.length === 0 ? (selectedDate ? '该日期没有历史对话' : '暂无历史对话') : '没有匹配的对话'}</strong>
+            <span>{sessions.length === 0 ? (selectedDate ? '请选择其他日期，或清除日期筛选查看全部归档。' : 'Web、CLI、定时任务或外部消息完成对话后会在这里生成历史记录。') : '请尝试输入其他对话名称或渠道。'}</span>
           </div>}
         </div>
       </div>
@@ -376,7 +533,7 @@ export function HistorySearchDrawer({
     <GlobalConfirmDialog
       open={deleteAllOpen}
       title="确认删除全部历史对话？"
-      detail={`共 ${webSessions.length} 条 Web 历史对话`}
+      detail={selectedDate ? '将删除当前用户的全部 Web 历史对话，而不只限于所选日期' : `共 ${webSessions.length} 条 Web 历史对话`}
       description="当前用户的全部 Web 历史对话及其完整内容将被永久删除，此操作无法撤销。"
       error={mutationError}
       icon={<Trash2 size={21} />}

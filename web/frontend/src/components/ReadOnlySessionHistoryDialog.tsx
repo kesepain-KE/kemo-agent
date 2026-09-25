@@ -1,7 +1,7 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { createPortal } from 'react-dom'
 import { Archive, LoaderCircle, X } from 'lucide-react'
-import { getHistory } from '../api/client'
+import { ApiError, getHistory } from '../api/client'
 import type { HistoryMessage, SessionSummary } from '../types/api'
 import { formatDateTime } from './ModuleUi'
 import { sessionDisplayName } from './SessionHistoryPanel'
@@ -14,6 +14,7 @@ function sourceLabel(session: SessionSummary) {
   if (source === 'web') return '网页版'
   if (source === 'app') return 'APP版'
   if (source === 'cli') return 'CLI'
+  if (source.startsWith('background:cron:')) return '定时任务'
   if (source.startsWith('message:')) return session.bound_platform || source.slice(8) || '外部消息'
   return source
 }
@@ -74,6 +75,14 @@ function ReadOnlySessionHistoryDialogContent({
   const memoryStatus = session.memory_status || 'unknown'
   const processed = Math.max(0, session.memory_processed_round || 0)
   const target = Math.max(0, session.memory_target_round || session.rounds || 0)
+  const isCronSource = source.startsWith('background:cron:')
+  const historyErrorMessage = history.error instanceof ApiError && history.error.status === 404
+    ? isCronSource
+      ? '这条历史归档已不存在，可能已经超过定时任务历史保留期。'
+      : '这条历史归档已不存在，可能已被清理或超过历史保留期。'
+    : history.error instanceof ApiError && history.error.status === 400
+      ? '该会话来源不支持只读历史访问。'
+      : '历史归档暂时读取失败，请稍后重试。'
 
   return createPortal(
     <div className={styles.layer} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
@@ -96,7 +105,7 @@ function ReadOnlySessionHistoryDialogContent({
         {session.memory_last_error?.message && <div className={styles.error}>记忆整理失败：{session.memory_last_error.message}</div>}
         <div className={styles.messages}>
           {history.isLoading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={20} />正在读取归档…</div>}
-          {history.isError && <div className={`${styles.empty} ${styles.error}`}>历史归档读取失败。</div>}
+          {history.isError && <div className={`${styles.empty} ${styles.error}`}>{historyErrorMessage}</div>}
           {!history.isLoading && !history.isError && history.hasNextPage && <button
             type="button"
             className={styles.loadMore}
@@ -116,7 +125,7 @@ function ReadOnlySessionHistoryDialogContent({
           </article>)}
           {!history.isLoading && !history.isError && messages.length === 0 && <div className={styles.empty}>这条归档没有可显示的消息正文。</div>}
         </div>
-        <footer>只读查看：网页不会接管、续写或修改来自 APP、CLI 与外部消息渠道的会话。</footer>
+        <footer>只读查看：网页不会接管、续写或修改来自 APP、CLI、定时任务与外部消息渠道的会话。</footer>
       </section>
     </div>,
     document.body,

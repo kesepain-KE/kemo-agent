@@ -42,6 +42,9 @@ function fallbackSessionLabel(sessionId: string) {
 }
 
 export function sessionDisplayName(session: SessionSummary) {
+  if (!session.title?.trim() && session.source?.startsWith('background:cron:')) {
+    return `定时任务 · ${session.source.slice('background:cron:'.length)}`
+  }
   return session.title?.trim() || fallbackSessionLabel(session.session_id)
 }
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import date as calendar_date
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -58,6 +60,7 @@ class SessionServiceMixin:
         query: Any = "",
         limit: Any = 50,
         before: Any = "",
+        archive_date: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_history_source(source, allow_all=True)
@@ -71,6 +74,16 @@ class SessionServiceMixin:
             raise InvalidRequestError("limit 必须是 1 到 100 的整数")
         if not isinstance(before, str):
             raise InvalidRequestError("before 必须是字符串")
+        if not isinstance(archive_date, str):
+            raise InvalidRequestError("date 必须是 YYYY-MM-DD 字符串")
+        normalized_date = archive_date.strip()
+        if normalized_date:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized_date):
+                raise InvalidRequestError("date 必须使用 YYYY-MM-DD 格式")
+            try:
+                calendar_date.fromisoformat(normalized_date)
+            except ValueError as exc:
+                raise InvalidRequestError("date 不是有效的自然日") from exc
         sessions, has_more = list_sessions_page(
             self.root,
             name,
@@ -78,12 +91,14 @@ class SessionServiceMixin:
             query=query.strip(),
             limit=limit,
             before_updated_at=before.strip(),
+            archive_date=normalized_date,
         )
         next_cursor = session_page_cursor(sessions[-1]) if has_more and sessions else ""
         return {
             "user": name,
             "source": normalized_source or "all",
             "query": query.strip(),
+            "date": normalized_date,
             "sessions": sessions,
             "has_more": has_more,
             "next_cursor": next_cursor,
@@ -184,7 +199,7 @@ class SessionServiceMixin:
             new_session_id=app_session_id,
             reuse_latest=True,
         )
-        if normalized_source == "web":
+        if normalized_source in {"web", "app"}:
             with self._active_runs_lock:
                 active_clients = self._touch_session_lease_locked(
                     name,
@@ -193,9 +208,6 @@ class SessionServiceMixin:
                     normalized_client,
                 )
         else:
-            # APP callers only need the durable active binding. Mobile screens
-            # do not own browser-style leases, otherwise a restore request
-            # would prevent the same device from closing its conversation.
             active_clients = 0
         return {
             "user": name,
@@ -313,12 +325,20 @@ class SessionServiceMixin:
         normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
             self._prune_session_leases_locked()
+            if normalized_client:
+                self._release_durable_session_lease_locked(
+                    name, normalized_source, normalized_session, normalized_client
+                )
             lease_clients = self._session_leases.get(
                 (name, normalized_source, normalized_session), {}
             )
             other_clients = [
                 value for value in lease_clients if value != normalized_client
             ]
+            durable_clients = self._other_durable_session_clients_locked(
+                name, normalized_source, normalized_session, normalized_client
+            )
+            other_clients = sorted(set([*other_clients, *durable_clients]))
             if other_clients:
                 raise ConflictError(
                     f"该对话正在其他 {len(other_clients)} 个页面中使用，暂时不能删除"

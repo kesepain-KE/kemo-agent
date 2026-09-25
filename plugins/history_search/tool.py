@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -158,7 +159,7 @@ def _snippet(content: str, match_span: tuple[int, int], max_chars: int) -> str:
 
 
 def _context_messages(
-    text: dict[str, Any], match_index: int, count: int
+    text: dict[str, Any], match_index: int, count: int, max_chars: int
 ) -> tuple[list[dict[str, str]], int]:
     raw_messages = text.get("messages")
     messages = raw_messages if isinstance(raw_messages, list) else []
@@ -173,9 +174,19 @@ def _context_messages(
         content = message.get("content")
         if not isinstance(content, str):
             continue
-        if index == match_index:
+        stored_index = message.get("_history_message_index", index)
+        try:
+            archive_index = int(stored_index)
+        except (TypeError, ValueError):
+            archive_index = index
+        if archive_index == match_index:
             match_position = len(eligible)
-        eligible.append((index, {"role": str(message["role"]), "content": content}))
+        rendered = content
+        if len(rendered) > max_chars:
+            rendered = rendered[: max(0, max_chars - 1)] + "…"
+        eligible.append(
+            (archive_index, {"role": str(message["role"]), "content": rendered})
+        )
     start = max(0, match_position - count)
     end = min(len(eligible), match_position + count + 1)
     return [item for _, item in eligible[start:end]], match_position - start
@@ -185,6 +196,19 @@ def _bounded_integer(value: int, *, field: str, minimum: int, maximum: int) -> i
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field} 必须是整数")
     return min(max(minimum, value), maximum)
+
+
+def _bounded_filter(value: str, *, field: str, maximum: int = 200) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} 必须是字符串")
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise ValueError(f"{field} 最多 {maximum} 个字符")
+    return normalized
+
+
+def _serialized_chars(value: dict[str, Any]) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
 def run(
@@ -197,6 +221,11 @@ def run(
     regex: bool = False,
     max_snippet: int = 500,
     context_messages: int = 0,
+    max_context_chars: int = 1000,
+    offset: int = 0,
+    page_char_limit: int = 80_000,
+    source: str = "",
+    session_id: str = "",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -223,6 +252,17 @@ def run(
     normalized_context = _bounded_integer(
         context_messages, field="context_messages", minimum=0, maximum=20
     )
+    normalized_context_chars = _bounded_integer(
+        max_context_chars, field="max_context_chars", minimum=50, maximum=5000
+    )
+    normalized_offset = _bounded_integer(
+        offset, field="offset", minimum=0, maximum=1_000_000
+    )
+    normalized_page_chars = _bounded_integer(
+        page_char_limit, field="page_char_limit", minimum=1000, maximum=90_000
+    )
+    normalized_source = _bounded_filter(source, field="source")
+    normalized_session_id = _bounded_filter(session_id, field="session_id")
     since_value = _normalize_date(since, field="since")
     until_value = _normalize_date(until, field="until")
     if since_value and until_value and since_value > until_value:
@@ -233,7 +273,16 @@ def run(
         "matches": [],
         "total_matches": 0,
         "truncated": False,
+        "offset": normalized_offset,
+        "next_offset": None,
+        "has_more": False,
+        "page_char_limit": normalized_page_chars,
+        "page_limited_by_chars": False,
         "time_range": {"since": since_value, "until": until_value},
+        "filters": {
+            "source": normalized_source or None,
+            "session_id": normalized_session_id or None,
+        },
     }
     if not needle:
         return result
@@ -245,7 +294,12 @@ def run(
     except (KeyError, TypeError):
         raise ValueError("context 必须包含 root 和 user") from None
     candidates: list[tuple[float, str, dict[str, Any], dict[str, Any]]] = []
-    for stored in message_windows(root, user):
+    for stored in message_windows(
+        root,
+        user,
+        source=normalized_source,
+        session_id=normalized_session_id,
+    ):
         window_name = str(stored.get("window_name") or "")
         data = stored.get("data")
         if not isinstance(data, dict) or data.get("complete") is not True:
@@ -265,6 +319,9 @@ def run(
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     matches: list[dict[str, Any]] = []
     total_matches = 0
+    rendered_chars = 0
+    page_limited_by_chars = False
+    collection_closed = False
     for _, window_name, stored, data in candidates:
         text = stored.get("text")
         if not isinstance(text, dict) or not isinstance(text.get("messages"), list):
@@ -286,25 +343,48 @@ def run(
                 continue
 
             total_matches += 1
-            if len(matches) >= normalized_limit:
+            if total_matches <= normalized_offset:
                 continue
+            if collection_closed or len(matches) >= normalized_limit:
+                continue
+            stored_index = message.get("_history_message_index", index)
+            try:
+                match_index = int(stored_index)
+            except (TypeError, ValueError):
+                match_index = index
             entry: dict[str, Any] = {
                 "window": window_name,
                 "source": data.get("source"),
                 "session_id": data.get("session_id"),
                 "role": message_role,
                 "snippet": _snippet(content, span, normalized_snippet),
-                "match_index": index,
+                "match_index": match_index,
             }
             if normalized_context > 0:
                 context_result, context_index = _context_messages(
-                    text, index, normalized_context
+                    text,
+                    match_index,
+                    normalized_context,
+                    normalized_context_chars,
                 )
                 entry["context"] = context_result
                 entry["context_index"] = context_index
+            entry_chars = _serialized_chars(entry)
+            if matches and rendered_chars + entry_chars > normalized_page_chars:
+                page_limited_by_chars = True
+                collection_closed = True
+                continue
             matches.append(entry)
+            rendered_chars += entry_chars
+            if rendered_chars > normalized_page_chars:
+                page_limited_by_chars = True
+                collection_closed = True
 
     result["matches"] = matches
     result["total_matches"] = total_matches
-    result["truncated"] = total_matches > normalized_limit
+    returned_end = normalized_offset + len(matches)
+    result["has_more"] = total_matches > returned_end
+    result["truncated"] = result["has_more"]
+    result["next_offset"] = returned_end if result["has_more"] else None
+    result["page_limited_by_chars"] = page_limited_by_chars
     return result

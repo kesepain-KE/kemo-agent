@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
 import * as api from '../api/client'
@@ -11,6 +11,70 @@ const sessions = [
 ]
 
 describe('HistorySearchDrawer', () => {
+  it('默认按更新时间倒序展示历史归档', () => {
+    render(<HistorySearchDrawer
+      open
+      sessions={[
+        { session_id: 'older', window: 'older-window', title: '较早对话', state: 'closed', rounds: 1, updated_at: '2026-09-24T08:00:00+00:00' },
+        { session_id: 'newer', window: 'newer-window', title: '较新对话', state: 'closed', rounds: 1, updated_at: '2026-09-25T08:00:00+00:00' },
+      ]}
+      activeSessionId=""
+      onClose={() => undefined}
+      onSelectSession={() => undefined}
+      onDeleteSession={() => undefined}
+      onDeleteAllSessions={() => undefined}
+      onRetrySummary={() => undefined}
+    />)
+
+    expect(screen.getAllByRole('button', { name: /打开对话/ }).map((button) => button.getAttribute('aria-label'))).toEqual([
+      '打开对话 较新对话',
+      '打开对话 较早对话',
+    ])
+  })
+
+  it('可在搜索框下方展开月历并选择、清除归档日期', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-25T04:00:00+00:00'))
+    const onDateChange = vi.fn()
+    const props = {
+      open: true,
+      sessions: [],
+      activeSessionId: '',
+      onClose: () => undefined,
+      onSelectSession: () => undefined,
+      onDeleteSession: () => undefined,
+      onDeleteAllSessions: () => undefined,
+      onRetrySummary: () => undefined,
+      onDateChange,
+    }
+    const { rerender } = render(<HistorySearchDrawer {...props} />)
+
+    const search = screen.getByRole('textbox', { name: '搜索历史对话名称' })
+    const dateToggle = screen.getByRole('button', { name: '按日期筛选历史归档' })
+    expect(search.compareDocumentPosition(dateToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(dateToggle)
+    const calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
+    expect(calendar).toHaveTextContent('2026年9月')
+    for (const weekday of ['一', '二', '三', '四', '五', '六', '日']) {
+      expect(within(calendar).getByText(weekday)).toBeInTheDocument()
+    }
+    expect(within(calendar).getByRole('button', { name: '上一个月' })).toBeInTheDocument()
+    expect(within(calendar).getByRole('button', { name: '下一个月' })).toBeInTheDocument()
+    expect(within(calendar).getByRole('button', { name: '2026年9月26日' })).toBeDisabled()
+
+    fireEvent.click(within(calendar).getByRole('button', { name: '2026年9月24日' }))
+    expect(onDateChange).toHaveBeenLastCalledWith('2026-09-24')
+    expect(screen.queryByRole('dialog', { name: '选择历史归档日期' })).not.toBeInTheDocument()
+
+    rerender(<HistorySearchDrawer {...props} selectedDate="2026-09-24" />)
+    expect(screen.getByText('2026年9月24日')).toBeInTheDocument()
+    expect(screen.getByText('该日期没有历史对话')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '按日期筛选历史归档' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: '选择历史归档日期' })).getByRole('button', { name: '清除' }))
+    expect(onDateChange).toHaveBeenLastCalledWith('')
+    vi.useRealTimers()
+  })
+
   it('按历史对话名称过滤卡片并在确认后选择目标会话', () => {
     const onSelectSession = vi.fn()
     render(<HistorySearchDrawer open sessions={sessions} activeSessionId="s1" onClose={() => undefined} onSelectSession={onSelectSession} onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} onRetrySummary={() => undefined} />)
@@ -215,6 +279,32 @@ describe('HistorySearchDrawer', () => {
     expect(screen.getByText('来自智能体的回答')).toBeInTheDocument()
     expect(screen.getByText('2/4')).toBeInTheDocument()
     expect(onSelectSession).not.toHaveBeenCalled()
+    history.mockRestore()
+  })
+
+  it('定时任务归档使用可读名称和来源，并通过只读历史接口打开', async () => {
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+      user: 'alice', source: 'background:cron:cron_1234abcd', session_id: 'cron-session',
+      messages: [{ role: 'user', content: '定时任务输入' }, { role: 'assistant', content: '定时任务结果' }],
+      round_metrics: [], round_traces: [],
+      pagination: { limit: 40, total_rounds: 1, first_round: 1, last_round: 1, has_more_before: false, next_before: null },
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
+      user="alice" open activeSessionId="" onClose={() => undefined} onSelectSession={() => undefined}
+      onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} onRetrySummary={() => undefined}
+      sessions={[{
+        source: 'background:cron:cron_1234abcd', session_id: 'cron-session', window: 'cron-window',
+        title: '', state: 'closed', memory_status: 'completed', memory_processed_round: 1,
+        memory_target_round: 1, rounds: 1, updated_at: '2026-09-25T05:00:00+00:00',
+      }]}
+    /></QueryClientProvider>)
+
+    expect(screen.getByText('定时任务 · cron_1234abcd')).toBeInTheDocument()
+    expect(screen.getByText(/定时任务 · 1 轮/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '只读查看对话 定时任务 · cron_1234abcd' }))
+    expect(await screen.findByText('定时任务结果')).toBeInTheDocument()
+    expect(api.getHistory).toHaveBeenCalledWith('alice', 'cron-session', expect.objectContaining({ source: 'background:cron:cron_1234abcd' }))
     history.mockRestore()
   })
 })

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from plugins.history_search.tool import run
 from plugins.manifest import discover_plugin_manifests
-from run.history import save_window
+from run.history import delete_session_windows, save_window
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,12 +29,14 @@ class HistorySearchPluginTests(unittest.TestCase):
         complete: bool = True,
         created_at: str = "",
         updated_at: str = "",
+        source: str = "web",
+        session_id: str = "",
     ) -> None:
         window = self.history / name
         data = {
             "complete": complete,
-            "source": "web",
-            "session_id": f"session-{name}",
+            "source": source,
+            "session_id": session_id or f"session-{name}",
         }
         if created_at:
             data["created_at"] = created_at
@@ -194,6 +196,104 @@ class HistorySearchPluginTests(unittest.TestCase):
         self.assertEqual(result["total_matches"], 10)
         self.assertTrue(result["truncated"])
 
+    def test_source_session_pagination_and_character_budget(self) -> None:
+        self.write_window(
+            "2026-09-26-web",
+            [{"role": "user", "content": f"paged hit {index} " + "x" * 300} for index in range(5)],
+            created_at="2026-09-26T01:00:00+08:00",
+            updated_at="2026-09-26T01:05:00+08:00",
+            source="web",
+            session_id="web-session",
+        )
+        self.write_window(
+            "2026-09-26-cli",
+            [{"role": "user", "content": "paged hit from cli"}],
+            created_at="2026-09-26T02:00:00+08:00",
+            updated_at="2026-09-26T02:05:00+08:00",
+            source="cli",
+            session_id="cli-session",
+        )
+
+        first = run(
+            "paged hit",
+            source="web",
+            session_id="web-session",
+            limit=5,
+            max_snippet=320,
+            page_char_limit=1000,
+            context=self.context,
+        )
+        self.assertEqual(first["total_matches"], 5)
+        self.assertEqual(first["filters"], {"source": "web", "session_id": "web-session"})
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["page_limited_by_chars"])
+        self.assertGreater(first["next_offset"], 0)
+        self.assertNotIn("cli", " ".join(item["snippet"] for item in first["matches"]))
+
+        second = run(
+            "paged hit",
+            source="web",
+            session_id="web-session",
+            offset=first["next_offset"],
+            limit=5,
+            max_snippet=320,
+            page_char_limit=1000,
+            context=self.context,
+        )
+        self.assertEqual(second["offset"], first["next_offset"])
+        self.assertGreater(len(second["matches"]), 0)
+        self.assertEqual(
+            first["next_offset"] + len(second["matches"]),
+            second["next_offset"] or second["total_matches"],
+        )
+
+    def test_multimodal_text_uses_structured_text_column_and_preserves_index(self) -> None:
+        self.write_window(
+            "2026-09-26-multimodal",
+            [
+                {"role": "system", "content": "internal"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "multimodal needle"},
+                        {"type": "image_url", "image_url": {"url": "asset://1"}},
+                    ],
+                },
+                {"role": "tool", "content": "private tool output"},
+                {"role": "assistant", "content": "visible reply"},
+            ],
+            created_at="2026-09-26T03:00:00+08:00",
+        )
+
+        result = run(
+            "multimodal needle",
+            context_messages=1,
+            max_context_chars=50,
+            context=self.context,
+        )
+        self.assertEqual(result["total_matches"], 1)
+        self.assertEqual(result["matches"][0]["match_index"], 1)
+        self.assertEqual(
+            result["matches"][0]["context"],
+            [
+                {"role": "user", "content": "multimodal needle"},
+                {"role": "assistant", "content": "visible reply"},
+            ],
+        )
+
+    def test_deleted_session_is_never_returned_even_if_search_was_previously_visible(self) -> None:
+        name = "2026-09-26-deleted"
+        session_id = "deleted-session"
+        self.write_window(
+            name,
+            [{"role": "user", "content": "deleted needle"}],
+            source="app",
+            session_id=session_id,
+        )
+        self.assertEqual(run("deleted needle", context=self.context)["total_matches"], 1)
+        delete_session_windows(self.root, "alice", "app", session_id)
+        self.assertEqual(run("deleted needle", context=self.context)["total_matches"], 0)
+
     def test_validation_empty_result_and_manifest_contract(self) -> None:
         empty = run("  ", since="2026-07-20", context=self.context)
         self.assertEqual(empty["matches"], [])
@@ -219,7 +319,7 @@ class HistorySearchPluginTests(unittest.TestCase):
             for item in discover_plugin_manifests(PROJECT_ROOT)
             if item.tool["name"] == "history_search"
         )
-        self.assertEqual(manifest.tool["version"], "1.1.1")
+        self.assertEqual(manifest.tool["version"], "1.2.0")
         self.assertEqual(
             set(manifest.tool["input_schema"]["properties"]),
             {
@@ -232,6 +332,11 @@ class HistorySearchPluginTests(unittest.TestCase):
                 "regex",
                 "max_snippet",
                 "context_messages",
+                "max_context_chars",
+                "offset",
+                "page_char_limit",
+                "source",
+                "session_id",
             },
         )
 
