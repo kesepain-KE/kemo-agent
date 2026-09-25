@@ -535,9 +535,11 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .knowledge-editor-file strong, .knowledge-editor-file small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-editor-file strong { color: var(--text); font-size: .8125rem; }
 .knowledge-editor-file small { margin-top: 4px; color: var(--muted-2); font-size: .6875rem; }
-.knowledge-editor-toolbar { min-height: 54px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 9px; border-bottom: 1px solid var(--line); }
-.knowledge-mode-switch { display: flex; align-items: center; gap: 5px; }
+.knowledge-editor-toolbar { min-height: 54px; padding: 9px 12px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.knowledge-editor-toolbar.read-only { grid-template-columns: minmax(0, 1fr); }
+.knowledge-editor-toolbar > .module-btn { width: 100%; min-width: 0; justify-content: center; }
 .knowledge-mode-switch .module-btn.active { border-color: color-mix(in srgb, var(--brand) 30%, var(--line)); background: var(--brand-soft); color: var(--brand); }
+.knowledge-mode-toggle[aria-pressed='true'] { border-color: color-mix(in srgb, var(--brand) 30%, var(--line)); background: var(--brand-soft); color: var(--brand); }
 .knowledge-editor .module-error { margin: 9px 12px 0; }
 .knowledge-editor-content { flex: 1 1 0; min-height: 0; height: 0; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-control-lg); background: var(--surface-2); }
 .knowledge-markdown-editor { display: block; width: 100%; height: 100%; min-height: 0; max-height: none; padding: 16px; resize: none; overflow: auto; border: 0; outline: 0; background: var(--surface); color: var(--text); font: .75rem/1.75 var(--font-mono); tab-size: 2; }
@@ -559,16 +561,37 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .knowledge-markdown-preview th, .knowledge-markdown-preview td { padding: 7px; border: 1px solid var(--line); text-align: left; }
 .knowledge-editor-footer { min-height: 42px; padding: 0 14px; display: flex; align-items: center; gap: 12px; color: var(--muted-2); font-size: .6875rem; }
 .knowledge-editor-footer span:last-child { margin-left: auto; }
+.knowledge-preview-layer { position: fixed; inset: 0; z-index: 1400; padding: clamp(14px, 3vw, 34px); display: grid; place-items: center; background: color-mix(in srgb, #111527 58%, transparent); backdrop-filter: blur(10px); }
+.knowledge-preview-dialog { width: min(1120px, 100%); height: min(900px, calc(100vh - 40px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 22px; background: var(--surface-elevated); color: var(--text); box-shadow: 0 28px 90px rgba(12, 17, 33, .34); }
+.knowledge-preview-dialog > header { min-height: 78px; padding: 15px 18px 14px 22px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); }
+.knowledge-preview-dialog > header > div { min-width: 0; }
+.knowledge-preview-dialog > header span { display: block; margin-bottom: 3px; color: var(--brand); font-size: .625rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.knowledge-preview-dialog > header h2 { margin: 0; overflow: hidden; color: var(--text); font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-preview-dialog > header p { margin: 5px 0 0; overflow: hidden; color: var(--muted); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-preview-dialog > header button { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); cursor: pointer; }
+.knowledge-preview-dialog > header button:hover { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
+.knowledge-preview-dialog > header button:focus-visible { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.knowledge-preview-content { min-height: 0; flex: 1 1 auto; padding: 14px; overflow: hidden; background: var(--surface-2); }
+.knowledge-markdown-preview-expanded { border: 1px solid var(--line); border-radius: var(--radius-control-lg); padding: clamp(24px, 4vw, 54px) clamp(24px, 6vw, 76px) 70px; font-size: .9375rem; line-height: 1.88; box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 60%, transparent); }
+.knowledge-markdown-preview-expanded h1 { font-size: 1.55rem; }
+.knowledge-markdown-preview-expanded h2 { font-size: 1.2rem; }
+.knowledge-preview-dialog > footer { min-height: 42px; padding: 0 20px; display: flex; align-items: center; gap: 14px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: .6875rem; }
+.knowledge-preview-dialog > footer span:last-child { margin-left: auto; }
 @media (max-width: 1250px) {
   .knowledge-grid-editor { grid-template-columns: minmax(0, 1fr) 370px; }
   .knowledge-header-actions { max-width: 720px; }
-  .knowledge-editor-toolbar { align-items: stretch; flex-direction: column; }
-  .knowledge-editor-toolbar > .module-actions { justify-content: flex-end; }
 }
 @media (max-width: 1050px) {
   .knowledge-header-actions { max-width: none; justify-content: flex-start; }
   .knowledge-grid-editor { grid-template-columns: 1fr; }
   .knowledge-editor { position: static; height: auto; }
+}
+@media (max-width: 620px) {
+  .knowledge-preview-layer { padding: 0; }
+  .knowledge-preview-dialog { width: 100%; height: 100%; border: 0; border-radius: 0; }
+  .knowledge-preview-content { padding: 8px; }
+  .knowledge-markdown-preview-expanded { padding: 22px 18px 56px; font-size: .875rem; }
+  .knowledge-preview-dialog > footer span:last-child { display: none; }
 }
 .sense-bottom-grid { margin-top: 14px; }
 .decision-output { max-height: 240px; overflow: auto; color: var(--muted); font-family: var(--font-mono); font-size: .75rem; white-space: pre-wrap; }
@@ -811,6 +834,14 @@ label > input[type="search"]::-webkit-search-results-decoration {
 .chat-view {
   --conversation-width: 1120px;
   --welcome-status-gap: 14px;
+  /* Composer auxiliary-space budget:
+     one unit contains a status row, four readable body lines, one action row,
+     and the card's vertical chrome. Gaps remain inside the capped regions. */
+  --composer-aux-card-unit: 10.5rem;
+  --composer-aux-card-half-unit: 5.25rem;
+  --composer-aux-card-gap: .5rem;
+  --composer-follow-up-max: calc(var(--composer-aux-card-unit) + var(--composer-aux-card-unit) + var(--composer-aux-card-half-unit));
+  --composer-guidance-max: var(--composer-aux-card-unit);
 }
 @media (max-width: 620px) {
   .knowledge-pagination { align-items: stretch; flex-direction: column; }
@@ -1843,8 +1874,9 @@ label > input[type="search"]::-webkit-search-results-decoration {
   background-clip: padding-box;
 }
 .tool-call-panel pre::-webkit-scrollbar-corner { background: transparent; }
-.composer-guidance-preview { width: min(100%, var(--conversation-width)); max-width: 100%; box-sizing: border-box; margin: 0 auto 9px; }
-.composer-guidance-preview > .guidance-message.guidance-current { width: 100%; max-width: 100%; margin: 0; box-sizing: border-box; border-radius: 14px; box-shadow: var(--shadow-soft); }
+.composer-guidance-preview { width: min(100%, var(--conversation-width)); max-width: 100%; min-height: 0; box-sizing: border-box; margin: 0 auto var(--composer-aux-card-gap, .5rem); }
+.composer-guidance-preview.composer-guidance-preview-embedded { width: 100%; margin: 0; }
+.composer-guidance-preview > .guidance-message.guidance-current { width: 100%; max-width: 100%; max-height: var(--composer-guidance-max, 10.5rem); margin: 0; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; border-radius: 14px; box-shadow: var(--shadow-soft); }
 .guidance-title { display: inline-flex !important; align-items: center; gap: 7px; }
 .guidance-title > i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 11%, transparent); }
 .guidance-message.accepted .guidance-title,

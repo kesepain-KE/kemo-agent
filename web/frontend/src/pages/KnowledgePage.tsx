@@ -1,6 +1,7 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, ChevronLeft, ChevronRight, Database, Eye, FileText, Layers3, LoaderCircle, Pencil, RefreshCw, Save, Search, Share2, Trash2, Upload, UserRound, X } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight, Database, Eye, FileText, Layers3, LoaderCircle, Maximize2, RefreshCw, Save, Search, Share2, Trash2, Upload, UserRound, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from '../markdownLinks'
 import { useNavigate, useOutletContext } from 'react-router-dom'
@@ -33,6 +34,7 @@ export function KnowledgePage() {
   const [selected, setSelected] = useState<{ scope: string; path: string } | null>(null)
   const [draft, setDraft] = useState('')
   const [editorMode, setEditorMode] = useState<EditorMode>('preview')
+  const [previewOpen, setPreviewOpen] = useState(false)
   const [hasIndexChanges, setHasIndexChanges] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importScope, setImportScope] = useState<EditableScope>('user')
@@ -53,7 +55,21 @@ export function KnowledgePage() {
   }, [documentQuery.data])
   useEffect(() => {
     setEditorMode('preview')
+    setPreviewOpen(false)
   }, [selected?.scope, selected?.path])
+  useEffect(() => {
+    if (!previewOpen || typeof document === 'undefined') return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewOpen(false)
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [previewOpen])
 
   const data = query.data
   const documents = useMemo(() => {
@@ -179,7 +195,7 @@ export function KnowledgePage() {
           <div className="panel-head"><div className="panel-title"><span className="panel-title-icon knowledge-collection-icon"><FileText size={17} /></span><span><strong>编辑查看</strong><span>{readOnly ? '全局层只支持查看' : 'Markdown 编辑与预览'}</span></span></div>{selected && <button type="button" className="knowledge-close-button" aria-label="关闭编辑查看" onClick={() => setSelected(null)}><X size={16} /></button>}</div>
           {!selected || !selectedSummary ? <div className="knowledge-editor-empty"><BookOpen size={25} /><strong>选择知识文件</strong><span>点击左侧知识文件后，可在此处编辑或预览。</span></div> : <>
             <div className="knowledge-editor-file"><span className="knowledge-file-avatar"><FileText size={18} /></span><span><strong>{basename(selected.path)}</strong><small>{selectedSummary.relative_path}</small></span><span className={`scope-tag ${selected.scope}`}>{scopeLabels[selected.scope as Exclude<Scope, 'all'>] || selected.scope}</span><StatusChip status={selectedSummary.active_for_main_agent ? 'enabled' : 'paused'}>{selectedSummary.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></div>
-            <div className="knowledge-editor-toolbar"><div className="knowledge-mode-switch"><button type="button" className={`module-btn ${editorMode === 'preview' ? 'active' : ''}`} onClick={() => setEditorMode('preview')}><Eye size={14} />预览</button>{!readOnly && <button type="button" className={`module-btn ${editorMode === 'markdown' ? 'active' : ''}`} onClick={() => setEditorMode('markdown')}><Pencil size={14} />编辑</button>}</div>{!readOnly && <div className="module-actions"><button type="button" className="module-btn primary" disabled={saveMutation.isPending || documentQuery.isFetching || editorMode !== 'markdown'} onClick={() => saveMutation.mutate()}><Save size={14} />保存编辑</button><button type="button" className="module-btn danger" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm('删除此知识文件？')) deleteMutation.mutate() }}><Trash2 size={14} />删除此知识</button></div>}</div>
+            <div className={`knowledge-editor-toolbar ${readOnly ? 'read-only' : ''}`}>{!readOnly && <button type="button" className="module-btn knowledge-mode-toggle" aria-label={editorMode === 'preview' ? '切换到编辑模式' : '切换到预览模式'} aria-pressed={editorMode === 'preview'} onClick={() => setEditorMode((current) => current === 'preview' ? 'markdown' : 'preview')}><Eye size={14} />预览</button>}<button type="button" className="module-btn" aria-label="放大预览" disabled={documentQuery.isLoading} onClick={() => setPreviewOpen(true)}><Maximize2 size={14} />放大</button>{!readOnly && <><button type="button" className="module-btn primary" aria-label="保存编辑" disabled={saveMutation.isPending || documentQuery.isFetching || editorMode !== 'markdown'} onClick={() => saveMutation.mutate()}><Save size={14} />保存</button><button type="button" className="module-btn danger" aria-label="删除此知识" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm('删除此知识文件？')) deleteMutation.mutate() }}><Trash2 size={14} />删除</button></>}</div>
             {saveMutation.isError && <ModuleError message={saveMutation.error instanceof Error ? saveMutation.error.message : '知识文件保存失败'} />}
             {deleteMutation.isError && <ModuleError message={deleteMutation.error instanceof Error ? deleteMutation.error.message : '知识文件删除失败'} />}
             <div className="knowledge-editor-content">{documentQuery.isLoading ? <div className="center-state">正在加载知识正文…</div> : editorMode === 'markdown' ? <textarea className="knowledge-markdown-editor" value={draft} readOnly={readOnly} spellCheck={false} onChange={(event) => setDraft(event.target.value)} /> : <article className="knowledge-markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article>}</div>
@@ -187,6 +203,13 @@ export function KnowledgePage() {
           </>}
         </aside>
       </div>
+      {typeof document !== 'undefined' && previewOpen && selected && selectedSummary ? createPortal(<div className="knowledge-preview-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewOpen(false) }}>
+        <section className="knowledge-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="knowledge-preview-title" onMouseDown={(event) => event.stopPropagation()}>
+          <header><div><span>渲染后文本预览</span><h2 id="knowledge-preview-title">{basename(selected.path)}</h2><p>{scopeLabels[selected.scope as Exclude<Scope, 'all'>] || selected.scope} · {selectedSummary.relative_path}</p></div><button type="button" autoFocus aria-label="关闭放大预览" onClick={() => setPreviewOpen(false)}><X size={19} /></button></header>
+          <div className="knowledge-preview-content"><article className="knowledge-markdown-preview knowledge-markdown-preview-expanded"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article></div>
+          <footer><span>共 {draft.split('\n').length} 行</span><span>约 {draft.trim().length} 字符</span><span>Esc 可关闭</span></footer>
+        </section>
+      </div>, document.body) : null}
     </ModuleFrame>
   )
 }
