@@ -39,6 +39,15 @@ describe('dark theme surface contracts', () => {
     expect(lastRule(css, '.detailBody dd')).toContain('color: var(--text-2)')
   })
 
+  it('distributes the four knowledge editor actions into equal columns', () => {
+    const css = stylesheet('src/styles/app.css')
+
+    expect(lastRule(css, '.knowledge-editor-toolbar')).toContain('display: grid')
+    expect(lastRule(css, '.knowledge-editor-toolbar')).toContain('grid-template-columns: repeat(4, minmax(0, 1fr))')
+    expect(lastRule(css, '.knowledge-editor-toolbar > .module-btn')).toContain('width: 100%')
+    expect(lastRule(css, '.knowledge-editor-toolbar > .module-btn')).toContain('justify-content: center')
+  })
+
   it('derives status and category tint backgrounds from the active surface', () => {
     const runtime = stylesheet('src/pages/RuntimeStatusPage.module.css')
     const expand = stylesheet('src/pages/ExpandPage.module.css')

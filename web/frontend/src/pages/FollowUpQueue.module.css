@@ -1,11 +1,14 @@
-.queue { width: min(var(--conversation-width, 1120px), 100%); margin: 0 auto 10px; }
-.queue ol { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
-.queue li { min-width: 0; }
-.bubble { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); }
+.queue { width: min(var(--conversation-width, 1120px), 100%); min-height: 0; margin: 0 auto var(--composer-aux-card-gap, .5rem); }
+.queue.embedded { width: 100%; margin: 0; }
+.queue ol { display: grid; gap: var(--composer-aux-card-gap, .5rem); list-style: none; padding: 0; margin: 0; max-height: var(--composer-follow-up-max, 26.25rem); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+.queue li { min-width: 0; min-height: 0; }
+.bubble { box-sizing: border-box; max-height: var(--composer-follow-up-max, 26.25rem); padding: 10px 12px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 14px; background: var(--surface-elevated); color: var(--text); }
 .heading { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: .75rem; }
 .heading span { margin-left: auto; color: var(--muted); font-size: .7rem; }
-.bubble p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
-.bubble small { color: var(--red); overflow-wrap: anywhere; }
+.heading, .actions { flex: 0 0 auto; }
+.body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.body p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; line-height: 1.5; }
+.body small { color: var(--red); overflow-wrap: anywhere; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .queue button { display: inline-flex; align-items: center; gap: 3px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text-2); font-size: .7rem; cursor: pointer; }
 .queue button svg { width: 13px; height: 13px; }

@@ -854,6 +854,7 @@ export function SettingsPage() {
             <div className="setting-section-head"><strong>当前版本</strong><span>只读展示项目内的版本声明，不提供检查、下载或更新功能。</span></div>
             <SettingRow title="项目" description="当前运行的智能体框架" control={<span className="settings-version-name">{versionQuery.data.name}</span>} />
             <SettingRow title="正式版本" description="来自项目根目录 version.json" control={<span className="settings-version-value primary">{versionLabel(versionQuery.data.version)}</span>} />
+            {versionQuery.data.compatibility?.['kemo-adapter-api'] ? <SettingRow title="配套 Kemo 网关" description="已确认匹配当前 Kemo 1.0 线路协议" control={<span className="settings-version-value">v{versionQuery.data.compatibility['kemo-adapter-api']}</span>} /> : null}
             <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || '未声明'}</span>} />
             <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">只读</span>} />
           </article>

@@ -55,7 +55,6 @@ import {
 } from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
 import { ApiError } from '../api/transport'
-import { reorderFollowUps } from './followUpQueue'
 import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
 import lifecycleStyles from './SessionLifecycle.module.css'
@@ -72,15 +71,10 @@ import {
   type ReasoningEffort,
 } from '../reasoningEffort'
 
-import type {
-  ChatItemsUpdater,
-  ChatRunSnapshot,
-  PendingNextTurnMessage,
-  ShellOutletContext,
-} from './appShellTypes'
+import type { ShellOutletContext } from './appShellTypes'
+import { useChatRunRegistry } from './useChatRunRegistry'
 import {
   CONVERSATION_COMMAND_EVENT,
-  chatRunKey,
   fontSizeLabels,
   formatTokens,
   injectionPolicyPresentation,
@@ -95,16 +89,6 @@ import {
 } from './appShellConfig'
 export * from './appShellConfig'
 export type * from './appShellTypes'
-
-interface ChatRunControl {
-  user: string
-  sessionId: string
-  runId: string
-  logicalRunId: string
-  running: boolean
-  stopping: boolean
-  controller: AbortController | null
-}
 
 export function AppShell() {
   const location = useLocation()
@@ -185,143 +169,33 @@ export function AppShell() {
   const [commandQuery, setCommandQuery] = useState('')
   const [commandMode, setCommandMode] = useState<'main' | 'slash'>('main')
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false)
+  const [historyArchiveDate, setHistoryArchiveDate] = useState('')
   const [historySwitchingSessionId, setHistorySwitchingSessionId] = useState('')
   const [historySwitchError, setHistorySwitchError] = useState('')
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
   const [logoutPending, setLogoutPending] = useState(false)
   const [avatarRevision, setAvatarRevision] = useState(0)
-  const [, setChatControlRevision] = useState(0)
-  const chatRunControlsRef = useRef(new Map<string, ChatRunControl>())
-  const chatDraftRunKeysRef = useRef(new Map<string, string>())
-  const [chatRuns, setChatRuns] = useState<Record<string, ChatRunSnapshot>>({})
   const locationRef = useRef(location)
-  const userRef = useRef(user)
-  const sessionIdRef = useRef(sessionId)
   const sessionChannelRef = useRef<ReturnType<typeof createSessionChannel> | null>(null)
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const commandInputRef = useRef<HTMLInputElement>(null)
+  const historyDateSessionsQuery = useQuery({
+    queryKey: ['history-sessions', user, historyArchiveDate],
+    queryFn: () => getSessions(user, '', 50, '', 'all', historyArchiveDate),
+    enabled: Boolean(user && historyDrawerOpen && historyArchiveDate),
+  })
+  const historySessionsData = historyArchiveDate
+    ? historyDateSessionsQuery.data
+    : sessionsQuery.data
 
   locationRef.current = location
-  userRef.current = user
-  sessionIdRef.current = sessionId
-
-  const bumpChatControlRevision = () => setChatControlRevision((value) => value + 1)
-  const getCurrentChatRunControl = () => {
-    const currentUser = userRef.current
-    if (!currentUser) return undefined
-    const key = sessionIdRef.current
-      ? chatRunKey(currentUser, sessionIdRef.current)
-      : chatDraftRunKeysRef.current.get(currentUser) || ''
-    return key ? chatRunControlsRef.current.get(key) : undefined
-  }
-  const currentChatRunControl = getCurrentChatRunControl()
-  const chatRunning = Boolean(currentChatRunControl?.running)
-  const chatStopping = Boolean(currentChatRunControl?.stopping)
-  const chatRunId = currentChatRunControl?.runId || ''
-  const chatRunSessionId = currentChatRunControl?.sessionId || ''
-  const chatRunToken = currentChatRunControl?.logicalRunId || ''
-
-  const beginChatRun = useCallback((runUser: string, runSessionId: string, runId: string, historyUserMessages: number) => {
-    const key = chatRunKey(runUser, runSessionId)
-    const current = chatRunControlsRef.current.get(key)
-    setChatRuns((current) => ({
-      ...current,
-      [key]: {
-        items: current[key]?.items ?? [],
-        phase: 'streaming',
-        runId,
-        historyUserMessages,
-        nextTurnQueue: current[key]?.nextTurnQueue ?? [],
-      },
-    }))
-    const logicalRunId = current?.running ? current.logicalRunId : runId
-    chatRunControlsRef.current.set(key, {
-      user: runUser, sessionId: runSessionId, runId, logicalRunId,
-      running: true, stopping: current?.running ? current.stopping : false,
-      controller: current?.running ? current.controller : null,
-    })
-    if (!sessionIdRef.current && userRef.current === runUser) chatDraftRunKeysRef.current.set(runUser, key)
-    bumpChatControlRevision()
-  }, [])
-
-  const updateChatRunItems = useCallback((runUser: string, runSessionId: string, updater: ChatItemsUpdater) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key] ?? { items: [], phase: 'idle' as const, runId: '', historyUserMessages: 0, nextTurnQueue: [] }
-      const items = typeof updater === 'function' ? updater(existing.items) : updater
-      return { ...current, [key]: { ...existing, items } }
-    })
-  }, [])
-
-  const queueNextTurnMessage = useCallback((runUser: string, runSessionId: string, message: PendingNextTurnMessage) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key] ?? { items: [], phase: 'idle' as const, runId: '', historyUserMessages: message.historyUserMessages, nextTurnQueue: [] }
-      if (existing.nextTurnQueue.some((item) => item.id === message.id)) return current
-      return { ...current, [key]: { ...existing, nextTurnQueue: [...existing.nextTurnQueue, message] } }
-    })
-  }, [])
-
-  const setNextTurnMessageStatus = useCallback((runUser: string, runSessionId: string, messageId: string, status: PendingNextTurnMessage['status'], error?: string) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key]
-      if (!existing) return current
-      return {
-        ...current,
-        [key]: {
-          ...existing,
-          nextTurnQueue: existing.nextTurnQueue.map((item) => item.id === messageId ? { ...item, status, error } : item),
-        },
-      }
-    })
-  }, [])
-
-  const removeNextTurnMessage = useCallback((runUser: string, runSessionId: string, messageId: string) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key]
-      if (!existing) return current
-      return { ...current, [key]: { ...existing, nextTurnQueue: existing.nextTurnQueue.filter((item) => item.id !== messageId) } }
-    })
-  }, [])
-
-  const finishChatRun = useCallback((runUser: string, runSessionId: string, committed: boolean, expectedRunId = '') => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key]
-      if (!existing) return current
-      // A late terminal callback from an older Run must not seal the
-      // snapshot that a continuation or a newer send has already claimed.
-      if (expectedRunId && existing.runId !== expectedRunId) return current
-      return { ...current, [key]: { ...existing, phase: committed ? 'awaiting_history' : 'idle' } }
-    })
-  }, [])
-
-  const reorderNextTurnMessages = useCallback((runUser: string, runSessionId: string, messageId: string, targetId: string) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key]
-      if (!existing) return current
-      const nextTurnQueue = reorderFollowUps(existing.nextTurnQueue, messageId, targetId)
-      return nextTurnQueue === existing.nextTurnQueue ? current : { ...current, [key]: { ...existing, nextTurnQueue } }
-    })
-  }, [])
-
-  const clearChatRun = useCallback((runUser: string, runSessionId: string) => {
-    const key = chatRunKey(runUser, runSessionId)
-    setChatRuns((current) => {
-      const existing = current[key]
-      if (!existing) return current
-      if (existing.nextTurnQueue.length) {
-        return { ...current, [key]: { ...existing, items: [], phase: 'idle', runId: '' } }
-      }
-      const next = { ...current }
-      delete next[key]
-      return next
-    })
-  }, [])
+  const {
+    userRef, sessionIdRef, chatRuns, chatRunning, chatStopping, chatRunId, chatRunSessionId, chatRunToken,
+    beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus,
+    removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun,
+    setChatRunning, setChatRunId, setChatAbortController, setChatStopping, abortChatRun,
+  } = useChatRunRegistry(user, sessionId)
 
   useEffect(() => {
     document.documentElement.dataset.theme = ui.theme
@@ -381,8 +255,12 @@ export function AppShell() {
   }, [commandOpen])
 
   useEffect(() => {
+    if (!historyDrawerOpen && historyArchiveDate) setHistoryArchiveDate('')
+  }, [historyArchiveDate, historyDrawerOpen])
+
+  useEffect(() => {
     if (!historyDrawerOpen) return
-    const sessions = sessionsQuery.data?.sessions ?? []
+    const sessions = historySessionsData?.sessions ?? []
     const hasPendingSummary = sessions.some(
       (session) => ['queued', 'processing'].includes(session.summary_status || ''),
     )
@@ -398,9 +276,12 @@ export function AppShell() {
       const nextRetryAt = retryTimes.length ? Math.min(...retryTimes) : Date.now() + 30_000
       delay = Math.min(30_000, Math.max(2_000, nextRetryAt - Date.now() + 1_500))
     }
-    const timer = window.setTimeout(() => { void sessionsQuery.refetch() }, delay)
+    const timer = window.setTimeout(() => {
+      if (historyArchiveDate) void historyDateSessionsQuery.refetch()
+      else void sessionsQuery.refetch()
+    }, delay)
     return () => window.clearTimeout(timer)
-  }, [historyDrawerOpen, sessionsQuery.data?.sessions])
+  }, [historyArchiveDate, historyDateSessionsQuery.refetch, historyDrawerOpen, historySessionsData?.sessions, sessionsQuery.refetch])
 
   useEffect(() => {
     const refreshAvatar = (event: Event) => {
@@ -426,121 +307,6 @@ export function AppShell() {
     const next = new URLSearchParams()
     next.set('user', nextUser)
     setParams(next)
-  }
-
-  const resolveRunScope = (runUser?: string, runSessionId?: string, runId = '') => ({
-    user: runUser ?? userRef.current,
-    sessionId: runSessionId ?? sessionIdRef.current,
-    runId,
-  })
-
-  const setChatRunning = (running: boolean, runUser?: string, runSessionId?: string, runId = '') => {
-    const scope = resolveRunScope(runUser, runSessionId, runId)
-    if (!scope.user || !scope.sessionId) return
-    const key = chatRunKey(scope.user, scope.sessionId)
-    const current = chatRunControlsRef.current.get(key)
-    if (!running) {
-      // Compare-and-set by Run ID.  Do not let a late stop/finally callback
-      // clear the control belonging to a continuation or a newer Run.
-      if (!current || (scope.runId && current.runId !== scope.runId)) return
-      chatRunControlsRef.current.delete(key)
-      if (chatDraftRunKeysRef.current.get(scope.user) === key) {
-        chatDraftRunKeysRef.current.delete(scope.user)
-      }
-      bumpChatControlRevision()
-      return
-    }
-    const sameRun = Boolean(current && (!scope.runId || current.runId === scope.runId))
-    chatRunControlsRef.current.set(key, {
-      user: scope.user,
-      sessionId: scope.sessionId,
-      runId: scope.runId || current?.runId || '',
-      logicalRunId: current?.logicalRunId || scope.runId,
-      running: true,
-      stopping: sameRun ? current?.stopping ?? false : false,
-      controller: sameRun ? current?.controller || null : null,
-    })
-    if (!sessionIdRef.current && userRef.current === scope.user) {
-      chatDraftRunKeysRef.current.set(scope.user, key)
-    }
-    bumpChatControlRevision()
-  }
-
-  const setChatRunId = (runId: string, runUser?: string, runSessionId?: string, expectedRunId = '') => {
-    const scope = resolveRunScope(runUser, runSessionId, runId)
-    if (!scope.user || !scope.sessionId) return
-    const key = chatRunKey(scope.user, scope.sessionId)
-    const current = chatRunControlsRef.current.get(key)
-    if (!runId) {
-      if (!current || (expectedRunId && current.runId !== expectedRunId)) return
-      chatRunControlsRef.current.set(key, { ...current, runId: '' })
-      bumpChatControlRevision()
-      return
-    }
-    if (expectedRunId && (!current || current.runId !== expectedRunId)) return
-    chatRunControlsRef.current.set(key, {
-      user: scope.user,
-      sessionId: scope.sessionId,
-      runId,
-      logicalRunId: current?.logicalRunId || runId,
-      running: current?.running ?? true,
-      stopping: current?.stopping ?? false,
-      controller: current?.controller || null,
-    })
-    bumpChatControlRevision()
-  }
-
-  const setChatAbortController = (
-    controller: AbortController | null,
-    runUser?: string,
-    runSessionId?: string,
-    runId = '',
-  ) => {
-    const scope = resolveRunScope(runUser, runSessionId, runId)
-    if (!scope.user || !scope.sessionId) return
-    const key = chatRunKey(scope.user, scope.sessionId)
-    const current = chatRunControlsRef.current.get(key)
-    if (controller) {
-      chatRunControlsRef.current.set(key, {
-        user: scope.user,
-        sessionId: scope.sessionId,
-        runId: runId || current?.runId || '',
-        logicalRunId: current?.logicalRunId || runId,
-        running: current?.running ?? true,
-        stopping: current?.stopping ?? false,
-        controller,
-      })
-      bumpChatControlRevision()
-      return
-    }
-    if (!current || (runId && current.runId !== runId)) return
-    chatRunControlsRef.current.set(key, { ...current, controller: null })
-    bumpChatControlRevision()
-  }
-
-  const setChatStopping = (stopping: boolean, runUser?: string, runSessionId?: string, runId = '', logicalRunId = '') => {
-    const scope = resolveRunScope(runUser, runSessionId, runId)
-    if (!scope.user || !scope.sessionId) return
-    const key = chatRunKey(scope.user, scope.sessionId)
-    const current = chatRunControlsRef.current.get(key)
-    // Stopping is part of the Run control rather than page-local state.  A
-    // delayed pause/cancel response may only update the Run it targeted.
-    if (!current || (scope.runId && current.runId !== scope.runId && current.logicalRunId !== logicalRunId)) return
-    if (current.stopping === stopping) return
-    chatRunControlsRef.current.set(key, { ...current, stopping })
-    bumpChatControlRevision()
-  }
-
-  const abortChatRun = (runUser?: string, runSessionId?: string, runId?: string, logicalRunId = '') => {
-    const current = runUser === undefined && runSessionId === undefined && runId === undefined
-      ? getCurrentChatRunControl()
-      : (() => {
-          const scope = resolveRunScope(runUser, runSessionId, runId || '')
-          if (!scope.user || !scope.sessionId) return undefined
-          return chatRunControlsRef.current.get(chatRunKey(scope.user, scope.sessionId))
-        })()
-    if (!current || (runId && current.runId !== runId && current.logicalRunId !== logicalRunId)) return
-    current.controller?.abort()
   }
 
   const setSessionId = (nextSession: string) => {
@@ -595,9 +361,12 @@ export function AppShell() {
     const touch = () => {
       if (!disposed) void touchSessionLease(user, sessionId, clientId).catch((error: unknown) => {
         if (disposed || !(error instanceof ApiError) || error.status !== 404) return
-        setSessionLifecycleNotice('此空对话已在离线期间清理，或已被删除。请创建新对话；已有对话数据不会因离线被清理。')
+        setSessionLifecycleNotice('此对话已被清理或删除，已返回开始页。历史归档列表将自动刷新；如归档也已清理，则无法恢复。')
         queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
+        queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
+        queryClient.removeQueries({ queryKey: ['overview', user, sessionId] })
         void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+        void queryClient.invalidateQueries({ queryKey: ['history-sessions', user] })
         setSessionTransitioning(true)
         setSessionId('')
       })
@@ -625,6 +394,7 @@ export function AppShell() {
       if (event.clientId === clientId || event.user !== userRef.current) return
       queryClient.removeQueries({ queryKey: ['history', event.user, event.sessionId] })
       void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
+      void queryClient.invalidateQueries({ queryKey: ['history-sessions', event.user] })
       void queryClient.invalidateQueries({ queryKey: ['overview', event.user] })
       if (sessionIdRef.current === event.sessionId) {
         queryClient.removeQueries({ queryKey: ['active-session', event.user, clientId] })
@@ -646,12 +416,15 @@ export function AppShell() {
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
 
   const loadMoreHistorySessions = async () => {
-    const current = sessionsQuery.data
+    const current = historySessionsData
     if (!user || !current?.has_more || !current.next_cursor || historyLoadingMore) return
     setHistoryLoadingMore(true)
     try {
-      const nextPage = await getSessions(user, '', 50, current.next_cursor)
-      queryClient.setQueryData<SessionsResponse>(['sessions', user], {
+      const nextPage = await getSessions(user, '', 50, current.next_cursor, 'all', historyArchiveDate)
+      const queryKey = historyArchiveDate
+        ? ['history-sessions', user, historyArchiveDate]
+        : ['sessions', user]
+      queryClient.setQueryData<SessionsResponse>(queryKey, {
         ...nextPage,
         sessions: [
           ...current.sessions,
@@ -749,6 +522,7 @@ export function AppShell() {
     queryClient.removeQueries({ queryKey: ['history', user, targetSessionId] })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['history-sessions', user] }),
       queryClient.invalidateQueries({ queryKey: ['overview', user] }),
     ])
     if (targetSessionId === sessionId) {
@@ -760,7 +534,10 @@ export function AppShell() {
   const retryHistorySummary = async (targetSessionId: string) => {
     if (!user) throw new Error('当前没有可用用户')
     await retrySessionSummary(user, targetSessionId)
-    await sessionsQuery.refetch()
+    await Promise.all([
+      sessionsQuery.refetch(),
+      queryClient.invalidateQueries({ queryKey: ['history-sessions', user] }),
+    ])
   }
 
   const deleteAllHistorySessions = async () => {
@@ -771,6 +548,7 @@ export function AppShell() {
     queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['history-sessions', user] }),
       queryClient.invalidateQueries({ queryKey: ['overview', user] }),
     ])
     if (sessionId) setSessionId('')
@@ -1026,16 +804,20 @@ export function AppShell() {
       <HistorySearchDrawer
         user={user}
         open={historyDrawerOpen}
-        sessions={sessionsQuery.data?.sessions ?? []}
+        sessions={historySessionsData?.sessions ?? []}
         activeSessionId={sessionId}
-        loading={sessionsQuery.isLoading || sessionsQuery.isFetching}
+        loading={historyArchiveDate
+          ? historyDateSessionsQuery.isLoading || historyDateSessionsQuery.isFetching
+          : sessionsQuery.isLoading || sessionsQuery.isFetching}
         loadingMore={historyLoadingMore}
-        hasMore={Boolean(sessionsQuery.data?.has_more)}
-        error={sessionsQuery.isError}
+        hasMore={Boolean(historySessionsData?.has_more)}
+        error={historyArchiveDate ? historyDateSessionsQuery.isError : sessionsQuery.isError}
         chatRunning={chatRunning}
         switchingSessionId={historySwitchingSessionId}
         actionError={historySwitchError}
+        selectedDate={historyArchiveDate}
         onClose={() => setHistoryDrawerOpen(false)}
+        onDateChange={setHistoryArchiveDate}
         onSelectSession={(targetSessionId) => { void selectHistorySession(targetSessionId) }}
         onDeleteSession={deleteHistorySession}
         onDeleteAllSessions={deleteAllHistorySessions}

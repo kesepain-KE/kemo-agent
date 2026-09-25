@@ -25,14 +25,24 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
 }
 
 describe('AgentComposer', () => {
-  it('运行中 Enter 默认消息跟进，下一轮发送是独立按钮且输入框没有本轮引导', () => {
+  it('运行中 Enter 默认消息跟进，Ctrl+Enter 直接本轮引导，Shift+Enter 保留换行', () => {
     const onSubmit = vi.fn()
+    const onGuide = vi.fn()
     const onNextTurn = vi.fn()
-    const { rerender, props } = renderComposer({ value: '跟进任务', running: true, onSubmit, onNextTurn })
+    const { rerender, props } = renderComposer({ value: '跟进任务', running: true, onSubmit, onGuide, onNextTurn })
     const input = screen.getByRole('textbox', { name: '消息内容' })
+    expect(input).toHaveAttribute('aria-keyshortcuts', 'Control+Enter')
     fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
     expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true, isComposing: true })
+    expect(onGuide).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledOnce()
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+    expect(onGuide).toHaveBeenCalledOnce()
+    expect(onSubmit).toHaveBeenCalledOnce()
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(onGuide).toHaveBeenCalledOnce()
     expect(onSubmit).toHaveBeenCalledOnce()
     expect(onNextTurn).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
@@ -43,16 +53,21 @@ describe('AgentComposer', () => {
     expect(screen.getByRole('button', { name: '消息跟进' })).toBeDisabled()
   })
 
-  it('展示真实轮次并支持 Enter 发送、Shift+Enter 换行', () => {
+  it('空闲时 Enter 发送，Shift+Enter 和 Ctrl+Enter 均保留编辑行为', () => {
     const onSubmit = vi.fn()
-    renderComposer({ value: '检查状态', currentRound: 8, totalRounds: 44, roundLimit: 30, onSubmit })
+    const onGuide = vi.fn()
+    renderComposer({ value: '检查状态', currentRound: 8, totalRounds: 44, roundLimit: 30, onSubmit, onGuide })
     expect(screen.getByText('上下文 8 轮')).toBeInTheDocument()
     expect(screen.getByText('8/30')).toBeInTheDocument()
     expect(screen.getByText('历史 44')).toBeInTheDocument()
 
     const input = screen.getByRole('textbox', { name: '消息内容' })
+    expect(input).not.toHaveAttribute('aria-keyshortcuts')
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(onGuide).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
@@ -79,7 +94,11 @@ describe('AgentComposer', () => {
 
   it('停止过渡期间把新文本作为下一轮提交，不会误投给旧运行', () => {
     const onSubmit = vi.fn()
-    renderComposer({ value: '停止后继续处理', running: true, stopping: true, onSubmit, onStop: vi.fn() })
+    const onGuide = vi.fn()
+    renderComposer({ value: '停止后继续处理', running: true, stopping: true, onSubmit, onGuide, onStop: vi.fn() })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter', ctrlKey: true })
+    expect(onGuide).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
     const submit = screen.getByRole('button', { name: '消息跟进' })
     expect(submit).toBeEnabled()
     fireEvent.click(submit)

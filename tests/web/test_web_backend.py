@@ -44,6 +44,7 @@ from run.history import (
     reserve_session,
 )
 from run.history import window_exists
+from run.infra import LogStore
 from run.memory import MemoryStore
 from tests.support.memory_db import update_fragment_metadata
 from run.config import PROMPT_SECTION_ORDER, build_prompt_bundle
@@ -74,11 +75,21 @@ class FakeService:
     def users(self):
         return [{"name": "alice"}]
 
-    def sessions(self, user, *, source="web", query="", limit=50, before=""):
+    def sessions(
+        self,
+        user,
+        *,
+        source="web",
+        query="",
+        limit=50,
+        before="",
+        archive_date="",
+    ):
         return {
             "user": user,
             "source": source,
             "query": query,
+            "date": archive_date,
             "sessions": [],
             "has_more": False,
             "next_cursor": "",
@@ -844,6 +855,37 @@ class WebBackendTests(unittest.TestCase):
             )
         )
 
+        start_page_overview = service.overview(
+            "alice",
+            source="web",
+            session_id="",
+        )
+        self.assertIsNone(start_page_overview["active_plan"])
+
+        from run.history import delete_session as delete_history_session
+
+        self.assertGreater(
+            delete_history_session(root, "alice", "web", "scope-a"),
+            0,
+        )
+        cleaned_overview = WebRunService(root).overview(
+            "alice",
+            source="web",
+            session_id="scope-a",
+        )
+        self.assertIsNone(cleaned_overview["active_plan"])
+        self.assertIn(
+            "A-only plan",
+            [
+                item["title"]
+                for item in WebRunService(root).tasks(
+                    "alice",
+                    source="web",
+                    session_id="scope-a",
+                )["plans"]
+            ],
+        )
+
     def test_media_preview_is_inline_range_capable_and_enforces_limits(self) -> None:
         _, root = self.make_root()
         upload_root = root / "users" / "alice" / "file_upload"
@@ -1105,6 +1147,10 @@ class WebBackendTests(unittest.TestCase):
                     "name": "kemo-agent",
                     "version": "0.2.0",
                     "schema_version": 1,
+                    "compatibility": {
+                        "kemo-adapter-api": "0.8.2",
+                        "private-gateway-note": "must not leak either",
+                    },
                     "private_note": "must not leak",
                     "components": {
                         "web": {
@@ -1127,6 +1173,10 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["version"], "0.2.0")
         self.assertEqual(response.json()["schema_version"], 1)
+        self.assertEqual(
+            response.json()["compatibility"],
+            {"kemo-adapter-api": "0.8.2"},
+        )
         self.assertTrue(response.json()["read_only"])
         self.assertEqual(
             [item["id"] for item in response.json()["components"]],
@@ -1134,6 +1184,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertNotIn("must not leak", response.text)
         self.assertNotIn("hidden", response.text)
+        self.assertNotIn("must not leak either", response.text)
 
     def test_version_check_reports_remote_updates_without_changing_files(self) -> None:
         _, root = self.make_root()
@@ -1990,18 +2041,31 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(home.status_code, 200)
         self.assertIn("text/html", home.headers["content-type"])
         self.assertIn("kemo UI", home.text)
+        self.assertEqual(
+            home.headers["cache-control"],
+            "no-store, no-cache, must-revalidate",
+        )
 
         tasks = self.request(app, "GET", "/tasks?user=alice")
         self.assertEqual(tasks.status_code, 200)
         self.assertIn("kemo UI", tasks.text)
+        self.assertEqual(
+            tasks.headers["cache-control"],
+            "no-store, no-cache, must-revalidate",
+        )
 
         asset = self.request(app, "GET", "/assets/app.js")
         self.assertEqual(asset.status_code, 200)
         self.assertIn("text/javascript", asset.headers["content-type"])
         self.assertEqual(asset.text, "window.KEMO = true")
+        self.assertEqual(
+            asset.headers["cache-control"],
+            "public, max-age=31536000, immutable",
+        )
         image = self.request(app, "GET", "/kemo-agent.jpg")
         self.assertEqual(image.status_code, 200)
         self.assertEqual(image.content, b"kemo-image")
+        self.assertEqual(image.headers["cache-control"], "no-cache")
 
         missing_api = self.request(app, "GET", "/api/does-not-exist")
         self.assertEqual(missing_api.status_code, 404)
@@ -2263,6 +2327,21 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(closed.json()["closed"])
         self.assertFalse(closed.json()["deferred"])
 
+    def test_close_without_client_cannot_bypass_a_durable_live_link(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        active = self.request(
+            app, "GET", "/api/users/alice/sessions/active?client_id=web_live_client"
+        ).json()
+        session_id = active["session"]["session_id"]
+        result = self.request(
+            app, "POST", f"/api/users/alice/sessions/{session_id}/close"
+        )
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertFalse(result.json()["closed"])
+        self.assertTrue(result.json()["deferred"])
+        self.assertEqual(result.json()["active_clients"], 1)
+
     def test_active_session_supports_app_source_without_sharing_web_binding(self) -> None:
         _, root = self.make_root()
         app = create_app(service=WebRunService(root))
@@ -2278,6 +2357,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(app_payload["active_key"], f"app:alice:{client_id}")
         self.assertEqual(app_payload["session"]["source"], "app")
         self.assertTrue(app_payload["session"]["session_id"].startswith("app-"))
+        self.assertEqual(app_payload["active_clients"], 1)
 
         restored = self.request(
             app,
@@ -2333,6 +2413,12 @@ class WebBackendTests(unittest.TestCase):
 
         with service._active_runs_lock:
             service._session_leases[("alice", "web", session_id)][client_b] = 0.0
+        from run.history.store import connection
+        with connection(root, "alice", write=True) as database:
+            database.execute(
+                "UPDATE history_web_leases SET expires_at=0 WHERE session_id=? AND client_id=?",
+                (session_id, client_b),
+            )
         deleted = self.request(
             app,
             "DELETE",
@@ -2349,6 +2435,8 @@ class WebBackendTests(unittest.TestCase):
             yield RunEvent(type="done")
 
         service = WebRunService(root, event_source=source)
+        from run.history import reserve_session
+        reserve_session(root, "alice", "web", "client-session")
         events = list(
             service.stream_chat(
                 "alice",
@@ -2377,6 +2465,8 @@ class WebBackendTests(unittest.TestCase):
             yield RunEvent(type="done")
 
         service = WebRunService(root, event_source=source)
+        from run.history import reserve_session
+        reserve_session(root, "alice", "app", "app-session")
         events = list(
             service.stream_chat(
                 "alice",
@@ -2484,6 +2574,76 @@ class WebBackendTests(unittest.TestCase):
             [item["session_id"] for item in searched["sessions"]],
             ["page-07"],
         )
+
+    def test_session_list_filters_by_shanghai_archive_date(self) -> None:
+        from run.history.store import read_registry_record, upsert_registry_record
+
+        _, root = self.make_root()
+        timestamps = {
+            "previous-day": "2026-09-25T15:59:00+00:00",
+            "selected-older": "2026-09-25T16:30:00+00:00",
+            "selected-newer": "2026-09-25T17:30:00+00:00",
+        }
+        for session_id, updated_at in timestamps.items():
+            window = empty_window("alice", "web", session_id)
+            window["data"]["title"] = session_id
+            commit_window(root / "users" / "alice" / "history" / session_id, window)
+            record = read_registry_record(root, "alice", "web", session_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            record["updated_at"] = updated_at
+            upsert_registry_record(
+                root,
+                "alice",
+                record,
+                updated_at=updated_at,
+            )
+        app = create_app(service=WebRunService(root))
+
+        first = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions?source=all&date=2026-09-26&limit=1",
+        )
+        self.assertEqual(first.status_code, 200)
+        first_payload = first.json()
+        self.assertEqual(first_payload["date"], "2026-09-26")
+        self.assertEqual(
+            [item["session_id"] for item in first_payload["sessions"]],
+            ["selected-newer"],
+        )
+        self.assertTrue(first_payload["has_more"])
+
+        second = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions?source=all&date=2026-09-26&limit=1"
+            f"&before={first_payload['next_cursor'].replace('+', '%2B')}",
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            [item["session_id"] for item in second.json()["sessions"]],
+            ["selected-older"],
+        )
+        self.assertFalse(second.json()["has_more"])
+
+        previous = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions?date=2026-09-25",
+        )
+        self.assertEqual(
+            [item["session_id"] for item in previous.json()["sessions"]],
+            ["previous-day"],
+        )
+
+        invalid = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions?date=2026-02-30",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.json()["error"]["code"], "invalid_request")
 
     def test_session_rename_validates_title(self) -> None:
         _, root = self.make_root()
@@ -3068,6 +3228,7 @@ class WebBackendTests(unittest.TestCase):
             ("app", "app-session", "app content"),
             ("cli", "cli-session", "cli content"),
             ("message:telegram", "telegram-session", "telegram content"),
+            ("background:cron:cron_1234abcd", "cron-session", "cron content"),
         ):
             window = empty_window("alice", source, session_id)
             window["text"]["messages"] = [
@@ -3099,7 +3260,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(payload["source"], "all")
         self.assertEqual(
             {item["source"] for item in payload["sessions"]},
-            {"web", "app", "cli", "message:telegram"},
+            {"web", "app", "cli", "message:telegram", "background:cron:cron_1234abcd"},
         )
         app_session = next(
             item for item in payload["sessions"] if item["source"] == "app"
@@ -3141,6 +3302,13 @@ class WebBackendTests(unittest.TestCase):
             telegram_history.json()["messages"][0]["content"],
             "telegram content",
         )
+        cron_history = self.request(
+            app,
+            "GET",
+            "/api/users/alice/sessions/cron-session/history?source=background%3Acron%3Acron_1234abcd",
+        )
+        self.assertEqual(cron_history.status_code, 200, cron_history.text)
+        self.assertEqual(cron_history.json()["messages"][0]["content"], "cron content")
 
         read_only_boundary = self.request(
             app,
@@ -4699,6 +4867,61 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(accepted.json()["content"], "12345678")
         self.assertEqual(rejected.status_code, 400, rejected.text)
 
+    def test_user_task_page_excludes_system_cron_execution_records(self) -> None:
+        _, root = self.make_root()
+        CronStore(root, "__system__", system=True).create(normalize_task(
+            task_id="expand_update",
+            title="拓展模块数据采集",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=60,
+            next_run_at="2026-10-01T09:00:00+08:00",
+            exec_mode="system",
+            action="expand_update",
+        ))
+        store = LogStore(root)
+        store.append_cron({
+            "executed_at": "2026-10-01T08:00:00+08:00",
+            "user": "alice",
+            "task_id": "cron_user_record",
+            "status": "success",
+            "duration_ms": 1,
+            "result": {"scope": "user"},
+        })
+        store.append_cron_records([
+            {
+                "executed_at": "2026-10-02T09:00:00+08:00",
+                "user": "__system__",
+                "task_id": "expand_update",
+                "status": "success",
+                "duration_ms": 1,
+                "result": {"scope": "system"},
+            },
+            *[
+              {
+                "executed_at": f"2026-10-02T09:{index // 60:02d}:{index % 60:02d}+08:00",
+                "user": "alice",
+                "task_id": "expand_update",
+                "status": "success",
+                "duration_ms": 1,
+                "result": {"scope": "system-user", "index": index},
+              }
+              for index in range(100)
+            ],
+        ])
+        app = create_app(service=WebRunService(root))
+
+        response = self.request(app, "GET", "/api/users/alice/tasks")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        cron_executions = [
+            item for item in response.json()["executions"] if item["kind"] == "cron"
+        ]
+        self.assertEqual(len(cron_executions), 1)
+        self.assertEqual(cron_executions[0]["task_id"], "cron_user_record")
+        self.assertTrue(cron_executions[0]["user_defined"])
+
     def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -4761,6 +4984,58 @@ class WebBackendTests(unittest.TestCase):
             },
         )
         self.assertEqual(cron.status_code, 200, cron.text)
+        weekly = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/crons",
+            json={
+                "title": "Weekly",
+                "prompt": "run weekly",
+                "type": "weekly",
+                "weekdays": [1, 5],
+                "times": ["09:00", "20:00"],
+                "start_date": "2026-10-01",
+                "end_date": "2026-12-31",
+                "max_runs": 4,
+            },
+        )
+        self.assertEqual(weekly.status_code, 200, weekly.text)
+        self.assertEqual(weekly.json()["cron_task"]["weekdays"], [1, 5])
+        self.assertEqual(weekly.json()["cron_task"]["times"], ["09:00", "20:00"])
+        self.assertEqual(weekly.json()["cron_task"]["max_runs"], 4)
+        weekly_id = weekly.json()["cron_task"]["task_id"]
+        single_time = self.request(
+            app,
+            "PUT",
+            f"/api/users/alice/tasks/crons/{weekly_id}",
+            json={
+                "time": "12:30",
+                "start_date": "",
+                "end_date": "",
+                "max_runs": None,
+            },
+        )
+        self.assertEqual(single_time.status_code, 200, single_time.text)
+        single_summary = single_time.json()["cron_task"]
+        self.assertEqual(single_summary["time"], "12:30")
+        self.assertNotIn("times", single_summary)
+        self.assertNotIn("start_date", single_summary)
+        self.assertNotIn("end_date", single_summary)
+        self.assertNotIn("max_runs", single_summary)
+        once = self.request(
+            app,
+            "PUT",
+            f"/api/users/alice/tasks/crons/{weekly_id}",
+            json={
+                "type": "once",
+                "next_run_at": "2026-12-30T09:00:00+08:00",
+            },
+        )
+        self.assertEqual(once.status_code, 200, once.text)
+        self.assertEqual(once.json()["cron_task"]["type"], "once")
+        stored_once = CronStore(root, "alice").read(weekly_id)
+        for field in ("time", "times", "weekdays", "month_days", "interval_seconds"):
+            self.assertNotIn(field, stored_once)
         too_fast = self.request(
             app,
             "POST",
@@ -4773,6 +5048,44 @@ class WebBackendTests(unittest.TestCase):
             },
         )
         self.assertEqual(too_fast.status_code, 400)
+        for once_payload in (
+            {"title": "Missing once time", "prompt": "x", "type": "once"},
+            {"title": "Empty once time", "prompt": "x", "type": "once", "next_run_at": ""},
+        ):
+            invalid_once = self.request(
+                app,
+                "POST",
+                "/api/users/alice/tasks/crons",
+                json=once_payload,
+            )
+            self.assertEqual(invalid_once.status_code, 400, invalid_once.text)
+        outside_range_once = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/crons",
+            json={
+                "title": "Outside range",
+                "prompt": "x",
+                "type": "once",
+                "next_run_at": "2026-12-30T09:00:00+08:00",
+                "start_date": "2026-12-31",
+                "end_date": "2026-12-31",
+            },
+        )
+        self.assertEqual(outside_range_once.status_code, 400, outside_range_once.text)
+        invalid_max_runs = self.request(
+            app,
+            "POST",
+            "/api/users/alice/tasks/crons",
+            json={
+                "title": "Invalid max runs",
+                "prompt": "x",
+                "type": "daily",
+                "time": "09:00",
+                "max_runs": "abc",
+            },
+        )
+        self.assertEqual(invalid_max_runs.status_code, 400, invalid_max_runs.text)
 
         put_knowledge = self.request(
             app,
@@ -5688,6 +6001,34 @@ class WebBackendTests(unittest.TestCase):
             WebRunService._cron_summary({"exec_mode": "system"})["user_defined"]
         )
         self.assertNotIn("do not expose", tasks.text)
+        cron_task_id = tasks.json()["cron_tasks"][0]["task_id"]
+        cron_detail = self.request(
+            app,
+            "GET",
+            f"/api/users/alice/tasks/crons/{cron_task_id}",
+        )
+        self.assertEqual(cron_detail.status_code, 200, cron_detail.text)
+        self.assertEqual(
+            cron_detail.json()["cron_task"]["prompt"],
+            "do not expose this prompt",
+        )
+        self.assertEqual(cron_detail.json()["cron_task"]["exec_mode"], "agent")
+        self.assertNotIn(
+            "prompt",
+            WebRunService._cron_detail(
+                {"task_id": "system", "exec_mode": "system", "prompt": "internal"}
+            ),
+        )
+        self.assertEqual(
+            WebRunService._cron_detail(
+                {
+                    "task_id": "secret",
+                    "exec_mode": "agent",
+                    "prompt": "Authorization: Bearer abcdefghijklmnop",
+                }
+            )["prompt"],
+            "***",
+        )
 
         knowledge = self.request(app, "GET", "/api/users/alice/knowledge")
         self.assertEqual(knowledge.json()["summary"]["user_documents"], 1)

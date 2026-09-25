@@ -63,7 +63,7 @@ describe('AppShell user persistence', () => {
     expect(creates).toBe(2)
   })
 
-  it('空对话离线清理后恢复网页会解除绑定并解释原因', async () => {
+  it('已清理对话恢复时解除绑定、刷新日期归档且不在开始页显示孤立计划', async () => {
     let creates = 0
     server.use(
       http.post('/api/users/kesepain/sessions/gone/lease', () => HttpResponse.json({ error: { message: 'gone' } }, { status: 404 })),
@@ -71,12 +71,38 @@ describe('AppShell user persistence', () => {
         creates += 1
         return HttpResponse.json({ user: 'kesepain', created: true, session: { session_id: 'must_not_create', rounds: 0 } })
       }),
+      http.get('/api/users/kesepain/overview', ({ request }) => {
+        const selectedSession = new URL(request.url).searchParams.get('session_id') || ''
+        return HttpResponse.json({
+          user: 'kesepain', session_id: selectedSession,
+          context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false }, limit: 120000, percent: 0, rounds: 0, round_limit: 30 },
+          provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true },
+          counts: { sessions: 0, knowledge_documents: 0, enabled_tools: 0, enabled_agents: 0, active_tasks: 1 },
+          context_window: {
+            tokens: { total_tokens: 0, capacity_tokens: 120000, percent: 0, source: 'unavailable' },
+            conversation: { foreground_rounds: 0, archived_rounds: 0, session_total_rounds: 0, session_tool_calls: 0, total_tool_calls: 0 },
+            tasks: { active_plans: 1, waiting_crons: 0 }, capabilities: { tools_enabled: 0, tools_disabled: 0, agents_enabled: 0 },
+            knowledge: { enabled: 0, disabled: 0 }, messages: { connected: 0 }, integrations: { expands: 0, senses: 0 },
+          },
+          runtime_host: { state: 'unmanaged', components: {} }, activities: [],
+          active_plan: {
+            plan_id: 'orphan-plan', title: '不应出现在开始页的孤立计划', description: '来源会话已经清理',
+            status: 'paused', source: 'web', session_id: 'gone', revision: 1,
+            progress: { completed: 1, total: 2, percent: 50 }, steps: [], updated_at: '2026-08-25T12:00:00+08:00',
+          },
+        })
+      }),
     )
     const app = renderApp('/chat?user=kesepain&session=gone')
-    await screen.findByText(/此空对话已在离线期间清理/)
+    app.client.setQueryData(['history-sessions', 'kesepain', '2026-08-25'], {
+      user: 'kesepain', source: 'all', date: '2026-08-25', sessions: [{ session_id: 'gone' }],
+    })
+    await screen.findByText(/此对话已被清理或删除/)
     await waitFor(() => expect(new URLSearchParams(app.getSearch()).has('session')).toBe(false))
+    await waitFor(() => expect(app.client.getQueryState(['history-sessions', 'kesepain', '2026-08-25'])?.isInvalidated).toBe(true))
     await delay(30)
     expect(creates).toBe(0)
+    expect(screen.queryByText('不应出现在开始页的孤立计划')).not.toBeInTheDocument()
   })
 
   it('把注入策略状态码稳定映射为三个只读状态', () => {
@@ -1026,7 +1052,7 @@ describe('AppShell navigation', () => {
         + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"old-call","tool_name":"old-tool","arguments":{"value":"before-retry"}}\n\n'
         + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"old-call","tool_name":"old-tool","result":{"ok":true},"metadata":{"status":"completed"}}\n\n'
         + 'event: text_delta\ndata: {"type":"text_delta","content":"旧正文"}\n\n'
-        + 'event: retrying\ndata: {"type":"retrying","content":"正在自动重试","metadata":{"failed_attempt":1,"next_attempt":2,"max_attempts":5}}\n\n'
+        + 'event: retrying\ndata: {"type":"retrying","content":"正在自动重试","metadata":{"failed_attempt":1,"next_attempt":2,"max_attempts":6}}\n\n'
         + 'event: reasoning_delta\ndata: {"type":"reasoning_delta","content":"新思考"}\n\n'
         + 'event: tool_call_start\ndata: {"type":"tool_call_start","tool_call_id":"new-call","tool_name":"new-tool","arguments":{"value":"after-retry"}}\n\n'
         + 'event: tool_call_result\ndata: {"type":"tool_call_result","tool_call_id":"new-call","tool_name":"new-tool","result":{"ok":true},"metadata":{"status":"completed"}}\n\n'
@@ -1304,6 +1330,7 @@ describe('AppShell navigation', () => {
     }
     fireEvent.change(composer, { target: { value: '跟进C' } })
     fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     expect(screen.getAllByRole('article', { name: /^消息跟进 \d+$/ })).toHaveLength(3)
     expect(guidanceRequests).toBe(0)
     expect(prompts).toHaveLength(1)
@@ -1342,8 +1369,7 @@ describe('AppShell navigation', () => {
     await chatStarted
 
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '先检查目录' } })
-    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
-    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter', ctrlKey: true })
     const firstCurrent = await screen.findByText('正在引导')
     const firstCard = firstCurrent.closest('article')!
     const guidancePreview = firstCard.closest('.composer-guidance-preview')!
@@ -1351,12 +1377,14 @@ describe('AppShell navigation', () => {
     expect(guidancePreview).toBeInTheDocument()
     expect(firstCard.closest('.messages')).toBeNull()
     expect(guidancePreview.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '展开跟进消息' })).not.toBeInTheDocument()
 
     streamController.enqueue(encoder.encode('event: guidance_applied\ndata: {"type":"guidance_applied","metadata":{"guidance":["先检查目录"]}}\n\n'))
     expect(await screen.findByText('智能体已读取该引导并继续运行')).toBeInTheDocument()
 
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '结果放入临时区' } })
     fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     await waitFor(() => expect(screen.getByText('结果放入临时区')).toBeInTheDocument())
     expect(screen.queryByText('先检查目录')).not.toBeInTheDocument()
@@ -1417,10 +1445,8 @@ describe('AppShell navigation', () => {
       new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
     ] } })
     expect(await screen.findByText(/已上传 voice\.mp3/)).toBeInTheDocument()
-    const sendGuidance = screen.getByRole('button', { name: '消息跟进' })
-    expect(sendGuidance).toBeEnabled()
-    fireEvent.click(sendGuidance)
-    fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
+    expect(screen.getByRole('button', { name: '消息跟进' })).toBeEnabled()
+    fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true })
 
     await waitFor(() => expect(guidanceBody).toMatchObject({
       guidance: '',
@@ -1542,7 +1568,9 @@ describe('AppShell navigation', () => {
     expect(await screen.findByText(/已上传 queued\.mp3/)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '作为第二轮继续处理' } })
     fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
+    fireEvent.click(await screen.findByRole('button', { name: '展开跟进消息' }))
     expect(await screen.findByText('已排队到下一轮')).toBeInTheDocument()
     expect(screen.getByText('作为第二轮继续处理')).toBeInTheDocument()
 
@@ -1588,10 +1616,12 @@ describe('AppShell navigation', () => {
 
     fireEvent.change(composer, { target: { value: '你给修一下网关' } })
     fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     firstStreamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
     firstStreamController.close()
 
+    fireEvent.click(await screen.findByRole('button', { name: '展开跟进消息' }))
     expect(await screen.findByText('自动发送失败')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新发送' })).toBeInTheDocument()
@@ -1830,6 +1860,35 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(getSearch()).toContain('session=s2'))
     expect(extractedSession).toBe('')
     expect(screen.queryByRole('dialog', { name: '历史对话' })).not.toBeInTheDocument()
+  })
+
+  it('历史抽屉选择日期后使用独立日期查询加载归档', async () => {
+    const requestedDates: string[] = []
+    server.use(http.get('/api/users/kesepain/sessions', ({ request }) => {
+      const selectedDate = new URL(request.url).searchParams.get('date') || ''
+      requestedDates.push(selectedDate)
+      return HttpResponse.json({
+        user: 'kesepain',
+        source: 'all',
+        date: selectedDate,
+        sessions: selectedDate === '2026-09-24'
+          ? [{ ...session('dated-session', '日期归档', 2), state: 'closed', updated_at: '2026-09-24T08:00:00+00:00' }]
+          : [{ ...session('s1', '当前工作', 3), state: 'open' }],
+        has_more: false,
+        next_cursor: '',
+      })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByTitle('搜索历史对话'))
+
+    const historyDrawer = await screen.findByRole('dialog', { name: '历史对话' })
+    fireEvent.click(within(historyDrawer).getByRole('button', { name: '按日期筛选历史归档' }))
+    const calendar = within(historyDrawer).getByRole('dialog', { name: '选择历史归档日期' })
+    fireEvent.click(within(calendar).getByRole('button', { name: '2026年9月24日' }))
+
+    expect(await within(historyDrawer).findByText('日期归档')).toBeInTheDocument()
+    expect(requestedDates).toContain('2026-09-24')
+    expect(within(historyDrawer).queryByText('当前工作')).not.toBeInTheDocument()
   })
 
   it('输入框知识库按钮按层级展示卡片并把引用写入草稿', async () => {

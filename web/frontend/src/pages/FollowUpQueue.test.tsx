@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { PendingNextTurnMessage } from '../components/appShellTypes'
@@ -65,5 +65,36 @@ describe('FollowUpQueue', () => {
     expect(onRemove).toHaveBeenCalledWith('a')
     rerender(<FollowUpQueue user="alice" messages={[]} canGuide={false} onGuide={vi.fn()} onRemove={onRemove} onRetry={onRetry} onReorder={vi.fn()} />)
     expect(screen.queryByLabelText('消息跟进队列')).not.toBeInTheDocument()
+  })
+
+  it('只在可见消息数量变化时滚动到最新消息', async () => {
+    const scrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() { return this.tagName === 'OL' ? 420 : 0 },
+    })
+    try {
+      const props = {
+        user: 'alice',
+        canGuide: true,
+        onGuide: vi.fn(),
+        onRemove: vi.fn(),
+        onRetry: vi.fn(),
+        onReorder: vi.fn(),
+      }
+      const { rerender } = render(<FollowUpQueue {...props} messages={[message('a')]} />)
+      const list = screen.getByRole('list')
+      await waitFor(() => expect(list.scrollTop).toBe(420))
+
+      list.scrollTop = 37
+      rerender(<FollowUpQueue {...props} messages={[message('a', 'error')]} />)
+      expect(list.scrollTop).toBe(37)
+
+      rerender(<FollowUpQueue {...props} messages={[message('a', 'error'), message('b')]} />)
+      await waitFor(() => expect(list.scrollTop).toBe(420))
+    } finally {
+      if (scrollHeight) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', scrollHeight)
+      else Reflect.deleteProperty(HTMLElement.prototype, 'scrollHeight')
+    }
   })
 })

@@ -26,6 +26,7 @@ export interface AgentComposerProps {
   onOpenCommands: () => void
   onToggleConversationMenu: () => void
   onSubmit: () => void
+  onGuide?: () => void
   onNextTurn?: () => void
   onStop?: () => void
 }
@@ -52,6 +53,7 @@ export function AgentComposer({
   onOpenCommands,
   onToggleConversationMenu,
   onSubmit,
+  onGuide,
   onNextTurn,
   onStop,
 }: AgentComposerProps) {
@@ -82,7 +84,13 @@ export function AgentComposer({
     if (canSubmit) onSubmit()
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
+    if (running && !stopping && event.ctrlKey && onGuide) {
+      event.preventDefault()
+      if (canSubmit) onGuide()
+      return
+    }
+    if (!event.shiftKey && !event.ctrlKey) {
       event.preventDefault()
       handleSubmit()
     }
@@ -117,6 +125,7 @@ export function AgentComposer({
         disabled={disabled}
         rows={1}
         aria-label="消息内容"
+        aria-keyshortcuts={running && onGuide ? 'Control+Enter' : undefined}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
