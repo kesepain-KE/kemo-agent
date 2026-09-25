@@ -7,6 +7,7 @@ import type {
   CompletionSoundFallbackResponse,
   CompletionSoundStatus,
   CompletionSoundUploadResponse,
+  CronTaskDetailResponse,
   FailureSoundDeleteResponse,
   FailureSoundFallbackResponse,
   FailureSoundStatus,
@@ -30,6 +31,7 @@ import type {
   MessageCheckResponse,
   MessageDeleteResponse,
   MessageStatusResponse,
+  ModulePanelResponse,
   OverviewResponse,
   ActiveSessionResponse,
   PreferencesResponse,
@@ -92,10 +94,12 @@ export async function getSessions(
   limit = 50,
   before = '',
   source = 'all',
+  archiveDate = '',
 ): Promise<SessionsResponse> {
   const params = new URLSearchParams({ limit: String(limit), source })
   if (query.trim()) params.set('query', query.trim())
   if (before) params.set('before', before)
+  if (archiveDate) params.set('date', archiveDate)
   return requestJson(`/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`)
 }
 
@@ -326,6 +330,10 @@ export async function getTasks(user: string, sessionId = ''): Promise<TasksRespo
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`)
 }
 
+export async function getCron(user: string, taskId: string): Promise<CronTaskDetailResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`)
+}
+
 export async function editPlan(
   user: string,
   planId: string,
@@ -417,6 +425,12 @@ export async function updateCron(user: string, taskId: string, task: Record<stri
   })
 }
 
+export async function createCron(user: string, task: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(task),
+  })
+}
+
 export async function deleteCron(user: string, taskId: string): Promise<Record<string, unknown>> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`, { method: 'DELETE' })
 }
@@ -485,6 +499,23 @@ export async function refreshSenseModule(user: string, moduleName: string): Prom
     `/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/refresh`,
     { method: 'POST' },
   )
+}
+
+export async function getSenseModulePanel(user: string, moduleName: string): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/panel`)
+}
+
+export async function putSenseModulePanel(
+  user: string,
+  moduleName: string,
+  values: Record<string, string | number | boolean>,
+  clearSecrets: string[] = [],
+): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/panel`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values, clear_secrets: clearSecrets }),
+  })
 }
 
 export async function setSenseModuleEnabled(
@@ -832,6 +863,38 @@ export async function refreshExpandModule(user: string, scope: ExpandScope, modu
     `/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/refresh`,
     { method: 'POST' },
   )
+}
+
+export async function getExpandModulePanel(user: string, scope: ExpandScope, moduleName: string): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/panel`)
+}
+
+export async function putExpandModulePanel(
+  user: string,
+  scope: ExpandScope,
+  moduleName: string,
+  values: Record<string, string | number | boolean>,
+  clearSecrets: string[] = [],
+): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/panel`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values, clear_secrets: clearSecrets }),
+  })
+}
+
+export async function invokeExpandModulePanelAction(
+  user: string,
+  scope: ExpandScope,
+  moduleName: string,
+  command: string,
+  params: Record<string, string | number | boolean>,
+): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/panel/action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, params }),
+  })
 }
 
 export async function setExpandModuleEnabled(

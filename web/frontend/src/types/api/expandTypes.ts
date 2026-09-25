@@ -1,5 +1,6 @@
 import type { MainAgentSourcePolicySummary } from '../api'
 import type { InventoryFile } from './fileTypes'
+import type { ModulePanelDefinition } from './modulePanelTypes'
 
 export type ExpandScope = 'global' | 'shared' | 'user'
 
@@ -56,6 +57,8 @@ export interface ExpandModuleSummary {
   }
   files: InventoryFile[]
   updated_at: number
+  panel?: ModulePanelDefinition | null
+  panel_error?: string
 }
 
 export interface ExpandsResponse {

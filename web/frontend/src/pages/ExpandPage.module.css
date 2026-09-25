@@ -317,6 +317,10 @@
 .previewTabs > button.active { background: var(--surface-elevated); color: var(--brand); box-shadow: var(--shadow-soft); }
 
 .previewGrid { min-height: 16rem; flex: 1; margin-top: .5rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
+.panelHost { min-height: 16rem; max-height: 28rem; flex: 1; margin-top: .5rem; padding: 0; box-sizing: border-box; display: grid; grid-template-rows: minmax(0, 1fr); align-items: stretch; overflow: auto; border: 1px solid var(--line); border-radius: .75rem; background: var(--surface); scrollbar-width: thin; }
+.panelInset { min-width: 0; min-height: 100%; padding: .65rem .65rem 0; box-sizing: border-box; display: grid; grid-template-rows: minmax(min-content, 1fr) .65rem; align-self: stretch; }
+.panelInset::after { content: ''; display: block; min-height: .65rem; }
+.panelInset > * { min-width: 0; min-height: 0; align-self: stretch; }
 .textPreview { min-width: 0; min-height: 15rem; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
 .textPreview > header { min-height: 2.8rem; padding: 0 .7rem; display: flex; align-items: center; justify-content: space-between; gap: .55rem; border-bottom: 1px solid var(--line); }
 .textPreview > header > span { min-width: 0; display: flex; align-items: center; gap: .42rem; color: var(--brand); }

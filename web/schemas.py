@@ -103,6 +103,16 @@ class SkillToggleBody(BaseModel):
     enabled: bool
 
 
+class ModulePanelValuesBody(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+    clear_secrets: list[str] = Field(default_factory=list, max_length=64)
+
+
+class ModulePanelActionBody(BaseModel):
+    command: str = Field(min_length=1, max_length=128)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class DeleteManyBody(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=10_000)
 

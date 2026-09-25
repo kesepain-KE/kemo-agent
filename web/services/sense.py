@@ -20,6 +20,11 @@ from run.config import load_prompt_source_registry
 from run.config import MainAgentSourcePolicy
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _reject_tree_links
+from web.services.module_panels import (
+    load_module_panel,
+    module_panel_response,
+    save_module_panel_values,
+)
 
 
 class SenseServiceMixin:
@@ -47,6 +52,8 @@ class SenseServiceMixin:
         injected_files = set(selection.source_files)
         sources: list[dict[str, Any]] = []
         for item in inventory:
+            module_root = self.root / str(item.get("root") or "") / str(item.get("name") or "")
+            panel, panel_error = load_module_panel(module_root, "sense")
             collected_markdown = self._sense_markdown(item)
             # 片段在真实注入文本中的位置由权威侧（prompt_sources）给出，
             # 预览侧只按 key 取值，不再自己拼片段、不再自己算累加游标。
@@ -95,6 +102,8 @@ class SenseServiceMixin:
                 "update_interval": f"每 {update_interval_seconds} 秒",
                 "update_interval_seconds": update_interval_seconds,
                 "updated_at": item["updated_at"],
+                "panel": panel,
+                "panel_error": panel_error,
             })
         core_files = sum(item["files"] for item in inventory)
         preview_limit = 4000
@@ -213,6 +222,35 @@ class SenseServiceMixin:
             "updated": True,
             "source": refreshed_source,
             "injection": refreshed["injection"],
+        }
+
+    def sense_module_panel(self, user: Any, module_name: Any) -> dict[str, Any]:
+        name, logical_name, target = self._sense_module_directory(user, module_name)
+        return {
+            "user": name,
+            "module": logical_name,
+            **module_panel_response(target, "sense"),
+        }
+
+    def put_sense_module_panel(
+        self,
+        user: Any,
+        module_name: Any,
+        values: Any,
+        clear_secrets: Any = None,
+    ) -> dict[str, Any]:
+        name, logical_name, target = self._sense_module_directory(user, module_name)
+        saved = save_module_panel_values(
+            target,
+            "sense",
+            values,
+            clear_secrets,
+        )
+        return {
+            "user": name,
+            "module": logical_name,
+            "saved": True,
+            **saved,
         }
 
     def set_sense_module_enabled(self, user: Any, module_name: Any, enabled: Any) -> dict[str, Any]:

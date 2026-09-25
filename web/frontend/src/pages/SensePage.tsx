@@ -23,11 +23,14 @@ import {
 import { useOutletContext } from 'react-router-dom'
 import {
   deleteSenseModule,
+  getSenseModulePanel,
   getSense,
+  putSenseModulePanel,
   refreshSenseModule,
   setSenseModuleEnabled,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import { ModulePanel } from '../components/ModulePanel'
 import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton } from '../components/ModuleUi'
 import type { SenseSourceSummary } from '../types/api'
 import { copyText } from '../utils/clipboard'
@@ -109,6 +112,11 @@ export function SensePage() {
   const data = query.data
   const sources = data?.sources || []
   const selectedModule = sources.find((source) => source.id === selectedModuleId) || null
+  const panelQuery = useQuery({
+    queryKey: ['sense-panel', user, selectedModule?.name],
+    queryFn: () => getSenseModulePanel(user, selectedModule!.name),
+    enabled: Boolean(user && selectedModule),
+  })
 
   useEffect(() => {
     if (selectedModuleId && data && !data.sources.some((source) => source.id === selectedModuleId)) {
@@ -143,6 +151,36 @@ export function SensePage() {
       setNotice(`${moduleName} 全局感知模块已删除`)
     },
     onError: (error: Error) => setActionError(error.message || '感知模块删除失败'),
+  })
+  const panelSaveMutation = useMutation({
+    mutationFn: ({ values, clearSecrets }: { values: Record<string, string | number | boolean>; clearSecrets: string[] }) => {
+      if (!selectedModule) throw new Error('请先选择感知模块')
+      return putSenseModulePanel(user, selectedModule.name, values, clearSecrets)
+    },
+    onSuccess: async () => {
+      if (!selectedModule) return
+      await refreshSenseModule(user, selectedModule.name)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sense', user] }),
+        queryClient.invalidateQueries({ queryKey: ['sense-panel', user, selectedModule.name] }),
+      ])
+      setNotice('用户配置已保存，感知信息已刷新')
+    },
+  })
+  const panelActionMutation = useMutation({
+    mutationFn: async ({ command }: { command: string; params: Record<string, string | number | boolean> }) => {
+      if (!selectedModule) throw new Error('请先选择感知模块')
+      if (command !== 'refresh') throw new Error('感知模块只允许执行刷新操作')
+      return refreshSenseModule(user, selectedModule.name)
+    },
+    onSuccess: async () => {
+      if (!selectedModule) return
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sense', user] }),
+        queryClient.invalidateQueries({ queryKey: ['sense-panel', user, selectedModule.name] }),
+      ])
+      setNotice('感知信息已刷新')
+    },
   })
 
   const latestSource = useMemo(
@@ -328,6 +366,18 @@ export function SensePage() {
                 onCopy={() => void handleCopy('injected', selectedModule.injected_markdown || '')}
               />
             </div>
+            <section className={styles.panelHost} aria-label="感知模块用户配置">
+              <ModulePanel
+                kind="sense"
+                data={panelQuery.data}
+                loading={panelQuery.isLoading}
+                busy={panelSaveMutation.isPending || panelActionMutation.isPending}
+                error={panelQuery.error instanceof Error ? panelQuery.error.message : selectedModule.panel_error || ''}
+                emptyText="此感知模块无可控组件"
+                onSave={async (values, clearSecrets) => { await panelSaveMutation.mutateAsync({ values, clearSecrets }) }}
+                onAction={async (command, params) => { await panelActionMutation.mutateAsync({ command, params }) }}
+              />
+            </section>
           </div>}
       </aside>
     </div>

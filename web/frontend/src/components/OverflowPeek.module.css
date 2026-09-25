@@ -1,0 +1,30 @@
+.anchor { min-width: 0; }
+.anchor[data-overflow="true"] { cursor: zoom-in; }
+.anchor[data-overflow="true"]:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 8px; }
+
+.tooltip {
+  position: fixed;
+  z-index: 240;
+  display: grid;
+  gap: 7px;
+  max-height: min(360px, 60dvh);
+  padding: 12px 14px;
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  color: var(--text);
+  background: var(--surface-elevated);
+  box-shadow: 0 16px 42px color-mix(in srgb, #000 24%, transparent), var(--shadow-soft);
+  pointer-events: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.tooltip small { color: var(--brand); font-size: .625rem; font-weight: 780; letter-spacing: .04em; }
+.tooltip p { margin: 0; color: var(--text-2); font-size: .8125rem; line-height: 1.65; white-space: pre-wrap; }
+.interactive { pointer-events: auto; cursor: auto; }
+.attachments { display: grid; gap: 5px; padding-top: 7px; border-top: 1px solid var(--line); }
+.attachments strong { color: var(--muted); font-size: .6875rem; }
+.attachments ul { display: grid; gap: 3px; padding: 0; margin: 0; list-style: none; }
+.attachments li { color: var(--text-2); font-size: .75rem; overflow-wrap: anywhere; }
+.above { transform: translate(-50%, -100%); }
+.below { transform: translateX(-50%); }

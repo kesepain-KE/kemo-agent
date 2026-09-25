@@ -17,6 +17,7 @@ from run.context import estimate_text_tokens
 from run.extensions import read_expand_runtime, record_expand_runtime
 from run.infra import LogStore
 from run.extensions import (
+    invoke_expand,
     module_update_timeout,
     record_module_health,
     run_module_updater,
@@ -33,6 +34,12 @@ from web.constants import (
 )
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _flat_files, _reject_tree_links, _visible_children
+from web.services.module_panels import (
+    load_module_panel,
+    module_panel_response,
+    save_module_panel_values,
+    validate_expand_panel_action,
+)
 
 
 class MessageExpandServiceMixin:
@@ -385,6 +392,11 @@ class MessageExpandServiceMixin:
                     if module_path_safe and module.is_dir()
                     else {"schema_version": 1}
                 )
+                panel, panel_error = (
+                    load_module_panel(module, "expand")
+                    if module_path_safe
+                    else (None, "拓展模块目录不安全，无法读取用户配置面板")
+                )
                 items.append(
                     {
                         "id": f"{scope}:{module_name}",
@@ -415,6 +427,8 @@ class MessageExpandServiceMixin:
                         "injected_markdown": injected_markdown,
                         "injected_tokens": estimate_text_tokens(injected_markdown),
                         "runtime": runtime_state,
+                        "panel": panel,
+                        "panel_error": panel_error,
                         "files": files,
                         "updated_at": updated_at,
                     }
@@ -615,6 +629,87 @@ class MessageExpandServiceMixin:
             "updated": True,
             "item": refreshed_module,
             "injection": refreshed["injection"],
+        }
+
+    def expand_module_panel(
+        self, user: Any, scope: Any, module_name: Any
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, target = self._expand_module_directory(
+            user, scope, module_name
+        )
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            **module_panel_response(target, "expand"),
+        }
+
+    def put_expand_module_panel(
+        self,
+        user: Any,
+        scope: Any,
+        module_name: Any,
+        values: Any,
+        clear_secrets: Any = None,
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, target = self._expand_module_directory(
+            user, scope, module_name
+        )
+        saved = save_module_panel_values(
+            target,
+            "expand",
+            values,
+            clear_secrets,
+        )
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            "saved": True,
+            **saved,
+        }
+
+    def invoke_expand_panel_action(
+        self,
+        user: Any,
+        scope: Any,
+        module_name: Any,
+        command: Any,
+        params: Any,
+    ) -> dict[str, Any]:
+        name, normalized_scope, logical_name, target = self._expand_module_directory(
+            user, scope, module_name
+        )
+        panel, panel_error = load_module_panel(target, "expand")
+        if panel is None:
+            raise InvalidRequestError(panel_error or "当前拓展模块没有用户配置面板")
+        normalized_command, validated_params = validate_expand_panel_action(
+            panel,
+            command,
+            params,
+        )
+        timeout = module_update_timeout(load_config(name, self.root))
+        try:
+            result = invoke_expand(
+                root=self.root,
+                user=name,
+                scope=normalized_scope,
+                module=logical_name,
+                command=normalized_command,
+                params=validated_params,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            raise WebServiceError(
+                f"拓展面板操作失败：{normalized_scope}:{logical_name}（{exc}）"
+            ) from exc
+        return {
+            "user": name,
+            "scope": normalized_scope,
+            "module": logical_name,
+            "command": normalized_command,
+            "result": result,
+            **module_panel_response(target, "expand"),
         }
 
     def set_expand_module_enabled(

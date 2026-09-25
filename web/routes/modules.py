@@ -9,7 +9,12 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.responses import Response
 
-from web.schemas import SkillToggleBody, TextBody
+from web.schemas import (
+    ModulePanelActionBody,
+    ModulePanelValuesBody,
+    SkillToggleBody,
+    TextBody,
+)
 from web.service import SKILL_ARCHIVE_MAX_BYTES, WebRunService
 
 
@@ -29,6 +34,45 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
             user,
             scope,
             module_name,
+        )
+
+    @app.get("/api/users/{user}/expand/{scope}/{module_name}/panel")
+    async def expand_module_panel(
+        user: str,
+        scope: str,
+        module_name: str,
+    ) -> dict[str, Any]:
+        return backend.expand_module_panel(user, scope, module_name)
+
+    @app.put("/api/users/{user}/expand/{scope}/{module_name}/panel")
+    async def put_expand_module_panel(
+        user: str,
+        scope: str,
+        module_name: str,
+        body: ModulePanelValuesBody,
+    ) -> dict[str, Any]:
+        return backend.put_expand_module_panel(
+            user,
+            scope,
+            module_name,
+            body.values,
+            body.clear_secrets,
+        )
+
+    @app.post("/api/users/{user}/expand/{scope}/{module_name}/panel/action")
+    async def invoke_expand_panel_action(
+        user: str,
+        scope: str,
+        module_name: str,
+        body: ModulePanelActionBody,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.invoke_expand_panel_action,
+            user,
+            scope,
+            module_name,
+            body.command,
+            body.params,
         )
 
     @app.patch("/api/users/{user}/expand/{scope}/{module_name}/enabled")
@@ -169,6 +213,23 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
     async def refresh_sense_module(user: str, module_name: str) -> dict[str, Any]:
         return await asyncio.to_thread(backend.refresh_sense_module, user, module_name)
 
+    @app.get("/api/users/{user}/sense/{module_name}/panel")
+    async def sense_module_panel(user: str, module_name: str) -> dict[str, Any]:
+        return backend.sense_module_panel(user, module_name)
+
+    @app.put("/api/users/{user}/sense/{module_name}/panel")
+    async def put_sense_module_panel(
+        user: str,
+        module_name: str,
+        body: ModulePanelValuesBody,
+    ) -> dict[str, Any]:
+        return backend.put_sense_module_panel(
+            user,
+            module_name,
+            body.values,
+            body.clear_secrets,
+        )
+
     @app.patch("/api/users/{user}/sense/{module_name}/enabled")
     async def set_sense_module_enabled(
         user: str,
@@ -180,4 +241,3 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.delete("/api/users/{user}/sense/{module_name}")
     async def delete_sense_module(user: str, module_name: str) -> dict[str, Any]:
         return backend.delete_sense_module(user, module_name)
-

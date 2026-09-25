@@ -240,26 +240,48 @@ describe('V16 module pages', () => {
         reminder: '', source: 'web', session_id: 's1', current_step: '', revision: 2,
         created_at: '2026-07-20T08:00:00+08:00', updated_at: '2026-07-20T08:30:00+08:00',
         progress: { completed: 0, total: 1, percent: 0 },
-        steps: [{ step_id: 'step_1', title: '未执行步骤', description: '', status: 'cancelled', depends_on: [], critical: false, tool_name: '', started_at: '', finished_at: '' }],
+        steps: [{ step_id: 'step_1', title: '未执行步骤', description: '核对取消状态与剩余依赖', status: 'cancelled', depends_on: ['step_0'], critical: false, tool_name: 'shell', tool_arguments: { command: 'status' }, started_at: '', finished_at: '' }],
       }],
       cron_tasks: [
         { task_id: 'cron_enabled', title: '待执行定时任务', user_defined: true, status: 'enabled', type: 'daily', time: '08:00', next_run_at: '2026-07-22T08:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T08:00:00+08:00', last_state: 'never' },
         { task_id: 'cron_running', title: '运行中定时任务', user_defined: true, status: 'running', type: 'recurring', interval_seconds: 3600, next_run_at: '2026-07-21T12:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T08:00:00+08:00', last_state: 'never' },
         { task_id: 'cron_completed', title: '较新的定时任务', user_defined: true, status: 'completed', type: 'once', next_run_at: '', latest_run_at: '2026-07-20T10:00:00+08:00', created_at: '2026-07-20T08:00:00+08:00', last_state: 'completed' },
       ],
-      executions: [],
-    })))
+      executions: [{ kind: 'cron', record_id: 'cron_completed:1', task_id: 'cron_completed', title: '较新的定时任务', status: 'success', updated_at: '2026-07-20T10:00:00+08:00', duration_ms: 1200, result: { summary: 'ok' }, error: null }],
+    })), http.get('/api/users/kesepain/tasks/crons/:taskId', ({ params }) => {
+      const taskId = String(params.taskId)
+      const summaries: Record<string, Record<string, unknown>> = {
+        cron_enabled: { title: '待执行定时任务', status: 'enabled', type: 'daily', time: '08:00', next_run_at: '2026-10-02T08:00:00+08:00' },
+        cron_running: { title: '运行中定时任务', status: 'running', type: 'recurring', interval_seconds: 3600, next_run_at: '2026-10-01T12:00:00+08:00' },
+        cron_completed: { title: '较新的定时任务', status: 'completed', type: 'once', next_run_at: '' },
+      }
+      return HttpResponse.json({
+        user: 'kesepain',
+        cron_task: {
+          task_id: taskId, user_defined: true, latest_run_at: '', created_at: '2026-09-20T08:00:00+08:00',
+          last_state: 'never', exec_mode: 'agent', prompt: `执行内容：${summaries[taskId]?.title}`,
+          ...summaries[taskId],
+        },
+      })
+    }))
     renderPage('tasks')
+    const planList = await screen.findByRole('main', { name: '任务计划列表' })
     await screen.findByText('较旧的任务计划')
+    expect(within(planList).getByRole('heading', { name: '任务计划' })).toBeInTheDocument()
+    expect(within(planList).getByRole('navigation', { name: '任务计划分页' })).toHaveTextContent('共 2 个计划 · 每页最多 6 个')
     const cancelledPlanCard = screen.getByText('已取消的任务计划').closest('article')!
     expect(within(cancelledPlanCard).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(within(cancelledPlanCard).queryByRole('button', { name: '修改' })).not.toBeInTheDocument()
     fireEvent.click(cancelledPlanCard)
     expect(await screen.findByText('取消后允许删除')).toBeInTheDocument()
     expect(screen.getByText('plan_cancelled')).toBeInTheDocument()
+    expect(screen.getByText('核对取消状态与剩余依赖')).toBeInTheDocument()
+    expect(screen.getByText('step_0')).toBeInTheDocument()
+    expect(screen.getByText('shell')).toBeInTheDocument()
+    expect(screen.getByText(/"command": "status"/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '定时任务' }))
 
-    expect(await screen.findByRole('heading', { name: '定时任务查看' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '定时任务详情' })).toBeInTheDocument()
     const enabledCard = screen.getAllByText('待执行定时任务').find((node) => node.closest('article'))!.closest('article')!
     expect(within(enabledCard).getByRole('button', { name: '暂停' })).toBeInTheDocument()
     expect(within(enabledCard).getByRole('button', { name: '删除' })).toBeInTheDocument()
@@ -269,15 +291,213 @@ describe('V16 module pages', () => {
     const completedCard = screen.getAllByText('较新的定时任务').find((node) => node.closest('article'))!.closest('article')!
     expect(within(completedCard).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(within(completedCard).queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
+    fireEvent.click(enabledCard)
+    expect(await screen.findByText('执行内容：待执行定时任务')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '执行记录' }))
     expect(await screen.findByRole('heading', { name: '执行记录查看' })).toBeInTheDocument()
+    const executionList = screen.getByRole('main', { name: '执行记录列表' })
+    expect(within(executionList).getByRole('heading', { name: '执行记录' })).toBeInTheDocument()
+    expect(within(executionList).getByRole('navigation', { name: '执行记录分页' })).toHaveTextContent('共 3 个记录 · 每页最多 6 个')
     const newer = screen.getAllByText('较新的定时任务').find((node) => node.closest('article'))!.closest('article')!
     const older = screen.getAllByText('较旧的任务计划').find((node) => node.closest('article'))!.closest('article')!
     expect(newer.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(within(newer).getAllByRole('button')).toHaveLength(1)
-    expect(within(newer).getByRole('button', { name: '删除' })).toBeInTheDocument()
-    expect(screen.getByText('只读记录，不提供编辑操作')).toBeInTheDocument()
+    expect(within(newer).queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
+    expect(screen.getByText('执行日志只读保存，不会因删除任务定义而自动删除')).toBeInTheDocument()
+  })
+
+  it('定时任务按下次执行时间排序并每页最多显示六个', async () => {
+    const task = (id: number, nextRun: string) => ({
+      task_id: `cron_${id}`, title: `排期任务 ${id}`, user_defined: true, status: nextRun ? 'enabled' : 'completed',
+      type: nextRun ? 'daily' : 'once', time: nextRun ? '09:00' : undefined, next_run_at: nextRun,
+      latest_run_at: '', created_at: '2026-09-20T08:00:00+08:00', last_state: 'never',
+    })
+    server.use(http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+      user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 7, completed_plans: 0 }, plans: [], executions: [],
+      cron_tasks: [
+        task(8, ''),
+        task(4, '2026-09-29T09:00:00+08:00'),
+        task(1, '2026-09-26T09:00:00+08:00'),
+        task(7, '2026-10-02T09:00:00+08:00'),
+        task(3, '2026-09-28T09:00:00+08:00'),
+        task(6, '2026-10-01T09:00:00+08:00'),
+        task(2, '2026-09-27T09:00:00+08:00'),
+        task(5, '2026-09-30T09:00:00+08:00'),
+      ],
+    })))
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByRole('button', { name: '定时任务' }))
+    const list = await screen.findByRole('main', { name: '定时任务列表' })
+    expect(Array.from(list.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual([
+      '排期任务 1', '排期任务 2', '排期任务 3', '排期任务 4', '排期任务 5', '排期任务 6',
+    ])
+    expect(within(list).getByText('1 / 2')).toBeInTheDocument()
+    fireEvent.click(within(list).getByRole('button', { name: '下一页定时任务' }))
+    expect(Array.from(list.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual(['排期任务 7', '排期任务 8'])
+    expect(within(list).getByText('2 / 2')).toBeInTheDocument()
+  })
+
+  it('执行记录隐藏系统内置定时任务并保留用户定时任务', async () => {
+    server.use(http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+      user: 'kesepain',
+      summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 0, completed_plans: 0 },
+      plans: [],
+      cron_tasks: [],
+      executions: [
+        {
+          kind: 'cron', record_id: 'expand_update:1', task_id: 'expand_update', title: '拓展模块数据采集',
+          user_defined: false, status: 'success', updated_at: '2026-09-26T09:01:00+08:00',
+        },
+        {
+          kind: 'cron', record_id: 'cron_user_report:1', task_id: 'cron_user_report', title: '用户日报',
+          user_defined: true, status: 'success', updated_at: '2026-09-26T09:00:00+08:00',
+        },
+      ],
+    })))
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByRole('button', { name: '执行记录' }))
+    const executionList = await screen.findByRole('main', { name: '执行记录列表' })
+
+    expect(within(executionList).queryByText('拓展模块数据采集')).not.toBeInTheDocument()
+    expect(within(executionList).getByText('用户日报')).toBeInTheDocument()
+    expect(within(executionList).getByRole('navigation', { name: '执行记录分页' })).toHaveTextContent('共 1 个记录 · 每页最多 6 个')
+  })
+
+  it('任务计划和执行记录都有独立容器并各自每页最多显示六个', async () => {
+    const plan = (id: number) => ({
+      plan_id: `plan_${id}`,
+      title: `分页计划 ${id}`,
+      description: `计划 ${id} 的完整说明`,
+      status: 'completed',
+      auto_accept: false,
+      reminder: '',
+      source: 'web',
+      session_id: 's1',
+      current_step: '',
+      revision: 1,
+      created_at: `2026-09-26T0${id}:00:00+08:00`,
+      updated_at: `2026-09-26T0${id}:30:00+08:00`,
+      progress: { completed: 1, total: 1, percent: 100 },
+      steps: [{
+        step_id: 'step_1',
+        title: `计划 ${id} 的步骤`,
+        description: '',
+        status: 'completed',
+        depends_on: [],
+        critical: false,
+        tool_name: '',
+        started_at: '',
+        finished_at: `2026-09-26T0${id}:30:00+08:00`,
+      }],
+    })
+    server.use(http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+      user: 'kesepain',
+      summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 0, completed_plans: 8 },
+      plans: Array.from({ length: 8 }, (_, index) => plan(index + 1)),
+      cron_tasks: [],
+      executions: [],
+    })))
+
+    renderPage('tasks')
+    const planList = await screen.findByRole('main', { name: '任务计划列表' })
+    await within(planList).findByText('分页计划 1')
+    expect(Array.from(planList.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual([
+      '分页计划 1', '分页计划 2', '分页计划 3', '分页计划 4', '分页计划 5', '分页计划 6',
+    ])
+    expect(within(planList).getByText('1 / 2')).toBeInTheDocument()
+    fireEvent.click(within(planList).getByRole('button', { name: '下一页任务计划' }))
+    expect(Array.from(planList.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual([
+      '分页计划 7', '分页计划 8',
+    ])
+    expect(within(planList).getByText('2 / 2')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '执行记录' }))
+    const executionList = await screen.findByRole('main', { name: '执行记录列表' })
+    expect(Array.from(executionList.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual([
+      '分页计划 8', '分页计划 7', '分页计划 6', '分页计划 5', '分页计划 4', '分页计划 3',
+    ])
+    expect(within(executionList).getByText('1 / 2')).toBeInTheDocument()
+    fireEvent.click(within(executionList).getByRole('button', { name: '下一页执行记录' }))
+    expect(Array.from(executionList.querySelectorAll('article h3')).map((node) => node.textContent)).toEqual([
+      '分页计划 2', '分页计划 1',
+    ])
+    expect(within(executionList).getByText('2 / 2')).toBeInTheDocument()
+  })
+
+  it('任务页可直接创建带生效区间和次数上限的 weekly 定时任务', async () => {
+    let created: Record<string, unknown> | undefined
+    server.use(http.post('/api/users/kesepain/tasks/crons', async ({ request }) => {
+      created = await request.json() as Record<string, unknown>
+      return HttpResponse.json({ user: 'kesepain', cron_task: { task_id: 'cron_new' }, updated: true })
+    }))
+    const prompt = vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('工作日巡检')
+      .mockReturnValueOnce('检查状态并汇总')
+      .mockReturnValueOnce('weekly')
+      .mockReturnValueOnce('09:00,20:00')
+      .mockReturnValueOnce('1,3,5')
+      .mockReturnValueOnce('2026-10-01')
+      .mockReturnValueOnce('2026-12-31')
+      .mockReturnValueOnce('10')
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByRole('button', { name: '新建定时任务' }))
+    await waitFor(() => expect(created).toEqual({
+      title: '工作日巡检', prompt: '检查状态并汇总', type: 'weekly',
+      times: ['09:00', '20:00'], weekdays: [1, 3, 5],
+      start_date: '2026-10-01', end_date: '2026-12-31', max_runs: 10,
+    }))
+    expect(await screen.findByRole('status')).toHaveTextContent('定时任务已创建。')
+    prompt.mockRestore()
+  })
+
+  it('定时任务创建会阻止非法次数上限并给出明确提示', async () => {
+    let createCalls = 0
+    server.use(http.post('/api/users/kesepain/tasks/crons', () => {
+      createCalls += 1
+      return HttpResponse.json({ user: 'kesepain', cron_task: { task_id: 'cron_invalid' }, updated: true })
+    }))
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    const prompt = vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('非法次数任务')
+      .mockReturnValueOnce('检查状态')
+      .mockReturnValueOnce('daily')
+      .mockReturnValueOnce('09:00')
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce('abc')
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByRole('button', { name: '新建定时任务' }))
+
+    expect(alert).toHaveBeenCalledWith('最大成功执行次数必须是大于等于 1 的整数，或留空表示不限。')
+    expect(createCalls).toBe(0)
+    prompt.mockRestore()
+    alert.mockRestore()
+  })
+
+  it('单次定时任务未填写执行时间时不会调用创建接口', async () => {
+    let createCalls = 0
+    server.use(http.post('/api/users/kesepain/tasks/crons', () => {
+      createCalls += 1
+      return HttpResponse.json({ user: 'kesepain', cron_task: { task_id: 'cron_invalid' }, updated: true })
+    }))
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    const prompt = vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('缺少时间的单次任务')
+      .mockReturnValueOnce('执行一次检查')
+      .mockReturnValueOnce('once')
+      .mockReturnValueOnce('   ')
+
+    renderPage('tasks')
+    fireEvent.click(await screen.findByRole('button', { name: '新建定时任务' }))
+
+    expect(alert).toHaveBeenCalledWith('单次定时任务必须填写执行时间。')
+    expect(createCalls).toBe(0)
+    prompt.mockRestore()
+    alert.mockRestore()
   })
 
   it('知识页展示文件索引元数据', async () => {
@@ -312,9 +532,28 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('没有匹配的知识文件')).toBeInTheDocument()
     fireEvent.change(search, { target: { value: '' } })
     fireEvent.click(await screen.findByText('个人笔记'))
-    expect(await screen.findByRole('button', { name: '预览' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    const editToggle = await screen.findByRole('button', { name: '切换到编辑模式' })
+    const editorToolbar = editToggle.closest('.knowledge-editor-toolbar') as HTMLElement
+    expect(within(editorToolbar).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual(['预览', '放大', '保存', '删除'])
+    expect(editToggle).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '放大预览' })).toBeInTheDocument()
+    fireEvent.click(editToggle)
+    expect(screen.getByRole('button', { name: '切换到预览模式' })).toHaveAttribute('aria-pressed', 'false')
     expect(await screen.findByDisplayValue(/知识正文/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '放大预览' }))
+    const previewDialog = await screen.findByRole('dialog', { name: 'notes.md' })
+    expect(within(previewDialog).getByRole('heading', { name: '知识正文' })).toBeInTheDocument()
+    expect(within(previewDialog).queryByRole('textbox')).not.toBeInTheDocument()
+    fireEvent.click(within(previewDialog).getByRole('button', { name: '关闭放大预览' }))
+    expect(screen.queryByRole('dialog', { name: 'notes.md' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '放大预览' }))
+    expect(await screen.findByRole('dialog', { name: 'notes.md' })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'notes.md' })).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: '切换到预览模式' }))
+    expect(screen.queryByDisplayValue(/知识正文/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '切换到编辑模式' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '切换到编辑模式' }))
     fireEvent.click(screen.getByRole('button', { name: '保存编辑' }))
     expect(await screen.findByText('当前知识文件已更新，请提醒智能体刷新索引')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '我知道了，不用刷新' })).toBeInTheDocument()
@@ -446,6 +685,31 @@ describe('V16 module pages', () => {
     expect(screen.queryByRole('listbox', { name: '记忆排序选项' })).not.toBeInTheDocument()
   })
 
+  it.each([true, false])('记忆日锁使用后端状态而不是 UTC 日期（locked=%s）', async (locked) => {
+    const item = {
+      memory_ref: 'seven_days:style.md', filename: 'style.md', tier: 'seven_days',
+      preview: '# 表达偏好', content: '# 表达偏好', weight: 0,
+      created_at: '2026-09-24T16:30:00Z', content_updated_at: '2026-09-24T16:30:00Z',
+      updated_at: '2026-09-24T16:30:00Z', last_used_at: null, expires_at: null,
+      // Contradicts any client-date heuristic deliberately: only the host flag decides.
+      last_weight_date: locked ? null : new Date().toISOString().slice(0, 10),
+      weight_locked_today: locked, weighted_today: false,
+      weight_day: '2026-09-25', weight_timezone: 'Asia/Shanghai',
+    }
+    server.use(
+      http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({
+        user: 'kesepain', summary: { total: 1, seven_days: 1, one_month: 0, half_year: 0, permanent: 0 }, items: [item],
+      })),
+      http.get('/api/users/kesepain/memory/item', () => HttpResponse.json({ user: 'kesepain', ...item })),
+    )
+    renderPage('memory')
+    fireEvent.click(await screen.findByText('表达偏好'))
+    expect(await screen.findByText(locked
+      ? '该记忆今日（上海时区）的证据已登记，再次保存不会重复加权。'
+      : '实际修改并保存后权重 +1；同一条记忆在上海时区的同一自然日最多增加一次。')).toBeInTheDocument()
+    expect(screen.queryByText(/今天已经因编辑/)).not.toBeInTheDocument()
+  })
+
   it('记忆删除确认框通过全局 Portal 覆盖应用外壳', async () => {
     server.use(http.get('/api/users/kesepain/memory/summary', () => HttpResponse.json({
       user: 'kesepain',
@@ -530,7 +794,46 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('button', { name: '信息更新' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '删除模块' })).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: '运行时感知 白名单' })).toBeChecked()
+    expect(await screen.findByText('此感知模块无可控组件')).toBeInTheDocument()
     expect(screen.queryByText('项目层')).not.toBeInTheDocument()
+  })
+
+  it('感知模块用户配置常驻详情区并在保存后刷新采集', async () => {
+    let savedBody: Record<string, unknown> | undefined
+    let refreshCount = 0
+    server.use(
+      http.get('/api/users/kesepain/sense/runtime/panel', () => HttpResponse.json({
+        user: 'kesepain', module: 'runtime', panel_error: '',
+        panel: { schema_version: 1, title: '运行时感知配置', containers: [
+          { kind: 'config', title: '采集参数', width: 'full', height: 'h2', values: 'module/panel.values.json', presets: [{ name: '高频', values: { interval: 5 } }], fields: [
+            { key: 'interval', label: '采集间隔', type: 'number', min: 1, max: 60 },
+            { key: 'token', label: '访问密钥', type: 'string', masked: true },
+          ], current_values: { interval: 30 }, secret_set: { token: true }, data_error: '' },
+          { kind: 'action', title: '操作', width: 'full', height: 'h1', controls: [{ type: 'button', label: '立即采集', command: 'refresh' }] },
+        ] },
+      })),
+      http.put('/api/users/kesepain/sense/runtime/panel', async ({ request }) => {
+        savedBody = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ user: 'kesepain', module: 'runtime', saved: true, panel: null, panel_error: '' })
+      }),
+      http.post('/api/users/kesepain/sense/runtime/refresh', () => {
+        refreshCount += 1
+        return HttpResponse.json({ updated: true })
+      }),
+    )
+    renderPage('sense')
+    expect(await screen.findByText('全局感知注入预览')).toBeInTheDocument()
+    expect(screen.queryByText('运行时感知配置')).not.toBeInTheDocument()
+    const moduleHeading = await screen.findByRole('heading', { name: '运行时感知' })
+    fireEvent.click(moduleHeading.closest('article')!)
+    expect(await screen.findByText('运行时感知配置')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('已设置；留空保持不变')).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: '高频' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(savedBody).toEqual({ values: { interval: 5 }, clear_secrets: [] }))
+    expect(refreshCount).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: '立即采集' }))
+    await waitFor(() => expect(refreshCount).toBe(2))
   })
 
   it('运行状态页使用五个栏目并支持顶部摘要卡快捷切换', async () => {
@@ -726,6 +1029,8 @@ describe('V16 module pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '版本查看 ›' }))
     expect(await screen.findByText('当前版本')).toBeInTheDocument()
     expect(screen.getAllByText('v0.2.0').length).toBeGreaterThanOrEqual(5)
+    expect(screen.getByText('配套 Kemo 网关')).toBeInTheDocument()
+    expect(screen.getByText('v0.8.2')).toBeInTheDocument()
     expect(screen.getByText('Schema 1')).toBeInTheDocument()
     expect(screen.getAllByText('核心引擎').length).toBeGreaterThan(0)
     expect(screen.getByText('只读')).toBeInTheDocument()
@@ -1113,8 +1418,54 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('switch', { name: '智能灯光控制 白名单' })).toBeChecked()
     fireEvent.click(screen.getByRole('button', { name: /查看操作文档/ }))
     expect((await screen.findAllByText('用户要求开灯时调用 start_expand.py')).length).toBe(2)
+    fireEvent.click(screen.getByRole('tab', { name: '用户配置' }))
+    expect(await screen.findByText('当前没有可操控组件')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /增加拓展模块/ }))
     expect(screen.getByRole('button', { name: /增加到用户层/ })).toBeInTheDocument()
+  })
+
+  it('拓展用户配置支持 preset、密钥脱敏与声明式动作', async () => {
+    let savedBody: Record<string, unknown> | undefined
+    let actionBody: Record<string, unknown> | undefined
+    let refreshCount = 0
+    server.use(
+      http.get('/api/users/kesepain/expand/global/example/panel', () => HttpResponse.json({
+        user: 'kesepain', scope: 'global', module: 'example', panel_error: '',
+        panel: { schema_version: 1, title: '灯光模块配置', containers: [
+          { kind: 'status', title: '状态', width: 'half', height: 'h1', source: 'module/status.json', fields: [{ key: 'phase', label: '阶段', type: 'badge' }], data: { phase: '健康' }, secret_set: {}, data_error: '' },
+          { kind: 'config', title: '配置', width: 'half', height: 'h2', values: 'module/panel.values.json', presets: [{ name: '夜间', values: { mode: 'night' } }], fields: [
+            { key: 'mode', label: '模式', type: 'enum', options: [{ value: 'day', label: '白天' }, { value: 'night', label: '夜间' }] },
+            { key: 'api_key', label: 'API Key', type: 'string', masked: true },
+          ], current_values: { mode: 'day' }, secret_set: { api_key: true }, data_error: '' },
+          { kind: 'action', title: '操控', width: 'full', height: 'h1', controls: [{ type: 'send', label: '发送', command: 'send', inputs: [{ key: 'text', label: '内容', type: 'text', required: true }] }] },
+        ] },
+      })),
+      http.put('/api/users/kesepain/expand/global/example/panel', async ({ request }) => {
+        savedBody = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ user: 'kesepain', scope: 'global', module: 'example', saved: true, panel: null, panel_error: '' })
+      }),
+      http.post('/api/users/kesepain/expand/global/example/panel/action', async ({ request }) => {
+        actionBody = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ user: 'kesepain', scope: 'global', module: 'example', command: 'send', result: { ok: true }, panel: null, panel_error: '' })
+      }),
+      http.post('/api/users/kesepain/expand/global/example/refresh', () => {
+        refreshCount += 1
+        return HttpResponse.json({ updated: true })
+      }),
+    )
+    renderPage('expand')
+    fireEvent.click(await screen.findByRole('tab', { name: '用户配置' }))
+    expect(await screen.findByText('灯光模块配置')).toBeInTheDocument()
+    expect(screen.getByText('健康')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('已设置；留空保持不变')).toHaveValue('')
+    expect(screen.queryByDisplayValue(/secret/i)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '夜间' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(savedBody).toEqual({ values: { mode: 'night' }, clear_secrets: [] }))
+    expect(refreshCount).toBe(1)
+    fireEvent.change(screen.getByLabelText('内容 *'), { target: { value: 'turn-on' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(actionBody).toEqual({ command: 'send', params: { text: 'turn-on' } }))
   })
 
   it('新增独立栏目拥有各自页面', async () => {

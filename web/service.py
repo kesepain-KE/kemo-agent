@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import copy
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 import queue
@@ -32,9 +33,11 @@ from run.history import (
     find_window,
     load_window,
     queue_memory_extraction,
-    touch_web_session_lease,
+    touch_session_lease,
     cleanup_empty_web_sessions as cleanup_empty_history_sessions,
     inspect_stale_web_sessions,
+    active_session_lease_clients,
+    release_durable_session_lease,
     WEB_STARTUP_INSPECTION_DELAY_SECONDS,
 )
 from run.history import (
@@ -374,6 +377,8 @@ class WebRunService(
                 for character in platform
             ):
                 return value
+        if re.fullmatch(r"background:cron:cron_[0-9a-f]{8}", value):
+            return value
         raise InvalidRequestError("source 不是受支持的历史来源")
 
     def require_session_id(self, session_id: Any) -> str:
@@ -410,9 +415,9 @@ class WebRunService(
     ) -> int:
         if not client_id:
             return 0
-        if source == 'web':
-            exists = touch_web_session_lease(self.root, user, session_id, client_id)
-            if require_existing and not exists:
+        if source in {'web', 'app'}:
+            exists = touch_session_lease(self.root, user, source, session_id, client_id)
+            if not exists:
                 return 0
         self._prune_session_leases_locked()
         clients = self._session_leases.setdefault((user, source, session_id), {})
@@ -439,6 +444,24 @@ class WebRunService(
         # out-of-order unload requests must not erase a newer heartbeat.
         return 0
 
+    def _other_durable_session_clients_locked(
+        self, user: str, source: str, session_id: str, client_id: str,
+    ) -> list[str]:
+        if source not in {'web', 'app'}:
+            return []
+        return active_session_lease_clients(
+            self.root, user, source, session_id,
+            exclude_client_id=client_id,
+        )
+
+    def _release_durable_session_lease_locked(
+        self, user: str, source: str, session_id: str, client_id: str,
+    ) -> None:
+        if source in {'web', 'app'} and client_id:
+            release_durable_session_lease(
+                self.root, user, source, session_id, client_id,
+            )
+
     def session_lease(
         self,
         user: Any,
@@ -455,8 +478,8 @@ class WebRunService(
             clients = self._touch_session_lease_locked(
                 name, normalized_source, normalized_session, normalized_client, require_existing=True,
             )
-            if normalized_source == 'web' and not clients:
-                raise NotFoundError('对话不存在或空对话已离线清理，请新建对话')
+            if normalized_source in {'web', 'app'} and not clients:
+                raise NotFoundError('对话不存在、已经结束或已离线清理，请新建对话')
         return {
             "user": name,
             "source": normalized_source,
@@ -514,7 +537,9 @@ class WebRunService(
         return deleted
 
     def inspect_conversation_spaces_on_startup(
-        self, stop: threading.Event | None = None,
+        self, stop: threading.Event | None = None, *,
+        queue_reason: str = 'startup_offline_session',
+        event_name: str = 'startup_session_inspection',
     ) -> dict[str, Any]:
         """Run one bounded-page startup audit without executing an agent here."""
         from run.infra import record_runtime_event
@@ -546,15 +571,33 @@ class WebRunService(
                     protected_sessions=protected,
                     stop=stop,
                     queue_memory=self._queue_memory_extraction,
+                    queue_reason=queue_reason,
                 )
+                from run.scheduler import sweep_idle_sessions
+                app_result = sweep_idle_sessions(
+                    self.root,
+                    user,
+                    idle_seconds=WEB_STARTUP_INSPECTION_DELAY_SECONDS,
+                    limit=100,
+                    sources={'app'},
+                    queue_reason=(
+                        'startup_offline_app_session'
+                        if queue_reason == 'startup_offline_session'
+                        else 'offline_app_session_expired'
+                    ),
+                )
+                result['app_sessions'] = app_result
                 outcome['users'][user] = result
-                outcome['queued_memory'] += int(result['queued_memory_count'])
+                outcome['queued_memory'] += (
+                    int(result['queued_memory_count'])
+                    + int(app_result.get('queued_memory') or 0)
+                )
                 outcome['deleted_sessions'] += int(result['deleted_count'])
-                outcome['errors'] += int(result['error_count'])
-                if result['deleted_count'] or result['closed_count']:
+                outcome['errors'] += int(result['error_count']) + len(app_result.get('errors') or [])
+                if result['deleted_count'] or result['closed_count'] or app_result.get('closed'):
                     self._overview_cache.invalidate(lambda key, owner=user: key[0] == owner)
                 record_runtime_event(
-                    self.root, user, category='backend', name='startup_session_inspection',
+                    self.root, user, category='backend', name=event_name,
                     status='failed' if result['error_count'] else 'success',
                     error_type='SessionInspectionError' if result['error_count'] else '',
                 )
@@ -562,7 +605,7 @@ class WebRunService(
                 outcome['errors'] += 1
                 outcome['users'][user] = {'error': type(exc).__name__}
                 record_runtime_event(
-                    self.root, user, category='backend', name='startup_session_inspection',
+                    self.root, user, category='backend', name=event_name,
                     status='failed', error_type=type(exc).__name__,
                 )
         if outcome['state'] == 'running':

@@ -1,0 +1,22 @@
+.preview {
+  position: fixed;
+  z-index: 1200;
+  max-height: min(20rem, calc(100vh - 24px));
+  padding: .75rem;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  color: var(--text-2);
+  box-shadow: var(--shadow);
+  font-size: .72rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.above { transform: translateY(-100%); }
+
+@media (prefers-reduced-motion: reduce) {
+  .preview { scroll-behavior: auto; }
+}

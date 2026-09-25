@@ -58,6 +58,7 @@ export const handlers = [
     name: 'kemo-agent',
     version: '0.2.0',
     schema_version: 1,
+    compatibility: { 'kemo-adapter-api': '0.8.2' },
     read_only: true,
     components: [
       { id: 'core', version: '0.2.0', description: '核心引擎' },
@@ -250,6 +251,23 @@ export const handlers = [
     },
   })),
   http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain', summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 1, completed_plans: 0 }, plans: [], cron_tasks: [{ task_id: 'daily-check', title: '每日检查', user_defined: true, status: 'enabled', type: 'daily', time: '18:00', next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never' }], executions: [] })),
+  http.get('/api/users/kesepain/tasks/crons/:taskId', ({ params }) => HttpResponse.json({
+    user: 'kesepain',
+    cron_task: {
+      task_id: params.taskId,
+      title: '每日检查',
+      user_defined: true,
+      status: 'enabled',
+      type: 'daily',
+      time: '18:00',
+      next_run_at: '2026-09-26T18:00:00+08:00',
+      latest_run_at: '',
+      created_at: '2026-09-20T12:00:00+08:00',
+      last_state: 'never',
+      exec_mode: 'agent',
+      prompt: '检查当前状态并生成摘要。',
+    },
+  })),
   http.post('/api/users/kesepain/tasks/plans/:planId/actions/:action', ({ params }) => HttpResponse.json({ user: 'kesepain', action: params.action, updated: true, plan: { plan_id: params.planId, status: params.action === 'cancel' ? 'cancelled' : 'paused', revision: 2, title: '测试计划', description: '', auto_accept: false, reminder: '', source: 'web', session_id: 's1', current_step: 'step_1', created_at: '', updated_at: '', progress: { completed: 0, total: 1, percent: 0 }, steps: [{ step_id: 'step_1', title: '执行', description: '', status: 'pending', depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }] } })),
   http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true, retrieval: { mode: 'index_only', full_index: true }, summary: { documents: 3, user_documents: 1, shared_documents: 1, global_documents: 1 }, documents: [{ scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true }, { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, active_for_main_agent: true }, { scope: 'global', relative_path: 'guide.md', title: '全局指南', size: 160, updated_at: 1, active_for_main_agent: true }], source_policy: sourcePolicy })),
   http.get('/api/users/kesepain/knowledge/:scope/document', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, relative_path: params.scope === 'shared' ? 'team.md' : params.scope === 'global' ? 'guide.md' : 'notes.md', content: '# 知识正文\n\n测试内容', size: 24, updated_at: 1 })),
@@ -301,6 +319,8 @@ export const handlers = [
     source_policy: sourcePolicy,
   })),
   http.post('/api/users/kesepain/sense/:module/refresh', () => HttpResponse.json({ updated: true })),
+  http.get('/api/users/kesepain/sense/:module/panel', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, panel: null, panel_error: '' })),
+  http.put('/api/users/kesepain/sense/:module/panel', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, panel: null, panel_error: '', saved: true })),
   http.patch('/api/users/kesepain/sense/:module/enabled', async ({ request }) => {
     const body = await request.json() as { enabled: boolean }
     return HttpResponse.json({ enabled: body.enabled })
@@ -485,6 +505,9 @@ export const handlers = [
     source_policy: sourcePolicy,
   })),
   http.post('/api/users/kesepain/expand/:scope/:module/refresh', () => HttpResponse.json({ updated: true })),
+  http.get('/api/users/kesepain/expand/:scope/:module/panel', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, module: params.module, panel: null, panel_error: '' })),
+  http.put('/api/users/kesepain/expand/:scope/:module/panel', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, module: params.module, panel: null, panel_error: '', saved: true })),
+  http.post('/api/users/kesepain/expand/:scope/:module/panel/action', ({ params }) => HttpResponse.json({ user: 'kesepain', scope: params.scope, module: params.module, panel: null, panel_error: '', command: 'refresh' })),
   http.patch('/api/users/kesepain/expand/:scope/:module/enabled', () => HttpResponse.json({ enabled: false })),
   http.delete('/api/users/kesepain/expand/user/:module', () => HttpResponse.json({ deleted: true })),
 ]

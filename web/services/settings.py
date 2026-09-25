@@ -680,10 +680,19 @@ class SettingsServiceMixin:
         schema_version = raw.get("schema_version")
         if isinstance(schema_version, bool) or not isinstance(schema_version, int):
             schema_version = 0
+        raw_compatibility = raw.get("compatibility")
+        compatibility: dict[str, str] = {}
+        if isinstance(raw_compatibility, dict):
+            gateway_version = str(
+                raw_compatibility.get("kemo-adapter-api") or ""
+            ).strip()
+            if gateway_version:
+                compatibility["kemo-adapter-api"] = gateway_version
         return {
             "name": str(raw.get("name") or "kemo-agent").strip() or "kemo-agent",
             "version": str(raw.get("version") or "").strip(),
             "schema_version": schema_version,
+            "compatibility": compatibility,
             "components": components,
             "read_only": True,
         }

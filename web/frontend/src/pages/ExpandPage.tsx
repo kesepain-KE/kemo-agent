@@ -21,6 +21,7 @@ import {
   RefreshCw,
   Share2,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   UserRound,
@@ -30,11 +31,15 @@ import {
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   deleteExpandModule,
+  getExpandModulePanel,
   getExpands,
+  invokeExpandModulePanelAction,
+  putExpandModulePanel,
   refreshExpandModule,
   setExpandModuleEnabled,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
+import { ModulePanel } from '../components/ModulePanel'
 import { EmptyPanel, ModuleError, ModuleFrame, RefreshActionButton, formatDateTime } from '../components/ModuleUi'
 import type { ExpandModuleSummary, ExpandScope } from '../types/api'
 import { copyText } from '../utils/clipboard'
@@ -106,7 +111,7 @@ export function ExpandPage() {
   const [activeScope, setActiveScope] = useState<ExpandScope>('global')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false)
-  const [previewMode, setPreviewMode] = useState<'data' | 'document'>('data')
+  const [previewMode, setPreviewMode] = useState<'data' | 'document' | 'panel'>('data')
   const [copiedBlock, setCopiedBlock] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [actionError, setActionError] = useState('')
@@ -121,6 +126,11 @@ export function ExpandPage() {
   const allModules = useMemo(() => groups.flatMap((group) => group.items), [groups])
   const visibleModules = groups.find((group) => group.scope === activeScope)?.items || []
   const selected = visibleModules.find((item) => item.id === selectedId) || visibleModules[0] || null
+  const panelQuery = useQuery({
+    queryKey: ['expand-panel', user, selected?.scope, selected?.name],
+    queryFn: () => getExpandModulePanel(user, selected!.scope, selected!.name),
+    enabled: Boolean(user && selected && previewMode === 'panel'),
+  })
 
   useEffect(() => {
     if (!visibleModules.some((item) => item.id === selectedId)) {
@@ -164,6 +174,36 @@ export function ExpandPage() {
       setNotice(`${item.display_name || item.name} 用户拓展已删除`)
     },
     onError: (error: Error) => setActionError(error.message || '用户拓展删除失败'),
+  })
+  const panelSaveMutation = useMutation({
+    mutationFn: ({ values, clearSecrets }: { values: Record<string, string | number | boolean>; clearSecrets: string[] }) => {
+      if (!selected) throw new Error('请先选择拓展模块')
+      return putExpandModulePanel(user, selected.scope, selected.name, values, clearSecrets)
+    },
+    onSuccess: async (_, variables) => {
+      if (!selected) return
+      await refreshExpandModule(user, selected.scope, selected.name)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['expands', user] }),
+        queryClient.invalidateQueries({ queryKey: ['expand-panel', user, selected.scope, selected.name] }),
+      ])
+      setNotice('用户配置已保存，模块数据已刷新')
+      void variables
+    },
+  })
+  const panelActionMutation = useMutation({
+    mutationFn: ({ command, params }: { command: string; params: Record<string, string | number | boolean> }) => {
+      if (!selected) throw new Error('请先选择拓展模块')
+      return invokeExpandModulePanelAction(user, selected.scope, selected.name, command, params)
+    },
+    onSuccess: async () => {
+      if (!selected) return
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['expands', user] }),
+        queryClient.invalidateQueries({ queryKey: ['expand-panel', user, selected.scope, selected.name] }),
+      ])
+      setNotice('模块快捷操作已完成')
+    },
   })
 
   const latestModule = useMemo(
@@ -325,8 +365,22 @@ export function ExpandPage() {
           <div className={styles.previewTabs} role="tablist" aria-label="拓展详情内容">
             <button type="button" role="tab" aria-selected={previewMode === 'data'} className={previewMode === 'data' ? styles.active : ''} onClick={() => setPreviewMode('data')}><Database size={13} />数据与注入</button>
             <button type="button" role="tab" aria-selected={previewMode === 'document'} className={previewMode === 'document' ? styles.active : ''} onClick={() => setPreviewMode('document')}><BookOpen size={13} />操作文档</button>
+            <button type="button" role="tab" aria-selected={previewMode === 'panel'} className={previewMode === 'panel' ? styles.active : ''} onClick={() => setPreviewMode('panel')}><SlidersHorizontal size={13} />用户配置</button>
           </div>
-          <div className={styles.previewGrid}>
+          {previewMode === 'panel' ? <div className={styles.panelHost}>
+            <div className={styles.panelInset}>
+              <ModulePanel
+                kind="expand"
+                data={panelQuery.data}
+                loading={panelQuery.isLoading}
+                busy={panelSaveMutation.isPending || panelActionMutation.isPending}
+                error={panelQuery.error instanceof Error ? panelQuery.error.message : selected.panel_error || ''}
+                emptyText="当前没有可操控组件"
+                onSave={async (values, clearSecrets) => { await panelSaveMutation.mutateAsync({ values, clearSecrets }) }}
+                onAction={async (command, params) => { await panelActionMutation.mutateAsync({ command, params }) }}
+              />
+            </div>
+          </div> : <div className={styles.previewGrid}>
             {previewMode === 'data' ? <>
               <TextPreview title="采集数据预览" subtitle={selected.input_data || '未配置数据文件'} content={selected.collected_markdown} empty={selected.open_input ? '当前采集数据为空' : '该模块未开启数据采集'} copied={copiedBlock === 'collected'} onCopy={() => void handleCopy('collected', selected.collected_markdown)} />
               <TextPreview title="系统提示词注入预览" subtitle="真实 Expand Data 注入片段" content={selected.injected_markdown} empty={selected.whitelisted ? '该模块当前没有内容进入 Prompt' : '该模块已被当前用户白名单禁用'} copied={copiedBlock === 'injected'} onCopy={() => void handleCopy('injected', selected.injected_markdown)} />
@@ -334,7 +388,7 @@ export function ExpandPage() {
               <TextPreview title="操控能力（注入层）" subtitle={selected.start_control || '未配置操作文档'} content={selected.control_injection_markdown} empty="操作文档未提供“注入层”内容" copied={copiedBlock === 'control'} onCopy={() => void handleCopy('control', selected.control_injection_markdown)} />
               <TextPreview title="触发场景与具体操作（操作层）" subtitle="完整使用方法与命令说明" content={selected.control_operation_markdown} empty="操作文档未提供“操作层”内容" copied={copiedBlock === 'operation'} onCopy={() => void handleCopy('operation', selected.control_operation_markdown)} />
             </>}
-          </div>
+          </div>}
 
           <div className={styles.detailActions}>
             <button type="button" onClick={() => setPreviewMode('document')}><BookOpen size={14} />查看文档</button>

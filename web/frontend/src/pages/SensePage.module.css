@@ -379,6 +379,7 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .65rem;
 }
+.panelHost { width: calc(100% - 1.6rem); max-width: calc(100% - 1.6rem); max-height: 24rem; margin: 0 .8rem .8rem; padding: .65rem; box-sizing: border-box; overflow: auto; border: 1px solid var(--line); border-radius: .75rem; background: var(--surface); scrollbar-width: thin; }
 
 .detailPreviewGrid .markdownPane pre { max-height: 22rem; }
 .spinning { animation: spin .85s linear infinite; }

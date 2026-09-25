@@ -5,12 +5,18 @@ import {
   AVATAR_UPDATED_EVENT,
   commandPlan,
   editPlan,
+  getExpandModulePanel,
   getLogoUrl,
   getRuntimeStatus,
+  getSessions,
+  getSenseModulePanel,
   getUserArtifactUrl,
   getUserAvatarUrl,
   getUserFileDownloadUrl,
   parseSseFrames,
+  invokeExpandModulePanelAction,
+  putExpandModulePanel,
+  putSenseModulePanel,
   retryPlanStep,
   submitGuidance,
   streamChat,
@@ -18,6 +24,56 @@ import {
 } from './client'
 
 describe('parseSseFrames', () => {
+  it('历史会话请求可携带上海自然日筛选参数', async () => {
+    let receivedUrl = ''
+    server.use(http.get('/api/users/kesepain/sessions', ({ request }) => {
+      receivedUrl = request.url
+      return HttpResponse.json({ user: 'kesepain', source: 'all', date: '2026-09-25', sessions: [], has_more: false, next_cursor: '' })
+    }))
+
+    const result = await getSessions('kesepain', '', 50, '', 'all', '2026-09-25')
+
+    expect(new URL(receivedUrl).searchParams.get('date')).toBe('2026-09-25')
+    expect(result.date).toBe('2026-09-25')
+  })
+
+  it('模块面板接口使用独立端点并保持 snake_case 请求合同', async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = []
+    server.use(
+      http.get('/api/users/kesepain/expand/global/demo/panel', ({ request }) => {
+        requests.push({ url: request.url, method: request.method })
+        return HttpResponse.json({ user: 'kesepain', scope: 'global', module: 'demo', panel: null, panel_error: '' })
+      }),
+      http.put('/api/users/kesepain/expand/global/demo/panel', async ({ request }) => {
+        requests.push({ url: request.url, method: request.method, body: await request.json() })
+        return HttpResponse.json({ user: 'kesepain', scope: 'global', module: 'demo', panel: null, panel_error: '', saved: true })
+      }),
+      http.post('/api/users/kesepain/expand/global/demo/panel/action', async ({ request }) => {
+        requests.push({ url: request.url, method: request.method, body: await request.json() })
+        return HttpResponse.json({ user: 'kesepain', scope: 'global', module: 'demo', panel: null, panel_error: '', command: 'probe' })
+      }),
+      http.get('/api/users/kesepain/sense/runtime/panel', ({ request }) => {
+        requests.push({ url: request.url, method: request.method })
+        return HttpResponse.json({ user: 'kesepain', module: 'runtime', panel: null, panel_error: '' })
+      }),
+      http.put('/api/users/kesepain/sense/runtime/panel', async ({ request }) => {
+        requests.push({ url: request.url, method: request.method, body: await request.json() })
+        return HttpResponse.json({ user: 'kesepain', module: 'runtime', panel: null, panel_error: '', saved: true })
+      }),
+    )
+
+    await getExpandModulePanel('kesepain', 'global', 'demo')
+    await putExpandModulePanel('kesepain', 'global', 'demo', { mode: 'fast' }, ['api_key'])
+    await invokeExpandModulePanelAction('kesepain', 'global', 'demo', 'probe', { target: 'local' })
+    await getSenseModulePanel('kesepain', 'runtime')
+    await putSenseModulePanel('kesepain', 'runtime', { enabled: true }, ['token'])
+
+    expect(requests.map(({ method }) => method)).toEqual(['GET', 'PUT', 'POST', 'GET', 'PUT'])
+    expect(requests[1].body).toEqual({ values: { mode: 'fast' }, clear_secrets: ['api_key'] })
+    expect(requests[2].body).toEqual({ command: 'probe', params: { target: 'local' } })
+    expect(requests[4].body).toEqual({ values: { enabled: true }, clear_secrets: ['token'] })
+  })
+
   it('subagent progress 在工具完成前透传且不终止 SSE', async () => {
     server.use(http.post('/api/chat', () => new HttpResponse(
       'event: subagent_progress\ndata: {"type":"subagent_progress","tool_call_id":"call-a","metadata":{"status":"tool_running","iteration":2,"tool_name":"file"}}\n\n'
@@ -103,7 +159,7 @@ describe('parseSseFrames', () => {
 
   it('不会把自动重试事件误判为流终态', async () => {
     server.use(http.post('/api/chat', () => new HttpResponse(
-      'event: retrying\ndata: {"type":"retrying","content":"正在重试","metadata":{"next_attempt":2,"max_attempts":5}}\n\n'
+      'event: retrying\ndata: {"type":"retrying","content":"正在重试","metadata":{"next_attempt":2,"max_attempts":6}}\n\n'
       + 'event: done\ndata: {"type":"done","metadata":{"status":"completed"}}\n\n',
       { headers: { 'Content-Type': 'text/event-stream' } },
     )))
