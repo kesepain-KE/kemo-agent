@@ -3,6 +3,7 @@ export * from './api/runtimeTypes'
 export * from './api/fileTypes'
 export * from './api/messageTypes'
 export * from './api/expandTypes'
+export * from './api/modulePanelTypes'
 
 // Public type-facade index: concrete declarations live in the domain modules.
 // interface RuntimeStatusResponse
@@ -234,6 +235,7 @@ export interface SessionsResponse {
   source: string
   sessions: SessionSummary[]
   query?: string
+  date?: string
   has_more?: boolean
   next_cursor?: string
 }
@@ -498,6 +500,8 @@ export interface SenseSourceSummary {
   update_interval: string
   update_interval_seconds: number
   updated_at: number
+  panel?: import('./api/modulePanelTypes').ModulePanelDefinition | null
+  panel_error?: string
 }
 
 export interface SenseResponse {
@@ -656,6 +660,7 @@ export interface VersionResponse {
   name: string
   version: string
   schema_version: number
+  compatibility: Record<string, string>
   components: Array<{
     id: string
     version: string
@@ -771,6 +776,10 @@ export interface MemoryItemResponse {
   tier_entered_at: string | null
   expires_at: string | null
   last_weight_date?: string | null
+  weighted_today?: boolean
+  weight_locked_today?: boolean
+  weight_day?: string
+  weight_timezone?: string
 }
 
 export interface ImportantMemoryLifecycle {

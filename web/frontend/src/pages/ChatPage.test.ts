@@ -2,6 +2,36 @@ import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
 import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import { splitInlineWidgets } from '../components/Chat/inlineWidgetProtocol'
+
+describe('正文内联组件消息链路', () => {
+  const incompleteWidget = '分析如下：\n\n```kemo-widget\n{"schema_version":1,"id":"retry-widget"'
+
+  it('历史恢复原样保留组件声明，由正文渲染层重新解析', () => {
+    const widget = '```kemo-widget\n{"schema_version":1,"id":"history-widget","component":"metric-grid","props":{"items":[{"label":"通过","value":12}]}}\n```'
+    const items = buildHistoryItems({
+      user: 'alice', source: 'web', session_id: 's1',
+      messages: [{ role: 'user', content: '查看摘要' }, { role: 'assistant', content: widget }],
+      round_metrics: [], round_traces: [],
+    })
+
+    expect(items.find((item) => item.kind === 'message' && item.role === 'assistant')).toMatchObject({ content: widget })
+    expect(splitInlineWidgets(widget)).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'widget', complete: true })]))
+  })
+
+  it('重试快照不会把未闭合组件与下一次尝试拼接', () => {
+    const retried = resetCurrentRoundItemsForRetry([
+      { id: 'u1', kind: 'message', role: 'user', content: '生成组件' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: incompleteWidget, streaming: true },
+    ], 1, 2)
+    const snapshot = retried.find((item) => item.kind === 'message' && item.role === 'assistant')
+
+    expect(snapshot).toMatchObject({ content: incompleteWidget, streaming: false })
+    if (!snapshot || snapshot.kind !== 'message') throw new Error('retry snapshot missing')
+    expect(splitInlineWidgets(snapshot.content)).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'widget', complete: false })]))
+    expect(retried).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'retry_boundary', phase: 'active', attempt: 2 })]))
+  })
+})
 
 describe('长任务气泡显示条件', () => {
   it('只显示活跃状态和可操作的暂停状态', () => {

@@ -2,7 +2,9 @@ import { Fragment, Suspense, lazy } from 'react'
 import { Check, ChevronDown, Copy, ListChecks, Pencil, RotateCcw, Save, Trash2, Workflow, Zap } from 'lucide-react'
 import { AgentComposer } from '../components/AgentComposer'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
+import { copyableAssistantText, type InlineWidgetAction } from '../components/Chat/inlineWidgetProtocol'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
+import { ComposerMessagePanel } from '../components/ComposerMessagePanel'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
 import { LongTaskBubble } from '../components/LongTaskBubble'
 import { SubagentToolCard } from '../components/SubagentProgressBubble'
@@ -57,7 +59,7 @@ export function ChatPageView(props: ChatPageViewProps) {
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
     activeCompression, longTaskQuery, longTaskBusy, stopLongTask, composerPlanDockRef, collapsedPlans,
-    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
+    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, guideDraft, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,
@@ -66,6 +68,24 @@ export function ChatPageView(props: ChatPageViewProps) {
     knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,
   } = props
+  const visibleFollowUpCount = followUpQueue.filter((message: { status: string }) => message.status !== 'guiding').length
+  const handleWidgetAction = (action: InlineWidgetAction) => {
+    if (action.type === 'fill-input') {
+      setDraft(action.text)
+      window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')?.focus())
+      return
+    }
+    if (action.type === 'copy') {
+      void copyMessage('widget-action', action.text)
+      return
+    }
+    if (running || stopping) {
+      setDraft(action.text)
+      window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')?.focus())
+      return
+    }
+    void send(action.text)
+  }
 
 return (
   <div className={`view chat-view active${showWelcome ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
@@ -160,7 +180,7 @@ return (
           }
 
           const { assistantMessages, usageItems, planItems, finalizedGuidance } = partitionAssistantTurnItems(block.items)
-          const assistantText = assistantMessages.map((item) => item.content).filter(Boolean).join('\n\n')
+          const assistantText = assistantMessages.map((item) => copyableAssistantText(item.content)).filter(Boolean).join('\n\n')
           const assistantCopyId = assistantMessages.at(-1)?.id || block.id
           const hasPlanBubble = block.items.some((item) => item.kind === 'task_plan')
           return (
@@ -195,6 +215,7 @@ return (
                           <MarkdownMessage
                             content={compactPlanAssistantText(item.content || (item.streaming ? '…' : ''), hasPlanBubble)}
                             streaming={Boolean(item.streaming)}
+                            onWidgetAction={handleWidgetAction}
                           />
                         </Suspense>
                       </div>
@@ -258,15 +279,19 @@ return (
           />
         </div>
       ) : null}
-      <FollowUpQueue user={user} messages={followUpQueue} canGuide={running && !stopping}
-        onGuide={(message) => { void sendGuidance(message) }}
-        onRemove={(id) => removeNextTurnMessage(user, liveSessionId, id)}
-        onRetry={(id) => setNextTurnMessageStatus(user, liveSessionId, id, 'queued')}
-        onReorder={(id, targetId) => reorderNextTurnMessages(user, liveSessionId, id, targetId)} />
-      {guidancePreviewItem ? <div className="composer-guidance-preview" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" /></div> : null}
+      <ComposerMessagePanel
+        sessionKey={liveSessionId || sessionId || ''}
+        followUpCount={visibleFollowUpCount}
+        followUpContent={<FollowUpQueue embedded user={user} messages={followUpQueue} canGuide={running && !stopping}
+          onGuide={(message) => { void sendGuidance(message) }}
+          onRemove={(id) => removeNextTurnMessage(user, liveSessionId, id)}
+          onRetry={(id) => setNextTurnMessageStatus(user, liveSessionId, id, 'queued')}
+          onReorder={(id, targetId) => reorderNextTurnMessages(user, liveSessionId, id, targetId)} />}
+        guidanceContent={guidancePreviewItem ? <div className="composer-guidance-preview composer-guidance-preview-embedded" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" /></div> : undefined}
+      />
       <AgentComposer
         value={draft}
-        placeholder={user ? running ? '回车加入消息跟进；可排序，或在气泡内选择本轮引导…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+        placeholder={user ? running ? 'Enter 加入消息跟进；Ctrl+Enter 直接本轮引导…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
         currentRound={currentRound}
         totalRounds={totalRounds}
         roundLimit={roundLimit}
@@ -322,6 +347,7 @@ return (
         onOpenCommands={openCommandPanel}
           onToggleConversationMenu={() => setConversationMenuOpen((value: boolean) => !value)}
         onSubmit={() => { if (running || stopping) queueFollowUp(); else void send(undefined, { uploadedFiles: pendingUploads }) }}
+        onGuide={guideDraft}
         onNextTurn={queueFollowUp}
         onStop={() => { void stopCurrentRun() }}
       />

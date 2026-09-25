@@ -34,6 +34,17 @@ describe('ChatPage guidance styles', () => {
     expect(rule).toContain('max-height: 33.333dvh')
     expect(rule).toContain('overflow-y: auto')
   })
+
+  it('limits only the composer guidance preview to one auxiliary card unit', () => {
+    const previewRule = stylesheet.match(/\.composer-guidance-preview\s*\{([^}]*)\}/)?.[1] ?? ''
+    const cardRule = stylesheet.match(/\.composer-guidance-preview > \.guidance-message\.guidance-current\s*\{([^}]*)\}/)?.[1] ?? ''
+
+    expect(previewRule).toContain('min-height: 0')
+    expect(previewRule).not.toContain('overflow-y')
+    expect(cardRule).toContain('max-height: var(--composer-guidance-max, 10.5rem)')
+    expect(cardRule).toContain('overflow-y: auto')
+    expect(cardRule).toContain('overscroll-behavior: contain')
+  })
 })
 
 describe('ChatPage tool-call theme styles', () => {

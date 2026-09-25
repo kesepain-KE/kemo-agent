@@ -692,7 +692,41 @@ export function ChatPage() {
     }
   }
 
-  const activePlan = overview?.active_plan
+  const guideDraft = () => {
+    const content = draft.trim()
+    const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
+    if (
+      (!content && !uploadedFiles.length)
+      || !user
+      || uploading
+      || !running
+      || stopping
+      || !effectiveRunId
+      || !liveSessionId
+    ) return
+    const message: PendingNextTurnMessage = {
+      id: eventId('guidance'),
+      content,
+      uploadedFiles,
+      historyUserMessages: Math.max(
+        persistedUserMessages,
+        (liveRun?.historyUserMessages ?? persistedUserMessages) + 1,
+      ),
+      status: 'queued',
+    }
+    queueNextTurnMessage(user, liveSessionId, message)
+    setDraft('')
+    if (uploadedFiles.length) {
+      setDraftUploads(draftKey, (current) => removeSubmittedUploads(current, uploadedFiles))
+    }
+    void sendGuidance(message)
+  }
+
+  const activePlan = sessionId
+    && hasCommitted
+    && overview?.session_id === sessionId
+    ? overview.active_plan
+    : null
   const lastUserMessage = [...items].reverse().find((item) => item.kind === 'message' && item.role === 'user')
   const latestRunningGuidance = running
     ? [...visibleLiveItems].reverse().find((item): item is GuidanceItem => item.kind === 'guidance' && !item.finalized)
@@ -956,7 +990,7 @@ export function ChatPage() {
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
     activeCompression, longTaskQuery, longTaskBusy, stopLongTask, composerPlanDockRef, collapsedPlans,
-    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
+    planActions, guidancePreviewItem, followUpQueue, queueFollowUp, guideDraft, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,

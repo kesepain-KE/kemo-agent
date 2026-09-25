@@ -13,6 +13,8 @@ import type { PluggableList } from 'unified'
 import 'highlight.js/styles/github-dark.min.css'
 import 'katex/dist/katex.min.css'
 import { randomUUID } from '../../randomId'
+import { InlineWidgetBlock, InlineWidgetPending } from './InlineWidget'
+import { splitInlineWidgets, type InlineWidgetAction } from './inlineWidgetProtocol'
 import styles from './MarkdownMessage.module.css'
 
 let mermaidReady = false
@@ -268,9 +270,10 @@ export interface MarkdownMessageProps {
   content: string
   streaming?: boolean
   className?: string
+  onWidgetAction?: (action: InlineWidgetAction) => void
 }
 
-export function MarkdownMessage({ content, streaming = false, className = '' }: MarkdownMessageProps) {
+export function MarkdownMessage({ content, streaming = false, className = '', onWidgetAction }: MarkdownMessageProps) {
   const remarkPlugins: PluggableList = streaming
     ? [[remarkGfm, { singleTilde: false }], remarkMath]
     : [[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks, remarkEmoji]
@@ -280,17 +283,27 @@ export function MarkdownMessage({ content, streaming = false, className = '' }: 
   const classes = [styles.markdownBody, 'markdown-body', streaming ? styles.streaming : '', className]
     .filter(Boolean)
     .join(' ')
+  const segments = splitInlineWidgets(content)
 
   return (
     <div className={classes}>
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={markdownComponents}
-        urlTransform={safeUrlTransform}
-      >
-        {content}
-      </ReactMarkdown>
+      {segments.map((segment) => segment.type === 'widget'
+        ? segment.complete
+          ? <InlineWidgetBlock key={segment.key} source={segment.source} blocked={segment.blocked} onAction={onWidgetAction} />
+          : <InlineWidgetPending key={segment.key} interrupted={!streaming} />
+        : segment.source
+          ? (
+            <ReactMarkdown
+              key={segment.key}
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={rehypePlugins}
+              components={markdownComponents}
+              urlTransform={safeUrlTransform}
+            >
+              {segment.source}
+            </ReactMarkdown>
+          )
+          : null)}
     </div>
   )
 }
