@@ -31,6 +31,7 @@ MAX_ACTIVE_BACKGROUND_JOBS_PER_USER = 8
 MAX_BACKGROUND_JOB_RECORDS_PER_USER = 256
 MAX_BACKGROUND_JOB_STORAGE_BYTES = 256 * 1024 * 1024
 BACKGROUND_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+BACKGROUND_JOB_RECONCILE_GRACE_SECONDS = 30.0
 MAX_BACKGROUND_JOB_LOG_BYTES = 16 * 1024 * 1024
 _JOB_ID_RE = re.compile(r"^job_[a-f0-9]{32}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -199,6 +200,35 @@ def _cleanup_background_jobs(directory: Path, *, now: float | None = None) -> No
             continue
 
 
+def _stale_active_job_ids(
+    records: list[tuple[Path, dict[str, Any]]],
+    *,
+    now: float | None = None,
+) -> list[str]:
+    """Return old active records that are safe to reconcile outside the lock.
+
+    A fresh ``starting`` record is deliberately left alone: another process may
+    still be launching its detached worker and registering the worker identity.
+    """
+
+    current_time = time.time() if now is None else float(now)
+    cutoff = current_time - BACKGROUND_JOB_RECONCILE_GRACE_SECONDS
+    result: list[str] = []
+    for _, record in records:
+        if record.get("status") not in JOB_ACTIVE_STATUSES:
+            continue
+        updated_at = _parse_timestamp(record.get("updated_at")) or _parse_timestamp(
+            record.get("started_at")
+        )
+        if updated_at is not None and updated_at > cutoff:
+            continue
+        try:
+            result.append(_validate_job_id(record.get("job_id")))
+        except ValueError:
+            continue
+    return result
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -283,6 +313,18 @@ def prepare_background_job(
         "stderr_path": str(paths["stderr"]),
     }
     directory = paths["record"].parent
+    with index_lock(root, user):
+        _cleanup_background_jobs(directory)
+        stale_active = _stale_active_job_ids(_iter_job_records(directory))
+    # Reconciliation reads process identity and performs its own atomic record
+    # updates.  Keep it outside the directory lock so process inspection never
+    # stalls unrelated job metadata operations.  The final quota check below is
+    # repeated under the lock and remains authoritative across processes.
+    for stale_job_id in stale_active:
+        try:
+            reconcile_background_job(root, user, stale_job_id)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            continue
     with index_lock(root, user):
         _cleanup_background_jobs(directory)
         records = _iter_job_records(directory)

@@ -1297,6 +1297,71 @@ class ShellPluginTests(unittest.TestCase):
                         command_digest="digest",
                     )
 
+    def test_background_job_quota_reconciles_stale_active_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            stale, _ = prepare_background_job(
+                root,
+                "alice",
+                source="test",
+                session_id="stale-job",
+                working_dir=str(root),
+                shell_type="auto",
+                command_digest="digest",
+            )
+            persist_background_job(
+                root,
+                "alice",
+                stale["job_id"],
+                lambda current: {
+                    **current,
+                    "status": "running",
+                    "updated_at": "2026-09-25T00:00:00+00:00",
+                    "pid": 0,
+                    "worker_pid": 0,
+                },
+            )
+            # update_background_job refreshes updated_at, so make the persisted
+            # record old in the same atomic format used by the job store.
+            record_path = (
+                root
+                / "users"
+                / "alice"
+                / "runtime"
+                / "background_jobs"
+                / f"{stale['job_id']}.json"
+            )
+            persisted = json.loads(record_path.read_text("utf-8"))
+            persisted["updated_at"] = "2026-09-25T00:00:00+00:00"
+            record_path.write_text(json.dumps(persisted), "utf-8")
+
+            with (
+                patch(
+                    "run.tools.background_jobs.MAX_ACTIVE_BACKGROUND_JOBS_PER_USER",
+                    1,
+                ),
+                patch(
+                    "run.tools.background_jobs.BACKGROUND_JOB_RECONCILE_GRACE_SECONDS",
+                    0,
+                ),
+            ):
+                replacement, _ = prepare_background_job(
+                    root,
+                    "alice",
+                    source="test",
+                    session_id="replacement-job",
+                    working_dir=str(root),
+                    shell_type="auto",
+                    command_digest="digest",
+                )
+
+            self.assertEqual(
+                reconcile_background_job(root, "alice", stale["job_id"])["status"],
+                "interrupted",
+            )
+            self.assertEqual(replacement["status"], "starting")
+
     def test_background_job_cleanup_removes_expired_terminal_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
