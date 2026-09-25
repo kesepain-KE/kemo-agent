@@ -12,6 +12,8 @@ python -m tests.template_tests.expand --target users/<user>/expand/<name>
 - Prompt 来源注册器能够发现采集数据和操控说明；
 - 开启操控端时，薄入口兼容 `execute(command, params)` 或旧版
   `execute(command_dict)`，并通过 JSON 子进程协议返回结果或结构化拒绝。
+- 正式参考模板必须包含可解析的 `module/panel.json`；默认采集完成后，状态容器引用的
+  `module/status.json` 可由框架读取。普通历史模块没有面板时仍可通过基础合同验收。
 
 ## 数据自由度
 

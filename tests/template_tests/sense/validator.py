@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from run.config import _read_sense_meta, load_prompt_source_registry
+from web.services.module_panels import load_module_panel, module_panel_response
 
 from tests.template_tests.base import begin_report, check_module_update, run_check
 from tests.template_tests.common import (
@@ -65,6 +66,26 @@ def _validate(
             update=meta.start_update,
             output=meta.data_md,
         )
+        panel_path = module / "module" / "panel.json"
+        panel, panel_error = load_module_panel(module, "sense")
+        if panel is None:
+            if panel_error:
+                report.failed("sense.panel_contract", panel_error)
+                return
+            if template_mode:
+                report.failed(
+                    "sense.panel_contract",
+                    "正式感知模板缺少 module/panel.json",
+                )
+                return
+            report.skipped("sense.panel_contract", "模块未声明用户配置组件")
+        else:
+            report.passed(
+                "sense.panel_contract",
+                "组件面板可被框架真实解析器读取",
+                path=str(panel_path.relative_to(module)),
+                containers=len(panel["containers"]),
+            )
         entry = module / meta.start_update
         imported = run_check(
             report,
@@ -122,10 +143,24 @@ def _validate(
             chars=len(output_text),
             health=current.health,
         )
+        if panel is not None:
+            panel_response = module_panel_response(module, "sense")
+            status_containers = [
+                container
+                for container in panel_response["panel"]["containers"]
+                if container["kind"] == "status"
+            ]
+            if not status_containers or status_containers[0].get("data_error"):
+                report.failed("sense.panel_runtime", "采集后组件状态文件不可读")
+                return
+            report.passed(
+                "sense.panel_runtime",
+                "采集入口已刷新可热读取的组件状态",
+                fields=len(status_containers[0].get("data", {})),
+            )
         registry = load_prompt_source_registry(root, "contract_user")
         selection = registry.select_perception(max_chars=1_000_000)
         if selection.original_items >= 1 and output_text in selection.text:
             report.passed("sense.prompt_injection", "真实 Prompt 来源注册器可发现并注入感知输出")
         else:
             report.failed("sense.prompt_injection", "感知输出未进入 Prompt 来源选择结果")
-

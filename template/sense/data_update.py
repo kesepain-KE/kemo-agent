@@ -10,6 +10,10 @@ RuntimeHost 会按配置周期在隔离子进程中调用零参数 ``update()``�
 - ``sense.md``：进入 System Prompt 的最新感知数据；
 - ``sense.json``：最近成功时间与健康状态；
 - ``_last_run.json``：最近一次执行结果。
+- ``module/status.json``：仅供 Web 用户配置面板读取的脱敏状态。
+
+输入：
+- ``module/panel.values.json``：Web 保存的用户配置；模块显式读取，框架不会自动注入 Prompt。
 """
 
 from __future__ import annotations
@@ -27,13 +31,26 @@ BASE_DIR = Path(__file__).resolve().parent
 SENSE_MD_PATH = BASE_DIR / "sense.md"
 STATUS_PATH = BASE_DIR / "_last_run.json"
 MANIFEST_PATH = BASE_DIR / "sense.json"
+PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
+PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 HOST_TZ = timezone(timedelta(hours=8))
 PERSISTENCE_CHECKPOINT_SECONDS = 300
 
 
-def collect() -> dict[str, Any]:
-    """可选样例钩子；也可以删除此函数并让 update() 调用其他内部实现。"""
+def load_panel_values() -> dict[str, Any]:
+    """读取用户配置组件值；框架不会自动把这些值注入 Prompt。"""
 
+    try:
+        value = json.loads(PANEL_VALUES_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def collect(config: dict[str, Any]) -> dict[str, Any]:
+    """可选样例钩子；配置密钥不得出现在返回值、Prompt 或状态摘要中。"""
+
+    del config
     # TODO: 直接实现极小采集，或导入模块目录内的任意内部工程。
     return {}
 
@@ -109,14 +126,44 @@ def write_manifest_health(*, healthy: bool, update_time: str) -> None:
     )
 
 
+def write_panel_status(result: dict[str, Any], config: dict[str, Any]) -> None:
+    """写入 Web 面板状态；不改 sense.md，也不泄露配置密钥。"""
+
+    ok = bool(result.get("ok"))
+    enabled = bool(config.get("enabled", True))
+    target = str(config.get("target") or "").strip()
+    profile = str(config.get("profile") or "brief").strip()
+    threshold = config.get("threshold", 90)
+    if ok:
+        summary = (
+            f"采集已完成；组件配置为{'启用' if enabled else '停用'}，"
+            f"目标{'已填写' if target else '未填写'}，输出 {profile}，阈值 {threshold}%。"
+        )
+    else:
+        summary = "采集失败；请查看模块运行诊断。组件状态不回显原始错误或敏感配置。"
+    atomic_write(
+        PANEL_STATUS_PATH,
+        json.dumps(
+            {
+                "health": "正常" if ok else "异常",
+                "last_run": str(result.get("time") or ""),
+                "summary": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+    )
+
+
 def update() -> dict[str, Any]:
     """零参数更新入口：采集、写入并返回结构化执行状态。"""
 
     current = datetime.now(HOST_TZ)
     now = current.strftime("%Y-%m-%d %H:%M:%S")
     checkpoint = checkpoint_time(current)
+    panel_values = load_panel_values()
     try:
-        data = collect()
+        data = collect(panel_values)
         content = render_markdown(data, now)
         changed = atomic_write(SENSE_MD_PATH, content)
         write_manifest_health(healthy=True, update_time=now if changed else checkpoint)
@@ -136,6 +183,10 @@ def update() -> dict[str, Any]:
             error = f"{error}；写回异常健康状态失败：{health_exc}"
         result = {"ok": False, "status": "error", "time": now, "error": error}
 
+    try:
+        write_panel_status(result, panel_values)
+    except Exception:
+        pass
     atomic_write(
         STATUS_PATH,
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",

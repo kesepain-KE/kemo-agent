@@ -12,6 +12,7 @@ from unittest.mock import patch
 from plugins.manifest import parse_plugin_manifest
 from plugins.sense_creater.tool import run
 from run.config import load_prompt_source_registry
+from web.services.module_panels import load_module_panel
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,7 +57,10 @@ class SenseCreaterPluginTests(unittest.TestCase):
             self.assertEqual(created["path"], "global_sense/system_monitor")
             self.assertEqual(
                 created["files"],
-                ["sense.json", "sense.md", "data_update.py"],
+                [
+                    "sense.json", "sense.md", "data_update.py",
+                    "module/panel.json", "module/panel.values.json", "module/status.json", "module/README.md",
+                ],
             )
             module = root / created["path"]
             self.assertTrue(all((module / name).is_file() for name in created["files"]))
@@ -73,10 +77,15 @@ class SenseCreaterPluginTests(unittest.TestCase):
 
             validation = run("validate", name="system_monitor", context=context)
             self.assertTrue(validation["valid"], validation["errors"])
+            self.assertTrue(validation["panel_enabled"])
+            panel, panel_error = load_module_panel(module, "sense")
+            self.assertEqual(panel_error, "")
+            self.assertEqual(panel["title"], "system_monitor · 用户配置")
             listing = run("list", context=context)
             self.assertEqual(len(listing["modules"]), 1)
             self.assertEqual(listing["modules"][0]["name"], "system_monitor")
             self.assertTrue(listing["modules"][0]["valid"])
+            self.assertTrue(listing["modules"][0]["panel_enabled"])
 
             selection = load_prompt_source_registry(root, "alice").select_perception(max_chars=10_000)
             self.assertIn("[system_monitor]", selection.text)
@@ -94,6 +103,19 @@ class SenseCreaterPluginTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertEqual(json.loads(process.stdout)["status"], "ok")
             self.assertIn("暂无数据", (module / "sense.md").read_text("utf-8"))
+            panel_status = json.loads((module / "module" / "status.json").read_text("utf-8"))
+            self.assertEqual(panel_status["health"], "正常")
+            self.assertTrue(panel_status["last_run"])
+
+            panel_source = json.loads((module / "module" / "panel.json").read_text("utf-8"))
+            panel_source["title"] = "热加载后的感知面板"
+            (module / "module" / "panel.json").write_text(
+                json.dumps(panel_source, ensure_ascii=False),
+                "utf-8",
+            )
+            reloaded, panel_error = load_module_panel(module, "sense")
+            self.assertEqual(panel_error, "")
+            self.assertEqual(reloaded["title"], "热加载后的感知面板")
             self.assertTrue(run("validate", name="system_monitor", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):
@@ -270,7 +292,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
             PROJECT_ROOT / "plugins" / "sense_creater" / "SKILL.md",
             root=PROJECT_ROOT,
         )
-        self.assertEqual(manifest.tool["version"], "1.0.0")
+        self.assertEqual(manifest.tool["version"], "1.1.0")
         self.assertEqual(
             set(manifest.tool["input_schema"]["properties"]["action"]["enum"]),
             {"list", "create", "validate"},

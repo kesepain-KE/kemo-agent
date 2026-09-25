@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,6 +18,8 @@ def test_reference_expand_contract() -> None:
         timeout=8,
     )
     assert report.ok, report.render_text()
+    passed_ids = {check.check_id for check in report.checks if check.status == "passed"}
+    assert {"expand.panel_contract", "expand.panel_runtime", "expand.panel_actions"} <= passed_ids
 
 
 def test_nested_complete_project_does_not_change_expand_contract() -> None:
@@ -39,3 +42,19 @@ def test_nested_complete_project_does_not_change_expand_contract() -> None:
         )
         assert report.ok, report.render_text()
 
+
+def test_invalid_component_panel_is_an_expand_failure() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        target = Path(temporary) / "broken_panel_expand"
+        shutil.copytree(ROOT / "template" / "expand", target)
+        panel_path = target / "module" / "panel.json"
+        panel = json.loads(panel_path.read_text("utf-8"))
+        panel["containers"][0]["source"] = "../../outside.json"
+        panel_path.write_text(json.dumps(panel, ensure_ascii=False), "utf-8")
+        report = validate(
+            target,
+            repository_root=ROOT,
+            runtime_probe=False,
+        )
+        failed_ids = {check.check_id for check in report.checks if check.status == "failed"}
+        assert "expand.panel_contract" in failed_ids, report.render_text()

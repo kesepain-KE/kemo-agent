@@ -10,6 +10,10 @@ RuntimeHost 会在隔离子进程中调用零参数 update()；Windows 后台调
 - 输出文件是 input_data.md（而非 sense.md）
 - expand 有操控层（start_expand.py），sense 只有感知层
 
+== 组件面板 ==
+- module/panel.values.json：Web 用户配置值，由本模块显式读取，不会自动进入 Prompt
+- module/status.json：脱敏运行状态，只供 Web 展示
+
 == 自由实现 ==
 本文件只是可替换的最小适配样例。可以保留这些辅助函数、缩成更小入口、
 重写整个文件，或调用模块目录内的完整工程。框架只要求零参数 update()
@@ -28,17 +32,31 @@ BASE_DIR = Path(__file__).resolve().parent
 INPUT_MD = BASE_DIR / "input_data.md"
 STATUS_PATH = BASE_DIR / "_last_run.json"
 MANIFEST_PATH = BASE_DIR / "expand.json"
+PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
+PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 HOST_TZ = timezone(timedelta(hours=8))  # 北京时间，按需修改
 PERSISTENCE_CHECKPOINT_SECONDS = 300
 
 
-def collect() -> Any:
+def load_panel_values() -> dict[str, Any]:
+    """读取用户配置组件值；这些值不会被框架自动写进 Prompt。"""
+
+    try:
+        value = json.loads(PANEL_VALUES_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def collect(config: dict[str, Any]) -> Any:
     """
     可选样例钩子；也可以删除并让 update() 调用其他内部实现。
 
+    ``config`` 来自组件值文件；只使用真实需要的字段，密钥不得写入返回值或日志。
     可以返回任意 JSON 兼容值用于生成 Prompt 摘要；大型内容保存在模块
     目录内由实际工程自行选择的位置。
     """
+    del config
     data: Any = {}
     # TODO: 直接实现极小采集，或导入模块目录内的任意内部工程。
     return data
@@ -113,13 +131,43 @@ def write_manifest_health(*, healthy: bool, update_time: str) -> None:
     )
 
 
+def write_panel_status(result: dict[str, Any], config: dict[str, Any]) -> None:
+    """只写 Web 用户配置页状态，不写入 Prompt 数据出口。"""
+
+    ok = bool(result.get("ok"))
+    enabled = bool(config.get("enabled", True))
+    endpoint = str(config.get("endpoint") or "").strip()
+    mode = str(config.get("mode") or "get").strip().upper()
+    timeout = config.get("interval", 10)
+    if ok:
+        summary = (
+            f"采集已完成；组件配置为{'启用' if enabled else '停用'}，"
+            f"目标{'已填写' if endpoint else '未填写'}，模式 {mode}，超时 {timeout} 秒。"
+        )
+    else:
+        summary = "采集失败；请查看模块运行诊断。组件状态不会把密钥或原始错误回显到浏览器。"
+    atomic_write(
+        PANEL_STATUS_PATH,
+        json.dumps(
+            {
+                "phase": "已完成" if ok else "失败",
+                "last_run": str(result.get("time") or ""),
+                "summary": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+    )
+
+
 def update():
     """入口：采集 → 写入 → 更新健康状态 → 打印结果。"""
     current = datetime.now(HOST_TZ)
     now = current.strftime("%Y-%m-%d %H:%M:%S")
     checkpoint = checkpoint_time(current)
+    panel_values = load_panel_values()
     try:
-        data = collect()
+        data = collect(panel_values)
 
         content = render_markdown(data, update_time=now)
         changed = atomic_write(INPUT_MD, content)
@@ -139,6 +187,10 @@ def update():
         except Exception as health_exc:
             error = f"{error}；写回异常健康状态失败：{health_exc}"
         result = {"ok": False, "time": now, "error": error}
+    try:
+        write_panel_status(result, panel_values)
+    except Exception:
+        pass
     atomic_write(
         STATUS_PATH,
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",

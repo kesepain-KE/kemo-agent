@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "title": "my_expand · 用户配置",
+  "containers": [
+    {
+      "kind": "status",
+      "title": "运行状态",
+      "source": "module/status.json",
+      "fields": [
+        { "key": "phase", "label": "阶段", "type": "badge" },
+        { "key": "last_run", "label": "最近一次运行", "type": "text" },
+        { "key": "summary", "label": "摘要", "type": "markdown" }
+      ]
+    },
+    {
+      "kind": "config",
+      "title": "连接配置",
+      "values": "module/panel.values.json",
+      "fields": [
+        { "key": "api_key", "label": "API Key", "type": "string", "masked": true },
+        {
+          "key": "endpoint",
+          "label": "服务地址",
+          "type": "string",
+          "placeholder": "https://api.example.com"
+        },
+        {
+          "key": "mode",
+          "label": "请求模式",
+          "type": "enum",
+          "options": [
+            { "value": "get", "label": "GET" },
+            { "value": "post", "label": "POST" },
+            { "value": "put", "label": "PUT" }
+          ]
+        },
+        { "key": "interval", "label": "超时（秒）", "type": "number", "min": 1, "max": 3600, "default": 10 },
+        { "key": "enabled", "label": "启用", "type": "boolean" },
+        { "key": "note", "label": "备注", "type": "text" }
+      ],
+      "presets": [
+        {
+          "name": "示例服务",
+          "values": { "endpoint": "https://api.example.com", "mode": "get", "interval": 10 }
+        },
+        {
+          "name": "本地服务",
+          "values": { "endpoint": "http://127.0.0.1:8080", "mode": "post", "interval": 30 }
+        }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "操控",
+      "controls": [
+        { "type": "button", "label": "立即采集", "command": "refresh" }
+      ]
+    }
+  ]
+}

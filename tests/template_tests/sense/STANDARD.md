@@ -11,6 +11,8 @@ python -m tests.template_tests.sense --target global_sense/<name>
 - 成功执行后，清单声明的 Markdown 出口非空，时间和健康状态有效；
 - Prompt 来源注册器能发现并注入该出口。
 - `sense.json` 不声明模块级刷新频率；框架调度统一读取全局 `task_cron_system.sense_update_rate`。
+- 正式参考模板必须包含只允许框架 `refresh` 的可解析组件面板；采集完成后，状态容器引用的
+  `module/status.json` 可由框架读取。普通历史感知模块没有面板时仍保持兼容。
 
 ## 不限制
 

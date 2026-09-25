@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 from plugins.expand_creater.tool import run
-from run.config import read_expand_meta
+from run.config import load_prompt_source_registry, read_expand_meta
+from web.services.module_panels import load_module_panel
 
 
 class ExpandCreaterPluginTests(unittest.TestCase):
@@ -34,7 +35,10 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertEqual(created["path"], "users/alice/expand/smart_lights")
             self.assertEqual(
                 set(created["files"]),
-                {"expand.json", "expand_control.md", "start_expand.py", "data_update.py", "input_data.md"},
+                {
+                    "expand.json", "expand_control.md", "start_expand.py", "data_update.py", "input_data.md",
+                    "module/panel.json", "module/panel.values.json", "module/status.json", "module/README.md",
+                },
             )
 
             module = root / created["path"]
@@ -52,10 +56,20 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertTrue(read_expand_meta(module).valid)
             validation = run("validate", "user", name="smart_lights", context=context)
             self.assertTrue(validation["valid"], validation["errors"])
+            self.assertTrue(validation["panel_enabled"])
+            panel, panel_error = load_module_panel(module, "expand")
+            self.assertEqual(panel_error, "")
+            self.assertEqual(panel["title"], "smart_lights · 用户配置")
             listing = run("list", "user", context=context)
             self.assertEqual(listing["count"], 1)
             self.assertEqual(listing["modules"][0]["name"], "smart_lights")
             self.assertTrue(listing["modules"][0]["valid"])
+            self.assertTrue(listing["modules"][0]["panel_enabled"])
+            prompt_selection = load_prompt_source_registry(root, "alice").select_expand(
+                max_chars=10_000
+            )
+            self.assertIn("智能灯光拓展可用", prompt_selection.text)
+            self.assertIn("智能灯光拓展可用", prompt_selection.fragment("user:smart_lights"))
 
             control = (module / "expand_control.md").read_text("utf-8")
             self.assertLess(control.index("## 注入层"), control.index("## 操作层"))
@@ -120,6 +134,32 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertFalse(json.loads(repeated.stdout)["changed"])
             self.assertEqual((module / "input_data.md").stat().st_mtime_ns, before)
+            panel_status = json.loads((module / "module" / "status.json").read_text("utf-8"))
+            self.assertEqual(panel_status["phase"], "已完成")
+            self.assertTrue(panel_status["last_run"])
+
+            refresh_process = subprocess.run(
+                [sys.executable, str(module / "start_expand.py")],
+                cwd=module,
+                input=json.dumps({"command": "refresh", "params": {}}, ensure_ascii=False),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(refresh_process.returncode, 0, refresh_process.stderr)
+            self.assertTrue(json.loads(refresh_process.stdout)["ok"])
+
+            panel_source = json.loads((module / "module" / "panel.json").read_text("utf-8"))
+            panel_source["title"] = "热加载后的面板"
+            (module / "module" / "panel.json").write_text(
+                json.dumps(panel_source, ensure_ascii=False),
+                "utf-8",
+            )
+            reloaded, panel_error = load_module_panel(module, "expand")
+            self.assertEqual(panel_error, "")
+            self.assertEqual(reloaded["title"], "热加载后的面板")
             self.assertTrue(run("validate", "user", name="smart_lights", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):
@@ -151,6 +191,9 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             )
             module = root / created["path"]
             self.assertTrue(run("validate", "shared", name="weather_station", context=context)["valid"])
+            panel, panel_error = load_module_panel(module, "expand")
+            self.assertEqual(panel_error, "")
+            self.assertFalse(any(container["kind"] == "action" for container in panel["containers"]))
 
             manifest_path = module / "expand.json"
             manifest = json.loads(manifest_path.read_text("utf-8"))

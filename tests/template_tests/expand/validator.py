@@ -9,6 +9,7 @@ from pathlib import Path
 from run.extensions import EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER
 from run.extensions import run_protocol_process
 from run.config import load_prompt_source_registry, read_expand_meta
+from web.services.module_panels import load_module_panel, module_panel_response
 
 from tests.template_tests.base import (
     begin_report,
@@ -80,6 +81,27 @@ def _validate(
             control_enabled=meta.open_control,
         )
 
+        panel_path = module / "module" / "panel.json"
+        panel, panel_error = load_module_panel(module, "expand")
+        if panel is None:
+            if panel_error:
+                report.failed("expand.panel_contract", panel_error)
+                return
+            if template_mode:
+                report.failed(
+                    "expand.panel_contract",
+                    "正式拓展模板缺少 module/panel.json",
+                )
+                return
+            report.skipped("expand.panel_contract", "模块未声明用户配置组件")
+        else:
+            report.passed(
+                "expand.panel_contract",
+                "组件面板可被框架真实解析器读取",
+                path=str(panel_path.relative_to(module)),
+                containers=len(panel["containers"]),
+            )
+
         update_entry = module / meta.start_update
         update_imported = run_check(
             report,
@@ -139,6 +161,21 @@ def _validate(
             chars=len(input_text),
             health=current.input_health,
         )
+        if panel is not None:
+            panel_response = module_panel_response(module, "expand")
+            status_containers = [
+                container
+                for container in panel_response["panel"]["containers"]
+                if container["kind"] == "status"
+            ]
+            if not status_containers or status_containers[0].get("data_error"):
+                report.failed("expand.panel_runtime", "采集后组件状态文件不可读")
+                return
+            report.passed(
+                "expand.panel_runtime",
+                "采集入口已刷新可热读取的组件状态",
+                fields=len(status_containers[0].get("data", {})),
+            )
 
         registry = load_prompt_source_registry(root, user)
         selection = registry.select_expand(max_chars=1_000_000)
@@ -232,3 +269,73 @@ def _validate(
                     detail or f"操控协议子进程退出码为 {returncode}",
                 )
 
+        if panel is not None and template_mode:
+            controls = [
+                control
+                for container in panel["containers"]
+                if container["kind"] == "action"
+                for control in container["controls"]
+            ]
+            if not controls:
+                report.passed("expand.panel_actions", "正式模板没有声明额外操控按钮")
+            elif not runtime_probe:
+                report.skipped("expand.panel_actions", "已请求仅静态检查，未调用面板动作")
+            elif not control_imported:
+                report.skipped("expand.panel_actions", "操控入口导入未完成，未调用面板动作")
+            else:
+                failed_action = ""
+                failure_detail = ""
+                for control in controls:
+                    command = str(control.get("command") or "")
+                    params = {
+                        field["key"]: field.get("default", "")
+                        for field in control.get("inputs", [])
+                    }
+                    _, action_payload, action_stdout, action_stderr = run_protocol_process(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-c",
+                            EXPAND_CALL_RUNNER,
+                            str(control_entry),
+                            str(module),
+                        ],
+                        cwd=module,
+                        timeout=timeout,
+                        result_prefix=EXPAND_CALL_RESULT_PREFIX,
+                        stdin_payload=json.dumps(
+                            {"command": command, "params": params},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    action_result = (
+                        action_payload.get("result")
+                        if isinstance(action_payload, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(action_payload, dict)
+                        or action_payload.get("ok") is not True
+                        or not isinstance(action_result, dict)
+                        or action_result.get("ok") is False
+                    ):
+                        failed_action = command
+                        failure_detail = str(
+                            (action_result or {}).get("error")
+                            if isinstance(action_result, dict)
+                            else (action_payload or {}).get("reason")
+                            if isinstance(action_payload, dict)
+                            else action_stderr or action_stdout
+                        )
+                        break
+                if failed_action:
+                    report.failed(
+                        "expand.panel_actions",
+                        f"面板声明的命令未被默认操控入口真实实现：{failed_action}（{failure_detail}）",
+                    )
+                else:
+                    report.passed(
+                        "expand.panel_actions",
+                        "正式模板声明的组件动作均能通过真实拓展协议执行",
+                        commands=[control["command"] for control in controls],
+                    )

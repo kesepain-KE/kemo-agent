@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "title": "my_sense · 组件面板",
+  "containers": [
+    {
+      "kind": "status",
+      "title": "采集状态",
+      "source": "module/status.json",
+      "fields": [
+        { "key": "health", "label": "健康", "type": "badge" },
+        { "key": "last_run", "label": "最近一次采集", "type": "text" },
+        { "key": "summary", "label": "摘要", "type": "markdown" }
+      ]
+    },
+    {
+      "kind": "config",
+      "title": "采集配置",
+      "values": "module/panel.values.json",
+      "fields": [
+        {
+          "key": "target",
+          "label": "采集目标",
+          "type": "string",
+          "placeholder": "例如 磁盘挂载点 / 设备名 / 城市"
+        },
+        { "key": "threshold", "label": "告警阈值（%）", "type": "number", "min": 0, "max": 100, "default": 90 },
+        {
+          "key": "profile",
+          "label": "输出侧重",
+          "type": "enum",
+          "options": [
+            { "value": "brief", "label": "简要" },
+            { "value": "full", "label": "完整" }
+          ]
+        },
+        { "key": "enabled", "label": "启用", "type": "boolean" },
+        { "key": "note", "label": "备注", "type": "text" }
+      ],
+      "presets": [
+        { "name": "简要观测", "values": { "profile": "brief", "threshold": 90 } },
+        { "name": "完整观测", "values": { "profile": "full", "threshold": 80 } }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "操作",
+      "controls": [
+        { "type": "button", "label": "立即采集", "command": "refresh" }
+      ]
+    }
+  ]
+}

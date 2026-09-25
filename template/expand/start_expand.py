@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import sys
 from typing import Any
 
@@ -29,6 +31,14 @@ def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any
 
     if not command:
         return {"ok": False, "error": "缺少命令参数"}
+    if command.strip().casefold() == "refresh":
+        from data_update import update
+
+        # data_update.py 兼容前台直接运行，会自行打印结果；作为操控命令
+        # 调用时吞掉这份兼容输出，只保留当前拓展协议的单一 JSON 结果。
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = update()
+        return result if isinstance(result, dict) else {"ok": True, "result": result}
     return {
         "ok": False,
         "error": f"未知命令或拓展操控入口尚未实现: {command}",

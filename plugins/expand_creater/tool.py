@@ -13,6 +13,7 @@ from typing import Any
 from run.memory import contains_sensitive_credential
 from run.config import read_expand_meta
 from run.config import validate_user_name
+from web.services.module_panels import load_module_panel
 
 
 _ACTIONS = frozenset({"list", "create", "validate"})
@@ -47,7 +48,12 @@ _CREATE_FILES = (
     "start_expand.py",
     "data_update.py",
     "input_data.md",
+    "module/panel.json",
+    "module/panel.values.json",
+    "module/status.json",
+    "module/README.md",
 )
+_PANEL_FILES = ("panel.json", "panel.values.json", "status.json", "README.md")
 _MAX_EXPLAIN_CHARS = 2_000
 _MAX_MARKDOWN_CHARS = 100_000
 _MAX_CODE_CHARS = 500_000
@@ -198,6 +204,36 @@ def _write_text(path: Path, content: str) -> None:
         os.fsync(handle.fileno())
 
 
+def _copy_panel_template(
+    target: Path,
+    module_name: str,
+    *,
+    include_default_action: bool,
+) -> None:
+    source = _BUNDLED_EXPAND_TEMPLATE / "module"
+    if not source.is_dir() or _is_link(source):
+        raise RuntimeError(f"根目录拓展组件模板不可用：{source}")
+    target.mkdir()
+    for filename in _PANEL_FILES:
+        source_file = source / filename
+        if not source_file.is_file() or _is_link(source_file):
+            raise RuntimeError(f"根目录拓展组件模板文件不可用：{source_file}")
+        content = source_file.read_text("utf-8")
+        if filename == "panel.json":
+            panel = json.loads(content)
+            if not isinstance(panel, dict):
+                raise RuntimeError("根目录拓展组件 panel.json 顶层必须是对象")
+            panel["title"] = f"{module_name} · 用户配置"
+            if not include_default_action:
+                panel["containers"] = [
+                    container
+                    for container in panel.get("containers", [])
+                    if isinstance(container, dict) and container.get("kind") != "action"
+                ]
+            content = json.dumps(panel, ensure_ascii=False, indent=2)
+        _write_text(target / filename, content)
+
+
 def _read_manifest(module_dir: Path) -> tuple[dict[str, Any], list[str]]:
     path = module_dir / "expand.json"
     if _is_link(path):
@@ -300,6 +336,14 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
     runtime_meta = read_expand_meta(module_dir)
     if not runtime_meta.valid and runtime_meta.error and runtime_meta.error not in errors:
         errors.append(f"运行时校验失败：{runtime_meta.error}")
+    panel_enabled = False
+    panel_path = module_dir / "module" / "panel.json"
+    if panel_path.exists() or _is_link(panel_path):
+        panel, panel_error = load_module_panel(module_dir, "expand")
+        if panel is None:
+            errors.append(f"组件面板无效：{panel_error or 'panel.json 无法解析'}")
+        else:
+            panel_enabled = True
     return {
         "action": "validate",
         "scope": scope,
@@ -310,6 +354,7 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
         "name": str(manifest.get("name") or name) if manifest else name,
         "explain": str(manifest.get("explain") or "") if manifest else "",
         "input_health": str(manifest.get("input_health") or "未知") if manifest else "未知",
+        "panel_enabled": panel_enabled,
     }
 
 
@@ -337,6 +382,7 @@ def _run_list(root: Path, scope: str, user: str) -> dict[str, Any]:
             "display_name": result.get("name", path.name),
             "explain": result.get("explain", ""),
             "input_health": result.get("input_health", "异常"),
+            "panel_enabled": bool(result.get("panel_enabled")),
             "valid": bool(result.get("valid")),
             "errors": result.get("errors", []),
         })
@@ -367,6 +413,7 @@ def _run_create(
         raise ValueError("start_expand 必须是字符串")
     if data_update is not None and not isinstance(data_update, str):
         raise ValueError("data_update 必须是字符串")
+    custom_start = bool((start_expand or "").strip())
     start_code = (start_expand or "").strip() or _bundled_template("start_expand.py")
     update_code = (data_update or "").strip() or _bundled_template("data_update.py")
     for field, source in (("start_expand", start_code), ("data_update", update_code)):
@@ -411,6 +458,11 @@ def _run_create(
             temporary / "input_data.md",
             _bundled_template("input_data.md", _INPUT_DATA_TEMPLATE),
         )
+        _copy_panel_template(
+            temporary / "module",
+            name,
+            include_default_action=not custom_start,
+        )
         if module_dir.exists() or _is_link(module_dir):
             raise FileExistsError(f"拓展模块已存在：{scope}:{name}")
         os.rename(temporary, module_dir)
@@ -437,6 +489,7 @@ def _run_create(
             "按实际复杂度在模块目录内自由实现；声明入口可以直接处理，也可以适配完整内部工程",
             "保持 Prompt 数据出口有界，操控入口返回结构化结果",
             "运行清单声明的更新入口初始化 input_data.md",
+            "按真实配置项和操控能力调整 module/panel.json；保存后无需重启即可由 Web 热加载",
         ],
     }
 

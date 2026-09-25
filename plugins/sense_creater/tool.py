@@ -12,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from run.memory import contains_sensitive_credential
+from web.services.module_panels import load_module_panel
 
 
 _ACTIONS = frozenset({"list", "create", "validate"})
@@ -25,7 +26,16 @@ _BEIJING = ZoneInfo("Asia/Shanghai")
 _MAX_EXPLAIN_CHARS = 2_000
 _MAX_MARKDOWN_CHARS = 100_000
 _MAX_CODE_CHARS = 500_000
-_CREATE_FILES = ("sense.json", "sense.md", "data_update.py")
+_CREATE_FILES = (
+    "sense.json",
+    "sense.md",
+    "data_update.py",
+    "module/panel.json",
+    "module/panel.values.json",
+    "module/status.json",
+    "module/README.md",
+)
+_PANEL_FILES = ("panel.json", "panel.values.json", "status.json", "README.md")
 _BUNDLED_SENSE_TEMPLATE = Path(__file__).resolve().parents[2] / "template" / "sense"
 
 
@@ -208,6 +218,14 @@ def _run_validate(root: Path, name: Any) -> dict[str, Any]:
                         compile(source, target.name, "exec")
                     except (OSError, UnicodeError, SyntaxError) as exc:
                         errors.append(f"start_update Python 代码无效：{exc}")
+    panel_enabled = False
+    panel_path = module / "module" / "panel.json"
+    if panel_path.exists() or _is_link(panel_path):
+        panel, panel_error = load_module_panel(module, "sense")
+        if panel is None:
+            errors.append(f"组件面板无效：{panel_error or 'panel.json 无法解析'}")
+        else:
+            panel_enabled = True
     return {
         "action": "validate",
         "name": module_name,
@@ -216,6 +234,7 @@ def _run_validate(root: Path, name: Any) -> dict[str, Any]:
         "health": str(manifest.get("health") or "异常") if manifest else "异常",
         "recent_update": str(manifest.get("recent_update") or "") if manifest else "",
         "data_md": str(manifest.get("data_md") or "") if manifest else "",
+        "panel_enabled": panel_enabled,
     }
 
 
@@ -243,6 +262,7 @@ def _run_list(root: Path) -> dict[str, Any]:
             "health": result["health"],
             "recent_update": result["recent_update"],
             "data_md": result["data_md"],
+            "panel_enabled": bool(result.get("panel_enabled")),
             "valid": result["valid"],
             "errors": result["errors"],
         }
@@ -256,6 +276,25 @@ def _write_text(path: Path, content: str) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _copy_panel_template(target: Path, module_name: str) -> None:
+    source = _BUNDLED_SENSE_TEMPLATE / "module"
+    if not source.is_dir() or _is_link(source):
+        raise RuntimeError(f"根目录感知组件模板不可用：{source}")
+    target.mkdir()
+    for filename in _PANEL_FILES:
+        source_file = source / filename
+        if not source_file.is_file() or _is_link(source_file):
+            raise RuntimeError(f"根目录感知组件模板文件不可用：{source_file}")
+        content = source_file.read_text("utf-8")
+        if filename == "panel.json":
+            panel = json.loads(content)
+            if not isinstance(panel, dict):
+                raise RuntimeError("根目录感知组件 panel.json 顶层必须是对象")
+            panel["title"] = f"{module_name} · 用户配置"
+            content = json.dumps(panel, ensure_ascii=False, indent=2)
+        _write_text(target / filename, content)
 
 
 def _run_create(
@@ -299,6 +338,7 @@ def _run_create(
         _write_text(temporary / "sense.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         _write_text(temporary / "sense.md", sense_body)
         _write_text(temporary / "data_update.py", update_source)
+        _copy_panel_template(temporary / "module", module_name)
         if module.exists() or _is_link(module):
             raise FileExistsError(f"感知模块已存在：{module_name}")
         os.rename(temporary, module)
@@ -323,6 +363,7 @@ def _run_create(
         "next_steps": [
             "按实际复杂度在模块目录内自由实现；data_update.py 可直接采集，也可作为内部工程适配入口",
             "运行清单声明的更新入口初始化 sense.md 数据",
+            "按真实采集参数调整 module/panel.json；保存后无需重启即可由 Web 热加载",
         ],
     }
 
