@@ -204,7 +204,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许 Maintenance 每轮后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
-| `extraction_max_candidates_per_batch` | int | `10` | 每批最多保留的记忆候选；同时受“每轮最多 2 条”限制，运行时硬上限为 40 |
+| `extraction_max_candidates_per_batch` | int | `30` | 每批最多保留的独立记忆候选，运行时硬上限为 40；不再按对话轮数设置额外上限，单轮包含多个独立长期事实时可分别保留 |
 | `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/config/` 的 Prompt 门面按该值截断 |
 | `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限；与注入预算语义独立，超过后拒绝本次更新且不覆盖旧热画像 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
@@ -607,7 +607,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | 10 | Maintenance 每次扫描最多补提取的总轮数，范围 1–20 |
 | `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
-| `extraction_max_candidates_per_batch` | int | 10 | 每批候选总上限；仍受每轮最多 2 条限制 |
+| `extraction_max_candidates_per_batch` | int | 30 | 每批独立记忆候选总上限，框架硬上限 40；不再按对话轮数乘系数裁剪 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days`。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入 |
 | `important_memory_max_chars` | int | 20000 | 临时重要热画像的 Prompt 注入字符预算；注入时按该值截断 |
 | `important_memory_output_max_chars` | int | 20000 | 临时重要热画像输出防失控硬上限；与注入预算语义独立，超过后拒绝且不覆盖旧热画像 |

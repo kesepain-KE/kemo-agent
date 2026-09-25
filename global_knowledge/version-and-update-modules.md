@@ -9,18 +9,21 @@
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.2.9",
+  "version": "1.3.0",
   "schema_version": 1,
+  "compatibility": {
+    "kemo-adapter-api": "0.8.2"
+  },
   "components": {
-    "core": {"version": "1.2.9"},
-    "agents": {"version": "1.2.9"},
-    "plugins": {"version": "1.2.9"},
-    "web": {"version": "1.2.9"}
+    "core": {"version": "1.3.0"},
+    "agents": {"version": "1.3.0"},
+    "plugins": {"version": "1.3.0"},
+    "web": {"version": "1.3.0"}
   }
 }
 ```
 
-`version` 是全量发布版本；四个 `components.*.version` 用于单独判断板块更新。版本号使用点分数字并由更新器比较。
+`version` 是全量发布版本；四个 `components.*.version` 用于单独判断板块更新。`compatibility.kemo-adapter-api` 记录当前正式验证通过的配套网关版本，不表示拒绝所有其他同协议版本。版本号使用点分数字并由更新器比较。
 
 组件版本不要求始终与根版本相同；只修改某个板块时，可以只推进对应组件版本。更新器以 `version.json` 中的根版本和所选组件版本为准，并拒绝降级。
 

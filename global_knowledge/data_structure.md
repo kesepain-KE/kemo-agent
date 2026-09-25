@@ -72,21 +72,22 @@ kemo-agent/
 | 文件 | 内容 |
 |------|------|
 | `prompt-authoring-standard.md` | 提示词分层、全局/用户默认人格、操作手册、知识索引、插件提示词规范、技能/拓展/感知定义、按需读取来源、健康快照与数据/指令边界 |
-| `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同 |
-| `builtin-expansions.md` | 内置 Kemo 网关状态拓展；Kemo Graph 图谱/实体/缓存/日志/维护/项目与文档组织边界 |
-| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、SSE 续传和取消边界；含 Kemo 1.0 双仓库共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与有界输出前重试 |
+| `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同；`module/panel.json` 用户配置组件面板、status/config/action、preset、masked 密钥与快速配置 |
+| `builtin-expansions.md` | 内置 kemo app 桥接激活意愿、端口/Token/用户绑定面板与异常诊断；Kemo 网关 IP/端口面板和状态拓展；Kemo Graph IP/端口、在线检测及图谱/实体/缓存/日志/维护/项目与文档组织边界 |
+| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、运行级连续失败 5 次重试（首轮加 5 次共 6 次尝试）、`retrying` 事件、SSE 续传和取消边界；含 Kemo 1.0 双仓库共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与独立 2 次传输预算 |
 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
-| `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存、跨进程版本校验和尾部重建；记忆碎片粒度分类（A 类画像可合并 / B 类事实最小碎片）；晋升时超限必拆（A 类 1000 字、B 类 100 字，不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；Cron 历史默认 7 天保留；Web 启动一次性旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
+| `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存（单项/全局/单用户三重容量）、跨进程版本校验和尾部重建；Web 历史默认时间倒序、复合游标分页与按上海自然日日期筛选；`history_search` 基于结构化正文、删除栅栏、来源/会话过滤和条数+字符预算分页；结构化运行日志、终端长行 pending 缓冲上限；记忆按独立更新/失效/加权/检索边界拆分，碎片数量以独立事实为准，A 类仅同一稳定子主题可成簇、B 类保持最小事实，手动 add/edit 同样执行 memory_type 与长度硬边界；晋升时超限必拆（显式 `memory_type`、A 类 1000 字异常硬上限、B 类通常 100/绝不超过 150 字、宿主落盘复验、不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；加权证据轮次 committed_at、Shanghai 原日期、memory_ref 检索绑定、create/reinforce/revise、creation 零分日锁、operation_id 幂等、weighted/daily_locked 可观测性；Cron 历史默认 7 天保留；Web 启动及周期旧空间巡检、有数据入记忆队列、空空间离线清理、Web/App 在线租约、CLI 独立绑定、closed 入队补偿、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
-| `version-and-update-modules.md` | core/agents/plugins/web 更新边界 |
+| `version-and-update-modules.md` | 当前正式版本、配套网关兼容基线，以及 core/agents/plugins/web 更新边界 |
 | `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级；`cron.history_retention_days` 及全局配置 API |
-| `task-automation.md` | 多步骤任务计划和北京时间定时任务规则；Cron 历史对话生命周期、网页配置入口、维护扫描与隔离边界 |
+| `task-automation.md` | 多步骤任务计划；Cron 的 once/daily/weekly/monthly/recurring、多时刻、生效区间、次数上限、失败终态、按任务索引的真实执行历史、历史只读访问；任务计划/定时任务/执行记录三栏独立容器与各自 6 条分页，定时任务近期执行排序、用户执行记录倒序、`cron/task_cron_system/` 系统维护记录隔离、按需脱敏详情、网页管理与隔离边界；聊天开始页不展示全局或已清理会话的孤立活动计划 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
-| `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南 |
-| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、会话生命周期兜底扫描 |
-| `frontend-conventions.md` | Web 前端样式组织约定与调试经验：CSS Module 与主题变量、变量链断裂（别名宿主未挂载导致声明整条失效）、投影被父容器裁切、滚动条、改样式后的验证步骤、文案与 DOM 契约 |
-| `project-introduction.md` | 项目定位、核心能力、部署与使用入口 |
+| `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南；受管理 Shell 后台作业、活动配额、启动宽限与失联 worker 对账 |
+| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、Enter 跟进与 Ctrl+Enter 直接引导快捷键、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、Web/App 存活租约、CLI 独立续接、closed 会话禁止复活、离线转记忆与入队失败补偿、会话生命周期兜底扫描 |
+| `frontend-conventions.md` | Web 前端样式组织约定与调试经验：CSS Module 与主题变量、变量链断裂（别名宿主未挂载导致声明整条失效）、投影被父容器裁切、滚动条、SPA 壳与哈希构建产物缓存头、改样式后的验证步骤、文案与 DOM 契约、知识库编辑/预览单按钮与 Portal 放大预览 |
+| `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、表单、建议追问、有限点击动作与站内媒体；未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
+| `project-introduction.md` | 项目定位、当前稳定版本与网关协议匹配、核心能力、部署和使用入口 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 
 ## 维护原则
@@ -103,3 +104,5 @@ kemo-agent/
 感知、拓展、外部消息、技能、子代理和工具插件的模板都只展示框架可发现的最小合同，不定义模块内部架构。模块目录可以是极小实现，也可以容纳任意层级文件或完整工程；框架只读取清单、主文档和已声明入口，其他内部内容不会自动注册、注入或执行。具体合同与安全边界以对应专题文档为准，不能因为模板没有列出某个内部文件就判定其非法。
 
 上述模块中的子代理、拓展、外部消息、感知、技能和用户包完成创建或实质修改后，应进入 `tests/template_tests/<kind>/` 运行对应的独立合同验收。具体映射、状态解释、沙箱边界和维护方法见 `module-template-validation.md`。
+
+- **上帝模块 / 800 行 / 低耦合 / 高内聚 / 统一入口 / 页面组合根 / 模块尺寸合同**：见 `architecture-overview.md` 的“上帝模块边界与统一入口”，前端细则见 `frontend-conventions.md`。

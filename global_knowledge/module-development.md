@@ -112,7 +112,7 @@ def execute(command: str, params: dict | None = None) -> dict:
 2. 确认 `user`/`shared` 作用域、英文名称和职责说明。
 3. 确认注入数据、操控命令、参数、返回值及副作用。
 4. 先列出现有模块查重，再获得用户最终确认。
-5. 使用 `expand_creater action=create` 建立最小框架合同；随后可在新模块目录内自由创建、复制或迁入其他文件及完整工程。全局层由管理员按相同合同手工创建。
+5. 使用 `expand_creater action=create` 原子建立最小框架合同和 `module/` 用户配置组件骨架；创建器会用真实清单与面板解析器复验。随后可按真实能力修改或删除组件容器，并在新模块目录内自由创建、复制或迁入其他文件及完整工程。全局层由管理员按相同合同手工创建。
 6. 完成内部实现后运行 `validate`，再在终端执行一次声明的更新入口，并用 `expand_call` 执行无副作用的健康检查；手动测试是前台执行，RuntimeHost 自动刷新和正式操控仍采用隐藏的隔离子进程。
 
 ### 验收清单
@@ -201,7 +201,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 2. 确认名称、采集指标、数据可见范围，并核对现有全局 `sense_update_rate` 是否满足需要；修改它会同时影响所有感知模块。
 3. 设计初始数据出口，明确哪些信息允许进入 Prompt；不要预先规定内部工程结构。
 4. 列出现有模块查重并获得最终确认。
-5. 使用 `sense_creater action=create` 建立最小框架合同；随后可按需求在新模块目录内自由创建或迁入其他文件和完整工程，再执行 `validate`。
+5. 使用 `sense_creater action=create` 原子建立最小框架合同和 `module/` 用户配置组件骨架；默认组件只提供配置、状态与框架内置 `refresh`。随后可按需求修改真实采集字段、创建或迁入其他文件和完整工程，再执行 `validate`。
 6. 在终端手动运行一次声明的采集入口，确认清单时间格式、Markdown 内容和失败行为；该手动测试是前台执行，不代表 RuntimeHost 后台会弹出窗口。
 
 ### 验收清单
@@ -260,6 +260,8 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 
 `skill_creater` 支持完整 `content` 写入，或 `title + description + instruction/tool_schema` 结构化写入。`instruction` 与 `tool_schema` 二选一。
 `update` 只替换 `SKILL.md`，保留其他内部文件；`delete` 删除整个技能目录，因此删除前必须把配套资源一并纳入影响确认。
+
+用户主动要求创建、修改或升级 `user_create` / `shared` 技能时，主智能体还必须用技能名和 2～4 个主题关键词执行 `memory_manage action=search_many tier=all`。存在相关记忆时，先向用户说明命中数量和文件名，询问是否融合进技能或整理；**默认只保留记忆，既不删除也不把“相关”自动视为“应融合”**。用户未表态或拒绝时仍可按原请求创建/更新技能，但记忆保持原样；只有用户明确同意后，才能继续执行融合或记忆整理。`self_improve` 在后台把工作记忆生成到 `agent_create` 时不进入交互确认，技能和来源记忆各自保留。
 
 ### Web 上传用户技能
 
@@ -586,3 +588,73 @@ external:user:remote_bridge:researcher
 4. 符号链接、越界路径、超大桥接文件、非法命令和超时值不会被接受。
 5. `wait=false` 明确失败，取消和拓展异常不会留下本地后台任务。
 6. 测试不得在输出、日志或快照中写入 URL 中的凭据、Token、密码、Cookie 或私钥。
+
+## 模块用户配置组件面板 2.0
+
+拓展和感知模块可以在自身目录旁挂 `module/panel.json`，由 Web 端生成声明式“用户配置”界面。
+该能力不修改 `expand.json` / `sense.json` 字段集，也不改变 Prompt 来源：面板状态和值文件与
+`input_data.md` / `sense.md` 是平行链路，**不会自动进入 Prompt、记忆、历史或知识库**。
+
+### 目录与模板
+
+```text
+<module>/
+├── expand.json / sense.json
+├── input_data.md / sense.md
+└── module/
+    ├── panel.json
+    ├── panel.values.json
+    ├── status.json
+    └── README.md
+```
+
+框架模板分别位于 `template/expand/module/` 和 `template/sense/module/`。`panel.json` 只接受
+`schema_version: 1`，最多 24 个容器；单文件最大 256 KiB。值文件和状态文件各最大 128 KiB。
+引用路径必须是模块目录内相对路径，拒绝绝对路径、`..`、符号链接和目录联接。
+
+`expand_creater` 与 `sense_creater` 创建新模块时会把四个组件文件写入同一个临时目录，完成清单、
+Python 和面板校验后再以目录重命名原子发布，失败不留下半个模块。面板标题会替换为真实模块名；
+默认采集入口会读取值文件并写脱敏状态，但不会把配置自动复制到 Prompt 数据出口。新增或修改
+`panel.json` 后无需重启后端：下一次面板请求、重新进入 Tab/模块或刷新页面即可热加载；已经开始的
+当前智能体轮次和已经打开但未重新请求的浏览器视图不会被文件变更中途改写。
+
+### 容器与字段
+
+| 容器 | 数据源与行为 |
+|------|--------------|
+| `status` | 读取 `source` JSON，只展示声明过的字段，不写入 |
+| `config` | 读取并原子写入 `values` JSON；支持 preset 快速套用 |
+| `action` | Expand 复用既有拓展调用通道；Sense 只允许框架内置 `refresh` |
+
+输入字段只允许 `string`、`number`、`boolean`、`enum`、`text`；状态展示只允许 `text`、
+`badge`、`keyvalue`、`markdown`。未声明 key、错误类型、越界数字、非法枚举和缺失必填值都会被拒绝。
+配置 key 在全部 config 容器中必须唯一；action command 也必须唯一。
+
+`masked: true` 的值允许以明文保存在模块自己的值文件中，但 GET 响应和悬浮预览只返回“已设置 / 未设置”，
+绝不把明文送到浏览器。保存时省略 masked 字段会保留旧值；只有 `clear_secrets` 显式列出时才清空。
+密钥不得由模块复制到 `input_data.md` 或 `sense.md`。
+
+### Expand 与 Sense 的页面差异
+
+- Expand 详情区固定有第三个 Tab“用户配置”；无声明时显示“当前没有可操控组件”。保存成功后前端再调用
+  现有模块刷新端点。action 中 `button` / `send` 声明的 command 与 params 必须先经过面板白名单校验，
+  再交给既有 `expand_call` 语义执行。
+- Sense 只在选中模块的详情态显示，位于“模块采集信息 / 系统提示词注入片段”下方；无声明时显示
+  “此感知模块无可控组件”。保存后复用现有感知刷新端点。Sense 没有模块操控通道，action 只允许
+  零参数 `button` + `command: "refresh"`。
+- `panel.json` 解析失败只产生模块自己的 `panel_error`，不得让模块库存、原详情或 Prompt 链路失效。
+
+### 布局和渲染边界
+
+面板内部使用 12 列 Grid：`quarter / third / half / full` 分别占 3 / 4 / 6 / 12 列；高度只允许
+`h1 / h2`。宿主按容器宽度逐级把过窄卡片提升到半宽或全宽，内容超出时在卡片或宿主内部滚动。
+只有实际溢出的卡片才在悬停或键盘 focus 约 200ms 后显示主题化完整预览，预览最大 4000 字符，
+masked 字段仍不回显。
+
+面板完全由框架 React 组件渲染，不接受模块自带 HTML、CSS、JavaScript、iframe、事件处理器或
+`innerHTML`。新增原语时必须同步后端归一化/校验、前端类型与渲染、模板、专题文档和回归测试。
+
+内置实例可参考 `global_expand/kemo_app/module/`、`global_expand/kemo_gateway_status/module/` 和
+`global_expand/kemo_graph/module/`：它们分别演示 masked Token 状态与替换、用户身份绑定、
+连接端点配置和只读在线检测。实例仍遵守同一边界：面板只声明允许操作的 command，模块入口必须
+再次做权限、范围和失败语义校验；配置值与状态不会因为出现在面板中就自动进入数据注入层。
