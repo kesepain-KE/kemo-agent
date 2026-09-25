@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 
 from render import refresh_catalog
+from start_expand import write_panel_status
 
 
 def update():
     result = refresh_catalog()
+    try:
+        write_panel_status()
+    except Exception:
+        pass
     print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
     return result
 

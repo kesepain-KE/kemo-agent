@@ -26,6 +26,7 @@ from plugins.kemo_graph import tool as graph_tool  # noqa: E402
 from plugins.kemo_graph.tool import run as graph_guide  # noqa: E402
 from plugins.manifest import parse_plugin_manifest  # noqa: E402
 from run.config import read_expand_meta  # noqa: E402
+from web.services.module_panels import load_module_panel  # noqa: E402
 
 
 class KemoGraphExpandTests(unittest.TestCase):
@@ -131,6 +132,79 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertTrue(meta.open_control)
         self.assertEqual(meta.start_update, "data_update.py")
         self.assertEqual(meta.start_expand, "start_expand.py")
+
+    def test_user_panel_exposes_endpoint_configuration_and_backend_check(self) -> None:
+        panel, error = load_module_panel(MODULE_ROOT, "expand")
+        self.assertEqual(error, "")
+        self.assertIsNotNone(panel)
+        commands = {
+            control["command"]
+            for container in panel["containers"]
+            if container["kind"] == "action"
+            for control in container["controls"]
+        }
+        self.assertEqual(commands, {"panel_configure_endpoint", "panel_check_backend"})
+
+    def test_panel_endpoint_update_preserves_registry_and_checks_backend(self) -> None:
+        graph.save_config(graph.config_from_mapping(self.portable_mapping()))
+        with (
+            patch.object(start_expand, "verify_service", return_value={"status": "ok"}),
+            patch.object(start_expand, "refresh_catalog", return_value={"ok": True}),
+        ):
+            result = start_expand.execute(
+                "panel_configure_endpoint",
+                {
+                    "scheme": "http",
+                    "graph_ip": "127.0.0.1",
+                    "graph_port": 8765,
+                    "allow_remote": False,
+                },
+                context={"user": "alice"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["backend_online"])
+        saved = graph.load_config()
+        self.assertEqual(saved.base_url, "http://127.0.0.1:8765/api/v1")
+        self.assertEqual(saved.admin_users, ("alice",))
+        self.assertEqual(saved.libraries[0].id, "project_docs")
+        self.assertEqual(saved.libraries[0].store_root, str(self.store.resolve()))
+        panel_status = json.loads((self.module / "module" / "status.json").read_text("utf-8"))
+        self.assertEqual(panel_status["backend_status"], "在线")
+        self.assertEqual(panel_status["graph_port"], 8765)
+
+    def test_panel_endpoint_keeps_remote_transport_rules_and_admin_acl(self) -> None:
+        graph.save_config(graph.config_from_mapping(self.portable_mapping()))
+        with self.assertRaises(PermissionError):
+            start_expand.execute(
+                "panel_configure_endpoint",
+                {"scheme": "http", "graph_ip": "127.0.0.1", "graph_port": 8765},
+                context={"user": "bob"},
+            )
+        with self.assertRaisesRegex(graph.GraphExpandError, "https"):
+            start_expand.execute(
+                "panel_configure_endpoint",
+                {
+                    "scheme": "http",
+                    "graph_ip": "graph.example.test",
+                    "graph_port": 8765,
+                    "allow_remote": True,
+                },
+                context={"user": "alice"},
+            )
+
+    def test_panel_backend_failure_is_persisted_without_leaking_response_data(self) -> None:
+        graph.save_config(graph.config_from_mapping(self.portable_mapping()))
+        with patch.object(start_expand, "verify_service", side_effect=graph.GraphExpandError("graph backend offline")):
+            result = start_expand.execute(
+                "panel_check_backend",
+                context={"user": "alice"},
+            )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["online"])
+        status = json.loads((self.module / "module" / "status.json").read_text("utf-8"))
+        self.assertEqual(status["backend_status"], "离线")
+        self.assertIn("offline", status["last_error"])
 
     def test_registry_requires_stable_ids_and_separate_absolute_paths(self) -> None:
         with self.assertRaisesRegex(graph.GraphExpandError, "allow_remote"):

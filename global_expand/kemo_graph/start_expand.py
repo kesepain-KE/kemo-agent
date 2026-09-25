@@ -6,7 +6,9 @@ import json
 import sys
 from datetime import datetime
 from typing import Any
+import urllib.parse
 
+from client import verify_service
 from errors import GraphExpandError
 from library_sync import scan_libraries, sync_libraries
 from operations import (
@@ -31,6 +33,7 @@ from registry import (
     CONFIG_PATH,
     LAST_RUN_PATH,
     atomic_json,
+    config_payload,
     config_from_mapping,
     configured_admin_users,
     configuration_status,
@@ -57,6 +60,100 @@ def _caller_user(context: dict[str, Any] | None) -> str | None:
     # Direct local CLI and the module contract validator have no framework
     # caller envelope; they are trusted local-administrator entry points.
     return user or None
+
+
+def _panel_endpoint(base_url: str) -> tuple[str, str, int | str]:
+    parsed = urllib.parse.urlsplit(base_url)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        port = ""
+    return parsed.scheme or "http", parsed.hostname or "", port
+
+
+def write_panel_status(
+    *,
+    online: bool | None = None,
+    error: str = "",
+    checked_at: str = "",
+) -> dict[str, Any]:
+    config = load_config()
+    if config is None:
+        payload = {
+            "configuration": "未配置",
+            "graph_ip": "—",
+            "graph_port": "—",
+            "scheme": "http",
+            "base_url": "—",
+            "allow_remote": False,
+            "backend_status": "未检测",
+            "last_checked": checked_at,
+            "last_error": error,
+        }
+    else:
+        scheme, host, port = _panel_endpoint(config.base_url)
+        payload = {
+            "configuration": "已配置",
+            "graph_ip": host or "—",
+            "graph_port": port or "—",
+            "scheme": scheme,
+            "base_url": config.base_url,
+            "allow_remote": config.allow_remote,
+            "backend_status": "在线" if online is True else "离线" if online is False else "未检测",
+            "last_checked": checked_at,
+            "last_error": error,
+        }
+    atomic_json(CONFIG_PATH.parent / "module" / "status.json", payload)
+    return payload
+
+
+def _check_panel_backend(config) -> dict[str, Any]:
+    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        response = verify_service(config)
+        write_panel_status(online=True, checked_at=checked_at)
+        return {
+            "ok": True,
+            "online": True,
+            "checked_at": checked_at,
+            "service_status": str(response.get("status") or response.get("object") or "ok") if isinstance(response, dict) else "ok",
+        }
+    except Exception as exc:
+        error = str(exc) or type(exc).__name__
+        write_panel_status(online=False, error=error, checked_at=checked_at)
+        return {"ok": False, "online": False, "checked_at": checked_at, "error": error}
+
+
+def _configure_panel_endpoint(arguments: dict[str, Any], caller_user: str | None) -> dict[str, Any]:
+    current = _active_config()
+    _require_admin(current, caller_user, "panel_configure_endpoint")
+    scheme = str(arguments.get("scheme") or "http").strip().casefold()
+    host = str(arguments.get("graph_ip") or "").strip()
+    raw_port = arguments.get("graph_port")
+    if isinstance(raw_port, bool):
+        raise GraphExpandError("graph_port 必须是整数")
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise GraphExpandError("graph_port 必须是整数") from exc
+    if not 1 <= port <= 65535:
+        raise GraphExpandError("graph_port 必须在 1～65535 之间")
+    payload = config_payload(current)
+    payload["allow_remote"] = bool(arguments.get("allow_remote", current.allow_remote))
+    payload["base_url"] = f"{scheme}://{host}:{port}/api/v1"
+    candidate = config_from_mapping(payload, require_source_roots_exist=False)
+    save_config(candidate)
+    catalog = refresh_catalog()
+    check = _check_panel_backend(candidate)
+    return {
+        "ok": True,
+        "configured": True,
+        "base_url": candidate.base_url,
+        "allow_remote": candidate.allow_remote,
+        "catalog_updated": bool(catalog.get("ok")),
+        "backend_online": bool(check.get("online")),
+        "backend_error": str(check.get("error") or ""),
+    }
 
 
 def execute(
@@ -92,6 +189,12 @@ def execute(
         }
     elif normalized in {"configuration_status", "libraries"}:
         result = configuration_status(caller_user)
+    elif normalized == "panel_configure_endpoint":
+        result = _configure_panel_endpoint(arguments, caller_user)
+    elif normalized == "panel_check_backend":
+        config = _active_config()
+        _require_admin(config, caller_user, normalized)
+        result = _check_panel_backend(config)
     elif normalized == "refresh":
         result = refresh_catalog()
     elif normalized == "status":

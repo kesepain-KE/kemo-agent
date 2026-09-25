@@ -1,0 +1,11 @@
+{
+  "configuration": "已配置",
+  "graph_ip": "127.0.0.1",
+  "graph_port": 8000,
+  "scheme": "http",
+  "base_url": "http://127.0.0.1:8000/api/v1",
+  "allow_remote": false,
+  "backend_status": "未检测",
+  "last_checked": "",
+  "last_error": ""
+}

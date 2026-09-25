@@ -46,6 +46,16 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 
 ## 操作层
 
+### 用户配置组件命令
+
+- `panel_configure_endpoint`：仅管理员可用，设置 `scheme`、`graph_ip`、`graph_port` 和
+  `allow_remote`；保留完整 Library 注册、ACL、来源目录和 Store 配置。
+- `panel_check_backend`：仅管理员可用，检测当前 `/api/v1/status`，把在线/离线、检查时间和
+  脱敏错误写入 `module/status.json`，不保存完整响应。
+
+两个命令都继续执行远程地址安全合同：非回环地址必须显式允许远程且使用 HTTPS；它们不改变
+`expand.json`、Prompt 注入开关或数据注入正文。
+
 ### 本地操作
 
 - `configuration_status` / `libraries`：读取注册表，不联网。
