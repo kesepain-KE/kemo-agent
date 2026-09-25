@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from run.config import load_config
+from run.memory import validate_memory_fragment_size
 
 from plugins.memory_manage.memory_ops import (
     add_fragment,
@@ -25,6 +26,7 @@ def run(
     filename: str | None = None,
     content: str | None = None,
     new_filename: str | None = None,
+    memory_type: str | None = None,
     limit: int = 50,
     offset: int = 0,
     compact: bool = False,
@@ -61,6 +63,23 @@ def run(
     }:
         raise PermissionError(
             "memory_temporary_important 只能读取记忆；热视图与永久协调由运行时原子持久化"
+        )
+    if tier == "important" and action not in {
+        "list",
+        "get",
+        "search_by_title",
+        "search_by_content",
+        "search_many",
+    }:
+        raise PermissionError(
+            "important 是只读热画像，禁止通过 memory_manage 直接写入或删除"
+        )
+    if action in {"add", "edit"} and tier != "important" and content is not None:
+        content, memory_type = validate_memory_fragment_size(
+            content,
+            memory_type,
+            operation="手动新增记忆" if action == "add" else "手动编辑记忆",
+            require_explicit_type=True,
         )
     config = load_config(user, root)
     if action == "list":
@@ -101,6 +120,8 @@ def run(
             case_sensitive=case_sensitive,
         )
     if action == "search_many":
+        if agent == "self_improve":
+            include_content = True
         return search_many(
             root,
             user,
@@ -127,9 +148,18 @@ def run(
             filename,
             content,
             new_filename=new_filename,
+            memory_type=memory_type,
         )
     if action == "add":
         if not filename or content is None:
             raise ValueError("add 需要 filename 和 content")
-        return add_fragment(root, user, config, tier, filename, content)
+        return add_fragment(
+            root,
+            user,
+            config,
+            tier,
+            filename,
+            content,
+            memory_type=memory_type,
+        )
     raise ValueError(f"未知 memory_manage action：{action}")

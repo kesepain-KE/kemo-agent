@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from run.agents import AgentRunResult
-from run.memory import MemoryStore
 from run.long_task import semantic_user_text
 
 
@@ -82,7 +81,10 @@ def memory_round_payload(
         {},
     )
     records = tool.get("calls", []) if isinstance(tool, dict) else []
+    metric = next((item for item in (window.get("data") or {}).get("round_metrics", [])
+                   if isinstance(item, dict) and item.get("round") == round_number), {})
     return {
+        **({"committed_at": metric["committed_at"]} if metric.get("committed_at") else {}),
         "prompt": prompt,
         "text": text,
         "reasoning": str(think.get("content") or "") if isinstance(think, dict) else "",
@@ -111,7 +113,11 @@ def extract_compressed_round_memory(
         except (TypeError, ValueError):
             pass
 
+    from run.memory.evidence import trusted_dates
+    from run.memory.analysis import memory_batch_operation_id, persist_round_memory_analysis
+
     source = {
+        "evidence_dates": trusted_dates(complete_rounds),
         "source": "context_compression",
         "trigger": trigger,
         "rounds": round_numbers,
@@ -133,5 +139,12 @@ def extract_compressed_round_memory(
     candidates = result.data.get("candidates")
     if not isinstance(candidates, list):
         raise MemoryExtractionError("self_improve 输出缺少 candidates 数组")
-    MemoryStore(root, user, config).upsert_candidates(candidates, source=source)
+    persisted = persist_round_memory_analysis(
+        root=root, user=user, config=config,
+        analysis={"status": "completed", "source": source, "candidates": candidates},
+        operation_id=memory_batch_operation_id(user, agent_source, session_id,
+                                              min(round_numbers, default=0), max(round_numbers, default=0), complete_rounds))
+    if persisted.get("status") != "completed":
+        raise MemoryExtractionError(str(persisted.get("error")))
+    result.metadata["memory_update"] = persisted["persisted"]
     return result

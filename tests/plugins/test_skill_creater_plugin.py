@@ -8,7 +8,7 @@ from pathlib import Path
 
 from plugins.manifest import parse_plugin_manifest
 from plugins.skill_creater.tool import run
-from run.config import parse_skill_descriptor
+from run.config import load_prompt_source_registry, parse_skill_descriptor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -95,6 +95,46 @@ class SkillCreaterPluginTests(unittest.TestCase):
                 self.assertEqual(parsed, schema)
                 self.assertTrue(run("validate", scope, name=f"{scope}-skill", context=context)["valid"])
                 self.assertEqual(len(run("list", scope, context=context)["skills"]), 1)
+
+    def test_create_update_and_delete_are_visible_on_the_next_prompt_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.prepare_root(root)
+            context = self.context(root)
+
+            run(
+                "create",
+                "user_create",
+                name="hot-skill",
+                title="Hot skill v1",
+                description="First discovery summary.",
+                instruction="Apply version one.",
+                context=context,
+            )
+            first = load_prompt_source_registry(root, "alice").select_skills()
+            self.assertEqual(
+                [(item.title, item.description) for item in first],
+                [("Hot skill v1", "First discovery summary.\n\nApply version one.")],
+            )
+
+            run(
+                "update",
+                "user_create",
+                name="hot-skill",
+                title="Hot skill v2",
+                description="Updated discovery summary.",
+                instruction="Apply version two.",
+                context=context,
+            )
+            second = load_prompt_source_registry(root, "alice").select_skills()
+            self.assertEqual(second[0].title, "Hot skill v2")
+            self.assertIn("Updated discovery summary.", second[0].description)
+
+            run("delete", "user_create", name="hot-skill", context=context)
+            self.assertEqual(
+                load_prompt_source_registry(root, "alice").select_skills(),
+                (),
+            )
 
     def test_full_content_mode_and_invalid_create_are_rolled_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -254,8 +294,9 @@ class SkillCreaterPluginTests(unittest.TestCase):
                         run("list", "user_create", context=context)
 
     def test_manifest_exposes_six_actions_and_version_1_1_0(self) -> None:
+        skill_path = PROJECT_ROOT / "plugins" / "skill_creater" / "SKILL.md"
         manifest = parse_plugin_manifest(
-            PROJECT_ROOT / "plugins" / "skill_creater" / "SKILL.md",
+            skill_path,
             root=PROJECT_ROOT,
         )
         self.assertEqual(manifest.tool["version"], "1.1.0")
@@ -264,6 +305,10 @@ class SkillCreaterPluginTests(unittest.TestCase):
             {"list", "get", "validate", "create", "update", "delete"},
         )
         self.assertEqual(manifest.tool["input_schema"]["required"], ["action", "scope"])
+        instructions = skill_path.read_text("utf-8")
+        self.assertIn("用户主动要求**创建、修改或升级**技能", instructions)
+        self.assertIn("默认保留记忆，不删除", instructions)
+        self.assertIn("用户未表态时，技能照常创建/更新，记忆原样保留", instructions)
 
 
 if __name__ == "__main__":

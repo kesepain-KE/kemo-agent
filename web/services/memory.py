@@ -80,6 +80,7 @@ class MemoryServiceMixin:
             "user": name,
             "memory_ref": f"{item['tier']}:{item['filename']}",
             **item,
+            **store.weight_status(item["tier"], item["filename"]),
         }
 
     def put_memory(
@@ -133,6 +134,7 @@ class MemoryServiceMixin:
             "memory_ref": f"{item['tier']}:{item['filename']}",
             **item,
             "updated": True,
+            **store.weight_status(item["tier"], item["filename"]),
         }
 
     def delete_memory(self, user: Any, tier: Any, filename: Any) -> dict[str, Any]:

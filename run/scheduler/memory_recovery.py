@@ -185,6 +185,7 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                         cancel_event=scheduler._stop_event,
                         agent_source=source,
                         session_id=session_id,
+                        committed_at=only_round.get("committed_at"),
                     )
                 else:
                     analysis = analyze_memory_batch_resilient(
@@ -354,6 +355,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                     "candidate_count": int(
                         (extraction or {}).get("candidate_count") or 0
                     ),
+                    "persisted": (extraction or {}).get("persisted", {}),
+                    "candidate_filter": (extraction or {}).get("candidate_filter", {}),
                     "claim_applied": finished is not None,
                     "archive_committed": archive_committed,
                 }

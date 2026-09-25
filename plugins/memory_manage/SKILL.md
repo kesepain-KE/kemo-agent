@@ -11,12 +11,13 @@
    - `permanent`：永久记忆碎片，不会过期，权重为 null。
    - `important`：单文件临时重要记忆热画像，由 `memory_temporary_important` 子代理自动维护，权重和到期时间为 null。**此文件不可删除，不可写入空内容。** 主智能体只允许 `get` 和 `search_by_title`/`search_by_content` 读取此层级，不得使用 `add`、`edit` 或 `delete` 操作。
 2. **权限范围**：主智能体可以使用全部 action，但 `important` 层级只允许读取（`get`、`search_by_title`、`search_by_content`、`search_many`），禁止写入或删除；`self_improve` 子代理只能使用三个搜索 action，且后台 `context_compression` / `memory_promotion` 模式禁止读取 `important`，只有用户主动的 `manual_review` 保留只读白名单；`memory_temporary_important` 只能使用 `list/get`。候选、热视图、遗忘、永久协调和晋升均由运行时原子持久化。所有查看和搜索都不改变权重。
-3. **搜索、列出与获取**：列出整层摘要使用 `list`；大层级使用 `offset`、`next_offset`、`has_more` 逐页读取。后台热画像全量巡检应使用 `limit=500, compact=true, include_content=true, page_char_limit=80000`，在分页结果中直接取得正文；工具会按“最多 500 条且序列化条目不超过 80,000 字符”双重边界提前截页，并返回准确的 `next_offset`，禁止再对全部条目逐条 `get`。按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；三个搜索 action 均可传 `tier: "all"` 跨 `seven_days`、`one_month`、`half_year`、`permanent` 四个碎片层查询。搜索先判断规范化完整短语，再按英文词与中文关键词/bigram 的覆盖率评分；多词模糊查询至少需要两个有效片段且覆盖率不低于 50%，避免单个公共词造成误命中。结果使用 `match_score`、`matched_terms`、`matched_by`、`tier` 与 `memory_ref` 解释和定位。多个候选应优先使用一次 `search_many`；它会对四层记忆只加载一次并在内存中匹配整批查询，适合数百至数千碎片。查询建议提供 2～4 个空格分隔的核心词，需要对命中项做完整融合时可传 `include_content=true`；获取单条完整正文使用 `get`。
+3. **搜索、列出与获取**：列出整层摘要使用 `list`；大层级使用 `offset`、`next_offset`、`has_more` 逐页读取。后台热画像全量巡检应使用 `limit=500, compact=true, include_content=true, page_char_limit=80000`，在分页结果中直接取得正文；工具会按“最多 500 条且序列化条目不超过 80,000 字符”双重边界提前截页，并返回准确的 `next_offset`，禁止再对全部条目逐条 `get`。按文件名搜索使用 `search_by_title`；按正文搜索使用 `search_by_content`，只返回 snippet；三个搜索 action 均可传 `tier: "all"` 跨 `seven_days`、`one_month`、`half_year`、`permanent` 四个碎片层查询。搜索先判断规范化完整短语，再按英文词与中文关键词/bigram 的覆盖率评分；多词模糊查询至少需要两个有效片段且覆盖率不低于 50%，避免单个公共词造成误命中。结果使用 `match_score`、`matched_terms`、`matched_by`、`tier` 与 `memory_ref` 解释和定位。多个候选应优先使用一次 `search_many`；它会对四层记忆只加载一次并在内存中匹配整批查询，适合数百至数千碎片。查询建议提供 2～4 个空格分隔的核心词，需要对命中项做完整融合时可传 `include_content=true`；`self_improve` 调用 `search_many` 时运行时强制开启完整正文（即使参数省略或为 false），用于引用与正文快照校验。单项搜索仍可用于发现，但修改旧碎片前须批量取得完整回执；该子代理仍无 `get` 或写入权限。其他调用方获取单条完整正文使用 `get`。
 4. **禁止空搜索**：两个搜索 action 的 query 都必须是非空字符串。列出全部记忆不能再依赖空 query，应使用 `list`；少量精确读取可用 `get`，后台全量读取必须使用分页 `list(include_content=true)`。
 5. **敏感凭据检测**：`add` 与 `edit` 会拒绝包含疑似密码、API Key、Token、Cookie 或私钥的内容。
 6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`list.has_more=true` 时使用返回的 `next_offset` 读取下一页；`truncated` 为兼容字段，与 `has_more` 同义。`compact=true` 时列表省略时间元数据；`include_content=true` 时额外附带完整正文。`page_char_limit` 会在条目数量上限之前按序列化字符预算截页，避免触发框架 100,000 字符硬限制；`page_limited_by_chars=true` 表示本页由字符预算截断，但仍应正常沿 `next_offset` 继续。
 7. **精确寻址**：`get`、`edit`、`delete` 使用 `tier + filename` 寻址 SQLite 表行；逻辑文件名在全部层级全局唯一，跨层同名会由数据库拒绝。删除成功返回 `row_removed=true`，不再存在文件孤儿修复语义。
 8. **稳定引用**：`list`、搜索及所有单条 CRUD 结果均返回 `memory_ref`，格式为 `tier:filename`；展示标题仍使用 `filename`，程序传递目标时优先保留 `memory_ref`。
+9. **手动写入也必须遵守碎片粒度**：`add` / `edit` 的 B 类事实通常控制在 100 字，硬上限 150 字；A 类画像或同一稳定子主题簇硬上限 1000 字。正文超过 150 字时必须显式传 `memory_type: "A"`，否则拒绝写入；显式声明 B 类时超过 150 字同样拒绝。`important` 是运行时维护的只读热画像，主智能体不能通过本工具直接新增、编辑或删除。
 
 ## 参数说明
 
@@ -29,6 +30,7 @@
 | `filename` | get / add / edit / delete | — | 记忆文件名 |
 | `content` | add / edit | — | Markdown 记忆正文 |
 | `new_filename` | edit | 无 | 重命名后的目标文件名 |
+| `memory_type` | add / edit | 无 | `A`=画像/同一稳定子主题簇，`B`=独立事实；正文超过 150 字时必须显式声明 A，A 类仍不得超过 1000 字 |
 | `limit` | list / search_* | 50 | 最大返回条数（1–500） |
 | `offset` | list | 0 | 从第几条开始读取（≥0）；下一页使用返回的 `next_offset` |
 | `compact` | list | false | 省略时间与到期元数据，适合后台全层巡检和大规模列表 |
@@ -109,6 +111,11 @@
         "type": "string",
         "description": "edit 使用的重命名目标"
       },
+      "memory_type": {
+        "type": "string",
+        "enum": ["A", "B"],
+        "description": "add/edit 的碎片类型；超过 150 字必须显式声明 A，A 类硬上限 1000 字"
+      },
       "limit": {
         "type": "integer",
         "minimum": 1,
@@ -156,7 +163,7 @@
     "required": ["action", "tier"],
     "additionalProperties": false
   },
-  "version": "1.8.0",
+  "version": "1.9.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }

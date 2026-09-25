@@ -711,6 +711,8 @@ def add_fragment(
     tier: str,
     filename: str,
     content: str,
+    *,
+    memory_type: str | None = None,
 ) -> dict[str, Any]:
     _validate_tier(tier)
     body = content.strip()
@@ -738,6 +740,7 @@ def add_fragment(
         "tier": tier,
         "memory_ref": _memory_ref(tier, normalized),
         "filename": normalized,
+        "memory_type": memory_type,
     }
 
 
@@ -750,6 +753,7 @@ def edit_fragment(
     content: str,
     *,
     new_filename: str | None = None,
+    memory_type: str | None = None,
 ) -> dict[str, Any]:
     _validate_tier(tier)
     body = content.strip()
@@ -788,4 +792,5 @@ def edit_fragment(
         "memory_ref": _memory_ref(tier, target_name),
         "filename": source_name,
         "new_filename": target_name,
+        "memory_type": memory_type,
     }

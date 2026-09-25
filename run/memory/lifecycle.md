@@ -14,16 +14,25 @@ seven_days → one_month → half_year → permanent
 - 同名 upsert 更新原表行，不创建重复行。
 - `filename_key` 在全部层级全局唯一，数据库直接拒绝跨层同名。
 - 普通搜索可查询逻辑文件名或正文，不依赖向量或知识图谱。
-- 每行只保存一个足够微量化的事实、偏好、关系或项目状态。
+- 每行只保存一个足够微量化的事实、偏好、关系或项目状态；碎片数量由独立事实数量决定，不按对话轮数或单片字符数折算。
+- 独立性按更新、失效、加权、检索四个边界判断：任意边界可独立处理就必须拆开；字符上限只防止异常膨胀，不构成合并许可。
+- A 类画像只能在同一稳定子主题且四个边界完全一致时形成特征簇；大维度只是分类，不能建立「用户偏好汇总」「项目方式总览」式容器。
 
 ## 权重规则
 
 - 不进行每日权重衰减，权重没有上限。
-- 临时记忆只在保存、手动压缩、Token 超限压缩等历史整理管线中，被 `self_improve` 依据用户原文命中时加权。
+- 历史整理管线由 `self_improve` 依据用户原文提出候选，宿主验证后加权；用户主动修改正文/手动审阅更新使用执行日，查看检索保持只读。
 - Prompt 注入、记忆工具查看和用户主动检索都是只读行为，不得加权。
-- 正文更新与同内容命中共用 `last_weight_date`，同一记忆在同一用户本地自然日合计最多 `+1`。
+- 正文更新与同内容命中共用 `(fragment_id, evidence_date)` 唯一日锁，同一档位每个上海自然日最多 `+1`。
 - 实际修改更新 `content_updated_at`；`updated_at` 仅是内容更新时间的兼容别名。
-- `last_weight_date` 显式按 `Asia/Shanghai` 计算，绝对时间统一保存为 UTC ISO 8601。
+- 历史证据日期由原轮次 `round_metrics.committed_at`（带时区的成功提交时间）映射到 `Asia/Shanghai`，不是提取运行日；绝对时间统一保存为 UTC ISO 8601。
+- 新片首个可信证据日登记 `reason=creation`，权重为 0；随后不同日期逐日 +1。同一天跨批次不重复加分。
+- 缺少时间、无时区、非法或未来时间的旧轮次只保存有效正文，不补造当天权重，返回 `missing_evidence_date`；不得用窗口创建时间回填。
+- 可接纳证据下界为本档位 creation 日期，没有该登记时用进入档位日；更早的乱序证据保守跳过。生命周期仍以实际入库/晋升时间计算。
+- `last_weight_date` 只表示最大已加权证据日期；乱序证据不使其倒退。普通晋升清除旧档位日锁，早于新档位进入日的证据不能再次加分；拆分子片维持继承的 tier_entered_at 下界。
+- 旧目标必须绑定本次完整 `search_many` 回执的 memory_ref 与正文哈希；reinforce 不改正文，revise 才写新正文；旧 upsert 兼容转换并同样校验。
+- on_commit 和归档恢复统一按用户证据计算批次幂等 ID；replayed=true 仅为回执重放。返回 weighted / daily_locked / content_updated / weight_skipped，区分加分、锁定与跳过。
+- Web 日锁由宿主返回 Shanghai 日期和 weight_locked_today；weighted_today 排除 creation。维护列表按事件处理时间纳入纯加权，不把补提取证据日误当作处理日。
 - 进入新档位后 weight 归零，重新计算该档位的固定到期时间。
 - 永久记忆不记录权重。
 
@@ -54,9 +63,10 @@ seven_days → one_month → half_year → permanent
 
 - `memory.extraction_mode` 控制提取边界；默认 `compression_only` 只在保存或上下文压缩时处理延期轮次。
 - 后台提取只向 `self_improve` 传入用户消息；助手回复、推理、工具结果和 `important` 层均不可作为提取来源。
+- 提取候选只受 `memory.extraction_max_candidates_per_batch` 与框架硬上限控制，不按批次轮数乘系数裁剪；达到上限时选择价值和证据最强的独立事实，不得合并不同生命周期的内容来规避上限。
 - 后台 `context_compression` / `memory_promotion` 禁止搜索 `important`；用户或主智能体主动查看记忆时保留只读权限，且查看不加权。
 - 临时重要热画像的 `important_memory_max_chars` 仅是 Prompt 注入预算；文件正文不在该值处截断。`important_memory_output_max_chars` 是独立输出硬上限，防止模型失控重复，超限时保留旧热画像。
-- 临时重要热画像巡检通过 `memory_manage list(limit=500, compact=true, include_content=true, page_char_limit=80000)` 按条目数与字符预算双重边界分页批量读取三层临时记忆和永久记忆，不得对全量条目逐条 `get`；`self_improve` 的候选匹配和晋升融合使用 `search_many` 批量查询，只有命中项需要完整正文时才传 `include_content=true`。
+- 临时重要热画像巡检通过 `memory_manage list(limit=500, compact=true, include_content=true, page_char_limit=80000)` 按条目数与字符预算双重边界分页批量读取三层临时记忆和永久记忆，不得对全量条目逐条 `get`；`self_improve` 的候选匹配和晋升融合使用 `search_many` 批量查询，运行时为该子代理强制 `include_content=true`，只有完整命中回执才能绑定旧目标。
 - 所有保存与压缩入口共用连续 `memory_processed_round` 游标；`context_manage` 只负责摘要，不重复持久化同一轮记忆。
 - 成功提交的对话才能产生记忆候选；失败、取消或未提交轮次不得写入。
 - 用户明确要求长期记住的有效内容直接进入永久层。

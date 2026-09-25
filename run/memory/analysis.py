@@ -19,6 +19,7 @@ from run.memory import (
     memory_extraction_mode,
 )
 from run.memory.pipeline import memory_round_payload
+from run.memory.evidence import trusted_dates, text as evidence_text
 from run.conversation import new_usage_total, record_provider_request, usage_from_dict
 
 
@@ -29,6 +30,7 @@ def memory_round_data(
     text: str,
     reasoning: str,
     tool_records: list[dict[str, Any]],
+    committed_at: str | None = None,
 ) -> dict[str, Any]:
     round_data: dict[str, Any] = {
         "round": round_number,
@@ -37,6 +39,8 @@ def memory_round_data(
             {"role": "assistant", "content": text},
         ],
     }
+    if committed_at:
+        round_data["committed_at"] = committed_at
     if reasoning:
         round_data["think"] = {"content": reasoning}
     if tool_records:
@@ -76,6 +80,7 @@ def analyze_memory_batch(
             "round_end": max(round_numbers),
         }
     )
+    effective_source["evidence_dates"] = trusted_dates(rounds)
     try:
         runner_kwargs: dict[str, Any] = {"cancel_event": cancel_event}
         if str(agent_source or "").strip():
@@ -104,6 +109,7 @@ def analyze_memory_batch(
             "source": effective_source,
             "agent": result.agent,
             "usage": dict(result.usage),
+            "candidate_filter": copy.deepcopy(result.metadata.get("candidate_filter", {})),
             "error": None,
         }
     except Exception as exc:
@@ -131,6 +137,7 @@ def analyze_round_memory(
     cancel_event: threading.Event | None,
     agent_source: str = "",
     session_id: str = "",
+    committed_at: str | None = None,
 ) -> dict[str, Any]:
     """Compatibility wrapper for callers that intentionally process one round."""
 
@@ -142,6 +149,7 @@ def analyze_round_memory(
                 text=text,
                 reasoning=reasoning,
                 tool_records=tool_records,
+                committed_at=committed_at,
             )
         ],
         agent_runner=agent_runner,
@@ -247,7 +255,8 @@ def analyze_memory_batch_resilient(
         "round_start": min(round_numbers),
         "round_end": max(round_numbers),
         "rounds": round_numbers,
-        "source": dict(source or {}),
+        "source": {**dict(source or {}), "evidence_dates": trusted_dates(rounds)},
+        "candidate_filter": {"batches": [part.get("candidate_filter", {}) for part in parts]},
         "agent": str(parts[-1].get("agent") or "self_improve"),
         "usage": combined_usage,
         "error": None,
@@ -280,6 +289,7 @@ def persist_round_memory_analysis(
     source = analysis.get("source")
     if not isinstance(source, dict):
         source = {"source": "round_commit"}
+    source = {**source, "evidence_dates": source.get("evidence_dates", {})}
     try:
         deduplicated: dict[str, dict[str, Any]] = {}
         unkeyed: list[dict[str, Any]] = []
@@ -290,7 +300,14 @@ def persist_round_memory_analysis(
             raw_key = candidate.get("filename") or candidate.get("target")
             key = str(raw_key or "").strip().casefold()
             if key:
-                deduplicated[key] = candidate
+                previous = deduplicated.get(key)
+                merged = dict(candidate)
+                if previous is not None:
+                    merged["evidence_rounds"] = sorted(set(
+                        previous.get("evidence_rounds", []) + candidate.get("evidence_rounds", [])))
+                    if previous.get("action") == "revise" and candidate.get("action") == "reinforce":
+                        merged = {**previous, "evidence_rounds": merged["evidence_rounds"]}
+                deduplicated[key] = merged
             else:
                 unkeyed.append(candidate)
         persisted_candidates = [*deduplicated.values(), *unkeyed]
@@ -327,9 +344,17 @@ def memory_batch_operation_id(
     round_end: int,
     rounds: list[dict[str, Any]] | None = None,
 ) -> str:
+    # Assistant/tool serialization differs between on_commit and archive recovery.
+    # Identity belongs to the user evidence, not those derived representations.
+    evidence = [{"round": item.get("round"), "committed_at": item.get("committed_at"),
+                 "messages": [evidence_text(message.get("content"))
+                              for message in item.get("messages", [])
+                              if isinstance(message, dict)
+                              and message.get("role", "user") == "user"]}
+                for item in rounds or []]
     payload_digest = hashlib.sha256(
         json.dumps(
-            rounds or [],
+            evidence,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -363,6 +388,7 @@ def extract_round_memory(
     cancel_event: threading.Event | None,
     agent_source: str = "",
     session_id: str = "",
+    committed_at: str | None = None,
 ) -> dict[str, Any]:
     """Analyze and persist one completed round synchronously."""
 
@@ -376,12 +402,16 @@ def extract_round_memory(
         cancel_event=cancel_event,
         agent_source=agent_source,
         session_id=session_id,
+        committed_at=committed_at,
     )
+    rounds = [memory_round_data(round_number=round_number, prompt=prompt, text=text,
+                               reasoning=reasoning, tool_records=tool_records, committed_at=committed_at)]
     return persist_round_memory_analysis(
         root=root,
         user=user,
         config=config,
         analysis=analysis,
+        operation_id=memory_batch_operation_id(user, agent_source, session_id, round_number, round_number, rounds),
     )
 
 

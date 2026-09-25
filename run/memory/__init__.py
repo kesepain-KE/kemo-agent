@@ -27,6 +27,7 @@ MAX_EXTRACTION_BATCH_ROUNDS = 20
 MAX_EXTRACTION_CANDIDATES_PER_BATCH = 40
 MEMORY_OPERATION_HISTORY_LIMIT = 512
 FILENAME_MAX_CHARS = 50
+MEMORY_FRAGMENT_TYPE_LIMITS = {"A": 1000, "B": 150}
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
@@ -166,6 +167,11 @@ def memory_extraction_candidate_limit(
     config: dict[str, Any],
     round_count: int,
 ) -> int:
+    # Candidate capacity follows the number of independent durable facts, not
+    # the number of conversation rounds in the extraction batch.  Keep the
+    # parameter for the public helper contract, but do not silently discard
+    # the third and later facts from a single information-dense user turn.
+    del round_count
     raw_memory = config.get("memory") or {}
     if not isinstance(raw_memory, dict):
         raise MemoryConfigError("memory 必须是对象")
@@ -187,8 +193,7 @@ def memory_extraction_candidate_limit(
         raise MemoryConfigError(
             "memory.extraction_max_candidates_per_batch 必须是正整数"
         )
-    bounded = min(configured, MAX_EXTRACTION_CANDIDATES_PER_BATCH)
-    return min(bounded, max(1, int(round_count)) * 2)
+    return min(configured, MAX_EXTRACTION_CANDIDATES_PER_BATCH)
 
 
 def tier_rules(config: dict[str, Any]) -> dict[str, TierRule]:
@@ -250,6 +255,67 @@ def contains_sensitive_credential(text: str) -> bool:
     return bool(_SECRET_RE.search(text))
 
 
+def normalize_memory_type(value: Any) -> str | None:
+    """Normalize the promotion-only A/B granularity classification."""
+
+    if value is None or not str(value).strip():
+        return None
+    normalized = unicodedata.normalize("NFKC", str(value)).strip().upper()
+    aliases = {
+        "A": "A",
+        "A类": "A",
+        "PROFILE": "A",
+        "B": "B",
+        "B类": "B",
+        "FACT": "B",
+    }
+    memory_type = aliases.get(normalized)
+    if memory_type is None:
+        raise MemoryError("memory_type 只允许 A 或 B")
+    return memory_type
+
+
+def validate_memory_fragment_size(
+    content: Any,
+    memory_type: Any = None,
+    *,
+    operation: str = "记忆晋升",
+    require_explicit_type: bool = False,
+) -> tuple[str, str | None]:
+    """Fail closed when a promotion would preserve an oversized fragment.
+
+    B-class facts have a 150-character hard ceiling (100 is the normal target),
+    while A-class profile clusters have a 1000-character emergency ceiling.
+    Content over the B ceiling must explicitly declare itself as A so a missing
+    model classification cannot silently turn a large fact into a profile blob.
+    """
+
+    normalized_content = _normalise_text(content)
+    if not normalized_content:
+        raise MemoryError(f"{operation}内容不能为空")
+    normalized_type = normalize_memory_type(memory_type)
+    if normalized_type is None:
+        if (
+            require_explicit_type
+            and len(normalized_content) > MEMORY_FRAGMENT_TYPE_LIMITS["B"]
+        ):
+            raise MemoryError(
+                f"{operation}内容超过 {MEMORY_FRAGMENT_TYPE_LIMITS['B']} 字，"
+                "必须声明 memory_type=A 或先拆分"
+            )
+        if len(normalized_content) > MEMORY_FRAGMENT_TYPE_LIMITS["A"]:
+            raise MemoryError(
+                f"{operation}内容超过 {MEMORY_FRAGMENT_TYPE_LIMITS['A']} 字，必须先拆分"
+            )
+        return normalized_content, None
+    limit = MEMORY_FRAGMENT_TYPE_LIMITS[normalized_type]
+    if len(normalized_content) > limit:
+        raise MemoryError(
+            f"{operation}的 {normalized_type} 类内容超过 {limit} 字，必须先拆分"
+        )
+    return normalized_content, normalized_type
+
+
 def _tokens(text: str) -> set[str]:
     normal = unicodedata.normalize("NFKC", text).casefold()
     words = _WORD_RE.findall(normal)
@@ -278,7 +344,7 @@ def normalize_memory_filename(value: Any) -> str:
 
 MemoryStore = SqliteMemoryStore
 
-_DOMAIN_MODULES = ("analysis", "pipeline", "sqlite", "store")
+_DOMAIN_MODULES = ("analysis", "evidence", "pipeline", "sqlite", "store")
 
 
 def __getattr__(name: str):

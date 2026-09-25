@@ -451,6 +451,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                             "from_tier": "one_month",
                             "to_tier": "half_year",
                             "filename": source,
+                            "memory_type": "A",
                             "merged_with": "ignored-because-split.md",
                             "split_into": [
                                 {"filename": "用户身份与背景", "content": "甲" * 800},
@@ -543,6 +544,111 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(store.get_entry("one_month", source), before)
         self.assertEqual(store.load_tier("half_year"), [])
 
+    def test_due_scan_rejects_oversized_unsplit_promotion_and_keeps_source(self) -> None:
+        now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+        source = self._seed(
+            "one_month",
+            "oversized-unsplit",
+            content="甲" * 151,
+            weight=10,
+            expires_at=now,
+        )
+
+        class Runner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, name, input_data, **kwargs):
+                return _result(
+                    promotions=[
+                        {
+                            "from_tier": "one_month",
+                            "to_tier": "half_year",
+                            "filename": source,
+                            "merged_with": None,
+                        }
+                    ]
+                )
+
+        with patch("cron.review_due.AgentRunner", Runner), self.assertLogs(
+            "cron.review_due", level="WARNING"
+        ):
+            result = scan_and_promote(
+                root=self.root,
+                user="alice",
+                config=CONFIG,
+                now=now,
+            )
+
+        store = MemoryStore(self.root, "alice", CONFIG)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(result["pending"], [source])
+        self.assertEqual(result["errors"][0]["stage"], "apply")
+        self.assertIn("必须声明 memory_type=A 或先拆分", result["errors"][0]["message"])
+        self.assertIsNotNone(store.get_entry("one_month", source))
+        self.assertEqual(store.load_tier("half_year"), [])
+
+    def test_split_promotion_rejects_oversized_typed_child_atomically(self) -> None:
+        now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+        source = self._seed(
+            "one_month", "typed-rollback", content="source", weight=10, expires_at=now
+        )
+        store = MemoryStore(self.root, "alice", CONFIG)
+        before = store.get_entry("one_month", source)
+        location = store.locate_in_tier("one_month", source)
+
+        for memory_type, length, expected in (
+            ("B", 151, "B 类内容超过 150 字"),
+            ("A", 1001, "A 类内容超过 1000 字"),
+        ):
+            with self.subTest(memory_type=memory_type), self.assertRaisesRegex(
+                Exception, expected
+            ):
+                store._split_promote_location(
+                    location,
+                    "half_year",
+                    now,
+                    [
+                        {"filename": "valid-child", "content": "valid"},
+                        {"filename": "oversized-child", "content": "乙" * length},
+                    ],
+                    memory_type=memory_type,
+                )
+
+            self.assertEqual(store.get_entry("one_month", source), before)
+            self.assertEqual(store.load_tier("half_year"), [])
+
+    def test_merged_promotion_rejects_content_above_declared_type_limit(self) -> None:
+        now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+        source = self._seed(
+            "seven_days", "merge-source-limit", content="source", weight=3, expires_at=now
+        )
+        target = self._seed(
+            "one_month",
+            "merge-target-limit",
+            content="target",
+            weight=2,
+            expires_at=now + timedelta(days=1),
+        )
+        store = MemoryStore(self.root, "alice", CONFIG)
+        source_before = store.get_entry("seven_days", source)
+        target_before = store.get_entry("one_month", target)
+        location = store.locate_in_tier("seven_days", source)
+
+        with self.assertRaisesRegex(Exception, "B 类内容超过 150 字"):
+            store._promote_location(
+                location,
+                "one_month",
+                now,
+                merged_content="丙" * 151,
+                target_filename=target,
+                memory_type="B",
+            )
+
+        self.assertEqual(store.get_entry("seven_days", source), source_before)
+        self.assertEqual(store.get_entry("one_month", target), target_before)
+
     def test_promotion_system_task_registration_is_idempotent(self) -> None:
         first = ensure_memory_promotion_task(self.root)
         second = ensure_memory_promotion_task(self.root)
@@ -573,7 +679,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 {"trigger": "memory_promotion", "promotions": []},
             )
 
-    def test_context_extraction_rejects_non_durable_and_caps_candidates(self) -> None:
+    def test_context_extraction_rejects_non_durable_or_unverifiable_candidates(self) -> None:
         class Context:
             @staticmethod
             def run_model(input_data):
@@ -711,7 +817,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 "trigger": "context_compression",
                 "rounds": [
                     {
-                        "round": index,
+                        "round": 1,
                         "messages": [
                             {
                                 "role": "user",
@@ -721,13 +827,61 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                             }
                         ],
                     }
-                    for index in range(1, 6)
                 ],
             },
         )
 
         self.assertEqual(len(result.data["candidates"]), 6)
         self.assertEqual(result.metadata["candidate_filter"]["limit"], 6)
+        self.assertEqual(result.metadata["candidate_filter"]["rejected"], 2)
+
+    def test_context_extraction_keeps_many_independent_facts_from_one_round(self) -> None:
+        fact_count = 12
+
+        class Context:
+            runner = SimpleNamespace(
+                config={"memory": {"extraction_max_candidates_per_batch": 30}}
+            )
+
+            @staticmethod
+            def run_model(input_data):
+                return _result(
+                    candidates=[
+                        {
+                            "action": "upsert",
+                            "filename": f"独立事实{index}",
+                            "content": f"用户长期事实 {index}",
+                            "durable": True,
+                            "evidence": f"长期证据 {index}",
+                        }
+                        for index in range(fact_count)
+                    ]
+                )
+
+        result = execute_self_improve(
+            Context(),
+            {
+                "trigger": "context_compression",
+                "rounds": [
+                    {
+                        "round": 1,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": " ".join(
+                                    f"长期证据 {index}" for index in range(fact_count)
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(len(result.data["candidates"]), fact_count)
+        self.assertEqual(result.metadata["candidate_filter"]["accepted"], fact_count)
+        self.assertEqual(result.metadata["candidate_filter"]["rejected"], 0)
+        self.assertEqual(result.metadata["candidate_filter"]["limit"], 30)
 
     def test_manual_review_persists_candidates_for_main_agent_call(self) -> None:
         class Context:

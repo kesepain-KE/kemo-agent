@@ -64,6 +64,7 @@ def _promotion_summary(value: Any) -> dict[str, Any] | None:
             "from_tier",
             "to_tier",
             "filename",
+            "memory_type",
             "merged_with",
             "skill_created",
         )
@@ -215,39 +216,63 @@ def scan_and_promote(
                     continue
                 split_into = decision.get("split_into")
                 merged_with = decision.get("merged_with")
-                if isinstance(split_into, list) and split_into:
-                    if merged_with:
-                        _LOGGER.warning(
-                            "Memory promotion decision contains both split_into and "
-                            "merged_with; split_into takes precedence for %s",
-                            requested["filename"],
+                memory_type = decision.get("memory_type")
+                try:
+                    if isinstance(split_into, list) and split_into:
+                        if merged_with:
+                            _LOGGER.warning(
+                                "Memory promotion decision contains both split_into and "
+                                "merged_with; split_into takes precedence for %s",
+                                requested["filename"],
+                            )
+                        store._split_promote_location(
+                            location,
+                            requested["to_tier"],
+                            current,
+                            split_into,
+                            memory_type=memory_type,
+                            require_explicit_type=True,
                         )
-                    store._split_promote_location(
-                        location,
-                        requested["to_tier"],
-                        current,
-                        split_into,
+                    elif merged_with:
+                        merged_content = decision.get("content")
+                        if (
+                            not isinstance(merged_content, str)
+                            or not merged_content.strip()
+                        ):
+                            continue
+                        store._promote_location(
+                            location,
+                            requested["to_tier"],
+                            current,
+                            merged_content=merged_content,
+                            target_filename=str(merged_with),
+                            memory_type=memory_type,
+                            require_explicit_type=True,
+                        )
+                    else:
+                        store._promote_location(
+                            location,
+                            requested["to_tier"],
+                            current,
+                            memory_type=memory_type,
+                            require_explicit_type=True,
+                        )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "batch": batch_index + 1,
+                            "filename": requested["filename"],
+                            "stage": "apply",
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        }
                     )
-                elif merged_with:
-                    merged_content = decision.get("content")
-                    if (
-                        not isinstance(merged_content, str)
-                        or not merged_content.strip()
-                    ):
-                        continue
-                    store._promote_location(
-                        location,
-                        requested["to_tier"],
-                        current,
-                        merged_content=merged_content,
-                        target_filename=str(merged_with),
+                    _LOGGER.warning(
+                        "Memory promotion apply rejected for %s: %s",
+                        requested["filename"],
+                        exc,
                     )
-                else:
-                    store._promote_location(
-                        location,
-                        requested["to_tier"],
-                        current,
-                    )
+                    continue
                 batch_applied.append(requested["filename"])
         applied.extend(batch_applied)
         summaries.extend(

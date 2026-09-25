@@ -305,6 +305,57 @@ class MemoryManageTests(unittest.TestCase):
         self.assertEqual(metadata["weight"], 0)
         self.assertIsNone(metadata["last_weight_date"])
 
+    def test_manual_writes_enforce_fragment_granularity_and_important_is_read_only(self) -> None:
+        context = {"root": str(self.root), "user": "alice", "caller": "main_agent"}
+        oversized_fact = "独立事实" * 40
+        with self.assertRaisesRegex(RuntimeMemoryError, "memory_type=A"):
+            run_memory_manage(
+                "add",
+                "seven_days",
+                filename="oversized-fact",
+                content=oversized_fact,
+                context=context,
+            )
+        with self.assertRaisesRegex(RuntimeMemoryError, "B 类内容超过 150 字"):
+            run_memory_manage(
+                "add",
+                "seven_days",
+                filename="oversized-b",
+                content=oversized_fact,
+                memory_type="B",
+                context=context,
+            )
+
+        created = run_memory_manage(
+            "add",
+            "seven_days",
+            filename="profile-cluster",
+            content=oversized_fact,
+            memory_type="A",
+            context=context,
+        )
+        self.assertEqual(created["memory_type"], "A")
+        edited = run_memory_manage(
+            "edit",
+            "seven_days",
+            filename=created["filename"],
+            content=oversized_fact + "更新",
+            memory_type="A",
+            context=context,
+        )
+        self.assertEqual(edited["memory_type"], "A")
+
+        for action in ("add", "edit", "delete"):
+            with self.subTest(action=action):
+                arguments = {
+                    "filename": "memory_temporary_important.md",
+                    "context": context,
+                }
+                if action != "delete":
+                    arguments["content"] = "禁止直接写入"
+                with self.assertRaisesRegex(PermissionError, "只读热画像"):
+                    run_memory_manage(action, "important", **arguments)
+
     def test_important_memory_agent_can_read_but_cannot_mutate_directly(self) -> None:
         add_fragment(
             self.root,
@@ -888,7 +939,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
-        self.assertEqual(tool.version, "1.8.0")
+        self.assertEqual(tool.version, "1.9.0")
         schema = tool.input_schema
         self.assertEqual(
             set(schema["properties"]["action"]["enum"]),
@@ -912,6 +963,7 @@ class MemoryManageTests(unittest.TestCase):
             "page_char_limit",
             "context_chars",
             "case_sensitive",
+            "memory_type",
         ):
             self.assertIn(field, schema["properties"])
         validate_arguments(

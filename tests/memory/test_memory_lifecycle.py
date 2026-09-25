@@ -12,6 +12,7 @@ from run.memory import (
     MemoryError,
     MemoryStore,
     contains_sensitive_credential,
+    memory_extraction_candidate_limit,
     memory_extraction_mode,
     normalize_memory_filename,
     tier_rules,
@@ -114,6 +115,29 @@ class MemoryLifecycleTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MemoryError, "extraction_mode"):
             memory_extraction_mode({"memory": {"extraction_mode": "invalid"}})
+
+    def test_extraction_candidate_limit_uses_batch_cap_not_round_count(self) -> None:
+        self.assertEqual(
+            memory_extraction_candidate_limit(
+                {"memory": {"extraction_max_candidates_per_batch": 30}},
+                1,
+            ),
+            30,
+        )
+        self.assertEqual(
+            memory_extraction_candidate_limit(
+                {"memory": {"extraction_max_candidates_per_batch": 6}},
+                20,
+            ),
+            6,
+        )
+        self.assertEqual(
+            memory_extraction_candidate_limit(
+                {"memory": {"extraction_max_candidates_per_batch": 100}},
+                1,
+            ),
+            40,
+        )
 
     def test_database_starts_empty(self) -> None:
         self.assertEqual(self.store.list_items(), [])
@@ -372,6 +396,8 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(definition.trigger_file, "trigger.md")
         self.assertIn("candidates", definition.trigger_content)
         self.assertIn("最长 20 字符", definition.trigger_content)
+        self.assertIn("独立更新、独立失效、独立加权、独立检索", definition.trigger_content)
+        self.assertIn("不按对话轮数或单文件字数折算", definition.trigger_content)
 
     def test_permanent_prompt_selection_is_unlimited(self) -> None:
         self.add("永久一", "永久记忆一。", explicit=True)
