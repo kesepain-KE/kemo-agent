@@ -15,6 +15,12 @@ rate-limit identity. Leave the list empty for direct connections.
 
 Current bridge version: **1.1.5**.
 
+The Web user-configuration panel may change only the exposed port, replace the
+device Token, and bind/unbind an App login to an existing kemo-agent user. The
+Token remains SHA-256-only: the panel shows configuration state and a truncated
+fingerprint, never the historical plaintext. Panel state is separate from
+`input_data.md` and is not injected into the agent prompt.
+
 ## Detached Android runs and recovery snapshots
 
 An Android SSE connection is now only a subscriber to a bridge-owned run. The

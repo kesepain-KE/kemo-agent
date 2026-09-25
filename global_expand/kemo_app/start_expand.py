@@ -24,6 +24,7 @@ from pathlib import Path
 
 from lifecycle import load_ready_config
 from device_commands import DeviceCommandStore
+from panel_control import bind_user, set_device_token, set_port, unbind_user, write_status
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_PATH = Path(BASE_DIR)
@@ -718,6 +719,23 @@ def _read_connections() -> dict:
         return {}
 
 
+def _panel_runtime_result(result: dict, *, was_running: bool) -> dict:
+    """Return a truthful result when a panel edit requires a bridge restart."""
+    runtime = start() if was_running else status()
+    write_status(runtime)
+    summary = {key: runtime.get(key) for key in ("active", "running", "port")}
+    if was_running and (runtime.get("ok") is False or not runtime.get("active")):
+        return {
+            **result,
+            "ok": False,
+            "config_applied": True,
+            "error": runtime.get("error") or "bridge_restart_failed",
+            "message": "配置已保存，但桥接重启失败。",
+            "runtime": summary,
+        }
+    return {**result, "config_applied": True, "runtime": summary}
+
+
 def execute(command: str, params: dict | None = None, *, context: dict | None = None) -> dict:
     """框架操作层入口：execute(command, params)。"""
     cmd = str(command or "").strip().casefold()
@@ -725,11 +743,59 @@ def execute(command: str, params: dict | None = None, *, context: dict | None = 
         return device_action(params, context=context)
     if cmd == "device_action_status":
         return device_action_status(params, context=context)
+    if cmd == "panel_set_port":
+        before = status()
+        if before.get("running") and not before.get("active"):
+            return {"ok": False, "error": "bridge_process_unmanaged", "message": "端口上存在未受管实例，拒绝修改端口。"}
+        was_running = bool(before.get("active"))
+        if was_running:
+            stopped = stop()
+            if not stopped.get("ok"):
+                return stopped
+        try:
+            result = set_port((params or {}).get("port"))
+        except Exception as exc:
+            if was_running:
+                start()
+            return {"ok": False, "error": str(exc) or type(exc).__name__}
+        return _panel_runtime_result(result, was_running=was_running)
+    if cmd == "panel_set_token":
+        before = status()
+        if before.get("running") and not before.get("active"):
+            return {"ok": False, "error": "bridge_process_unmanaged", "message": "端口上存在未受管实例，拒绝替换 Token。"}
+        was_running = bool(before.get("active"))
+        if was_running:
+            stopped = stop()
+            if not stopped.get("ok"):
+                return stopped
+        try:
+            result = set_device_token((params or {}).get("token"))
+        except Exception as exc:
+            if was_running:
+                start()
+            return {"ok": False, "error": str(exc) or type(exc).__name__}
+        return _panel_runtime_result(result, was_running=was_running)
+    if cmd == "panel_bind_user":
+        try:
+            result = bind_user((params or {}).get("app_username"), (params or {}).get("agent_username"))
+            write_status(status())
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc) or type(exc).__name__}
+    if cmd == "panel_unbind_user":
+        try:
+            result = unbind_user((params or {}).get("app_username"))
+            write_status(status())
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc) or type(exc).__name__}
     handler = _COMMANDS.get(cmd)
     if not handler:
         return {"ok": False, "error": f"unknown command: {command}"}
     try:
-        return handler()
+        result = handler()
+        write_status(result if isinstance(result, dict) else status())
+        return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

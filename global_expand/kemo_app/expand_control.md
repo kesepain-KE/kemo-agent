@@ -34,6 +34,16 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 # 可用命令
 
+Web“用户配置”组件只声明以下四个面板命令，不代表开放其他本地配置：
+
+- `panel_set_port`：修改对外监听端口；受管实例运行中会先停止、写入再重启。
+- `panel_set_token`：写入新设备 Token，磁盘只保存 SHA-256，返回值只含配置状态和核对指纹。
+- `panel_bind_user`：把已经存在的 App 密码账户绑定到已经存在的智能体用户目录。
+- `panel_unbind_user`：解除绑定，后续登录恢复使用 App 用户同名的智能体用户。
+
+端口或 Token 已保存但桥接重启失败时返回 `ok=false`、`config_applied=true`。面板不开放上游地址、
+会话密钥、限流、代理或其他配置，也不会把绑定关系或 Token 写入数据注入层。
+
 ## `status`
 
 查询桥接服务运行状态（进程、端口、日志路径）。只读，无副作用。

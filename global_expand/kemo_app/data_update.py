@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from lifecycle import load_ready_config
 import start_expand
+from panel_control import write_status
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -114,12 +115,25 @@ def _load_connections() -> dict[str, Any]:
         return {}
 
 
-def _read_activation() -> dict[str, Any] | None:
+def _read_activation_state() -> tuple[str, dict[str, Any] | None, str]:
     try:
-        value = json.loads(ACTIVATION_PATH.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else None
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
+        raw = ACTIVATION_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "missing", None, ""
+    except (OSError, UnicodeError) as exc:
+        return "invalid", None, f"activation_file_unreadable:{type(exc).__name__}"
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return "invalid", None, "activation_file_invalid_json"
+    if not isinstance(value, dict):
+        return "invalid", None, "activation_file_root_not_object"
+    return "active", value, ""
+
+
+def _read_activation() -> dict[str, Any] | None:
+    state, value, _ = _read_activation_state()
+    return value if state == "active" else None
 
 
 def _update_activation(payload: dict[str, Any]) -> None:
@@ -218,6 +232,27 @@ def _inactive_output(state: dict[str, Any]) -> None:
     _set_manifest(active=False, healthy=True)
 
 
+def _deactivated_output() -> None:
+    _atomic_text(
+        INPUT_PATH,
+        "# kemo app 桥接服务\n\n"
+        "- 状态: **已停用**\n\n"
+        "桥接已经完成配置，但当前没有激活意愿；框架不会自动启动服务，也不会把主动停用判定为故障。\n",
+    )
+    _set_manifest(active=False, healthy=True)
+
+
+def _invalid_activation_output(reason: str) -> None:
+    _atomic_text(
+        INPUT_PATH,
+        "# kemo app 桥接服务\n\n"
+        "- 状态: **激活记录异常**\n"
+        f"- 错误代码: {_safe_label(reason)}\n\n"
+        "无法确认桥接服务当前是否应当启用。为避免误启动或错误接管进程，本次不会检查、启动或恢复桥接服务；请修复或重新生成 `_activated.json`。\n",
+    )
+    _set_manifest(active=False, healthy=False)
+
+
 def _probe_health(url: str) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=5) as response:
         data = json.loads(response.read().decode("utf-8"))
@@ -291,6 +326,10 @@ def _launch_diagnostics(reason: str) -> dict[str, Any]:
 def update() -> dict[str, Any]:
     config, state = load_ready_config(BASE_DIR)
     if config is None:
+        try:
+            write_status({"active": False, "running": False, "activated": False})
+        except Exception:
+            pass
         _inactive_output(state)
         return {
             "ok": True,
@@ -308,8 +347,46 @@ def update() -> dict[str, Any]:
     url = f"http://{probe_host}:{port}/v1/health"
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     update_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    activation_state, _, activation_error = _read_activation_state()
+    if activation_state == "missing":
+        try:
+            write_status({"active": False, "running": False, "activated": False, "port": port})
+        except Exception:
+            pass
+        _deactivated_output()
+        return {
+            "ok": True,
+            "status": "inactive",
+            "active": False,
+            "initialized": True,
+            "configured": True,
+            "resources": [],
+        }
+    if activation_state != "active":
+        try:
+            write_status({"active": False, "running": False, "activated": False, "port": port})
+        except Exception:
+            pass
+        _invalid_activation_output(activation_error)
+        return {
+            "ok": False,
+            "status": "activation_error",
+            "active": False,
+            "initialized": True,
+            "configured": True,
+            "error": "activation_state_invalid",
+            "diagnosis": {
+                "error_code": activation_error,
+                "description": "激活记录无法读取或不是有效的 JSON 对象。",
+            },
+            "resources": [],
+        }
     try:
         runtime_status = start_expand.status()
+        try:
+            write_status(runtime_status)
+        except Exception:
+            pass
         if not runtime_status.get("active"):
             if runtime_status.get("unmanaged_process"):
                 raise RuntimeError("bridge_process_unmanaged")

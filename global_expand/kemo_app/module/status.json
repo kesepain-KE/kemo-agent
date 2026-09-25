@@ -1,0 +1,12 @@
+{
+  "bridge_state": "未运行",
+  "endpoint": "127.0.0.1:8742",
+  "exposed_port": 8742,
+  "token_status": "未配置",
+  "token_fingerprint": "—",
+  "bindings": {},
+  "configured_users": 0,
+  "activation": "未激活",
+  "updated_at": "2026-09-26T01:01:41+08:00",
+  "note": "Token 只保存 SHA-256，不可反向查看明文；页面展示配置状态与核对指纹。"
+}

@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "title": "Kemo App 用户配置",
+  "containers": [
+    {
+      "kind": "status",
+      "title": "桥接配置与绑定状态",
+      "width": "full",
+      "height": "h2",
+      "source": "module/status.json",
+      "fields": [
+        { "key": "bridge_state", "label": "桥接状态", "type": "badge" },
+        { "key": "endpoint", "label": "对外监听地址", "type": "text" },
+        { "key": "token_status", "label": "设备 Token", "type": "badge" },
+        { "key": "token_fingerprint", "label": "Token 核对指纹", "type": "text" },
+        { "key": "bindings", "label": "App 用户 → 智能体用户", "type": "keyvalue" },
+        { "key": "configured_users", "label": "已配置 App 用户", "type": "text" },
+        { "key": "activation", "label": "持续运行意愿", "type": "badge" },
+        { "key": "note", "label": "说明", "type": "markdown" }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "端口与 Token",
+      "width": "half",
+      "height": "h2",
+      "controls": [
+        {
+          "type": "send",
+          "label": "设置对外端口",
+          "command": "panel_set_port",
+          "inputs": [
+            { "key": "port", "label": "端口", "type": "number", "min": 1, "max": 65535, "default": 8742, "required": true }
+          ]
+        },
+        {
+          "type": "send",
+          "label": "写入新设备 Token",
+          "command": "panel_set_token",
+          "inputs": [
+            { "key": "token", "label": "新 Token", "type": "string", "masked": true, "required": true, "max_length": 4096 }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "用户绑定",
+      "width": "half",
+      "height": "h2",
+      "controls": [
+        {
+          "type": "send",
+          "label": "绑定用户",
+          "command": "panel_bind_user",
+          "inputs": [
+            { "key": "app_username", "label": "App 用户", "type": "string", "required": true },
+            { "key": "agent_username", "label": "智能体用户", "type": "string", "required": true }
+          ]
+        },
+        {
+          "type": "send",
+          "label": "解除绑定",
+          "command": "panel_unbind_user",
+          "inputs": [
+            { "key": "app_username", "label": "App 用户", "type": "string", "required": true }
+          ]
+        }
+      ]
+    }
+  ]
+}

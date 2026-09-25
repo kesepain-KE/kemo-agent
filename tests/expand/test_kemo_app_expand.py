@@ -52,9 +52,13 @@ finally:
         sys.modules["upstream"] = _previous_upstream_for_events
 _previous_lifecycle = sys.modules.get("lifecycle", _missing_module)
 _previous_start_expand = sys.modules.get("start_expand", _missing_module)
+_previous_initialize = sys.modules.get("initialize_config", _missing_module)
+_previous_panel_control = sys.modules.get("panel_control", _missing_module)
 try:
     bridge_lifecycle = _load_module("lifecycle", "lifecycle.py")
     bridge_initialize = _load_module("kemo_app_test_initialize", "initialize_config.py")
+    sys.modules["initialize_config"] = bridge_initialize
+    bridge_panel_control = _load_module("panel_control", "panel_control.py")
     bridge_start = _load_module("kemo_app_test_start", "start_expand.py")
     sys.modules["start_expand"] = bridge_start
     bridge_update = _load_module("kemo_app_test_update", "data_update.py")
@@ -67,11 +71,92 @@ finally:
         sys.modules.pop("lifecycle", None)
     else:
         sys.modules["lifecycle"] = _previous_lifecycle
+    if _previous_initialize is _missing_module:
+        sys.modules.pop("initialize_config", None)
+    else:
+        sys.modules["initialize_config"] = _previous_initialize
+    if _previous_panel_control is _missing_module:
+        sys.modules.pop("panel_control", None)
+    else:
+        sys.modules["panel_control"] = _previous_panel_control
 
 from run.config import read_expand_meta  # noqa: E402
+from web.services.module_panels import load_module_panel  # noqa: E402
 
 
 class KemoAppExpandTests(unittest.TestCase):
+    def test_user_panel_declares_only_port_token_and_user_binding_controls(self) -> None:
+        panel, error = load_module_panel(MODULE_ROOT, "expand")
+        self.assertEqual(error, "")
+        self.assertIsNotNone(panel)
+        commands = {
+            control["command"]
+            for container in panel["containers"]
+            if container["kind"] == "action"
+            for control in container["controls"]
+        }
+        self.assertEqual(commands, {
+            "panel_set_port",
+            "panel_set_token",
+            "panel_bind_user",
+            "panel_unbind_user",
+        })
+
+    def test_panel_token_is_hashed_and_user_binding_survives_password_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            users_root = root / "agent-users"
+            (users_root / "alice").mkdir(parents=True)
+            config_path = root / "config.json"
+            users_path = root / "users.json"
+            status_path = root / "module" / "status.json"
+            config_path.write_text(json.dumps({
+                "host": "127.0.0.1",
+                "port": 8742,
+                "users_path": "users.json",
+            }), "utf-8")
+            store = bridge_auth.UserStore(users_path, 100_000)
+            store.set_password("mobile", "long-enough-password")
+            token = "plain-device-token-1234567890abcdef"
+            with mock.patch.multiple(
+                bridge_panel_control,
+                BASE_DIR=root,
+                CONFIG_PATH=config_path,
+                PANEL_STATUS_PATH=status_path,
+                USERS_DIR=users_root,
+            ):
+                written = bridge_panel_control.set_device_token(token)
+                bound = bridge_panel_control.bind_user("mobile", "alice")
+                public = bridge_panel_control.public_status()
+                store.set_password("mobile", "replacement-password")
+                rebound_store = bridge_auth.UserStore(users_path, 100_000)
+
+            persisted_config = json.loads(config_path.read_text("utf-8"))
+            self.assertTrue(written["ok"])
+            self.assertNotIn(token, config_path.read_text("utf-8"))
+            self.assertEqual(persisted_config["token_sha256"], hashlib.sha256(token.encode()).hexdigest())
+            self.assertEqual(bound["agent_user"], "alice")
+            self.assertEqual(public["bindings"], {"mobile": "alice"})
+            self.assertNotIn(token, json.dumps(public, ensure_ascii=False))
+            self.assertEqual(rebound_store.agent_user("mobile"), "alice")
+
+    def test_running_panel_change_reports_restart_failure_after_config_was_applied(self) -> None:
+        events: list[str] = []
+        with (
+            mock.patch.object(bridge_start, "status", return_value={"running": True, "active": True, "port": 8742}),
+            mock.patch.object(bridge_start, "stop", side_effect=lambda: events.append("stop") or {"ok": True}),
+            mock.patch.object(bridge_start, "set_port", side_effect=lambda value: events.append(f"write:{value}") or {"ok": True, "port": int(value)}),
+            mock.patch.object(bridge_start, "start", side_effect=lambda: events.append("start") or {"ok": False, "active": False, "running": False, "port": 9753, "error": "boom"}),
+            mock.patch.object(bridge_start, "write_status"),
+        ):
+            result = bridge_start.execute("panel_set_port", {"port": 9753})
+
+        self.assertEqual(events, ["stop", "write:9753", "start"])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["config_applied"])
+        self.assertEqual(result["error"], "boom")
+        self.assertIn("配置已保存", result["message"])
+
     def test_bridge_follows_runtime_local_web_endpoint(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -114,14 +199,14 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIsNot(sys.modules.get("lifecycle"), bridge_lifecycle)
 
     def test_bridge_declares_current_version(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
         self.assertIn('VERSION = "1.1.5"', source)
         self.assertIn("v1.1.5", manifest["explain"])
         self.assertIn("**1.1.5**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_bridge_keeps_android_conversations_in_app_partition(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('APP_SOURCE = "app"', source)
         self.assertIn('"source": APP_SOURCE', source)
         self.assertIn('params={"source": APP_SOURCE}', source)
@@ -130,7 +215,7 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertNotIn('"web" if source == "app" else source', source)
 
     def test_bridge_exposes_detached_run_snapshot_and_resume_routes(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('@app.get("/v1/runs/active")', source)
         self.assertIn('@app.get("/v1/runs/{run_id}/snapshot")', source)
         self.assertIn('@app.get("/v1/runs/{run_id}/stream")', source)
@@ -138,14 +223,14 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertNotIn('UPSTREAM.open_stream("POST", "/api/chat"', source)
 
     def test_active_runs_allows_device_only_recovery_scope(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('if not requested_session and not requested_client:', source)
         self.assertIn('raise HTTPException(400, "client_id_or_session_id_required")', source)
         self.assertIn('client_id=requested_client,', source)
         self.assertIn('session_id=requested_session,', source)
 
     def test_bridge_controls_forward_the_durable_run_session_scope(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         broker_source = (MODULE_ROOT / "run_broker.py").read_text(encoding="utf-8")
         self.assertIn("scope = RUNS.scope(session.username, body.run_id)", source)
         self.assertIn('"source": APP_SOURCE', source)
@@ -153,7 +238,7 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn("def scope(self, username: str, run_id: str)", broker_source)
 
     def test_bridge_uses_core_session_id_length_for_all_boundaries(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn("SESSION_ID_MAX_LENGTH = 128", source)
         self.assertNotIn("session_id: str = Field(min_length=1, max_length=256)", source)
         self.assertNotIn('session_id: str = Query("", max_length=256)', source)
@@ -205,7 +290,7 @@ class KemoAppExpandTests(unittest.TestCase):
             store.close()
 
     def test_chat_streams_the_broker_issued_run_id_for_legacy_clients(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn(
             'run_id = str(body.run_id or "").strip() or f"run_{uuid.uuid4().hex}"',
             source,
@@ -409,7 +494,7 @@ class KemoAppExpandTests(unittest.TestCase):
             restarted.close()
 
     def test_bridge_status_keeps_android_context_in_app_partition(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('params = {"source": APP_SOURCE}', source)
         self.assertIn('f"/api/users/{user}/sessions/active"', source)
         self.assertIn('params={"source": APP_SOURCE, "client_id": client_id}', source)
@@ -417,7 +502,7 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn('f"/api/users/{user}/runtime/status", params=params', source)
 
     def test_bridge_task_and_status_routes_keep_explicit_session_scope(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         events = (MODULE_ROOT / "events.py").read_text(encoding="utf-8")
         self.assertIn(
             'data = await _tasks(session.username, session_id=requested_session)',
@@ -590,7 +675,7 @@ class KemoAppExpandTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_conversation_delete_and_close_forward_android_client_id(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('@app.delete("/v1/conversations/{session_id}")', source)
         self.assertIn('@app.post("/v1/conversations/{session_id}/close")', source)
         self.assertGreaterEqual(source.count('client_id: str = Query("", max_length=128)'), 3)
@@ -599,13 +684,13 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIn("RUNS.delete_session(session.username, session_id)", source)
 
     def test_bridge_exposes_user_scoped_model_capabilities(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('@app.get("/v1/models/capabilities")', source)
         self.assertIn('f"/api/users/{user}/provider/model-capabilities"', source)
         self.assertIn('params={"model": model, "refresh": str(refresh).lower()}', source)
 
     def test_bridge_defers_reasoning_selection_to_account_configuration(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('reasoning_effort: str = Field(default="", max_length=64)', source)
         self.assertIn('body.model_dump(exclude={"reasoning_effort"})', source)
         self.assertNotIn('pattern="^(minimal|low|medium|high|max)$"', source)
@@ -1146,6 +1231,60 @@ class KemoAppExpandTests(unittest.TestCase):
                 now = bridge_update.datetime.fromisoformat("2026-08-12T12:00:30+08:00")
                 self.assertEqual(bridge_update._should_auto_launch(now), (False, "cooldown"))
 
+    def test_configured_but_deactivated_bridge_is_a_healthy_inactive_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input_data.md"
+            manifest_path = root / "expand.json"
+            manifest_path.write_text((MODULE_ROOT / "expand.json").read_text("utf-8"), "utf-8")
+            state = {"initialized": True, "configured": True, "missing": []}
+            with (
+                mock.patch.object(bridge_update, "INPUT_PATH", input_path),
+                mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(bridge_update, "ACTIVATION_PATH", root / "_activated.json"),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742}, state)),
+                mock.patch.object(bridge_update.start_expand, "status") as status,
+            ):
+                result = bridge_update.update()
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "inactive")
+            self.assertFalse(result["active"])
+            status.assert_not_called()
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            self.assertFalse(manifest["open_input"])
+            self.assertEqual(manifest["input_health"], "正常")
+
+    def test_corrupt_activation_file_is_reported_as_abnormal_without_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input_data.md"
+            manifest_path = root / "expand.json"
+            activation = root / "_activated.json"
+            manifest_path.write_text((MODULE_ROOT / "expand.json").read_text("utf-8"), "utf-8")
+            activation.write_text("{not-json", encoding="utf-8")
+            state = {"initialized": True, "configured": True, "missing": []}
+            with (
+                mock.patch.object(bridge_update, "INPUT_PATH", input_path),
+                mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(bridge_update, "ACTIVATION_PATH", activation),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742}, state)),
+                mock.patch.object(bridge_update.start_expand, "status") as status,
+                mock.patch.object(bridge_update.start_expand, "execute") as execute,
+            ):
+                result = bridge_update.update()
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "activation_error")
+            self.assertEqual(result["diagnosis"]["error_code"], "activation_file_invalid_json")
+            status.assert_not_called()
+            execute.assert_not_called()
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            self.assertFalse(manifest["open_input"])
+            self.assertEqual(manifest["input_health"], "异常")
+            output = input_path.read_text(encoding="utf-8")
+            self.assertIn("激活记录异常", output)
+            self.assertIn("不会检查、启动或恢复桥接服务", output)
+
     def test_data_update_records_failed_auto_launch_without_deleting_intent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             activation = Path(directory) / "_activated.json"
@@ -1311,13 +1450,16 @@ class KemoAppExpandTests(unittest.TestCase):
             bridge_auth.trusted_proxy_networks(["invalid-network"])
 
     def test_websocket_credentials_are_header_only(self) -> None:
-        source = (MODULE_ROOT / "app.py").read_text(encoding="utf-8")
+        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         websocket_source = source[source.index('@app.websocket("/v1/ws")'):]
         self.assertIn('websocket.headers.get("authorization", "")', websocket_source)
         self.assertIn('websocket.headers.get("x-kemo-session", "")', websocket_source)
         self.assertIn('websocket.headers.get("x-kemo-device-id", "")', websocket_source)
         self.assertNotIn('query_params.get("device_token"', websocket_source)
         self.assertNotIn('query_params.get("session_token"', websocket_source)
+        self.assertIn('lease_client_id = "app_ws_"', websocket_source)
+        self.assertIn('json_body={"client_id": lease_client_id}', websocket_source)
+        self.assertIn('lease_path + "/release"', websocket_source)
 
     def test_sse_stream_has_unbounded_read_timeout_but_rest_stays_bounded(self) -> None:
         client = bridge_upstream.UpstreamClient(

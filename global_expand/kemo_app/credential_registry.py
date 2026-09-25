@@ -43,6 +43,7 @@ def build_snapshot() -> dict[str, Any]:
                 "username": str(username),
                 "configured": bool(verification_record["salt"] and verification_record["hash"]),
                 "enabled": verification_record["enabled"],
+                "agent_user": str(record.get("agent_user") or username),
                 "iterations": verification_record["iterations"],
                 "record_fingerprint": _fingerprint(verification_record),
             }
