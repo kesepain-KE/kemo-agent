@@ -42,6 +42,10 @@ _FAILURE_DETAIL_FIELDS = (
     "retryable",
     "retry_after_ms",
     "attempt_count",
+    "retry_budget_exhausted",
+    "retry_exhausted",
+    "retry_attempts",
+    "retry_max_attempts",
 )
 
 
@@ -52,10 +56,16 @@ def _safe_failure_detail(error: Any) -> dict[str, Any]:
         source: dict[str, Any] = {
             "exception_type": type(error).__name__,
             "category": getattr(error, "category", ""),
+            "code": getattr(error, "code", ""),
             "status_code": getattr(error, "status_code", None),
             "retry_after_ms": getattr(error, "retry_after_ms", None),
             "attempt_count": getattr(error, "attempt_count", None),
+            "retry_attempts": getattr(error, "retry_attempts", None),
+            "retry_max_attempts": getattr(error, "retry_max_attempts", None),
         }
+        for flag in ("retry_budget_exhausted", "retry_exhausted"):
+            if hasattr(error, flag):
+                source[flag] = bool(getattr(error, flag))
         retryable = getattr(error, "retryable", None)
         if (
             isinstance(retryable, bool)

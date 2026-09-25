@@ -73,6 +73,9 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertIn("## 用户明确路径优先", global_soul)
         self.assertIn("必须按用户指定路径执行", global_soul)
         self.assertIn("未获授权时停在冲突步骤", global_soul)
+        self.assertIn("## 表达与呈现能力", global_soul)
+        self.assertIn("Web 对话中原生具备正文内联组件能力", global_soul)
+        self.assertIn("内联组件属于输出表达方式", global_soul)
         self.assertLess(
             global_soul.index("## 硬性底线"), global_soul.index("## 用户明确路径优先")
         )
@@ -87,6 +90,13 @@ class PromptPipelineTests(unittest.TestCase):
             "以最新的明确指令为准",
         ):
             self.assertIn(requirement, agents_manual)
+        self.assertIn("### 4.6 Web 正文内联组件", agents_manual)
+        self.assertIn("原生输出能力", agents_manual)
+        self.assertIn("不要先声称“无法生成交互组件”", agents_manual)
+        self.assertIn("其他声明式 `component` 名称同样允许", agents_manual)
+        self.assertIn("技能与记忆联动", agents_manual)
+        self.assertIn("默认继续保留记忆，不自动删除", agents_manual)
+        self.assertIn("只有明确同意后才执行融合/整理", agents_manual)
 
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path, dict]:
         temporary = tempfile.TemporaryDirectory()
@@ -1604,6 +1614,15 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", provider.requests[0].extra)
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         self.assertEqual(result["memory"]["weighted_files"], [])
+        from run.history import find_record, load_window
+        from run.memory.pipeline import memory_round_payload
+        from run.memory.evidence import trusted_dates
+
+        record = find_record(root, "alice", "cli", "ok")
+        archive = load_window(root / "users" / "alice" / "history" / record["archive_window"])
+        payload = memory_round_payload(archive, 1)
+        self.assertIsNotNone(datetime.fromisoformat(payload["committed_at"]).tzinfo)
+        self.assertTrue(trusted_dates([{"round": 1, "committed_at": payload["committed_at"]}]))
         unchanged = MemoryStore(root, "alice", result_config(root)).load_tier(
             "seven_days"
         )

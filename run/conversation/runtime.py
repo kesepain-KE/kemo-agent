@@ -170,6 +170,7 @@ from run.conversation.helpers import (
     _tool_schema_map,
 )
 from run.conversation.main_loop import iter_request_events_impl as _main_loop_impl
+from run.retry.policy import backoff_seconds, view_from_event
 
 
 
@@ -298,21 +299,7 @@ def _iter_request_events_unlocked(
         return event
 
     def retry_delay_seconds(attempt: int, event: RunEvent) -> float:
-        candidates: list[Any] = []
-        error = event.error if isinstance(event.error, dict) else {}
-        candidates.append(error.get("retry_after_ms"))
-        details = error.get("details")
-        if isinstance(details, dict):
-            candidates.append(details.get("retry_after_ms"))
-        candidates.append((event.metadata or {}).get("retry_after_ms"))
-        for raw in candidates:
-            try:
-                milliseconds = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if milliseconds >= 0:
-                return min(120.0, max(0.25, milliseconds / 1000.0))
-        return min(2.0, 0.25 * (2 ** (attempt - 1)))
+        return backoff_seconds(attempt, view_from_event(event))
 
     def wait_before_retry(attempt: int, event: RunEvent) -> bool:
         delay = retry_delay_seconds(attempt, event)
@@ -349,6 +336,8 @@ def _iter_request_events_unlocked(
         if auto_retry:
             attempt_request["_defer_failure_commit"] = attempt < max_attempts
             attempt_request["_retry_attempt"] = attempt
+            attempt_request["_retry_max_attempts"] = max_attempts
+            attempt_request["_retry_final_attempt"] = attempt >= max_attempts
             attempt_request["_retry_recovery"] = [
                 copy.deepcopy(value) for value in recovery.values()
             ]
@@ -453,6 +442,19 @@ def _iter_request_events_unlocked(
                 yield from (publish(item) for item in emit_cancelled_attempt())
                 return
             continue
+        missing.error = {
+            **(missing.error or {}),
+            "retryable": False,
+            "retry_exhausted": True,
+            "retry_budget_exhausted": True,
+            "retry_attempts": attempt,
+            "retry_max_attempts": max_attempts,
+        }
+        missing.metadata = {
+            **missing.metadata,
+            "retry_attempts": attempt,
+            "max_attempts": max_attempts,
+        }
         yield publish(missing)
         return
 

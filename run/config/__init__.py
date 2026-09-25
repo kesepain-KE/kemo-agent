@@ -368,6 +368,7 @@ def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
 _DOMAIN_MODULES = (
     "source_policy",
     "users",
+    "prompt_source_helpers",
     "prompt_sources",
     "markdown",
     "knowledge",

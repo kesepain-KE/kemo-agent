@@ -25,35 +25,31 @@ from run.conversation.provider_events import (
     metric_provider_response_payload as _metric_provider_response_payload,
 )
 from run.infra import EngineError
+from run.retry.policy import (
+    MAX_ATTEMPTS,
+    attempt_budget,
+    must_commit_now,
+    retry_reason,
+    retrying_event,
+    should_retry,
+    view_from_event,
+    view_from_exception,
+)
+from run.retry.recovery import (
+    MAX_GUIDANCE_CHARS,
+    MAX_GUIDANCE_ITEMS,
+    MAX_RECOVERY_CALLS,
+    MAX_RECOVERY_CHARS,
+    reuse_allowed,
+)
 from run.tools import ToolResultTooLargeError, tool_call_signature
 
 
-_EXPAND_CALL_LIVE_READ_COMMANDS = frozenset(
-    {"configuration_status", "query", "refresh", "status"}
-)
-_FILE_LIVE_READ_ACTIONS = frozenset(
-    {"exists", "hash", "list_dir", "read", "read_range", "search", "stat", "tree_dir"}
-)
-_MAX_AUTO_RETRY_ATTEMPTS = 5
-_MAX_RETRY_RECOVERY_CALLS = 32
-_MAX_RETRY_RECOVERY_CHARS = 120_000
-_MAX_RETRY_GUIDANCE_ITEMS = 32
-_MAX_RETRY_GUIDANCE_CHARS = 120_000
-_NON_RETRYABLE_ERROR_CATEGORIES = frozenset(
-    {
-        "auth_error",
-        "authorization_error",
-        "capability_error",
-        "context_length_exceeded",
-        "gateway_protocol_error",
-        "idempotency_conflict",
-        "invalid_request",
-        "protocol_error",
-        "request_validation_error",
-        "validation_error",
-    }
-)
-_NON_RETRYABLE_ERROR_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+_MAX_AUTO_RETRY_ATTEMPTS = MAX_ATTEMPTS
+_MAX_RETRY_RECOVERY_CALLS = MAX_RECOVERY_CALLS
+_MAX_RETRY_RECOVERY_CHARS = MAX_RECOVERY_CHARS
+_MAX_RETRY_GUIDANCE_ITEMS = MAX_GUIDANCE_ITEMS
+_MAX_RETRY_GUIDANCE_CHARS = MAX_GUIDANCE_CHARS
 
 
 def _metric_provider_responses(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -94,13 +90,7 @@ def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
     mutates the filesystem. Replaying either kind of live read hides the current state.
     """
 
-    if name == "expand_call":
-        command = str(arguments.get("command") or "").strip().casefold()
-        return command not in _EXPAND_CALL_LIVE_READ_COMMANDS
-    if name == "file":
-        action = str(arguments.get("action") or "").strip().casefold()
-        return action not in _FILE_LIVE_READ_ACTIONS
-    return True
+    return reuse_allowed(name, arguments)
 
 def _drain_guidance(channel: Any) -> list[Any]:
     drain = getattr(channel, "drain", None)
@@ -245,14 +235,7 @@ def _remember_retry_guidance(state: Any, values: list[Any]) -> None:
 def _auto_retry_attempt_limit(request: dict[str, Any]) -> int:
     """Return the bounded run retry limit without exposing a user setting."""
 
-    raw = request.get("_auto_retry_max_attempts", _MAX_AUTO_RETRY_ATTEMPTS)
-    if isinstance(raw, bool):
-        return _MAX_AUTO_RETRY_ATTEMPTS
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return _MAX_AUTO_RETRY_ATTEMPTS
-    return max(1, min(_MAX_AUTO_RETRY_ATTEMPTS, value))
+    return attempt_budget(request)
 
 def _retry_error_is_eligible(
     event: RunEvent,
@@ -263,124 +246,21 @@ def _retry_error_is_eligible(
 
     if event.type != "error":
         return False
-    if cancel_event is not None and cancel_event.is_set():
-        return False
-    metadata = event.metadata or {}
-    error = event.error if isinstance(event.error, dict) else {}
-    if metadata.get("cancelled") is True or error.get("cancelled") is True:
-        return False
-    phase = str(error.get("phase") or metadata.get("phase") or "run").casefold()
-    # Input validation is deterministic and must be reported immediately.
-    if phase == "request":
-        return False
-    # Provider/adapter declarations are authoritative.  Do not let the
-    # provisional-commit marker turn an explicit retryable=false into true.
-    containers: list[dict[str, Any]] = [error, metadata]
-    nested_details = error.get("details")
-    if isinstance(nested_details, dict):
-        containers.append(nested_details)
-    incomplete_details = error.get("incomplete_details")
-    if isinstance(incomplete_details, dict):
-        containers.append(incomplete_details)
-    for container in containers:
-        declared = container.get("retryable")
-        if isinstance(declared, bool):
-            return declared
-    category = str(
-        error.get("category")
-        or error.get("type")
-        or (nested_details.get("category") if isinstance(nested_details, dict) else "")
-        or ""
-    ).casefold()
-    if category in _NON_RETRYABLE_ERROR_CATEGORIES:
-        return False
-    for container in containers:
-        try:
-            status = int(container.get("status_code"))
-        except (TypeError, ValueError):
-            try:
-                status = int(container.get("provider_status"))
-            except (TypeError, ValueError):
-                status = None
-        if status in _NON_RETRYABLE_ERROR_STATUSES:
-            return False
-    return True
+    cancelled = cancel_event is not None and cancel_event.is_set()
+    return should_retry(view_from_event(event), cancelled=cancelled)
 
 def _failure_requires_immediate_commit(error: Any) -> bool:
-    """Do not leave a deterministic/non-retryable failure provisional."""
+    """Commit only cancellation or a lower-layer exhausted retry budget now."""
 
     if isinstance(error, BaseException):
-        declared = getattr(error, "retryable_declared", None)
-        if declared is True:
-            return getattr(error, "retryable", None) is False
-        category = str(
-            getattr(error, "category", "")
-            or getattr(error, "code", "")
-            or ""
-        ).casefold()
-        if category in _NON_RETRYABLE_ERROR_CATEGORIES:
-            return True
-        for raw_status in (
-            getattr(error, "status_code", None),
-            getattr(error, "provider_status", None),
-        ):
-            try:
-                if int(raw_status) in _NON_RETRYABLE_ERROR_STATUSES:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-    if not isinstance(error, dict):
-        return False
-    containers: list[dict[str, Any]] = [error]
-    details = error.get("details")
-    if isinstance(details, dict):
-        containers.append(details)
-    incomplete_details = error.get("incomplete_details")
-    if isinstance(incomplete_details, dict):
-        containers.append(incomplete_details)
-    for container in containers:
-        if isinstance(container.get("retryable"), bool):
-            return container["retryable"] is False
-    category = str(
-        error.get("category")
-        or error.get("type")
-        or (details.get("category") if isinstance(details, dict) else "")
-        or ""
-    ).casefold()
-    if category in _NON_RETRYABLE_ERROR_CATEGORIES:
-        return True
-    for container in containers:
-        try:
-            status = int(container.get("status_code"))
-        except (TypeError, ValueError):
-            try:
-                status = int(container.get("provider_status"))
-            except (TypeError, ValueError):
-                status = None
-        if status in _NON_RETRYABLE_ERROR_STATUSES:
-            return True
-    return str(error.get("phase") or "").casefold() == "request"
+        return must_commit_now(view_from_exception(error))
+    if isinstance(error, dict):
+        synthetic = RunEvent(type="error", error=error)
+        return must_commit_now(view_from_event(synthetic))
+    return False
 
 def _retry_reason(event: RunEvent) -> str:
-    error = event.error if isinstance(event.error, dict) else {}
-    raw = str(
-        (event.metadata or {}).get("stop_reason")
-        or error.get("stop_reason")
-        or (
-            error.get("incomplete_details", {}).get("reason")
-            if isinstance(error.get("incomplete_details"), dict)
-            else ""
-        )
-        or error.get("code")
-        or error.get("exception_type")
-        or "run_error"
-    ).strip()
-    safe = "".join(
-        character if character.isalnum() or character in "-_" else "_"
-        for character in raw
-    )
-    return safe[:80] or "run_error"
+    return retry_reason(view_from_event(event))
 
 def _retrying_event(
     event: RunEvent,
@@ -390,19 +270,12 @@ def _retrying_event(
     next_attempt: int,
     max_attempts: int,
 ) -> RunEvent:
-    error = event.error if isinstance(event.error, dict) else {}
-    exception_type = str(error.get("exception_type") or "RuntimeError").strip()
-    return RunEvent(
-        type="retrying",
-        content=f"运行出现问题，正在自动重试（第 {next_attempt}/{max_attempts} 次）",
-        metadata={
-            "run_id": run_id,
-            "failed_attempt": failed_attempt,
-            "next_attempt": next_attempt,
-            "max_attempts": max_attempts,
-            "exception_type": exception_type[:80],
-            "reason": _retry_reason(event),
-        },
+    return retrying_event(
+        event,
+        run_id=run_id,
+        failed_attempt=failed_attempt,
+        next_attempt=next_attempt,
+        max_attempts=max_attempts,
     )
 
 def _collect_retry_recovery(
@@ -703,8 +576,17 @@ def _committed_failure_event(
     }
     if event.usage is None and terminal_event.usage is not None:
         event.usage = dict(terminal_event.usage)
-    if not committed and failure:
-        # Provisional attempts are not shown as final failures and must not
-        # carry an upstream response body into the retry event stream.
-        event.error = failure
+    if failure:
+        # Always expose the normalized classification generated by the commit
+        # pipeline.  Provisional attempts contain only this bounded view;
+        # committed failures merge it over the public event so retry exhaustion
+        # and protocol codes cannot disappear after persistence.
+        public_error = event.error if isinstance(event.error, dict) else {}
+        if committed:
+            normalized_failure = dict(failure)
+            if public_error.get("message"):
+                normalized_failure.pop("message", None)
+            event.error = {**public_error, **normalized_failure}
+        else:
+            event.error = failure
     return event
