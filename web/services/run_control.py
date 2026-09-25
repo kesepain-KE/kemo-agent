@@ -265,10 +265,24 @@ class RunControlServiceMixin:
         normalized_session = self.require_session_id(session_id)
         normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
-            remaining_clients = self._release_session_lease_locked(
+            self._prune_session_leases_locked()
+            if normalized_client:
+                remaining_clients = self._release_session_lease_locked(
+                    name, normalized_source, normalized_session, normalized_client
+                )
+            else:
+                remaining_clients = len(self._session_leases.get(
+                    (name, normalized_source, normalized_session), {}
+                ))
+            if normalized_client:
+                self._release_durable_session_lease_locked(
+                    name, normalized_source, normalized_session, normalized_client
+                )
+            durable_clients = self._other_durable_session_clients_locked(
                 name, normalized_source, normalized_session, normalized_client
-            ) if normalized_client else 0
-            if normalized_client and remaining_clients:
+            )
+            remaining_clients = max(remaining_clients, len(durable_clients))
+            if remaining_clients:
                 record = find_index_record(
                     self.root, name, normalized_source, normalized_session
                 )

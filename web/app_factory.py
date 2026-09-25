@@ -133,11 +133,19 @@ def create_app(
                 logging.getLogger(__name__).warning('Startup Web session inspection unavailable')
             while not stop.wait(60):
                 try:
-                    backend.cleanup_empty_web_sessions(stop)
+                    inspector = getattr(backend, 'inspect_conversation_spaces_on_startup', None)
+                    if callable(inspector):
+                        inspector(
+                            stop,
+                            queue_reason='offline_session_expired',
+                            event_name='offline_session_inspection',
+                        )
+                    else:
+                        backend.cleanup_empty_web_sessions(stop)
                 except Exception:
-                    # A failed directory enumeration must not kill maintenance.
+                    # A failed inspection must not kill the lifecycle worker.
                     import logging
-                    logging.getLogger(__name__).warning('Empty Web session cleanup unavailable')
+                    logging.getLogger(__name__).warning('Web session lifecycle inspection unavailable')
 
         worker = None
         if callable(getattr(backend, 'cleanup_empty_web_sessions', None)):
@@ -487,7 +495,24 @@ def create_app(
         except ValueError:
             candidate = index
         if full_path and candidate.is_file():
-            return FileResponse(candidate, media_type=_frontend_media_type(candidate))
-        return FileResponse(index)
+            relative = candidate.relative_to(frontend_dist)
+            cache_control = (
+                "public, max-age=31536000, immutable"
+                if relative.parts and relative.parts[0] == "assets"
+                else "no-cache"
+            )
+            return FileResponse(
+                candidate,
+                media_type=_frontend_media_type(candidate),
+                headers={"Cache-Control": cache_control},
+            )
+        return FileResponse(
+            index,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     return app
