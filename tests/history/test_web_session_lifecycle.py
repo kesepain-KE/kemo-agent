@@ -44,8 +44,15 @@ class WebSessionLifecycleTests(unittest.TestCase):
 
     def age(self, sid, *, user='alice', source='web'):
         with connection(self.root, user, write=True) as db:
-            db.execute('UPDATE history_sessions SET updated_at=? WHERE source=? AND session_id=?',
-                       (datetime.fromtimestamp(self.now - 200, timezone.utc).isoformat(), source, sid))
+            timestamp = datetime.fromtimestamp(self.now - 200, timezone.utc).isoformat()
+            row = db.execute(
+                'SELECT record_json FROM history_sessions WHERE source=? AND session_id=?',
+                (source, sid),
+            ).fetchone()
+            record = json.loads(row['record_json']) if row is not None else {}
+            record['updated_at'] = timestamp
+            db.execute('UPDATE history_sessions SET updated_at=?, record_json=? WHERE source=? AND session_id=?',
+                       (timestamp, json.dumps(record, ensure_ascii=False), source, sid))
 
     def clean(self, **kwargs):
         return cleanup_empty_web_sessions(self.root, 'alice', now=self.now, **kwargs)
@@ -105,6 +112,14 @@ class WebSessionLifecycleTests(unittest.TestCase):
             touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now + 15)
             touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now + 30)
             self.assertEqual(sum(bool(call.kwargs.get('write')) for call in connect.call_args_list), 2)
+
+    def test_closed_session_rejects_late_lease_and_cannot_be_reopened(self):
+        self.seed_data('ended')
+        from run.history import close_session, prepare_window
+        close_session(self.root, 'alice', 'web', 'ended')
+        self.assertFalse(touch_web_session_lease(self.root, 'alice', 'ended', 'late', now=self.now))
+        with self.assertRaisesRegex(Exception, '已经结束'):
+            prepare_window(self.root, 'alice', 'web', 'ended')
 
     def test_data_and_claims_protected_even_with_zero_registry_rounds(self):
         for sid, field in [('running', 'run_state'), ('memory', 'memory_status'), ('summary', 'summary_status')]:
@@ -233,6 +248,17 @@ class WebSessionLifecycleTests(unittest.TestCase):
         replacement = WebRunService(self.root).create_session('alice', 'new_page')['session']['session_id']
         self.assertNotEqual(replacement, 'empty-startup')
 
+    def test_periodic_offline_inspection_uses_distinct_memory_reason(self):
+        self.seed_data('periodic-offline')
+        result = inspect_stale_web_sessions(
+            self.root, 'alice', now=self.now,
+            queue_reason='offline_session_expired',
+        )
+        self.assertEqual(result['queued_memory'], ['periodic-offline'])
+        record = find_record(self.root, 'alice', 'web', 'periodic-offline')
+        self.assertEqual(record['lifecycle'], 'closed')
+        self.assertEqual(record['memory_queue_reason'], 'offline_session_expired')
+
     def test_startup_inspection_protects_online_new_busy_and_partial_data(self):
         self.seed_data('online')
         touch_web_session_lease(self.root, 'alice', 'online', 'live_page', now=self.now)
@@ -295,6 +321,35 @@ class WebSessionLifecycleTests(unittest.TestCase):
         again = service.inspect_conversation_spaces_on_startup()
         self.assertEqual(again['queued_memory'], 0)
         wake.assert_called_once_with()
+
+    def test_service_inspection_retires_offline_app_data_but_keeps_live_app(self):
+        offline = empty_window('alice', 'app', 'app-offline')
+        offline['text']['messages'] = [
+            {'role': 'user', 'content': 'app fact'},
+            {'role': 'assistant', 'content': 'saved'},
+        ]
+        offline['data'].update(rounds=1, memory_status='deferred', memory_processed_round=0)
+        path = self.root / 'users/alice/history/conv_app_offline'
+        commit_terminal_windows(path, offline, runtime_window_path(path), copy.deepcopy(offline))
+        self.age('app-offline', source='app')
+
+        service = WebRunService(self.root)
+        reserve_session(
+            self.root, 'alice', 'app', 'app-live',
+            active_key='app:alice:app_live_client',
+        )
+        live = service.active_session('alice', 'app_live_client', source='app')
+        live_id = live['session']['session_id']
+        self.age(live_id, source='app')
+
+        result = service.inspect_conversation_spaces_on_startup()
+        self.assertEqual(result['queued_memory'], 1)
+        self.assertEqual(find_record(self.root, 'alice', 'app', 'app-offline')['lifecycle'], 'closed')
+        self.assertEqual(
+            find_record(self.root, 'alice', 'app', 'app-offline')['memory_queue_reason'],
+            'startup_offline_app_session',
+        )
+        self.assertEqual(find_record(self.root, 'alice', 'app', live_id)['lifecycle'], 'open')
 
     def test_app_lifespan_runs_one_delayed_startup_pass(self):
         service = WebRunService(self.root)

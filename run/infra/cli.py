@@ -18,18 +18,18 @@ from run.history import (
 def resolve_interactive_context(
     user: str, *, root: Path | None = None
 ) -> dict[str, str]:
-    """Resolve the Web/CLI shared interactive binding for CLI presentation."""
+    """Resolve the CLI-owned binding; a finished process never reopens Web chat."""
 
     base = (root or project_root()).resolve()
     active, _ = get_or_reserve_history_session(
         base,
         user,
-        "web",
-        f"interactive:{user}",
+        "cli",
+        f"cli:{user}",
         reuse_latest=True,
     )
     return {
-        "source": str(active.get("source") or "web"),
+        "source": str(active.get("source") or "cli"),
         "session_id": str(active.get("session_id") or ""),
     }
 
@@ -44,10 +44,10 @@ def _interactive_request(
     if not user:
         raise ValueError("CLI 请求缺少字段：user")
     base = (root or project_root()).resolve()
-    active_key = f"interactive:{user}"
+    active_key = f"cli:{user}"
     session_id = str(payload.get("session_id") or "").strip()
     if not session_id:
-        # Web and CLI intentionally share one canonical interactive binding.
+        # Each CLI process owns its continuation and closes it on exit.
         context = resolve_interactive_context(user, root=base)
         session_id = context["session_id"]
         payload["source"] = context["source"]

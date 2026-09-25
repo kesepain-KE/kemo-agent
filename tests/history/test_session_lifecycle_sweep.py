@@ -16,6 +16,7 @@ from run.history import (
     reserve_session,
     runtime_window_path,
     update_run_state,
+    touch_session_lease,
 )
 from run.history.store import connection
 from run.scheduler.session_sweep import sweep_idle_sessions
@@ -91,7 +92,7 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.assertEqual(result["closed"], 0)
         self.assertEqual(find_record(self.root, "alice", "web", "recent")["lifecycle"], "open")
 
-    def test_closed_session_is_idempotently_skipped(self) -> None:
+    def test_closed_session_with_unqueued_rounds_is_recovered(self) -> None:
         self.seed("closed")
         with connection(self.root, "alice", write=True) as db:
             row = db.execute(
@@ -106,6 +107,8 @@ class SessionLifecycleSweepTests(unittest.TestCase):
             )
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
+        self.assertEqual(result["requeued_closed"], 1)
+        self.assertEqual(find_record(self.root, "alice", "web", "closed")["memory_status"], "queued")
 
     def test_running_session_is_skipped(self) -> None:
         self.seed("running")
@@ -125,6 +128,15 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.assertEqual(result["closed"], 0)
         self.assertEqual(find_record(self.root, "alice", "web", "leased")["lifecycle"], "open")
 
+    def test_online_app_lease_is_skipped(self) -> None:
+        self.seed("app-live", source="app")
+        self.assertTrue(touch_session_lease(
+            self.root, "alice", "app", "app-live", "app-device", now=self.now,
+        ))
+        result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
+        self.assertEqual(result["closed"], 0)
+        self.assertEqual(find_record(self.root, "alice", "app", "app-live")["lifecycle"], "open")
+
     def test_one_failure_does_not_stop_following_sessions(self) -> None:
         self.seed("first")
         self.seed("second")
@@ -138,7 +150,11 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         with patch("run.scheduler.session_sweep.queue_memory_extraction", side_effect=fail_first):
             result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertTrue(result["errors"])
+        self.assertEqual(find_record(self.root, "alice", "web", "first")["lifecycle"], "closed")
         self.assertEqual(find_record(self.root, "alice", "web", "second")["lifecycle"], "closed")
+        recovered = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
+        self.assertEqual(recovered["requeued_closed"], 1)
+        self.assertEqual(find_record(self.root, "alice", "web", "first")["memory_status"], "queued")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from run.agents import AgentRunner
 from run.config import load_config
 from run.scheduler import CronError, CronStore, CronValidationError, now_beijing
 from run.engine import handle_request
-from run.history import close_session, new_conversation_id, queue_memory_extraction
+from run.history import close_session, new_conversation_id, queue_memory_extraction, rename_session
 from run.extensions import record_expand_runtime
 from run.extensions import (
     module_update_timeout as _module_update_timeout,
@@ -77,7 +77,7 @@ def _execute_internal_function(
 
 def _claim_task(store: CronStore, task_id: str) -> dict[str, Any]:
     def _claim(task: dict[str, Any]) -> dict[str, Any]:
-        if task["status"] not in ("enabled", "failed"):
+        if task["status"] != "enabled":
             raise CronError(f"任务 {task_id} 当前状态为 {task['status']!r}，无法领取")
         task["status"] = "running"
         task["latest_run_at"] = now_beijing()
@@ -97,14 +97,21 @@ def _finish_task(store: CronStore, task: dict[str, Any], *, failed: bool) -> dic
         if failed:
             current["status"] = "failed"
             return current
+        current["successful_runs"] = int(current.get("successful_runs") or 0) + 1
         if current["type"] == "once":
+            current["status"] = "completed"
+            current["next_run_at"] = ""
+            return current
+        max_runs = current.get("max_runs")
+        if isinstance(max_runs, int) and current["successful_runs"] >= max_runs:
             current["status"] = "completed"
             current["next_run_at"] = ""
             return current
         from cron.schedule import compute_next_run
 
-        current["status"] = "enabled"
-        current["next_run_at"] = compute_next_run(current, after=datetime.now().astimezone())
+        next_run_at = compute_next_run(current, after=datetime.now().astimezone())
+        current["status"] = "enabled" if next_run_at else "completed"
+        current["next_run_at"] = next_run_at
         return current
 
     try:
@@ -140,7 +147,7 @@ def _execute_claimed_task(
     if cancel_event is not None and cancel_event.is_set():
         return _revert_claim(store, task_id)
 
-    failed = False
+    failure: Exception | None = None
     background_session_id = ""
     background_source = f"background:cron:{task_id}"
     try:
@@ -168,9 +175,7 @@ def _execute_claimed_task(
                 cancel_event=cancel_event,
             )
         else:
-            background_session_id = str(task.get("session_id") or "").strip()
-            if not background_session_id or background_session_id == "cron":
-                background_session_id = new_conversation_id()
+            background_session_id = new_conversation_id()
             request_payload: dict[str, Any] = {
                 "user": task["user"],
                 "prompt": task["prompt"],
@@ -190,6 +195,16 @@ def _execute_claimed_task(
             finally:
                 try:
                     try:
+                        rename_session(
+                            root,
+                            task["user"],
+                            background_source,
+                            background_session_id,
+                            str(task.get("title") or task_id),
+                        )
+                    except Exception:
+                        pass
+                    try:
                         queue_memory_extraction(
                             root, task["user"], background_source, background_session_id,
                             reason="cron_session_closed",
@@ -198,9 +213,15 @@ def _execute_claimed_task(
                         close_session(root, task["user"], background_source, background_session_id)
                 except Exception:
                     pass
-    except Exception:
-        failed = True
-    return _finish_task(store, task, failed=failed)
+    except Exception as exc:
+        failure = exc
+    result = _finish_task(store, task, failed=failure is not None)
+    if failure is not None:
+        result["_execution_error"] = {
+            "type": type(failure).__name__,
+            "message": str(failure)[:1000],
+        }
+    return result
 
 
 def _execute_memory_promotion(

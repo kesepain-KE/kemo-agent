@@ -122,6 +122,8 @@ class CLITests(unittest.TestCase):
     def test_interactive_session_commands(self) -> None:
         root = Path(self.make_root("kesepain").name)
         (root / "users" / "kesepain" / "history").mkdir()
+        from run.history import reserve_session
+        reserve_session(root, "kesepain", "cli", "beta", active_key="cli:kesepain")
         stdout = io.StringIO()
         code = cli.main(
             ["--interactive", "--session", "initial"],

@@ -121,6 +121,41 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 10)
         self.assertEqual(len(window["text"]["messages"]), 4)
 
+    def test_closed_conversation_cannot_be_silently_resumed(self) -> None:
+        _, root = self.make_root()
+        from run.history import close_session, queue_memory_extraction
+        from run.infra import EngineError
+
+        request = {"user": "alice", "source": "cli", "session_id": "ended", "prompt": "one"}
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
+        queue_memory_extraction(root, "alice", "cli", "ended")
+        close_session(root, "alice", "cli", "ended")
+        request["prompt"] = "must not append"
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            with self.assertRaisesRegex(EngineError, "已经结束"):
+                handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
+        self.assertEqual(load_window(find_window(root, "alice", "cli", "ended"))["data"]["rounds"], 1)
+
+    def test_deleted_conversation_is_rejected_before_provider_execution(self) -> None:
+        _, root = self.make_root()
+        from run.history import delete_session
+        from run.infra import EngineError
+
+        request = {"user": "alice", "source": "cli", "session_id": "deleted", "prompt": "one"}
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
+        self.assertEqual(delete_session(root, "alice", "cli", "deleted"), 1)
+        invoked = []
+        request["prompt"] = "must not execute"
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            with self.assertRaisesRegex(EngineError, "已经删除"):
+                handle_request(
+                    request, root=root,
+                    provider_factory=lambda _: invoked.append(True) or MockProvider([]),
+                )
+        self.assertEqual(invoked, [])
+
     def test_archive_is_unbounded_while_temp_is_bounded_and_recoverable(self) -> None:
         _, root = self.make_root()
         (root / "config" / "global_config.json").write_text(
@@ -404,7 +439,7 @@ class EngineAndCLITests(unittest.TestCase):
             window = load_window(find_window(root, "alice", "cli", "chat"))
             self.assertEqual(window["data"]["rounds"], 2)
 
-    def test_default_cli_resolves_the_shared_web_interactive_session(self) -> None:
+    def test_default_cli_owns_and_retires_its_own_session(self) -> None:
         _, root = self.make_root()
         received: list[dict[str, str]] = []
 
@@ -424,12 +459,51 @@ class EngineAndCLITests(unittest.TestCase):
             )
 
         self.assertEqual(code, 0)
-        self.assertEqual(received[0]["source"], "web")
+        self.assertEqual(received[0]["source"], "cli")
         self.assertTrue(received[0]["session_id"].startswith("conv_"))
+        from run.history import find_record
         self.assertEqual(
+            find_record(root, "alice", "cli", received[0]["session_id"])["lifecycle"],
+            "closed",
+        )
+        self.assertNotEqual(
             received[0]["session_id"],
             cli.resolve_interactive_context("alice", root)["session_id"],
         )
+
+    def test_interactive_new_retires_previous_and_use_rejects_closed(self) -> None:
+        _, root = self.make_root()
+        seen: list = []
+
+        def handler(request):
+            return handle_request(
+                request, root=root, provider_factory=lambda _: MockProvider(seen)
+            )
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            self.assertEqual(
+                cli.main(
+                    ["--user", "alice", "--interactive", "--session", "first"],
+                    handler=handler,
+                    stdin=io.StringIO("one\n/new second\ntwo\n/exit\n"),
+                    stdout=output,
+                    stderr=io.StringIO(),
+                    root=root,
+                ),
+                0,
+            )
+        from run.history import find_record
+        self.assertEqual(find_record(root, "alice", "cli", "first")["lifecycle"], "closed")
+        self.assertEqual(find_record(root, "alice", "cli", "first")["memory_status"], "queued")
+        self.assertEqual(find_record(root, "alice", "cli", "second")["lifecycle"], "closed")
+        handled, selected = cli._interactive_command(
+            "/use first", root=root, user="alice", source="cli",
+            session_id="second", stdout=output,
+        )
+        self.assertTrue(handled)
+        self.assertEqual(selected, "second")
+        self.assertIn("会话已经结束，只能查看历史", output.getvalue())
 
 
 if __name__ == "__main__":

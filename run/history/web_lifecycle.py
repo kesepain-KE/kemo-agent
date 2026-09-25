@@ -1,4 +1,4 @@
-"""Cross-process browser presence, startup inspection, and empty cleanup."""
+"""Cross-process interactive presence, Web offline inspection, and empty cleanup."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -16,6 +16,20 @@ WEB_LEASE_CHECKPOINT_SECONDS = 30
 WEB_EMPTY_GRACE_SECONDS = 90
 WEB_STARTUP_INSPECTION_DELAY_SECONDS = 90
 WEB_INSPECTION_RESULT_SAMPLE_LIMIT = 20
+_LEASE_SCOPE_SEPARATOR = '\x1f'
+
+
+def _lease_client_key(source: str, client_id: str) -> str:
+    # v6 Web rows predate source-scoped leases and remain plain for migration
+    # compatibility. Non-Web sources are prefixed to prevent session-id
+    # collisions from making one channel look alive in another.
+    return client_id if source == 'web' else f'{source}{_LEASE_SCOPE_SEPARATOR}{client_id}'
+
+
+def _lease_scope_sql(source: str) -> tuple[str, str]:
+    if source == 'web':
+        return "l.client_id NOT LIKE ?", f'%{_LEASE_SCOPE_SEPARATOR}%'
+    return "l.client_id LIKE ?", f'{source}{_LEASE_SCOPE_SEPARATOR}%'
 
 _HAS_DATA = """(
     s.rounds>0
@@ -33,7 +47,8 @@ _STALE_OFFLINE = """s.source='web' AND s.lifecycle!='deleted'
     AND s.run_state NOT IN ('running', 'queued', 'pending')
     AND s.memory_status!='processing' AND s.summary_status!='processing'
     AND julianday(s.updated_at)<=julianday(?)
-    AND NOT EXISTS (SELECT 1 FROM history_web_leases l WHERE l.session_id=s.session_id AND l.expires_at>?)
+    AND NOT EXISTS (SELECT 1 FROM history_web_leases l WHERE l.session_id=s.session_id
+        AND l.expires_at>? AND instr(l.client_id, char(31))=0)
 """
 
 _STARTUP_NEEDS_REVIEW = f"""{_STALE_OFFLINE} AND (
@@ -47,29 +62,80 @@ _STARTUP_NEEDS_REVIEW = f"""{_STALE_OFFLINE} AND (
 )"""
 
 
-def touch_web_session_lease(root: Path, user: str, session_id: str, client_id: str,
-                            *, now: float | None = None) -> bool:
+def touch_session_lease(root: Path, user: str, source: str, session_id: str,
+                        client_id: str, *, now: float | None = None) -> bool:
     """Small durable presence checkpoint; a late heartbeat never recreates history.
 
     Read-only fast path avoids a write transaction for each 15-second heartbeat.
     All processes still recheck session existence inside any renewal transaction.
     """
     current = time.time() if now is None else now
+    stored_client_id = _lease_client_key(source, client_id)
     with connection(root, user) as db:
         row = db.execute("""SELECT l.expires_at FROM history_sessions s
             LEFT JOIN history_web_leases l ON l.session_id=s.session_id AND l.client_id=?
-            WHERE s.source='web' AND s.session_id=?""", (client_id, session_id)).fetchone()
+            WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'""",
+            (stored_client_id, source, session_id)).fetchone()
         if row is None:
             return False
         if row['expires_at'] is not None and row['expires_at'] > current + WEB_LEASE_SECONDS - WEB_LEASE_CHECKPOINT_SECONDS:
             return True
     with connection(root, user, write=True) as db:
-        if db.execute("SELECT 1 FROM history_sessions WHERE source='web' AND session_id=?", (session_id,)).fetchone() is None:
+        if db.execute("SELECT 1 FROM history_sessions WHERE source=? AND session_id=? AND lifecycle='open'",
+                      (source, session_id)).fetchone() is None:
             return False
         db.execute("""INSERT INTO history_web_leases(session_id, client_id, expires_at) VALUES(?, ?, ?)
             ON CONFLICT(session_id, client_id) DO UPDATE SET expires_at=MAX(expires_at, excluded.expires_at)""",
-            (session_id, client_id, current + WEB_LEASE_SECONDS))
+            (session_id, stored_client_id, current + WEB_LEASE_SECONDS))
     return True
+
+
+def touch_web_session_lease(root: Path, user: str, session_id: str, client_id: str,
+                            *, now: float | None = None) -> bool:
+    """Compatibility wrapper for browser callers."""
+    return touch_session_lease(root, user, 'web', session_id, client_id, now=now)
+
+
+def active_session_lease_clients(root: Path, user: str, source: str, session_id: str,
+                                 *, exclude_client_id: str = '',
+                                 now: float | None = None) -> list[str]:
+    """Return durable live clients without creating a missing history database."""
+    if not database_path(root, user).is_file():
+        return []
+    current = time.time() if now is None else now
+    scope_sql, scope_value = _lease_scope_sql(source)
+    excluded = _lease_client_key(source, exclude_client_id) if exclude_client_id else ''
+    with connection(root, user) as db:
+        rows = db.execute(
+            """SELECT l.client_id FROM history_web_leases l
+               JOIN history_sessions s ON s.session_id=l.session_id
+               WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'
+                 AND l.expires_at>? AND l.client_id!=? AND """ + scope_sql + """
+               ORDER BY l.client_id""",
+            (source, session_id, current, excluded, scope_value),
+        ).fetchall()
+    prefix = f'{source}{_LEASE_SCOPE_SEPARATOR}'
+    return [str(row['client_id'])[len(prefix):] if source != 'web' else str(row['client_id'])
+            for row in rows]
+
+
+def release_durable_session_lease(root: Path, user: str, source: str,
+                                  session_id: str, client_id: str) -> bool:
+    """Release one explicitly closed client; pagehide still uses natural expiry."""
+    if not database_path(root, user).is_file():
+        return False
+    with connection(root, user, write=True) as db:
+        exists = db.execute(
+            "SELECT 1 FROM history_sessions WHERE source=? AND session_id=?",
+            (source, session_id),
+        ).fetchone()
+        if exists is None:
+            return False
+        changed = db.execute(
+            "DELETE FROM history_web_leases WHERE session_id=? AND client_id=?",
+            (session_id, _lease_client_key(source, client_id)),
+        ).rowcount
+    return bool(changed)
 
 
 _EMPTY = f"{_STALE_OFFLINE} AND NOT {_HAS_DATA}"
@@ -91,6 +157,7 @@ def inspect_stale_web_sessions(
     stop: threading.Event | None = None,
     batch_size: int = 100,
     queue_memory: Callable[..., dict[str, Any]] | None = None,
+    queue_reason: str = 'startup_offline_session',
 ) -> dict[str, Any]:
     """One startup pass: retire offline data sessions and delete empty ones.
 
@@ -200,7 +267,7 @@ def inspect_stale_web_sessions(
                         sample('closed_sessions', session_id)
                     queued = queue_memory(
                         root, user, 'web', session_id,
-                        reason='startup_offline_session',
+                        reason=queue_reason,
                     )
                     status = str((queued or {}).get('status') or 'unknown')
                     if status == 'queued':

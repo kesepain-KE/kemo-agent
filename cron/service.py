@@ -32,7 +32,7 @@ def _current_beijing() -> str:
 
 def _draft_from_agent(data: dict[str, Any]) -> dict[str, Any]:
     task_type = data.get("type")
-    if task_type not in {"recurring", "daily", "once"}:
+    if task_type not in {"recurring", "daily", "weekly", "monthly", "once"}:
         raise CronGenerationError(f"time_plan 子代理未返回有效 type：{task_type!r}")
     draft: dict[str, Any] = {"type": task_type}
     if task_type == "recurring":
@@ -40,17 +40,33 @@ def _draft_from_agent(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 60:
             raise CronGenerationError("用户 recurring 任务需要 interval_seconds >= 60")
         draft["interval_seconds"] = interval
-    elif task_type == "daily":
-        draft["time"] = data.get("time")
+    elif task_type in {"daily", "weekly", "monthly"}:
+        has_time = isinstance(data.get("time"), str) and bool(data["time"].strip())
+        has_times = isinstance(data.get("times"), list) and bool(data["times"])
+        if has_time == has_times:
+            raise CronGenerationError(f"{task_type} 任务必须且只能返回 time 或 times")
+        if has_times:
+            draft["times"] = data["times"]
+        else:
+            draft["time"] = data.get("time")
+        if task_type == "weekly":
+            draft["weekdays"] = data.get("weekdays")
+        elif task_type == "monthly":
+            draft["month_days"] = data.get("month_days")
     else:
         next_run_at = data.get("next_run_at")
         if not isinstance(next_run_at, str) or not next_run_at.strip():
             raise CronGenerationError("once 任务需要 next_run_at")
         draft["next_run_at"] = next_run_at
+    for field in ("start_date", "end_date", "max_runs"):
+        if data.get(field) not in (None, "", 0):
+            draft[field] = data[field]
     try:
         draft["next_run_at"] = compute_next_run(draft)
     except CronValidationError as exc:
         raise CronGenerationError(f"调度时间计算失败：{exc}") from exc
+    if not draft["next_run_at"]:
+        raise CronGenerationError("调度范围内已经没有可执行时间")
     return draft
 
 
@@ -117,6 +133,12 @@ def generate_cron_task(
             type=draft["type"],
             interval_seconds=draft.get("interval_seconds"),
             time=draft.get("time"),
+            times=draft.get("times"),
+            weekdays=draft.get("weekdays"),
+            month_days=draft.get("month_days"),
+            start_date=draft.get("start_date", ""),
+            end_date=draft.get("end_date", ""),
+            max_runs=draft.get("max_runs"),
             next_run_at=draft["next_run_at"],
         )
     except CronValidationError as exc:
@@ -148,7 +170,12 @@ def edit_cron_task(
         return {"action": "delete"}
     title = data.get("title") or task.get("title", "")
     prompt = data.get("prompt") or task.get("prompt", "")
-    draft = _draft_from_agent(data)
+    merged = {**task, **data}
+    if "time" in data:
+        merged.pop("times", None)
+    if "times" in data:
+        merged.pop("time", None)
+    draft = _draft_from_agent(merged)
     try:
         return normalize_task(
             task_id=task.get("task_id"),
@@ -158,6 +185,13 @@ def edit_cron_task(
             type=draft["type"],
             interval_seconds=draft.get("interval_seconds"),
             time=draft.get("time"),
+            times=draft.get("times"),
+            weekdays=draft.get("weekdays"),
+            month_days=draft.get("month_days"),
+            start_date=draft.get("start_date", ""),
+            end_date=draft.get("end_date", ""),
+            max_runs=draft.get("max_runs"),
+            successful_runs=int(task.get("successful_runs") or 0),
             next_run_at=draft["next_run_at"],
             latest_run_at=str(task.get("latest_run_at") or ""),
             status=str(task.get("status") or "enabled"),
