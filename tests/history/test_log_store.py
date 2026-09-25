@@ -54,6 +54,44 @@ class LogStoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["task_id"], "memory_promotion")
             self.assertEqual(rows[0]["result"], {"status": "completed"})
 
+    def test_task_specific_cron_query_filters_before_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LogStore(Path(directory))
+            records = [
+                {
+                    "executed_at": "2026-10-01T08:00:00+08:00",
+                    "user": "alice",
+                    "task_id": "cron_target",
+                    "status": "success",
+                    "duration_ms": 1,
+                    "result": {"order": 1},
+                },
+                {
+                    "executed_at": "2026-10-02T08:00:00+08:00",
+                    "user": "alice",
+                    "task_id": "cron_target",
+                    "status": "success",
+                    "duration_ms": 1,
+                    "result": {"order": 2},
+                },
+            ]
+            records.extend(
+                {
+                    "executed_at": f"2026-11-{1 + index // 86400:02d}T00:{(index // 60) % 60:02d}:{index % 60:02d}+08:00",
+                    "user": "alice",
+                    "task_id": "cron_unrelated",
+                    "status": "success",
+                    "duration_ms": 1,
+                    "result": {"index": index},
+                }
+                for index in range(5000)
+            )
+            store.append_cron_records(records)
+
+            self.assertNotIn("cron_target", {row["task_id"] for row in store.list_cron("alice", limit=5000)})
+            target_rows = store.list_cron_for_task("alice", "cron_target", limit=2)
+            self.assertEqual([row["result"]["order"] for row in target_rows], [2, 1])
+
     def test_message_records_are_idempotent_and_queryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = LogStore(Path(directory))

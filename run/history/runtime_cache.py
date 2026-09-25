@@ -20,6 +20,9 @@ from typing import Any
 
 MAX_ENTRIES = 64
 MAX_ENTRY_BYTES = 8 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_OWNER_ENTRIES = 16
+MAX_OWNER_BYTES = 16 * 1024 * 1024
 
 _LOCK = threading.RLock()
 _CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -54,6 +57,20 @@ def _size_bytes(window: dict[str, Any]) -> int:
         return MAX_ENTRY_BYTES + 1
 
 
+def _owner(window: dict[str, Any], key: str) -> str:
+    data = window.get("data") if isinstance(window, dict) else None
+    user = str(data.get("user") or "").strip() if isinstance(data, dict) else ""
+    if user:
+        for parent in Path(key).parents:
+            if parent.name == user and parent.parent.name.casefold() == "users":
+                return os.path.normcase(str(parent))
+    return key
+
+
+def _cached_bytes() -> int:
+    return sum(int(entry.get("size") or 0) for entry in _CACHE.values())
+
+
 def load(directory: Path, *, version: str) -> dict[str, Any] | None:
     key = cache_key(directory)
     with _LOCK:
@@ -71,17 +88,32 @@ def store(directory: Path, window: dict[str, Any], *, version: str) -> bool:
     rendered = copy.deepcopy(window)
     size = _size_bytes(rendered)
     key = cache_key(directory)
+    owner = _owner(rendered, key)
     with _LOCK:
-        if size > MAX_ENTRY_BYTES:
+        if size > min(MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, MAX_OWNER_BYTES):
             _CACHE.pop(key, None)
             return False
+        _CACHE.pop(key, None)
         _CACHE[key] = {
             "version": str(version or ""),
             "window": rendered,
             "size": size,
+            "owner": owner,
         }
         _CACHE.move_to_end(key)
-        while len(_CACHE) > MAX_ENTRIES:
+        owned = [
+            candidate
+            for candidate, entry in _CACHE.items()
+            if str(entry.get("owner") or candidate) == owner
+        ]
+        owner_bytes = sum(int(_CACHE[candidate].get("size") or 0) for candidate in owned)
+        while owned and (
+            len(owned) > MAX_OWNER_ENTRIES or owner_bytes > MAX_OWNER_BYTES
+        ):
+            oldest = owned.pop(0)
+            owner_bytes -= int(_CACHE[oldest].get("size") or 0)
+            _CACHE.pop(oldest, None)
+        while len(_CACHE) > MAX_ENTRIES or _cached_bytes() > MAX_TOTAL_BYTES:
             _CACHE.popitem(last=False)
     return True
 
@@ -152,13 +184,16 @@ def stats() -> dict[str, int]:
     with _LOCK:
         return {
             "entries": len(_CACHE),
-            "bytes": sum(int(entry.get("size") or 0) for entry in _CACHE.values()),
+            "bytes": _cached_bytes(),
         }
 
 
 __all__ = [
     "MAX_ENTRIES",
     "MAX_ENTRY_BYTES",
+    "MAX_TOTAL_BYTES",
+    "MAX_OWNER_ENTRIES",
+    "MAX_OWNER_BYTES",
     "archive_version",
     "cache_key",
     "clear",

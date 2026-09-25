@@ -387,6 +387,7 @@ def query_session_records(
     query: str = "",
     limit: int | None = None,
     before_updated_at: str = "",
+    archive_date: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     clauses = ["lifecycle != 'deleted'"]
     params: list[Any] = []
@@ -407,6 +408,12 @@ def query_session_records(
         )
         needle = f"%{query.strip().casefold()}%"
         params.extend((needle, needle, needle, needle))
+    if archive_date:
+        # Session timestamps are persisted as ISO-8601 UTC values.  SQLite
+        # first normalizes explicit offsets and then applies the Shanghai
+        # offset, so the filter follows the product's fixed natural-day rule.
+        clauses.append("date(updated_at, '+8 hours')=?")
+        params.append(archive_date)
     if before_updated_at:
         cursor_updated_at = before_updated_at
         cursor_session_id = ""
@@ -478,27 +485,70 @@ def session_page_cursor(record: dict[str, Any]) -> str:
     )
 
 
-def message_windows(root: Path, user: str) -> list[dict[str, Any]]:
-    """Return archive messages grouped by window for rich search semantics."""
+def message_windows(
+    root: Path,
+    user: str,
+    *,
+    source: str = "",
+    session_id: str = "",
+) -> list[dict[str, Any]]:
+    """Return committed archive messages grouped by window for rich search.
+
+    The structured ``history_messages.content_text`` column is authoritative
+    for searchable user-visible text.  ``message_json`` may contain a
+    multimodal content array, so callers must not have to reimplement text
+    extraction or lose those messages.  Optional identity filters keep plugin
+    searches from loading unrelated sessions.
+    """
+
+    clauses = [
+        "window.window_kind='archive'",
+        "NOT EXISTS ("
+        "SELECT 1 FROM history_deleted_sessions AS deleted "
+        "WHERE deleted.source=window.source "
+        "AND deleted.session_id=window.session_id)",
+    ]
+    params: list[Any] = []
+    if source:
+        clauses.append("window.source=?")
+        params.append(source)
+    if session_id:
+        clauses.append("window.session_id=?")
+        params.append(session_id)
+    where = " AND ".join(clauses)
 
     with connection(root, user) as database:
         windows = database.execute(
-            """
-            SELECT window_name, source, session_id, data_json
-            FROM history_windows WHERE window_kind='archive'
-            ORDER BY updated_at DESC, window_name DESC
-            """
+            f"""
+            SELECT window.window_name, window.source, window.session_id,
+                   window.data_json
+            FROM history_windows AS window
+            WHERE {where}
+            ORDER BY window.updated_at DESC, window.window_name DESC
+            """,
+            params,
         ).fetchall()
         messages = database.execute(
-            """
-            SELECT window_name, message_index, role, content_text, message_json
-            FROM history_messages ORDER BY window_name, message_index
-            """
+            f"""
+            SELECT message.window_name, message.message_index, message.role,
+                   message.content_text, message.message_json
+            FROM history_messages AS message
+            JOIN history_windows AS window
+              ON window.window_kind='archive'
+             AND window.window_name=message.window_name
+            WHERE {where}
+            ORDER BY message.window_name, message.message_index
+            """,
+            params,
         ).fetchall()
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in messages:
         message = _object(row["message_json"], {})
         if isinstance(message, dict):
+            message = dict(message)
+            message["role"] = str(row["role"])
+            message["content"] = str(row["content_text"])
+            message["_history_message_index"] = int(row["message_index"])
             grouped.setdefault(str(row["window_name"]), []).append(message)
     return [
         {

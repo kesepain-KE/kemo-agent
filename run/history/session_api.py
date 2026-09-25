@@ -21,6 +21,8 @@ from run.history.index import (
 )
 from run.history.runtime_window import load_window, runtime_window_path
 from run.history.store import (
+    connection,
+    database_path,
     delete_session_windows,
     delete_source_windows,
     find_window_name,
@@ -41,6 +43,21 @@ def find_window(root: Path, user: str, source: str, session_id: str) -> Path | N
             return indexed_directory
     stored_name = find_window_name(root, user, source, session_id)
     return history_dir / stored_name if stored_name else None
+
+
+def ensure_session_appendable(root: Path, user: str, source: str, session_id: str) -> None:
+    """Reject terminal identities before Provider/tool work can start."""
+    indexed = find_index_record(root, user, source, session_id)
+    if isinstance(indexed, dict) and str(indexed.get("lifecycle") or "") in {"closed", "deleted"}:
+        raise HistoryError("对话已经结束，不能继续追加；请创建新对话")
+    if indexed is None and database_path(root, user).is_file():
+        with connection(root, user) as database:
+            deleted = database.execute(
+                "SELECT 1 FROM history_deleted_sessions WHERE source=? AND session_id=?",
+                (source, session_id),
+            ).fetchone()
+        if deleted is not None:
+            raise HistoryError("对话已经删除，不能用旧链接继续；请创建新对话")
 
 
 def queue_memory_extraction(
@@ -139,6 +156,7 @@ def prepare_window(
     conversation windows.
     """
 
+    ensure_session_appendable(root, user, source, session_id)
     indexed = find_index_record(root, user, source, session_id)
     existing = find_window(root, user, source, session_id)
     if existing is not None:
@@ -237,10 +255,17 @@ def list_sessions(
     source: str | None,
     *,
     query: str = "",
+    archive_date: str = "",
 ) -> list[dict[str, Any]]:
     return [
         _session_payload(record)
-        for record in list_index_records(root, user, source=source, query=query)
+        for record in list_index_records(
+            root,
+            user,
+            source=source,
+            query=query,
+            archive_date=archive_date,
+        )
     ]
 
 
@@ -252,6 +277,7 @@ def list_sessions_page(
     query: str = "",
     limit: int = 50,
     before_updated_at: str = "",
+    archive_date: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     records, has_more = list_index_records_page(
         root,
@@ -260,6 +286,7 @@ def list_sessions_page(
         query=query,
         limit=limit,
         before_updated_at=before_updated_at,
+        archive_date=archive_date,
     )
     return [_session_payload(record) for record in records], has_more
 

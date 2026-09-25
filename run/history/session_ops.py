@@ -467,6 +467,7 @@ def list_records(
     query: str = "",
     limit: int | None = None,
     before_updated_at: str = "",
+    archive_date: str = "",
 ) -> list[dict[str, Any]]:
     records, _ = query_session_records(
         root,
@@ -475,6 +476,7 @@ def list_records(
         query=query,
         limit=limit,
         before_updated_at=before_updated_at,
+        archive_date=archive_date,
     )
     return [copy.deepcopy(record) for record in records]
 
@@ -487,6 +489,7 @@ def list_records_page(
     query: str = "",
     limit: int = 50,
     before_updated_at: str = "",
+    archive_date: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     records, has_more = query_session_records(
         root,
@@ -495,5 +498,6 @@ def list_records_page(
         query=query,
         limit=max(1, min(100, int(limit))),
         before_updated_at=before_updated_at,
+        archive_date=archive_date,
     )
     return [copy.deepcopy(record) for record in records], has_more

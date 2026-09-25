@@ -18,6 +18,7 @@ from run.history.session_api import (
     clear_session,
     delete_all_sessions,
     delete_session,
+    ensure_session_appendable,
     find_window,
     get_or_create_window,
     list_sessions,

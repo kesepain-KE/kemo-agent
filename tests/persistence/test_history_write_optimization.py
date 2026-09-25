@@ -327,6 +327,70 @@ def test_runtime_cache_is_deep_copied_and_lru_bounded(
     assert reloaded["data"].get("title") != "mutated"
 
 
+def test_runtime_cache_enforces_total_bytes_and_per_user_fairness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cache.clear()
+    monkeypatch.setattr(runtime_cache, "MAX_ENTRIES", 10)
+    monkeypatch.setattr(runtime_cache, "MAX_TOTAL_BYTES", 100)
+    monkeypatch.setattr(runtime_cache, "MAX_OWNER_ENTRIES", 1)
+    monkeypatch.setattr(runtime_cache, "MAX_OWNER_BYTES", 100)
+    monkeypatch.setattr(runtime_cache, "_size_bytes", lambda _window: 60)
+
+    bob_path = runtime_window_path(_archive(tmp_path, user="bob", session_id="bob-1"))
+    bob = empty_window("bob", "web", "bob-1")
+    alice_first_path = runtime_window_path(
+        _archive(tmp_path, user="alice", session_id="alice-1")
+    )
+    alice_first = empty_window("alice", "web", "alice-1")
+    alice_second_path = runtime_window_path(
+        _archive(tmp_path, user="alice", session_id="alice-2")
+    )
+    alice_second = empty_window("alice", "web", "alice-2")
+
+    assert runtime_cache.store(
+        bob_path, bob, version=runtime_cache.archive_version(bob)
+    )
+    assert runtime_cache.store(
+        alice_first_path,
+        alice_first,
+        version=runtime_cache.archive_version(alice_first),
+    )
+    # The global 100-byte limit evicts the oldest entry instead of allowing
+    # 64 individually valid 8 MiB windows to accumulate without a total cap.
+    assert runtime_cache.load(
+        bob_path, version=runtime_cache.archive_version(bob)
+    ) is None
+    runtime_cache.clear()
+    monkeypatch.setattr(runtime_cache, "MAX_TOTAL_BYTES", 1000)
+    assert runtime_cache.store(
+        bob_path, bob, version=runtime_cache.archive_version(bob)
+    )
+    assert runtime_cache.store(
+        alice_first_path,
+        alice_first,
+        version=runtime_cache.archive_version(alice_first),
+    )
+    assert runtime_cache.store(
+        alice_second_path,
+        alice_second,
+        version=runtime_cache.archive_version(alice_second),
+    )
+    # Alice's per-owner quota removes only her older entry.
+    assert runtime_cache.load(
+        bob_path, version=runtime_cache.archive_version(bob)
+    ) is not None
+    assert runtime_cache.load(
+        alice_first_path,
+        version=runtime_cache.archive_version(alice_first),
+    ) is None
+    assert runtime_cache.load(
+        alice_second_path,
+        version=runtime_cache.archive_version(alice_second),
+    ) is not None
+    assert runtime_cache.stats() == {"entries": 2, "bytes": 120}
+
+
 def test_runtime_cache_invalidates_after_clear_and_delete(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     runtime = runtime_window_path(archive)
