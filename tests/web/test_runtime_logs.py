@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -148,6 +149,19 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertIs(__import__('sys').stderr, original_stderr)
         terminal = self.backend.runtime_logs('alice', category='terminal', refresh=True)
         self.assertIn('RuntimeHost 已启动 | transports=无', [entry['title'] for entry in terminal['entries']])
+
+    def test_terminal_capture_bounds_partial_line_buffer(self):
+        original = io.StringIO()
+        tee = diagnostics._TerminalOutputTee(self.root, "stdout", original)
+        tee.write("x" * 100_000)
+        self.assertLessEqual(
+            len(tee._pending), diagnostics._MAX_TERMINAL_PENDING_CHARS
+        )
+        tee.write("\n")
+        terminal = self.backend.runtime_logs("alice", category="terminal", refresh=True)
+        self.assertEqual(len(terminal["entries"]), 1)
+        self.assertEqual(len(terminal["entries"][0]["title"]), 1001)
+        self.assertTrue(terminal["entries"][0]["title"].endswith("…"))
 
     def test_terminal_omits_decorative_startup_banner_borders(self):
         for text in ('┌────────────┐', '│  kemo-agent  1.2.8  │', '└────────────┘'):

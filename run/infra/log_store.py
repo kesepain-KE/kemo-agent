@@ -119,6 +119,8 @@ class LogStore:
                             ON cron_execution_logs(user, occurred_at_ms DESC, id DESC);
                         CREATE INDEX IF NOT EXISTS idx_cron_task_time
                             ON cron_execution_logs(task_id, occurred_at_ms DESC, id DESC);
+                        CREATE INDEX IF NOT EXISTS idx_cron_user_task_time
+                            ON cron_execution_logs(user, task_id, occurred_at_ms DESC, id DESC);
                         CREATE TABLE IF NOT EXISTS message_route_logs (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             event_key TEXT NOT NULL UNIQUE,
@@ -183,23 +185,57 @@ class LogStore:
             except (UnboundLocalError, AttributeError):
                 pass
 
-    def _prune(self, connection: sqlite3.Connection) -> None:
+    def _prune(self, connection: sqlite3.Connection) -> int:
         if self.retention_days <= 0:
-            return
+            return 0
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         last = connection.execute(
             "SELECT value FROM log_meta WHERE key = 'last_pruned_ms'"
         ).fetchone()
         if last is not None and now_ms - int(last[0] or 0) < 86_400_000:
-            return
+            return 0
         cutoff = int((datetime.now(timezone.utc) - timedelta(days=self.retention_days)).timestamp() * 1000)
+        before = connection.total_changes
         connection.execute("DELETE FROM cron_execution_logs WHERE occurred_at_ms < ?", (cutoff,))
         connection.execute("DELETE FROM message_route_logs WHERE occurred_at_ms < ?", (cutoff,))
+        deleted = connection.total_changes - before
         connection.execute(
             "INSERT INTO log_meta(key, value) VALUES('last_pruned_ms', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(now_ms),),
         )
+        return max(0, deleted)
+
+    def _compact_if_needed(self) -> None:
+        """Reclaim substantial free space after retention pruning, at most weekly."""
+
+        try:
+            if not self.path.is_file() or self.path.stat().st_size < 64 * 1024 * 1024:
+                return
+            with self._lock:
+                connection = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+                try:
+                    connection.execute("PRAGMA busy_timeout=5000")
+                    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    row = connection.execute(
+                        "SELECT value FROM log_meta WHERE key = 'last_compacted_ms'"
+                    ).fetchone()
+                    if row is not None and now_ms - int(row[0] or 0) < 7 * 86_400_000:
+                        return
+                    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+                    free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+                    if page_count <= 0 or free_pages / page_count < 0.25:
+                        return
+                    connection.execute("VACUUM")
+                    connection.execute(
+                        "INSERT INTO log_meta(key, value) VALUES('last_compacted_ms', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(now_ms),),
+                    )
+                finally:
+                    connection.close()
+        except (OSError, sqlite3.Error, ValueError):
+            return
 
     def append_cron(self, record: dict[str, Any]) -> None:
         self.append_cron_records([record])
@@ -207,6 +243,7 @@ class LogStore:
     def append_cron_records(self, records: list[dict[str, Any]]) -> None:
         if not records:
             return
+        pruned = 0
         with self._connection() as connection:
             for record in records:
                 occurred_at = str(record.get("executed_at") or datetime.now(BEIJING).isoformat())
@@ -232,18 +269,13 @@ class LogStore:
                         int(datetime.now(timezone.utc).timestamp() * 1000),
                     ),
                 )
-            self._prune(connection)
+            pruned = self._prune(connection)
+        if pruned:
+            self._compact_if_needed()
         invalidate_runtime_log_cache(self.root)
 
-    def list_cron(self, user: str, *, limit: int = 1000) -> list[dict[str, Any]]:
-        with self._connection() as connection:
-            rows = connection.execute(
-                """SELECT event_key, occurred_at, user, task_id, status, duration_ms,
-                          result_json, error_json
-                   FROM cron_execution_logs WHERE user = ?
-                   ORDER BY occurred_at_ms DESC, id DESC LIMIT ?""",
-                (user, max(1, min(5000, int(limit)))),
-            ).fetchall()
+    @staticmethod
+    def _decode_cron_rows(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         result = []
         for row in rows:
             result.append({
@@ -256,6 +288,48 @@ class LogStore:
                 "source": "execution_log",
             })
         return result
+
+    def list_cron(
+        self,
+        user: str,
+        *,
+        limit: int = 1000,
+        exclude_task_ids: set[str] | frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        excluded = sorted({str(task_id) for task_id in (exclude_task_ids or ()) if str(task_id)})
+        exclusion_sql = ""
+        parameters: list[Any] = [user]
+        if excluded:
+            exclusion_sql = f" AND task_id NOT IN ({','.join('?' for _ in excluded)})"
+            parameters.extend(excluded)
+        parameters.append(max(1, min(5000, int(limit))))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT event_key, occurred_at, user, task_id, status, duration_ms,
+                          result_json, error_json
+                   FROM cron_execution_logs WHERE user = ?"""
+                + exclusion_sql
+                + " ORDER BY occurred_at_ms DESC, id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return self._decode_cron_rows(rows)
+
+    def list_cron_for_task(
+        self,
+        user: str,
+        task_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT event_key, occurred_at, user, task_id, status, duration_ms,
+                          result_json, error_json
+                   FROM cron_execution_logs WHERE user = ? AND task_id = ?
+                   ORDER BY occurred_at_ms DESC, id DESC LIMIT ?""",
+                (user, task_id, max(1, min(5000, int(limit)))),
+            ).fetchall()
+        return self._decode_cron_rows(rows)
 
     def runtime_log_records(self, user: str) -> list[dict[str, Any]]:
         """Small indexed projection, excluding result bodies and message content."""
@@ -293,6 +367,7 @@ class LogStore:
     def append_message_entries(self, entries: list[dict[str, Any]]) -> None:
         if not entries:
             return
+        pruned = 0
         with self._connection() as connection:
             for entry in entries:
                 event_key = _fingerprint(
@@ -321,7 +396,9 @@ class LogStore:
                         int(datetime.now(timezone.utc).timestamp() * 1000),
                     ),
                 )
-            self._prune(connection)
+            pruned = self._prune(connection)
+        if pruned:
+            self._compact_if_needed()
         invalidate_runtime_log_cache(self.root)
 
     def list_messages(self, machine_id: str, *, limit: int = 500) -> list[dict[str, Any]]:

@@ -35,6 +35,8 @@ _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
 _URL_CREDENTIAL_RE = re.compile(r"(://[^\s/:@]+:)([^\s@/]+)(@)")
 _BOX_DRAWING_ONLY_RE = re.compile(r"^[\s┌┐└┘├┤─│]+$")
 _MAX_TERMINAL_LINE_CHARS = 1000
+_MAX_TERMINAL_PENDING_CHARS = _MAX_TERMINAL_LINE_CHARS + 1
+_TERMINAL_NEWLINE_RE = re.compile(r"\r\n|\r|\n")
 
 
 def _root_key(root: Path) -> str:
@@ -106,15 +108,25 @@ class _TerminalOutputTee:
     def write(self, value: str) -> int:
         written = self._original.write(value)
         with self._lock:
-            self._pending += str(value)
-            lines = self._pending.splitlines(keepends=True)
-            self._pending = ""
-            for line in lines:
-                if line.endswith(("\n", "\r")):
-                    record_terminal_output(self._root, line.rstrip("\r\n"), stream=self._stream)
-                else:
-                    self._pending = line
+            text = str(value)
+            offset = 0
+            for newline in _TERMINAL_NEWLINE_RE.finditer(text):
+                self._append_pending(text[offset:newline.start()])
+                if self._pending:
+                    record_terminal_output(
+                        self._root,
+                        self._pending,
+                        stream=self._stream,
+                    )
+                self._pending = ""
+                offset = newline.end()
+            self._append_pending(text[offset:])
         return written if isinstance(written, int) else len(value)
+
+    def _append_pending(self, value: str) -> None:
+        remaining = _MAX_TERMINAL_PENDING_CHARS - len(self._pending)
+        if remaining > 0:
+            self._pending += value[:remaining]
 
     def flush(self) -> None:
         with self._lock:

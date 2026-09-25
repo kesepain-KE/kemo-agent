@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 def runtime_status(
     service,
     user: Any,
@@ -349,8 +351,14 @@ def runtime_status(
         promotion_tracking = system_cron["tracking"] == "execution_log"
         memory_updates = []
         store = MemoryStore(service.root, name, config)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        weight_activity = store.weight_activity(day_start, day_start + timedelta(days=1))
         for item in store.list_items():
             updated = _parse_datetime(item.get("updated_at"))
+            activity = weight_activity.get(str(item.get("filename") or ""), {})
+            applied = _parse_datetime(activity.get("applied_at"))
+            if applied is not None and (updated is None or applied > updated):
+                updated = applied
             if updated is None or updated.astimezone(_BEIJING).date() != now.date():
                 continue
             promotion = promotion_by_file.get(str(item.get("filename") or ""))
@@ -360,7 +368,8 @@ def runtime_status(
                     "filename": str(item.get("filename") or ""),
                     "tier": str(item.get("tier") or ""),
                     "weight": _nonnegative_int(item.get("weight")),
-                    "updated_at": str(item.get("updated_at") or ""),
+                    "updated_at": updated.isoformat(),
+                    "weight_increments": int(activity.get("increments") or 0),
                     "upgraded": bool(promotion) if promotion_tracking else None,
                     "from_tier": str((promotion or {}).get("from_tier") or ""),
                     "to_tier": str((promotion or {}).get("to_tier") or ""),
@@ -486,6 +495,5 @@ def runtime_status(
         "runtime_host": runtime_host,
         "congestion": congestion,
     }
-
 
 

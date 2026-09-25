@@ -72,6 +72,9 @@ const taskStatusMeta: Record<ScheduledTaskStatus, { label: string; className: st
   disabled: { label: '已停用', className: styles.statusDisabled },
 }
 
+const MAX_TASK_ITEMS = 3
+const MAX_SENSE_ITEMS = 3
+
 function cx(...classNames: Array<string | undefined | false>) {
   return classNames.filter(Boolean).join(' ')
 }
@@ -92,15 +95,15 @@ export function RecentActivityCard({
   senseData,
   title = '最近状态',
   className,
-  maxTaskItems = 4,
-  maxSenseItems = 3,
+  maxTaskItems = MAX_TASK_ITEMS,
+  maxSenseItems = MAX_SENSE_ITEMS,
   onViewAllTasks,
   onViewAllSenseData,
   onTaskClick,
   onSenseDataClick,
 }: RecentActivityCardProps) {
-  const visibleTasks = scheduledTasks.slice(0, maxTaskItems)
-  const visibleSenseData = senseData.slice(0, maxSenseItems)
+  const visibleTasks = scheduledTasks.slice(0, Math.min(MAX_TASK_ITEMS, Math.max(0, maxTaskItems)))
+  const visibleSenseData = senseData.slice(0, Math.min(MAX_SENSE_ITEMS, Math.max(0, maxSenseItems)))
   return <section className={cx(styles.card, className)} aria-labelledby="recent-activity-title">
     <h2 id="recent-activity-title" className={styles.cardTitle}>{title}</h2>
     <div className={styles.scrollArea}>

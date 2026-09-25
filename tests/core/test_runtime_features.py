@@ -1818,7 +1818,7 @@ def run(*, context):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(
-            runner.input_data["source"], {"source": "round_commit", "round": 3}
+            runner.input_data["source"], {"source": "round_commit", "round": 3, "evidence_dates": {}}
         )
         self.assertEqual(
             MemoryStore(root, "alice", {}).get_entry("seven_days", "device.md")[
@@ -2539,7 +2539,7 @@ def run(*, context):
             "最终回答",
         )
 
-    def test_runtime_error_retries_at_most_five_times_then_commits_once(self) -> None:
+    def test_runtime_error_retries_five_times_then_commits_once(self) -> None:
         _, root = self.make_root()
         provider = ScriptedProvider(
             responses=[
@@ -2549,7 +2549,7 @@ def run(*, context):
                     category="upstream_error",
                     retryable=True,
                 )
-                for _ in range(5)
+                for _ in range(6)
             ]
         )
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -2566,14 +2566,72 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events].count("retrying"), 4)
+        self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual([event.type for event in events].count("error"), 1)
         self.assertTrue(events[-1].metadata["committed"])
-        self.assertEqual(len(provider.requests), 5)
+        self.assertEqual(len(provider.requests), 6)
+        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertEqual(events[-1].error["retry_attempts"], 6)
         window = load_window(find_window(root, "alice", "cli", "auto-retry-exhausted"))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(len(window["data"]["round_metrics"]), 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+
+    def test_two_failures_in_one_conversation_each_receive_five_retries(self) -> None:
+        _, root = self.make_root()
+
+        def failing_provider(label: str) -> ScriptedProvider:
+            return ScriptedProvider(
+                responses=[
+                    ProviderError(
+                        f"{label} unavailable",
+                        status_code=503,
+                        category="upstream_error",
+                        retryable=False,
+                    )
+                    for _ in range(6)
+                ]
+            )
+
+        first = failing_provider("first")
+        second = failing_provider("second")
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.time.sleep"),
+        ):
+            first_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "fresh-retry-budget",
+                        "run_id": "run_first_failure",
+                        "prompt": "first",
+                    },
+                    root=root,
+                    provider_factory=lambda _: first,
+                )
+            )
+            second_events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "fresh-retry-budget",
+                        "run_id": "run_second_failure",
+                        "prompt": "second",
+                    },
+                    root=root,
+                    provider_factory=lambda _: second,
+                )
+            )
+
+        self.assertEqual(len(first.requests), 6)
+        self.assertEqual(len(second.requests), 6)
+        self.assertEqual([event.type for event in first_events].count("retrying"), 5)
+        self.assertEqual([event.type for event in second_events].count("retrying"), 5)
+        self.assertTrue(first_events[-1].error["retry_budget_exhausted"])
+        self.assertTrue(second_events[-1].error["retry_budget_exhausted"])
 
     def test_retryable_tool_failure_enters_outer_retry_before_next_provider_iteration(
         self,
@@ -2630,16 +2688,17 @@ def run(*, context):
             )
         )
 
-    def test_explicit_non_retryable_provider_error_commits_without_retry(self) -> None:
+    def test_explicit_non_retryable_provider_error_still_uses_run_retry_budget(self) -> None:
         _, root = self.make_root()
         provider = ScriptedProvider(
             responses=[
                 ProviderError(
                     "authentication rejected",
-                    status_code=503,
+                    status_code=401,
                     category="auth_error",
                     retryable=False,
                 )
+                for _ in range(6)
             ]
         )
 
@@ -2657,16 +2716,18 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events], ["error"])
-        self.assertFalse(events[0].metadata["retryable"])
-        self.assertTrue(events[0].metadata["committed"])
-        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual([event.type for event in events].count("retrying"), 5)
+        self.assertEqual(events[-1].type, "error")
+        self.assertFalse(events[-1].metadata["retryable"])
+        self.assertTrue(events[-1].metadata["committed"])
+        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertEqual(len(provider.requests), 6)
         window = load_window(
             find_window(root, "alice", "cli", "explicit-no-retry")
         )
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
-    def test_deterministic_incomplete_reason_does_not_retry_unchanged_request(
+    def test_deterministic_incomplete_reason_uses_full_run_retry_budget(
         self,
     ) -> None:
         _, root = self.make_root()
@@ -2705,10 +2766,11 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(len(provider.requests), 1)
-        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(len(provider.requests), 6)
+        self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual(events[-1].type, "error")
         self.assertFalse(events[-1].error["retryable"])
+        self.assertTrue(events[-1].error["retry_budget_exhausted"])
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_transient_incomplete_metadata_retries_and_recovers(self) -> None:
@@ -2813,7 +2875,42 @@ def run(*, context):
         self.assertFalse(events[-1].error["retryable"])
         self.assertTrue(events[-1].metadata["committed"])
 
-    def test_unknown_incomplete_respects_non_retryable_base_status(self) -> None:
+    def test_transport_retry_budget_exhaustion_does_not_start_outer_retry(self) -> None:
+        _, root = self.make_root()
+        provider = ScriptedProvider(
+            responses=[
+                ProviderError(
+                    "chat transport exhausted",
+                    category="connection_error",
+                    retryable=False,
+                    retry_budget_exhausted=True,
+                    attempt_count=2,
+                )
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "transport-budget-exhausted",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(events[-1].type, "error")
+        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertEqual(events[-1].error["attempt_count"], 2)
+        self.assertTrue(events[-1].metadata["committed"])
+
+    def test_unknown_incomplete_http_400_uses_full_run_retry_budget(self) -> None:
         _, root = self.make_root()
 
         class InvalidRequestProvider:
@@ -2850,11 +2947,12 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(len(provider.requests), 1)
-        self.assertFalse(any(event.type == "retrying" for event in events))
+        self.assertEqual(len(provider.requests), 6)
+        self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual(events[-1].type, "error")
         self.assertEqual(events[-1].error["status_code"], 400)
         self.assertFalse(events[-1].error["retryable"])
+        self.assertTrue(events[-1].error["retry_budget_exhausted"])
 
     def test_retry_after_is_bounded_and_used_for_outer_retry(self) -> None:
         _, root = self.make_root()

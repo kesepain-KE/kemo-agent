@@ -24,4 +24,32 @@ describe('RecentActivityCard', () => {
     expect(screen.getByText('当前没有已配置的用户定时任务')).toBeInTheDocument()
     expect(screen.getByText('当前没有正在注入的感知数据')).toBeInTheDocument()
   })
+
+  it('定时任务和感知数据各最多显示三个且合计最多六个', () => {
+    render(<RecentActivityCard
+      scheduledTasks={Array.from({ length: 4 }, (_, index) => ({
+        id: `t${index + 1}`,
+        title: `定时任务 ${index + 1}`,
+        schedule: '每天 18:00',
+        nextRun: '09/26 18:00',
+        status: 'enabled' as const,
+      }))}
+      senseData={Array.from({ length: 4 }, (_, index) => ({
+        id: `s${index + 1}`,
+        name: `感知数据 ${index + 1}`,
+        value: `${index + 1}`,
+        updateInterval: '每 5 分钟',
+        updatedAt: '09/25 22:00',
+        injected: true,
+      }))}
+      maxTaskItems={10}
+      maxSenseItems={10}
+    />)
+
+    expect(screen.getByText('定时任务 3')).toBeInTheDocument()
+    expect(screen.queryByText('定时任务 4')).not.toBeInTheDocument()
+    expect(screen.getByText('感知数据 3')).toBeInTheDocument()
+    expect(screen.queryByText('感知数据 4')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(6)
+  })
 })
