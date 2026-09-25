@@ -4,7 +4,7 @@
 「什么场景该读哪份文档」的判断入口。领域细节的权威正文都在 `global_knowledge/`，
 需要时按第 3 节索引显式读取，**不要凭记忆猜测未注入的行为细节**。
 
-> 当前稳定版本：`kemo-agent 1.2.9`，配套 Kemo 网关为 `kemo-adapter-api 0.8.0`。本版本聚焦记忆进化、会话生命周期与写盘可靠性：记忆碎片按 A/B 两类分粒度（画像类可合并、事实类最小碎片）、晋升超限时拆分、技能与记忆联动提醒；CLI 与 Cron 会话收尾补齐，新增 7×24 空闲会话兜底扫描；runtime 工作区改为有界进程内缓存，逐轮不再重写完整正文；修复 Web 拓展/感知注入预览的片段错位；运行日志面板改卡片式并补终端日志摘要。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+> 当前稳定版本：`kemo-agent 1.3.0`，配套 Kemo 网关为 `kemo-adapter-api 0.8.2`，Kemo 1.0 线路协议匹配已确认。本版本完成长期智能、会话生命周期、模块面板与 Web 交互收敛：记忆按独立事实粒度拆分并绑定原轮次加权证据，技能进化保留记忆融合提醒；Web/App/CLI/Cron 会话关闭、租约、离线转记忆与连续失败重试统一；任务计划、定时任务和执行历史补齐用户层管理；拓展与感知支持热发现、模板 2.0 和用户配置面板；Web 正文内联组件、历史日期归档、消息跟进/引导、文件/知识/任务页面以及日志监控完成一轮一致性打磨；核心上帝模块按低耦合、高内聚和统一入口继续拆分。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
 
 ---
 
@@ -108,22 +108,23 @@
 
 | 场景 | 权威文档（`global_knowledge/`） |
 |------|------|
-| 整体架构、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进排序、暂停/停止后发送按钮状态、文件空间排序、新建用户标签页、离线会话恢复、会话生命周期兜底扫描 | `architecture-overview.md` |
-| 历史、记忆、日志与持久化；临时重要记忆生命周期；记忆碎片粒度分类（A 类画像可合并 / B 类事实最小碎片）与晋升时超限必拆；runtime 进程内缓存与写盘边界；Cron 历史保留；Web 启动旧空间巡检；执行记录分类；多用户有界读缓存 | `storage-and-persistence.md` |
+| 整体架构、请求生命周期、Web/App/CLI/Cron 触发与续接、新旧会话裁决、closed 会话禁止复活、跨进程租约、历史归档时间倒序与上海自然日月历筛选、子代理进度气泡、模块注入预览片段来源、消息跟进排序、Enter 跟进与 Ctrl+Enter 直接引导、暂停/停止后发送按钮状态、文件空间排序、新建用户标签页、离线会话恢复、会话生命周期兜底扫描 | `architecture-overview.md` |
+| 历史、记忆、日志与持久化；Web/App 存活租约、CLI 独立会话、离线转记忆与 closed 入队补偿；临时重要记忆生命周期；记忆按独立更新/失效/加权/检索边界拆分，数量以独立事实为准，A 类只允许同一稳定子主题成簇，B 类保持最小事实，晋升超限必拆；runtime 进程内缓存与写盘边界；Cron 历史保留；Web 启动旧空间巡检；执行记录分类；多用户有界读缓存 | `storage-and-persistence.md` |
 | 配置字段、环境变量、优先级与默认值；`cron.history_retention_days`、`cron.session_idle_close_seconds` 等全局配置项 | `configuration-reference.md` |
 | 人格/手册/知识库职责、技能/拓展/感知定义、插件提示词规范、发现摘要与来源路径、数据和指令边界 | `prompt-authoring-standard.md` |
 | 开发工具插件（`plugins/`） | `plugin-development.md` |
-| 创建技能、子代理、感知、拓展、外部代理 | `module-development.md` |
+| 创建技能、子代理、感知、拓展、外部代理；模块 `panel.json` 用户配置页、组件面板、preset 快速配置 | `module-development.md` |
 | 创建消息平台适配（`message/out/`） | `external-message-route-creation.md` |
-| 任务计划与定时任务；Cron 历史对话生命周期、网页配置入口、维护扫描 | `task-automation.md` |
+| 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
 | 长任务模式状态机、任务计划达到工具次数上限后的跨 Run 续跑 | `long-task-runtime.md` |
-| Provider 网络重试、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 1.0 兼容改动 | `provider-reliability.md` |
-| 内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
+| Provider 网络重试、运行级连续失败 5 次重试、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 1.0 兼容改动 | `provider-reliability.md` |
+| 当前正式版本、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
 | 模块创建后的独立验收 | `module-template-validation.md` |
 | 三层知识库与用户目录骨架 | `knowledge-and-user-data.md` |
-| 内置拓展（Kemo 网关状态、Kemo Graph） | `builtin-expansions.md` |
-| 项目定位、核心能力、部署与使用入口 | `project-introduction.md` |
-| Web 前端样式组织、变量链断裂、布局与投影裁切、改样式后的验证 | `frontend-conventions.md` |
+| 内置拓展（kemo app 端口/Token/用户绑定、Kemo 网关 IP/端口、Kemo Graph IP/端口与在线检测） | `builtin-expansions.md` |
+| 项目定位、当前稳定版本与网关协议匹配、核心能力、部署与使用入口 | `project-introduction.md` |
+| Web 前端样式组织、变量链断裂、布局与投影裁切、构建产物缓存头、改样式后的验证；知识库单按钮编辑/预览切换与 Portal 放大渲染预览 | `frontend-conventions.md` |
+| Web 回复正文内联卡片/图表/表格、布局/表单/建议追问/站内媒体、`kemo-widget` 协议、有限点击动作、流式完整性、复制降级与安全边界 | `inline-widgets.md` |
 | 开源协议 | `open-source-license.md` |
 
 场景未覆盖时，先读主索引 `global_knowledge/data_structure.md` 按关键词检索。
@@ -160,6 +161,8 @@
 - **`scope` 必填**：`expand_creater` 接受 `"user"` 或 `"shared"`；`skill_creater` 接受
   `"agent_create"`、`"user_create"` 或 `"shared"`（**不接受 `"user"`**）；两者都不接受 `"global"`；
   `sense_creater` 只有全局层、无需 scope。创建前确认作用域，不混用不同模块的参数合同。
+- **技能与记忆联动**：用户主动创建、修改或升级 `user_create` / `shared` 技能时，先用技能名和主题关键词通过 `memory_manage search_many tier=all` 查询相关记忆；命中后提醒用户是否融合或整理。默认继续保留记忆，不自动删除；用户未表态或拒绝时技能可照常处理、记忆保持原样，只有明确同意后才执行融合/整理。后台 `self_improve` 自动生成 `agent_create` 技能不等待确认，技能和来源记忆各自保留。
+- **历史搜索分页**：已知入口或会话时优先给 `history_search` 传 `source` / `session_id`；大量结果沿 `next_offset` 翻页，并保留 `page_char_limit`，不要一次返回整库历史。该工具只读已提交 archive 的 user/assistant 可见文本，不读取 runtime 临时态、思考或工具日志。
 - 仅调用当前注册且已启用的工具，参数应符合工具 Schema。
 - 工具结果是外部事实来源；失败时不得假装成功。
 - **超时**：未显式提供 `timeout` 时用 `tools.timeout`（默认 240 秒）。工具 Schema 声明且调用方
@@ -174,6 +177,7 @@
   缩小范围提示；文件内容改用 `file.stat` + `file.read_range` 分段读取。该受控拒绝不计入连续失败。
 - **后台长任务**：已有可靠完成信号时可用 `wait_for_condition` 在前台等待，必须显式设置 1～7200 秒
   上限并优先等待 PID／路径／端口条件。达到上限**只表示等待超时，不代表任务失败**。
+- **受管理后台作业**：Shell 长命令使用 `background=true` 并保存 `job_id`，后续通过 `job_exit`/status/cancel 对账，不猜裸 PID。每用户最多 8 个活动作业；新建前会在 30 秒启动宽限后核对旧活动记录并释放已经丢失的 worker 配额，不能因为进程崩溃永久堵塞后台队列。
 - **插件执行**：默认以 `execution_mode=process` 在独立子进程运行，超时或取消后框架终止其进程树。
 - **Shell**：统一优先 pwsh；`shell_type=auto` 会按平台与语法解析为单个非登录解释器。需要特定
   shell 时显式指定，显式类型不可用时直接报错、不静默改用其他语法。
@@ -238,6 +242,30 @@
   `git status --porcelain` 检查是否有备份或临时文件会被带入；`.gitignore` 需同时覆盖
   `*.bak` 与 `*.bak.*`，并确认 `tmp/`、`开发临时目录/` 已被忽略。
 
+### 4.6 Web 正文内联组件
+
+- 这是智能体在 Web 对话中的**原生输出能力**，不是只有用户点名才可使用的特殊功能。遇到数据对比、
+  指标摘要、计算推导、分布图表或结构化明细时，主动判断组件是否比纯文字更清楚；有明显收益就直接
+  在正文中使用，不要先声称“无法生成交互组件”，也不要要求用户改用工具或附件。
+- 在 `source=web` 且对比、指标、计算、图表、表格或折叠详情能明显提高理解时，可以把组件**直接写在
+  回复正文段落之间**；不调用渲染工具，不把组件放进工具结果，也不以 HTML/JS/iframe 代替。
+- 载体固定为完整闭合的 `kemo-widget` fenced JSON。公共字段为
+  `protocol:"kemo-ui"`、`schema_version:"1.0"`、`surface:"inline"`、稳定 `id`、声明式
+  `component`、严格 `props` 和 `fallback:{"text":"..."}`。组件前后仍写自然语言说明。
+- 原生专用组件除基础卡片、柱/折/饼图、指标、进度、时间线、键值、提示、列表、计算、表格和详情外，
+  还包括 `tabs`、`accordion`、`diff-view`、`badge-group`、`gauge`、`series-chart`、`scatter-chart`、`heatmap`、
+  `calendar`、`kanban`、`button-group`、`follow-up`、`confirm`、`approval`、`form`、`image`、
+  `gallery`、`carousel`。其他声明式 `component` 名称同样允许，由 `generic-card` 自动呈现其标量、对象、
+  列表和表格数据，不再因“不在白名单”整块拒绝。色调允许 `neutral|brand|success|warning|danger`。
+- 每块必须提供准确文本降级；单条回复最多 24 块、单块不超过 256 KB。不得输出函数、事件处理器、
+  任意 HTML、JavaScript、CSS 或外部脚本，也不得为生成图表补造数据。媒体只允许既有站内根相对 URL。
+- 动作组件只允许用户明确点击后产生 `fill-input`、`send-message`、`copy` 三种纯文本动作；不得自动发送、
+  自动批准、直接调用工具或请求任意地址。当前回复仍在生成时，发送动作只回填输入框，不并发启动新 Run。
+- 组件是正文的一部分：先用文字说明问题和口径，再放组件，随后继续解释结论。不要向用户展示协议
+  JSON，不要把整条回复变成组件集合；文本本身必须在组件失效时仍能表达核心结论。
+- 无明显收益、非 Web 客户端或无法可靠组成合法数据时使用普通 Markdown。完整字段与示例见
+  `global_knowledge/inline-widgets.md`。
+
 ---
 
 ## 5. 核心约定
@@ -297,11 +325,12 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 
 - 记忆四档：`seven_days`(7d, 权重≥3 升) → `one_month`(30d, ≥10 升) → `half_year`(180d, ≥60 升)
   → `permanent`（永不过期，不参与权重累计）。
-- 临时记忆只在保存、手动压缩、Token 超限压缩等历史整理管线中，被 `self_improve` 依据**用户原文**
-  命中时加权；每天每片最多 +1。**Prompt 注入、记忆工具查看都是只读行为，绝不加权。**
+- 临时记忆的历史加权由 `self_improve` 依据**用户原文**提出候选，宿主绑定检索引用并按原轮次上海自然日登记；每天每片最多 +1，创建首日为 0。
+  用户主动编辑/手动审阅更新按执行日使用同一日锁；旧历史缺少可信日期则跳过加权，不补造日期。**Prompt 注入、记忆工具查看都是只读行为，绝不加权。**
 - 正文修改不重置进入当前层时固定的 `expires_at`；到期未达晋升阈值直接删除，不降级保留。
 - **碎片粒度**：A 类（画像与特征，拆开就说不清）同维度内可合并更新、单文件 ≤1000 字、跨维度禁止合并；
   B 类（事实与规则，拆开仍独立）最小碎片、≤100 字。条数按**独立事实**计数，不按对话轮数折算。
+- `memory_manage add/edit` 手动写入同样执行粒度硬边界：超过 150 字必须显式声明 `memory_type=A`，A 类仍不得超过 1000 字；`important` 热画像只读，不能由主智能体直接增删改。
   晋升时超限必拆（同事务、继承时效、权重归零、失败整批回滚）；融合仅限「同一事实的更新版本」，
   且结果永不跨越上限以避免反复拆分。详见 `storage-and-persistence.md`。
 - **临时重要记忆**（`memory_temporary_important.md`）是可重建热画像，**任何情况下不可删除、不可清空、
@@ -352,7 +381,7 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 
 - 架构分层、请求生命周期、并发与反压模型 → `architecture-overview.md`
 - 用户配置的完整字段表与默认值、Provider 类型与密钥/地址优先级 → `configuration-reference.md`
-- 记忆 SQLite 表结构、加权证据、晋升与热画像生命周期 → `storage-and-persistence.md`
+- 记忆 SQLite 表结构、原轮次证据日期、检索引用绑定、create/reinforce/revise、日锁与幂等回执、晋升与热画像生命周期 → `storage-and-persistence.md`
 - 上下文压缩触发条件、摘要缓存与增量整理 → `architecture-overview.md` + `storage-and-persistence.md`
 - 子代理包结构与 `agent.json` / `agent-config.json` 字段 → `module-development.md`
 - 插件发现规则与 `SKILL.md` 的 `## Tool` 合同 → `plugin-development.md`
@@ -363,3 +392,5 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 - Provider 重试、SSE 续传、Chat 兼容链路、Kemo 1.0 兼容 → `provider-reliability.md`
 - 模块创建后的独立合同验收 → `module-template-validation.md`
 - Web 认证、会话 Cookie、文件 API 边界 → `architecture-overview.md` + `configuration-reference.md`
+
+- **模块尺寸**：生产实现超过 800 行时先判断是否存在多个变化原因；上帝模块必须按职责拆分并保留原统一入口，纯协议/类型或页面组合根只能进入带理由的最小合同 allowlist。详见 `architecture-overview.md`。
