@@ -650,13 +650,15 @@ class SubAgentHotPlugTests(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(AgentRunError, "最大工具调用次数 1"):
+        with self.assertRaisesRegex(AgentRunError, "最大工具调用次数 1") as raised:
             AgentRunner(
                 root,
                 "alice",
                 config=config,
                 provider_factory=lambda _: provider,
             ).run("limited_agent", {})
+        self.assertEqual(type(raised.exception).__name__, "AgentToolLimitError")
+        self.assertEqual(len(provider.requests), 1)
 
     def test_agent_blocks_only_consecutive_identical_tool_arguments(self) -> None:
         _, root, config = self.make_root()

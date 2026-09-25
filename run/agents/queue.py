@@ -45,6 +45,7 @@ _ERROR_DETAIL_FIELDS = (
     "retry_attempts",
     "retry_max_attempts",
     "retry_exhausted",
+    "retry_budget_exhausted",
 )
 
 

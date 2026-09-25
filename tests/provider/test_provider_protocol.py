@@ -1965,6 +1965,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(caught.exception.category, "connection_error")
         self.assertFalse(caught.exception.retryable)
         self.assertTrue(caught.exception.retryable_declared)
+        self.assertTrue(caught.exception.retry_budget_exhausted)
         self.assertEqual(caught.exception.attempt_count, 2)
         self.assertEqual(len(requests), 2)
 

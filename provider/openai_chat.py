@@ -313,6 +313,7 @@ class OpenAIChatTransport:
             error.retryable = False
             error.retryable_declared = True
             error.attempt_count = attempt
+            error.retry_budget_exhausted = True
             raise error
         if error.category == "tools_unsupported" and payload.get("tools"):
             return {

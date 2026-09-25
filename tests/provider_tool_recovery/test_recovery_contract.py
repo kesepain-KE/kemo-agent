@@ -296,7 +296,7 @@ def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
                 arguments_raw="{",
                 parse_error={"message": "invalid again"},
             ),
-        ]
+        ] * 6
     )
 
     with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
@@ -308,4 +308,4 @@ def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
                 max_tokens=512,
             )
 
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 12

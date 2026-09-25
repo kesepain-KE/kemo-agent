@@ -129,9 +129,14 @@ def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
     }
     for field in (
         "category",
+        "code",
         "status_code",
         "retry_after_ms",
         "attempt_count",
+        "retry_budget_exhausted",
+        "retry_exhausted",
+        "retry_attempts",
+        "retry_max_attempts",
     ):
         value = getattr(exc, field, None)
         if isinstance(value, bool) or isinstance(value, (int, float)):

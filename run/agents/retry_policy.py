@@ -10,40 +10,20 @@ from typing import Any
 import uuid
 
 from provider.protocol.models import JsonContent, ToolCallItem, ToolResultItem
+from run.retry.policy import (
+    MAX_ATTEMPTS,
+    backoff_seconds,
+    mark_retry_exhausted,
+    retry_reason,
+    should_retry,
+    view_from_exception,
+)
+from run.retry.recovery import MAX_RECOVERY_CALLS, MAX_RECOVERY_CHARS, reuse_allowed
 from run.tools import tool_call_signature
 
-_MAX_AGENT_RETRY_ATTEMPTS = 5
-_MAX_AGENT_RETRY_RECOVERY_CALLS = 32
-_MAX_AGENT_RETRY_RECOVERY_CHARS = 120_000
-_AGENT_RETRYABLE_CATEGORIES = frozenset(
-    {
-        "connection_error",
-        "gateway_error",
-        "provider_error",
-        "timeout",
-        "upstream_error",
-    }
-)
-_AGENT_NON_RETRYABLE_CATEGORIES = frozenset(
-    {
-        "auth_error",
-        "authorization_error",
-        "asset_error",
-        "asset_integrity_error",
-        "capability_error",
-        "context_length_exceeded",
-        "gateway_protocol_error",
-        "idempotency_conflict",
-        "invalid_request",
-        "protocol_error",
-        "request_too_large",
-        "request_validation_error",
-        "result_too_large",
-        "execution_capacity",
-        "validation_error",
-    }
-)
-_AGENT_NON_RETRYABLE_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+_MAX_AGENT_RETRY_ATTEMPTS = MAX_ATTEMPTS
+_MAX_AGENT_RETRY_RECOVERY_CALLS = MAX_RECOVERY_CALLS
+_MAX_AGENT_RETRY_RECOVERY_CHARS = MAX_RECOVERY_CHARS
 def _new_agent_usage() -> dict[str, Any]:
     return {
         "prompt_tokens": 0,
@@ -80,22 +60,7 @@ def _agent_tool_result_reuse_allowed(
 ) -> bool:
     """Return whether replaying a successful tool result is safe in one run."""
 
-    if name == "expand_call":
-        command = str(arguments.get("command") or "").strip().casefold()
-        return command not in {"configuration_status", "query", "refresh", "status"}
-    if name == "file":
-        action = str(arguments.get("action") or "").strip().casefold()
-        return action not in {
-            "exists",
-            "hash",
-            "list_dir",
-            "read",
-            "read_range",
-            "search",
-            "stat",
-            "tree_dir",
-        }
-    return True
+    return reuse_allowed(name, arguments)
 
 
 def _record_agent_recovery(
@@ -246,76 +211,21 @@ def _agent_error_is_retryable(
 ) -> bool:
     if cancel_event.is_set():
         return False
-    error_type = type(error).__name__
-    if error_type in {"AgentCancelledError", "ToolCancelledError"}:
-        return False
-    if error_type == "AgentInputError":
-        return False
-    declared = getattr(error, "retryable_declared", None)
-    # Structured/JSON output failures are commonly caused by transient
-    # truncation or provider formatting drift; let the bounded retry loop
-    # repair them just like other provider response failures.
-    if error_type == "AgentOutputError":
-        return bool(getattr(error, "retryable", True)) if declared is True else True
-    if error_type == "AgentTimeoutError":
-        return bool(getattr(error, "process_terminated", False))
-    if declared is True:
-        return bool(getattr(error, "retryable", False))
-    if declared is not False:
-        explicit_retryable = getattr(error, "retryable", None)
-        if isinstance(explicit_retryable, bool):
-            return explicit_retryable
-    if bool(getattr(error, "still_running", False)):
-        return False
-    category = str(
-        getattr(error, "category", "")
-        or getattr(error, "code", "")
-        or ""
-    ).casefold()
-    if category in _AGENT_NON_RETRYABLE_CATEGORIES:
-        return False
-    for raw_status in (
-        getattr(error, "status_code", None),
-        getattr(error, "provider_status", None),
-    ):
-        try:
-            if int(raw_status) in _AGENT_NON_RETRYABLE_STATUSES:
-                return False
-        except (TypeError, ValueError):
-            continue
-    if category in _AGENT_RETRYABLE_CATEGORIES:
-        return True
-    if error_type in {
-        "AgentProviderError",
-        "ProviderError",
-        "ProviderCongestionError",
+    if type(error).__name__ in {
+        "AgentCancelledError",
+        "ToolCancelledError",
+        "AgentToolLimitError",
     }:
-        return True
-    return False
+        return False
+    return should_retry(view_from_exception(error))
 
 
 def _agent_retry_delay_seconds(error: BaseException, failed_attempt: int) -> float:
-    raw = getattr(error, "retry_after_ms", None)
-    try:
-        milliseconds = int(raw)
-    except (TypeError, ValueError):
-        milliseconds = -1
-    if milliseconds >= 0:
-        return min(120.0, max(0.25, milliseconds / 1000.0))
-    return min(2.0, 0.25 * (2 ** max(0, failed_attempt - 1)))
+    return backoff_seconds(failed_attempt, view_from_exception(error))
 
 
 def _agent_retry_reason(error: BaseException) -> str:
-    raw = str(
-        getattr(error, "category", "")
-        or getattr(error, "code", "")
-        or type(error).__name__
-    ).strip()
-    safe = "".join(
-        character if character.isalnum() or character in "-_" else "_"
-        for character in raw
-    )
-    return safe[:80] or "agent_error"
+    return retry_reason(view_from_exception(error))
 
 
 def _mark_agent_retry_exhausted(
@@ -324,8 +234,4 @@ def _mark_agent_retry_exhausted(
     attempts: int,
     max_attempts: int,
 ) -> None:
-    setattr(error, "retry_exhausted", True)
-    setattr(error, "retry_attempts", attempts)
-    setattr(error, "retry_max_attempts", max_attempts)
-    setattr(error, "retryable_declared", True)
-    setattr(error, "retryable", False)
+    mark_retry_exhausted(error, attempts=attempts, max_attempts=max_attempts)

@@ -23,6 +23,7 @@ class ProviderError(RuntimeError):
         retryable: bool | object = _RETRYABLE_UNSET,
         retry_after_ms: int | None = None,
         attempt_count: int | None = None,
+        retry_budget_exhausted: bool = False,
         body: Any = None,
     ) -> None:
         super().__init__(message)
@@ -36,6 +37,7 @@ class ProviderError(RuntimeError):
         self.retryable = retryable if self.retryable_declared else False
         self.retry_after_ms = retry_after_ms
         self.attempt_count = attempt_count
+        self.retry_budget_exhausted = bool(retry_budget_exhausted)
         self.body = body
 
 

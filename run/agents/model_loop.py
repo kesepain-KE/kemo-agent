@@ -24,6 +24,7 @@ def run_model(
     AgentProviderError = _runner.AgentProviderError
     AgentRunError = _runner.AgentRunError
     AgentRunResult = _runner.AgentRunResult
+    AgentToolLimitError = _runner.AgentToolLimitError
     AgentToolRetryError = _runner.AgentToolRetryError
     Any = _runner.Any
     ConsecutiveIdenticalToolCallTracker = _runner.ConsecutiveIdenticalToolCallTracker
@@ -365,6 +366,7 @@ def run_model(
                     status_code=status_code,
                     retryable=retryable,
                     retry_after_ms=retry_after_ms,
+                    cancelled=response.status == ResponseStatus.CANCELLED,
                 )
             if response.status == ResponseStatus.INCOMPLETE:
                 incomplete = incomplete_retry_metadata(response.incomplete_details)
@@ -382,6 +384,7 @@ def run_model(
                 f"子代理 Provider 响应失败：{response.status}",
                 category="provider_error",
                 retryable=response.status != ResponseStatus.CANCELLED,
+                cancelled=response.status == ResponseStatus.CANCELLED,
             )
         normalized_output = _response_items_for_next_request(response.output)
         calls = [
@@ -435,7 +438,7 @@ def run_model(
         retryable_tool_failure: AgentToolRetryError | None = None
         for call in calls:
             if processed_tool_calls >= max_tool_calls:
-                raise AgentRunError(
+                raise AgentToolLimitError(
                     f"子代理 {definition.name} 已达到最大工具调用次数 {max_tool_calls}"
                 )
             processed_tool_calls += 1

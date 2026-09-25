@@ -352,7 +352,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(events[1].metadata["failed_attempt"], 1)
         self.assertEqual(events[1].metadata["next_attempt"], 2)
 
-    def test_runner_stops_after_five_transient_provider_failures(self) -> None:
+    def test_runner_stops_after_initial_attempt_and_five_retries(self) -> None:
         class FailingProvider(MockProvider):
             def create(inner_self, request):
                 inner_self.requests.append(request)
@@ -379,16 +379,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     event_callback=events.append,
                 )
 
-        self.assertEqual(len(provider.requests), 5)
+        self.assertEqual(len(provider.requests), 6)
         self.assertTrue(raised.exception.retry_exhausted)
-        self.assertEqual(raised.exception.retry_attempts, 5)
-        self.assertEqual(raised.exception.retry_max_attempts, 5)
+        self.assertTrue(raised.exception.retry_budget_exhausted)
+        self.assertEqual(raised.exception.retry_attempts, 6)
+        self.assertEqual(raised.exception.retry_max_attempts, 6)
         self.assertFalse(raised.exception.retryable)
         events = [event for event in events if event.type != "subagent_progress"]
         self.assertEqual(
             [event.metadata["status"] for event in events],
-            ["started", "retrying", "retrying", "retrying", "retrying", "failed"],
+            ["started", "retrying", "retrying", "retrying", "retrying", "retrying", "failed"],
         )
+        self.assertTrue(events[-1].metadata["retry_budget_exhausted"])
 
     def test_runner_retries_gateway_response_when_retryable_is_omitted(self) -> None:
         class FailedResponseProvider(MockProvider):
@@ -424,7 +426,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 2)
 
-    def test_runner_does_not_retry_deterministic_incomplete_response(self) -> None:
+    def test_runner_retries_deterministic_incomplete_response_five_times(self) -> None:
         class TruncatedProvider(MockProvider):
             def create(inner_self, request):
                 inner_self.requests.append(request)
@@ -448,9 +450,10 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
 
-        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(len(provider.requests), 6)
         self.assertTrue(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
+        self.assertTrue(raised.exception.retry_budget_exhausted)
         self.assertEqual(raised.exception.code, "output_truncated")
 
     def test_runner_retries_transient_incomplete_response(self) -> None:
@@ -488,7 +491,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(result.metadata["retry_attempts"], 2)
 
-    def test_runner_unknown_incomplete_respects_base_http_400(self) -> None:
+    def test_runner_unknown_incomplete_http_400_retries_five_times(self) -> None:
         class InvalidRequestProvider(MockProvider):
             def create(inner_self, request):
                 inner_self.requests.append(request)
@@ -513,10 +516,11 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
 
-        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(len(provider.requests), 6)
         self.assertEqual(raised.exception.status_code, 400)
         self.assertTrue(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
+        self.assertTrue(raised.exception.retry_budget_exhausted)
 
     def test_runner_disables_chat_reasoning_without_capability_lookup(self) -> None:
         provider = MockProvider()
@@ -749,7 +753,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(provider.requests), 2)
 
     def test_context_manage_failed_repair_preserves_last_raw_output(self) -> None:
-        provider = MockProvider(texts=["first invalid", "second invalid"])
+        provider = MockProvider(texts=["first invalid", "second invalid"] * 6)
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
             with self.assertRaises(AgentOutputError) as caught:
                 self.runner(provider).run(
@@ -758,7 +762,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 )
         self.assertEqual(caught.exception.raw_text, "second invalid")
         self.assertIn("JSON 修复失败", str(caught.exception))
-        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(provider.requests), 12)
+        self.assertTrue(caught.exception.retry_budget_exhausted)
 
     def test_context_manage_extracts_json_object_from_surrounding_text(self) -> None:
         provider = MockProvider(
