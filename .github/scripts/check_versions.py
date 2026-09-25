@@ -43,6 +43,28 @@ def main(argv: list[str] | None = None) -> int:
             if not SEMVER.fullmatch(component_version):
                 errors.append(f"组件 {name} 的版本不是合法 SemVer：{component_version!r}")
 
+    compatibility = version_document.get("compatibility")
+    gateway_version = ""
+    version_match = SEMVER.fullmatch(version)
+    requires_gateway_baseline = bool(
+        version_match
+        and tuple(int(value) for value in version_match.groups()[:3]) >= (1, 3, 0)
+    )
+    if compatibility is None:
+        if requires_gateway_baseline:
+            errors.append("version.json 缺少 compatibility.kemo-adapter-api")
+    elif not isinstance(compatibility, dict):
+        errors.append("version.json 的 compatibility 必须是对象")
+    else:
+        gateway_version = str(compatibility.get("kemo-adapter-api") or "").strip()
+        if not gateway_version:
+            errors.append("version.json compatibility 缺少 kemo-adapter-api")
+        elif not SEMVER.fullmatch(gateway_version):
+            errors.append(
+                "version.json 的 kemo-adapter-api 兼容版本不是合法 SemVer："
+                f"{gateway_version!r}"
+            )
+
     frontend = read_json(ROOT / "web" / "frontend" / "package.json")
     if frontend.get("version") != version:
         errors.append(
@@ -104,12 +126,45 @@ def main(argv: list[str] | None = None) -> int:
         next_heading = summary_span.find("\n## ")
         summary = summary_span[: next_heading if next_heading >= 0 else len(summary_span)]
         highlights = {
+            "1.3.0": "长期智能、会话生命周期、模块面板与 Web 交互收敛",
             "1.2.8": "多用户 Web 工作区与运行可靠性",
             "1.2.7": "Chat 兼容传输链路",
         }
         marker = highlights.get(version)
         if marker and marker not in summary:
             errors.append(f"agents.md 运行手册版本摘要未包含 {version} 的重点「{marker}」")
+
+    global_soul_path = ROOT / "config" / "global_soul.md"
+    global_soul = (
+        global_soul_path.read_text(encoding="utf-8")
+        if global_soul_path.is_file()
+        else ""
+    )
+    if global_soul and f"kemo-agent {version}" not in global_soul:
+        errors.append(f"全局人格能力基线未指向 kemo-agent {version}")
+
+    if gateway_version:
+        gateway_markers = {
+            "agents.md": agents_manual,
+            "config/global_soul.md": global_soul,
+            "global_knowledge/project-introduction.md": project_introduction,
+            "global_knowledge/version-and-update-modules.md": version_guide,
+            "readme.md": readme,
+            "README_EN.md": readme_en,
+        }
+        optional_gateway_docs = (
+            "global_knowledge/provider-reliability.md",
+            "global_knowledge/builtin-expansions.md",
+        )
+        for relative in optional_gateway_docs:
+            path = ROOT / relative
+            if path.is_file():
+                gateway_markers[relative] = path.read_text(encoding="utf-8")
+        for label, text in gateway_markers.items():
+            if gateway_version not in text:
+                errors.append(
+                    f"{label} 未声明配套 kemo-adapter-api {gateway_version}"
+                )
 
     tag = args.tag.strip()
     if not tag and os.getenv("GITHUB_REF_TYPE") == "tag":

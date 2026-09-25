@@ -679,6 +679,7 @@ class UpdateModuleTests(unittest.TestCase):
         dispatcher = self.load_dispatcher("kemo_update_version_merge")
         local = {
             "version": "1.0.0",
+            "compatibility": {"kemo-adapter-api": "0.8.2"},
             "components": {
                 "core": {"version": "1.0.0"},
                 "plugins": {"version": "1.0.0"},
@@ -695,9 +696,42 @@ class UpdateModuleTests(unittest.TestCase):
         merged = manifest_update.version_document_after_update(local, remote, "plugins")
 
         self.assertEqual(merged["version"], "1.0.0")
+        self.assertEqual(
+            merged["compatibility"],
+            {"kemo-adapter-api": "0.8.2"},
+        )
         self.assertEqual(merged["components"]["core"]["version"], "1.0.0")
         self.assertEqual(merged["components"]["plugins"]["version"], "2.1.0")
         self.assertEqual(local["components"]["plugins"]["version"], "1.0.0")
+
+    def test_full_update_adopts_remote_compatibility_baseline(self) -> None:
+        self.load_dispatcher("kemo_update_full_version_merge")
+        local = {
+            "version": "1.2.9",
+            "compatibility": {"kemo-adapter-api": "0.8.1"},
+            "components": {
+                name: {"version": "1.2.9"}
+                for name in MODULES
+            },
+        }
+        remote = {
+            "version": "1.3.0",
+            "compatibility": {"kemo-adapter-api": "0.8.2"},
+            "components": {
+                name: {"version": "1.3.0"}
+                for name in MODULES
+            },
+        }
+
+        merged = manifest_update.version_document_after_update(local, remote, "all")
+
+        self.assertEqual(merged["version"], "1.3.0")
+        self.assertEqual(
+            merged["compatibility"],
+            {"kemo-adapter-api": "0.8.2"},
+        )
+        self.assertIsNot(merged, remote)
+        self.assertIsNot(merged["compatibility"], remote["compatibility"])
 
     def test_finalize_version_writes_only_after_explicit_commit(self) -> None:
         dispatcher = self.load_dispatcher("kemo_update_version_commit")

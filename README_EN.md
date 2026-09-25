@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.2.9-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -204,7 +204,23 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.2.9`
+Current version: `1.3.0`
+
+Confirmed compatible Kemo gateway: `kemo-adapter-api 0.8.2` (Kemo 1.0 wire protocol matched).
+
+### 1.3.0 update
+
+This is the formal release that consolidates long-term intelligence, conversation lifecycle, module extensibility, and consistent Web interaction.
+
+- Tidal Engram memories are split by whether a fact can be updated, invalidated, weighted, and retrieved independently. Historical weighting is bound to the original round, Shanghai calendar date, and retrieval reference, producing an auditable chain for creation, reinforcement, revision, daily locking, and idempotent receipts. Oversized promotions are still split transactionally, while skill creation, editing, and upgrades offer to merge related memories and keep the originals by default.
+- Conversation continuation, leases, closing, and offline memory transfer are aligned across Web, App, CLI, external messaging, and Cron. Closed-session queue compensation, idle-session sweeping, deletion fences, and a bounded runtime cache prevent false resurrection, permanently hanging sessions, and quadratic archive rewrites.
+- Recoverable Provider and subagent failures now converge on a run-level consecutive-failure budget. Network recovery, tool-argument repair, and outer retries retain separate boundaries so nested retry paths cannot grow without limit.
+- Task plans, scheduled tasks, and real execution history now have independent containers, six-item pagination, detailed previews, stable ordering, system-task isolation, and richer recurrence rules. The chat start page only shows an active plan owned by the current valid conversation and no longer surfaces orphaned cards from cleaned archives.
+- Expand and Sense modules move to the 2.0 component-panel contract with template defaults, user configuration pages, presets, secret fields, action controls, hot discovery, and quick configuration switching. The built-in Kemo App, gateway, and knowledge-graph modules expose their intended controls and online checks.
+- Web responses can embed declarative cards, charts, tables, layouts, forms, follow-up suggestions, and site-local media directly in the answer. Unknown component names safely fall back to a generic data card while preserving streaming closure, text fallback, and bounded action semantics.
+- Historical archives are sorted newest first and can be filtered through an inline Shanghai-calendar picker. Follow-up/guidance messages, file sorting, task panels, knowledge editing and preview, Expand/Sense panel spacing, and runtime logs received a broader consistency pass.
+- Core implementations continue to split god modules above 800 lines around low coupling, high cohesion, and stable public entry points, with corresponding cache, background queue, logging, template, and contract tests.
+- `kemo-agent 1.3.0` and `kemo-adapter-api 0.8.2` have completed Kemo 1.0 wire-protocol matching across model capabilities, streaming responses, tool calls, multimodal assets, Usage, Embedding, Rerank, resume behavior, and unified terminal states.
 
 ### 1.2.9 update
 
@@ -337,7 +353,7 @@ If you are trying an early release, reports about problems, usability feedback, 
 kemo-agent is not an island. Around it, several independently maintained projects cooperate through stable protocols to form the Kemo ecosystem:
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway: unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
+  Kemo Provider Gateway: the formally matched release for kemo-agent 1.3.0 is `0.8.2`. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.

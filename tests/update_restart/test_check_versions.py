@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -131,6 +132,67 @@ class CheckVersionsTests(unittest.TestCase):
             )
             code, output = run_check(root)
             self.assertEqual(code, 0, output)
+
+    def test_130_gateway_compatibility_markers_are_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_release_tree(root, "1.3.0")
+            version_path = root / "version.json"
+            manifest = json.loads(version_path.read_text(encoding="utf-8"))
+            manifest["compatibility"] = {"kemo-adapter-api": "0.8.2"}
+            version_path.write_text(json.dumps(manifest), encoding="utf-8")
+            gateway_marker = "配套 kemo-adapter-api 0.8.2"
+            (root / "readme.md").write_text(
+                (root / "readme.md").read_text(encoding="utf-8")
+                + f"\n{gateway_marker}\n",
+                encoding="utf-8",
+            )
+            (root / "README_EN.md").write_text(
+                (root / "README_EN.md").read_text(encoding="utf-8")
+                + "\nCompatible kemo-adapter-api 0.8.2\n",
+                encoding="utf-8",
+            )
+            (root / "global_knowledge" / "project-introduction.md").write_text(
+                "当前稳定版本为 `1.3.0`。配套 kemo-adapter-api 0.8.2。\n",
+                encoding="utf-8",
+            )
+            (root / "global_knowledge" / "version-and-update-modules.md").write_text(
+                '{"version": "1.3.0", "compatibility": {"kemo-adapter-api": "0.8.2"}}\n',
+                encoding="utf-8",
+            )
+            (root / "agents.md").write_text(
+                "当前稳定版本：`kemo-agent 1.3.0`，配套 kemo-adapter-api 0.8.2，"
+                "本版本完成长期智能、会话生命周期、模块面板与 Web 交互收敛。\n\n## 架构\n",
+                encoding="utf-8",
+            )
+            soul = root / "config" / "global_soul.md"
+            soul.parent.mkdir(parents=True, exist_ok=True)
+            soul.write_text(
+                "当前能力基线：kemo-agent 1.3.0，配套 kemo-adapter-api 0.8.2。\n",
+                encoding="utf-8",
+            )
+
+            code, output = run_check(root)
+            self.assertEqual(code, 0, output)
+
+            manifest.pop("compatibility")
+            version_path.write_text(json.dumps(manifest), encoding="utf-8")
+            code, output = run_check(root)
+            self.assertEqual(code, 1)
+            self.assertIn("version.json 缺少 compatibility.kemo-adapter-api", output)
+
+            manifest["compatibility"] = {"kemo-adapter-api": "0.8.2"}
+            version_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            (root / "README_EN.md").write_text(
+                (root / "README_EN.md")
+                .read_text(encoding="utf-8")
+                .replace("0.8.2", "0.8.1"),
+                encoding="utf-8",
+            )
+            code, output = run_check(root)
+            self.assertEqual(code, 1)
+            self.assertIn("README_EN.md 未声明配套 kemo-adapter-api 0.8.2", output)
 
     def test_tag_mismatch_still_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
