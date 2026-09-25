@@ -131,6 +131,8 @@ class GatewayStatusExpandTests(unittest.TestCase):
             LAST_RUN_PATH=self.module / "_last_run.json",
             DATA_PATH=self.module / "data" / "gateway_status.json",
             CHART_PATH=self.module / "artifacts" / "gateway_status.png",
+            PANEL_VALUES_PATH=self.module / "module" / "panel.values.json",
+            PANEL_STATUS_PATH=self.module / "module" / "status.json",
         )
         self.path_patch.start()
 
@@ -187,6 +189,51 @@ class GatewayStatusExpandTests(unittest.TestCase):
         with Image.open(self.module / "artifacts" / "gateway_status.png") as chart:
             self.assertEqual(chart.format, "PNG")
             self.assertEqual(chart.size, (1600, 900))
+
+    def test_panel_endpoint_can_be_saved_before_token_and_reused_on_activation(self) -> None:
+        pending = gateway.configure_endpoint({
+            "scheme": "http",
+            "gateway_ip": "127.0.0.1",
+            "gateway_port": 9753,
+        })
+        self.assertTrue(pending["ok"])
+        self.assertEqual(pending["status"], "pending_token")
+        self.assertEqual(pending["base_url"], "http://127.0.0.1:9753")
+
+        safe = gateway.sanitize_snapshot(status_payload())
+        with patch.object(gateway, "fetch_status", return_value=safe):
+            activated = gateway.activate({"status_token": "status-secret-token"})
+        self.assertEqual(activated["base_url"], "http://127.0.0.1:9753")
+        config = json.loads((self.module / "gateway_config.json").read_text("utf-8"))
+        self.assertEqual(config["status_token"], "status-secret-token")
+
+    def test_panel_endpoint_change_preserves_token_and_failed_probe_keeps_old_config(self) -> None:
+        gateway._atomic_json(  # noqa: SLF001 - fixture for panel reconfiguration
+            self.module / "gateway_config.json",
+            {
+                "schema_version": 1,
+                "base_url": "http://127.0.0.1:7531",
+                "status_token": "status-secret-token",
+                "timeout_seconds": 15,
+                "ranking_limit": 20,
+                "log_limit": 20,
+            },
+        )
+        with patch.object(gateway, "fetch_status", side_effect=gateway.GatewayStatusError("new endpoint offline")):
+            with self.assertRaisesRegex(gateway.GatewayStatusError, "offline"):
+                gateway.configure_endpoint({
+                    "scheme": "http",
+                    "gateway_ip": "127.0.0.1",
+                    "gateway_port": 9753,
+                })
+
+        config = json.loads((self.module / "gateway_config.json").read_text("utf-8"))
+        self.assertEqual(config["base_url"], "http://127.0.0.1:7531")
+        self.assertEqual(config["status_token"], "status-secret-token")
+        panel_status = json.loads((self.module / "module" / "status.json").read_text("utf-8"))
+        self.assertEqual(panel_status["backend_status"], "离线")
+        self.assertIn("offline", panel_status["last_error"])
+        self.assertNotIn("status-secret-token", json.dumps(panel_status, ensure_ascii=False))
 
     def test_status_request_uses_dedicated_bearer_endpoint_and_sanitizes_response(self) -> None:
         class FakeResponse:

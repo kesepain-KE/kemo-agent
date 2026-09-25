@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from gateway_status import activate, configuration_status, deactivate, update_snapshot
+from gateway_status import activate, configuration_status, configure_endpoint, deactivate, update_snapshot
 
 
 def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -28,6 +28,8 @@ def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any
         return result
     if normalized == "configuration_status":
         return configuration_status()
+    if normalized == "panel_configure_endpoint":
+        return configure_endpoint(arguments)
     if normalized == "deactivate":
         return deactivate()
     return {"ok": False, "error": f"未知命令: {command}"}
@@ -68,4 +70,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

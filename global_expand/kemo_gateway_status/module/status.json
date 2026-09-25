@@ -1,0 +1,11 @@
+{
+  "configuration": "待配置 Token",
+  "gateway_ip": "127.0.0.1",
+  "gateway_port": 7531,
+  "scheme": "http",
+  "base_url": "http://127.0.0.1:7531",
+  "token_status": "未配置",
+  "backend_status": "未检测",
+  "last_checked": "2026-09-26 01:01:42",
+  "last_error": ""
+}

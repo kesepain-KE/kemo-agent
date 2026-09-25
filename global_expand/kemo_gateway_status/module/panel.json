@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "title": "Kemo 网关用户配置",
+  "containers": [
+    {
+      "kind": "status",
+      "title": "网关连接状态",
+      "width": "full",
+      "height": "h2",
+      "source": "module/status.json",
+      "fields": [
+        { "key": "configuration", "label": "配置状态", "type": "badge" },
+        { "key": "gateway_ip", "label": "网关 IP / 主机", "type": "text" },
+        { "key": "gateway_port", "label": "网关端口", "type": "text" },
+        { "key": "scheme", "label": "协议", "type": "text" },
+        { "key": "base_url", "label": "当前地址", "type": "text" },
+        { "key": "token_status", "label": "独立 STATUS_TOKEN", "type": "badge" },
+        { "key": "backend_status", "label": "最近连接", "type": "badge" },
+        { "key": "last_checked", "label": "最近检查", "type": "text" },
+        { "key": "last_error", "label": "最近错误", "type": "text" }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "配置网关地址",
+      "width": "full",
+      "height": "h2",
+      "controls": [
+        {
+          "type": "send",
+          "label": "保存网关 IP 与端口",
+          "command": "panel_configure_endpoint",
+          "inputs": [
+            { "key": "scheme", "label": "协议", "type": "enum", "options": [
+              { "value": "http", "label": "HTTP" },
+              { "value": "https", "label": "HTTPS" }
+            ], "required": true },
+            { "key": "gateway_ip", "label": "网关 IP / 主机", "type": "string", "required": true, "placeholder": "127.0.0.1" },
+            { "key": "gateway_port", "label": "网关端口", "type": "number", "min": 1, "max": 65535, "default": 7531, "required": true }
+          ]
+        }
+      ]
+    }
+  ]
+}

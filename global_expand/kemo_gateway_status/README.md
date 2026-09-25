@@ -18,3 +18,6 @@ python data_update.py
 
 本地 `gateway_config.json` 保存敏感 Token，已被模块自己的 `.gitignore` 排除。不要把它上传、复制到知识库或长期记忆。
 
+Web“用户配置”页只允许设置网关协议、IP/主机和端口。未激活时地址暂存在
+`module/panel.values.json`；已激活时新地址必须先通过 `/status` 验证，失败不会覆盖旧配置。
+独立 `STATUS_TOKEN` 不在该面板回显或修改，面板状态也不会进入 `input_data.md`。

@@ -24,6 +24,8 @@ INPUT_PATH = BASE_DIR / "input_data.md"
 LAST_RUN_PATH = BASE_DIR / "_last_run.json"
 DATA_PATH = BASE_DIR / "data" / "gateway_status.json"
 CHART_PATH = BASE_DIR / "artifacts" / "gateway_status.png"
+PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
+PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 PERSISTENCE_CHECKPOINT_SECONDS = 300
 
@@ -217,15 +219,95 @@ def _config_payload(config: GatewayConfig) -> dict[str, Any]:
 
 def configuration_status() -> dict[str, Any]:
     config = load_config()
+    pending = _pending_endpoint()
     return {
         "ok": True,
         "active": config is not None,
-        "base_url": config.base_url if config else "",
+        "base_url": config.base_url if config else pending,
         "status_token_configured": bool(config),
         "timeout_seconds": config.timeout_seconds if config else 15,
         "ranking_limit": config.ranking_limit if config else 20,
         "log_limit": config.log_limit if config else 20,
     }
+
+
+def _pending_endpoint() -> str:
+    try:
+        value = json.loads(PANEL_VALUES_PATH.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    return str(value.get("base_url") or "").strip() if isinstance(value, dict) else ""
+
+
+def _endpoint_parts(base_url: str) -> tuple[str, str, int | str]:
+    if not base_url:
+        return "http", "", ""
+    parsed = urllib.parse.urlsplit(base_url)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        port = ""
+    return parsed.scheme or "http", parsed.hostname or "", port
+
+
+def _write_panel_status(result: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        config = load_config()
+        config_error = ""
+    except Exception as exc:
+        config = None
+        config_error = str(exc) or type(exc).__name__
+    base_url = config.base_url if config else _pending_endpoint()
+    scheme, host, port = _endpoint_parts(base_url)
+    outcome = dict(result or {})
+    online = bool(outcome.get("ok") and outcome.get("status") == "active")
+    payload = {
+        "configuration": "已激活" if config else "待配置 Token" if base_url else "未配置",
+        "gateway_ip": host or "—",
+        "gateway_port": port or "—",
+        "scheme": scheme,
+        "base_url": base_url or "—",
+        "token_status": "已配置" if config else "未配置",
+        "backend_status": "在线" if online else "离线" if outcome.get("ok") is False else "未检测",
+        "last_checked": str(outcome.get("time") or datetime.now().astimezone().isoformat(timespec="seconds")),
+        "last_error": str(outcome.get("error") or config_error or ""),
+    }
+    _atomic_json(PANEL_STATUS_PATH, payload)
+    return payload
+
+
+def configure_endpoint(params: dict[str, Any]) -> dict[str, Any]:
+    scheme = str(params.get("scheme") or "http").strip().casefold()
+    host = str(params.get("gateway_ip") or "").strip()
+    port = _integer(params.get("gateway_port"), name="gateway_port", default=7531, minimum=1, maximum=65535)
+    candidate_url = _normalized_base_url(f"{scheme}://{host}:{port}")
+    current = load_config()
+    if current is None:
+        _atomic_json(PANEL_VALUES_PATH, {"base_url": candidate_url})
+        result = {
+            "ok": True,
+            "status": "pending_token",
+            "active": False,
+            "base_url": candidate_url,
+            "message": "网关地址已保存；配置独立 STATUS_TOKEN 后才能激活并连接。",
+        }
+        _write_panel_status(result)
+        return result
+    try:
+        result = activate({
+            **_config_payload(current),
+            "base_url": candidate_url,
+        })
+    except Exception as exc:
+        _write_panel_status({
+            "ok": False,
+            "status": "failed",
+            "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "error": str(exc) or type(exc).__name__,
+        })
+        raise
+    _atomic_json(PANEL_VALUES_PATH, {"base_url": candidate_url})
+    return result
 
 
 def _error_detail(body: bytes) -> str:
@@ -655,6 +737,7 @@ def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
             _inactive_output(update_time)
             result = {"ok": True, "status": "inactive", "time": update_time, "active": False, "resources": []}
             _atomic_json(LAST_RUN_PATH, result)
+            _write_panel_status(result)
             return result
         snapshot = fetch_status(config, target_date=target_date)
         changed = _snapshot_changed(snapshot)
@@ -680,11 +763,15 @@ def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
             pass
         result = {"ok": False, "status": "failed", "time": update_time, "error": error}
     _atomic_json(LAST_RUN_PATH, result)
+    _write_panel_status(result)
     return result
 
 
 def activate(params: dict[str, Any]) -> dict[str, Any]:
-    candidate = config_from_mapping(params)
+    arguments = dict(params)
+    if not str(arguments.get("base_url") or "").strip():
+        arguments["base_url"] = _pending_endpoint()
+    candidate = config_from_mapping(arguments)
     # Validate and render before replacing a previously working configuration.
     snapshot = fetch_status(candidate, target_date=str(params.get("date") or "").strip() or None)
     update_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -703,6 +790,8 @@ def activate(params: dict[str, Any]) -> dict[str, Any]:
         "artifacts": [{"path": "artifacts/gateway_status.png", "kind": "image", "name": "kemo-gateway-status.png"}],
     }
     _atomic_json(LAST_RUN_PATH, {**result, "artifacts": [{"path": "artifacts/gateway_status.png", "kind": "image"}]})
+    _atomic_json(PANEL_VALUES_PATH, {"base_url": candidate.base_url})
+    _write_panel_status(result)
     return result
 
 
@@ -713,4 +802,5 @@ def deactivate() -> dict[str, Any]:
     _inactive_output(update_time)
     result = {"ok": True, "status": "inactive", "active": False, "state_changed": True}
     _atomic_json(LAST_RUN_PATH, result)
+    _write_panel_status(result)
     return result
