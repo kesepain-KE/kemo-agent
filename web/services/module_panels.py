@@ -52,10 +52,6 @@ def _safe_panel_path(module_root: Path, value: Any, field: str) -> tuple[str, Pa
         raise InvalidRequestError(f"{field} 必须是模块目录内的相对路径")
     root = module_root.resolve()
     candidate = root.joinpath(*pure.parts)
-    try:
-        candidate.resolve().relative_to(root)
-    except ValueError:
-        raise InvalidRequestError(f"{field} 越出模块目录") from None
     current = root
     for part in pure.parts:
         current = current / part
@@ -63,6 +59,10 @@ def _safe_panel_path(module_root: Path, value: Any, field: str) -> tuple[str, Pa
             current.is_symlink() or getattr(current, "is_junction", lambda: False)()
         ):
             raise InvalidRequestError(f"{field} 不允许经过符号链接或目录联接")
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError:
+        raise InvalidRequestError(f"{field} 越出模块目录") from None
     return pure.as_posix(), candidate
 
 
