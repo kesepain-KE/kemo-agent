@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.baseline.json
+.test-work/
+artifacts/
+out/
+
