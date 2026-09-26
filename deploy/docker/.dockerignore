@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!requirements.txt
+!runtime/
+!runtime/**
+!release.zip
+!entrypoint.py
+!healthcheck.py
+

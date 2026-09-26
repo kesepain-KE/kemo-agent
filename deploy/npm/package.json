@@ -1,0 +1,10 @@
+{
+  "name": "@kesepain/kemo-agent",
+  "private": true,
+  "description": "kemo-agent launcher and self-contained deployment distribution",
+  "license": "Apache-2.0",
+  "bin": { "kemo": "bin/kemo.cjs" },
+  "files": ["bin/", "runtime/", "release.zip", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "publishConfig": { "access": "public" }
+}

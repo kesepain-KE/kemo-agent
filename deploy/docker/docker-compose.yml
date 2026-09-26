@@ -1,0 +1,12 @@
+services:
+  kemo-agent:
+    image: ghcr.io/kesepain-ke/kemo-agent:${KEMO_VERSION:-latest}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KEMO_WEB_PORT:-1357}:1357"
+    volumes:
+      - kemo-data:/data
+    stop_grace_period: 40s
+volumes:
+  kemo-data:
