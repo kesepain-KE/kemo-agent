@@ -1,16 +1,16 @@
 # kemo-agent npm launcher
 
-After the generated distribution has been published to npm:
+安装（免 registry 凭据，直接从 GitHub Release 资产下载）：
 
 ```sh
-npm install -g @kesepain/kemo-agent
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
-To upgrade, stop the application first, then run:
+升级：先停止应用，然后重跑同一条命令 —— URL 里的 `latest` 永远指向最新发布版：
 
 ```sh
-npm install -g @kesepain/kemo-agent@latest
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
@@ -31,7 +31,8 @@ new bundled application release. `KEMO_INSTALL_ROOT` selects an empty destinatio
 it cannot take over an installation owned by the Windows/Linux installer.
 
 Maintainers: **do not publish this source directory directly**. Run
-`python deploy/pack.py`, review the generated archive, then publish its
-`deploy/artifacts/<framework-version>/npm` staging directory. Version is generated
-from the framework's root version.json. Registry namespace access is required.
+`python deploy/pack.py`, review the generated archive, then upload the packed
+tarball to the matching GitHub Release — both under a versioned name and under the
+fixed name `kemo-agent-npm.tgz`, so the `releases/latest/download/` URL keeps
+pointing at the newest release. Version comes from the framework's root version.json.
 

@@ -1,10 +1,14 @@
 {
-  "name": "@kesepain/kemo-agent",
+  "name": "@kesepain-ke/kemo-agent",
   "private": true,
   "description": "kemo-agent launcher and self-contained deployment distribution",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kesepain-KE/kemo-agent.git"
+  },
   "bin": { "kemo": "bin/kemo.cjs" },
   "files": ["bin/", "runtime/", "release.zip", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
-  "publishConfig": { "access": "public" }
+  "publishConfig": { "access": "public", "registry": "https://npm.pkg.github.com" }
 }

@@ -182,13 +182,14 @@ macOS 复用 Unix 入口，尚需在目标系统验收；不提供 Homebrew 系�
 ### npm
 
 ```sh
-npm install -g @kesepain/kemo-agent
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
-npm 包是壳，包含这次框架发布的 ZIP 和独立部署器。**没有 postinstall**，首次
-`kemo` 才部署；关闭 npm 安装脚本不影响命令入口。应用仍需 Python 和 pip 网络。
-`npm install -g ...@latest` 更新分发包，下次 `kemo` 启动前更新应用。
+包直接从 GitHub Release 资产安装，**不需要任何 registry 凭据**。包含这次框架发布的
+ZIP 和独立部署器。**没有 postinstall**，首次 `kemo` 才部署；关闭 npm 安装脚本不影响
+命令入口。应用仍需 Python 和 pip 网络。重跑上面同一条命令即可更新分发包（URL 里的
+`latest` 永远指向最新版），下次 `kemo` 启动前更新应用。
 `kemo update` 使用当前 npm 包携带的框架版本，不再额外跟随 GitHub latest。
 `KEMO_INSTALL_ROOT` 可指定独立安装目录；不接管 Windows/Linux 渠道拥有的根目录。
 
