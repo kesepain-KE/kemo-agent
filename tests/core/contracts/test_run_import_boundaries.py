@@ -90,6 +90,7 @@ PRODUCTION_EXCLUDES = {
     "users",
     "venv",
 }
+NESTED_PRODUCTION_EXCLUDES = {".test-work", "__pycache__"}
 
 
 def production_python_files() -> list[Path]:
@@ -98,7 +99,9 @@ def production_python_files() -> list[Path]:
         relative = path.relative_to(ROOT)
         if relative.parts and relative.parts[0] in PRODUCTION_EXCLUDES:
             continue
-        if "node_modules" in relative.parts or "__pycache__" in relative.parts:
+        if "node_modules" in relative.parts or any(
+            part in NESTED_PRODUCTION_EXCLUDES for part in relative.parts
+        ):
             continue
         result.append(path)
     return result
@@ -127,6 +130,9 @@ def is_legacy_reference(value: str) -> bool:
 
 
 class RunImportBoundaryTests(unittest.TestCase):
+    def test_deployment_test_work_is_not_production_source(self) -> None:
+        self.assertIn(".test-work", NESTED_PRODUCTION_EXCLUDES)
+
     def test_run_root_contains_only_the_lazy_entry_and_total_facade(self) -> None:
         self.assertEqual(
             {path.name for path in RUN_ROOT.glob("*.py")},

@@ -15,6 +15,7 @@ class TestSuiteBoundaryTests(unittest.TestCase):
             "contracts/",
             "runtime/",
             "storage/",
+            "deploy/",
             "tests/template_tests/",
             "开发临时目录/test_kemo/",
         ):
@@ -23,6 +24,15 @@ class TestSuiteBoundaryTests(unittest.TestCase):
     def test_local_system_suite_is_gitignored(self) -> None:
         gitignore = (ROOT / ".gitignore").read_text("utf-8")
         self.assertIn("开发临时目录/", gitignore.splitlines())
+
+    def test_deployment_assertions_have_a_formal_release_gate(self) -> None:
+        canonical = ROOT / "tests" / "deploy" / "test_deploy.py"
+        compatibility = ROOT / "deploy" / "tests" / "test_deploy.py"
+        self.assertTrue(canonical.is_file())
+        self.assertIn("class DeploymentTests", canonical.read_text("utf-8"))
+        wrapper = compatibility.read_text("utf-8")
+        self.assertIn("tests.deploy.test_deploy", wrapper)
+        self.assertNotIn("class DeploymentTests", wrapper)
 
     def test_builtin_expand_private_dotenv_rules_follow_source_exceptions(
         self,

@@ -8,7 +8,7 @@ MAX_IMPLEMENTATION_LINES = 800
 SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
 IGNORED_PARTS = {
     ".git", "node_modules", "tests", "tmp", "开发临时目录", "dist", "build",
-    "coverage", "__pycache__",
+    "coverage", "__pycache__", ".test-work",
 }
 # These are cohesive declaration/protocol or page-composition roots rather than
 # multi-domain implementation modules.  Every exception must carry a rationale.
@@ -48,6 +48,10 @@ def test_multi_responsibility_implementation_modules_stay_below_800_lines() -> N
         if lines > MAX_IMPLEMENTATION_LINES and relative not in COHESIVE_LONG_MODULES:
             oversized.append(f"{relative}: {lines}")
     assert not oversized, "Unexpected production modules above 800 lines:\n" + "\n".join(oversized)
+
+
+def test_deployment_test_work_is_not_production_source() -> None:
+    assert ".test-work" in IGNORED_PARTS
 
 
 def test_long_module_allowlist_is_exact_and_documented() -> None:

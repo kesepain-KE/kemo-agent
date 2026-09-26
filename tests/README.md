@@ -8,6 +8,7 @@
 - `contracts/`：稳定公共 API、Schema、目录布局和兼容性合同。
 - `runtime/`：请求生命周期、状态机、并发、取消、恢复和错误路径。
 - `storage/`：SQLite、文件持久化、迁移、事务和幂等行为。
+- `deploy/`：独立部署器、Release 归档、四渠道命令、故障恢复和发布文档合同。
 - `support/`：跨多个测试领域复用的夹具和测试辅助代码，不承载独立断言。
 - `tests/template_tests/`：插件、子代理、拓展、消息、感知和技能六类模板的独立合同。
 
@@ -23,6 +24,7 @@
 
 ```powershell
 python -m pytest tests -q
+python -m pytest tests/deploy -q
 python -m tests.contracts.kemo_v1 -q
 python -m pytest tests/template_tests -q
 ```
