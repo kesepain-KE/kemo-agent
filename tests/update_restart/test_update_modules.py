@@ -75,17 +75,120 @@ class UpdateModuleTests(unittest.TestCase):
         dispatcher = self.load_dispatcher("kemo_update_backup_runtime_locks")
         self.assertIn(".module.execution.lock", BACKUP_EXCLUDES)
 
-    def test_kemo_app_update_manifest_contains_all_runtime_python_modules(self) -> None:
-        module = ROOT / core_update.KEMO_APP_EXPAND
-        expected = {
-            path.name
-            for path in module.glob("*.py")
-            if path.name != "__init__.py"
-        }
-        self.assertTrue(
-            expected.issubset(set(core_update.KEMO_APP_EXPAND_FILES)),
-            expected - set(core_update.KEMO_APP_EXPAND_FILES),
-        )
+    def test_builtin_expand_update_manifests_cover_runtime_and_panel_definitions(
+        self,
+    ) -> None:
+        for relative, files, _config_file, _obsolete_files in (
+            core_update.BUILTIN_GLOBAL_EXPANDS
+        ):
+            with self.subTest(relative=relative):
+                module = ROOT / relative
+                expected = {
+                    path.relative_to(module).as_posix()
+                    for path in module.glob("*.py")
+                    if path.name != "__init__.py"
+                }
+                expected.update(
+                    name
+                    for name in ("module/README.md", "module/panel.json")
+                    if (module / name).is_file()
+                )
+                missing = expected - set(files)
+                self.assertFalse(missing, missing)
+                self.assertNotIn("module/status.json", files)
+                self.assertNotIn("module/panel.values.json", files)
+
+    def test_builtin_expand_updates_panel_definitions_and_preserves_local_values(
+        self,
+    ) -> None:
+        for relative, files, config_file, obsolete_files in (
+            core_update.BUILTIN_GLOBAL_EXPANDS
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                target = root / "target"
+                module = Path(relative)
+                for name in files:
+                    write(source / module / name, f"new {name}")
+                write_json(source / module / "expand.json", {"open_input": False})
+                write(source / module / "input_data.md", "source status")
+                write_json(
+                    source / module / "module" / "panel.values.json",
+                    {"endpoint": "source-default"},
+                )
+                write_json(
+                    source / module / "module" / "status.json",
+                    {"health": "source"},
+                )
+                write_json(
+                    target / module / "module" / "panel.values.json",
+                    {"endpoint": "local-value"},
+                )
+                write_json(
+                    target / module / "module" / "status.json",
+                    {"health": "local"},
+                )
+
+                core_update._update_builtin_global_expand(
+                    source,
+                    target,
+                    relative=relative,
+                    source_files=files,
+                    config_file=config_file,
+                    obsolete_files=obsolete_files,
+                    dry_run=False,
+                    details=[],
+                    warnings=[],
+                )
+
+                self.assertEqual(
+                    (target / module / "module" / "panel.json").read_text("utf-8"),
+                    "new module/panel.json",
+                )
+                self.assertEqual(
+                    json.loads(
+                        (target / module / "module" / "panel.values.json").read_text(
+                            "utf-8"
+                        )
+                    ),
+                    {"endpoint": "local-value"},
+                )
+                self.assertEqual(
+                    json.loads(
+                        (target / module / "module" / "status.json").read_text(
+                            "utf-8"
+                        )
+                    ),
+                    {"health": "local"},
+                )
+
+                fresh_target = root / "fresh-target"
+                core_update._update_builtin_global_expand(
+                    source,
+                    fresh_target,
+                    relative=relative,
+                    source_files=files,
+                    config_file=config_file,
+                    obsolete_files=obsolete_files,
+                    dry_run=False,
+                    details=[],
+                    warnings=[],
+                )
+                self.assertEqual(
+                    json.loads(
+                        (
+                            fresh_target
+                            / module
+                            / "module"
+                            / "panel.values.json"
+                        ).read_text("utf-8")
+                    ),
+                    {"endpoint": "source-default"},
+                )
+                self.assertFalse(
+                    (fresh_target / module / "module" / "status.json").exists()
+                )
 
     def test_failed_backup_does_not_leave_partial_backup_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -332,6 +435,19 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertIn(str(module).replace("\\", "/"), "\n".join(result["details"]))
             self.assertEqual((target / module / "graph_core.py").read_text("utf-8"), "new graph_core.py")
             self.assertEqual((target / module / "registry.py").read_text("utf-8"), "new registry.py")
+            for name in (
+                "graph_operations.py",
+                "library_content_operations.py",
+                "library_document_operations.py",
+                "library_operations.py",
+                "library_status_operations.py",
+                "scan_safety.py",
+                "module/panel.json",
+            ):
+                self.assertEqual(
+                    (target / module / name).read_text("utf-8"),
+                    f"new {name}",
+                )
             self.assertEqual((target / module / "input_data.md").read_text("utf-8"), "source inactive")
             self.assertEqual(
                 json.loads((target / module / "graph_config.json").read_text("utf-8"))["base_url"],

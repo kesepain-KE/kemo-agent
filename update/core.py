@@ -79,6 +79,8 @@ GATEWAY_STATUS_EXPAND_FILES = (
     "data_update.py",
     "start_expand.py",
     "expand_control.md",
+    "module/README.md",
+    "module/panel.json",
 )
 
 KEMO_GRAPH_EXPAND = "global_expand/kemo_graph"
@@ -89,12 +91,20 @@ KEMO_GRAPH_EXPAND_FILES = (
     "registry.py",
     "client.py",
     "library_sync.py",
+    "library_content_operations.py",
+    "library_document_operations.py",
+    "library_operations.py",
+    "library_status_operations.py",
+    "graph_operations.py",
     "operations.py",
     "render.py",
+    "scan_safety.py",
     "graph_core.py",
     "data_update.py",
     "start_expand.py",
     "expand_control.md",
+    "module/README.md",
+    "module/panel.json",
 )
 KEMO_GRAPH_OBSOLETE_FILES = (
     "sync_sources.py",
@@ -131,6 +141,8 @@ KEMO_APP_EXPAND_FILES = (
     "start_expand.py",
     "expand_control.md",
     "upstream.py",
+    "module/README.md",
+    "module/panel.json",
 )
 
 BUILTIN_GLOBAL_EXPANDS = (
@@ -425,6 +437,19 @@ def _update_builtin_global_expand(
             warnings.append(f"源缺少文件: {relative}/{name}")
             continue
         if copy_file_safe(source / name, target / name, dry_run=dry_run):
+            changed = True
+
+    # Built-in panel values are user-owned after first initialization.  Seed
+    # newly introduced defaults for old source installations, but never
+    # overwrite an operator's existing choices.
+    source_panel_values = source / "module" / "panel.values.json"
+    target_panel_values = target / "module" / "panel.values.json"
+    if source_panel_values.is_file() and not target_panel_values.exists():
+        if copy_file_safe(
+            source_panel_values,
+            target_panel_values,
+            dry_run=dry_run,
+        ):
             changed = True
 
     for name in obsolete_files:

@@ -121,7 +121,7 @@ python -m update --check
 - `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
 - `config/global_config.json` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。
 - 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
-- `global_expand/kemo_gateway_status/` 是内置例外：core 会同步其静态代码和说明，同时保留部署机的本地凭据、状态摘要、脱敏快照、图表和运行状态；存在本地配置时继续保持激活。
+- `global_expand/kemo_app/`、`global_expand/kemo_gateway_status/` 与 `global_expand/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`expand.json` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
 - core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。
 
 ## agents — 内置子智能体
@@ -167,7 +167,7 @@ python -m update --check
 - `shared_knowledge/`
 - 根目录 `.gitignore`
 - `config/` 中除 `global_soul.md` 和交互处理的 `global_config.json` 之外的文件
-- `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 和内置 `global_expand/kemo_gateway_status/` 静态实现之外的模块数据
+- `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 和三个内置拓展的受管程序/面板定义之外的模块数据
 - `users/`、`tmp/`、`message/out/` 等运行数据
 
 如这些框架路径发生版本变化，需要先扩展更新板块实现，或由维护者使用其他明确方式更新。不要假设 `--module all` 会覆盖未列出的路径。
