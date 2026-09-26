@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$(dirname "$0")/deploy.py" "$@"
+fi
+exec python "$(dirname "$0")/deploy.py" "$@"

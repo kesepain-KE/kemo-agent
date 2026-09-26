@@ -1,0 +1,26 @@
+schema_version: 1
+deploy:
+  repo: kesepain-KE/kemo-agent
+  asset: "kemo-agent-release-{version}.zip"
+  tag: "v{version}"
+  mirrors:
+    - "https://ghfast.top/"
+    - "https://gh-proxy.com/"
+platforms:
+  windows:
+    install_root: "%USERPROFILE%\\.kemo-agent"
+  linux:
+    install_root: "~/.kemo-agent"
+  npm:
+    install_root: "~/.kemo-agent"
+  docker:
+    install_root: "/data"
+mapping:
+  "tree/": "{install_root}/"
+  preserve:
+    - "users/"
+    - "runtime/"
+    - "tmp/"
+    - ".env"
+  interactive:
+    - "deploy/deploy.yaml"
