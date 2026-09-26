@@ -194,14 +194,14 @@ python3 "$HOME/.kemo-agent/deploy/deploy.py" start
 ### npm：安装与日常使用
 
 ```sh
-npm install -g @kesepain/kemo-agent
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
 没有 `postinstall`，首次运行 `kemo` 才部署并启动。升级时先停止应用，再执行：
 
 ```sh
-npm install -g @kesepain/kemo-agent@latest
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 

@@ -181,7 +181,7 @@ python3 "$HOME/.kemo-agent/deploy/deploy.py" start
 npm：
 
 ```sh
-npm install -g @kesepain/kemo-agent
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
@@ -274,7 +274,7 @@ CLI 复用核心对话引擎和用户数据，不是另一套独立历史系统�
 先识别安装渠道，停止应用后再更新；不能交替使用两个更新器管理同一个安装：
 
 - Windows/Linux：使用安装根内 `deploy/deploy.py check` / `update --yes`，再 `start`。
-- npm：先 `npm install -g @kesepain/kemo-agent@latest`，再 `kemo`；`kemo update` 只使用本机分发包版本。
+- npm：先 `npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz`，再 `kemo`；`kemo update` 只使用本机分发包版本。
 - Docker：在同一项目中 `docker compose stop` → `docker compose pull` → `docker compose up -d`；禁止以 `down -v` 更新。
 - 源码：使用下面原业务更新器，仍支持 core/agents/plugins/web 板块。
 

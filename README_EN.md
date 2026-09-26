@@ -194,14 +194,14 @@ The default directory is `~/.kemo-agent`. macOS can reuse the Unix entry point, 
 ### npm: installation and everyday use
 
 ```sh
-npm install -g @kesepain/kemo-agent
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 
 There is no `postinstall`; the first `kemo` invocation deploys and starts the application. To upgrade, stop the application first, then run:
 
 ```sh
-npm install -g @kesepain/kemo-agent@latest
+npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
 kemo
 ```
 

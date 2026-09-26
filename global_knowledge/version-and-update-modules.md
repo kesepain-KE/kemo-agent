@@ -13,7 +13,7 @@
 |---|---|
 | 源码 | `python update.py`，支持原 core/agents/plugins/web 板块 |
 | Windows/Linux Release | 安装根内 `python deploy/deploy.py update --yes`（Linux 通常用 python3）；检查用 `check`，重启用 `start` |
-| npm | `npm install -g @kesepain/kemo-agent@latest`，再 `kemo` |
+| npm | `npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz`，再 `kemo` |
 | Docker | 同一项目目录 `docker compose stop` → `docker compose pull` → `docker compose up -d` |
 
 部署器以主框架 `version.json.version` 管理整包，不提供旧更新器的 `--module` 更新语义。
