@@ -7,6 +7,6 @@
   "bindings": {},
   "configured_users": 0,
   "activation": "未激活",
-  "updated_at": "2026-09-26T01:01:41+08:00",
+  "updated_at": "2026-09-26T11:47:26+08:00",
   "note": "Token 只保存 SHA-256，不可反向查看明文；页面展示配置状态与核对指纹。"
 }
