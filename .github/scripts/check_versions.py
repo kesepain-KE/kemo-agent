@@ -103,8 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     project_introduction = (
         ROOT / "global_knowledge" / "project-introduction.md"
     ).read_text(encoding="utf-8")
-    if f"当前稳定版本为 `{version}`" not in project_introduction:
-        errors.append(f"项目介绍中的稳定版本未指向 {version}")
+    if not any(
+        f"当前{status}版本为 `{version}`" in project_introduction
+        for status in ("稳定", "暂定")
+    ):
+        errors.append(f"项目介绍中的稳定或暂定版本未指向 {version}")
 
     version_guide = (
         ROOT / "global_knowledge" / "version-and-update-modules.md"
@@ -113,9 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"版本与更新模块文档未展示根版本 {version}")
 
     agents_manual = (ROOT / "agents.md").read_text(encoding="utf-8")
-    manual_version = re.search(r"当前稳定版本：`kemo-agent ([0-9][^`]+)`", agents_manual)
+    manual_version = re.search(r"当前(?:稳定|暂定)版本：`kemo-agent ([0-9][^`]+)`", agents_manual)
     if not manual_version:
-        errors.append("agents.md 运行手册缺少「当前稳定版本：`kemo-agent x.y.z`」标注")
+        errors.append("agents.md 运行手册缺少「当前稳定版本」或「当前暂定版本」标注")
     elif manual_version.group(1) != version:
         errors.append(
             "agents.md 运行手册稳定版本不一致："
@@ -126,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         next_heading = summary_span.find("\n## ")
         summary = summary_span[: next_heading if next_heading >= 0 else len(summary_span)]
         highlights = {
+            "1.3.1": "四渠道独立部署",
             "1.3.0": "长期智能、会话生命周期、模块面板与 Web 交互收敛",
             "1.2.8": "多用户 Web 工作区与运行可靠性",
             "1.2.7": "Chat 兼容传输链路",

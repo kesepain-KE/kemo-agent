@@ -194,6 +194,62 @@ class CheckVersionsTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("README_EN.md 未声明配套 kemo-adapter-api 0.8.2", output)
 
+    def test_tentative_release_markers_preserve_version_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_release_tree(root, "1.3.1")
+            version_path = root / "version.json"
+            manifest = json.loads(version_path.read_text(encoding="utf-8"))
+            manifest["compatibility"] = {"kemo-adapter-api": "0.8.2"}
+            version_path.write_text(json.dumps(manifest), encoding="utf-8")
+            for relative in (
+                "readme.md", "README_EN.md",
+                "global_knowledge/version-and-update-modules.md",
+            ):
+                path = root / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8") + "\nkemo-adapter-api 0.8.2\n",
+                    encoding="utf-8",
+                )
+            introduction = root / "global_knowledge/project-introduction.md"
+            introduction.write_text(
+                "当前暂定版本为 `1.3.1`（待发布），配套 kemo-adapter-api 0.8.2。\n",
+                encoding="utf-8",
+            )
+            soul = root / "config/global_soul.md"
+            soul.parent.mkdir(parents=True, exist_ok=True)
+            soul.write_text(
+                "当前能力基线：kemo-agent 1.3.1（待发布），配套 kemo-adapter-api 0.8.2。\n",
+                encoding="utf-8",
+            )
+            manual = root / "agents.md"
+            manual.write_text(
+                "当前暂定版本：`kemo-agent 1.3.1`（待发布），配套 kemo-adapter-api 0.8.2，"
+                "新增四渠道独立部署。\n\n## 架构\n",
+                encoding="utf-8",
+            )
+            code, output = run_check(root, "--tag", "v1.3.1")
+            self.assertEqual(code, 0, output)
+            code, output = run_check(root, "--tag", "v1.3.0")
+            self.assertEqual(code, 1)
+            self.assertIn("发布标签", output)
+
+            # Tentative wording must not bypass the actual version comparison.
+            manual.write_text(
+                manual.read_text(encoding="utf-8").replace("1.3.1", "1.3.0"),
+                encoding="utf-8",
+            )
+            code, output = run_check(root)
+            self.assertEqual(code, 1)
+            self.assertIn("运行手册稳定版本不一致", output)
+            introduction.write_text(
+                introduction.read_text(encoding="utf-8").replace("1.3.1", "1.3.0"),
+                encoding="utf-8",
+            )
+            code, output = run_check(root)
+            self.assertEqual(code, 1)
+            self.assertIn("项目介绍中的稳定或暂定版本未指向", output)
+
     def test_tag_mismatch_still_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
