@@ -23,7 +23,7 @@ App 用户到智能体用户的绑定。其他桥接配置只读，不通过组�
 
 ## Kemo 网关运行状态拓展
 
-当前正式兼容基线为 `kemo-agent 1.3.0` 配套 `kemo-adapter-api 0.8.2`，Kemo 1.0 Provider 线路协议匹配已确认。状态拓展继续只依赖网关独立的只读 `GET /status` 合同；版本匹配不扩大其管理权限。
+当前暂定代码版本 `kemo-agent 1.3.1` 延续 1.3.0 已确认的兼容基线，配套 `kemo-adapter-api 0.8.2`，Kemo 1.0 Provider 线路协议匹配已确认。状态拓展继续只依赖网关独立的只读 `GET /status` 合同；版本匹配不扩大其管理权限。
 
 `global_expand/kemo_gateway_status/` 是框架内置、默认未激活的全局拓展。它面向“一个 kemo-agent 连接一个 Kemo 网关”的常见部署方式，通过网关公开的只读状态接口采集运行信息，并生成适合主智能体使用的摘要、脱敏快照和 PNG 图表。
 

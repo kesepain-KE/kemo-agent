@@ -4,21 +4,39 @@
 
 本文只说明当前更新器行为，不保存发布历史、版本变更记录或单次审计结论；当前版本以根目录 `version.json` 为准。
 
+## 先选择更新入口
+
+当前代码版本暂定为 **1.3.1（待发布）**，网关兼容基线保持 **0.8.2**。
+本页后续命令和业务迁移描述只适用于源码安装的旧更新器，不适用于 `deploy/`：
+
+| 安装方式 | 更新操作（均先停止应用） |
+|---|---|
+| 源码 | `python update.py`，支持原 core/agents/plugins/web 板块 |
+| Windows/Linux Release | 安装根内 `python deploy/deploy.py update --yes`（Linux 通常用 python3）；检查用 `check`，重启用 `start` |
+| npm | `npm install -g @kesepain/kemo-agent@latest`，再 `kemo` |
+| Docker | 同一项目目录 `docker compose stop` → `docker compose pull` → `docker compose up -d` |
+
+部署器以主框架 `version.json.version` 管理整包，不提供旧更新器的 `--module` 更新语义。
+`kemo check/update` 使用本机 npm 包携带的版本，不直接检查 GitHub latest。
+部署安装存在 `.kemo-install.json` 记录时，不要交替使用源码更新器，以免受管清单与实际版本漂移。
+Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故障恢复与发布产物前提见
+`deployment-and-release.md`；Release/npm/GHCR 是否已发布必须单独确认。
+
 ## 版本结构
 
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "schema_version": 1,
   "compatibility": {
     "kemo-adapter-api": "0.8.2"
   },
   "components": {
-    "core": {"version": "1.3.0"},
-    "agents": {"version": "1.3.0"},
-    "plugins": {"version": "1.3.0"},
-    "web": {"version": "1.3.0"}
+    "core": {"version": "1.3.1"},
+    "agents": {"version": "1.3.1"},
+    "plugins": {"version": "1.3.1"},
+    "web": {"version": "1.3.1"}
   }
 }
 ```

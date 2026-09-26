@@ -103,7 +103,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Kemo 1.0 共享契约 Fixture
 
-`kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认。该兼容基线覆盖当前共享 Fixture、请求/响应模型、SSE 续传、工具调用、模型能力目录、Asset、Usage、Embedding 与 Rerank 合同；后续任一端修改线路字段时仍必须重新执行双仓库契约测试，不能只依赖版本号声明。
+`kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认。当前暂定待发布的 `kemo-agent 1.3.1` 延续该兼容基线，部署渠道变更不改变线路协议。该兼容基线覆盖当前共享 Fixture、请求/响应模型、SSE 续传、工具调用、模型能力目录、Asset、Usage、Embedding 与 Rerank 合同；后续任一端修改线路字段时仍必须重新执行双仓库契约测试，不能只依赖版本号声明。
 
 Agent 与网关在各自仓库维护同一份脱敏线协议 Fixture：
 `tests/contracts/kemo_v1/fixtures/manifest.json` 和 `wire.json` 必须逐字节一致。Fixture 覆盖文本、

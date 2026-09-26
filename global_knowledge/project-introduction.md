@@ -6,7 +6,7 @@ kemo-agent 是面向个人智能基础设施的本地优先、多用户 Agent Ru
 上下文的聊天壳，而是把对话历史、长期记忆、知识、工具、子代理、任务计划、定时调度、感知、
 拓展和多入口交互组织成持续存在的用户工作空间。
 
-当前稳定版本为 `1.3.0`，已确认兼容 `kemo-adapter-api 0.8.2`，两端使用的 Kemo 1.0 线路协议匹配。版本号、各组件版本和兼容网关基线以根目录 `version.json` 为准。本文只说明项目定位、当前能力、部署方式和功能边界，不保存历史版本或发布记录；具体实现合同请阅读对应专题文档。
+当前暂定版本为 `1.3.1`（待发布，延续 1.3.0 能力与网关兼容基线），已确认兼容 `kemo-adapter-api 0.8.2`，两端使用的 Kemo 1.0 线路协议匹配。版本号、各组件版本和兼容网关基线以根目录 `version.json` 为准。本文只说明项目定位、当前能力、部署方式和功能边界，不保存历史版本或发布记录；具体实现合同请阅读对应专题文档。
 
 项目的核心目标是：
 
@@ -148,15 +148,53 @@ kemo-agent 本地管理对话、记忆、知识、任务和用户文件。不同
 
 ## 环境要求
 
-基础环境：
+按安装渠道区分：
 
-- Python 3.10 或更高版本；
-- Git；
-- Node.js 与 npm（构建 React 前端时需要）。
+- Windows/Linux Release 部署：Python 3.10+；Linux 需要可用的 venv/ensurepip，应用依赖仍需安装；不要求 Git/Node.js。
+- npm：Node.js 18+、npm、Python 3.10+ 与可用的 Python 虚拟环境。
+- Docker：Docker Engine 与 Docker Compose，宿主无需安装 Python/Node.js。
+- 源码部署：Python 3.10+、Git、Node.js/npm；只有源码前端构建才要求 Node.js。
 
-如果机器暂时没有 Node.js，Python 后端仍可安装，但无法重新构建更新后的 Web 前端。
+Release 带预构建前端。完整渠道选择、日常操作和发布合同见 `deployment-and-release.md`。
 
 ## 获取与首次部署
+
+### 一键部署（对应产物发布后）
+
+当前 1.3.1 暂定待发布；不要把下列命令理解为远程分发已经上线。原生安装依赖 Release 的
+`kemo-agent-release-<version>.zip` 与校验文件；npm/Docker 各自需要发布包/镜像，推送代码本身不等于发布。
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/windows/install.ps1 | iex
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
+```
+
+Linux：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/linux/install.sh | sh
+python3 "$HOME/.kemo-agent/deploy/deploy.py" start
+```
+
+npm：
+
+```sh
+npm install -g @kesepain/kemo-agent
+kemo
+```
+
+Docker（在固定专用目录中执行，不覆盖已有 Compose 文件）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
+```
+
+原生脚本只安装，首次 `start` 才调用原初始化向导；可以先下载脚本审查再执行。
+安装根默认位于用户主目录 `.kemo-agent`（Docker 为 `/data`），不能接管开发仓库或其他渠道安装。
+
+### 源码部署（开发者）
 
 ```bash
 git clone https://github.com/kesepain-KE/kemo-agent.git
@@ -189,6 +227,9 @@ python user_create.py
 `knowledge-and-user-data.md`。
 
 ## 启动 Web
+
+下面是源码安装入口。Release 安装应使用安装根内 `deploy/deploy.py start`，npm 使用 `kemo`，
+Docker 使用 `docker compose up -d`，不要绕过各渠道的运行锁与初始化入口。
 
 ```bash
 python start_web.py
@@ -230,7 +271,16 @@ CLI 复用核心对话引擎和用户数据，不是另一套独立历史系统�
 
 ## 更新与重启
 
-更新：
+先识别安装渠道，停止应用后再更新；不能交替使用两个更新器管理同一个安装：
+
+- Windows/Linux：使用安装根内 `deploy/deploy.py check` / `update --yes`，再 `start`。
+- npm：先 `npm install -g @kesepain/kemo-agent@latest`，再 `kemo`；`kemo update` 只使用本机分发包版本。
+- Docker：在同一项目中 `docker compose stop` → `docker compose pull` → `docker compose up -d`；禁止以 `down -v` 更新。
+- 源码：使用下面原业务更新器，仍支持 core/agents/plugins/web 板块。
+
+安装根、完整可复制命令、恢复与数据边界见 `deployment-and-release.md`。
+
+**以下仅描述源码更新器：**
 
 ```bash
 python update.py
@@ -260,9 +310,11 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 | `global_knowledge/` | 框架级知识库和主索引 |
 | `users/<name>/` | 用户私有工作空间 |
 | `template/` | 模块和用户创建骨架 |
+| `deploy/` | 四渠道 Release 部署、事务更新、恢复、打包和渠道入口 |
 | `tests/` | 会上传的正式发布红线，按领域及 contracts/runtime/storage 职责组织 |
+| `tests/deploy/` | 独立部署器、Release 归档、四渠道命令与文档一致性的正式测试 |
 | `tests/template_tests/` | 六类模块创建后合同验收 |
-| `开发临时目录/test_kemo/` | `.gitignore` 排除的本机系统/集成补强，不与正式测试重复断言 |
+| `开发临时目录/test_kemo/` | `.gitignore` 排除的本机系统/集成补强；其中 deployment_distribution 负责真实打包和隔离安装，不与正式测试重复断言 |
 
 `run/` 的公开调用只允许从 `run.<领域>` 入口导入；顶层只保留懒加载的 `run/__init__.py` 和
 `run/engine.py` 总门面，不再维护旧平铺模块或平行兼容层。完整导航见 `data_structure.md`。
@@ -275,7 +327,9 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 | `cli.py` | 命令行对话 |
 | `setup.py` | 首次部署 |
 | `user_create.py` | 用户创建与管理 |
-| `update.py` | 更新薄入口；实际实现位于 `update/` |
+| `update.py` | 源码安装的更新薄入口；实际实现位于 `update/` |
+| `deploy/deploy.py` | Release 安装的统一 install/update/check/recover/init/start 入口 |
+| `deploy/pack.py` | 从主框架版本生成 Release ZIP、npm 暂存目录和 Docker 构建上下文 |
 | `restart.py` | Web 受控重启辅助进程 |
 | `version.json` | core/agents/plugins/web/all 版本 |
 
@@ -290,7 +344,7 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 
 ## 相关项目
 
-- `kemo-adapter-api 0.8.2`：与 kemo-agent 1.3.0 完成协议匹配确认的 Kemo 模型网关与 Provider 适配项目；
+- `kemo-adapter-api 0.8.2`：Kemo 模型网关与 Provider 适配项目；1.3.1 待发布版延续 1.3.0 已确认的协议匹配；
 - `kemo-graph`：可选知识图谱和大型文档 Library 服务；
 - `kemo-agent-doc`：面向用户的独立文档站；
 - `votx-agent`：独立维护的 Agent 项目，与 kemo-agent 不存在继承关系。

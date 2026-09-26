@@ -21,7 +21,8 @@ kemo-agent/
 ├── shared_knowledge/       # 共享知识库
 ├── users/<name>/           # 用户配置、人格、历史、记忆和私有资源
 ├── template/               # 用户、子智能体、技能、拓展等创建模板
-├── update/                 # 更新调度、版本校验、备份、锁、恢复与四板块实现
+├── update/                 # 源码更新调度、版本校验、备份、锁、恢复与四板块实现
+├── deploy/                 # Windows/Linux/npm/Docker 独立部署、事务更新与发布打包
 ├── tests/                  # 后端测试
 ├── config/                 # 全局配置与全局人格
 ├── runtime/                # 结构化运行日志 SQLite（自动生成，不入 Git）
@@ -78,7 +79,8 @@ kemo-agent/
 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
 | `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存（单项/全局/单用户三重容量）、跨进程版本校验和尾部重建；Web 历史默认时间倒序、复合游标分页与按上海自然日日期筛选；`history_search` 基于结构化正文、删除栅栏、来源/会话过滤和条数+字符预算分页；结构化运行日志、终端长行 pending 缓冲上限；记忆按独立更新/失效/加权/检索边界拆分，碎片数量以独立事实为准，A 类仅同一稳定子主题可成簇、B 类保持最小事实，手动 add/edit 同样执行 memory_type 与长度硬边界；晋升时超限必拆（显式 `memory_type`、A 类 1000 字异常硬上限、B 类通常 100/绝不超过 150 字、宿主落盘复验、不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；加权证据轮次 committed_at、Shanghai 原日期、memory_ref 检索绑定、create/reinforce/revise、creation 零分日锁、operation_id 幂等、weighted/daily_locked 可观测性；Cron 历史默认 7 天保留；Web 启动及周期旧空间巡检、有数据入记忆队列、空空间离线清理、Web/App 在线租约、CLI 独立绑定、closed 入队补偿、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
-| `version-and-update-modules.md` | 当前正式版本、配套网关兼容基线，以及 core/agents/plugins/web 更新边界 |
+| `version-and-update-modules.md` | 当前代码版本与发布状态、配套网关兼容基线、安装渠道更新入口，以及源码 core/agents/plugins/web 更新边界 |
+| `deployment-and-release.md` | 一键部署；Windows/Linux/npm/Docker；Release ZIP/校验；安装渠道与安装根；启动/检查/停止后更新/恢复；预构建前端；打包/发布前提；用户数据保护与禁止混用更新器 |
 | `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级；`cron.history_retention_days` 及全局配置 API |
 | `task-automation.md` | 多步骤任务计划；Cron 的 once/daily/weekly/monthly/recurring、多时刻、生效区间、次数上限、失败终态、按任务索引的真实执行历史、历史只读访问；任务计划/定时任务/执行记录三栏独立容器与各自 6 条分页，定时任务近期执行排序、用户执行记录倒序、`cron/task_cron_system/` 系统维护记录隔离、按需脱敏详情、网页管理与隔离边界；聊天开始页不展示全局或已清理会话的孤立活动计划 |
 | `external-message-route-creation.md` | 外部消息平台模块合同 |
@@ -87,7 +89,7 @@ kemo-agent/
 | `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、Enter 跟进与 Ctrl+Enter 直接引导快捷键、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、Web/App 存活租约、CLI 独立续接、closed 会话禁止复活、离线转记忆与入队失败补偿、会话生命周期兜底扫描 |
 | `frontend-conventions.md` | Web 前端样式组织约定与调试经验：CSS Module 与主题变量、变量链断裂（别名宿主未挂载导致声明整条失效）、投影被父容器裁切、滚动条、SPA 壳与哈希构建产物缓存头、改样式后的验证步骤、文案与 DOM 契约、知识库编辑/预览单按钮与 Portal 放大预览 |
 | `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、表单、建议追问、有限点击动作与站内媒体；未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
-| `project-introduction.md` | 项目定位、当前稳定版本与网关协议匹配、核心能力、部署和使用入口 |
+| `project-introduction.md` | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署和使用入口 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 
 ## 维护原则
