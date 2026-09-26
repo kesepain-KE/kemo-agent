@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -137,51 +137,113 @@ The project does not claim that every model service is inherently private. What 
 
 > 📖 For complete installation, configuration, usage, and extension-development guidance, visit the **[kemo-agent online documentation](https://kesepain-ke.github.io/kemo-agent-doc/)**. The documentation site is currently available in Chinese.
 
-### Requirements
+### Choose an installation method
 
-- Python 3.10+
-- Node.js (for building the frontend)
-- Git
+Windows, Linux, npm, and Docker share the framework version. The tentative next release is **1.3.1**; the compatible gateway baseline remains **0.8.2**.
 
-### Clone and deploy
+> **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
+
+| Method | Host requirements |
+|---|---|
+| Windows / Linux one-command deployment | Python 3.10+; working `venv` / `ensurepip` on Linux; network access to install application dependencies |
+| npm | Node.js 18+, npm, Python 3.10+, and a working Python virtual environment |
+| Docker | Docker Engine and Docker Compose; no host Python / Node.js required |
+| Source development | Python 3.10+, Git, Node.js and npm for frontend builds |
+
+The Release includes a prebuilt frontend, so native Windows / Linux clients do not need Git or Node.js. Remote installers execute code; download and review them first if preferred.
+
+### Windows: install, start, and update
+
+Install in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/windows/install.ps1 | iex
+```
+
+The installer installs files and dependencies but does not start a persistent service. The default directory is `%USERPROFILE%\.kemo-agent`. For everyday use:
+
+```powershell
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
+# Check only; this does not install updates
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" check
+# Stop the running application before updating and restarting
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" update --yes
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
+```
+
+If only the `py` launcher is available, replace `python` with `py -3`. First startup initializes configuration and the user. The installer does not install system Python, change PATH, or create a system service.
+
+### Linux: install, start, and update
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/linux/install.sh | sh
+python3 "$HOME/.kemo-agent/deploy/deploy.py" start
+```
+
+For routine checks and updates:
+
+```sh
+python3 "$HOME/.kemo-agent/deploy/deploy.py" check
+# Stop the running application first
+python3 "$HOME/.kemo-agent/deploy/deploy.py" update --yes
+python3 "$HOME/.kemo-agent/deploy/deploy.py" start
+```
+
+The default directory is `~/.kemo-agent`. macOS can reuse the Unix entry point, but on-device validation has not been completed.
+
+### npm: installation and everyday use
+
+```sh
+npm install -g @kesepain/kemo-agent
+kemo
+```
+
+There is no `postinstall`; the first `kemo` invocation deploys and starts the application. To upgrade, stop the application first, then run:
+
+```sh
+npm install -g @kesepain/kemo-agent@latest
+kemo
+```
+
+`kemo check` / `kemo update` compare against the framework bundled in the locally installed npm package, not the latest GitHub Release. The default root is `~/.kemo-agent` (the user home directory on Windows). Use `KEMO_INSTALL_ROOT` for a separate directory; npm cannot take over an existing native-channel installation.
+
+### Docker: one-command startup and updates
+
+Run in a dedicated Compose project directory that you will keep using; do not overwrite an existing `docker-compose.yml`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
+```
+
+The default image is `ghcr.io/kesepain-ke/kemo-agent:latest`; the publisher must supply that tag. Alternatively, set `KEMO_VERSION` to a published framework version. For everyday use, stay in the same directory:
+
+```sh
+docker compose logs -f
+# Update: stop, pull, and start the new image
+docker compose stop
+docker compose pull
+docker compose up -d
+```
+
+A named volume mounted at `/data` stores persistent data. New images synchronize managed application files on startup while preserving user data. **Do not update using `docker compose down -v`.** Keep the Compose project name and directory unchanged to avoid accidentally selecting a new, empty volume. The default binding is local-only at `127.0.0.1:1357`; public access is not configured automatically.
+
+### Source installation (developers)
 
 ```bash
 git clone https://github.com/kesepain-KE/kemo-agent.git
 cd kemo-agent
 python setup.py
-```
-
-The setup script guides you through dependency installation, environment configuration, frontend building, and user creation. To accept all defaults and skip the interactive prompts, run:
-
-```bash
-python setup.py --yes
-```
-
-After setup, start the web interface:
-
-```bash
+# Use python setup.py --yes to accept initialization defaults
 python start_web.py
 ```
 
-Open the default address:
+`setup.py` guides dependency installation, environment configuration, frontend builds, and user creation. Source installations can also use `python cli.py` for the CLI; stop the application before updating with `python update.py`.
 
-```text
-http://127.0.0.1:1357
-```
+**Do not alternate between `update.py` and `deploy/deploy.py` for the same installation.** Deployment refuses nonempty unmanaged directories and installations owned by another channel. Choose custom paths at first installation; do not target your development checkout.
 
-If you prefer the command line, run:
+The default web address is `http://127.0.0.1:1357`. Start with the web interface and configure model services, the user, and access credentials.
 
-```bash
-python cli.py
-```
-
-To update the project:
-
-```bash
-python update.py
-```
-
-> The web interface is the recommended starting point. Users, conversations, memories, knowledge, tasks, and extension capabilities can all be inspected in one place.
+See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](global_knowledge/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
 
 ---
 
@@ -204,9 +266,15 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.3.0`
+Current version: `1.3.1` (tentative; not yet published)
 
 Confirmed compatible Kemo gateway: `kemo-adapter-api 0.8.2` (Kemo 1.0 wire protocol matched).
+
+### 1.3.1 planned release
+
+- Adds independent Windows, Linux, npm, and Docker deployment entry points sharing the framework version and a standard Release archive.
+- Documents one-command installation, routine startup, updates after stopping the application, transaction recovery, and publication while retaining source installation.
+- Retains the 1.3.0 capabilities and the `kemo-adapter-api 0.8.2` compatibility baseline. Remote artifacts must be built and published separately.
 
 ### 1.3.0 update
 
@@ -353,7 +421,7 @@ If you are trying an early release, reports about problems, usability feedback, 
 kemo-agent is not an island. Around it, several independently maintained projects cooperate through stable protocols to form the Kemo ecosystem:
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway: the formally matched release for kemo-agent 1.3.0 is `0.8.2`. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
+  Kemo Provider Gateway: the compatibility baseline is `0.8.2`; the planned 1.3.1 release retains the protocol match confirmed for 1.3.0. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.

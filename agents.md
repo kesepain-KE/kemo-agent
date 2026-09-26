@@ -4,9 +4,16 @@
 「什么场景该读哪份文档」的判断入口。领域细节的权威正文都在 `global_knowledge/`，
 需要时按第 3 节索引显式读取，**不要凭记忆猜测未注入的行为细节**。
 
-> 当前稳定版本：`kemo-agent 1.3.0`，配套 Kemo 网关为 `kemo-adapter-api 0.8.2`，Kemo 1.0 线路协议匹配已确认。本版本完成长期智能、会话生命周期、模块面板与 Web 交互收敛：记忆按独立事实粒度拆分并绑定原轮次加权证据，技能进化保留记忆融合提醒；Web/App/CLI/Cron 会话关闭、租约、离线转记忆与连续失败重试统一；任务计划、定时任务和执行历史补齐用户层管理；拓展与感知支持热发现、模板 2.0 和用户配置面板；Web 正文内联组件、历史日期归档、消息跟进/引导、文件/知识/任务页面以及日志监控完成一轮一致性打磨；核心上帝模块按低耦合、高内聚和统一入口继续拆分。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+> 当前暂定版本：`kemo-agent 1.3.1`（待发布），配套 Kemo 网关为 `kemo-adapter-api 0.8.2`，Kemo 1.0 线路协议匹配已确认。本版新增四渠道独立部署与一键部署文档，远程产物需另行发布；延续 1.3.0 已完成的长期智能、会话生命周期、模块面板与 Web 交互收敛：记忆按独立事实粒度拆分并绑定原轮次加权证据，技能进化保留记忆融合提醒；Web/App/CLI/Cron 会话关闭、租约、离线转记忆与连续失败重试统一；任务计划、定时任务和执行历史补齐用户层管理；拓展与感知支持热发现、模板 2.0 和用户配置面板；Web 正文内联组件、历史日期归档、消息跟进/引导、文件/知识/任务页面以及日志监控完成一轮一致性打磨；核心上帝模块按低耦合、高内聚和统一入口继续拆分。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
 
 ---
+
+### 部署操作边界
+
+涉及安装、升级或恢复时，先读 `global_knowledge/deployment-and-release.md`，识别源码或
+Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混用于同一安装根。
+更新前停止应用，`check` 仅检查；推送代码不等于发布 Release/npm/GHCR，未确认远程产物前
+必须注明一键命令的发布前提。1.3.1 是暂定待发布版本，不得宣称已经上线。
 
 ## 1. 手册与知识库的关系
 
@@ -118,11 +125,12 @@
 | 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
 | 长任务模式状态机、任务计划达到工具次数上限后的跨 Run 续跑 | `long-task-runtime.md` |
 | Provider 网络重试、运行级连续失败 5 次重试、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 1.0 兼容改动 | `provider-reliability.md` |
-| 当前正式版本、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
+| 当前代码版本与发布状态、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
 | 模块创建后的独立验收 | `module-template-validation.md` |
 | 三层知识库与用户目录骨架 | `knowledge-and-user-data.md` |
 | 内置拓展（kemo app 端口/Token/用户绑定、Kemo 网关 IP/端口、Kemo Graph IP/端口与在线检测） | `builtin-expansions.md` |
-| 项目定位、当前稳定版本与网关协议匹配、核心能力、部署与使用入口 | `project-introduction.md` |
+| 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署与使用入口 | `project-introduction.md` |
+| 一键部署、Windows/Linux/npm/Docker 渠道选择、日常启动/更新/恢复、Release 打包与发布前提 | `deployment-and-release.md` |
 | Web 前端样式组织、变量链断裂、布局与投影裁切、构建产物缓存头、改样式后的验证；知识库单按钮编辑/预览切换与 Portal 放大渲染预览 | `frontend-conventions.md` |
 | Web 回复正文内联卡片/图表/表格、布局/表单/建议追问/站内媒体、`kemo-widget` 协议、有限点击动作、流式完整性、复制降级与安全边界 | `inline-widgets.md` |
 | 开源协议 | `open-source-license.md` |
@@ -315,7 +323,8 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 | 智能体临时文件 | `tmp/`（不交付给用户） |
 | 外部消息模块 | `message/out/<platform>/`（附件在 `files/`） |
 | 创建模板 / 验收基准 | `template/`、`tests/template_tests/<kind>/` |
-| 全局版本 / 更新系统 | `version.json`、`update.py` + `update/` |
+| 全局版本 / 源码更新系统 | `version.json`、`update.py` + `update/` |
+| Release 四渠道部署 / 打包 | `deploy/deploy.py`、`deploy/pack.py`、`deploy/README.md` |
 | Web 服务 | `web/`（前端 React + Vite，后端 FastAPI） |
 
 **知识库检索优先级**：用户级 → 共享级 → 全局级。新增知识默认写入用户知识库；只有用户明确说

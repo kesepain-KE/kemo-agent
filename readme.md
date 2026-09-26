@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.1-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -137,51 +137,113 @@ kemo-agent 坚持本地优先。
 
 > 📖 完整的安装、配置、功能使用和扩展开发说明，请访问 **[kemo-agent 在线文档](https://kesepain-ke.github.io/kemo-agent-doc/)**。
 
-### 环境要求
+### 选择安装方式
 
-- Python 3.10+
-- Node.js（用于前端构建）
-- Git
+Windows、Linux、npm 和 Docker 共用主框架版本。当前暂定待发布版本为 **1.3.1**，网关兼容基线仍为 **0.8.2**。
 
-### 获取并部署
+> **发布前提：** 以下远程命令仅在安装脚本已推送、对应渠道发布产物就绪后可用。原生安装需要 Release 中的 `kemo-agent-release-<version>.zip` 与 `.zip.sha256`，npm 需要已发布的分发包，Docker 需要已发布的镜像标签。仅推送代码不会自动发布这些产物；本文不代表线上已经可安装。Release ZIP 不是 GitHub 自动生成的源码 ZIP。
+
+| 方式 | 本机要求 |
+|---|---|
+| Windows / Linux 一键部署 | Python 3.10+；Linux 需可用的 `venv` / `ensurepip`；安装应用依赖需要网络 |
+| npm | Node.js 18+、npm、Python 3.10+ 及可用的 Python 虚拟环境 |
+| Docker | Docker Engine 与 Docker Compose；无需宿主 Python / Node.js |
+| 源码开发 | Python 3.10+、Git、Node.js 与 npm（用于构建前端） |
+
+Release 已包含构建好的前端，Windows / Linux 客户端不要求 Git 或 Node.js。远程脚本会执行代码，可以先下载审阅再运行。
+
+### Windows：安装、启动与更新
+
+在 PowerShell 中首装：
+
+```powershell
+irm https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/windows/install.ps1 | iex
+```
+
+安装脚本只安装，不自动常驻启动。默认目录为 `%USERPROFILE%\.kemo-agent`，日常使用：
+
+```powershell
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
+# 只检查是否有更新
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" check
+# 先停止正在运行的应用，再更新和启动
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" update --yes
+python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
+```
+
+如果本机只有 `py` 命令，将上述 `python` 替换为 `py -3`。首次启动会进入配置与用户初始化；安装脚本不自动安装系统 Python、不修改 PATH、不创建系统服务。
+
+### Linux：安装、启动与更新
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/linux/install.sh | sh
+python3 "$HOME/.kemo-agent/deploy/deploy.py" start
+```
+
+日常检查和更新：
+
+```sh
+python3 "$HOME/.kemo-agent/deploy/deploy.py" check
+# 先停止正在运行的应用
+python3 "$HOME/.kemo-agent/deploy/deploy.py" update --yes
+python3 "$HOME/.kemo-agent/deploy/deploy.py" start
+```
+
+默认安装到 `~/.kemo-agent`。macOS 可复用 Unix 入口，但尚未完成目标系统实机验收。
+
+### npm：安装与日常使用
+
+```sh
+npm install -g @kesepain/kemo-agent
+kemo
+```
+
+没有 `postinstall`，首次运行 `kemo` 才部署并启动。升级时先停止应用，再执行：
+
+```sh
+npm install -g @kesepain/kemo-agent@latest
+kemo
+```
+
+`kemo check` / `kemo update` 只对比本机 npm 包附带的框架版本，不直接跟随 GitHub 最新 Release。默认目录为 `~/.kemo-agent`（Windows 对应用户主目录），可用 `KEMO_INSTALL_ROOT` 指定独立目录；不能接管原生渠道已有安装。
+
+### Docker：一键启动与更新
+
+在一个专用、后续保持不变的 Compose 项目目录中执行（不要覆盖已有的 `docker-compose.yml`）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
+```
+
+默认使用 `ghcr.io/kesepain-ke/kemo-agent:latest`；发布者必须提供该标签，也可通过 `KEMO_VERSION` 指定已发布的主框架版本。日常在同一目录执行：
+
+```sh
+docker compose logs -f
+# 更新：先停止，再拉取并启动新镜像
+docker compose stop
+docker compose pull
+docker compose up -d
+```
+
+数据保存在挂载到 `/data` 的命名卷中，新镜像启动时会同步受管应用文件并保留用户数据；**不要用 `docker compose down -v` 更新**。保持 Compose 项目名和目录不变，避免切换到新的空卷。默认仅映射本机 `127.0.0.1:1357`，不自动开放公网。
+
+### 源码部署（开发者）
 
 ```bash
 git clone https://github.com/kesepain-KE/kemo-agent.git
 cd kemo-agent
 python setup.py
-```
-
-部署脚本会引导你完成依赖安装、环境配置、前端构建和用户创建。如果希望跳过交互，可以使用：
-
-```bash
-python setup.py --yes
-```
-
-部署完成后，启动网页端：
-
-```bash
+# 接受默认初始化选项可使用 python setup.py --yes
 python start_web.py
 ```
 
-默认访问：
+`setup.py` 引导依赖安装、环境配置、前端构建和用户创建。源码方式也可用 `python cli.py` 进入命令行；停止应用后用 `python update.py` 更新。
 
-```text
-http://127.0.0.1:1357
-```
+**不要交替用 `update.py` 和 `deploy/deploy.py` 管理同一安装目录。** 一键部署拒绝接管非空的未受管目录或其他渠道安装；自定义路径须首装时指定，不能把开发仓库当作目标。
 
-如果更习惯命令行，也可以使用：
+默认网页地址：`http://127.0.0.1:1357`。初次使用建议从网页端开始，完成模型服务、用户与访问凭据配置。
 
-```bash
-python cli.py
-```
-
-更新项目：
-
-```bash
-python update.py
-```
-
-> 初次使用建议从网页端开始。用户、对话、记忆、知识、任务和扩展能力都可以在同一界面中查看。
+完整参数、自定义路径、离线包、恢复和发布步骤见 [部署说明](deploy/README.md)；智能体使用的统一合同见 [部署与发布知识专题](global_knowledge/deployment-and-release.md)。
 
 ---
 
@@ -204,9 +266,15 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.3.0`
+当前版本：`1.3.1`（暂定，待发布）
 
 已确认兼容的 Kemo 网关：`kemo-adapter-api 0.8.2`（Kemo 1.0 线路协议匹配）。
+
+### 1.3.1 待发布
+
+- 新增 Windows、Linux、npm、Docker 四渠道独立部署入口，共用主框架版本和标准 Release 包。
+- 同步一键安装、日常启动、停止后更新、事务恢复与发布说明，保留源码部署入口。
+- 延续 1.3.0 的能力与 `kemo-adapter-api 0.8.2` 兼容基线；远程发布产物须另行打包和发布。
 
 ### 1.3.0 更新
 
@@ -353,7 +421,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 kemo-agent 不是一座孤岛。围绕它，还有几个独立维护、通过稳定协议协作的项目，共同构成 Kemo 生态：
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway：当前与 kemo-agent 1.3.0 正式匹配的版本为 `0.8.2`。它统一多厂商模型的发现、流式响应、工具调用、能力声明、多模态 Asset 与 Token 计量，为 kemo-agent 提供一致的模型服务边界。
+  Kemo Provider Gateway：当前兼容基线为 `0.8.2`；1.3.1 待发布版延续 1.3.0 已确认的协议匹配。它统一多厂商模型的发现、流式响应、工具调用、能力声明、多模态 Asset 与 Token 计量，为 kemo-agent 提供一致的模型服务边界。
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   知识图谱与 RAG 检索项目，可外挂为 kemo-agent 的超级文档站：注册文档库后，通过 `expand_call` 按需查询、同步与维护，不替换框架内置的知识库与记忆。
