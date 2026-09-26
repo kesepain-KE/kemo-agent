@@ -1,5 +1,25 @@
 # kemo-agent npm launcher
 
+After the generated distribution has been published to npm:
+
+```sh
+npm install -g @kesepain/kemo-agent
+kemo
+```
+
+To upgrade, stop the application first, then run:
+
+```sh
+npm install -g @kesepain/kemo-agent@latest
+kemo
+```
+
+Pushing repository code does not publish this package. The npm version is generated
+from the framework's `version.json.version`; there is no separate launcher version.
+`kemo check` and `kemo update` use the locally installed package's bundled release,
+not the latest GitHub Release. Do not mix the legacy `update.py` updater with this
+installation. Node.js 18+ and a working Python virtual environment are required.
+
 This package wraps the Python application; Python 3.10+ must already be installed.
 No postinstall script is required. `kemo` installs the exact bundled framework
 release into `~/.kemo-agent`, prepares an isolated Python environment, then starts

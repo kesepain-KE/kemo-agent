@@ -2,6 +2,11 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
+> 当前主框架暂定版本 **1.3.1（待发布）**，配套网关仍为 **0.8.2**。本页远程命令仅在
+> 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
+> 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
+> `../global_knowledge/deployment-and-release.md`。已有 1.3.0 本地验收包不能改名充当 1.3.1，须重新构建打包。
+
 ## 1. 发布合同：一个版本、一份应用包
 
 版本唯一真值：应用根目录的 `version.json.version`。
@@ -75,10 +80,10 @@ deploy/artifacts/<version>/
 发布流程需要上传 ZIP 及其 `.sha256`，另外显式执行：
 
 ```text
-cd deploy/artifacts/<version>/npm
-npm pack --dry-run
-npm publish
+npm pack ./deploy/artifacts/<version>/npm --dry-run
+npm publish ./deploy/artifacts/<version>/npm
 
+# 以下也从仓库根目录执行
 docker build -t ghcr.io/kesepain-ke/kemo-agent:<version> deploy/artifacts/<version>/docker
 docker push ghcr.io/kesepain-ke/kemo-agent:<version>
 ```
@@ -92,8 +97,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.3.0.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.3.0.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.3.1.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.3.1.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
@@ -189,8 +194,22 @@ npm 包是壳，包含这次框架发布的 ZIP 和独立部署器。**没有 po
 
 ### Docker
 
+没有源码仓库时，可在一个固定的专用目录下载 Compose 后直接启动（不要覆盖已有文件）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
+# 后续始终在同一个 Compose 项目目录中执行
+# 更新前先停止应用，保留命名数据卷
+docker compose stop
+docker compose pull
+docker compose up -d
+```
+
+已有源码仓库时，也可使用仓库内配置；不要与上面不同项目目录的命令混用：
+
 ```sh
 docker compose -f deploy/docker/docker-compose.yml up -d
+docker compose -f deploy/docker/docker-compose.yml stop
 docker compose -f deploy/docker/docker-compose.yml pull
 docker compose -f deploy/docker/docker-compose.yml up -d
 ```
@@ -256,6 +275,8 @@ requirements 存在版本范围，因此这不是依赖可复现锁定方案。
 ## 7. 验证
 
 ```sh
+python -m pytest tests/deploy -q
+# 兼容仅在 deploy 子系统中运行的旧入口：
 python -B -m unittest discover -s deploy/tests -v
 node --check deploy/npm/bin/kemo.cjs
 ```
