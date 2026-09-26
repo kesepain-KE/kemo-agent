@@ -28,13 +28,16 @@ class DeploymentDocumentationTests(unittest.TestCase):
         self.assertIsNotNone(repo_match)
         repo = repo_match.group(1)
         base = f"https://raw.githubusercontent.com/{repo}/main/deploy"
-        package = json.loads(read("deploy/npm/package.json"))["name"]
+        package_name = json.loads(read("deploy/npm/package.json"))["name"]
+        npm_asset = "kemo-agent-npm.tgz"
         commands = (
             f"irm {base}/windows/install.ps1 | iex",
             f"curl -fsSL {base}/linux/install.sh | sh",
-            f"npm install -g {package}",
+            f"npm install -g https://github.com/{repo}/releases/latest/download/{npm_asset}",
             f"curl -fsSL {base}/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d",
         )
+        # npm 渠道走 Release 资产直装，不经过 npm registry（该 registry 即使包为 public 也强制要 token）
+        self.assertTrue(package_name.startswith("@kesepain"))
         for guide in GUIDES:
             with self.subTest(guide=guide):
                 text = read(guide)
