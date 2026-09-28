@@ -2,7 +2,8 @@
 
 日期：2026-09-26，外部环境补验更新于 2026-09-28。本地验证均使用 `deploy/.test-work`
 内的隔离目录，未覆盖开发仓库、未修改真实用户安装；2026-09-28 的补验在隔离安装目录与
-临时容器数据卷中进行，同样未改动任何真实安装。
+临时容器数据卷中进行，同样未改动任何真实安装。同日源码内的错误序列重试修复落地后，
+四个 1.3.2 分发产物已按同一版本号重建并覆盖上传，哈希与镜像摘要在下节同步更新。
 
 ## 已通过
 
@@ -12,7 +13,7 @@
 所有安装与运行都在隔离目录、临时数据卷中完成，未触碰任何真实安装：
 
 - 远程 Release 直装：从 `releases/download/v1.3.2/` 下载 ZIP，SHA256 与同版本 `.sha256`
-  资产一致（`fc837056…c9fb`），内层 `release-manifest.json` 版本为 1.3.2、`tree/` 与
+  资产一致（`28904d22…3991`），内层 `release-manifest.json` 版本为 1.3.2、`tree/` 与
   `tree/version.json` 齐备，归档内无 `users/` 与 `.env`。随后用 `deploy.py install windows
   --files-only` 装到隔离目录（1024 个文件），`deploy.py check windows` 报
   `installed=1.3.2; target=1.3.2; current`。
@@ -21,12 +22,30 @@
   `release.zip` 的 SHA256 与 Release ZIP 完全一致，证明固定名资产与版本名资产同源。
 - GHCR 镜像：由 `pack.py` 生成的 Docker 构建上下文（其 `release.zip` 与 Release 资产哈希一致）
   构建并推送 `ghcr.io/kesepain-ke/kemo-agent:1.3.2` 与 `latest`，索引摘要
-  `sha256:dab76042…fedb7`，仅含 `linux/amd64` 平台。
+  `sha256:1b0411d9…f424`，仅含 `linux/amd64` 平台。
 - 容器运行与跨版本同步：用 1.3.1 镜像在空数据卷上首装（四个组件均为 1.3.1、
   `cron.session_idle_close_seconds=86400`），再以 1.3.2 镜像挂载**同一数据卷**启动。
   升级后四个组件均为 1.3.2、`version.json` 为 1.3.2、`/api/health` 返回 200 且容器进入
   `healthy`；挂载前写入数据卷的自定义文件仍在原处，且 1.3.2 的窄范围迁移把仍是旧默认值的
   86400 改成了 5400。这条实测覆盖了“容器旧数据卷跨版本同步”与“升级迁移生效”。
+
+### 1.3.2 分发产物按同版本重建（2026-09-28）
+
+源码内的「重试额度按错误序列重计」修复落地后，四个 1.3.2 分发产物以同一版本号重建并覆盖上传，
+避免源码与产物语义不一致（版本号与 `version.json` 未变，tag `v1.3.2` 未移动）：
+
+- `deploy/pack.py --out deploy/artifacts/1.3.2-retryfix` 产出 ZIP（6,029,115 字节，
+  SHA256 `28904d22c4a2ee980abbf5942af821492b4709a5d2fbe560174095e5c0443991`）、npm 暂存目录与
+  Docker 构建上下文；ZIP 内 1025 条目、manifest 1.3.2 共 1024 文件、含预构建前端，
+  无 `users/` 与 `.env`，`tree/run/retry/loop.py` 已含新账本实现。
+- `npm pack` 产出 `kesepain-ke-kemo-agent-1.3.2.tgz`（5,950,217 字节，SHA256
+  `5e9c87d8…6da4`，17 个文件），内层 `release.zip` 与发布 ZIP 哈希一致，固定名
+  `kemo-agent-npm.tgz` 与其逐字节相同。
+- 镜像重建并推送后 `1.3.2` 与 `latest` 同指索引摘要 `sha256:1b0411d9…f424`；容器内
+  `/opt/kemo-release.zip` 的 SHA256 与发布 ZIP 一致，容器启动后进入 `healthy`。
+- 四个资产用 `gh release upload --clobber` 覆盖同一 Release；复核显示远程 ZIP 为
+  6,029,115 字节、SHA256 与 `.sha256` 资产一致（`28904d22…3991`），内层 manifest 与
+  `tree/version.json` 均为 1.3.2，两个 npm tarball 同源，`releases/latest` 仍指向 v1.3.2。
 
 ### 1.3.1 暂定版本分层补验
 
