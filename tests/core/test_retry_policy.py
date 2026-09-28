@@ -15,6 +15,7 @@ from run.retry import (
     view_from_event,
     view_from_exception,
 )
+from run.retry.loop import RetryLedger
 
 
 class RetryPolicyTests(unittest.TestCase):
@@ -95,6 +96,44 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertIn("第 2/6 次尝试", event.content)
         self.assertEqual(event.metadata["max_retries"], 5)
         self.assertEqual(event.metadata["consecutive_failures"], 1)
+
+    def test_ledger_counts_only_consecutive_failures_without_progress(self) -> None:
+        ledger = RetryLedger(max_attempts=6)
+        for _ in range(5):
+            ledger.begin_attempt()
+            ledger.record_failure(progress=False)
+            self.assertTrue(ledger.can_retry())
+        ledger.begin_attempt()
+        ledger.record_failure(progress=False)
+        self.assertFalse(ledger.can_retry())
+        self.assertEqual(ledger.consecutive_failures, 6)
+        self.assertEqual(ledger.attempts, 6)
+
+    def test_ledger_starts_a_new_episode_after_progress(self) -> None:
+        ledger = RetryLedger(max_attempts=6)
+        for _ in range(50):
+            ledger.begin_attempt()
+            ledger.record_failure(progress=True)
+            self.assertTrue(ledger.can_retry())
+            self.assertEqual(ledger.consecutive_failures, 1)
+        self.assertEqual(ledger.attempts, 50)
+
+    def test_would_allow_retry_matches_record_failure(self) -> None:
+        for progress in (False, True):
+            ledger = RetryLedger(max_attempts=6)
+            for _ in range(8):
+                if ledger.exhausted:
+                    break
+                ledger.begin_attempt()
+                expected = ledger.would_allow_retry(progress)
+                ledger.record_failure(progress)
+                self.assertEqual(expected, ledger.can_retry())
+
+    def test_single_attempt_budget_still_disables_retry_after_progress(self) -> None:
+        ledger = RetryLedger(max_attempts=1)
+        ledger.begin_attempt()
+        ledger.record_failure(progress=True)
+        self.assertFalse(ledger.can_retry())
 
 
 if __name__ == "__main__":

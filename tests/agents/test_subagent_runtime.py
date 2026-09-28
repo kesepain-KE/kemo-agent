@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from events import RunEvent
@@ -33,7 +34,7 @@ from run.agents import (
     AgentTimeoutError,
 )
 from run.agents import AgentDisabledError, AgentManifestError, discover_agents
-from run.agents.runner import AgentProviderError
+from run.agents.runner import AgentProviderError, _run_agent_with_retries
 from run.extensions import clear_model_capability_cache
 
 
@@ -391,6 +392,54 @@ class SubAgentRuntimeTests(unittest.TestCase):
             ["started", "retrying", "retrying", "retrying", "retrying", "retrying", "failed"],
         )
         self.assertTrue(events[-1].metadata["retry_budget_exhausted"])
+
+    def test_subagent_retry_budget_resets_after_progress(self) -> None:
+        events: list[RunEvent] = []
+        context = SimpleNamespace(
+            definition=SimpleNamespace(name="episode_agent"),
+            cancel_event=threading.Event(),
+            event_callback=events.append,
+            task_id="task_episode",
+            source="web",
+            session_id="episode-session",
+        )
+        calls = 0
+
+        def run_once(current, _input):
+            nonlocal calls
+            calls += 1
+            if calls <= 8:
+                current.retry_state.progress = True
+                raise ProviderError(
+                    "temporary interruption after progress",
+                    category="upstream_error",
+                    retryable=True,
+                    retry_after_ms=0,
+                )
+            return AgentRunResult(
+                agent="episode_agent",
+                data={"ok": True},
+                raw_text="done",
+                usage={},
+                model="test-model",
+            )
+
+        with patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0):
+            result = _run_agent_with_retries(
+                run_once,
+                context,
+                {},
+                max_attempts=6,
+            )
+
+        retries = [
+            event for event in events if event.metadata.get("status") == "retrying"
+        ]
+        self.assertEqual(calls, 9)
+        self.assertEqual(result.data, {"ok": True})
+        self.assertEqual([event.metadata["failed_attempt"] for event in retries], [1] * 8)
+        self.assertEqual([event.metadata["run_attempt"] for event in retries], list(range(1, 9)))
+        self.assertTrue(all(event.metadata["retry_progress"] for event in retries))
 
     def test_runner_retries_gateway_response_when_retryable_is_omitted(self) -> None:
         class FailedResponseProvider(MockProvider):

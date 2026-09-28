@@ -2577,6 +2577,70 @@ def run(*, context):
         self.assertEqual(len(window["data"]["round_metrics"]), 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
+    def test_progress_resets_retry_budget_inside_one_run(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        responses: list[ChatResponse | BaseException] = []
+        for index in range(8):
+            responses.extend(
+                [
+                    ChatResponse(
+                        text="",
+                        tool_calls=[
+                            ToolCall(
+                                f"progress-call-{index}",
+                                "lookup",
+                                {"value": str(index)},
+                            )
+                        ],
+                    ),
+                    ProviderError(
+                        "temporary upstream interruption",
+                        status_code=503,
+                        category="upstream_error",
+                        retryable=True,
+                    ),
+                ]
+            )
+        responses.append(ChatResponse(text="最终完成"))
+        provider = ScriptedProvider(responses=responses)
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.time.sleep"),
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "retry-episode-progress",
+                        "run_id": "run_retry_episode_progress",
+                        "prompt": "执行长工具链",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        retries = [event for event in events if event.type == "retrying"]
+        self.assertEqual(len(retries), 8)
+        self.assertEqual(
+            [event.metadata["failed_attempt"] for event in retries],
+            [1] * 8,
+        )
+        self.assertEqual(
+            [event.metadata["run_attempt"] for event in retries],
+            list(range(1, 9)),
+        )
+        self.assertTrue(all(event.metadata["retry_progress"] for event in retries))
+        self.assertEqual(len(provider.requests), 17)
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["text"], "最终完成")
+        window = load_window(find_window(root, "alice", "cli", "retry-episode-progress"))
+        self.assertEqual(window["data"]["rounds"], 1)
+        self.assertEqual(len(window["data"]["round_metrics"]), 1)
+
     def test_two_failures_in_one_conversation_each_receive_five_retries(self) -> None:
         _, root = self.make_root()
 
