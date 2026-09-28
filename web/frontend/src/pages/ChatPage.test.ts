@@ -282,7 +282,7 @@ describe('reduceRunEvent', () => {
     expect(compactPlanAssistantText('新计划已生成：完整步骤', false)).toBe('新计划已生成：完整步骤')
   })
 
-  it('最近活动只保留用户定时任务', () => {
+  it('最近活动只保留用户未完成定时任务', () => {
     const base: CronTaskSummary = {
       task_id: 'user-task', title: '用户任务', user_defined: true, status: 'enabled', type: 'daily', time: '18:00',
       next_run_at: '2026-07-20T18:00:00+08:00', latest_run_at: '', created_at: '2026-07-20T12:00:00+08:00', last_state: 'never',
@@ -292,8 +292,8 @@ describe('reduceRunEvent', () => {
       { ...base, task_id: 'completed-task', title: '已完成单次任务', status: 'completed', type: 'once', next_run_at: '', last_state: 'completed' },
       { ...base, task_id: 'system-task', title: '系统维护', user_defined: false },
     ])
-    expect(items.map((item) => item.title)).toEqual(['已完成单次任务', '用户任务'])
-    expect(items[0]).toMatchObject({ id: 'completed-task', status: 'completed', nextRun: '—' })
+    expect(items.map((item) => item.title)).toEqual(['用户任务'])
+    expect(items[0]).toMatchObject({ id: 'user-task', status: 'enabled' })
   })
 
   it('最近活动只保留本轮实际注入的感知来源', () => {
