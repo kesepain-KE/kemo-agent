@@ -48,6 +48,7 @@ import type {
   SessionDeleteResponse,
   SessionCompressResponse,
   SessionCloseResponse,
+  SessionReopenResponse,
   SessionMemoryExtractionResponse,
   SessionUndoLastRoundResponse,
   SessionRenameResponse,
@@ -328,6 +329,21 @@ export async function getRuntimeLogs(
 export async function getTasks(user: string, sessionId = ''): Promise<TasksResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`)
+}
+
+export async function reopenSession(
+  user: string,
+  sessionId: string,
+  clientId = '',
+): Promise<SessionReopenResponse> {
+  return requestJson(
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/reopen`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId }),
+    },
+  )
 }
 
 export async function getCron(user: string, taskId: string): Promise<CronTaskDetailResponse> {

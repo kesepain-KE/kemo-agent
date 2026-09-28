@@ -147,6 +147,16 @@ export interface SessionCloseResponse {
   session: SessionSummary
 }
 
+export interface SessionReopenResponse {
+  user: string
+  source: 'web'
+  session_id: string
+  client_id?: string
+  reopened: boolean
+  active_clients?: number
+  session: SessionSummary
+}
+
 export interface HistoryMessage {
   role: 'user' | 'assistant' | 'system' | 'tool' | string
   content: string
