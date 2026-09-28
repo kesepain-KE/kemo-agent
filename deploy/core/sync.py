@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import DeployError, atomic, digest, json_bytes, read_json, target
+from .common import DeployError, atomic, digest, json_bytes, read_json, target, version_key
 from .config import merge_defaults
 from .policy import local_module, merge_file, protected
 from .source import Bundle
@@ -27,6 +27,41 @@ class Change:
 def installed(root: Path) -> dict:
     path = target(root, '.kemo-install.json')
     return read_json(path) if path.exists() else {}
+
+
+def _migrate_global_config_defaults(
+    merged: dict,
+    defaults: dict,
+    local: dict,
+    *,
+    installed_version: str,
+    bundle_version: str,
+) -> dict:
+    """Migrate the pre-1.3.2 idle-session default while preserving custom values."""
+
+    if not installed_version:
+        return merged
+    try:
+        is_legacy_upgrade = (
+            version_key(installed_version) <= version_key('1.3.1')
+            and version_key(bundle_version) >= version_key('1.3.2')
+        )
+    except DeployError:
+        return merged
+    if not is_legacy_upgrade:
+        return merged
+    default_cron = defaults.get('cron')
+    local_cron = local.get('cron')
+    merged_cron = merged.get('cron')
+    if (
+        isinstance(default_cron, dict)
+        and isinstance(local_cron, dict)
+        and isinstance(merged_cron, dict)
+        and default_cron.get('session_idle_close_seconds') == 5400
+        and local_cron.get('session_idle_close_seconds') == 86400
+    ):
+        merged_cron['session_idle_close_seconds'] = 5400
+    return merged
 
 
 def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -> tuple[list[Change], dict]:
@@ -59,6 +94,14 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                     if defaults.get('schema_version') != local.get('schema_version'):
                         raise DeployError(f'Config schema changed: {name}; manual migration required')
                     merged = merge_defaults(defaults, local)
+                    if name == 'config/global_config.json':
+                        merged = _migrate_global_config_defaults(
+                            merged,
+                            defaults,
+                            local,
+                            installed_version=str(old.get('version') or ''),
+                            bundle_version=bundle.version,
+                        )
                     data = before if merged == local else json_bytes(merged)
                 except ValueError as exc:
                     raise DeployError(f'Cannot merge invalid JSON: {name}') from exc
