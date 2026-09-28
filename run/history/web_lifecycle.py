@@ -43,15 +43,18 @@ _HAS_DATA = """(
     OR EXISTS (SELECT 1 FROM history_context_summaries c WHERE c.source='web' AND c.session_id=s.session_id)
 )"""
 
-_STALE_OFFLINE = """s.source='web' AND s.lifecycle!='deleted'
+def _stale_offline_sql(cutoff_placeholder: str = "?") -> str:
+    return f"""s.source='web' AND s.lifecycle!='deleted'
     AND s.run_state NOT IN ('running', 'queued', 'pending')
     AND s.memory_status!='processing' AND s.summary_status!='processing'
-    AND julianday(s.updated_at)<=julianday(?)
+    AND julianday(s.updated_at)<=julianday({cutoff_placeholder})
     AND NOT EXISTS (SELECT 1 FROM history_web_leases l WHERE l.session_id=s.session_id
         AND l.expires_at>? AND instr(l.client_id, char(31))=0)
 """
 
-_STARTUP_NEEDS_REVIEW = f"""{_STALE_OFFLINE} AND (
+
+def _startup_needs_review_sql(cutoff_placeholder: str = "?") -> str:
+    return f"""{_stale_offline_sql(cutoff_placeholder)} AND (
     s.lifecycle!='closed'
     OR NOT {_HAS_DATA}
     OR (
@@ -60,6 +63,10 @@ _STARTUP_NEEDS_REVIEW = f"""{_STALE_OFFLINE} AND (
             < MAX(s.rounds, COALESCE(CAST(json_extract(s.record_json, '$.last_committed_round') AS INTEGER), 0))
     )
 )"""
+
+
+_STALE_OFFLINE = _stale_offline_sql()
+_STARTUP_NEEDS_REVIEW = _startup_needs_review_sql()
 
 
 def touch_session_lease(root: Path, user: str, source: str, session_id: str,
@@ -156,6 +163,7 @@ def inspect_stale_web_sessions(
     protected_sessions: Collection[str] = (),
     stop: threading.Event | None = None,
     batch_size: int = 100,
+    idle_seconds: int | float = WEB_STARTUP_INSPECTION_DELAY_SECONDS,
     queue_memory: Callable[..., dict[str, Any]] | None = None,
     queue_reason: str = 'startup_offline_session',
 ) -> dict[str, Any]:
@@ -185,19 +193,27 @@ def inspect_stale_web_sessions(
 
     current = time.time() if now is None else now
     timestamp = datetime.fromtimestamp(current, timezone.utc).isoformat()
-    cutoff = datetime.fromtimestamp(current - WEB_EMPTY_GRACE_SECONDS, timezone.utc).isoformat()
+    idle_cutoff = datetime.fromtimestamp(
+        current - max(1.0, float(idle_seconds)), timezone.utc
+    ).isoformat()
+    empty_cutoff = datetime.fromtimestamp(
+        current - WEB_EMPTY_GRACE_SECONDS, timezone.utc
+    ).isoformat()
+    review_sql = _startup_needs_review_sql()
+    empty_sql = f"{_stale_offline_sql()} AND NOT {_HAS_DATA}"
+    candidate_sql = f"(({review_sql}) OR ({empty_sql}))"
     protected = set(protected_sessions)
     cursor: tuple[str, str] | None = None
     page_size = max(1, min(500, int(batch_size)))
     while stop is None or not stop.is_set():
         cursor_sql = ''
-        params: list[Any] = [cutoff, current]
+        params: list[Any] = [idle_cutoff, current, empty_cutoff, current]
         if cursor is not None:
             cursor_sql = ' AND (s.updated_at>? OR (s.updated_at=? AND s.session_id>?))'
             params.extend((cursor[0], cursor[0], cursor[1]))
         with connection(root, user) as database:
             rows = database.execute(
-                f"SELECT s.updated_at, s.session_id FROM history_sessions s WHERE {_STARTUP_NEEDS_REVIEW}{cursor_sql} "
+                f"SELECT s.updated_at, s.session_id FROM history_sessions s WHERE {candidate_sql}{cursor_sql} "
                 "ORDER BY s.updated_at, s.session_id LIMIT ?",
                 (*params, page_size),
             ).fetchall()
@@ -219,8 +235,8 @@ def inspect_stale_web_sessions(
                 with connection(root, user, write=True) as database:
                     row = database.execute(
                         f"SELECT s.record_json, s.lifecycle, CASE WHEN {_HAS_DATA} THEN 1 ELSE 0 END AS has_data "
-                        f"FROM history_sessions s WHERE s.session_id=? AND {_STARTUP_NEEDS_REVIEW}",
-                        (session_id, cutoff, current),
+                        f"FROM history_sessions s WHERE s.session_id=? AND {candidate_sql}",
+                        (session_id, idle_cutoff, current, empty_cutoff, current),
                     ).fetchone()
                     if row is None:
                         continue
