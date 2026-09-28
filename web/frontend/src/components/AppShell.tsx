@@ -51,6 +51,7 @@ import {
   releaseSessionLease,
   retrySessionSummary,
   touchSessionLease,
+  reopenSession,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
@@ -500,10 +501,18 @@ export function AppShell() {
     setHistorySwitchingSessionId(targetSessionId)
     setHistorySwitchError('')
     try {
-        const currentSession = sessionsQuery.data?.sessions.find((session) => (session.source || 'web') === 'web' && session.session_id === sessionId)
-        if (sessionId && currentSession?.state !== 'closed') {
-          await closeSession(user, sessionId, clientId)
-        }
+      const currentSession = sessionsQuery.data?.sessions.find(
+        (session) => (session.source || 'web') === 'web' && session.session_id === sessionId,
+      )
+      if (sessionId && currentSession?.state !== 'closed') {
+        await closeSession(user, sessionId, clientId)
+      }
+      const targetSession = historySessionsData?.sessions.find(
+        (session) => (session.source || 'web') === 'web' && session.session_id === targetSessionId,
+      )
+      if (targetSession?.state === 'closed') {
+        await reopenSession(user, targetSessionId, clientId)
+      }
       await sessionsQuery.refetch()
       setHistoryDrawerOpen(false)
       navigate(withContext('/chat', targetSessionId))
