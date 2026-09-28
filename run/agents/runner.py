@@ -112,7 +112,13 @@ def _run_agent_with_retries(
         context.attempt = attempt.attempt_index
         context.max_attempts = max_attempts
         context.retry_state = state
-        result = function(context, input_data)
+        context.retry_ledger = ledger
+        state.progress = False
+        try:
+            result = function(context, input_data)
+        except BaseException as exc:
+            setattr(exc, "retry_progress", state.progress)
+            raise
         if not isinstance(result, AgentRunResult):
             raise AgentRunError(
                 f"子代理 {context.definition.name} executor 必须返回 AgentRunResult"
@@ -142,11 +148,13 @@ def _run_agent_with_retries(
             source=context.source,
             session_id=context.session_id,
             detail={
-                "failed_attempt": attempt.attempt_index,
-                "next_attempt": attempt.attempt_index + 1,
+                "failed_attempt": ledger.consecutive_failures,
+                "next_attempt": ledger.consecutive_failures + 1,
                 "max_attempts": attempt.max_attempts,
                 "max_retries": max(0, attempt.max_attempts - 1),
-                "consecutive_failures": attempt.attempt_index,
+                "consecutive_failures": ledger.consecutive_failures,
+                "run_attempt": attempt.attempt_index,
+                "retry_progress": bool(getattr(exc, "retry_progress", False)),
                 "exception_type": type(exc).__name__,
                 "reason": _agent_retry_reason(exc),
             },
@@ -311,6 +319,7 @@ class AgentExecutionContext:
     attempt: int = 1
     max_attempts: int = 1
     retry_state: _AgentRetryState | None = field(default=None, repr=False)
+    retry_ledger: RetryLedger | None = field(default=None, repr=False)
 
     def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
         return self.runner._run_model(

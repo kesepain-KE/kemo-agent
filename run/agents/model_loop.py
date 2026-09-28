@@ -420,6 +420,7 @@ def run_model(
                 ) from exc
             final_data = dict(structured_calls[0].arguments)
             final_text = raw_structured
+            retry_state.progress = True
             tool_records.append(
                 {
                     "id": structured_calls[0].call_id,
@@ -435,6 +436,7 @@ def run_model(
                 text_from_content(item.content) for item in messages
             )
             break
+        retry_state.progress = True
         retryable_tool_failure: AgentToolRetryError | None = None
         for call in calls:
             if processed_tool_calls >= max_tool_calls:
@@ -606,7 +608,10 @@ def run_model(
                 )
             )
             if (
-                attempt < max_attempts
+                (
+                    context.retry_ledger is None
+                    or context.retry_ledger.would_allow_retry(retry_state.progress)
+                )
                 and retryable_tool_failure is None
                 and _agent_tool_failure_is_retryable(payload, status)
             ):

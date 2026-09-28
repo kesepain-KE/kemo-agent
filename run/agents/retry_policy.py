@@ -39,6 +39,7 @@ class _AgentRetryState:
     usage: dict[str, Any] = field(default_factory=_new_agent_usage)
     response_ids: list[str] = field(default_factory=list)
     auxiliary: dict[str, Any] = field(default_factory=dict)
+    progress: bool = False
 
 
 def _agent_json(value: Any) -> str:
