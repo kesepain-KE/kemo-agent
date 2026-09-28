@@ -295,9 +295,9 @@ export function ContextCompressionBubble({ item }: { item: Extract<ChatItem, { k
 }
 
 export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
-  const supportedStatuses = new Set<ScheduledTaskItem['status']>(['enabled', 'running', 'completed', 'paused', 'failed', 'cancelled', 'disabled'])
+  const supportedStatuses = new Set<ScheduledTaskItem['status']>(['enabled', 'running', 'paused', 'failed', 'cancelled', 'disabled'])
   return [...tasks]
-    .filter((task) => task.user_defined)
+    .filter((task) => task.user_defined && task.status !== 'completed')
     .sort((left, right) => (left.next_run_at || left.created_at).localeCompare(right.next_run_at || right.created_at))
     .map((task) => ({
       id: task.task_id,
