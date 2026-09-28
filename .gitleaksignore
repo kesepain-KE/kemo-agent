@@ -1,0 +1,6 @@
+# gitleaks 指印忽略清单（Security 全历史扫描使用）
+# 每一行是一个被确认的误报指印，格式：commit:file:rule:line
+# da8f49a 的 tests/test_expand_creater_plugin.py 用例故意传入形如密钥的参数值，
+# 用来断言 expand_creater 插件会拒绝疑似凭据；该字符串是测试夹具，不是真实凭据。
+# 文件在当前 HEAD 中已不存在，该指印只会在全历史扫描里命中。
+da8f49a95d3db3efbb21272de212a17d5a1777e0:tests/test_expand_creater_plugin.py:generic-api-key:168

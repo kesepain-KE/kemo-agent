@@ -1,0 +1,21 @@
+# gitleaks 配置（Security 工作流全历史扫描使用）
+#
+# 保留官方默认规则集，只对一处历史负向测试夹具做定点豁免：
+# 提交 da8f49a 的 tests/test_expand_creater_plugin.py 用例，故意传入形如密钥的
+# 参数值，用来断言 expand_creater 插件会拒绝疑似凭据。该字符串是测试夹具，
+# 不是真实凭据；文件在当前 HEAD 中已不存在，只会在全历史扫描里出现。
+#
+# 豁免同时限定「文件路径 + 该行文本形态」，不影响其他文件与其他提交，
+# 也不放宽 generic-api-key 规则本身。
+
+title = "kemo-agent"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "历史负向用例夹具（da8f49a）：故意传入密钥形态参数以断言插件拒绝该输入"
+paths = ["""tests/test_expand_creater_plugin.py"""]
+regexTarget = "line"
+regexes = ['''explain="api_key=[A-Za-z0-9]+"''']
+condition = "AND"
