@@ -103,7 +103,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Kemo 1.0 共享契约 Fixture
 
-`kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认。当前暂定待发布的 `kemo-agent 1.3.1` 延续该兼容基线，部署渠道变更不改变线路协议。该兼容基线覆盖当前共享 Fixture、请求/响应模型、SSE 续传、工具调用、模型能力目录、Asset、Usage、Embedding 与 Rerank 合同；后续任一端修改线路字段时仍必须重新执行双仓库契约测试，不能只依赖版本号声明。
+`kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认。当前稳定版 `kemo-agent 1.3.2` 延续该兼容基线，部署渠道与会话生命周期修复不改变线路协议。该兼容基线覆盖当前共享 Fixture、请求/响应模型、SSE 续传、工具调用、模型能力目录、Asset、Usage、Embedding 与 Rerank 合同；后续任一端修改线路字段时仍必须重新执行双仓库契约测试，不能只依赖版本号声明。
 
 Agent 与网关在各自仓库维护同一份脱敏线协议 Fixture：
 `tests/contracts/kemo_v1/fixtures/manifest.json` 和 `wire.json` 必须逐字节一致。Fixture 覆盖文本、
@@ -272,4 +272,3 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 - `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播，以及 Chat 传输层重试矩阵（零输出重试、已输出不重放、429 Retry-After、401/403/409/400 零重试、工具降级一次性、JSON 响应降级、id/name 幂等聚合、完整 JSON 对象参数、截断工具不可执行）；
 - `tests/cron/test_task_plan.py`：非成功主运行终态与暂停原因；
 - `tests/core/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。
-

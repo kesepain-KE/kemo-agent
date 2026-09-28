@@ -6,7 +6,7 @@
 
 ## 先选择更新入口
 
-当前代码版本暂定为 **1.3.1（待发布）**，网关兼容基线保持 **0.8.2**。
+当前代码稳定版本为 **1.3.2（2026-09-28 正式定档）**，网关兼容基线保持 **0.8.2**。源码定档不等于 Release、npm 或 GHCR 产物已经发布。
 本页后续命令和业务迁移描述只适用于源码安装的旧更新器，不适用于 `deploy/`：
 
 | 安装方式 | 更新操作（均先停止应用） |
@@ -27,16 +27,16 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "schema_version": 1,
   "compatibility": {
     "kemo-adapter-api": "0.8.2"
   },
   "components": {
-    "core": {"version": "1.3.1"},
-    "agents": {"version": "1.3.1"},
-    "plugins": {"version": "1.3.1"},
-    "web": {"version": "1.3.1"}
+    "core": {"version": "1.3.2"},
+    "agents": {"version": "1.3.2"},
+    "plugins": {"version": "1.3.2"},
+    "web": {"version": "1.3.2"}
   }
 }
 ```
@@ -119,7 +119,7 @@ python -m update --check
 
 - `message/` 同步框架消息路由代码，但保留本地 `message/out/` 平台模块和运行数据。
 - `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
-- `config/global_config.json` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。
+- `config/global_config.json` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。1.3.2 有一个窄范围旧默认迁移：当本地框架版本不高于 1.3.1、目标版本不低于 1.3.2，且 `cron.session_idle_close_seconds` 仍精确等于旧默认值 `86400`、新版本默认值为 `5400` 时，自动改为 `5400`；其他自定义值不变。
 - 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
 - `global_expand/kemo_app/`、`global_expand/kemo_gateway_status/` 与 `global_expand/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`expand.json` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
 - core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。

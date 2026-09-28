@@ -267,6 +267,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `enabled` | bool | `true` | 是否启用 cron 调度器 |
 | `history_retention_days` | int | `7` | `agent` 模式定时任务生成的历史对话保留天数，范围 0–3650；`0` 表示永久保留。该字段只接受全局配置，用户配置不能覆盖 |
+| `session_idle_close_seconds` | int | `5400` | 有数据会话无活动后进入记忆队列并归档的闲置阈值（默认 90 分钟）；范围为至少 3600 秒。该字段只接受全局配置，用户配置不能覆盖；空 Web 会话仍使用独立的 90 秒删除宽限 |
 | `poll_interval` | int | `30` | 任务轮询间隔（秒）。运行时会自动取它与 `sense_update_rate`、`expand_update_rate` 的最小值，保证短周期任务按时被扫描 |
 | `avoid_congestion` | bool | `true` | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | `0.2` | 拥塞阈值比例。当 Provider 可用槽位低于此比例时，推迟普通用户任务和重型系统任务；全局感知/拓展采集不退避 |
@@ -658,11 +659,12 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 |------|------|-----------|------|
 | `enabled` | bool | true | 是否启用 cron 调度器 |
 | `history_retention_days` | int | 7 | 只读继承全局值，用户配置不能覆盖；0 表示永久保留 |
+| `session_idle_close_seconds` | int | 5400 | 只读继承全局值，用户配置不能覆盖；Web/App 数据会话默认空闲 90 分钟后归档 |
 | `poll_interval` | int | 30 | 任务轮询间隔（秒） |
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
 
-`cron.history_retention_days` 是本段的例外：即使旧用户配置残留同名值，运行时也始终采用全局配置。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认 7 天。整数之外、负数或超过 3650 的值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。
+`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
 
 ---
 
