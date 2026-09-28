@@ -269,6 +269,8 @@ def _retrying_event(
     failed_attempt: int,
     next_attempt: int,
     max_attempts: int,
+    run_attempt: int | None = None,
+    progress: bool | None = None,
 ) -> RunEvent:
     return retrying_event(
         event,
@@ -276,6 +278,8 @@ def _retrying_event(
         failed_attempt=failed_attempt,
         next_attempt=next_attempt,
         max_attempts=max_attempts,
+        run_attempt=run_attempt,
+        progress=progress,
     )
 
 def _collect_retry_recovery(
@@ -573,6 +577,11 @@ def _committed_failure_event(
             "stop_reason", "provider_error"
         ),
         "failure": failure,
+        **{
+            key: terminal_event.metadata[key]
+            for key in ("retry_progress", "retry_follows", "run_attempt")
+            if key in terminal_event.metadata
+        },
     }
     if event.usage is None and terminal_event.usage is not None:
         event.usage = dict(terminal_event.usage)

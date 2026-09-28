@@ -170,7 +170,8 @@ from run.conversation.helpers import (
     _tool_schema_map,
 )
 from run.conversation.main_loop import iter_request_events_impl as _main_loop_impl
-from run.retry.policy import backoff_seconds, view_from_event
+from run.retry.loop import RetryLedger
+from run.retry.policy import backoff_seconds, is_progress_signal, view_from_event
 
 
 
@@ -282,6 +283,7 @@ def _iter_request_events_unlocked(
     run_id = str(request.get("run_id") or "")
     auto_retry = request.get("_auto_retry", True) is not False
     max_attempts = _auto_retry_attempt_limit(request) if auto_retry else 1
+    retry_ledger = RetryLedger(max_attempts=max_attempts)
     recovery: dict[str, dict[str, Any]] = {}
     retry_state: dict[str, Any] = {"guidance": []}
     retry_usage: dict[str, Any] = {}
@@ -311,7 +313,6 @@ def _iter_request_events_unlocked(
     def emit_cancelled_attempt() -> Iterator[RunEvent]:
         cancelled_request = dict(request)
         cancelled_request["_auto_retry"] = False
-        cancelled_request["_defer_failure_commit"] = False
         cancelled_request["_retry_recovery"] = [
             copy.deepcopy(value) for value in recovery.values()
         ]
@@ -331,13 +332,14 @@ def _iter_request_events_unlocked(
             cancel_event=cancel_event,
         )
 
-    for attempt in range(1, max_attempts + 1):
+    while not retry_ledger.exhausted:
+        attempt_context = retry_ledger.begin_attempt()
+        run_attempt = attempt_context.attempt_index
         attempt_request = dict(request)
         if auto_retry:
-            attempt_request["_defer_failure_commit"] = attempt < max_attempts
-            attempt_request["_retry_attempt"] = attempt
+            attempt_request["_retry_ledger"] = retry_ledger
+            attempt_request["_retry_attempt"] = run_attempt
             attempt_request["_retry_max_attempts"] = max_attempts
-            attempt_request["_retry_final_attempt"] = attempt >= max_attempts
             attempt_request["_retry_recovery"] = [
                 copy.deepcopy(value) for value in recovery.values()
             ]
@@ -351,6 +353,8 @@ def _iter_request_events_unlocked(
                 attempt_request["_retry_usage_base"] = copy.deepcopy(retry_usage)
         terminal_seen = False
         retry_scheduled = False
+        retry_event: RunEvent | None = None
+        attempt_progress = False
         for event in _iter_request_events_impl(
             attempt_request,
             root=root,
@@ -359,6 +363,7 @@ def _iter_request_events_unlocked(
             cancel_event=cancel_event,
         ):
             _collect_retry_recovery(recovery, event)
+            attempt_progress = attempt_progress or is_progress_signal(event)
             if event.type in {"done", "error"}:
                 raw_usage = event.usage
                 if not isinstance(raw_usage, dict):
@@ -368,44 +373,58 @@ def _iter_request_events_unlocked(
             if event.type == "error" and _retry_error_is_eligible(
                 event, cancel_event=cancel_event
             ):
-                if attempt < max_attempts:
+                progress = bool(
+                    event.metadata.get("retry_progress", attempt_progress)
+                )
+                failed_attempt = retry_ledger.record_failure(progress)
+                if retry_ledger.can_retry():
                     event.metadata = {
                         **event.metadata,
                         "committed": False,
                         "retryable": event.metadata.get("retryable", True),
-                        "failed_attempt": attempt,
+                        "failed_attempt": failed_attempt,
                         "max_attempts": max_attempts,
                     }
-                    yield publish(
-                        _retrying_event(
-                            event,
-                            run_id=run_id,
-                            failed_attempt=attempt,
-                            next_attempt=attempt + 1,
-                            max_attempts=max_attempts,
-                        )
+                    retry_event = _retrying_event(
+                        event,
+                        run_id=run_id,
+                        failed_attempt=failed_attempt,
+                        next_attempt=failed_attempt + 1,
+                        max_attempts=max_attempts,
+                        run_attempt=run_attempt,
+                        progress=progress,
                     )
+                    yield publish(retry_event)
                     retry_scheduled = True
                     break
                 event.metadata = {
                     **event.metadata,
-                    "retry_attempts": attempt,
+                    "retry_attempts": failed_attempt,
                     "max_attempts": max_attempts,
+                    "run_attempt": run_attempt,
+                    "retry_progress": progress,
                 }
                 yield publish(event)
                 return
             if event.type in {"done", "error"}:
                 terminal_seen = True
+                failure = event.error if isinstance(event.error, dict) else {}
                 event.metadata = {
                     **event.metadata,
-                    "retry_attempts": attempt,
+                    "retry_attempts": int(
+                        failure.get("retry_attempts")
+                        or event.metadata.get("retry_attempts")
+                        or run_attempt
+                    ),
                     "max_attempts": max_attempts,
+                    "run_attempt": run_attempt,
                 }
             yield publish(event)
             if event.type in {"done", "error"}:
                 return
         if retry_scheduled:
-            if wait_before_retry(attempt, event):
+            assert retry_event is not None
+            if wait_before_retry(retry_ledger.consecutive_failures, retry_event):
                 yield from (publish(item) for item in emit_cancelled_attempt())
                 return
             continue
@@ -422,23 +441,26 @@ def _iter_request_events_unlocked(
                 "phase": "run",
             },
         )
-        if attempt < max_attempts:
+        progress = attempt_progress
+        failed_attempt = retry_ledger.record_failure(progress)
+        if retry_ledger.can_retry():
             missing.metadata = {
                 "committed": False,
                 "retryable": True,
-                "failed_attempt": attempt,
+                "failed_attempt": failed_attempt,
                 "max_attempts": max_attempts,
             }
-            yield publish(
-                _retrying_event(
-                    missing,
-                    run_id=run_id,
-                    failed_attempt=attempt,
-                    next_attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                )
+            retry_event = _retrying_event(
+                missing,
+                run_id=run_id,
+                failed_attempt=failed_attempt,
+                next_attempt=failed_attempt + 1,
+                max_attempts=max_attempts,
+                run_attempt=run_attempt,
+                progress=progress,
             )
-            if wait_before_retry(attempt, missing):
+            yield publish(retry_event)
+            if wait_before_retry(failed_attempt, retry_event):
                 yield from (publish(item) for item in emit_cancelled_attempt())
                 return
             continue
@@ -447,13 +469,15 @@ def _iter_request_events_unlocked(
             "retryable": False,
             "retry_exhausted": True,
             "retry_budget_exhausted": True,
-            "retry_attempts": attempt,
+            "retry_attempts": failed_attempt,
             "retry_max_attempts": max_attempts,
         }
         missing.metadata = {
             **missing.metadata,
-            "retry_attempts": attempt,
+            "retry_attempts": failed_attempt,
             "max_attempts": max_attempts,
+            "run_attempt": run_attempt,
+            "retry_progress": progress,
         }
         yield publish(missing)
         return

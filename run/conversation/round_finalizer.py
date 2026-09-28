@@ -29,6 +29,12 @@ from run.conversation.provider_events import metric_provider_response_payload
 from run.conversation.run_state import RoundState, RunDependencies, RunIdentity
 from run.conversation.session_runtime import copy_committed_round_to_archive
 from run.conversation.usage import merge_usage, usage_from_dict
+from run.retry.policy import (
+    failure_retry_follows,
+    mark_retry_exhausted,
+    should_retry,
+    view_from_error,
+)
 
 
 _FAILURE_DETAIL_FIELDS = (
@@ -486,13 +492,52 @@ class TerminalRoundCommitter:
         error: Any,
         *,
         reason: str = "provider_error",
-        persist: bool = True,
     ) -> RunEvent:
-        failure = _safe_failure_detail(error)
-        if not persist:
+        state = self.context.state
+        request = self.context.request
+        ledger = request.get("_retry_ledger")
+        progress = bool(state.retry_progress_observed)
+        view = view_from_error(error)
+        cancelled = bool(
+            self.context.dependencies.cancel_event is not None
+            and self.context.dependencies.cancel_event.is_set()
+        )
+        retry_follows = failure_retry_follows(
+            ledger=ledger,
+            progress=progress,
+            view=view,
+            cancelled=cancelled,
+        )
+        state.retry_follows = retry_follows
+        effective_error = error
+        if ledger is not None and should_retry(view, cancelled=cancelled) and not retry_follows:
+            failures = ledger.next_consecutive_failures(progress)
+            if failures > ledger.max_retries:
+                if isinstance(error, BaseException):
+                    mark_retry_exhausted(
+                        error,
+                        attempts=failures,
+                        max_attempts=ledger.max_attempts,
+                    )
+                elif isinstance(error, dict):
+                    effective_error = {
+                        **error,
+                        "retry_exhausted": True,
+                        "retry_budget_exhausted": True,
+                        "retry_attempts": failures,
+                        "retry_max_attempts": ledger.max_attempts,
+                        "retryable": False,
+                    }
+        failure = _safe_failure_detail(effective_error)
+        retry_metadata = {
+            "retry_progress": progress,
+            "retry_follows": retry_follows,
+            "run_attempt": getattr(ledger, "attempts", None),
+        }
+        if retry_follows:
             # Automatic retries must not create a durable failed round for each
             # provisional attempt.  Keep only a bounded, classification-only
-            # event for the retry coordinator; the final attempt persists the
+            # event for the retry coordinator; an exhausted error sequence persists the
             # normal failed-round record.
             retryable = failure.get("retryable")
             if not isinstance(retryable, bool):
@@ -508,9 +553,10 @@ class TerminalRoundCommitter:
                     "stop_reason": reason,
                     "failure": copy.deepcopy(failure),
                     "run_id": self.context.identity.run_id,
+                    **retry_metadata,
                 },
             )
-        return self.commit_terminal_round(
+        terminal = self.commit_terminal_round(
             status="failed",
             reason=reason,
             marker=(
@@ -522,3 +568,5 @@ class TerminalRoundCommitter:
             pending_status="failed",
             failure=failure,
         )
+        terminal.metadata.update(retry_metadata)
+        return terminal

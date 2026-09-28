@@ -55,7 +55,6 @@ def execute_tool_batch(context: ToolBatchContext):
     commit_cancelled_round = values['commit_cancelled_round']
     commit_terminal_round = values['commit_terminal_round']
     copy = values['copy']
-    defer_failure_commit = values['defer_failure_commit']
     detect_task_plan_creation_boundary = values['detect_task_plan_creation_boundary']
     execute_tool = values['execute_tool']
     failure_limit = values['failure_limit']
@@ -74,6 +73,7 @@ def execute_tool_batch(context: ToolBatchContext):
     provider_response = values['provider_response']
     registry = values['registry']
     request = values['request']
+    round_state = values['round_state']
     seen_calls = values['seen_calls']
     session_id = values['session_id']
     source = values['source']
@@ -317,8 +317,10 @@ def execute_tool_batch(context: ToolBatchContext):
                 "content": _json_result(result_payload),
             }
         )
+        retry_ledger = request.get("_retry_ledger")
         if (
-            defer_failure_commit
+            retry_ledger is not None
+            and retry_ledger.would_allow_retry(round_state.retry_progress_observed)
             and retryable_tool_failure is None
             and _tool_failure_is_retryable(result_payload, status)
         ):

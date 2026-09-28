@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 def run_conversation(request, *, runtime_bindings, root=None, provider_factory=None, tool_registry_factory=None, cancel_event=None):
-    (ContextLengthExceededError, ProviderLoopState, RoundRuntime, RoundState, RunDependencies, RunEvent, SUMMARY_STORE_REF, TerminalRoundCommitter, TerminalRoundContext, _build_request_context, _commit_verified_manual_compression, _committed_failure_event, _compress_per_round_tool_think, _content_display, _copy_committed_round_to_archive, _extract_round_memory, _failure_requires_immediate_commit, _memory_injected_chars, _merge_usage, _metric_provider_responses, _prepare_compression, _prepare_provider_request, _queue_summary_memory_extraction, _record_provider_request, _request_content_blocks, _required_text, _retry_recovery_messages, _retry_recovery_provider_responses, _run_provider_loop, _session_lock, _tool_result_reuse_allowed, _trim_to_max_rounds, _usage_from_dict, append_round_items, build_context_snapshot, build_summary_message, cleanup_run_registration, commit_terminal_windows, copy, datetime, error_event, memory_extraction_mode, patch_archive_metadata, project_root, queue_memory_extraction, restore_summary_cache, select_context, terminal_failure_events, time, timezone, tool_call_signature, update_run_state) = map(runtime_bindings.__getitem__, ('ContextLengthExceededError', 'ProviderLoopState', 'RoundRuntime', 'RoundState', 'RunDependencies', 'RunEvent', 'SUMMARY_STORE_REF', 'TerminalRoundCommitter', 'TerminalRoundContext', '_build_request_context', '_commit_verified_manual_compression', '_committed_failure_event', '_compress_per_round_tool_think', '_content_display', '_copy_committed_round_to_archive', '_extract_round_memory', '_failure_requires_immediate_commit', '_memory_injected_chars', '_merge_usage', '_metric_provider_responses', '_prepare_compression', '_prepare_provider_request', '_queue_summary_memory_extraction', '_record_provider_request', '_request_content_blocks', '_required_text', '_retry_recovery_messages', '_retry_recovery_provider_responses', '_run_provider_loop', '_session_lock', '_tool_result_reuse_allowed', '_trim_to_max_rounds', '_usage_from_dict', 'append_round_items', 'build_context_snapshot', 'build_summary_message', 'cleanup_run_registration', 'commit_terminal_windows', 'copy', 'datetime', 'error_event', 'memory_extraction_mode', 'patch_archive_metadata', 'project_root', 'queue_memory_extraction', 'restore_summary_cache', 'select_context', 'terminal_failure_events', 'time', 'timezone', 'tool_call_signature', 'update_run_state'))
+    (ContextLengthExceededError, ProviderLoopState, RoundRuntime, RoundState, RunDependencies, RunEvent, SUMMARY_STORE_REF, TerminalRoundCommitter, TerminalRoundContext, _build_request_context, _commit_verified_manual_compression, _committed_failure_event, _compress_per_round_tool_think, _content_display, _copy_committed_round_to_archive, _extract_round_memory, _memory_injected_chars, _merge_usage, _metric_provider_responses, _prepare_compression, _prepare_provider_request, _queue_summary_memory_extraction, _record_provider_request, _request_content_blocks, _required_text, _retry_recovery_messages, _retry_recovery_provider_responses, _run_provider_loop, _session_lock, _tool_result_reuse_allowed, _trim_to_max_rounds, _usage_from_dict, append_round_items, build_context_snapshot, build_summary_message, cleanup_run_registration, commit_terminal_windows, copy, datetime, error_event, memory_extraction_mode, patch_archive_metadata, project_root, queue_memory_extraction, restore_summary_cache, select_context, terminal_failure_events, time, timezone, tool_call_signature, update_run_state) = map(runtime_bindings.__getitem__, ('ContextLengthExceededError', 'ProviderLoopState', 'RoundRuntime', 'RoundState', 'RunDependencies', 'RunEvent', 'SUMMARY_STORE_REF', 'TerminalRoundCommitter', 'TerminalRoundContext', '_build_request_context', '_commit_verified_manual_compression', '_committed_failure_event', '_compress_per_round_tool_think', '_content_display', '_copy_committed_round_to_archive', '_extract_round_memory', '_memory_injected_chars', '_merge_usage', '_metric_provider_responses', '_prepare_compression', '_prepare_provider_request', '_queue_summary_memory_extraction', '_record_provider_request', '_request_content_blocks', '_required_text', '_retry_recovery_messages', '_retry_recovery_provider_responses', '_run_provider_loop', '_session_lock', '_tool_result_reuse_allowed', '_trim_to_max_rounds', '_usage_from_dict', 'append_round_items', 'build_context_snapshot', 'build_summary_message', 'cleanup_run_registration', 'commit_terminal_windows', 'copy', 'datetime', 'error_event', 'memory_extraction_mode', 'patch_archive_metadata', 'project_root', 'queue_memory_extraction', 'restore_summary_cache', 'select_context', 'terminal_failure_events', 'time', 'timezone', 'tool_call_signature', 'update_run_state'))
     round_state = RoundState(run_started=time.monotonic())
     run_started = round_state.run_started
     dependencies = RunDependencies(
@@ -128,7 +128,6 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
             )
             commit_terminal_round = terminal_committer.commit_terminal_round
             commit_cancelled_round = terminal_committer.commit_cancelled_round
-            defer_failure_commit = bool(request.get("_defer_failure_commit", False))
             task_plan_boundary = None
 
             def commit_failed_round(
@@ -136,35 +135,9 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 *,
                 reason: str = "provider_error",
             ) -> RunEvent:
-                effective_error = error
-                if request.get("_retry_final_attempt"):
-                    retry_attempt = int(request.get("_retry_attempt") or 1)
-                    retry_max_attempts = int(
-                        request.get("_retry_max_attempts") or retry_attempt
-                    )
-                    if isinstance(error, BaseException):
-                        setattr(error, "retry_exhausted", True)
-                        setattr(error, "retry_budget_exhausted", True)
-                        setattr(error, "retry_attempts", retry_attempt)
-                        setattr(error, "retry_max_attempts", retry_max_attempts)
-                        setattr(error, "retryable_declared", True)
-                        setattr(error, "retryable", False)
-                    elif isinstance(error, dict):
-                        effective_error = {
-                            **error,
-                            "retry_exhausted": True,
-                            "retry_budget_exhausted": True,
-                            "retry_attempts": retry_attempt,
-                            "retry_max_attempts": retry_max_attempts,
-                            "retryable": False,
-                        }
                 return terminal_committer.commit_failed_round(
-                    effective_error,
+                    error,
                     reason=reason,
-                    persist=(
-                        not defer_failure_commit
-                        or _failure_requires_immediate_commit(effective_error)
-                    ),
                 )
 
             if cancel_event is not None and cancel_event.is_set():
@@ -779,7 +752,6 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 cancel_event=cancel_event,
                 request=request,
                 context_length_error_type=ContextLengthExceededError,
-                failure_requires_immediate_commit=_failure_requires_immediate_commit,
                 committed_failure_event=_committed_failure_event,
                 error_event=error_event,
             )

@@ -13,7 +13,6 @@ def terminal_failure_events(
     cancel_event: Any,
     request: dict[str, Any],
     context_length_error_type: type[BaseException],
-    failure_requires_immediate_commit: Callable[[BaseException], bool],
     committed_failure_event: Callable[[Any, Any], Any],
     error_event: Callable[..., Any],
 ) -> Iterator[Any]:
@@ -25,15 +24,10 @@ def terminal_failure_events(
     if cancel_event is not None and cancel_event.is_set():
         yield terminal_committer.commit_cancelled_round()
         return
-    defer_failure_commit = bool(request.get("_defer_failure_commit", False))
     context_limit = isinstance(exc, context_length_error_type)
     terminal_event = terminal_committer.commit_failed_round(
         exc,
         reason=("provider_context_recovery_failed" if context_limit else "runtime_exception"),
-        persist=(
-            not defer_failure_commit
-            or failure_requires_immediate_commit(exc)
-        ),
     )
     yield committed_failure_event(
         error_event(exc, phase="provider" if context_limit else "run"),
@@ -76,7 +70,7 @@ def cleanup_run_registration(
             session_id,
             run_state=(
                 "running"
-                if request.get("_defer_failure_commit") and not round_state.finalized
+                if round_state.retry_follows and not round_state.finalized
                 else "idle"
             ),
             run_id=run_id or None,

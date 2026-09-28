@@ -44,6 +44,8 @@ class RoundState:
     tool_argument_retries: int = 0
     usage_total: dict[str, Any] = field(default_factory=new_usage_total)
     context_stats: dict[str, Any] = field(default_factory=dict)
+    retry_progress_observed: bool = False
+    retry_follows: bool = False
     finalized: bool = False
     history_run_registered: bool = False
     history_run_error: dict[str, Any] | None = None
