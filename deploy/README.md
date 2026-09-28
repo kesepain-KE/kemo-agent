@@ -2,10 +2,10 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
-> 当前主框架暂定版本 **1.3.1（待发布）**，配套网关仍为 **0.8.2**。本页远程命令仅在
+> 当前主框架稳定版本 **1.3.2（2026-09-28 正式定档）**，配套网关仍为 **0.8.2**。本页远程命令仅在
 > 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
 > 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
-> `../global_knowledge/deployment-and-release.md`。已有 1.3.0 本地验收包不能改名充当 1.3.1，须重新构建打包。
+> `../global_knowledge/deployment-and-release.md`。已有 1.3.0 或 1.3.1 本地验收包不能改名充当 1.3.2，须重新构建打包。
 
 ## 1. 发布合同：一个版本、一份应用包
 
@@ -97,8 +97,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.3.1.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.3.1.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.3.2.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.3.2.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
