@@ -26,6 +26,7 @@ from run.agents import AgentRunner
 from run.extensions import history_attachment_descriptors
 from run.config import (
     ConfigError,
+    cron_session_idle_close_seconds,
     load_config,
 )
 from run.engine import compress_context, iter_request_events
@@ -42,6 +43,7 @@ from run.history import (
 )
 from run.history import (
     close_session as close_index_session,
+    reopen_session as reopen_index_session,
     queue_summary as queue_history_summary,
     find_record as find_index_record,
 )
@@ -424,6 +426,12 @@ class WebRunService(
         clients[client_id] = time.monotonic()
         return len(clients)
 
+    def _session_idle_close_seconds(self, user: str) -> int:
+        try:
+            return cron_session_idle_close_seconds(load_config(user, self.root))
+        except (ConfigError, OSError, ValueError, TypeError):
+            return 90 * 60
+
     def _release_session_lease_locked(
         self,
         user: str,
@@ -487,6 +495,47 @@ class WebRunService(
             "client_id": normalized_client,
             "active_clients": clients,
             "leased": True,
+        }
+
+    def reopen_session(
+        self,
+        user: Any,
+        session_id: Any,
+        client_id: Any = "",
+        *,
+        source: Any = "web",
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        if normalized_source != "web":
+            raise InvalidRequestError("只有 Web 归档会话支持显式重开")
+        normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id)
+        with self._active_runs_lock:
+            record = reopen_index_session(
+                self.root,
+                name,
+                normalized_source,
+                normalized_session,
+            )
+            if record is None:
+                raise NotFoundError(
+                    f"会话不存在、已经删除或无法重开：{normalized_session}"
+                )
+            active_clients = self._touch_session_lease_locked(
+                name,
+                normalized_source,
+                normalized_session,
+                normalized_client,
+            )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "client_id": normalized_client,
+            "reopened": True,
+            "active_clients": active_clients,
+            "session": self._index_session_payload(record),
         }
 
     def release_session_lease(
@@ -568,6 +617,7 @@ class WebRunService(
                 result = inspect_stale_web_sessions(
                     self.root,
                     user,
+                    idle_seconds=self._session_idle_close_seconds(user),
                     protected_sessions=protected,
                     stop=stop,
                     queue_memory=self._queue_memory_extraction,
@@ -577,7 +627,7 @@ class WebRunService(
                 app_result = sweep_idle_sessions(
                     self.root,
                     user,
-                    idle_seconds=WEB_STARTUP_INSPECTION_DELAY_SECONDS,
+                    idle_seconds=self._session_idle_close_seconds(user),
                     limit=100,
                     sources={'app'},
                     queue_reason=(

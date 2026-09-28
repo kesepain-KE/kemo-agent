@@ -103,6 +103,21 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> dict[str, Any]:
         return await asyncio.to_thread(backend.session_lease, user, session_id, body.client_id, source=source)
 
+    @app.post("/api/users/{user}/sessions/{session_id}/reopen")
+    async def reopen_session(
+        user: str,
+        session_id: str,
+        body: SessionClientBody | None = None,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.reopen_session,
+            user,
+            session_id,
+            body.client_id if body is not None else "",
+            source=source,
+        )
+
     @app.post("/api/users/{user}/sessions/{session_id}/lease/release")
     async def release_session_lease(
         user: str,
