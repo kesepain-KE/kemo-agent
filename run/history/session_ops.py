@@ -82,6 +82,33 @@ def close_session(
         return _write_index_unlocked(root, user, index)["sessions"][key]
 
 
+def reopen_session(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Explicitly reopen one saved session without reviving deleted history."""
+
+    with index_lock(root, user):
+        index = _load_index_unlocked(root, user)
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict):
+            return None
+        lifecycle = str(record.get("lifecycle") or "open")
+        if lifecycle not in {"open", "closed"}:
+            return None
+        now = _now()
+        record["lifecycle"] = "open"
+        record["run_state"] = "idle"
+        record["updated_at"] = now
+        record["reopened_at"] = now
+        record.pop("startup_offline_closed_at", None)
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
 def update_title(
     root: Path,
     user: str,

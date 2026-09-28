@@ -32,6 +32,7 @@ from run.history.memory_claims import (
 from run.history.session_ops import (
     claim_pending_summary,
     close_session,
+    reopen_session,
     defer_summary_claim,
     finish_summary_claim,
     get_active,
