@@ -194,13 +194,14 @@ return async (
           const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
           const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
           const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 6))
+          const boundaryKey = Math.max(1, Number(event.metadata?.run_attempt || nextAttempt))
           // Apply deltas from the failed attempt before sealing it as a
           // snapshot. Otherwise a pending batch can be flushed after the
           // boundary and mix failed-attempt text with the next attempt.
           deltaBatcher.flush()
           setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
           setRunErrorNoticeFor(targetUser, activeSession, null)
-          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt))
+          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
           return
         }
         if (isProvisionalRunError(event)) return
@@ -474,12 +475,13 @@ const executePlan = async (plan: PlanSummary) => {
           const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
           const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata?.next_attempt || failedAttempt + 1))
           const maxAttempts = Math.max(nextAttempt, Number(event.metadata?.max_attempts || 6))
+          const boundaryKey = Math.max(1, Number(event.metadata?.run_attempt || nextAttempt))
           // Keep the retry boundary ordered with the buffered failed-attempt
           // deltas so they cannot be applied after the snapshot is sealed.
           deltaBatcher.flush()
           setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
           setRunErrorNoticeFor(targetUser, activeSession, null)
-          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt))
+          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
           return
         }
         if (isProvisionalRunError(event)) return

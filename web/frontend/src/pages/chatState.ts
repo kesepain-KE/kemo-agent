@@ -163,6 +163,7 @@ export function resetCurrentRoundItemsForRetry(
   items: ChatItem[],
   failedAttempt = 1,
   nextAttempt = failedAttempt + 1,
+  boundaryKey = nextAttempt,
 ) {
   items = items.filter((item) => item.kind !== 'subagent_progress')
   const roundStart = currentRoundStartIndex(items)
@@ -173,14 +174,14 @@ export function resetCurrentRoundItemsForRetry(
   return [
     ...prefix,
     {
-      id: `retry_boundary_${retrySeed}_${failedAttempt}_snapshot`,
+      id: `retry_boundary_${retrySeed}_${boundaryKey}_snapshot`,
       kind: 'retry_boundary' as const,
       attempt: failedAttempt,
       phase: 'snapshot' as const,
     },
     ...currentAttempt.map(snapshotRetryItem),
     {
-      id: `retry_boundary_${retrySeed}_${nextAttempt}_active`,
+      id: `retry_boundary_${retrySeed}_${boundaryKey}_active`,
       kind: 'retry_boundary' as const,
       attempt: nextAttempt,
       phase: 'active' as const,

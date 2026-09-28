@@ -445,15 +445,15 @@ describe('reduceRunEvent', () => {
       { id: 'e1', kind: 'error', content: '旧错误' },
     ]
 
-    const retried = resetCurrentRoundItemsForRetry(items, 1, 2)
+    const retried = resetCurrentRoundItemsForRetry(items, 1, 2, 7)
     expect(retried).toEqual([
       userItem,
-      { id: 'retry_boundary_u1_1_snapshot', kind: 'retry_boundary', attempt: 1, phase: 'snapshot' },
+      { id: 'retry_boundary_u1_7_snapshot', kind: 'retry_boundary', attempt: 1, phase: 'snapshot' },
       { id: 'r1', kind: 'reasoning', content: '旧思考', streaming: false },
       { id: 't1', kind: 'tool', callId: 'c1', name: 'shell', status: 'error' },
       { id: 'a1', kind: 'message', role: 'assistant', content: '旧正文', streaming: false },
       { id: 'e1', kind: 'error', content: '旧错误' },
-      { id: 'retry_boundary_u1_2_active', kind: 'retry_boundary', attempt: 2, phase: 'active' },
+      { id: 'retry_boundary_u1_7_active', kind: 'retry_boundary', attempt: 2, phase: 'active' },
     ])
 
     const nextAttempt = reduceRunEvent(retried, {

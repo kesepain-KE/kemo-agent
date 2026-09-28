@@ -257,7 +257,7 @@ return (
     <div className="composer-zone">
       {runRetryNotice ? (
         <div className="run-retry-bubble" role="status" aria-live="polite">
-          <span>运行出现问题，正在自动重试（第 {runRetryNotice.nextAttempt}/{runRetryNotice.maxAttempts} 次）</span>
+          <span>运行出现问题，正在自动重试（本次错误第 {runRetryNotice.nextAttempt}/{runRetryNotice.maxAttempts} 次）</span>
         </div>
       ) : null}
       {runErrorNotice ? (
