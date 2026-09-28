@@ -391,6 +391,36 @@ class UpdateSafetyContractTests(unittest.TestCase):
             self.assertEqual(stored["local_only"]["operator_choice"], "keep")
             self.assertTrue(stored["new_default"]["enabled"])
 
+    def test_core_update_migrates_only_the_legacy_session_idle_default(self) -> None:
+        for local_value, expected in ((86400, 5400), (7200, 7200)):
+            with self.subTest(local_value=local_value), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                target = root / "target"
+                _write_json(source / "version.json", _version_document("1.3.2"))
+                _write_json(target / "version.json", _version_document("1.3.1"))
+                _write_json(
+                    source / "config" / "global_config.json",
+                    {
+                        "schema_version": 1,
+                        "cron": {"session_idle_close_seconds": 5400},
+                    },
+                )
+                _write_json(
+                    target / "config" / "global_config.json",
+                    {
+                        "schema_version": 1,
+                        "cron": {"session_idle_close_seconds": local_value},
+                    },
+                )
+
+                core_update.update(source, target, assume_yes=True)
+                stored = json.loads(
+                    (target / "config" / "global_config.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(stored["cron"]["session_idle_close_seconds"], expected)
+
     def test_core_update_rejects_unmigrated_global_config_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
