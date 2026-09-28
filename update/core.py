@@ -10,6 +10,7 @@ from pathlib import Path
 from ._utils import (
     UpdateError,
     ask_choice,
+    compare_versions,
     copy_file_safe,
     paths_differ,
     redact_json,
@@ -220,6 +221,52 @@ def _merge_remote_defaults(source: object, target: object) -> object:
     return merged
 
 
+def _root_version(root: Path) -> str:
+    path = root / "version.json"
+    if not path.is_file():
+        return ""
+    try:
+        value = read_json(path).get("version")
+    except (OSError, ValueError, UpdateError):
+        return ""
+    return str(value or "").strip()
+
+
+def _migrate_global_config_defaults(
+    merged: dict,
+    *,
+    source_json: dict,
+    target_json: dict,
+    source_version: str,
+    target_version: str,
+) -> dict:
+    """Migrate exact legacy defaults without replacing operator customizations."""
+
+    if not source_version or not target_version:
+        return merged
+    try:
+        is_legacy_upgrade = (
+            compare_versions(target_version, "1.3.1") <= 0
+            and compare_versions(source_version, "1.3.2") >= 0
+        )
+    except UpdateError:
+        return merged
+    if not is_legacy_upgrade:
+        return merged
+    source_cron = source_json.get("cron")
+    target_cron = target_json.get("cron")
+    merged_cron = merged.get("cron")
+    if (
+        isinstance(source_cron, dict)
+        and isinstance(target_cron, dict)
+        and isinstance(merged_cron, dict)
+        and source_cron.get("session_idle_close_seconds") == 5400
+        and target_cron.get("session_idle_close_seconds") == 86400
+    ):
+        merged_cron["session_idle_close_seconds"] = 5400
+    return merged
+
+
 def _update_global_config(
     source_root: Path,
     target_root: Path,
@@ -290,6 +337,13 @@ def _update_global_config(
         return False, "保留本地 config/global_config.json"
     if choice == "m":
         merged = _merge_remote_defaults(source_json, target_json)
+        merged = _migrate_global_config_defaults(
+            merged,
+            source_json=source_json,
+            target_json=target_json,
+            source_version=_root_version(source_root),
+            target_version=_root_version(target_root),
+        )
         if merged == target_json:
             return False, "config/global_config.json 无需补充默认值"
         if dry_run:
