@@ -31,7 +31,10 @@ class WebSessionLifecycleTests(unittest.TestCase):
         self.root = Path(temp.name)
         (self.root / 'config').mkdir()
         (self.root / 'config/global_config.json').write_text(
-            json.dumps({'memory': {'extraction_mode': 'compression_only'}}), encoding='utf-8'
+            json.dumps({
+                'memory': {'extraction_mode': 'compression_only'},
+                'cron': {'session_idle_close_seconds': 3600},
+            }), encoding='utf-8'
         )
         for user in ('alice', 'bob'):
             (self.root / 'users' / user).mkdir(parents=True)
@@ -44,7 +47,7 @@ class WebSessionLifecycleTests(unittest.TestCase):
 
     def age(self, sid, *, user='alice', source='web'):
         with connection(self.root, user, write=True) as db:
-            timestamp = datetime.fromtimestamp(self.now - 200, timezone.utc).isoformat()
+            timestamp = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
             row = db.execute(
                 'SELECT record_json FROM history_sessions WHERE source=? AND session_id=?',
                 (source, sid),
@@ -113,13 +116,35 @@ class WebSessionLifecycleTests(unittest.TestCase):
             touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now + 30)
             self.assertEqual(sum(bool(call.kwargs.get('write')) for call in connect.call_args_list), 2)
 
-    def test_closed_session_rejects_late_lease_and_cannot_be_reopened(self):
+    def test_closed_session_rejects_late_lease_but_can_be_reopened_explicitly(self):
         self.seed_data('ended')
-        from run.history import close_session, prepare_window
+        from run.history import close_session, prepare_window, reopen_session
         close_session(self.root, 'alice', 'web', 'ended')
         self.assertFalse(touch_web_session_lease(self.root, 'alice', 'ended', 'late', now=self.now))
-        with self.assertRaisesRegex(Exception, '已经结束'):
-            prepare_window(self.root, 'alice', 'web', 'ended')
+        reopened = reopen_session(self.root, 'alice', 'web', 'ended')
+        self.assertEqual(reopened['lifecycle'], 'open')
+        self.assertTrue(touch_web_session_lease(self.root, 'alice', 'ended', 'page', now=self.now))
+        self.assertIsNotNone(prepare_window(self.root, 'alice', 'web', 'ended'))
+
+    def test_deleted_session_cannot_be_reopened(self):
+        self.seed_data('deleted')
+        from run.history import close_session, delete_session, reopen_session
+        close_session(self.root, 'alice', 'web', 'deleted')
+        self.assertEqual(delete_session(self.root, 'alice', 'web', 'deleted'), 1)
+        self.assertIsNone(reopen_session(self.root, 'alice', 'web', 'deleted'))
+
+    def test_idle_threshold_does_not_extend_empty_session_grace(self):
+        self.seed('empty-threshold')
+        self.seed_data('data-threshold')
+        result = inspect_stale_web_sessions(
+            self.root,
+            'alice',
+            now=self.now,
+            idle_seconds=7200,
+        )
+        self.assertEqual(result['deleted_sessions'], ['empty-threshold'])
+        self.assertEqual(result['queued_memory'], [])
+        self.assertEqual(find_record(self.root, 'alice', 'web', 'data-threshold')['lifecycle'], 'open')
 
     def test_data_and_claims_protected_even_with_zero_registry_rounds(self):
         for sid, field in [('running', 'run_state'), ('memory', 'memory_status'), ('summary', 'summary_status')]:
