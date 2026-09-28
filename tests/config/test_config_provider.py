@@ -262,7 +262,7 @@ class ServerMixin:
 
 class ConfigAndHistoryTests(unittest.TestCase):
     def test_session_idle_close_threshold_is_global_and_bounded(self) -> None:
-        self.assertEqual(cron_session_idle_close_seconds({}), 86400)
+        self.assertEqual(cron_session_idle_close_seconds({}), 5400)
         self.assertEqual(
             cron_session_idle_close_seconds({"cron": {"session_idle_close_seconds": 7200}}),
             7200,
