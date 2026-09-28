@@ -117,6 +117,14 @@ export const handlers = [
       client_id: body.client_id, active_clients: 1, leased: true,
     })
   }),
+  http.post('/api/users/kesepain/sessions/:sessionId/reopen', async ({ params, request }) => {
+    const body = await request.json() as { client_id?: string }
+    return HttpResponse.json({
+      user: 'kesepain', source: 'web', session_id: params.sessionId,
+      client_id: body.client_id || '', active_clients: 1, reopened: true,
+      session: { session_id: params.sessionId, window: 'w1', title: '', rounds: 2, updated_at: 'now', state: 'open', run_state: 'idle', chain: 'interactive' },
+    })
+  }),
   http.post('/api/users/kesepain/sessions/:sessionId/lease/release', async ({ params, request }) => {
     const body = await request.json() as { client_id: string }
     return HttpResponse.json({
@@ -409,7 +417,7 @@ export const handlers = [
       provider_runtime: { max_concurrent_requests: 10, request_semaphore_timeout: 300 },
       web: { max_concurrent_chats: 3, max_pending_chats: 5, pending_chat_timeout: 30 },
       message: { max_workers: 8, max_queued_messages: 20 },
-      cron: { poll_interval: 30, history_retention_days: 7, session_idle_close_seconds: 86400, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
+      cron: { poll_interval: 30, history_retention_days: 7, session_idle_close_seconds: 5400, avoid_congestion: true, congestion_threshold_ratio: 0.2 },
       agent_runtime: { default_timeout: 600, queue_maxsize: 50 },
     },
     redacted_paths: [],

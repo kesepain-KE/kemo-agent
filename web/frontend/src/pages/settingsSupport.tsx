@@ -243,7 +243,7 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
     },
     cron: {
       history_retention_days: numberValue(cron.history_retention_days, 7),
-      session_idle_close_seconds: numberValue(cron.session_idle_close_seconds, 86400),
+      session_idle_close_seconds: numberValue(cron.session_idle_close_seconds, 5400),
       poll_interval: numberValue(cron.poll_interval, 30),
       avoid_congestion: booleanValue(cron.avoid_congestion, true),
       congestion_threshold_ratio: numberValue(cron.congestion_threshold_ratio, 0.2),
