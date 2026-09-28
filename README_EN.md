@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -139,7 +139,7 @@ The project does not claim that every model service is inherently private. What 
 
 ### Choose an installation method
 
-Windows, Linux, npm, and Docker share the framework version. The tentative next release is **1.3.1**; the compatible gateway baseline remains **0.8.2**.
+Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.3.2**; the compatible gateway baseline remains **0.8.2**.
 
 > **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
 
@@ -266,15 +266,18 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.3.1` (tentative; not yet published)
+Current version: `1.3.2` (stable source release; remote distribution artifacts are published separately)
 
 Confirmed compatible Kemo gateway: `kemo-adapter-api 0.8.2` (Kemo 1.0 wire protocol matched).
 
-### 1.3.1 planned release
+### 1.3.2 stable release
 
 - Adds independent Windows, Linux, npm, and Docker deployment entry points sharing the framework version and a standard Release archive.
 - Documents one-command installation, routine startup, updates after stopping the application, transaction recovery, and publication while retaining source installation.
-- Retains the 1.3.0 capabilities and the `kemo-adapter-api 0.8.2` compatibility baseline. Remote artifacts must be built and published separately.
+- Repairs archive lifecycle semantics: populated closed Web sessions can be explicitly reopened, including sessions selected through date-filtered archives, while late heartbeats, parameterless entry points, and stale links still cannot revive them implicitly.
+- Archives inactive Web/App data sessions after 90 minutes by default while preserving the independent 90-second deletion grace for empty Web sessions. Source and managed-deployment updaters migrate only installations that still use the legacy 86400-second default; custom values remain unchanged.
+- Removes completed user scheduled tasks from the chat start page while keeping their task-center and execution-history records.
+- Retains the 1.3.0 capabilities and the `kemo-adapter-api 0.8.2` compatibility baseline. Version 1.3.2 is finalized in source; Release, npm, and GHCR artifacts must still be built and published separately.
 
 ### 1.3.0 update
 
@@ -421,7 +424,7 @@ If you are trying an early release, reports about problems, usability feedback, 
 kemo-agent is not an island. Around it, several independently maintained projects cooperate through stable protocols to form the Kemo ecosystem:
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway: the compatibility baseline is `0.8.2`; the planned 1.3.1 release retains the protocol match confirmed for 1.3.0. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
+  Kemo Provider Gateway: the compatibility baseline is `0.8.2`; the stable 1.3.2 release retains the protocol match confirmed for 1.3.0. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.

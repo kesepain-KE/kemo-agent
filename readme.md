@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -139,7 +139,7 @@ kemo-agent 坚持本地优先。
 
 ### 选择安装方式
 
-Windows、Linux、npm 和 Docker 共用主框架版本。当前暂定待发布版本为 **1.3.1**，网关兼容基线仍为 **0.8.2**。
+Windows、Linux、npm 和 Docker 共用主框架版本。当前正式定档版本为 **1.3.2**，网关兼容基线仍为 **0.8.2**。
 
 > **发布前提：** 以下远程命令仅在安装脚本已推送、对应渠道发布产物就绪后可用。原生安装需要 Release 中的 `kemo-agent-release-<version>.zip` 与 `.zip.sha256`，npm 需要已发布的分发包，Docker 需要已发布的镜像标签。仅推送代码不会自动发布这些产物；本文不代表线上已经可安装。Release ZIP 不是 GitHub 自动生成的源码 ZIP。
 
@@ -266,15 +266,18 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.3.1`（暂定，待发布）
+当前版本：`1.3.2`（正式版；远程分发产物需另行发布）
 
 已确认兼容的 Kemo 网关：`kemo-adapter-api 0.8.2`（Kemo 1.0 线路协议匹配）。
 
-### 1.3.1 待发布
+### 1.3.2 正式版
 
 - 新增 Windows、Linux、npm、Docker 四渠道独立部署入口，共用主框架版本和标准 Release 包。
 - 同步一键安装、日常启动、停止后更新、事务恢复与发布说明，保留源码部署入口。
-- 延续 1.3.0 的能力与 `kemo-adapter-api 0.8.2` 兼容基线；远程发布产物须另行打包和发布。
+- 修复历史归档生命周期：有内容的 closed Web 会话支持显式重开，日期筛选归档也会先重开再切换；迟到心跳、无参数入口和旧链接仍不能隐式复活会话。
+- Web/App 数据会话默认空闲 90 分钟后归档，空 Web 会话继续使用独立 90 秒删除宽限；源码更新器和部署器只迁移仍等于旧默认值 86400 的安装，自定义阈值保持不变。
+- 聊天开始页不再展示已完成的用户定时任务，任务中心和执行历史仍保留完整记录。
+- 延续 1.3.0 的能力与 `kemo-adapter-api 0.8.2` 兼容基线；本次仅在源码中正式定档，远程 Release、npm 与 GHCR 产物须另行构建和发布。
 
 ### 1.3.0 更新
 
@@ -421,7 +424,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 kemo-agent 不是一座孤岛。围绕它，还有几个独立维护、通过稳定协议协作的项目，共同构成 Kemo 生态：
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway：当前兼容基线为 `0.8.2`；1.3.1 待发布版延续 1.3.0 已确认的协议匹配。它统一多厂商模型的发现、流式响应、工具调用、能力声明、多模态 Asset 与 Token 计量，为 kemo-agent 提供一致的模型服务边界。
+  Kemo Provider Gateway：当前兼容基线为 `0.8.2`；1.3.2 正式版延续 1.3.0 已确认的协议匹配。它统一多厂商模型的发现、流式响应、工具调用、能力声明、多模态 Asset 与 Token 计量，为 kemo-agent 提供一致的模型服务边界。
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   知识图谱与 RAG 检索项目，可外挂为 kemo-agent 的超级文档站：注册文档库后，通过 `expand_call` 按需查询、同步与维护，不替换框架内置的知识库与记忆。
