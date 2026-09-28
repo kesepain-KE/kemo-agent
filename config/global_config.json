@@ -69,7 +69,7 @@
   "cron": {
     "enabled": true,
     "history_retention_days": 7,
-    "session_idle_close_seconds": 86400,
+    "session_idle_close_seconds": 5400,
     "poll_interval": 30,
     "avoid_congestion": true,
     "congestion_threshold_ratio": 0.2

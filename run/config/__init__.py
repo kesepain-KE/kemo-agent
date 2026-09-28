@@ -68,7 +68,7 @@ def cron_session_idle_close_seconds(config: dict[str, Any]) -> int:
     cron = config.get("cron", {})
     if not isinstance(cron, dict):
         raise ConfigError("cron 必须是对象")
-    value = cron.get("session_idle_close_seconds", 24 * 3600)
+    value = cron.get("session_idle_close_seconds", 90 * 60)
     if type(value) is not int or value < 3600:
         raise ConfigError("cron.session_idle_close_seconds 必须是至少 3600 秒的整数")
     return value
