@@ -16,14 +16,6 @@ class RunAttemptContext:
     attempt_index: int
     max_attempts: int
 
-    @property
-    def is_last_attempt(self) -> bool:
-        return self.attempt_index >= self.max_attempts
-
-    @property
-    def defer_commit(self) -> bool:
-        return not self.is_last_attempt
-
 
 @dataclass(slots=True)
 class RetryLedger:
@@ -32,22 +24,29 @@ class RetryLedger:
     consecutive_failures: int = 0
     exhausted: bool = False
 
+    @property
+    def max_retries(self) -> int:
+        return max(0, self.max_attempts - 1)
+
     def begin_attempt(self) -> RunAttemptContext:
-        if self.attempts >= self.max_attempts:
+        if self.exhausted:
             raise RuntimeError("retry attempt budget already exhausted")
         self.attempts += 1
         return RunAttemptContext(self.attempts, self.max_attempts)
 
-    def record_failure(self) -> None:
-        self.consecutive_failures += 1
-        self.exhausted = self.attempts >= self.max_attempts
+    def next_consecutive_failures(self, progress: bool) -> int:
+        return 1 if progress else self.consecutive_failures + 1
 
-    def record_success(self) -> None:
-        self.consecutive_failures = 0
-        self.exhausted = False
+    def would_allow_retry(self, progress: bool) -> bool:
+        return self.next_consecutive_failures(progress) <= self.max_retries
+
+    def record_failure(self, progress: bool = False) -> int:
+        self.consecutive_failures = self.next_consecutive_failures(progress)
+        self.exhausted = self.consecutive_failures > self.max_retries
+        return self.consecutive_failures
 
     def can_retry(self) -> bool:
-        return self.attempts < self.max_attempts
+        return not self.exhausted
 
 
 def run_attempts(
@@ -58,20 +57,21 @@ def run_attempts(
     on_retry: Callable[[RunAttemptContext, BaseException], None] | None = None,
     wait_before_retry: Callable[[RunAttemptContext, BaseException], None] | None = None,
 ) -> T:
-    while ledger.attempts < ledger.max_attempts:
+    while not ledger.exhausted:
         attempt = ledger.begin_attempt()
         try:
             result = run_once(attempt)
         except (KeyboardInterrupt, GeneratorExit):
             raise
         except BaseException as exc:
-            ledger.record_failure()
+            progress = bool(getattr(exc, "retry_progress", False))
+            failures = ledger.record_failure(progress)
             if not should_retry_error(exc):
                 raise
             if not ledger.can_retry():
                 mark_retry_exhausted(
                     exc,
-                    attempts=ledger.attempts,
+                    attempts=failures,
                     max_attempts=ledger.max_attempts,
                 )
                 raise
@@ -80,6 +80,5 @@ def run_attempts(
             if wait_before_retry is not None:
                 wait_before_retry(attempt, exc)
             continue
-        ledger.record_success()
         return result
     raise AssertionError("retry loop exited without a result or exception")

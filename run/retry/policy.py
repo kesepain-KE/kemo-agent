@@ -11,6 +11,7 @@ from events import RunEvent
 MAX_RETRIES = 5
 MAX_ATTEMPTS = MAX_RETRIES + 1
 BUDGET_EXHAUSTED = "retry_budget_exhausted"
+PROGRESS_SIGNAL_EVENT_TYPES = frozenset({"tool_call_result"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +156,12 @@ def view_from_event(event: Any) -> FailureView:
     return _view_from_containers(containers)
 
 
+def view_from_error(error: Any) -> FailureView:
+    if isinstance(error, BaseException):
+        return view_from_exception(error)
+    return view_from_event(RunEvent(type="error", error=error if isinstance(error, dict) else {}))
+
+
 def attempt_budget(request: dict[str, Any] | None) -> int:
     raw = (request or {}).get("_auto_retry_max_attempts", MAX_ATTEMPTS)
     if isinstance(raw, bool):
@@ -173,6 +180,20 @@ def should_retry(view: FailureView, *, cancelled: bool = False) -> bool:
 
 def must_commit_now(view: FailureView, *, cancelled: bool = False) -> bool:
     return not should_retry(view, cancelled=cancelled)
+
+
+def is_progress_signal(event: RunEvent) -> bool:
+    """Conservative outer fallback when no accepted Provider response is visible."""
+
+    return event.type in PROGRESS_SIGNAL_EVENT_TYPES
+
+
+def failure_retry_follows(
+    *, ledger: Any, progress: bool, view: FailureView, cancelled: bool = False
+) -> bool:
+    if ledger is None or not should_retry(view, cancelled=cancelled):
+        return False
+    return bool(ledger.would_allow_retry(progress))
 
 
 def backoff_seconds(failed_attempt: int, view: FailureView) -> float:
@@ -197,24 +218,33 @@ def retrying_event(
     failed_attempt: int,
     next_attempt: int,
     max_attempts: int,
+    run_attempt: int | None = None,
+    progress: bool | None = None,
 ) -> RunEvent:
     view = view_from_event(event)
+    metadata = {
+        "run_id": run_id,
+        "failed_attempt": failed_attempt,
+        "next_attempt": next_attempt,
+        "max_attempts": max_attempts,
+        "max_retries": max(0, max_attempts - 1),
+        "consecutive_failures": failed_attempt,
+        "exception_type": (view.exception_type or "RuntimeError")[:80],
+        "reason": retry_reason(view),
+    }
+    if run_attempt is not None:
+        metadata["run_attempt"] = run_attempt
+    if progress is not None:
+        metadata["retry_progress"] = bool(progress)
+    if view.retry_after_ms is not None:
+        metadata["retry_after_ms"] = view.retry_after_ms
     return RunEvent(
         type="retrying",
         content=(
             "运行出现问题，正在自动重试"
-            f"（第 {next_attempt}/{max_attempts} 次尝试；已连续失败 {failed_attempt} 次）"
+            f"（本次错误第 {next_attempt}/{max_attempts} 次尝试；已连续失败 {failed_attempt} 次）"
         ),
-        metadata={
-            "run_id": run_id,
-            "failed_attempt": failed_attempt,
-            "next_attempt": next_attempt,
-            "max_attempts": max_attempts,
-            "max_retries": max(0, max_attempts - 1),
-            "consecutive_failures": failed_attempt,
-            "exception_type": (view.exception_type or "RuntimeError")[:80],
-            "reason": retry_reason(view),
-        },
+        metadata=metadata,
     )
 
 
