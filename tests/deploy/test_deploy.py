@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -227,6 +228,33 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'config/global_config.json').read_bytes()), {'schema_version': 1, 'local_value': False, 'new': 4})
         for name, data in secrets.items():
             self.assertEqual((self.root / name).read_bytes(), data)
+
+    def test_upgrade_migrates_only_the_legacy_session_idle_default(self):
+        for local_value, expected in ((86400, 5400), (7200, 7200)):
+            with self.subTest(local_value=local_value):
+                if self.root.exists():
+                    shutil.rmtree(self.root)
+                old_config = {
+                    'schema_version': 1,
+                    'cron': {'session_idle_close_seconds': 86400},
+                }
+                self.install(self.bundle('1.3.1', {
+                    'config/global_config.json': json_bytes(old_config),
+                }))
+                local_config = json.loads((self.root / 'config/global_config.json').read_bytes())
+                local_config['cron']['session_idle_close_seconds'] = local_value
+                (self.root / 'config/global_config.json').write_bytes(json_bytes(local_config))
+
+                new_config = {
+                    'schema_version': 1,
+                    'cron': {'session_idle_close_seconds': 5400},
+                }
+                self.install(self.bundle('1.3.2', {
+                    'config/global_config.json': json_bytes(new_config),
+                }))
+                stored = json.loads((self.root / 'config/global_config.json').read_bytes())
+
+                self.assertEqual(stored['cron']['session_idle_close_seconds'], expected)
 
     def test_obsolete_managed_files_removed_unmanaged_kept(self):
         self.install(self.bundle(extra={'run/obsolete.py': b'old'}))
