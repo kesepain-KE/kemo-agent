@@ -1,9 +1,32 @@
 # 部署模块验证记录
 
-日期：2026-09-26。验证均使用 `deploy/.test-work` 内的隔离目录；未覆盖开发仓库、
-未修改真实用户安装、未上传 Release、未发布 npm、未推送镜像或 Git。
+日期：2026-09-26，外部环境补验更新于 2026-09-28。本地验证均使用 `deploy/.test-work`
+内的隔离目录，未覆盖开发仓库、未修改真实用户安装；2026-09-28 的补验在隔离安装目录与
+临时容器数据卷中进行，同样未改动任何真实安装。
 
 ## 已通过
+
+### 1.3.2 外部环境实机补验（2026-09-28）
+
+发布 v1.3.2 后，在真实公网资产与运行中的 Docker 引擎上补齐了此前标注为“未实机验收”的链路。
+所有安装与运行都在隔离目录、临时数据卷中完成，未触碰任何真实安装：
+
+- 远程 Release 直装：从 `releases/download/v1.3.2/` 下载 ZIP，SHA256 与同版本 `.sha256`
+  资产一致（`fc837056…c9fb`），内层 `release-manifest.json` 版本为 1.3.2、`tree/` 与
+  `tree/version.json` 齐备，归档内无 `users/` 与 `.env`。随后用 `deploy.py install windows
+  --files-only` 装到隔离目录（1024 个文件），`deploy.py check windows` 报
+  `installed=1.3.2; target=1.3.2; current`。
+- npm 渠道免凭据安装：`npm install -g` 直接指向
+  `releases/latest/download/kemo-agent-npm.tgz`，匿名拉取成功、装出 1.3.2，包内
+  `release.zip` 的 SHA256 与 Release ZIP 完全一致，证明固定名资产与版本名资产同源。
+- GHCR 镜像：由 `pack.py` 生成的 Docker 构建上下文（其 `release.zip` 与 Release 资产哈希一致）
+  构建并推送 `ghcr.io/kesepain-ke/kemo-agent:1.3.2` 与 `latest`，索引摘要
+  `sha256:dab76042…fedb7`，仅含 `linux/amd64` 平台。
+- 容器运行与跨版本同步：用 1.3.1 镜像在空数据卷上首装（四个组件均为 1.3.1、
+  `cron.session_idle_close_seconds=86400`），再以 1.3.2 镜像挂载**同一数据卷**启动。
+  升级后四个组件均为 1.3.2、`version.json` 为 1.3.2、`/api/health` 返回 200 且容器进入
+  `healthy`；挂载前写入数据卷的自定义文件仍在原处，且 1.3.2 的窄范围迁移把仍是旧默认值的
+  86400 改成了 5400。这条实测覆盖了“容器旧数据卷跨版本同步”与“升级迁移生效”。
 
 ### 1.3.1 暂定版本分层补验
 
@@ -47,12 +70,13 @@
 
 ## 尚未通过实机验收的范围
 
-- 本机 Docker 引擎未运行：仅完成 Compose 校验，未构建/运行镜像，未实测
-  容器旧数据卷跨版本同步及容器退出信号。
-- 未从公开 npm Registry 拉取本项目包，也未验证该命名空间发布权限。
-- 真实 Release 资产尚未发布，未执行远程 bootstrap 一键安装和公网镜像回退。
+- 公开 npm Registry 仍未使用：npm 渠道按设计从 Release 资产直装，无需 registry 凭据，
+  因此未验证 `@kesepain-ke` 命名空间的发布权限（当前流程也不再依赖它）。
 - 未在完全干净的机器上从公网安装全部 pip 依赖；实际应用启动测试使用
   预装依赖的解释器。虚拟环境准备失败不污染旧版本的行为有隔离测试覆盖。
+- 镜像只构建了 `linux/amd64`；ARM64、多架构清单与 Apple Silicon 未实测。
+- 容器退出信号与 `stop_grace_period` 的停机行为未逐项计时验证，只确认了正常启动、
+  健康检查与跨版本重启。
 - macOS 未实机测试；系统服务、自启动、目录迁移、数据库降级不在本版范围。
 
 发布前应完成这些外部环境验收，不能将 `check all` 或本地测试绿灯解释为

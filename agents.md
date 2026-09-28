@@ -124,7 +124,7 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 | 创建消息平台适配（`message/out/`） | `external-message-route-creation.md` |
 | 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
 | 长任务模式状态机、任务计划达到工具次数上限后的跨 Run 续跑 | `long-task-runtime.md` |
-| Provider 网络重试、运行级连续失败 5 次重试、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 1.0 兼容改动 | `provider-reliability.md` |
+| Provider 网络重试、单次错误序列最多重试 5 次、接受完整响应即重置且单 Run 累计尝试不设上限、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 1.0 兼容改动 | `provider-reliability.md` |
 | 当前代码版本与发布状态、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
 | 模块创建后的独立验收 | `module-template-validation.md` |
 | 三层知识库与用户目录骨架 | `knowledge-and-user-data.md` |
