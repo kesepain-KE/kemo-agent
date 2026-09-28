@@ -1828,6 +1828,7 @@ describe('AppShell navigation', () => {
   it('顶部历史搜索保存当前对话后跳转到指定历史会话', async () => {
     let extractedSession = ''
     let closedSession = ''
+    let reopenedSession = ''
     const sessions = [
       { ...session('s1', '当前工作', 3), state: 'open' },
       { ...session('s2', '项目复盘', 8), state: 'closed' },
@@ -1841,6 +1842,10 @@ describe('AppShell navigation', () => {
       http.post('/api/users/kesepain/sessions/:sessionId/close', ({ params }) => {
         closedSession = String(params.sessionId)
         return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: params.sessionId, closed: true, session: { ...sessions[0], state: 'closed' } })
+      }),
+      http.post('/api/users/kesepain/sessions/:sessionId/reopen', ({ params }) => {
+        reopenedSession = String(params.sessionId)
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: params.sessionId, reopened: true, session: { ...sessions[1], state: 'open' } })
       }),
       http.get('/api/users/kesepain/sessions/s2/history', () => HttpResponse.json({
         user: 'kesepain', source: 'web', session_id: 's2', messages: [], round_metrics: [], round_traces: [],
@@ -1857,6 +1862,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
 
     await waitFor(() => expect(closedSession).toBe('s1'))
+    await waitFor(() => expect(reopenedSession).toBe('s2'))
     await waitFor(() => expect(getSearch()).toContain('session=s2'))
     expect(extractedSession).toBe('')
     expect(screen.queryByRole('dialog', { name: '历史对话' })).not.toBeInTheDocument()
@@ -1864,21 +1870,34 @@ describe('AppShell navigation', () => {
 
   it('历史抽屉选择日期后使用独立日期查询加载归档', async () => {
     const requestedDates: string[] = []
-    server.use(http.get('/api/users/kesepain/sessions', ({ request }) => {
-      const selectedDate = new URL(request.url).searchParams.get('date') || ''
-      requestedDates.push(selectedDate)
-      return HttpResponse.json({
-        user: 'kesepain',
-        source: 'all',
-        date: selectedDate,
-        sessions: selectedDate === '2026-09-24'
-          ? [{ ...session('dated-session', '日期归档', 2), state: 'closed', updated_at: '2026-09-24T08:00:00+00:00' }]
-          : [{ ...session('s1', '当前工作', 3), state: 'open' }],
-        has_more: false,
-        next_cursor: '',
-      })
-    }))
-    renderApp('/chat?user=kesepain&session=s1')
+    let reopenedSession = ''
+    server.use(
+      http.get('/api/users/kesepain/sessions', ({ request }) => {
+        const selectedDate = new URL(request.url).searchParams.get('date') || ''
+        requestedDates.push(selectedDate)
+        return HttpResponse.json({
+          user: 'kesepain',
+          source: 'all',
+          date: selectedDate,
+          sessions: selectedDate === '2026-09-24'
+            ? [{ ...session('dated-session', '日期归档', 2), state: 'closed', updated_at: '2026-09-24T08:00:00+00:00' }]
+            : [{ ...session('s1', '当前工作', 3), state: 'open' }],
+          has_more: false,
+          next_cursor: '',
+        })
+      }),
+      http.post('/api/users/kesepain/sessions/:sessionId/reopen', ({ params }) => {
+        reopenedSession = String(params.sessionId)
+        return HttpResponse.json({
+          user: 'kesepain', source: 'web', session_id: params.sessionId, reopened: true,
+          session: { ...session('dated-session', '日期归档', 2), state: 'open' },
+        })
+      }),
+      http.get('/api/users/kesepain/sessions/dated-session/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 'dated-session', messages: [], round_metrics: [], round_traces: [],
+      })),
+    )
+    const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
     fireEvent.click(await screen.findByTitle('搜索历史对话'))
 
     const historyDrawer = await screen.findByRole('dialog', { name: '历史对话' })
@@ -1889,6 +1908,12 @@ describe('AppShell navigation', () => {
     expect(await within(historyDrawer).findByText('日期归档')).toBeInTheDocument()
     expect(requestedDates).toContain('2026-09-24')
     expect(within(historyDrawer).queryByText('当前工作')).not.toBeInTheDocument()
+    fireEvent.click(within(historyDrawer).getByRole('button', { name: '打开对话 日期归档' }))
+    const switchDialog = screen.getByRole('alertdialog', { name: '确认切换历史对话？' })
+    fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
+
+    await waitFor(() => expect(reopenedSession).toBe('dated-session'))
+    await waitFor(() => expect(getSearch()).toContain('session=dated-session'))
   })
 
   it('输入框知识库按钮按层级展示卡片并把引用写入草稿', async () => {
