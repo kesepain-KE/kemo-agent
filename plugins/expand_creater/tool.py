@@ -14,6 +14,11 @@ from run.memory import contains_sensitive_credential
 from run.config import read_expand_meta
 from run.config import validate_user_name
 from web.services.module_panels import load_module_panel
+from plugins._creator_security import (
+    is_link as _is_link,
+    is_within as _is_within,
+    reject_link_components,
+)
 
 
 _ACTIONS = frozenset({"list", "create", "validate"})
@@ -81,30 +86,8 @@ def _bundled_template(name: str, fallback: str = "") -> str:
     raise RuntimeError(f"根目录拓展模板为空：{path}")
 
 
-def _is_link(path: Path) -> bool:
-    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
-
-
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
 def _reject_link_components(root: Path, target: Path) -> None:
-    resolved_root = root.resolve()
-    candidate = target if target.is_absolute() else resolved_root / target
-    try:
-        relative = candidate.relative_to(resolved_root)
-    except ValueError:
-        raise ValueError("拓展路径越出项目根目录") from None
-    current = resolved_root
-    for part in relative.parts:
-        current = current / part
-        if current.exists() and _is_link(current):
-            raise ValueError("拓展路径不允许包含符号链接或目录联接")
+    reject_link_components(root, target, label="拓展")
 
 
 def _validate_name(value: Any) -> str:

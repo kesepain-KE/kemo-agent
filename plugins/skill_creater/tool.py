@@ -10,6 +10,11 @@ from typing import Any
 
 from run.memory import contains_sensitive_credential
 from run.config import scan_markdown_structure, validate_user_name
+from plugins._creator_security import (
+    is_link as _is_link,
+    is_within as _is_within,
+    reject_link_components,
+)
 
 
 _INVALID_NAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -32,30 +37,8 @@ def _validate_name(value: Any) -> str:
     return name
 
 
-def _is_link(path: Path) -> bool:
-    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
-
-
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
 def _reject_link_components(root: Path, target: Path) -> None:
-    resolved_root = root.resolve()
-    candidate = target if target.is_absolute() else resolved_root / target
-    try:
-        relative = candidate.relative_to(resolved_root)
-    except ValueError:
-        raise ValueError("技能路径越出项目根目录") from None
-    current = resolved_root
-    for part in relative.parts:
-        current = current / part
-        if current.exists() and _is_link(current):
-            raise ValueError("技能路径不允许包含符号链接或目录联接")
+    reject_link_components(root, target, label="技能")
 
 
 def _base_path(root: Path, user: str, scope: str) -> Path:

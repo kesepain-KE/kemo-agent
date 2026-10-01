@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import random
 import time
+import uuid
 from typing import Any
 
 from provider.factory import create_provider, provider_request_slot
@@ -433,6 +434,8 @@ def run(
                 multimodal_assets.append({"asset_id": str(remote.id), "role": role})
 
     request = KemoRequest(
+        protocol_version="2.0",
+        request_id=f"req_multimodal_{uuid.uuid4().hex}",
         model=model,
         stream=False,
         system_prompt=(

@@ -2,7 +2,6 @@
 
 import fnmatch
 import hashlib
-import locale
 import os
 import re
 import shutil
@@ -10,35 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from plugins.file.text_editing import (
-    DEFAULT_READ_MAX_BYTES as _DEFAULT_READ_MAX_BYTES,
-    MAX_READ_BYTES_LIMIT as _MAX_READ_BYTES_LIMIT,
-    atomic_write_bytes as _atomic_write_bytes,
-    bounded_line_snapshot as _bounded_line_snapshot,
     byte_limit as _byte_limit,
-    column as _column,
-    convert_newlines as _convert_newlines,
-    count_lines_fast as _count_lines_fast,
-    dominant_newline as _dominant_newline,
     is_same_or_child as _is_same_or_child,
-    line_entries as _line_entries,
-    line_parts as _line_parts,
-    newline_near as _newline_near,
-    newline_style as _newline_style,
-    newline_tokens as _newline_tokens,
-    next_backup_path as _next_backup_path,
-    normalize_newlines as _normalize_newlines,
-    normalized_with_boundaries as _normalized_with_boundaries,
-    preview_lines as _preview_lines,
-    range_text as _range_text,
-    read_preserving_format as _read_preserving_format,
-    read_text as _read,
-    read_with_encoding as _read_with_encoding,
     read_with_encoding_bytes as _read_with_encoding_bytes,
-    resolve_path as _resolve_path,
     result as _result,
-    strip_trailing_newlines as _strip_trailing_newlines,
-    validate_expected_hash as _validate_expected_hash,
-    validate_expected_text as _validate_expected_text,
 )
 
 
