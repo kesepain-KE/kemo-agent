@@ -212,8 +212,16 @@ def response_invalid_tool_arguments_error(
     if invalid_call is not None:
         return invalid_tool_call_error(invalid_call)
     details = response.incomplete_details
+    if hasattr(details, "model_dump"):
+        try:
+            details = details.model_dump(mode="python")
+        except Exception:
+            details = None
     if response.status != ResponseStatus.INCOMPLETE or not isinstance(details, dict):
         return None
+    nested = details.get("details")
+    if isinstance(nested, dict):
+        details = {**nested, **details}
     if (
         str(details.get("reason") or "").strip().casefold()
         != INVALID_TOOL_ARGUMENTS_STOP_REASON

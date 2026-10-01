@@ -113,6 +113,10 @@ def analyze_memory_batch(
             "error": None,
         }
     except Exception as exc:
+        capacity_blocked = (
+            getattr(exc, "category", "") == "execution_capacity"
+            or type(exc).__name__ == "AgentExecutionCapacityError"
+        )
         return {
             "status": "failed",
             "candidate_count": 0,
@@ -122,6 +126,7 @@ def analyze_memory_batch(
             "error": {
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
+                "capacity_blocked": capacity_blocked,
             },
         }
 

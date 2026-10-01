@@ -87,10 +87,10 @@ class ToolResultTooLargeError(ToolError):
         result_chars: int,
         limit_chars: int,
     ) -> None:
-        self.tool_name = str(tool_name or "unknown_tool")
+        self.tool_name = str(tool_name or "unknown_tool").strip()[:128] or "unknown_tool"
         self.result_chars = max(0, int(result_chars))
         self.limit_chars = max(1, int(limit_chars))
-        self.action = str(arguments.get("action") or "").strip()
+        self.action = str(arguments.get("action") or "").strip()[:256]
         self.path = str(arguments.get("path") or "").strip()[:512]
         self.instruction = _oversized_result_instruction(
             self.tool_name,
@@ -124,6 +124,9 @@ _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
 _SUBAGENT_DEFAULT_WATCHDOG_SECONDS = 3_600.0
+# Tool results are inline model context, not an unrestricted file transport.
+# Keep this contract centralized so every built-in, user, and sub-agent tool
+# receives the same bound through ``execute_tool``.
 MAX_TOOL_RESULT_CHARS = 100_000
 
 

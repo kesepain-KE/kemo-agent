@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+
+class MemoryCapacityBlocked(RuntimeError):
+    """The shared agent watchdog is temporarily unavailable."""
+
+
 def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
     import importlib
     _maintenance = importlib.import_module("run.scheduler.maintenance")
     AgentRunner = _maintenance.AgentRunner
-    Any = _maintenance.Any
     MEMORY_RECOVERY_ROUNDS_PER_SCAN = _maintenance.MEMORY_RECOVERY_ROUNDS_PER_SCAN
     MaintenanceError = _maintenance.MaintenanceError
     Path = _maintenance.Path
     analyze_memory_batch_resilient = _maintenance.analyze_memory_batch_resilient
     analyze_round_memory = _maintenance.analyze_round_memory
     claim_pending_memory = _maintenance.claim_pending_memory
+    defer_memory_claim = _maintenance.defer_memory_claim
     find_record = _maintenance.find_record
     finish_memory_claim = _maintenance.finish_memory_claim
     history_directory = _maintenance.history_directory
@@ -51,8 +58,10 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
     runner: AgentRunner | None = None
     processed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
     claimed = 0
     batches = 0
+    capacity_blocked = False
 
     while claimed < limit:
         if scheduler._stop_event.is_set():
@@ -212,6 +221,10 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                             "exception_type": "MaintenanceError",
                         }
                     )
+                    if isinstance(raw_error, dict) and raw_error.get("capacity_blocked"):
+                        raise MemoryCapacityBlocked(
+                            str(extraction_error.get("message") or "记忆执行资源暂不可用")
+                        )
                     raise MaintenanceError(
                         str(extraction_error.get("message") or "记忆提取失败")
                     )
@@ -366,6 +379,57 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
             }
+            if isinstance(exc, MemoryCapacityBlocked) or error.get("capacity_blocked"):
+                try:
+                    finished = defer_memory_claim(
+                        scheduler.root,
+                        user,
+                        source,
+                        session_id,
+                        claim_id=claim_id,
+                        reason="execution_capacity",
+                    )
+                except Exception as defer_exc:
+                    error["defer_error"] = {
+                        "message": str(defer_exc),
+                        "exception_type": type(defer_exc).__name__,
+                    }
+                    finished = None
+                if isinstance(finished, dict):
+                    try:
+                        with session_lock(scheduler.root, user, source, session_id):
+                            window = load_window(archive_path)
+                            data = window.setdefault("data", {})
+                            data["memory_status"] = "queued"
+                            data.pop("memory_error", None)
+                            data["memory_queue_reason"] = str(
+                                finished.get("memory_queue_reason") or "execution_capacity"
+                            )
+                            data["memory_queued_at"] = str(
+                                finished.get("memory_queued_at") or ""
+                            )
+                            data["memory_retry_at"] = str(
+                                finished.get("memory_retry_at") or ""
+                            )
+                            patch_archive_metadata(
+                                archive_path,
+                                window,
+                                updates={
+                                    "memory_status": "queued",
+                                    "memory_queue_reason": data["memory_queue_reason"],
+                                    "memory_queued_at": data["memory_queued_at"],
+                                    "memory_retry_at": data["memory_retry_at"],
+                                },
+                                removals=("memory_error",),
+                            )
+                    except Exception as archive_exc:
+                        error["archive_error"] = {
+                            "message": str(archive_exc),
+                            "exception_type": type(archive_exc).__name__,
+                        }
+                    deferred.append({**identity, "deferred": True, "error": error})
+                    capacity_blocked = True
+                    break
             if stale_result:
                 failed.append({**identity, "stale": True, "error": error})
                 continue
@@ -419,5 +483,6 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
         "batches": batches,
         "processed": processed,
         "failed": failed,
+        "deferred": deferred,
+        "capacity_blocked": capacity_blocked,
     }
-

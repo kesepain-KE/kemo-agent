@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import sqlite3
 import threading
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,7 +23,7 @@ from run.tasks.revision_codec import (
     _externalize_revision_values,
     _json_text,
     _json_value,
-    _normalized_key,
+    _normalized_key,  # noqa: F401 - public run.tasks compatibility export
     _redact_secret_text,
     _redact_revision_secrets,
     _restore_revision_values,
@@ -36,14 +33,14 @@ from run.tasks.revision_codec import (
 )
 
 from run.tasks.plan_validation import (
-    PLAN_ID_RE,
+    PLAN_ID_RE,  # noqa: F401 - public run.tasks compatibility export
     ROLLBACK_SAFE_PLAN_STATUSES,
-    STEP_ID_RE,
-    SCHEMA_VERSION,
+    STEP_ID_RE,  # noqa: F401 - public run.tasks compatibility export
+    SCHEMA_VERSION,  # noqa: F401 - public run.tasks compatibility export
     _now,
     _plan_dir,
     _validate_plan,
-    normalize_plan,
+    normalize_plan,  # noqa: F401 - public run.tasks compatibility export
 )
 
 _STORE_LOCKS: dict[tuple[str, str], threading.RLock] = {}

@@ -7,71 +7,25 @@
 
 from __future__ import annotations
 
-import copy
-import json
 import threading
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from events import RunEvent, error_event
+from events import RunEvent
 from provider.factory import create_provider
-from run.config import load_config
 from run.tasks.store import (
-    PlanError,
-    PlanNotFoundError,
+    PlanError,  # noqa: F401 - compatibility re-export
+    PlanNotFoundError,  # noqa: F401 - compatibility re-export
     PlanStore,
-    PlanValidationError,
+    PlanValidationError,  # noqa: F401 - compatibility re-export
 )
 from run.tools import (
-    ToolResultTooLargeError,
     ToolRegistry,
-    apply_runtime_tool_policy,
-    discover_tools,
-    execute_tool,
+)
+from run.tasks.execution_support import (
+    PlanExecutionError,
 )
 from run.tasks.plan_execution import execute_plan as _execute_plan_impl
-
-
-class PlanExecutionError(RuntimeError):
-    pass
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _next_step(plan: dict[str, Any]) -> dict[str, Any] | None:
-    """Select the next runnable step: pending with all deps completed."""
-    steps_by_id = {s["step_id"]: s for s in plan["steps"]}
-    for step in plan["steps"]:
-        if step["status"] != "pending":
-            continue
-        deps = step.get("depends_on") or []
-        if all(
-            steps_by_id.get(dep, {}).get("status") == "completed"
-            for dep in deps
-        ):
-            return step
-    return None
-
-
-def _failed_steps_needing_fix(plan: dict[str, Any]) -> list[str]:
-    """Return every critical failed step that must be explicitly repaired."""
-
-    return [
-        str(step.get("step_id") or "")
-        for step in (plan.get("steps") or [])
-        if isinstance(step, dict)
-        and str(step.get("step_id") or "")
-        and step.get("status") == "failed"
-        and bool(step.get("critical", True))
-    ]
-
-
-def _is_plan_active(status: str) -> bool:
-    return status in ("approved", "running")
 
 
 def execute_plan(

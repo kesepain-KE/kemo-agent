@@ -25,6 +25,7 @@ from run.memory import (
 from run.history import load_window, patch_archive_metadata
 from run.history import (
     claim_pending_memory,
+    defer_memory_claim,
     claim_pending_summary,
     defer_summary_claim,
     find_record,

@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import threading
+import uuid
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from events import RunEvent, error_event
+from run.config import load_config
+from run.tasks.errors import PlanError, PlanNotFoundError, PlanValidationError
+from run.tasks.execution_support import (
+    PlanExecutionError,
+    _failed_steps_needing_fix,
+    _next_step,
+    _now,
+)
+from run.tasks.store import PlanStore
+from run.tools import (
+    ToolRegistry,
+    ToolResultTooLargeError,
+    apply_runtime_tool_policy,
+    discover_tools,
+    execute_tool,
+)
+
+
 def execute_plan(
     *,
     root: Path,
@@ -23,32 +49,6 @@ def execute_plan(
     On process restart, ``recover_interrupted`` (called at startup) converts
     leftover ``running`` steps to ``pending`` and pauses the plan.
     """
-    import importlib
-    _executor = importlib.import_module("run.tasks.executor")
-    Any = _executor.Any
-    Callable = _executor.Callable
-    Iterator = _executor.Iterator
-    Path = _executor.Path
-    PlanError = _executor.PlanError
-    PlanExecutionError = _executor.PlanExecutionError
-    PlanNotFoundError = _executor.PlanNotFoundError
-    PlanStore = _executor.PlanStore
-    PlanValidationError = _executor.PlanValidationError
-    RunEvent = _executor.RunEvent
-    ToolRegistry = _executor.ToolRegistry
-    ToolResultTooLargeError = _executor.ToolResultTooLargeError
-    _failed_steps_needing_fix = _executor._failed_steps_needing_fix
-    _next_step = _executor._next_step
-    _now = _executor._now
-    apply_runtime_tool_policy = _executor.apply_runtime_tool_policy
-    copy = _executor.copy
-    discover_tools = _executor.discover_tools
-    error_event = _executor.error_event
-    execute_tool = _executor.execute_tool
-    json = _executor.json
-    load_config = _executor.load_config
-    threading = _executor.threading
-    uuid = _executor.uuid
     cfg = config or load_config(user, root)
     if agent_event_source is None and tool_registry is None:
         tool_config = cfg.get("tools") or {}
@@ -494,4 +494,3 @@ def execute_plan(
                         # 非关键：继续下一步
         if cancel_event is not None and cancel_event.is_set():
             return
-
