@@ -75,7 +75,7 @@ kemo-agent/
 | `prompt-authoring-standard.md` | 提示词分层、全局/用户默认人格、操作手册、知识索引、插件提示词规范、技能/拓展/感知定义、按需读取来源、健康快照与数据/指令边界 |
 | `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同；`module/panel.json` 用户配置组件面板、status/config/action、preset、masked 密钥与快速配置 |
 | `builtin-expansions.md` | 内置 kemo app 桥接激活意愿、端口/Token/用户绑定面板与异常诊断；Kemo 网关 IP/端口面板和状态拓展；Kemo Graph IP/端口、在线检测及图谱/实体/缓存/日志/维护/项目与文档组织边界 |
-| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、错误序列内最多重试 5 次、接受完整响应即重置序列、单 Run 累计尝试不设上限、`retrying` 的序列序号与 Run 累计序号、SSE 续传和取消边界；含 Kemo 1.0 双仓库共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与独立 2 次传输预算 |
+| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、错误序列内最多重试 5 次、接受完整响应即重置序列、单 Run 累计尝试不设上限、`retrying` 的序列序号与 Run 累计序号、SSE 续传和取消边界；含 Kemo 2.0 双仓固定制品与共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与独立 2 次传输预算 |
 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
 | `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存（单项/全局/单用户三重容量）、跨进程版本校验和尾部重建；Web 历史默认时间倒序、复合游标分页与按上海自然日日期筛选；`history_search` 基于结构化正文、删除栅栏、来源/会话过滤和条数+字符预算分页；结构化运行日志、终端长行 pending 缓冲上限；记忆按独立更新/失效/加权/检索边界拆分，碎片数量以独立事实为准，A 类仅同一稳定子主题可成簇、B 类保持最小事实，手动 add/edit 同样执行 memory_type 与长度硬边界；晋升时超限必拆（显式 `memory_type`、A 类 1000 字异常硬上限、B 类通常 100/绝不超过 150 字、宿主落盘复验、不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；加权证据轮次 committed_at、Shanghai 原日期、memory_ref 检索绑定、create/reinforce/revise、creation 零分日锁、operation_id 幂等、weighted/daily_locked 可观测性；Cron 历史默认 7 天保留；Web/App 数据会话按可配置空闲阈值归档（默认 90 分钟），空 Web 会话保留独立 90 秒删除宽限，closed Web 会话支持显式重开但禁止迟到心跳、无参数入口和旧链接隐式复活；Web 启动及周期旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、CLI 独立绑定、closed 入队补偿、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
 | `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
@@ -88,7 +88,7 @@ kemo-agent/
 | `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南；受管理 Shell 后台作业、活动配额、启动宽限与失联 worker 对账 |
 | `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、Enter 跟进与 Ctrl+Enter 直接引导快捷键、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、Web/App 存活租约、CLI 独立续接、closed Web 会话显式重开与禁止隐式复活、离线转记忆与入队失败补偿、会话生命周期兜底扫描 |
 | `frontend-conventions.md` | Web 前端样式组织约定与调试经验：CSS Module 与主题变量、变量链断裂（别名宿主未挂载导致声明整条失效）、投影被父容器裁切、滚动条、SPA 壳与哈希构建产物缓存头、改样式后的验证步骤、文案与 DOM 契约、知识库编辑/预览单按钮与 Portal 放大预览 |
-| `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、表单、建议追问、有限点击动作与站内媒体；未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
+| `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、组合 UI、表单、建议追问、位置、影音、文件、商品、订单、投票、评分、有限点击动作与站内媒体；兼容历史 `follow-up.options`，未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
 | `project-introduction.md` | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署和使用入口 |
 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
 

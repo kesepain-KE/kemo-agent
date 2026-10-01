@@ -147,7 +147,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 > 用户配置 `tools` 为对象深合并，可覆盖其中任意字段。
 
-单次工具内联 JSON 结果有不可配置的 100,000 字符核心硬限制。超限时框架丢弃正文，只向智能体、事件和历史写入 `ToolResultTooLargeError`、原始字符数与缩小范围提示；文件内容应改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入 `consecutive_tool_fail_limit`。
+单次工具内联 JSON 结果有不可配置的 100,000 字符核心硬限制。超限时框架丢弃正文，只向智能体、事件和历史写入 `ToolResultTooLargeError`、原始字符数与缩小范围提示；文件内容应改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入 `consecutive_tool_fail_limit`。该限制只约束工具回传到模型上下文的结果，不改变工具读取、写入或处理文件的实际容量。
 
 ---
 
@@ -518,7 +518,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
-单次工具内联 JSON 结果的 100,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。
+单次工具内联 JSON 结果的 100,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。该限制不改变文件实际读写和插件内部处理上限。
 
 ---
 
@@ -664,7 +664,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
 
-`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
+`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.4.0 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
 
 ---
 

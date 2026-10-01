@@ -6,7 +6,7 @@
 
 ## 先选择更新入口
 
-当前代码稳定版本为 **1.3.2（2026-09-28 正式定档）**，网关兼容基线保持 **0.8.2**。源码定档不等于 Release、npm 或 GHCR 产物已经发布。
+当前代码稳定版本为 **1.4.0（2026-10-01 正式定档）**，网关兼容基线为 **1.0.0**，知识图谱基线为 **1.6.0**。源码定档不等于 Release、npm 或 GHCR 产物已经发布。
 本页后续命令和业务迁移描述只适用于源码安装的旧更新器，不适用于 `deploy/`：
 
 | 安装方式 | 更新操作（均先停止应用） |
@@ -27,16 +27,16 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "schema_version": 1,
   "compatibility": {
-    "kemo-adapter-api": "0.8.2"
+    "kemo-adapter-api": "1.0.0"
   },
   "components": {
-    "core": {"version": "1.3.2"},
-    "agents": {"version": "1.3.2"},
-    "plugins": {"version": "1.3.2"},
-    "web": {"version": "1.3.2"}
+    "core": {"version": "1.4.0"},
+    "agents": {"version": "1.4.0"},
+    "plugins": {"version": "1.4.0"},
+    "web": {"version": "1.4.0"}
   }
 }
 ```

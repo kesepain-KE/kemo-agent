@@ -40,6 +40,7 @@ runtime 工作区是 archive 最近轮次的派生视图，不再作为每轮持
 - 活跃会话通过主键绑定恢复，不在启动阶段扫描全部归档。
 - 完整正文只在打开指定会话、上下文构建、摘要或记忆整理时读取。
 - 记忆处理状态使用 archive `data_json` 与 `history_sessions` 的小范围事务更新，不再重写 text/think/tool/items 大分区。
+- `memory_error` 表示当前失败，`memory_last_error` 仅作为最近一次历史诊断保留；后续恢复为 `completed` 后，网页不得继续把 `memory_last_error` 显示成当前红色失败。Agent watchdog 因超时执行尚未退出而拒绝新任务时，维护器释放当前 claim、写入 `queued + memory_retry_at` 并停止该用户本轮继续领取；该容量延期不推进游标、不增加失败重试次数，也不会把同轮扫描中的 Web、App、CLI、Cron 或 `message:<platform>` 会话级联标记为失败。
 
 ### Web 对话空间启动巡检与空空间生命周期
 

@@ -70,6 +70,14 @@
 - `diff` / `diff_view` → `diff-view`
 - `buttons` / `button_group` → `button-group`
 - `suggestions` / `follow_up` → `follow-up`
+- `ui` / `layout` / `list-view` → `ui-card`
+- `map-view` → `map`
+- `audio` / `video` / `media` → `media-player`，其中 `audio` / `video` 自动补 `media_type`
+- `files` / `attachments` → `file-list`
+- `products` / `shop` → `product-grid`
+- `cart` / `checkout` → `order-summary`
+- `survey` → `poll`
+- `stars` → `rating`
 - `multi-series-chart` / `series_chart` → `series-chart`
 - `stacked-chart` / `stacked_chart` → `series-chart` 并补 `stacked:true`
 - `card` / `panel` → `generic-card`
@@ -224,6 +232,10 @@
 
 会话正在生成回复时，`send-message` 不会并发启动第二个 Run，而是把文本放入输入框等待用户处理。
 
+为恢复已经进入历史的早期模型输出，解析器还会在严格校验前把 `follow-up.props.options` 兼容转换为
+`prompts`：`message` / `action.text` 转为 `text`，`action.type:"send-message"` 转为 `send:true`。
+新回复仍必须使用 `prompts`，不要继续生成旧字段。
+
 ### `form`
 
 用于在当前回复内收集少量信息，再由用户点击提交：
@@ -246,6 +258,59 @@
 - `carousel`：`images` 1～50 项，`start_index?` 指定初始图片。
 
 推荐引用现有 `/api/users/.../files/.../download` 站内文件端点。组件不会自动抓取外网资源。
+
+### `ui-card`：组合式市场组件
+
+`ui-card` 用一棵受限 `nodes` 树组合常见对话式应用 UI。它覆盖 ChatGPT / ChatKit 类产品中常见的
+卡片、列表、行列布局、标题正文、Markdown、图标、图片、分隔、过渡、按钮与输入控件，不需要为每个
+布局原语单独包一个 `kemo-widget`。
+
+- 容器节点：`card|list-view|list-item|box|row|col|transition`，字段为
+  `{type, children, gap?, align?, tone?}`；最多嵌套 8 层、合计最多 300 节点；
+- 文本节点：`title|text|caption|markdown`，字段为 `{type, text, tone?}`；Markdown 仍经过安全净化；
+- 展示节点：`badge`、`icon`、`image`、`divider`、`spacer`；图片仍只接受站内根相对 URL；
+- 输入节点：`date-picker|select|text-input|textarea|number-input|checkbox-group|radio|slider|switch`；
+  每个输入必须有稳定 `name`，值只存在当前组件本地状态；
+- `button`：`{type:"button", label, action:{type,text}, tone?, disabled?}`；动作文本可用
+  `{{field_name}}` 引用同卡片输入值，只有用户点击才交给页面动作处理器。
+
+该组件不支持模型提供自定义 JSX、HTML、CSS、事件函数或网络请求。`transition` 只是固定的本地入场效果。
+
+### `map`
+
+安全的位置分布示意，不加载第三方地图瓦片：
+
+- `points`：1～200 项 `{label, latitude, longitude, detail?, tone?, action?}`；
+- `latitude` 为 -90～90，`longitude` 为 -180～180；
+- 点击标记只切换本地详情；可选 `action` 仍只允许三种文本动作；
+- `center_label?` 是顶部口径标签，不改变坐标计算。
+
+需要真实道路、导航或地理底图时，应由已有站内资产或显式授权的拓展提供数据；正文组件本身不访问外网。
+
+### `media-player` 与 `file-list`
+
+- `media-player`：`media_type` 为 `audio|video`，提供 `src`、可选 `poster?`、`caption?`、
+  `transcript?`；只使用浏览器原生控件，`autoplay` 只能省略或为 `false`；
+- `file-list.files`：1～200 项 `{name, description?, size?, mime_type?, url?, action?}`；
+  `url` 只允许站内根相对 URL，`action` 仍是纯文本动作；
+- `audio` / `video` 别名会自动补 `media_type`，但新输出推荐统一写 `media-player`。
+
+### `product-grid` 与 `order-summary`
+
+- `product-grid.products`：1～100 项
+  `{name, description?, image?, price, previous_price?, badge?, rating?, action?}`，`columns?` 为 1～4；
+- `order-summary.items`：1～200 项 `{label, quantity, unit_price, detail?}`；可加
+  `adjustments?: {label, amount}[]`、`currency?`、`total?` 和最多 12 个安全文本 `actions`；
+- 价格与订单只用于展示、比较和生成用户确认文本，组件不会付款、创建订单或调用商户 API。
+
+### `poll` 与 `rating`
+
+- `poll`：`title`、2～50 个 `options:{label,value,description?,votes?}`、`multiple?` 和
+  `submit:{label,action,template,tone?}`；模板以 `{{selection}}` 读取当前选择；
+- `rating`：`label`、`max?`（2～10）、`default_value?`、可选 `submit`；模板以 `{{rating}}` 读取评分；
+- 选择和评分在组件本地完成，只有点击提交才回填、发送或复制纯文本。
+
+这些组件不保存独立调查记录；如果需要持久化结果，应由用户提交文本后再经过正常对话和工具授权链路处理。
 
 ### 任意自定义名称 / `generic-card`
 
@@ -307,6 +372,9 @@
 - `web/frontend/src/components/Chat/inlineWidgetProtocol.ts`：扫描、Schema、兼容归一化和复制降级。
 - `web/frontend/src/components/Chat/InlineWidget.tsx`：内置专用 React 组件和开放名称通用渲染器。
 - `web/frontend/src/components/Chat/InlineWidget.module.css`：主题、响应式和图表布局。
+- `web/frontend/src/components/Chat/inlineWidgetExtendedProtocol.ts`：组合 UI、位置、影音、文件、商业与反馈组件合同。
+- `web/frontend/src/components/Chat/InlineWidgetExtended.tsx`：扩展组件渲染与本地交互。
+- `web/frontend/src/components/Chat/InlineWidgetExtended.module.css`：扩展组件布局、控件和响应式样式。
 - `web/frontend/src/components/Chat/MarkdownMessage.tsx`：Markdown 与组件片段的有序镶嵌。
 - `web/frontend/src/pages/ChatPageView.tsx`：复制回复时使用文本降级，并把有限 Widget 动作接到输入框、
   发送函数和剪贴板。

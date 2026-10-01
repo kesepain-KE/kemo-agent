@@ -63,7 +63,7 @@ HTTP 错误中的显式 `retryable` 是最高优先级声明。即使状态码�
 3. 在本地保留最后接收的 `sequence`，使用同一个顺序守卫继续校验后续事件；
 4. 丢弃事件 ID 完全相同的重放事件，不重复展示文本或工具调用。
 
-Kemo 1.0 在线路上只定义 `Last-Event-ID` 作为服务端恢复游标。`sequence` 仅用于客户端本地连续性校验，不作为查询参数发送；内部调用若只提供 `resume_from_sequence` 而没有 `Last-Event-ID`，会在发起网络请求前被拒绝。
+Kemo 2.0 在线路上只定义 `Last-Event-ID` 作为服务端恢复游标。`sequence` 仅用于客户端本地连续性校验，不作为查询参数发送；内部调用若只提供 `resume_from_sequence` 而没有 `Last-Event-ID`，会在发起网络请求前被拒绝。
 
 续传响应必须保持相同 `response_id`。如果网关重启或状态丢失后为同一请求创建了另一份 Response，客户端会拒绝拼接并明确失败；它不会把两份模型输出连接成一轮伪造回答。
 
@@ -99,37 +99,36 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 - 显式 `retryable=false` 覆盖 HTTP 状态默认值；
 - 完整协议损坏不重试；
 - SSE 与非流式阻塞读取取消、远端取消传播；
-- Kemo 1.0 `Last-Event-ID` 恢复边界。
+- Kemo 2.0 `Last-Event-ID` 恢复边界。
 
 这组单元测试验证客户端状态机，不替代真实 Nginx/CDN、丢包、网关进程崩溃和磁盘故障测试。发布前应同时运行 Agent 与网关两侧的传输稳定性测试。
 
-### Kemo 1.0 共享契约 Fixture
+### Kemo 2.0 固定协议制品与契约门禁
 
-`kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认。当前稳定版 `kemo-agent 1.3.2` 延续该兼容基线，部署渠道与会话生命周期修复不改变线路协议。该兼容基线覆盖当前共享 Fixture、请求/响应模型、SSE 续传、工具调用、模型能力目录、Asset、Usage、Embedding 与 Rerank 合同；后续任一端修改线路字段时仍必须重新执行双仓库契约测试，不能只依赖版本号声明。
+`kemo-agent 1.4.0` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
+`provider/protocol/`，其 `spec/` 生成 `schema.json`、`model-index.json`、`invariants.json`、
+`freeze.json` 与脱敏 Fixture；Gateway 只消费由该目录构建并以 lock 文件固定 SHA-256 的
+`vendor/kemo_protocol-2.0.zip`。这保证两仓不各自维护模型副本，也不提供 Kemo 1.x shim。
 
-Agent 与网关在各自仓库维护同一份脱敏线协议 Fixture：
-`tests/contracts/kemo_v1/fixtures/manifest.json` 和 `wire.json` 必须逐字节一致。Fixture 覆盖文本、
-动态推理档位、多轮工具结果、多模态、能力与模型目录、Asset、Usage、Embedding、Rerank、统一终态
-以及 SSE 顺序和去重。两端测试只依赖本仓库生产代码，不互相导入 Python 模块，避免把兼容测试
-变成跨仓库运行时耦合。
-
-在 kemo-agent 中运行：
+Agent 门禁：
 
 ```powershell
-python -m tests.contracts.kemo_v1 -q
-python -m tests.contracts.kemo_v1 --peer-root E:\code\kemo-adapter-api -q
+python -m pytest tests/contracts/kemo_v2 -q
+python -m provider.protocol.spec.build_artifact E:\code\kemo-adapter-api\vendor
 ```
 
-第二条命令中的路径按实际目录调整。Fixture 是 Kemo 1.0 的共同最小线路合同，不要求两端内部
-类型完全相同：`ProviderStreamEvent.run_id/run_sequence` 是 Agent 运行态字段，不是网关必填线路字段；
-Asset 和 Item 的可空时间字段用于接收网关明确返回的 `null`。Agent 的扩展模型可以宽容读取同一
-主版本的新增字段，但正常发出的请求、协议 Header、共享 Fixture 与当前网关路由均使用精确 `1.0`。
-ID、Token 计量、媒体 SHA-256、工具对应关系、终态和 SSE 顺序仍按严格合同验证。
+Gateway 门禁：
 
-修改共享 Fixture 时，必须同时更新两边 `manifest.json` 的 SHA-256/计数和
-`fixture_loader.py` 的 `EXPECTED_WIRE_SHA256`，随后从两个仓库各运行一次单入口和镜像核对。
-不得以缩减无效用例、降低 Schema 校验或维护两套不同样例处理失败。该套件不替代真实 HTTP
-反向代理、进程崩溃、磁盘故障和上游 Provider 验收。
+```powershell
+python -m pytest tests/contracts/kemo_v2 -q
+python -m tests --suite kemo-contract -q
+```
+
+修改 Request/Response/Batch、Item/ItemStart、Asset、Embedding、Rerank、能力、工具或 SSE 时，
+必须先更新 Agent 权威模型和 Fixture，再重建制品、更新 lock 摘要，并通过双仓 artifact contract。
+`protocol_version` 精确为 `2.0`，所有公开端点使用 `X-Kemo-Protocol-Version: 2.0`；错误 envelope、
+SSE sequence、ItemStart、工具整批提交和终态规则均属于同一制品。上述离线门禁不替代真实代理、
+进程崩溃或上游联调，未测的外部行为必须单独注明。
 
 ---
 
@@ -274,3 +273,15 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 - `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播，以及 Chat 传输层重试矩阵（零输出重试、已输出不重放、429 Retry-After、401/403/409/400 零重试、工具降级一次性、JSON 响应降级、id/name 幂等聚合、完整 JSON 对象参数、截断工具不可执行）；
 - `tests/cron/test_task_plan.py`：非成功主运行终态与暂停原因；
 - `tests/core/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。
+
+### Kemo 2.0 当前线协议硬边界
+
+当前 Agent 与 `kemo-adapter-api 1.0.0` 使用精确 `Kemo 2.0`，服务端只接受并输出
+`protocol_version="2.0"`；不提供 Kemo 1.x shim，也不按 `2.x` 前缀放行未来版本。所有公开端点
+通过 `X-Kemo-Protocol-Version: 2.0` 协商；有 JSON body 时 header 与 body 必须一致。
+
+- 非流式 `n>1` 返回 `kemo.response_batch`，一次请求只计一份 batch usage；流式请求、工具、历史工具条目与 structured output 互斥。
+- Asset、Embedding、Rerank、模型目录和错误响应均属于同一 2.0 制品；错误 body 使用 `object="kemo.error"`。
+- SSE 事件使用 `evt_`、`req_`、`resp_` 标识，sequence 必须连续；`output_item.added` 身份快照先于 delta，文本块按 `(response_id,item_id,content_index)` 隔离，done 后不得继续 delta。
+- `tool_call.completed` 只作整批暂存，只有 `response.completed(status=requires_action)` 到达后调用方才可执行；断流不得提前执行。
+- 双仓共享固定 `vendor/kemo_protocol-2.0.zip`，由 Agent 的 `provider/protocol` 生成，Gateway 通过 lock 文件校验 SHA-256。

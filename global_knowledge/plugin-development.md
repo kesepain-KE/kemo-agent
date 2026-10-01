@@ -217,7 +217,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 
 ## 工具结果大小
 
-`run/tools/__init__.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000。结果先序列化为 JSON 字符串再计算字符数。
+`run/tools/__init__.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000。结果先序列化为 JSON 字符串再计算字符数；这是所有内置、用户插件和子代理工具共用的统一回传上限。
 超过上限时正文完全不回填上下文，而是返回 `ToolResultTooLargeError` 和缩小范围的提示。
 
 常见处理方式：
