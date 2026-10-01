@@ -430,6 +430,98 @@ describe('MarkdownMessage', () => {
     expect(onWidgetAction).toHaveBeenCalledWith({ type: 'fill-input', text: '课程：物理' })
   })
 
+  it('renders composable market-style controls and templates their explicit actions', async () => {
+    const onWidgetAction = vi.fn()
+    const widget = JSON.stringify({
+      schema_version: 1,
+      id: 'ui-market-card',
+      component: 'ui-card',
+      props: {
+        title: '旅行配置',
+        nodes: [
+          { type: 'row', children: [{ type: 'icon', name: 'map-pin', label: '目的地' }, { type: 'badge', label: '模式', value: '交互' }] },
+          { type: 'text-input', name: 'city', label: '城市', default_value: '上海' },
+          { type: 'date-picker', name: 'date', label: '日期', default_value: '2026-10-01' },
+          { type: 'slider', name: 'days', label: '天数', min: 1, max: 7, default_value: 3 },
+          { type: 'switch', name: 'direct', label: '只看直达路线', default_value: true },
+          { type: 'button', label: '写入输入框', action: { type: 'fill-input', text: '规划 {{city}} {{date}} 的 {{days}} 天行程；直达：{{direct}}' } },
+        ],
+      },
+    })
+    render(<MarkdownMessage content={`\`\`\`kemo-widget\n${widget}\n\`\`\``} onWidgetAction={onWidgetAction} />)
+
+    expect(screen.getByRole('region', { name: '旅行配置' })).toBeInTheDocument()
+    await userEvent.clear(screen.getByLabelText('城市'))
+    await userEvent.type(screen.getByLabelText('城市'), '杭州')
+    await userEvent.click(screen.getByRole('button', { name: '写入输入框' }))
+    expect(onWidgetAction).toHaveBeenCalledWith({
+      type: 'fill-input',
+      text: '规划 杭州 2026-10-01 的 3 天行程；直达：是',
+    })
+  })
+
+  it('keeps composable control state isolated between widgets in the same conversation', async () => {
+    const widget = (id: string, title: string, defaultValue: string) => `\`\`\`kemo-widget\n${JSON.stringify({
+      schema_version: 1,
+      id,
+      component: 'ui-card',
+      props: {
+        title,
+        nodes: [{
+          type: 'radio', name: 'mode', label: '模式', default_value: defaultValue,
+          options: [{ label: '方案 A', value: 'a' }, { label: '方案 B', value: 'b' }],
+        }],
+      },
+    })}\n\`\`\``
+    render(<MarkdownMessage content={`${widget('card-a', '卡片 A', 'a')}\n\n${widget('card-b', '卡片 B', 'b')}`} />)
+
+    const optionA = screen.getAllByRole('radio', { name: '方案 A' }) as HTMLInputElement[]
+    const optionB = screen.getAllByRole('radio', { name: '方案 B' }) as HTMLInputElement[]
+    expect(optionA[0]).toBeChecked()
+    expect(optionB[1]).toBeChecked()
+    await userEvent.click(optionA[1])
+    expect(optionA[0]).toBeChecked()
+    expect(optionA[1]).toBeChecked()
+    expect(optionB[1]).not.toBeChecked()
+  })
+
+  it('does not load external images embedded in composable markdown nodes', () => {
+    const widget = JSON.stringify({
+      schema_version: 1,
+      id: 'safe-markdown-node',
+      component: 'ui-card',
+      props: { nodes: [{ type: 'markdown', text: '![外部图](https://example.com/track.png)' }] },
+    })
+    const { container } = render(<MarkdownMessage content={`\`\`\`kemo-widget\n${widget}\n\`\`\``} />)
+
+    expect(container.querySelector('img[src="https://example.com/track.png"]')).not.toBeInTheDocument()
+    expect(screen.getByText('[外部图片已阻止]')).toBeInTheDocument()
+  })
+
+  it('renders map, files, commerce, poll and rating widgets with local interaction', async () => {
+    const onWidgetAction = vi.fn()
+    const widgets = [
+      { id: 'map', component: 'map', props: { title: '地点', points: [{ label: '上海', latitude: 31.23, longitude: 121.47, detail: '起点', action: { type: 'fill-input', text: '选择上海' } }] } },
+      { id: 'files', component: 'file-list', props: { title: '文件', files: [{ name: '说明.pdf', size: '1 MB', url: '/api/files/a.pdf' }] } },
+      { id: 'products', component: 'product-grid', props: { title: '商品', products: [{ name: '组件包', price: '¥99', rating: 4.8, action: { type: 'fill-input', text: '选择组件包' } }] } },
+      { id: 'order', component: 'order-summary', props: { title: '订单', items: [{ label: '组件包', quantity: 2, unit_price: 99 }], actions: [{ label: '确认订单', action: { type: 'send-message', text: '确认订单' }, tone: 'brand' }] } },
+      { id: 'poll', component: 'poll', props: { title: '选择方向', options: [{ label: '界面', value: 'ui' }, { label: '协议', value: 'protocol' }], submit: { label: '提交选择', action: 'fill-input', template: '方向：{{selection}}' } } },
+      { id: 'rating', component: 'rating', props: { title: '体验评分', label: '满意度', max: 5, submit: { label: '提交评分', action: 'fill-input', template: '评分：{{rating}}' } } },
+    ].map((item) => `\`\`\`kemo-widget\n${JSON.stringify({ schema_version: 1, ...item })}\n\`\`\``).join('\n\n')
+    render(<MarkdownMessage content={widgets} onWidgetAction={onWidgetAction} />)
+
+    expect(screen.getByRole('region', { name: '地点' })).toHaveTextContent('上海')
+    expect(screen.getByRole('region', { name: '文件' })).toHaveTextContent('说明.pdf')
+    expect(screen.getByRole('region', { name: '商品' })).toHaveTextContent('¥99')
+    expect(screen.getByRole('region', { name: '订单' })).toHaveTextContent('¥198')
+    await userEvent.click(screen.getByRole('button', { name: '界面' }))
+    await userEvent.click(screen.getByRole('button', { name: '提交选择' }))
+    expect(onWidgetAction).toHaveBeenCalledWith({ type: 'fill-input', text: '方向：ui' })
+    await userEvent.click(screen.getByRole('radio', { name: '4 分' }))
+    await userEvent.click(screen.getByRole('button', { name: '提交评分' }))
+    expect(onWidgetAction).toHaveBeenCalledWith({ type: 'fill-input', text: '评分：4' })
+  })
+
   it('filters, sorts, paginates and hides columns in data tables', async () => {
     const widget = JSON.stringify({
       schema_version: 1,

@@ -1,4 +1,3 @@
-export type ModulePanelScope = 'expand' | 'sense'
 export type ModulePanelWidth = 'quarter' | 'third' | 'half' | 'full'
 export type ModulePanelHeight = 'h1' | 'h2'
 export type ModulePanelInputType = 'string' | 'number' | 'boolean' | 'enum' | 'text'

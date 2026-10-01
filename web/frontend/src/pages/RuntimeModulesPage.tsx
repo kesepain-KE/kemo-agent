@@ -68,14 +68,6 @@ export function RuntimeModulesPage({ fixedTab }: { fixedTab?: RuntimeTab } = {})
   )
 }
 
-export function MessagesPage() {
-  return <RuntimeModulesPage fixedTab="messages" />
-}
-
-export function ExpandPage() {
-  return <RuntimeModulesPage fixedTab="expand" />
-}
-
 function AgentInventory({ data }: { data: Awaited<ReturnType<typeof getAgents>> | undefined }) {
   return <>
     <section className="metric-strip">

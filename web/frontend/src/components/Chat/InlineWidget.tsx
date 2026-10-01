@@ -6,6 +6,7 @@ import {
   type InlineWidgetDefinition,
   type InlineWidgetTone,
 } from './inlineWidgetProtocol'
+import { ExtendedInlineWidget } from './InlineWidgetExtended'
 import styles from './InlineWidget.module.css'
 
 function toneClass(tone: InlineWidgetTone | undefined): string {
@@ -748,6 +749,9 @@ function RenderedInlineWidget({ widget, onAction }: { widget: InlineWidgetDefini
     case 'image': return <ImageWidget widget={widget} />
     case 'gallery': return <GalleryWidget widget={widget} />
     case 'carousel': return <CarouselWidget widget={widget} />
+    case 'ui-card': case 'map': case 'media-player': case 'file-list':
+    case 'product-grid': case 'order-summary': case 'poll': case 'rating':
+      return <ExtendedInlineWidget widget={widget} onAction={onAction} />
     case 'generic-card': return <GenericCardWidget widget={widget} />
   }
 }

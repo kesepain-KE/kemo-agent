@@ -184,6 +184,67 @@ describe('inline widget protocol', () => {
     }
   })
 
+  it('normalizes legacy follow-up options from persisted model output', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: '1.0',
+      id: 'legacy-follow-up-options',
+      component: 'follow-up',
+      props: {
+        title: '下一步可以',
+        options: [
+          { label: '继续分析', message: '请继续分析当前问题' },
+          { label: '直接执行', action: { type: 'send-message', text: '确认执行' } },
+        ],
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok || result.widget.component !== 'follow-up') throw new Error('legacy follow-up normalization failed')
+    expect(result.widget.props.prompts).toEqual([
+      { label: '继续分析', text: '请继续分析当前问题', send: undefined },
+      { label: '直接执行', text: '确认执行', send: true },
+    ])
+  })
+
+  it('parses the composable, location, media, commerce and feedback catalog', () => {
+    const samples = [
+      {
+        id: 'ui-card-1', component: 'ui-card', props: {
+          title: '组合卡片',
+          nodes: [
+            { type: 'row', children: [{ type: 'icon', name: 'sparkles', label: '智能摘要' }, { type: 'badge', label: '状态', value: '正常', tone: 'success' }] },
+            { type: 'markdown', text: '**重点**：组件可组合。' },
+            { type: 'text-input', name: 'topic', label: '主题', default_value: '组件' },
+            { type: 'button', label: '继续', action: { type: 'fill-input', text: '继续分析 {{topic}}' } },
+          ],
+        },
+      },
+      { id: 'map-1', component: 'map', props: { points: [{ label: '上海', latitude: 31.2304, longitude: 121.4737 }] } },
+      { id: 'audio-1', component: 'audio', props: { src: '/api/media/a.mp3', caption: '音频' } },
+      { id: 'files-1', component: 'file-list', props: { files: [{ name: '报告.pdf', url: '/api/files/report.pdf' }] } },
+      { id: 'products-1', component: 'product-grid', props: { products: [{ name: '组件包', price: '¥99' }] } },
+      { id: 'order-1', component: 'order-summary', props: { items: [{ label: '组件包', quantity: 2, unit_price: 99 }] } },
+      { id: 'poll-1', component: 'poll', props: { title: '选择方向', options: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }], submit: { label: '提交', action: 'fill-input', template: '选择：{{selection}}' } } },
+      { id: 'rating-1', component: 'rating', props: { label: '满意度', max: 5, submit: { label: '提交评分', action: 'fill-input', template: '评分：{{rating}}' } } },
+    ]
+
+    for (const sample of samples) {
+      const result = parseInlineWidget(JSON.stringify({ schema_version: 1, ...sample }))
+      expect(result.ok, sample.component).toBe(true)
+    }
+  })
+
+  it('rejects external URLs in the extended media catalog', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'external-video',
+      component: 'video',
+      props: { src: 'https://example.com/video.mp4' },
+    }))
+
+    expect(result.ok).toBe(false)
+  })
+
   it('keeps media widgets on same-origin relative URLs', () => {
     const result = parseInlineWidget(JSON.stringify({
       schema_version: 1,

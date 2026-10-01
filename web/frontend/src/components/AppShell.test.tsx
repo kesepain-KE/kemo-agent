@@ -1869,6 +1869,11 @@ describe('AppShell navigation', () => {
   })
 
   it('历史抽屉选择日期后使用独立日期查询加载归档', async () => {
+    // Calendar defaults to the Shanghai current month. Pin only Date so this
+    // contract remains deterministic without replacing the async timer APIs
+    // used by React Query and Testing Library.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-25T04:00:00+00:00'))
     const requestedDates: string[] = []
     let reopenedSession = ''
     server.use(

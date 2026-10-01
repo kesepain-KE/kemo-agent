@@ -73,6 +73,10 @@ function ReadOnlySessionHistoryDialogContent({
   const pages = history.data?.pages || []
   const messages = [...pages].reverse().flatMap((page) => page.messages || [])
   const memoryStatus = session.memory_status || 'unknown'
+  // memory_last_error is an audit record and intentionally survives a later
+  // successful retry.  It must not be presented as a current failure once
+  // the cursor has caught up with the target.
+  const hasCurrentMemoryFailure = memoryStatus === 'failed'
   const processed = Math.max(0, session.memory_processed_round || 0)
   const target = Math.max(0, session.memory_target_round || session.rounds || 0)
   const isCronSource = source.startsWith('background:cron:')
@@ -102,7 +106,7 @@ function ReadOnlySessionHistoryDialogContent({
           <span><small>记忆进度</small><strong>{processed}/{target}</strong></span>
         </div>
         {session.summary?.trim() && <div className={styles.summary}><small>历史摘要</small><p>{session.summary}</p></div>}
-        {session.memory_last_error?.message && <div className={styles.error}>记忆整理失败：{session.memory_last_error.message}</div>}
+        {hasCurrentMemoryFailure && session.memory_last_error?.message && <div className={styles.error}>记忆整理失败：{session.memory_last_error.message}</div>}
         <div className={styles.messages}>
           {history.isLoading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={20} />正在读取归档…</div>}
           {history.isError && <div className={`${styles.empty} ${styles.error}`}>{historyErrorMessage}</div>}

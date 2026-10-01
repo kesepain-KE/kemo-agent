@@ -2,9 +2,10 @@ import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api/client'
+import type { SessionSummary } from '../types/api'
 import { ReadOnlySessionHistoryDialog } from './ReadOnlySessionHistoryDialog'
 
-const session = {
+const session: SessionSummary = {
   session_id: 'conv_cron_123',
   window: 'conv_cron_123',
   title: '',
@@ -57,5 +58,35 @@ describe('ReadOnlySessionHistoryDialog', () => {
     renderDialog()
 
     expect(await screen.findByText('该会话来源不支持只读历史访问。')).toBeInTheDocument()
+  })
+
+  it('已恢复完成的记忆不再显示历史失败提示', async () => {
+    vi.spyOn(api, 'getHistory').mockResolvedValue({
+      messages: [],
+      pagination: { has_more_before: false },
+    } as never)
+    renderDialog({
+      ...session,
+      memory_last_error: { message: '同一执行仍在超时后的后台退出过程中，已拒绝重复启动' },
+      memory_status: 'completed',
+    })
+
+    await screen.findByText('这条归档没有可显示的消息正文。')
+    expect(screen.queryByText(/记忆整理失败/)).not.toBeInTheDocument()
+    expect(screen.getByText('1/1')).toBeInTheDocument()
+  })
+
+  it('当前记忆失败时显示失败诊断', async () => {
+    vi.spyOn(api, 'getHistory').mockResolvedValue({
+      messages: [],
+      pagination: { has_more_before: false },
+    } as never)
+    renderDialog({
+      ...session,
+      memory_last_error: { message: '记忆提取失败' },
+      memory_status: 'failed',
+    })
+
+    expect(await screen.findByText('记忆整理失败：记忆提取失败')).toBeInTheDocument()
   })
 })
