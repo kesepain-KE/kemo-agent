@@ -256,7 +256,8 @@ class WebBackendTests(unittest.TestCase):
         original = config_path.read_bytes()
         catalog = ModelCatalogResponse.model_validate(
             {
-                "protocol_version": "1.0",
+                "protocol_version": "2.0",
+                "supported_protocol_versions": ["2.0"],
                 "object": "kemo.model_list",
                 "count": 1,
                 "data": [
@@ -312,6 +313,8 @@ class WebBackendTests(unittest.TestCase):
         app = create_app(service=service)
         catalog = ModelCatalogResponse.model_validate(
             {
+                "protocol_version": "2.0",
+                "supported_protocol_versions": ["2.0"],
                 "count": 1,
                 "data": [
                     {
@@ -327,12 +330,16 @@ class WebBackendTests(unittest.TestCase):
         )
         capabilities = ModelCapabilities.model_validate(
             {
+                "protocol_version": "2.0",
                 "model": "mapped-model",
+                "provider_id": "test",
+                "provider_model": "mapped-upstream",
                 "task": "llm",
                 "reasoning": {
                     "supported": True,
                     "efforts": ["minimal", "low", "medium", "high", "max"],
                     "summary": True,
+                    "returns": ["none", "summary", "auto"],
                 },
                 "extensions": {
                     "reasoning_effort_map": {"max": "high"},

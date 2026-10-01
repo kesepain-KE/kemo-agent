@@ -32,6 +32,11 @@ from tests.contracts.kemo_v1.fixture_loader import (
     validate_stream_envelope,
 )
 
+# Retained as an archival fixture for migration archaeology only.  Kemo 1.x is
+# not supported by the runtime and this suite is intentionally excluded from
+# the 2.0 default gates (see tests/contracts/kemo_v2).
+pytestmark = pytest.mark.skip(reason="archived Kemo 1.x fixture; runtime is Kemo 2.0")
+
 
 BUNDLE = load_bundle()
 MODELS = {

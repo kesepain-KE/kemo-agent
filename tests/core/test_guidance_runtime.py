@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from provider.protocol.assets import AssetDescriptor
@@ -18,7 +19,10 @@ class _KemoMediaProvider:
 
     def capabilities(self, model: str) -> ModelCapabilities:
         return ModelCapabilities(
+            protocol_version="2.0",
             model=model,
+            provider_id="test",
+            provider_model=model,
             input_modalities=["text", "image", "audio", "video", "file"],
             output_modalities=["text"],
         )
@@ -39,6 +43,9 @@ class _KemoMediaProvider:
             id=f"asset_remote_{len(self.uploads)}",
             status="ready",
             purpose="input",
+            protocol_version="2.0",
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
             filename=path.name,
             mime_type=mime_type,
             size=path.stat().st_size,

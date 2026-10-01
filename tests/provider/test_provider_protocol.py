@@ -65,6 +65,7 @@ from provider.protocol.models import (
 )
 from provider.protocol.serialization import parse_request, parse_response, to_json_bytes
 from provider.protocol.streaming import (
+    MessageItemStart,
     ProviderStreamEvent,
     StreamSequenceGuard,
     encode_sse,
@@ -90,6 +91,7 @@ from run.conversation import (
 
 def make_request(*, stream: bool = True) -> KemoRequest:
     return KemoRequest(
+        protocol_version="2.0",
         request_id="req_test",
         model="gateway/test",
         stream=stream,
@@ -113,6 +115,7 @@ def make_response(
     request: KemoRequest, *, response_id: str = "resp_test"
 ) -> KemoResponse:
     return KemoResponse(
+        protocol_version="2.0",
         id=response_id,
         request_id=request.request_id,
         status=ResponseStatus.COMPLETED,
@@ -193,7 +196,10 @@ class NativeProvider:
 
     def capabilities(self, model: str) -> ModelCapabilities:
         return ModelCapabilities(
+            protocol_version="2.0",
             model=model,
+            provider_id="test",
+            provider_model="model",
             input_modalities=["text", "image"],
             output_modalities=["text"],
         )
@@ -210,6 +216,7 @@ class NativeProvider:
         yield ProviderStreamEvent(
             type=StreamEventType.OUTPUT_TEXT_DELTA,
             sequence=1,
+            previous_sequence=0,
             request_id=request.request_id,
             response_id=response.id,
             item_id="msg_answer",
@@ -219,6 +226,7 @@ class NativeProvider:
         yield ProviderStreamEvent(
             type=StreamEventType.USAGE_UPDATED,
             sequence=2,
+            previous_sequence=1,
             request_id=request.request_id,
             response_id=response.id,
             usage=response.usage,
@@ -226,6 +234,7 @@ class NativeProvider:
         yield ProviderStreamEvent(
             type=StreamEventType.RESPONSE_COMPLETED,
             sequence=3,
+            previous_sequence=2,
             request_id=request.request_id,
             response_id=response.id,
             response=response,
@@ -345,6 +354,7 @@ class UnifiedProtocolTests(unittest.TestCase):
 
     def test_chat_stream_usage_promotes_cache_and_reasoning_fields(self) -> None:
         request = KemoRequest(
+            protocol_version="2.0",
             request_id="req_cache",
             model="chat-model",
             stream=True,
@@ -376,6 +386,7 @@ class UnifiedProtocolTests(unittest.TestCase):
 
     def test_chat_stream_usage_promotes_prompt_cache_hit_alias(self) -> None:
         request = KemoRequest(
+            protocol_version="2.0",
             request_id="req_cache_alias",
             model="chat-model",
             stream=True,
@@ -421,15 +432,15 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
         self.assertEqual(converted.incomplete_details["reason"], "output_truncated")
-        self.assertEqual(converted.incomplete_details["finish_reason"], "length")
+        self.assertEqual(converted.incomplete_details.details["finish_reason"], "length")
         serialized_details = json.dumps(
-            converted.incomplete_details,
+            converted.incomplete_details.model_dump(mode="json"),
             ensure_ascii=False,
         )
         self.assertNotIn("arguments_raw", serialized_details)
         self.assertNotIn('{"query":"unfinished', serialized_details)
         self.assertTrue(
-            converted.incomplete_details["invalid_tool_calls"][0][
+            converted.incomplete_details.details["invalid_tool_calls"][0][
                 "arguments_diagnostic"
             ]["content_omitted"]
         )
@@ -468,7 +479,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(terminal.type, StreamEventType.RESPONSE_INCOMPLETE)
         self.assertEqual(terminal.response.status, ResponseStatus.INCOMPLETE)
         self.assertEqual(
-            terminal.response.incomplete_details["finish_reason"], "length"
+            terminal.response.incomplete_details.details["finish_reason"], "length"
         )
         runtime_terminal = list(run_events_for_protocol_event(terminal))
         self.assertEqual(runtime_terminal[0].type, "error")
@@ -481,13 +492,14 @@ class UnifiedProtocolTests(unittest.TestCase):
     def test_kemo_parse_error_tool_call_is_rejected_before_runtime(self) -> None:
         request = make_request(stream=False)
         response = KemoResponse(
+            protocol_version="2.0",
             request_id=request.request_id,
             status=ResponseStatus.REQUIRES_ACTION,
             model=request.model,
             output=[
                 ToolCallItem(
                     id="call_item_bad",
-                    call_id="call_bad",
+                    call_id="callid_bad",
                     name="history_search",
                     arguments={},
                     arguments_raw='{"authorization":"Bearer provider-secret',
@@ -509,13 +521,14 @@ class UnifiedProtocolTests(unittest.TestCase):
     def test_provider_response_diagnostic_omits_raw_tool_arguments(self) -> None:
         request = make_request(stream=False)
         response = KemoResponse(
+            protocol_version="2.0",
             request_id=request.request_id,
             status=ResponseStatus.REQUIRES_ACTION,
             model=request.model,
             output=[
                 ToolCallItem(
                     id="call_item_safe",
-                    call_id="call_safe",
+                    call_id="callid_safe",
                     name="history_search",
                     arguments={"query": "safe"},
                     arguments_raw="RAW_PROVIDER_ARGUMENT_MARKER",
@@ -533,13 +546,14 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertNotIn("arguments_raw", serialized)
         self.assertIn("arguments_diagnostic", serialized)
         self.assertEqual(durable["output"][0]["type"], "tool_call")
-        self.assertEqual(durable["output"][0]["call_id"], "call_safe")
+        self.assertEqual(durable["output"][0]["call_id"], "callid_safe")
         self.assertEqual(durable["output"][0]["name"], "history_search")
         self.assertNotIn("internal", terminal.to_dict())
 
     def test_long_provider_diagnostic_cannot_truncate_durable_tool_call(self) -> None:
         request = make_request(stream=False)
         response = KemoResponse(
+            protocol_version="2.0",
             request_id=request.request_id,
             status=ResponseStatus.REQUIRES_ACTION,
             model=request.model,
@@ -547,7 +561,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 ReasoningItem(id="rs_long", content="R" * 12_000),
                 ToolCallItem(
                     id="call_item_after_long_text",
-                    call_id="call_after_long_text",
+                    call_id="callid_after_long_text",
                     name="file",
                     arguments={"action": "stat", "path": "safe.txt"},
                 ),
@@ -562,7 +576,7 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         self.assertIn("诊断内容已截断", public_serialized)
         self.assertEqual(durable_call["type"], "tool_call")
-        self.assertEqual(durable_call["call_id"], "call_after_long_text")
+        self.assertEqual(durable_call["call_id"], "callid_after_long_text")
         self.assertEqual(durable_call["name"], "file")
         self.assertEqual(durable_call["arguments"]["action"], "stat")
         self.assertNotIn("internal", terminal.to_dict())
@@ -570,6 +584,7 @@ class UnifiedProtocolTests(unittest.TestCase):
     def test_credential_shaped_provider_state_is_omitted_from_durable_history(self) -> None:
         request = make_request(stream=False)
         response = KemoResponse(
+            protocol_version="2.0",
             request_id=request.request_id,
             status=ResponseStatus.COMPLETED,
             model=request.model,
@@ -596,6 +611,7 @@ class UnifiedProtocolTests(unittest.TestCase):
     def test_stream_terminal_keeps_durable_tool_call_for_history(self) -> None:
         request = make_request(stream=True)
         response = KemoResponse(
+            protocol_version="2.0",
             request_id=request.request_id,
             status=ResponseStatus.REQUIRES_ACTION,
             model=request.model,
@@ -603,7 +619,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 ReasoningItem(id="rs_stream_long", content="S" * 12_000),
                 ToolCallItem(
                     id="call_item_stream",
-                    call_id="call_stream",
+                    call_id="callid_stream",
                     name="file",
                     arguments={"action": "stat", "path": "safe.txt"},
                 ),
@@ -612,6 +628,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         protocol_terminal = ProviderStreamEvent(
             type=StreamEventType.RESPONSE_COMPLETED,
             sequence=9,
+            previous_sequence=8,
             request_id=request.request_id,
             response_id=response.id,
             response=response,
@@ -622,7 +639,7 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         self.assertEqual(terminal.type, "done")
         self.assertEqual(durable_call["type"], "tool_call")
-        self.assertEqual(durable_call["call_id"], "call_stream")
+        self.assertEqual(durable_call["call_id"], "callid_stream")
         self.assertEqual(durable_call["name"], "file")
         self.assertNotIn("internal", terminal.to_dict())
 
@@ -763,13 +780,43 @@ class UnifiedProtocolTests(unittest.TestCase):
 
     def test_provider_tool_argument_parser_rejects_oversized_valid_prefix(self) -> None:
         prefix = '{"x":1}'
-        oversized = prefix + (" " * (1_000_000 - len(prefix))) + "TRAILING"
+        oversized = prefix + (" " * (1024 * 1024 - len(prefix))) + "TRAILING"
 
         parsed = parse_tool_arguments(oversized)
 
         self.assertEqual(parsed.arguments, {})
         self.assertEqual(parsed.parse_error["kind"], "arguments_too_large")
         self.assertIsNone(parsed.arguments_raw)
+
+    def test_provider_tool_argument_parser_enforces_strict_json_contract(self) -> None:
+        wrapper_bytes = len('{"x":""}'.encode("utf-8"))
+        boundary = '{"x":"' + ("a" * (1024 * 1024 - wrapper_bytes)) + '"}'
+        accepted = parse_tool_arguments(boundary)
+        self.assertIsNone(accepted.parse_error)
+        self.assertEqual(len(accepted.arguments_raw.encode("utf-8")), 1024 * 1024)
+
+        over = parse_tool_arguments(boundary[:-2] + 'a"}')
+        self.assertEqual(over.parse_error["kind"], "arguments_too_large")
+        self.assertEqual(
+            parse_tool_arguments('{"x":1,"x":2}').parse_error["kind"],
+            "duplicate_key",
+        )
+        self.assertEqual(
+            parse_tool_arguments('{"x":Infinity}').parse_error["kind"],
+            "non_finite_number",
+        )
+        self.assertEqual(
+            parse_tool_arguments({"x": float("nan")}).parse_error["kind"],
+            "non_finite_number",
+        )
+
+        deep: dict[str, object] = {"leaf": True}
+        for _ in range(65):
+            deep = {"next": deep}
+        self.assertEqual(
+            parse_tool_arguments(deep).parse_error["kind"],
+            "arguments_too_complex",
+        )
 
     def test_gateway_http_error_message_is_sanitized(self) -> None:
         adapter = KemoGatewayAdapter(
@@ -820,7 +867,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         response = make_response(request)
         self.assertEqual(parse_response(to_json_bytes(response)), response)
         invalid = request.model_dump(mode="json")
-        invalid["protocol_version"] = "2.0"
+        invalid["protocol_version"] = "2.1"
         with self.assertRaises(ProtocolValidationError):
             parse_request(invalid)
 
@@ -832,28 +879,35 @@ class UnifiedProtocolTests(unittest.TestCase):
         payload["output"][0]["created_at"] = None
         payload["status"] = "incomplete"
         payload["incomplete_details"] = {
-            "reason": "provider_timeout",
-            "retry_after_ms": 1200,
-            "provider_code": "UPSTREAM_BUSY",
+            "reason": "other",
+            "details": {
+                "provider_reason": "provider_timeout",
+                "retry_after_ms": 1200,
+                "provider_code": "UPSTREAM_BUSY",
+            },
         }
         parsed = parse_response(payload)
         self.assertIsNone(parsed.output[0].created_at)
-        self.assertEqual(parsed.incomplete_details["retry_after_ms"], 1200)
-        self.assertEqual(parsed.incomplete_details["provider_code"], "UPSTREAM_BUSY")
+        self.assertEqual(parsed.incomplete_details.details["retry_after_ms"], 1200)
+        self.assertEqual(
+            parsed.incomplete_details.details["provider_code"], "UPSTREAM_BUSY"
+        )
 
     def test_ids_tool_linkage_and_asset_path_are_strict(self) -> None:
         with self.assertRaises(ValidationError):
             ImageContent(asset_id="C:\\secret\\image.png")
         call = ToolCallItem(
-            id="call_item", call_id="call_1", name="lookup", arguments={"q": "x"}
+            id="call_item", call_id="callid_1", name="lookup", arguments={"q": "x"}
         )
         result = ToolResultItem(
             id="result_item",
-            call_id="call_1",
+            call_id="callid_1",
             name="lookup",
             content=[JsonContent(data={"ok": True})],
         )
         request = KemoRequest(
+            protocol_version="2.0",
+            request_id="req_linkage",
             model="gateway/test",
             system_prompt="",
             input=[call, result],
@@ -871,6 +925,8 @@ class UnifiedProtocolTests(unittest.TestCase):
             validate_request(invalid_name)
         with self.assertRaises(ValidationError):
             KemoRequest(
+                protocol_version="2.0",
+                request_id="req_duplicate_items",
                 model="gateway/test",
                 system_prompt="",
                 input=[
@@ -894,6 +950,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 type=StreamEventType.RESPONSE_COMPLETED,
                 event_id="evt_1",
                 sequence=1,
+                previous_sequence=0,
                 request_id=request.request_id,
                 response_id=response.id,
                 response=response,
@@ -909,6 +966,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         after = ProviderStreamEvent(
             type=StreamEventType.USAGE_UPDATED,
             sequence=2,
+            previous_sequence=1,
             request_id=request.request_id,
             response_id=response.id,
             usage=response.usage,
@@ -918,6 +976,117 @@ class UnifiedProtocolTests(unittest.TestCase):
         gap_guard = StreamSequenceGuard()
         with self.assertRaises(StreamProtocolError):
             gap_guard.accept(parsed[1])
+
+    def test_stream_guard_isolates_text_blocks_and_rejects_delta_after_done(self) -> None:
+        guard = StreamSequenceGuard()
+        response_id = "resp_block_guard"
+        request_id = "req_block_guard"
+
+        def event(sequence: int, event_type, **kwargs):
+            return ProviderStreamEvent(
+                type=event_type,
+                event_id=f"evt_block_{sequence}",
+                sequence=sequence,
+                previous_sequence=None if sequence == 0 else sequence - 1,
+                request_id=request_id,
+                response_id=response_id,
+                **kwargs,
+            )
+
+        frames = [
+            event(0, StreamEventType.RESPONSE_CREATED),
+            event(
+                1,
+                StreamEventType.OUTPUT_ITEM_ADDED,
+                item_id="msg_first",
+                item=MessageItemStart(
+                    id="msg_first", phase=MessagePhase.FINAL_ANSWER
+                ),
+            ),
+            event(
+                2,
+                StreamEventType.OUTPUT_TEXT_DELTA,
+                item_id="msg_first",
+                content_index=0,
+                delta="一",
+            ),
+            event(
+                3,
+                StreamEventType.OUTPUT_TEXT_DONE,
+                item_id="msg_first",
+                content_index=0,
+                text="一",
+            ),
+            event(
+                4,
+                StreamEventType.OUTPUT_ITEM_ADDED,
+                item_id="msg_second",
+                item=MessageItemStart(
+                    id="msg_second", phase=MessagePhase.FINAL_ANSWER
+                ),
+            ),
+            event(
+                5,
+                StreamEventType.OUTPUT_TEXT_DELTA,
+                item_id="msg_second",
+                content_index=0,
+                delta="二",
+            ),
+            event(
+                6,
+                StreamEventType.OUTPUT_TEXT_DONE,
+                item_id="msg_second",
+                content_index=0,
+                text="二",
+            ),
+        ]
+        self.assertTrue(all(guard.accept(frame) for frame in frames))
+
+        with self.assertRaisesRegex(StreamProtocolError, "done 后"):
+            guard.accept(
+                event(
+                    7,
+                    StreamEventType.OUTPUT_TEXT_DELTA,
+                    item_id="msg_second",
+                    content_index=0,
+                    delta="!",
+                )
+            )
+
+        double_done_guard = StreamSequenceGuard()
+        for frame in frames[:4]:
+            self.assertTrue(double_done_guard.accept(frame))
+        with self.assertRaisesRegex(StreamProtocolError, "不得重复"):
+            double_done_guard.accept(
+                event(
+                    4,
+                    StreamEventType.OUTPUT_TEXT_DONE,
+                    item_id="msg_first",
+                    content_index=0,
+                    text="一",
+                )
+            )
+
+    def test_stream_guard_rejects_cross_response_continuation(self) -> None:
+        guard = StreamSequenceGuard()
+        first = ProviderStreamEvent(
+            type=StreamEventType.RESPONSE_CREATED,
+            event_id="evt_identity_0",
+            sequence=0,
+            request_id="req_identity",
+            response_id="resp_identity_a",
+        )
+        self.assertTrue(guard.accept(first))
+        with self.assertRaisesRegex(StreamProtocolError, "必须保持不变"):
+            guard.accept(
+                ProviderStreamEvent(
+                    type=StreamEventType.RESPONSE_CREATED,
+                    event_id="evt_identity_1",
+                    sequence=0,
+                    request_id="req_identity",
+                    response_id="resp_identity_b",
+                )
+            )
 
     def test_chat_bridge_mapping_and_multimodal_capability_error(self) -> None:
         chat = ChatRequest(
@@ -965,11 +1134,17 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(restored.extra["reasoning_effort"], "medium")
         self.assertEqual(restored.messages[0]["role"], "system")
         self.assertEqual(restored.messages[1]["content"][1]["type"], "image_url")
-        self.assertEqual(restored.messages[-1]["tool_call_id"], "call_1")
+        restored_call_id = restored.messages[-1]["tool_call_id"]
+        self.assertTrue(restored_call_id.startswith("callid_"))
+        self.assertEqual(
+            restored.messages[-2]["tool_calls"][0]["id"], restored_call_id
+        )
         response = make_response(request)
         self.assertEqual(kemo_response_to_chat(response).text, "answer")
 
         unsupported = KemoRequest(
+            protocol_version="2.0",
+            request_id="req_chat_unsupported",
             model="chat-only",
             system_prompt="",
             input=[
@@ -1049,7 +1224,10 @@ class UnifiedProtocolTests(unittest.TestCase):
     def test_kemo_reasoning_uses_gateway_declared_efforts_and_excludes_none(self) -> None:
         capabilities = ModelCapabilities.model_validate(
             {
+                "protocol_version": "2.0",
                 "model": "dynamic-model",
+                "provider_id": "test",
+                "provider_model": "dynamic-model",
                 "reasoning": {
                     "supported": True,
                     "efforts": ["none", "low", "ultra"],
@@ -1225,7 +1403,10 @@ class UnifiedProtocolTests(unittest.TestCase):
         adapter._open = lambda capability_request: FakeHTTPResponse(
             json.dumps(
                 {
+                    "protocol_version": "2.0",
                     "model": request.model,
+                    "provider_id": "test",
+                    "provider_model": "model",
                     "task": "llm",
                     "input_modalities": ["text", "image"],
                     "output_modalities": ["text"],
@@ -1236,7 +1417,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                         "parallel_calls": False,
                         "multimodal_results": False,
                     },
-                    "structured_output": False,
+                    "structured_output": {"supported": False},
                     "embedding": None,
                     "rerank": None,
                     "metadata": {"source": "provider_package"},
@@ -1255,7 +1436,10 @@ class UnifiedProtocolTests(unittest.TestCase):
             or FakeHTTPResponse(
                 json.dumps(
                     {
+                        "protocol_version": "2.0",
                         "model": request.model,
+                        "provider_id": "test",
+                        "provider_model": "model",
                         "task": "llm",
                         "reasoning": {
                             "supported": True,
@@ -1286,7 +1470,8 @@ class UnifiedProtocolTests(unittest.TestCase):
             or FakeHTTPResponse(
                 json.dumps(
                     {
-                        "protocol_version": "1.0",
+                        "protocol_version": "2.0",
+                        "supported_protocol_versions": ["2.0"],
                         "object": "kemo.model_list",
                         "count": 1,
                         "data": [
@@ -1321,6 +1506,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             ProviderStreamEvent(
                 type=StreamEventType.RESPONSE_COMPLETED,
                 sequence=1,
+                previous_sequence=0,
                 request_id=request.request_id,
                 response_id=response.id,
                 response=response,
@@ -1344,11 +1530,13 @@ class UnifiedProtocolTests(unittest.TestCase):
                 return self._stream.read(size)
 
         descriptor = {
-            "protocol_version": "1.0",
+            "protocol_version": "2.0",
             "id": "asset_audio_1",
             "object": "kemo.asset",
             "status": "ready",
             "purpose": "input",
+            "created_at": "2026-10-01T00:00:00Z",
+            "expires_at": "2026-10-02T00:00:00Z",
             "filename": "voice.wav",
             "mime_type": "audio/wav",
             "size": len(payload),
@@ -1391,6 +1579,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             {"base_url": "https://gateway.test/v1", "api_key": "secret", "model": "m"}
         )
         embedding_request = EmbeddingRequest(
+            protocol_version="2.0",
             request_id="req_embed_1",
             model="acme-embed-v1",
             input_type="document",
@@ -1399,6 +1588,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             normalize=True,
         )
         rerank_request = RerankRequest(
+            protocol_version="2.0",
             request_id="req_rerank_1",
             model="acme-rerank-v1",
             query="hello",
@@ -1415,7 +1605,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             seen.append(http_request)
             if http_request.full_url.endswith("/embeddings"):
                 payload = {
-                    "protocol_version": "1.0",
+                    "protocol_version": "2.0",
                     "object": "kemo.embedding_list",
                     "request_id": "req_embed_1",
                     "model": "acme-embed-v1",
@@ -1425,7 +1615,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 }
             else:
                 payload = {
-                    "protocol_version": "1.0",
+                    "protocol_version": "2.0",
                     "object": "kemo.rerank",
                     "request_id": "req_rerank_1",
                     "model": "acme-rerank-v1",
@@ -1456,7 +1646,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             ],
         )
         self.assertEqual(seen[0].get_header("Idempotency-key"), "req_embed_1")
-        self.assertEqual(seen[1].get_header("X-kemo-protocol-version"), "1.0")
+        self.assertEqual(seen[1].get_header("X-kemo-protocol-version"), "2.0")
         self.assertEqual(json.loads(seen[0].data)["input_type"], "document")
         self.assertEqual(json.loads(seen[1].data)["top_n"], 1)
 
@@ -1813,7 +2003,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         )
         self.assertEqual(converted[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
 
-    def test_chat_tools_unsupported_retries_once_without_tool_fields(self) -> None:
+    def test_chat_tools_unsupported_is_returned_to_unified_retry_owner(self) -> None:
         requests: list[dict[str, object]] = []
         success = {
             "id": "chat-fallback",
@@ -1851,19 +2041,13 @@ class UnifiedProtocolTests(unittest.TestCase):
             }
         )
         with patch("urllib.request.urlopen", side_effect=open_request):
-            events = list(self._chat_transport().chat_stream(request))
+            with self.assertRaises(ProviderError) as caught:
+                list(self._chat_transport().chat_stream(request))
 
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 1)
         self.assertIn("tools", requests[0])
-        for key in ("tools", "tool_choice", "parallel_tool_calls"):
-            self.assertNotIn(key, requests[1])
-        self.assertEqual(requests[0]["messages"], requests[1]["messages"])
-        self.assertEqual(requests[0]["model"], requests[1]["model"])
-        self.assertEqual(
-            [event.content for event in events if event.type == "text_delta"],
-            ["plain text fallback"],
-        )
-        self.assertEqual(len([event for event in events if event.type == "done"]), 1)
+        self.assertEqual(caught.exception.category, "tools_unsupported")
+        self.assertFalse(caught.exception.retryable)
 
     def test_chat_plain_http_400_does_not_drop_tools_or_retry(self) -> None:
         for message in (
@@ -1894,7 +2078,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                         )
                 self.assertEqual(len(requests), 1)
 
-    def test_chat_tools_fallback_is_never_repeated(self) -> None:
+    def test_chat_tools_unsupported_nonstream_is_not_retried_by_transport(self) -> None:
         requests: list[dict[str, object]] = []
 
         def open_request(request, **_kwargs):
@@ -1915,11 +2099,10 @@ class UnifiedProtocolTests(unittest.TestCase):
             with self.assertRaises(ProviderError):
                 self._chat_transport().chat(request)
 
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 1)
         self.assertIn("tools", requests[0])
-        self.assertNotIn("tools", requests[1])
 
-    def test_chat_connection_failure_retries_once_and_can_recover(self) -> None:
+    def test_chat_connection_failure_is_returned_to_unified_retry_owner(self) -> None:
         requests: list[dict[str, object]] = []
         success = {
             "id": "chat-network-recovered",
@@ -1938,38 +2121,33 @@ class UnifiedProtocolTests(unittest.TestCase):
                 raise urllib.error.URLError(ConnectionRefusedError("offline"))
             return FakeHTTPResponse(json.dumps(success).encode("utf-8"))
 
-        with (
-            patch("urllib.request.urlopen", side_effect=open_request),
-            patch("provider.openai_chat.time.sleep") as sleep,
-        ):
-            response = self._chat_transport().chat(self._chat_request())
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                self._chat_transport().chat(self._chat_request())
 
-        self.assertEqual(response.text, "recovered")
-        self.assertEqual(len(requests), 2)
-        sleep.assert_called_once()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(caught.exception.category, "connection_error")
+        self.assertTrue(caught.exception.retryable)
 
-    def test_chat_connection_failure_stops_after_second_attempt(self) -> None:
+    def test_chat_connection_failure_is_single_transport_attempt(self) -> None:
         requests: list[dict[str, object]] = []
 
         def open_request(request, **_kwargs):
             requests.append(json.loads(request.data.decode("utf-8")))
             raise urllib.error.URLError(ConnectionResetError("reset"))
 
-        with (
-            patch("urllib.request.urlopen", side_effect=open_request),
-            patch("provider.openai_chat.time.sleep"),
-        ):
+        with patch("urllib.request.urlopen", side_effect=open_request):
             with self.assertRaises(ProviderError) as caught:
                 self._chat_transport().chat(self._chat_request())
 
         self.assertEqual(caught.exception.category, "connection_error")
-        self.assertFalse(caught.exception.retryable)
+        self.assertTrue(caught.exception.retryable)
         self.assertTrue(caught.exception.retryable_declared)
-        self.assertTrue(caught.exception.retry_budget_exhausted)
-        self.assertEqual(caught.exception.attempt_count, 2)
-        self.assertEqual(len(requests), 2)
+        self.assertFalse(caught.exception.retry_budget_exhausted)
+        self.assertIsNone(caught.exception.attempt_count)
+        self.assertEqual(len(requests), 1)
 
-    def test_chat_http_429_retries_once_and_honors_bounded_retry_after(self) -> None:
+    def test_chat_http_429_is_returned_to_unified_retry_owner(self) -> None:
         requests: list[dict[str, object]] = []
         success = {
             "id": "chat-rate-recovered",
@@ -1996,15 +2174,14 @@ class UnifiedProtocolTests(unittest.TestCase):
                 )
             return FakeHTTPResponse(json.dumps(success).encode("utf-8"))
 
-        with (
-            patch("urllib.request.urlopen", side_effect=open_request),
-            patch("provider.openai_chat.time.sleep") as sleep,
-        ):
-            response = self._chat_transport().chat(self._chat_request())
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                self._chat_transport().chat(self._chat_request())
 
-        self.assertEqual(response.text, "available")
-        self.assertEqual(len(requests), 2)
-        sleep.assert_called_once_with(10.0)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(caught.exception.status_code, 429)
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.retry_after_ms, 10000)
 
     def test_chat_http_final_statuses_are_not_network_retried(self) -> None:
         for status in (400, 401, 403, 409):
@@ -2043,7 +2220,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         payload = f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
         return FakeHTTPResponse(payload, content_type="text/event-stream")
 
-    def test_chat_stream_zero_output_disconnect_retries_once(self) -> None:
+    def test_chat_stream_zero_output_disconnect_is_single_attempt(self) -> None:
         requests: list[dict[str, object]] = []
 
         def open_request(request, **_kwargs):
@@ -2052,18 +2229,13 @@ class UnifiedProtocolTests(unittest.TestCase):
                 return InterruptedHTTPResponse()
             return self._successful_sse()
 
-        with (
-            patch("urllib.request.urlopen", side_effect=open_request),
-            patch("provider.openai_chat.time.sleep"),
-        ):
-            events = list(self._chat_transport().chat_stream(self._chat_request()))
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            with self.assertRaises(ProviderError) as caught:
+                list(self._chat_transport().chat_stream(self._chat_request()))
 
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(
-            [event.content for event in events if event.type == "text_delta"],
-            ["recovered"],
-        )
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(caught.exception.category, "stream_interrupted")
+        self.assertTrue(caught.exception.retryable)
 
     def test_chat_stream_never_replays_after_text_output(self) -> None:
         requests: list[dict[str, object]] = []

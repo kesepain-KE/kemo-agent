@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,7 +63,13 @@ class CapabilityProvider:
 
     def capabilities(self, model: str) -> ModelCapabilities:
         self.calls += 1
-        return ModelCapabilities(model=model, input_modalities=self.modalities)
+        return ModelCapabilities(
+            protocol_version="2.0",
+            model=model,
+            provider_id="test",
+            provider_model=model,
+            input_modalities=self.modalities,
+        )
 
 
 class MultimodalRoutingTests(unittest.TestCase):
@@ -405,7 +412,10 @@ class MultimodalRoutingTests(unittest.TestCase):
                 if self.calls == 1:
                     raise ProviderError("temporary failure", retryable=True)
                 return ModelCapabilities(
+                    protocol_version="2.0",
                     model=model,
+                    provider_id="test",
+                    provider_model=model,
                     input_modalities=["text", "image"],
                 )
 
@@ -529,6 +539,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         from plugins.multimodal import tool
 
         descriptor = AssetDescriptor(
+            protocol_version="2.0",
             id="asset_gateway_image",
             status="ready",
             purpose="input",
@@ -536,6 +547,8 @@ class MultimodalRoutingTests(unittest.TestCase):
             mime_type="image/png",
             size=len(_PNG),
             checksum_sha256="a" * 64,
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
 
         class GatewayProvider:
@@ -546,7 +559,10 @@ class MultimodalRoutingTests(unittest.TestCase):
 
             def capabilities(self, model: str) -> ModelCapabilities:
                 return ModelCapabilities(
+                    protocol_version="2.0",
                     model=model,
+                    provider_id="test",
+                    provider_model=model,
                     input_modalities=["text", "image"],
                     output_modalities=["text"],
                     extensions={"operations": {"vision": {"supported": True}}},
@@ -831,7 +847,10 @@ class MultimodalRoutingTests(unittest.TestCase):
         class FakeImageProvider:
             def capabilities(self, model):
                 return ModelCapabilities(
+                    protocol_version="2.0",
                     model=model,
+                    provider_id="test",
+                    provider_model=model,
                     input_modalities=["text"],
                     output_modalities=["image"],
                     extensions={"operations": {"image_generation": {"supported": True}}},
@@ -856,6 +875,7 @@ class MultimodalRoutingTests(unittest.TestCase):
 
             def get_asset(self, asset_id):
                 return AssetDescriptor(
+                    protocol_version="2.0",
                     id=asset_id,
                     status="ready",
                     purpose="output",
@@ -863,6 +883,8 @@ class MultimodalRoutingTests(unittest.TestCase):
                     mime_type="image/png",
                     size=len(payload),
                     checksum_sha256=checksum,
+                    created_at=datetime.now(timezone.utc),
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
                 )
 
             def wait_asset_ready(self, asset, **_kwargs):

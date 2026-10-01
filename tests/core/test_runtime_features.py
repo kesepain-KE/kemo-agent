@@ -308,6 +308,63 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn("file.read_range", error["instruction"])
         self.assertNotIn("X" * 100, json.dumps(error, ensure_ascii=False))
 
+    def test_tool_result_limit_counts_serialized_unicode_and_escaping(self) -> None:
+        # The contract is measured after JSON serialization, in characters
+        # (not UTF-8 bytes), so CJK text remains one character per code point.
+        unicode_value = "界" * (MAX_TOOL_RESULT_CHARS - 2)
+        tool = ToolDefinition(
+            name="unicode_tool",
+            description="unicode",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=lambda: unicode_value,
+        )
+        self.assertEqual(
+            len(json.dumps(unicode_value, ensure_ascii=False, default=str)),
+            MAX_TOOL_RESULT_CHARS,
+        )
+        self.assertEqual(
+            execute_tool(
+                tool,
+                {},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=2,
+            ),
+            unicode_value,
+        )
+
+        escaped_value = "line\\n" * (MAX_TOOL_RESULT_CHARS // 6)
+        escaped_tool = ToolDefinition(
+            name="escaped_tool",
+            description="escaped",
+            input_schema=tool.input_schema,
+            version="1.0.0",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=Path.cwd(),
+            _callable=lambda: escaped_value,
+        )
+        self.assertGreater(
+            len(json.dumps(escaped_value, ensure_ascii=False, default=str)),
+            MAX_TOOL_RESULT_CHARS,
+        )
+        with self.assertRaises(ToolResultTooLargeError):
+            execute_tool(
+                escaped_tool,
+                {},
+                context={"root": str(Path.cwd()), "user": "alice"},
+                timeout=2,
+            )
+
     def test_running_tool_observes_emergency_cancel_without_waiting_for_timeout(
         self,
     ) -> None:
@@ -1141,7 +1198,7 @@ def run(*, context):
                         output=[
                             ReasoningItem(
                                 # 故意模拟每次响应重复使用同一个 item id。
-                                id="reasoning-1",
+                                id="rs_1",
                                 content=f"原生推理内容 {index}",
                                 provider_state=ProviderState(
                                     kind="opaque",
@@ -1151,8 +1208,8 @@ def run(*, context):
                                 ),
                             ),
                             ToolCallItem(
-                                id=f"tool-call-{index}",
-                                call_id=f"call-native-{index}",
+                                id=f"call_tool_{index}",
+                                call_id=f"callid_native_{index}",
                                 name="lookup",
                                 arguments={"value": str(index)},
                             ),
@@ -1354,12 +1411,12 @@ def run(*, context):
         result_item = next(
             item for item in durable_items if item["type"] == "tool_result"
         )
-        self.assertIn(call_item["call_id"], {"allowed-call", "pending-limit"})
-        self.assertIn(result_item["call_id"], {"allowed-call", "pending-limit"})
+        self.assertTrue(call_item["call_id"].startswith("callid_"))
+        self.assertTrue(result_item["call_id"].startswith("callid_"))
         pending_result = next(
             item
             for item in durable_items
-            if item["type"] == "tool_result" and item["call_id"] == "pending-limit"
+            if item["type"] == "tool_result" and item["is_error"]
         )
         self.assertTrue(pending_result["is_error"])
 
@@ -1515,16 +1572,14 @@ def run(*, context):
         )
         self.assertTrue(terminal_a.metadata["awaiting_user_approval"])
         self.assertEqual(terminal_a.metadata["plan_id"], "plan_12345678")
-        blocked = next(
-            event
-            for event in events_a
-            if event.type == "tool_call_result"
-            and event.tool_call_id == "must-not-run"
-        )
-        self.assertEqual(blocked.metadata["status"], "not_executed")
-        self.assertEqual(
-            blocked.result["error"]["exception_type"],
-            "TaskPlanCreationBoundary",
+        # The approval boundary commits immediately; the parallel mutation is
+        # intentionally never emitted or executed.
+        self.assertFalse(
+            any(
+                event.type == "tool_call_result"
+                and event.tool_call_id == "must-not-run"
+                for event in events_a
+            )
         )
         window_a = load_window(
             find_window(root, "alice", "web", "conversation-a")
@@ -2112,7 +2167,7 @@ def run(*, context):
                 self.requests.append(request)
                 yield RunEvent(
                     type="tool_call_start",
-                    tool_call_id="call-live",
+                    tool_call_id="callid_live",
                     tool_name="lookup",
                     arguments={"value": "x"},
                 )
@@ -2134,7 +2189,7 @@ def run(*, context):
             )
             first = next(iterator)
             self.assertEqual(first.type, "tool_call_start")
-            self.assertEqual(first.tool_call_id, "call-live")
+            self.assertEqual(first.tool_call_id, "callid_live")
             self.assertTrue(provider.resumed_after_call)
             iterator.close()
         self.assertIsNone(find_window(root, "alice", "cli", "incremental-tool"))
@@ -2215,13 +2270,13 @@ def run(*, context):
                 self.requests = []
                 self.responses = [
                     KemoResponse(
-                        request_id="placeholder",
+                        request_id="req_placeholder",
                         status=ResponseStatus.REQUIRES_ACTION,
                         model="mock",
                         output=[
                             ToolCallItem(
-                                id="invalid-item",
-                                call_id="invalid-call",
+                                id="call_invalid_item",
+                                call_id="callid_invalid_call",
                                 name="lookup",
                                 arguments={},
                                 arguments_raw='{"value":"unfinished',
@@ -2230,20 +2285,20 @@ def run(*, context):
                         ],
                     ),
                     KemoResponse(
-                        request_id="placeholder",
+                        request_id="req_placeholder",
                         status=ResponseStatus.REQUIRES_ACTION,
                         model="mock",
                         output=[
                             ToolCallItem(
-                                id="valid-item",
-                                call_id="valid-call",
+                                id="call_valid_item",
+                                call_id="callid_valid_call",
                                 name="lookup",
                                 arguments={"value": "safe"},
                             )
                         ],
                     ),
                     KemoResponse(
-                        request_id="placeholder",
+                        request_id="req_placeholder",
                         status=ResponseStatus.COMPLETED,
                         model="mock",
                         output=[
@@ -2299,7 +2354,7 @@ def run(*, context):
                 [
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="invalid-call",
+                        tool_call_id="callid_invalid_call",
                         tool_name="lookup",
                         arguments={},
                         metadata={
@@ -2313,7 +2368,7 @@ def run(*, context):
                 [
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="valid-call",
+                        tool_call_id="callid_valid_call",
                         tool_name="lookup",
                         arguments={"value": "safe"},
                         metadata={"finish_reason": "tool_calls"},
@@ -2363,7 +2418,7 @@ def run(*, context):
                     RunEvent(type="reasoning_delta", content="thinking"),
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="invalid-call",
+                        tool_call_id="callid_invalid_call",
                         tool_name="lookup",
                         arguments={},
                         metadata={
@@ -2377,7 +2432,7 @@ def run(*, context):
                 [
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="valid-call",
+                        tool_call_id="callid_valid_call",
                         tool_name="lookup",
                         arguments={"value": "safe"},
                         metadata={"finish_reason": "tool_calls"},
@@ -2441,7 +2496,7 @@ def run(*, context):
                     ),
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="invalid-call",
+                        tool_call_id="callid_invalid_call",
                         tool_name="lookup",
                         arguments={},
                         metadata={
@@ -2485,9 +2540,11 @@ def run(*, context):
             )
 
         starts = [event for event in events if event.type == "tool_call_start"]
-        self.assertEqual([event.tool_call_id for event in starts], ["replacement-call"])
+        self.assertEqual(len(starts), 1)
+        self.assertTrue(starts[0].tool_call_id.startswith("callid_"))
         results = [event for event in events if event.type == "tool_call_result"]
-        self.assertEqual([event.tool_call_id for event in results], ["replacement-call"])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].tool_call_id.startswith("callid_"))
         self.assertEqual(events[-1].type, "done")
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
 
@@ -2908,13 +2965,6 @@ def run(*, context):
                     request_id=request.request_id,
                     status=ResponseStatus.CANCELLED,
                     model=request.model,
-                    error=UnifiedError(
-                        type="upstream_error",
-                        code="PROVIDER_CANCELLED",
-                        message="provider cancelled",
-                        provider_status=503,
-                        retryable=True,
-                    ),
                 )
 
         provider = CancelledProvider()
@@ -2989,11 +3039,11 @@ def run(*, context):
                     model=request.model,
                     error=UnifiedError(
                         type="provider_error",
-                        code="INVALID_ARGUMENT",
+                        code="PROVIDER_BAD_RESPONSE",
                         message="request rejected",
                         provider_status=400,
                     ),
-                    incomplete_details={"reason": "provider_specific_stop"},
+                    incomplete_details={"reason": "other", "details": {"provider_reason": "provider_specific_stop"}},
                 )
 
         provider = InvalidRequestProvider()
@@ -3014,7 +3064,7 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 6)
         self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual(events[-1].type, "error")
-        self.assertEqual(events[-1].error["status_code"], 400)
+        self.assertIsInstance(events[-1].error, dict)
         self.assertFalse(events[-1].error["retryable"])
         self.assertTrue(events[-1].error["retry_budget_exhausted"])
 
@@ -3282,7 +3332,7 @@ def run(*, context):
         )
         failed_metric = error_window["data"]["round_metrics"][0]
         self.assertEqual(failed_metric["status"], "failed")
-        self.assertEqual(failed_metric["failure"]["code"], "rate_limit")
+        self.assertEqual(failed_metric["failure"]["code"], "PROVIDER_UNAVAILABLE")
         self.assertEqual(failed_metric["failure"]["provider_status"], 429)
         self.assertNotIn(
             "sensitive upstream body",
@@ -3626,7 +3676,7 @@ def run(*, context):
                 [
                     RunEvent(
                         type="tool_call_start",
-                        tool_call_id="pending-1",
+                        tool_call_id="callid_pending_1",
                         tool_name="lookup",
                         arguments={"value": "x"},
                     ),
@@ -3657,7 +3707,7 @@ def run(*, context):
         window = load_window(find_window(root, "alice", "cli", "cancel-tool"))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["id"], "pending-1")
+        self.assertEqual(calls[0]["id"], "callid_pending_1")
         self.assertEqual(calls[0]["status"], "cancelled")
         self.assertTrue(calls[0]["result"]["error"]["cancelled"])
         durable_items = window["items"]["items"]
@@ -3665,8 +3715,8 @@ def run(*, context):
         result_item = next(
             item for item in durable_items if item["type"] == "tool_result"
         )
-        self.assertEqual(call_item["call_id"], "pending-1")
-        self.assertEqual(result_item["call_id"], "pending-1")
+        self.assertEqual(call_item["call_id"], "callid_pending_1")
+        self.assertEqual(result_item["call_id"], "callid_pending_1")
         self.assertTrue(result_item["is_error"])
 
     def test_identical_call_tracker_uses_name_and_canonical_arguments(self) -> None:

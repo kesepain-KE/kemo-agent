@@ -78,12 +78,16 @@ class MockProvider:
         self.capability_calls.append(model)
         return ModelCapabilities.model_validate(
             {
+                "protocol_version": "2.0",
                 "model": model,
+                "provider_id": "mock",
+                "provider_model": model,
                 "task": "llm",
                 "reasoning": {
                     "supported": self.reasoning_supported,
                     "efforts": self.reasoning_efforts if self.reasoning_supported else [],
                     "summary": self.reasoning_supported,
+                    "returns": ["none", "summary", "auto"] if self.reasoning_supported else ["none", "auto"],
                 },
             }
         )
@@ -485,9 +489,11 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     model=request.model,
                     incomplete_details={
                         "reason": "output_truncated",
-                        "finish_reason": "length",
-                        "category": "upstream_error",
-                        "retryable": True,
+                        "details": {
+                            "finish_reason": "length",
+                            "category": "upstream_error",
+                            "retryable": True,
+                        },
                     },
                 )
 
@@ -512,7 +518,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     inner_self.requests.append(request)
                     return KemoResponse(
                         request_id=request.request_id,
-                        status=ResponseStatus.INCOMPLETE,
+                         status=ResponseStatus.INCOMPLETE,
                         model=request.model,
                         incomplete_details={
                             "reason": "empty_output",
@@ -546,15 +552,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 inner_self.requests.append(request)
                 return KemoResponse(
                     request_id=request.request_id,
-                    status=ResponseStatus.INCOMPLETE,
+                    status=ResponseStatus.FAILED,
                     model=request.model,
                     error=UnifiedError(
                         type="provider_error",
-                        code="INVALID_ARGUMENT",
+                        code="PROVIDER_BAD_RESPONSE",
                         message="request rejected",
                         provider_status=400,
                     ),
-                    incomplete_details={"reason": "provider_specific_stop"},
                 )
 
         provider = InvalidRequestProvider()
@@ -613,7 +618,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                         ReasoningItem(id="rs_0", summary=f"reasoning {iteration}"),
                         ToolCallItem(
                             id="call_0_0",
-                            call_id="call_0_0",
+                            call_id="callid_0_0",
                             name="memory_manage",
                             arguments={
                                 "action": "search_by_content",
@@ -690,14 +695,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len({item.id for item in carried_calls}), 2)
         self.assertEqual(len({item.call_id for item in carried_calls}), 2)
         self.assertTrue(all(item.id != "call_0_0" for item in carried_calls))
-        self.assertTrue(all(item.call_id != "call_0_0" for item in carried_calls))
+        self.assertTrue(all(item.call_id != "callid_0_0" for item in carried_calls))
         self.assertEqual(
             {item.call_id for item in carried_results},
             {item.call_id for item in carried_calls},
         )
         self.assertTrue(
             all(
-                item.id == "call_0_0" and item.call_id == "call_0_0"
+                item.id == "call_0_0" and item.call_id == "callid_0_0"
                 for response in provider.responses[:2]
                 for item in response.output
                 if isinstance(item, ToolCallItem)
@@ -868,7 +873,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     output=[
                         ToolCallItem(
                             id="call_structured_output",
-                            call_id="structured_output_1",
+                            call_id="callid_structured_output_1",
                             name="submit_structured_output",
                             arguments=expected,
                         )

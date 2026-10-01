@@ -13,15 +13,11 @@ IGNORED_PARTS = {
 # These are cohesive declaration/protocol or page-composition roots rather than
 # multi-domain implementation modules.  Every exception must carry a rationale.
 COHESIVE_LONG_MODULES = {
-    "web/service.py": "single Web service compatibility facade; domain work lives in web/services",
-    "web/services/files.py": "single file-management service covering one storage domain",
-    "web/services/settings.py": "single settings service covering configuration reads and writes",
     "global_expand/kemo_app/start_expand.py": "single Kemo App control dispatcher and panel entry",
     "global_expand/kemo_gateway_status/gateway_status.py": "single gateway status collection and rendering domain",
     "provider/adapters/compat.py": "single provider compatibility conversion layer",
     "provider/protocol/models.py": "provider protocol data declarations without orchestration",
     "web/frontend/src/components/AppShell.tsx": "application-shell composition root; run registry is extracted to a dedicated hook",
-    "web/frontend/src/components/Chat/inlineWidgetProtocol.ts": "single inline-widget protocol and validators",
     "web/frontend/src/types/api.ts": "API declaration surface; executable implementations live elsewhere",
     "web/frontend/src/api/client.ts": "single HTTP transport facade grouped by backend resource",
     "web/frontend/src/pages/ChatPage.tsx": "chat lifecycle composition root; rendering lives in ChatPageView and workflows in chatWorkflows",

@@ -22,12 +22,13 @@ from provider.protocol.models import (
     RerankRequest,
 )
 from provider.protocol.serialization import to_json_bytes
-from provider.protocol.streaming import ProviderStreamEvent, encode_sse
+from provider.protocol.streaming import MessageItemStart, ProviderStreamEvent, encode_sse
 from provider.schema import ProviderError, ProviderTimeoutError
 
 
 def _request(*, stream: bool = True) -> KemoRequest:
     return KemoRequest(
+        protocol_version="2.0",
         request_id="req_transport",
         model="gateway/test",
         stream=stream,
@@ -38,6 +39,7 @@ def _request(*, stream: bool = True) -> KemoRequest:
 
 def _response(request: KemoRequest, response_id: str = "resp_transport") -> KemoResponse:
     return KemoResponse(
+        protocol_version="2.0",
         id=response_id,
         request_id=request.request_id,
         status=ResponseStatus.COMPLETED,
@@ -135,21 +137,47 @@ class KemoTransportReliabilityTests(unittest.TestCase):
                 response_id=response.id,
             ),
             ProviderStreamEvent(
-                type=StreamEventType.OUTPUT_TEXT_DELTA,
+                type=StreamEventType.OUTPUT_ITEM_ADDED,
                 event_id="evt_1",
                 sequence=1,
+                previous_sequence=0,
+                request_id=request.request_id,
+                response_id=response.id,
+                item_id="msg_answer",
+                item=MessageItemStart(
+                    id="msg_answer",
+                    phase=MessagePhase.FINAL_ANSWER,
+                ),
+            ),
+            ProviderStreamEvent(
+                type=StreamEventType.OUTPUT_TEXT_DELTA,
+                event_id="evt_2",
+                sequence=2,
+                previous_sequence=1,
                 request_id=request.request_id,
                 response_id=response.id,
                 item_id="msg_answer",
                 content_index=0,
                 delta="done",
             ),
+            ProviderStreamEvent(
+                type=StreamEventType.OUTPUT_TEXT_DONE,
+                event_id="evt_3",
+                sequence=3,
+                previous_sequence=2,
+                request_id=request.request_id,
+                response_id=response.id,
+                item_id="msg_answer",
+                content_index=0,
+                text="done",
+            ),
         ]
         second = [
             ProviderStreamEvent(
                 type=StreamEventType.RESPONSE_COMPLETED,
-                event_id="evt_2",
-                sequence=2,
+                event_id="evt_4",
+                sequence=4,
+                previous_sequence=3,
                 request_id=request.request_id,
                 response_id=response.id,
                 response=response,
@@ -172,13 +200,13 @@ class KemoTransportReliabilityTests(unittest.TestCase):
         adapter._open = open_response
         events = list(adapter.stream(request))
 
-        self.assertEqual([event.sequence for event in events], [0, 1, 2])
+        self.assertEqual([event.sequence for event in events], [0, 1, 2, 3, 4])
         self.assertEqual(len(seen), 2)
         self.assertEqual(
             json.loads(seen[0].data)["request_id"],
             json.loads(seen[1].data)["request_id"],
         )
-        self.assertEqual(seen[1].get_header("Last-event-id"), "evt_1")
+        self.assertEqual(seen[1].get_header("Last-event-id"), "evt_3")
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[1].full_url).query)
         self.assertEqual(query, {})
         self.assertEqual(seen[1].get_header("Idempotency-key"), request.request_id)
@@ -194,11 +222,15 @@ class KemoTransportReliabilityTests(unittest.TestCase):
                 response_id="resp_original",
             ),
             ProviderStreamEvent(
-                type=StreamEventType.RESPONSE_CREATED,
+                type=StreamEventType.OUTPUT_TEXT_DELTA,
                 event_id="evt_restarted",
                 sequence=1,
+                previous_sequence=0,
                 request_id=request.request_id,
                 response_id="resp_restarted",
+                item_id="msg_restarted",
+                content_index=0,
+                delta="unexpected",
             ),
         ]
         replies = [
@@ -298,13 +330,14 @@ class KemoTransportReliabilityTests(unittest.TestCase):
 
     def test_embedding_retries_with_identical_body_and_idempotency_key(self) -> None:
         request = EmbeddingRequest(
+            protocol_version="2.0",
             request_id="req_embed_retry",
             model="gateway/embed",
             input_type="query",
             inputs=[EmbeddingInput(id="query_1", text="hello")],
         )
         payload = {
-            "protocol_version": "1.0",
+            "protocol_version": "2.0",
             "object": "kemo.embedding_list",
             "request_id": request.request_id,
             "model": request.model,
@@ -334,13 +367,14 @@ class KemoTransportReliabilityTests(unittest.TestCase):
 
     def test_rerank_retries_with_identical_body_and_idempotency_key(self) -> None:
         request = RerankRequest(
+            protocol_version="2.0",
             request_id="req_rerank_retry",
             model="gateway/rerank",
             query="hello",
             documents=[RerankDocument(id="doc_1", text="hello world")],
         )
         payload = {
-            "protocol_version": "1.0",
+            "protocol_version": "2.0",
             "object": "kemo.rerank",
             "request_id": request.request_id,
             "model": request.model,
@@ -401,6 +435,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             type=StreamEventType.RESPONSE_COMPLETED,
             event_id="evt_terminal",
             sequence=1,
+            previous_sequence=0,
             request_id=request.request_id,
             response_id=response.id,
             response=response,
@@ -503,19 +538,20 @@ class KemoTransportReliabilityTests(unittest.TestCase):
         self.assertEqual(cancelled_ids, ["resp_to_cancel"])
         self.assertEqual(getattr(errors[0], "category", ""), "cancelled")
 
-    def test_kemo_1_0_rejects_sequence_without_last_event_id(self) -> None:
+    def test_kemo_2_0_rejects_sequence_without_last_event_id(self) -> None:
         adapter = self.make_adapter()
 
         with self.assertRaisesRegex(ValueError, "Last-Event-ID"):
             list(adapter.stream(_request(), resume_from_sequence=2))
 
-    def test_kemo_1_0_uses_last_event_id_without_legacy_query(self) -> None:
+    def test_kemo_2_0_uses_last_event_id_without_legacy_query(self) -> None:
         request = _request()
         response = _response(request)
         completed = ProviderStreamEvent(
             type=StreamEventType.RESPONSE_COMPLETED,
             event_id="evt_3",
             sequence=3,
+            previous_sequence=2,
             request_id=request.request_id,
             response_id=response.id,
             response=response,

@@ -507,6 +507,8 @@ class ProviderTests(ServerMixin, unittest.TestCase):
     @staticmethod
     def request(model: str = "mock-model", *, stream: bool = False) -> KemoRequest:
         return KemoRequest(
+            protocol_version="2.0",
+            request_id="req_test_request",
             model=model,
             stream=stream,
             system_prompt="",
@@ -565,10 +567,15 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         class KemoCapabilities:
             def capabilities(self, model: str) -> ModelCapabilities:
                 return ModelCapabilities(
+                    protocol_version="2.0",
                     model=model,
+                    provider_id="kemo",
+                    provider_model=model,
                     reasoning={
                         "supported": True,
                         "efforts": ["medium", "high"],
+                        "summary": True,
+                        "returns": ["none", "summary", "auto"],
                     },
                 )
 
@@ -625,7 +632,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         ]
         self.assertEqual(len(calls), 1)
         self.assertIsInstance(calls[0], ToolCallItem)
-        self.assertEqual(calls[0].call_id, "call-1")
+        self.assertTrue(calls[0].call_id.startswith("callid_"))
         self.assertEqual(calls[0].name, "history_search")
         self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
         self.assertEqual(calls[0].arguments_raw, '{"query":"hello","limit":2}')
@@ -636,7 +643,10 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         response = provider.create(self.request("truncated-tool"))
         self.assertEqual(response.status, ResponseStatus.INCOMPLETE)
         self.assertEqual(response.incomplete_details["reason"], "output_truncated")
-        response_details = json.dumps(response.incomplete_details, ensure_ascii=False)
+        response_details = json.dumps(
+            response.incomplete_details.model_dump(mode="json"),
+            ensure_ascii=False,
+        )
         self.assertNotIn("arguments_raw", response_details)
         self.assertNotIn('{"query":"unfinished', response_details)
         self.assertFalse(
@@ -659,13 +669,13 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         )
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
         stream_details = json.dumps(
-            events[-1].response.incomplete_details,
+            events[-1].response.incomplete_details.model_dump(mode="json"),
             ensure_ascii=False,
         )
         self.assertNotIn("arguments_raw", stream_details)
         self.assertNotIn('{"query":"unfinished', stream_details)
         self.assertTrue(
-            events[-1].response.incomplete_details["invalid_tool_calls"][0][
+            events[-1].response.incomplete_details.details["invalid_tool_calls"][0][
                 "arguments_diagnostic"
             ]["content_omitted"]
         )
@@ -674,7 +684,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         provider = create_provider(self.config("chat", model="eof-with-finish"))
         events = list(provider.stream(self.request("eof-with-finish", stream=True)))
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
-        self.assertEqual(events[-1].response.metadata["finish_reason"], "stop")
+        self.assertEqual(events[-1].response.status, ResponseStatus.COMPLETED)
 
     def test_auth_error_mapping(self) -> None:
         provider = create_provider(self.config("chat", key="bad-key"))

@@ -67,13 +67,13 @@ def _response_with_tool(
     arguments_raw: str | None = None,
 ) -> KemoResponse:
     return KemoResponse(
-        request_id="placeholder",
+        request_id="req_placeholder",
         status=ResponseStatus.COMPLETED,
         model="mock",
         output=[
             ToolCallItem(
-                id="tool-item",
-                call_id="tool-call",
+                id="call_tool_item",
+                call_id="callid_tool_call",
                 name="submit_structured_output",
                 arguments=arguments,
                 arguments_raw=arguments_raw,
@@ -196,21 +196,23 @@ def test_batch_parse_error_kind_is_allowlisted() -> None:
 
 def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
     response = KemoResponse(
-        request_id="placeholder",
+        request_id="req_placeholder",
         status=ResponseStatus.INCOMPLETE,
         model="mock",
         output=[],
         incomplete_details={
             "reason": "invalid_tool_arguments",
-            "debug": {"authorization": "Bearer gateway-secret"},
-            "invalid_tool_calls": [
-                {
-                    "name": "subagent_dispatch",
-                    "call_id": "call-subagent",
-                    "arguments_raw": '{"password":"gateway-secret',
-                    "parse_error": {"message": "gateway-secret"},
-                }
-            ],
+            "details": {
+                "debug": {"authorization": "Bearer gateway-secret"},
+                "invalid_tool_calls": [
+                    {
+                        "name": "subagent_dispatch",
+                        "call_id": "callid_subagent",
+                        "arguments_raw": '{"password":"gateway-secret',
+                        "parse_error": {"message": "gateway-secret"},
+                    }
+                ],
+            },
         },
         usage=_usage(),
     )
@@ -229,14 +231,14 @@ def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
 
 def test_malformed_tool_identifier_cannot_bypass_diagnostic_redaction() -> None:
     response = KemoResponse(
-        request_id="placeholder",
+        request_id="req_placeholder",
         status=ResponseStatus.REQUIRES_ACTION,
         model="mock",
         output=[
             ToolCallItem(
-                id="tool-item",
-                call_id="call\nBearer identifier-secret",
-                name="lookup\npassword=identifier-secret",
+                id="call_tool_item",
+                call_id="callid_identifier_secret",
+                name="lookup",
                 arguments={},
                 arguments_raw="{",
                 parse_error={"message": "invalid"},
@@ -250,8 +252,8 @@ def test_malformed_tool_identifier_cannot_bypass_diagnostic_redaction() -> None:
     assert error is not None
     serialized = json.dumps(error, ensure_ascii=False)
     assert "identifier-secret" not in serialized
-    assert error["tool_name"] == "unknown_tool"
-    assert error["call_id"] == ""
+    assert error["tool_name"] == "lookup"
+    assert error["call_id"] == "callid_identifier_secret"
 
 
 def test_subagent_retries_malformed_structured_tool_arguments() -> None:

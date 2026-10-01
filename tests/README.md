@@ -25,30 +25,32 @@
 ```powershell
 python -m pytest tests -q
 python -m pytest tests/deploy -q
-python -m tests.contracts.kemo_v1 -q
+python -m tests.contracts.kemo_v2 -q
 python -m pytest tests/template_tests -q
 ```
 
 发布前还应运行项目的完整 `开发临时目录/release_check.py`；该脚本只负责编排，不承载业务断言。
 
-## Kemo 1.0 共享契约
+## Kemo 2.0 固定协议制品
 
-`tests/contracts/kemo_v1` 是 kemo-agent 与 kemo-adapter-api 共用的离线线协议基准。两个仓库镜像
-相同的 `fixtures/manifest.json` 和 `fixtures/wire.json`，但分别调用自己的生产协议模型、序列化器、
-SSE 解析器和顺序守卫；不从另一仓库导入代码，也不访问真实网关或 Provider。
+`tests/contracts/kemo_v2` 验证 Agent 权威协议模型、Schema、规则清单和最小 Fixture。Gateway
+不复制一套 Python 模型，而是加载 Agent 构建的 `vendor/kemo_protocol-2.0.zip`，通过其
+`tests/contracts/kemo_v2/test_artifact_contract.py` 校验 lock、Schema 和 Fixture 摘要。
+当前只支持精确 `protocol_version="2.0"`，不提供 1.x shim。
 
-只验证当前 Agent：
-
-```powershell
-python -m tests.contracts.kemo_v1 -q
-```
-
-同时检出网关时，再核对镜像文件：
+Agent：
 
 ```powershell
-python -m tests.contracts.kemo_v1 --peer-root E:\code\kemo-adapter-api -q
+python -m pytest tests/contracts/kemo_v2 -q
+python -m provider.protocol.spec.build_artifact E:\code\kemo-adapter-api\vendor
 ```
 
-路径应替换为本机实际位置。修改 Kemo 请求、响应、能力声明、Asset、工具、多模态、Usage、
-Embedding、Rerank 或 SSE 时，必须同步两边 Fixture、清单摘要和固定摘要；不能靠删除用例、放宽
-Schema 或只修改一端让测试变绿。
+Gateway：
+
+```powershell
+python -m pytest tests/contracts/kemo_v2 -q
+python -m tests --suite kemo-contract -q
+```
+
+协议模型、SSE、Asset、工具、多模态、Usage、Embedding、Rerank 或能力声明发生变化时，必须先
+重建固定制品并让双仓摘要一致；禁止只改一侧、降低校验或恢复旧协议测试作为默认门禁。

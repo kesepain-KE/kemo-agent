@@ -15,7 +15,7 @@ from run.retry import (
     view_from_event,
     view_from_exception,
 )
-from run.retry.loop import RetryLedger
+from run.retry.loop import RetryLedger, run_attempts
 
 
 class RetryPolicyTests(unittest.TestCase):
@@ -134,6 +134,34 @@ class RetryPolicyTests(unittest.TestCase):
         ledger.begin_attempt()
         ledger.record_failure(progress=True)
         self.assertFalse(ledger.can_retry())
+
+    def test_exhaustion_reports_total_attempts_after_progress_resets_streak(self) -> None:
+        """Retry metadata must describe the run, not only its last streak."""
+
+        ledger = RetryLedger(max_attempts=3)
+        calls = 0
+
+        def run_once(_attempt):
+            nonlocal calls
+            calls += 1
+            error = RuntimeError("transient")
+            # Two successful-progress failures start fresh episodes.  The
+            # final two failures exhaust the configured consecutive budget
+            # (``max_attempts`` includes the initial attempt).
+            error.retry_progress = calls <= 2
+            raise error
+
+        with self.assertRaises(RuntimeError) as raised:
+            run_attempts(
+                run_once,
+                ledger=ledger,
+                should_retry_error=lambda _error: True,
+            )
+
+        self.assertEqual(calls, 4)
+        self.assertEqual(ledger.attempts, 4)
+        self.assertEqual(raised.exception.retry_attempts, 4)
+        self.assertEqual(raised.exception.retry_max_attempts, 3)
 
 
 if __name__ == "__main__":

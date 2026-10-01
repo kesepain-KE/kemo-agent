@@ -412,8 +412,11 @@ class ContextLifecycleTests(unittest.TestCase):
         protocol_request = chat_request_to_kemo(
             ChatRequest(model="gateway-model", messages=groups[0].messages)
         )
-        self.assertEqual(protocol_request.input[-2].call_id, "call_recovered")
-        self.assertEqual(protocol_request.input[-1].call_id, "call_recovered")
+        self.assertTrue(protocol_request.input[-2].call_id.startswith("callid_"))
+        self.assertEqual(
+            protocol_request.input[-1].call_id,
+            protocol_request.input[-2].call_id,
+        )
 
     def test_native_history_does_not_duplicate_valid_tool_call(self) -> None:
         window = make_window(1, with_tools=True)

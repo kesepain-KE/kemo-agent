@@ -806,6 +806,60 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(archived["memory_status"], "queued")
         self.assertNotIn("memory_error", archived)
 
+    def test_capacity_blocked_memory_is_deferred_and_stops_this_scan(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "config").mkdir()
+        (root / "users" / "alice" / "history").mkdir(parents=True)
+        (root / "config" / "global_config.json").write_text(
+            json.dumps({"memory": {"extraction_mode": "compression_only", "recovery_max_rounds_per_scan": 2}}),
+            "utf-8",
+        )
+        (root / "users" / "alice" / "user_config.json").write_text(
+            json.dumps({"schema_version": 1}), "utf-8"
+        )
+        archive = root / "users" / "alice" / "history" / "conv_capacity"
+        window = empty_window("alice", "message:nya_desk_pet", "message-capacity")
+        window["text"]["messages"] = [
+            {"role": "user", "content": "capacity"},
+            {"role": "assistant", "content": "defer"},
+        ]
+        window["data"].update(
+            {"rounds": 1, "memory_processed_round": 0, "memory_status": "deferred"}
+        )
+        commit_window(archive, window)
+        queue_memory_extraction(
+            root,
+            "alice",
+            "message:nya_desk_pet",
+            "message-capacity",
+            target_round=1,
+            reason="manual_compression",
+        )
+        blocked = {
+            "status": "failed",
+            "candidate_count": 0,
+            "error": {
+                "message": "同一执行仍在超时后的后台退出过程中，已拒绝重复启动",
+                "exception_type": "AgentExecutionCapacityError",
+                "capacity_blocked": True,
+            },
+        }
+        with patch("run.scheduler.maintenance.analyze_round_memory", return_value=blocked):
+            result = MaintenanceScheduler(root).scan_once()
+
+        recovery = result["alice"]["memory_recovery"]
+        self.assertEqual(recovery["claimed"], 1)
+        self.assertTrue(recovery["capacity_blocked"])
+        self.assertEqual(len(recovery["deferred"]), 1)
+        self.assertFalse(recovery["failed"])
+        archived = load_window(archive)["data"]
+        self.assertEqual(archived["memory_status"], "queued")
+        self.assertEqual(archived["memory_queue_reason"], "execution_capacity")
+        self.assertIn("memory_retry_at", archived)
+        self.assertNotIn("memory_error", archived)
+
     def test_force_scan_promotes_expired_half_year_memory_to_permanent(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

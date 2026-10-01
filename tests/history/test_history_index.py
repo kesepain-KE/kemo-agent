@@ -9,10 +9,12 @@ from run.history import (
     find_window,
     list_sessions,
     load_window,
+    patch_archive_metadata,
     prepare_window,
 )
 from run.history import (
     claim_pending_memory,
+    defer_memory_claim,
     claim_pending_summary,
     close_session,
     delete_session,
@@ -412,6 +414,53 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(finished["memory_processed_round"], 1)
         self.assertEqual(finished["memory_status"], "completed")
         self.assertNotIn("memory_claim_id", finished)
+
+    def test_memory_claim_can_be_deferred_without_consuming_a_retry(self) -> None:
+        _, root = self.make_root()
+        self.commit_archive(
+            root,
+            source="message:nya_desk_pet",
+            session_id="capacity-session",
+            directory_name="conv_capacity",
+            memory_status="pending",
+        )
+        claim = claim_pending_memory(root, "alice")
+        self.assertIsNotNone(claim)
+
+        deferred = defer_memory_claim(
+            root,
+            "alice",
+            "message:nya_desk_pet",
+            "capacity-session",
+            claim_id=claim["memory_claim_id"],
+        )
+        self.assertIsNotNone(deferred)
+        self.assertEqual(deferred["memory_status"], "queued")
+        self.assertEqual(deferred["memory_queue_reason"], "execution_capacity")
+        self.assertNotIn("memory_error", deferred)
+        self.assertNotIn("memory_claim_id", deferred)
+
+        # The scheduler mirrors the deferred state into the archive.  The
+        # retry lease must survive that metadata round-trip even when there is
+        # no bounded memory_target_round; otherwise the next scan can claim it
+        # immediately instead of honoring the back-off timestamp.
+        archive = root / "users" / "alice" / "history" / "conv_capacity"
+        window = load_window(archive)
+        patch_archive_metadata(
+            archive,
+            window,
+            updates={
+                "memory_status": "queued",
+                "memory_queue_reason": deferred["memory_queue_reason"],
+                "memory_queued_at": deferred["memory_queued_at"],
+                "memory_retry_at": deferred["memory_retry_at"],
+            },
+            removals=("memory_error",),
+        )
+        persisted = find_record(root, "alice", "message:nya_desk_pet", "capacity-session")
+        self.assertEqual(persisted["memory_status"], "queued")
+        self.assertEqual(persisted["memory_retry_at"], deferred["memory_retry_at"])
+        self.assertIsNone(claim_pending_memory(root, "alice"))
 
     def test_memory_claim_can_lease_a_contiguous_round_range(self) -> None:
         _, root = self.make_root()
