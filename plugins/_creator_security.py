@@ -46,11 +46,20 @@ def reject_link_components(
 
     resolved_root = root.resolve()
     candidate = target if target.is_absolute() else resolved_root / target
+    relative: Path | None = None
     try:
         relative = candidate.relative_to(resolved_root)
     except ValueError:
-        raise ValueError(f"{label}路径越出项目根目录") from None
-
+        # Absolute targets may carry a legitimate alias spelling of the root
+        # itself (Windows 8.3 short names such as ``RUNNER~1``, case drift).
+        # Lexical containment then fails for a path that is actually inside
+        # the root.  Fall back to resolved containment once; this follows at
+        # most one final alias resolution and never bypasses the junction
+        # walk below, which still runs on the component names.
+        try:
+            relative = candidate.resolve(strict=False).relative_to(resolved_root)
+        except (OSError, ValueError):
+            raise ValueError(f"{label}路径越出项目根目录") from None
     current = resolved_root
     for part in relative.parts:
         current = current / part
