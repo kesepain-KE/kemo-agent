@@ -2,10 +2,10 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
-> 当前主框架稳定版本 **1.3.2（2026-09-28 正式定档）**，配套网关仍为 **0.8.2**。本页远程命令仅在
+> 当前主框架稳定版本 **1.4.0（2026-10-01 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
 > 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
 > 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
-> `../global_knowledge/deployment-and-release.md`。已有 1.3.0 或 1.3.1 本地验收包不能改名充当 1.3.2，须重新构建打包。
+> `../global_knowledge/deployment-and-release.md`。已有 1.3.2 本地验收包不能改名充当 1.4.0，须重新构建打包。
 
 ## 1. 发布合同：一个版本、一份应用包
 
@@ -37,7 +37,7 @@ tree/
 默认标签格式为 `v<version>`，可在配置中更改 `tag` 模板。
 四个渠道不维护独立版本文件。npm 分发版本由打包器从主框架版本生成，
 源码 npm 清单不存版本且标记为 private，防止误把未组装的壳直接发布；
-Docker 镜像应使用同一主框架版本作为标签。网关 0.8.2 是兼容基线，不是部署器版本。
+Docker 镜像应使用同一主框架版本作为标签。网关 1.0.0 是兼容基线，不是部署器版本。
 
 远程 ZIP 依据官方 GitHub Release API 提供的 SHA256 digest 校验；若 API
 没有 digest，则读取**官方来源**的 `.sha256` 资产。镜像只用于 ZIP 下载回退，
@@ -97,8 +97,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.3.2.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.3.2.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.4.0.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.4.0.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
