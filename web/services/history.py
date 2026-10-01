@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Any
+
+from run.history import (
+    find_record as find_index_record,
+    find_window,
+    load_window,
+)
+from web.constants import _TOOL_TEXT_LIMIT
+from web.errors import NotFoundError, WebServiceError
+from web.services._paths import _reject_link_path, _safe_relative_target
+
+
+def _tool_text_preview(value: Any) -> tuple[str, bool]:
+    if isinstance(value, str):
+        rendered = value
+    else:
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except (TypeError, ValueError):
+            rendered = str(value)
+    truncated = len(rendered) > _TOOL_TEXT_LIMIT
+    return rendered[:_TOOL_TEXT_LIMIT], truncated
+
+
 def history(
     service,
     user: Any,
@@ -11,18 +37,6 @@ def history(
     limit: int | None = None,
     before: int | None = None,
 ) -> dict[str, Any]:
-    import importlib
-    _sessions = importlib.import_module("web.services.sessions")
-    Any = _sessions.Any
-    NotFoundError = _sessions.NotFoundError
-    Path = _sessions.Path
-    WebServiceError = _sessions.WebServiceError
-    _reject_link_path = _sessions._reject_link_path
-    _safe_relative_target = _sessions._safe_relative_target
-    _tool_text_preview = _sessions._tool_text_preview
-    find_index_record = _sessions.find_index_record
-    find_window = _sessions.find_window
-    load_window = _sessions.load_window
     name = service.require_user(user)
     normalized_source = service.require_history_source(source)
     assert normalized_source is not None
@@ -391,6 +405,5 @@ def history(
             "next_before": start_round if start_round > 1 else None,
         },
     }
-
 
 

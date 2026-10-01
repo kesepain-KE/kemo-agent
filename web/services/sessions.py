@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import date as calendar_date
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -13,11 +11,10 @@ from run.history import (
     HistoryError,
     delete_all_sessions as delete_all_history_sessions,
     delete_session as delete_history_session,
-    find_window,
     list_sessions,
     list_sessions_page,
-    load_window,
     rename_session as rename_history_session,
+    session_payload,
     undo_last_round as undo_history_last_round,
 )
 from run.history import (
@@ -28,27 +25,12 @@ from run.history import (
     reserve_session,
 )
 from run.history import session_page_cursor
-from web.constants import _TOOL_TEXT_LIMIT
 from web.errors import (
     ConflictError,
     InvalidRequestError,
     NotFoundError,
-    WebServiceError,
 )
-from web.services._paths import _reject_link_path, _safe_relative_target
 from web.services.history import history as _history_impl
-
-
-def _tool_text_preview(value: Any) -> tuple[str, bool]:
-    if isinstance(value, str):
-        rendered = value
-    else:
-        try:
-            rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
-        except (TypeError, ValueError):
-            rendered = str(value)
-    truncated = len(rendered) > _TOOL_TEXT_LIMIT
-    return rendered[:_TOOL_TEXT_LIMIT], truncated
 
 
 class SessionServiceMixin:
@@ -116,61 +98,7 @@ class SessionServiceMixin:
 
     @staticmethod
     def _index_session_payload(record: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "source": str(record.get("source") or ""),
-            "bound_platform": str(record.get("bound_platform") or ""),
-            "session_id": str(record.get("session_id") or ""),
-            "conversation_id": str(record.get("conversation_id") or ""),
-            "window": str(record.get("archive_window") or ""),
-            "title": str(record.get("title") or ""),
-            "summary": str(record.get("summary") or ""),
-            "summary_status": str(record.get("summary_status") or "none"),
-            "summary_target_round": int(record.get("summary_target_round") or 0),
-            "summary_completed_round": int(record.get("summary_completed_round") or 0),
-            "summary_retry_at": str(record.get("summary_retry_at") or ""),
-            "summary_retry_count": max(0, int(record.get("summary_retry_count") or 0)),
-            "summary_attempt_count": max(
-                0, int(record.get("summary_attempt_count") or 0)
-            ),
-            "summary_consecutive_failures": max(
-                0, int(record.get("summary_consecutive_failures") or 0)
-            ),
-            "summary_max_attempts": max(
-                1, int(record.get("summary_max_attempts") or 5)
-            ),
-            "summary_last_attempt_at": str(record.get("summary_last_attempt_at") or ""),
-            "summary_recovered_at": str(record.get("summary_recovered_at") or ""),
-            "summary_last_error": (
-                dict(record["summary_last_error"])
-                if isinstance(record.get("summary_last_error"), dict)
-                else None
-            ),
-            "summary_checkpoint_next_chunk": max(
-                0, int(record.get("summary_checkpoint_next_chunk") or 0)
-            ),
-            "summary_checkpoint_total_chunks": max(
-                0, int(record.get("summary_checkpoint_total_chunks") or 0)
-            ),
-            "state": str(record.get("lifecycle") or "open"),
-            "run_state": str(record.get("run_state") or "idle"),
-            "chain": str(record.get("chain") or "interactive"),
-            "memory_status": str(record.get("memory_status") or "unknown"),
-            "memory_processed_round": max(
-                0, int(record.get("memory_processed_round") or 0)
-            ),
-            "memory_target_round": max(
-                0, int(record.get("memory_target_round") or 0)
-            ),
-            "memory_queue_reason": str(record.get("memory_queue_reason") or ""),
-            "memory_queued_at": str(record.get("memory_queued_at") or ""),
-            "memory_last_error": (
-                dict(record["memory_last_error"])
-                if isinstance(record.get("memory_last_error"), dict)
-                else None
-            ),
-            "rounds": max(0, int(record.get("rounds") or 0)),
-            "updated_at": str(record.get("updated_at") or ""),
-        }
+        return session_payload(record, chain_default="interactive")
 
     def active_session(
         self,
