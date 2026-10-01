@@ -20,6 +20,7 @@ from run.history.index import (
     update_title as update_index_title,
 )
 from run.history.runtime_window import load_window, runtime_window_path
+from run.history.session_payload import session_payload
 from run.history.store import (
     connection,
     database_path,
@@ -197,58 +198,6 @@ def get_or_create_window(
     return directory, window
 
 
-def _session_payload(record: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "source": str(record.get("source") or ""),
-        "bound_platform": str(record.get("bound_platform") or ""),
-        "session_id": str(record.get("session_id") or ""),
-        "conversation_id": str(record.get("conversation_id") or ""),
-        "window": str(record.get("archive_window") or ""),
-        "title": str(record.get("title") or ""),
-        "summary": str(record.get("summary") or ""),
-        "summary_status": str(record.get("summary_status") or "none"),
-        "summary_target_round": int(record.get("summary_target_round") or 0),
-        "summary_completed_round": int(record.get("summary_completed_round") or 0),
-        "summary_retry_at": str(record.get("summary_retry_at") or ""),
-        "summary_retry_count": max(0, int(record.get("summary_retry_count") or 0)),
-        "summary_attempt_count": max(0, int(record.get("summary_attempt_count") or 0)),
-        "summary_consecutive_failures": max(
-            0, int(record.get("summary_consecutive_failures") or 0)
-        ),
-        "summary_max_attempts": max(1, int(record.get("summary_max_attempts") or 5)),
-        "summary_last_attempt_at": str(record.get("summary_last_attempt_at") or ""),
-        "summary_recovered_at": str(record.get("summary_recovered_at") or ""),
-        "summary_last_error": copy.deepcopy(
-            record.get("summary_last_error")
-            if isinstance(record.get("summary_last_error"), dict)
-            else None
-        ),
-        "summary_checkpoint_next_chunk": max(
-            0, int(record.get("summary_checkpoint_next_chunk") or 0)
-        ),
-        "summary_checkpoint_total_chunks": max(
-            0, int(record.get("summary_checkpoint_total_chunks") or 0)
-        ),
-        "state": str(record.get("lifecycle") or "open"),
-        "run_state": str(record.get("run_state") or "idle"),
-        "chain": str(record.get("chain") or ""),
-        "memory_status": str(record.get("memory_status") or "unknown"),
-        "memory_processed_round": max(
-            0, int(record.get("memory_processed_round") or 0)
-        ),
-        "memory_target_round": max(0, int(record.get("memory_target_round") or 0)),
-        "memory_queue_reason": str(record.get("memory_queue_reason") or ""),
-        "memory_queued_at": str(record.get("memory_queued_at") or ""),
-        "memory_last_error": copy.deepcopy(
-            record.get("memory_last_error")
-            if isinstance(record.get("memory_last_error"), dict)
-            else None
-        ),
-        "rounds": int(record.get("rounds") or 0),
-        "updated_at": str(record.get("updated_at") or ""),
-    }
-
-
 def list_sessions(
     root: Path,
     user: str,
@@ -258,7 +207,7 @@ def list_sessions(
     archive_date: str = "",
 ) -> list[dict[str, Any]]:
     return [
-        _session_payload(record)
+        session_payload(record)
         for record in list_index_records(
             root,
             user,
@@ -288,7 +237,7 @@ def list_sessions_page(
         before_updated_at=before_updated_at,
         archive_date=archive_date,
     )
-    return [_session_payload(record) for record in records], has_more
+    return [session_payload(record) for record in records], has_more
 
 
 def _source_windows(root: Path, user: str, source: str) -> list[tuple[Path, str]]:

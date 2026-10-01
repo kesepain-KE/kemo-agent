@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import uuid
@@ -89,6 +89,9 @@ def claim_pending_memory(
         if processed_round >= claim_limit or not record.get("archive_window"):
             return False
         status = str(record.get("memory_status") or "pending")
+        retry_at = _timestamp(record.get("memory_retry_at"))
+        if retry_at is not None and retry_at > now:
+            return False
         if status == "processing" and not _claim_is_stale(
             record, now=now, stale_after_seconds=stale_after_seconds
         ):
@@ -122,6 +125,7 @@ def claim_pending_memory(
         record["memory_claim_start_round"] = next_round
         record["memory_claim_end_round"] = end_round
         record["memory_state_updated_at"] = now.isoformat()
+        record.pop("memory_retry_at", None)
         return record
 
     return claim_registry_record(
@@ -176,6 +180,7 @@ def finish_memory_claim(
             "memory_claim_end_round",
         ):
             record.pop(field, None)
+        record.pop("memory_retry_at", None)
         if error is not None:
             previous_error = record.get("memory_last_error")
             retry_count = (
@@ -215,6 +220,49 @@ def finish_memory_claim(
                     if current_round >= committed_round
                     else remaining_status
                 )
+        record["memory_state_updated_at"] = _now()
+        index["sessions"][key] = record
+        return _write_index_unlocked(root, user, index)["sessions"][key]
+
+
+def defer_memory_claim(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    *,
+    claim_id: str,
+    reason: str = "execution_capacity",
+    delay_seconds: float = MEMORY_RETRY_DELAY_SECONDS,
+) -> dict[str, Any] | None:
+    """Release a claim when execution capacity is temporarily unavailable.
+
+    Deferral is not a content failure: the cursor and historical diagnostic
+    remain unchanged, while the claim becomes eligible after ``memory_retry_at``.
+    """
+
+    with index_lock(root, user):
+        index = _load_index_unlocked(root, user)
+        key = session_key(source, session_id)
+        record = index.setdefault("sessions", {}).get(key)
+        if not isinstance(record, dict) or record.get("memory_claim_id") != claim_id:
+            return None
+        for field in (
+            "memory_claim_id",
+            "memory_claimed_at",
+            "memory_claim_round",
+            "memory_claim_start_round",
+            "memory_claim_end_round",
+        ):
+            record.pop(field, None)
+        record.pop("memory_error", None)
+        record["memory_status"] = "queued"
+        record["memory_queue_reason"] = str(reason or "execution_capacity")[:160]
+        record["memory_queued_at"] = _now()
+        record["memory_retry_at"] = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=max(1.0, float(delay_seconds)))
+        ).isoformat()
         record["memory_state_updated_at"] = _now()
         index["sessions"][key] = record
         return _write_index_unlocked(root, user, index)["sessions"][key]

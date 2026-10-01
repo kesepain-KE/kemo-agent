@@ -12,8 +12,6 @@ agents.max_rounds 限制，允许保存压缩统计和局部轮号偏移。二�
 from __future__ import annotations
 
 import copy
-import json
-import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -44,9 +42,6 @@ from run.history.store import (
     save_window_bundle,
     window_exists,
 )
-from run.config import user_dir
-
-
 SCHEMA_VERSION = 1
 ITEMS_SCHEMA_VERSION = 2
 _ARCHIVE_DATA_FIELDS = frozenset(
@@ -69,6 +64,7 @@ _ARCHIVE_DATA_FIELDS = frozenset(
         "memory_queue_reason",
         "memory_target_round",
         "memory_queued_at",
+        "memory_retry_at",
         "complete",
     }
 )

@@ -264,7 +264,7 @@ def _record_from_data(
     memory_last_error = data.get("memory_last_error") or old.get("memory_last_error")
     if isinstance(memory_last_error, dict):
         record["memory_last_error"] = copy.deepcopy(memory_last_error)
-    for field in ("memory_queue_reason", "memory_queued_at"):
+    for field in ("memory_queue_reason", "memory_queued_at", "memory_retry_at"):
         value = data.get(field)
         if isinstance(value, str) and value.strip():
             record[field] = value
@@ -278,9 +278,15 @@ def _record_from_data(
         record["memory_target_round"] = memory_target_round
     else:
         record.pop("memory_target_round", None)
-        if not memory_claim_active:
+        # A capacity-deferred claim has no bounded ``memory_target_round``:
+        # it is still queued and its retry timestamp must survive the archive
+        # metadata round-trip.  Clearing queue metadata solely because there
+        # is no active claim used to make the next ``patch_archive_metadata``
+        # call erase ``memory_retry_at`` and immediately re-run the task.
+        if not memory_claim_active and memory_status != "queued":
             record.pop("memory_queue_reason", None)
             record.pop("memory_queued_at", None)
+            record.pop("memory_retry_at", None)
     if record["lifecycle"] not in {"open", "closed", "deleted"}:
         record["lifecycle"] = "open"
     return record

@@ -12,13 +12,12 @@ from run.history.store_core import (
     _deleted_window_exists,
     _json,
     _object,
-    _remember_deleted_window,
     _session_generation,
     _session_is_deleted,
     connection,
 )
 from run.history.registry_store import _upsert_session_row
-from run.history.message_store import _ROUND_INSERT_SQL, _sync_archive_messages
+from run.history.message_store import _sync_archive_messages
 
 
 from run.history.window_rounds import (

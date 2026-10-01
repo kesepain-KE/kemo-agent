@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Iterator
 
 from run.config import user_dir
 

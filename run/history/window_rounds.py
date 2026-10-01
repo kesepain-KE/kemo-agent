@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import copy
-from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Iterable
 
 from run.history.store_core import _json, _object
 from run.history.message_store import _ROUND_INSERT_SQL

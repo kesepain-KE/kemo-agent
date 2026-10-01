@@ -28,6 +28,7 @@ from run.history.session_api import (
     rename_session,
     session_messages,
 )
+from run.history.session_payload import session_payload
 
 _DOMAIN_MODULES = ("index", "store", "summary_scheduler", "retention", "web_lifecycle")
 

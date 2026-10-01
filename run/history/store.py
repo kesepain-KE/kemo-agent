@@ -11,7 +11,6 @@ from run.history.store_core import (
 )
 from run.history.window_store import (
     _save_window_on_connection,
-    _save_window_on_connection,
     delete_session_windows,
     delete_source_windows,
     delete_window,
@@ -26,7 +25,6 @@ from run.history.window_store import (
     window_location,
     window_path,
 )
-from run.history.message_store import _sync_archive_messages
 from run.history.message_store import _sync_archive_messages
 from run.history.summary_store import (
     context_summary_exists,

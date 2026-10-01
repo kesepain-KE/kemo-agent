@@ -27,6 +27,7 @@ from run.history.index_core import (
 )
 from run.history.memory_claims import (
     claim_pending_memory,
+    defer_memory_claim,
     finish_memory_claim,
 )
 from run.history.session_ops import (
