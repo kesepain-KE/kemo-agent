@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.4.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -139,7 +139,7 @@ kemo-agent 坚持本地优先。
 
 ### 选择安装方式
 
-Windows、Linux、npm 和 Docker 共用主框架版本。当前正式定档版本为 **1.3.2**，网关兼容基线仍为 **0.8.2**。
+Windows、Linux、npm 和 Docker 共用主框架版本。当前正式定档版本为 **1.4.0**，网关兼容基线为 **1.0.0**。
 
 > **发布前提：** 以下远程命令仅在安装脚本已推送、对应渠道发布产物就绪后可用。原生安装需要 Release 中的 `kemo-agent-release-<version>.zip` 与 `.zip.sha256`，npm 需要已发布的分发包，Docker 需要已发布的镜像标签。仅推送代码不会自动发布这些产物；本文不代表线上已经可安装。Release ZIP 不是 GitHub 自动生成的源码 ZIP。
 
@@ -266,9 +266,15 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.3.2`（正式版；远程分发产物需另行发布）
+当前版本：`1.4.0`（正式版；远程分发产物需另行发布）
 
-已确认兼容的 Kemo 网关：`kemo-adapter-api 0.8.2`（Kemo 1.0 线路协议匹配）。
+已确认兼容的 Kemo 网关：`kemo-adapter-api 1.0.0`（Kemo 2.0 线路协议匹配）。
+
+### 1.4.0 正式版
+
+- 主框架版本正式定档为 `1.4.0`，配套 Kemo 网关升级为 `kemo-adapter-api 1.0.0`，知识图谱基线升级为 `kemo-graph 1.6.0`。
+- 三个项目继续使用冻结的 Kemo 2.0 线路协议；协议 Schema、工具调用、流式响应、Embedding、Rerank 与结构化输出合同保持对齐。
+- 远程 Release、npm、GHCR 与网关/图谱分发产物仍需按各自项目单独构建和发布。
 
 ### 1.3.2 正式版
 
@@ -288,10 +294,10 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 - Provider 与子代理的可恢复异常统一按运行级连续失败预算收敛；同一轮中的网络恢复、工具参数修复和外层重试保持独立边界，不因嵌套链路无限放大。
 - 任务计划、定时任务和真实执行记录补齐独立容器、每页六项、详情预览、排序、系统任务隔离与多种周期规则；聊天开始页只显示当前有效会话所属的活动计划，不再展示已清理会话留下的孤立卡片。
 - 拓展与感知升级到模块组件面板 2.0：支持模板默认实现、用户配置页面、preset、秘密字段、动作控件、热发现和配置切换；内置 Kemo App、网关与知识图谱模块补齐可控接口和在线检测。
-- Web 回复正文支持声明式内联卡片、图表、表格、布局、表单、建议追问与站内媒体；未知组件可安全降级为通用数据卡，同时保持流式闭合、文本 fallback 和有限动作边界。
+- Web 回复正文支持声明式内联卡片、图表、表格、组合布局、表单、建议追问、位置示意、影音、文件、商品、订单、投票、评分与站内媒体；组合 UI 内置卡片/列表/行列/Markdown/图标/按钮/日期/选择/输入/滑杆/开关等常用节点，未知组件仍可安全降级为通用数据卡，同时保持流式闭合、文本 fallback 和有限动作边界。
 - 历史归档增加默认时间倒序和按上海自然日展开月历筛选；消息跟进与引导、文件排序、任务栏、知识库编辑/预览、拓展/感知面板间距和运行日志完成一轮交互一致性打磨。
 - 核心实现继续按低耦合、高内聚和统一入口拆分超过 800 行的上帝模块，并补齐缓存、后台队列、日志、模板和合同测试。
-- `kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 1.0 线路协议匹配确认，共享契约覆盖模型能力、流式响应、工具调用、多模态 Asset、Usage、Embedding、Rerank、续传与统一终态。
+- `kemo-agent 1.3.0` 已与 `kemo-adapter-api 0.8.2` 完成 Kemo 2.0 线路协议匹配确认，共享契约覆盖模型能力、流式响应、工具调用、多模态 Asset、Usage、Embedding、Rerank、续传与统一终态。
 
 ### 1.2.9 更新
 

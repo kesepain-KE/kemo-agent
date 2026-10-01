@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.3.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.4.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -139,7 +139,7 @@ The project does not claim that every model service is inherently private. What 
 
 ### Choose an installation method
 
-Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.3.2**; the compatible gateway baseline remains **0.8.2**.
+Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.4.0**; the compatible gateway baseline is **1.0.0**.
 
 > **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
 
@@ -266,9 +266,15 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.3.2` (stable source release; remote distribution artifacts are published separately)
+Current version: `1.4.0` (stable source release; remote distribution artifacts are published separately)
 
-Confirmed compatible Kemo gateway: `kemo-adapter-api 0.8.2` (Kemo 1.0 wire protocol matched).
+Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire protocol matched).
+
+### 1.4.0 stable release
+
+- 主框架版本正式定档为 `1.4.0`，配套 Kemo 网关升级为 `kemo-adapter-api 1.0.0`，知识图谱基线升级为 `kemo-graph 1.6.0`。
+- 三个项目继续使用冻结的 Kemo 2.0 线路协议；协议 Schema、工具调用、流式响应、Embedding、Rerank 与结构化输出合同保持对齐。
+- 远程 Release、npm、GHCR 与网关/图谱分发产物仍需按各自项目单独构建和发布。
 
 ### 1.3.2 stable release
 
@@ -288,10 +294,10 @@ This is the formal release that consolidates long-term intelligence, conversatio
 - Recoverable Provider and subagent failures now converge on a run-level consecutive-failure budget. Network recovery, tool-argument repair, and outer retries retain separate boundaries so nested retry paths cannot grow without limit.
 - Task plans, scheduled tasks, and real execution history now have independent containers, six-item pagination, detailed previews, stable ordering, system-task isolation, and richer recurrence rules. The chat start page only shows an active plan owned by the current valid conversation and no longer surfaces orphaned cards from cleaned archives.
 - Expand and Sense modules move to the 2.0 component-panel contract with template defaults, user configuration pages, presets, secret fields, action controls, hot discovery, and quick configuration switching. The built-in Kemo App, gateway, and knowledge-graph modules expose their intended controls and online checks.
-- Web responses can embed declarative cards, charts, tables, layouts, forms, follow-up suggestions, and site-local media directly in the answer. Unknown component names safely fall back to a generic data card while preserving streaming closure, text fallback, and bounded action semantics.
+- Web responses can embed declarative cards, charts, tables, composable layouts, forms, follow-up suggestions, location views, audio/video players, files, product grids, order summaries, polls, ratings, and site-local media directly in the answer. The composable UI catalog includes card/list/row/column/Markdown/icon/button/date/select/input/slider/switch nodes; unknown component names still fall back to a generic data card while preserving streaming closure, text fallback, and bounded action semantics.
 - Historical archives are sorted newest first and can be filtered through an inline Shanghai-calendar picker. Follow-up/guidance messages, file sorting, task panels, knowledge editing and preview, Expand/Sense panel spacing, and runtime logs received a broader consistency pass.
 - Core implementations continue to split god modules above 800 lines around low coupling, high cohesion, and stable public entry points, with corresponding cache, background queue, logging, template, and contract tests.
-- `kemo-agent 1.3.0` and `kemo-adapter-api 0.8.2` have completed Kemo 1.0 wire-protocol matching across model capabilities, streaming responses, tool calls, multimodal assets, Usage, Embedding, Rerank, resume behavior, and unified terminal states.
+- `kemo-agent 1.3.0` and `kemo-adapter-api 0.8.2` have completed Kemo 2.0 wire-protocol matching across model capabilities, streaming responses, tool calls, multimodal assets, Usage, Embedding, Rerank, resume behavior, and unified terminal states.
 
 ### 1.2.9 update
 
