@@ -64,9 +64,16 @@ def transport_error(exc: BaseException, *, action: str) -> ProviderError:
 class KemoNetworkRetryPolicy:
     """Retry only explicitly transient transport failures with bounded waits."""
 
-    max_attempts: int = 3
+    # Kemo 2.0 defines one error sequence as at most five retries after the
+    # initial attempt (six total attempts).  The owner may lower this for a
+    # deployment, but never silently exceed the protocol budget.
+    max_attempts: int = 6
     base_seconds: float = 0.5
     cap_seconds: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1 or self.max_attempts > 6:
+            raise ValueError("Kemo 2.0 max_attempts 必须在 1..6 之间")
 
     @staticmethod
     def cancelled_error(*, attempt_count: int | None = None) -> ProviderError:

@@ -32,12 +32,17 @@ from provider.protocol.models import (
     EmbeddingResponse,
     KemoRequest,
     KemoResponse,
+    KemoResponseBatch,
     ModelCapabilities,
     ModelCatalogResponse,
     RerankRequest,
     RerankResponse,
 )
-from provider.protocol.serialization import parse_response, to_json_bytes
+from provider.protocol.serialization import (
+    parse_response,
+    parse_response_envelope,
+    to_json_bytes,
+)
 from provider.protocol.streaming import (
     ProviderStreamEvent,
     StreamSequenceGuard,
@@ -82,7 +87,7 @@ class _MultipartUpload:
 
 
 class KemoGatewayAdapter:
-    """Send protocol-v1 objects without translating them to Chat Completions."""
+    """Send Kemo 2.0 objects without translating them to Chat Completions."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.base_url = str(config["base_url"]).rstrip("/")
@@ -109,7 +114,7 @@ class KemoGatewayAdapter:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": content_type,
             "Accept": "text/event-stream" if stream else "application/json",
-            "X-Kemo-Protocol-Version": "1.0",
+            "X-Kemo-Protocol-Version": "2.0",
         }
         if last_event_id:
             headers["Last-Event-ID"] = last_event_id
@@ -307,12 +312,12 @@ class KemoGatewayAdapter:
         request: KemoRequest,
         *,
         cancel_event: threading.Event | None = None,
-    ) -> KemoResponse:
+    ) -> KemoResponse | KemoResponseBatch:
         self.validate(request)
         payload = request.model_copy(update={"stream": False})
         body = to_json_bytes(payload)
 
-        def send() -> KemoResponse:
+        def send() -> KemoResponse | KemoResponseBatch:
             http_request = urllib.request.Request(
                 self.responses_url,
                 data=body,
@@ -328,7 +333,7 @@ class KemoGatewayAdapter:
                     action="读取响应",
                     cancel_event=cancel_event,
                 )
-            response = parse_response(raw)
+            response = parse_response_envelope(raw)
             if response.request_id != request.request_id:
                 raise ProviderError(
                     "Kemo gateway 响应的 request_id 与请求不一致",
@@ -463,7 +468,7 @@ class KemoGatewayAdapter:
             raise ValueError("resume_from_sequence 不能小于 0")
         if resume_from_sequence is not None and current_last_event_id is None:
             raise ValueError(
-                "Kemo 1.0 续传必须提供 Last-Event-ID；不能只使用 resume_from_sequence"
+                "Kemo 2.0 续传必须提供 Last-Event-ID；不能只使用 resume_from_sequence"
             )
         current_resume_sequence = (
             int(resume_from_sequence) if resume_from_sequence is not None else None
@@ -687,7 +692,7 @@ class KemoGatewayAdapter:
         timeout: float | None = None,
     ) -> AssetDescriptor:
         current = asset if isinstance(asset, AssetDescriptor) else self.get_asset(asset)
-        deadline = time.monotonic() + (self.timeout if timeout is None else max(1.0, timeout))
+        deadline = time.monotonic() + (self.timeout if timeout is None else max(2.0, timeout))
         while current.status in {"uploading", "processing"}:
             if cancel_event is not None and cancel_event.wait(0.25):
                 raise ProviderError(

@@ -5,9 +5,8 @@ from __future__ import annotations
 import http.client
 import json
 import math
-import random
 import socket
-import time
+import time  # noqa: F401 - retained for downstream monkey-patching compatibility
 import urllib.error
 import urllib.request
 from typing import Any, Iterable
@@ -32,15 +31,7 @@ from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
-_MAX_CHAT_ATTEMPTS = 2
 _MAX_RETRY_DELAY_SECONDS = 10.0
-_TOOL_PAYLOAD_KEYS = frozenset({
-    "tools",
-    "tool_choice",
-    "parallel_tool_calls",
-    "functions",
-    "function_call",
-})
 _TOOLS_UNSUPPORTED_PHRASES = (
     "tools are not supported",
     "tools is not supported",
@@ -290,43 +281,6 @@ class OpenAIChatTransport:
         )
 
     @staticmethod
-    def _wait_before_retry(error: ProviderError) -> None:
-        retry_after_ms = error.retry_after_ms
-        if isinstance(retry_after_ms, int) and retry_after_ms >= 0:
-            delay = min(_MAX_RETRY_DELAY_SECONDS, retry_after_ms / 1000.0)
-        else:
-            delay = random.uniform(0.5, 1.0)
-        if delay > 0:
-            time.sleep(delay)
-
-    def _next_payload_after_failure(
-        self,
-        payload: dict[str, Any],
-        error: ProviderError,
-        *,
-        attempt: int,
-    ) -> dict[str, Any]:
-        if attempt >= _MAX_CHAT_ATTEMPTS:
-            # The Chat transport owns a strict two-attempt budget.  Mark the
-            # exhausted failure final so the generic runtime cannot multiply
-            # it into another outer retry cycle.
-            error.retryable = False
-            error.retryable_declared = True
-            error.attempt_count = attempt
-            error.retry_budget_exhausted = True
-            raise error
-        if error.category == "tools_unsupported" and payload.get("tools"):
-            return {
-                key: value
-                for key, value in payload.items()
-                if key not in _TOOL_PAYLOAD_KEYS
-            }
-        if error.retryable:
-            self._wait_before_retry(error)
-            return payload
-        raise error
-
-    @staticmethod
     def _read_json_response(response: Any, context: str) -> dict[str, Any]:
         try:
             raw = response.read()
@@ -371,19 +325,12 @@ class OpenAIChatTransport:
         )
 
     def chat(self, request: ChatRequest) -> ChatResponse:
-        current = self._payload(request, stream=False)
-        for attempt in range(1, _MAX_CHAT_ATTEMPTS + 1):
-            try:
-                with self._open(self._request(current, stream=False)) as response:
-                    data = self._read_json_response(response, "Chat Completions")
-                return self._response(data, request)
-            except ProviderError as exc:
-                current = self._next_payload_after_failure(
-                    current,
-                    exc,
-                    attempt=attempt,
-                )
-        raise AssertionError("Chat 请求重试循环异常退出")
+        # Transport owns exactly one HTTP exchange.  Retry decisions belong to
+        # the unified Agent retry owner so a chat adapter cannot multiply the
+        # protocol's error-sequence budget or silently change request meaning.
+        with self._open(self._request(self._payload(request, stream=False), stream=False)) as response:
+            data = self._read_json_response(response, "Chat Completions")
+        return self._response(data, request)
 
     def _response_events(
         self,
@@ -429,6 +376,11 @@ class OpenAIChatTransport:
                 "model": response.model,
                 "response_id": response.response_id,
                 "response_format": response_format,
+                "refusal": response.refusal,
+                "annotations": response.annotations,
+                "logprobs": response.logprobs,
+                "system_fingerprint": response.system_fingerprint,
+                "service_tier": response.service_tier,
             },
         )
 
@@ -443,6 +395,15 @@ class OpenAIChatTransport:
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         text = message.get("content") or ""
         reasoning = message.get("reasoning_content") or ""
+        refusal = message.get("refusal")
+        if refusal is not None:
+            refusal = str(refusal)
+        annotations = message.get("annotations")
+        if not isinstance(annotations, list):
+            annotations = []
+        logprobs = choice.get("logprobs")
+        if not isinstance(logprobs, dict):
+            logprobs = None
         tool_calls: list[ToolCall] = []
         raw_tool_calls = message.get("tool_calls") or []
         legacy_function_call = message.get("function_call")
@@ -473,26 +434,32 @@ class OpenAIChatTransport:
             text=str(text),
             reasoning=str(reasoning),
             tool_calls=tool_calls,
+            refusal=refusal,
+            annotations=[item for item in annotations if isinstance(item, dict)],
+            logprobs=logprobs,
             finish_reason=str(choice.get("finish_reason") or ""),
             usage=self._usage(data.get("usage"), request, str(text)),
             model=str(data.get("model") or request.model or self.model),
             response_id=str(data.get("id") or ""),
+            system_fingerprint=(
+                str(data.get("system_fingerprint"))
+                if data.get("system_fingerprint") is not None
+                else None
+            ),
+            service_tier=(
+                str(data.get("service_tier"))
+                if data.get("service_tier") is not None
+                else None
+            ),
+            choice_index=int(choice.get("index") or 0),
+            choice_count=len(choices),
             raw=data,
         )
 
     def chat_stream(self, request: ChatRequest) -> Iterable[RunEvent]:
-        current = self._payload(request, stream=True)
-        for attempt in range(1, _MAX_CHAT_ATTEMPTS + 1):
-            try:
-                yield from self._chat_stream_once(request, current)
-                return
-            except ProviderError as exc:
-                current = self._next_payload_after_failure(
-                    current,
-                    exc,
-                    attempt=attempt,
-                )
-        raise AssertionError("Chat 流式请求重试循环异常退出")
+        # As with non-streaming calls, this is one SSE exchange.  The caller
+        # may retry only before any externally visible stream sequence exists.
+        yield from self._chat_stream_once(request, self._payload(request, stream=True))
 
     def _chat_stream_once(
         self,
@@ -501,6 +468,9 @@ class OpenAIChatTransport:
     ) -> Iterable[RunEvent]:
         response = self._open(self._request(payload, stream=True))
         text_parts: list[str] = []
+        refusal_parts: list[str] = []
+        annotations: list[dict[str, Any]] = []
+        last_logprobs: dict[str, Any] | None = None
         reasoning_parts: list[str] = []
         tool_parts: dict[int, dict[str, Any]] = {}
         final_usage: Usage | None = None
@@ -508,6 +478,8 @@ class OpenAIChatTransport:
         finish_reason = ""
         response_model = request.model or self.model
         response_id = ""
+        system_fingerprint: str | None = None
+        service_tier: str | None = None
         try:
             content_type = _response_content_type(response)
             if content_type == "application/json" or content_type.endswith("+json"):
@@ -564,6 +536,10 @@ class OpenAIChatTransport:
                     )
                 response_id = str(data.get("id") or response_id)
                 response_model = str(data.get("model") or response_model)
+                if data.get("system_fingerprint") is not None:
+                    system_fingerprint = str(data["system_fingerprint"])
+                if data.get("service_tier") is not None:
+                    service_tier = str(data["service_tier"])
                 if data.get("usage"):
                     final_usage = self._usage(data["usage"], request, "".join(text_parts))
                 choices = data.get("choices") or []
@@ -574,6 +550,16 @@ class OpenAIChatTransport:
                     delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
                     reasoning = delta.get("reasoning_content") or ""
                     text = delta.get("content") or ""
+                    refusal = delta.get("refusal") or ""
+                    if refusal:
+                        refusal_parts.append(str(refusal))
+                    raw_annotations = delta.get("annotations")
+                    if isinstance(raw_annotations, list):
+                        annotations.extend(
+                            item for item in raw_annotations if isinstance(item, dict)
+                        )
+                    if isinstance(choice.get("logprobs"), dict):
+                        last_logprobs = choice["logprobs"]
                     if reasoning:
                         reasoning_parts.append(str(reasoning))
                         yield RunEvent(
@@ -664,6 +650,11 @@ class OpenAIChatTransport:
                     "done_marker_received": done_received,
                     "model": response_model,
                     "response_id": response_id,
+                    "refusal": "".join(refusal_parts) or None,
+                    "annotations": annotations,
+                    "logprobs": last_logprobs,
+                    "system_fingerprint": system_fingerprint,
+                    "service_tier": service_tier,
                 },
             )
         finally:
