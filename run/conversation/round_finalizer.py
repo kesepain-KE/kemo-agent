@@ -516,7 +516,11 @@ class TerminalRoundCommitter:
                 if isinstance(error, BaseException):
                     mark_retry_exhausted(
                         error,
-                        attempts=failures,
+                        # ``failures`` is only the current consecutive-error
+                        # streak.  A prior successful-progress failure resets
+                        # that streak, but it must not make the persisted
+                        # retry metadata forget earlier attempts in this run.
+                        attempts=ledger.attempts,
                         max_attempts=ledger.max_attempts,
                     )
                 elif isinstance(error, dict):
@@ -524,7 +528,7 @@ class TerminalRoundCommitter:
                         **error,
                         "retry_exhausted": True,
                         "retry_budget_exhausted": True,
-                        "retry_attempts": failures,
+                        "retry_attempts": ledger.attempts,
                         "retry_max_attempts": ledger.max_attempts,
                         "retryable": False,
                     }

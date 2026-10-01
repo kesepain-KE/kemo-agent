@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 from run.retry.policy import MAX_ATTEMPTS, mark_retry_exhausted
 
@@ -65,13 +65,18 @@ def run_attempts(
             raise
         except BaseException as exc:
             progress = bool(getattr(exc, "retry_progress", False))
-            failures = ledger.record_failure(progress)
+            ledger.record_failure(progress)
             if not should_retry_error(exc):
                 raise
             if not ledger.can_retry():
                 mark_retry_exhausted(
                     exc,
-                    attempts=failures,
+                    # ``failures`` is the current consecutive-failure streak;
+                    # it may be smaller than the number of attempts when a
+                    # prior attempt made progress.  Consumers use
+                    # ``retry_attempts`` to explain the actual run history,
+                    # so report the ledger's total attempt count here.
+                    attempts=ledger.attempts,
                     max_attempts=ledger.max_attempts,
                 )
                 raise

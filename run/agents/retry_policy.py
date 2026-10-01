@@ -24,6 +24,22 @@ from run.tools import tool_call_signature
 _MAX_AGENT_RETRY_ATTEMPTS = MAX_ATTEMPTS
 _MAX_AGENT_RETRY_RECOVERY_CALLS = MAX_RECOVERY_CALLS
 _MAX_AGENT_RETRY_RECOVERY_CHARS = MAX_RECOVERY_CHARS
+
+# Categories without an explicit ``retryable`` flag that still describe a
+# transient provider/tool boundary.  Keep this list deliberately narrow:
+# validation, authentication, cancellation, and user-input failures must not
+# consume the agent retry budget implicitly.
+_AGENT_RETRYABLE_CATEGORIES = frozenset(
+    {
+        "connection_error",
+        "gateway_error",
+        "transport_error",
+        "timeout",
+        "upstream_error",
+    }
+)
+
+
 def _new_agent_usage() -> dict[str, Any]:
     return {
         "prompt_tokens": 0,
@@ -44,15 +60,6 @@ class _AgentRetryState:
 
 def _agent_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _safe_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _agent_tool_result_reuse_allowed(
@@ -104,19 +111,19 @@ def _agent_recovery_items(
         if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
             continue
         call_id = str(value.get("id") or "").strip()
-        if not call_id or call_id in used_call_ids:
-            call_id = f"recovered_{uuid.uuid4().hex}"
+        if not call_id.startswith("callid_") or call_id in used_call_ids:
+            call_id = f"callid_recovered_{uuid.uuid4().hex}"
         used_call_ids.add(call_id)
         items.extend(
             [
                 ToolCallItem(
-                    id=f"recovered_call_{uuid.uuid4().hex}",
+                    id=f"call_recovered_{uuid.uuid4().hex}",
                     call_id=call_id,
                     name=name,
                     arguments=copy.deepcopy(arguments),
                 ),
                 ToolResultItem(
-                    id=f"recovered_result_{uuid.uuid4().hex}",
+                    id=f"result_recovered_{uuid.uuid4().hex}",
                     call_id=call_id,
                     name=name,
                     is_error=result.get("ok") is not True,

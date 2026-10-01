@@ -59,6 +59,7 @@ from run.tools import (
 from run.extensions import resolve_reasoning_selection
 from run.agents.model_loop import run_model as _run_model_loop
 from run.retry.loop import RetryLedger, RunAttemptContext, run_attempts
+from run.retry.policy import _safe_int
 from run.tools import (
     invalid_tool_name,
     response_invalid_tool_arguments_error,
@@ -95,7 +96,6 @@ from run.agents.retry_policy import (
     _agent_tool_failure_is_retryable,
     _mark_agent_retry_exhausted,
     _record_agent_recovery,
-    _safe_int,
 )
 
 def _run_agent_with_retries(
@@ -191,7 +191,7 @@ def _response_items_for_next_request(output: list[Any]) -> list[Any]:
     for item in output:
         if not isinstance(item, ToolCallItem):
             continue
-        call_id = f"call_{uuid.uuid4().hex}"
+        call_id = f"callid_{uuid.uuid4().hex}"
         normalized_call_ids[id(item)] = call_id
         call_id_map.setdefault(item.call_id, call_id)
 
@@ -286,6 +286,7 @@ def _execute_agent(
 
 from run.agents.contracts import (
     AgentCancelledError,
+    AgentExecutionCapacityError,
     AgentInputError,
     AgentOutputError,
     AgentProviderError,
@@ -523,7 +524,7 @@ class AgentRunner:
                 f"agent:{self.root}:{self.user}:{name}"
             )
         except ExecutionCapacityError as exc:
-            raise AgentRunError(str(exc)) from exc
+            raise AgentExecutionCapacityError(str(exc)) from exc
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"agent-{name}")
         serial_key = (
             _serial_execution_key(self.root, self.user)

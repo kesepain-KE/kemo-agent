@@ -30,7 +30,6 @@ from provider.schema import ProviderError
 from run.infra import ContextLengthExceededError, EngineError
 from run.extensions import persist_response_media
 from run.tools import invalid_tool_call_error
-from provider.tool_arguments import MISSING, parse_tool_arguments
 
 
 _MAX_DURABLE_RESPONSE_CHARS = 256_000
@@ -357,8 +356,13 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
             "retryable": False,
         }
     if response.status == ResponseStatus.INCOMPLETE:
+        raw_incomplete_details: Any = response.incomplete_details or {}
+        if callable(getattr(raw_incomplete_details, "model_dump", None)):
+            raw_incomplete_details = raw_incomplete_details.model_dump(
+                mode="json", exclude_none=True
+            )
         details = sanitize_provider_diagnostic(
-            copy.deepcopy(response.incomplete_details or {}),
+            copy.deepcopy(raw_incomplete_details),
             key="incomplete_details",
         )
         if not isinstance(details, dict):
@@ -403,6 +407,11 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
         for field in ("category", "status_code", "retry_after_ms"):
             if field in retry:
                 error[field] = retry[field]
+        # UnifiedError carries the upstream HTTP status as ``provider_status``;
+        # expose the normalized ``status_code`` as well so retry/diagnostic
+        # consumers do not lose the boundary evidence on the final attempt.
+        if "status_code" not in error and base_error.get("provider_status") is not None:
+            error["status_code"] = base_error["provider_status"]
         return error
     if response.error is not None:
         return protocol_error(response.error)
@@ -603,7 +612,10 @@ def run_events_for_protocol_event(
         "content_index": event.content_index,
         "protocol_event_type": str(event.type),
     }
-    metadata = {"protocol_data": event.data} if event.data else {}
+    # Kemo 2.0 has no free-form event ``data`` bag.  Event-specific payloads
+    # are carried by typed fields (item/delta/usage/response/error), so runtime
+    # projection must not depend on the removed 1.x escape hatch.
+    metadata: dict[str, Any] = {}
     if event.type == StreamEventType.OUTPUT_TEXT_DELTA and event.delta:
         yield RunEvent(type="text_delta", content=event.delta, metadata=metadata, **common)
     elif event.type in {
@@ -622,30 +634,9 @@ def run_events_for_protocol_event(
                 **common,
             )
             return
-        if item is not None:
-            arguments = item.arguments
-        else:
-            raw_arguments = (
-                event.data["arguments"]
-                if isinstance(event.data, dict) and "arguments" in event.data
-                else MISSING
-            )
-            parsed_arguments = parse_tool_arguments(raw_arguments)
-            item = ToolCallItem(
-                id=event.item_id or f"call_{event.sequence or 0}",
-                call_id=event.call_id or f"call_{event.sequence or 0}",
-                name=event.name or "unknown_tool",
-                arguments=parsed_arguments.arguments,
-                arguments_raw=parsed_arguments.arguments_raw,
-                parse_error=parsed_arguments.parse_error,
-            )
-            if item.parse_error is not None:
-                yield RunEvent(
-                    type="error",
-                    error=invalid_tool_call_error(item),
-                    **common,
-                )
-                return
+        if item is None:
+            raise ValueError("Kemo 2.0 tool_call.completed 必须携带完整 ToolCallItem")
+        arguments = item.arguments
         yield RunEvent(
             type="tool_call_start",
             tool_call_id=(item.call_id if item is not None else event.call_id or ""),

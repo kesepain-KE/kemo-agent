@@ -15,6 +15,13 @@ class AgentRunError(RuntimeError):
     pass
 
 
+class AgentExecutionCapacityError(AgentRunError):
+    """The watchdog temporarily cannot accept another agent execution."""
+
+    category = "execution_capacity"
+    retryable = True
+
+
 class AgentToolLimitError(AgentRunError):
     """Normal bounded stop after the subagent reaches its tool-call ceiling."""
 

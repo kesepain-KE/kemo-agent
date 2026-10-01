@@ -371,7 +371,7 @@ def _retry_recovery_provider_responses(
                 "_iteration": 0,
                 "output": [
                     {
-                        "id": f"retry_recovery_call_{index}",
+                        "id": f"call_retry_recovery_{index}",
                         "type": "tool_call",
                         "call_id": call_id,
                         "name": name,

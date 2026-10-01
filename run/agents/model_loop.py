@@ -6,6 +6,13 @@ are resolved lazily so factories and tests can continue to patch runner globals.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from run.agents.runner import AgentExecutionContext, AgentRunResult
+    from run.agents.retry_policy import _AgentRetryState
+
+
 def run_model(
     agent_runner,
     context: AgentExecutionContext,
@@ -18,7 +25,6 @@ def run_model(
     import importlib
     _runner = importlib.import_module("run.agents.runner")
     AgentCancelledError = _runner.AgentCancelledError
-    AgentExecutionContext = _runner.AgentExecutionContext
     AgentInputError = _runner.AgentInputError
     AgentOutputError = _runner.AgentOutputError
     AgentProviderError = _runner.AgentProviderError
@@ -26,7 +32,6 @@ def run_model(
     AgentRunResult = _runner.AgentRunResult
     AgentToolLimitError = _runner.AgentToolLimitError
     AgentToolRetryError = _runner.AgentToolRetryError
-    Any = _runner.Any
     ConsecutiveIdenticalToolCallTracker = _runner.ConsecutiveIdenticalToolCallTracker
     ConsecutiveToolFailureTracker = _runner.ConsecutiveToolFailureTracker
     JsonContent = _runner.JsonContent
@@ -70,6 +75,10 @@ def run_model(
     validate_tool_call_batch = _runner.validate_tool_call_batch
     validate_json_schema = _runner.validate_json_schema
     retry_state = retry_state or _AgentRetryState()
+    # Snapshots present before this attempt are the only records that should
+    # be labelled as recovered. Current-attempt results are emitted via
+    # ``tool_records`` and must retain statuses such as ``completed``.
+    recovery_signatures_at_start = set(retry_state.recovery)
     definition = context.definition
     runtime = resolve_agent_provider_config(
         agent_runner.config,
@@ -168,11 +177,6 @@ def run_model(
         if value.get("replay_policy") == "reuse"
         and isinstance(value.get("result"), dict)
     }
-    blocked_recovery: dict[str, dict[str, Any]] = {
-        signature: value
-        for signature, value in retry_state.recovery.items()
-        if value.get("replay_policy") == "blocked"
-    }
     tool_argument_retry_count = 0
     def progress(status: str, **detail: Any) -> None:
         if context.event_callback is not None:
@@ -224,7 +228,7 @@ def run_model(
                     cancel_event=context.cancel_event,
                 ):
                     response = provider.create(
-                        KemoRequest(
+                        KemoRequest.create(
                             request_id=request_id,
                             parent_request_id=parent_request_id,
                             attempt=attempt + invalid_tool_arguments_retries,
@@ -645,7 +649,11 @@ def run_model(
     }
     committed_tool_records = [
         *_agent_recovery_records(
-            retry_state.recovery,
+            {
+                signature: value
+                for signature, value in retry_state.recovery.items()
+                if signature in recovery_signatures_at_start
+            },
             exclude_ids=current_tool_ids,
         ),
         *tool_records,
