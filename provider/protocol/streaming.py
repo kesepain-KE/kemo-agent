@@ -8,12 +8,13 @@ import base64
 import binascii
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Literal, Union
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from provider.protocol.enums import (
     MessageRole,
+    MessagePhase,
     ResponseStatus,
     StreamEventType,
     TERMINAL_STREAM_EVENTS,
@@ -29,21 +30,81 @@ from provider.protocol.models import (
     UnifiedError,
     Usage,
     _validate_output_media_item,
+    _validate_identifier,
 )
+
+
+class MessageItemStart(ProtocolModel):
+    id: str
+    type: Literal["message"] = "message"
+    status: Literal["in_progress"] = "in_progress"
+    role: Literal["assistant"] = "assistant"
+    phase: MessagePhase | None = None
+    created_at: datetime | None = None
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return _validate_identifier(value, "msg_", "message item id")
+
+
+class ReasoningItemStart(ProtocolModel):
+    id: str
+    type: Literal["reasoning"] = "reasoning"
+    status: Literal["in_progress"] = "in_progress"
+    created_at: datetime | None = None
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return _validate_identifier(value, "rs_", "reasoning item id")
+
+
+class ToolCallItemStart(ProtocolModel):
+    id: str
+    type: Literal["tool_call"] = "tool_call"
+    status: Literal["in_progress"] = "in_progress"
+    call_id: str
+    name: str
+    created_at: datetime | None = None
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return _validate_identifier(value, "call_", "tool call item id")
+
+    @field_validator("call_id")
+    @classmethod
+    def validate_call_id(cls, value: str) -> str:
+        return _validate_identifier(value, "callid_", "tool call id")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tool call name 不能为空")
+        return value
+
+
+ItemStart = Annotated[
+    Union[MessageItemStart, ReasoningItemStart, ToolCallItemStart],
+    Field(discriminator="type"),
+]
 
 
 class ProviderStreamEvent(ProtocolModel):
     type: StreamEventType
     event_id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex}")
     sequence: int = Field(ge=0)
+    previous_sequence: int | None = Field(default=None, ge=0)
     request_id: str
     response_id: str
     item_id: str | None = None
     content_index: int | None = Field(default=None, ge=0)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    data: dict[str, Any] = Field(default_factory=dict)
     delta: str | None = None
-    item: Item | None = None
+    text: str | None = None
+    item: Item | ItemStart | None = None
     usage: Usage | None = None
     response: KemoResponse | None = None
     error: UnifiedError | None = None
@@ -54,11 +115,55 @@ class ProviderStreamEvent(ProtocolModel):
 
     @model_validator(mode="after")
     def validate_terminal(self) -> "ProviderStreamEvent":
+        _validate_identifier(self.event_id, "evt_", "event_id")
+        _validate_identifier(self.request_id, "req_", "request_id")
+        _validate_identifier(self.response_id, "resp_", "response_id")
+        expected_previous = None if self.sequence == 0 else self.sequence - 1
+        if self.previous_sequence != expected_previous:
+            raise ValueError("previous_sequence 必须等于 sequence-1，首帧必须为 null")
+        if (self.run_id is None) != (self.run_sequence is None):
+            raise ValueError("run_id/run_sequence 必须同时出现或同时省略")
+        allowed: dict[StreamEventType, set[str]] = {
+            StreamEventType.RESPONSE_CREATED: set(),
+            StreamEventType.RESPONSE_IN_PROGRESS: set(),
+            StreamEventType.OUTPUT_ITEM_ADDED: {"item_id", "item"},
+            StreamEventType.REASONING_SUMMARY_DELTA: {"item_id", "delta"},
+            StreamEventType.REASONING_CONTENT_DELTA: {"item_id", "delta"},
+            StreamEventType.TOOL_CALL_ARGUMENTS_DELTA: {"item_id", "call_id", "name", "delta"},
+            StreamEventType.TOOL_CALL_COMPLETED: {"item_id", "call_id", "name", "item"},
+            StreamEventType.OUTPUT_TEXT_DELTA: {"item_id", "content_index", "delta"},
+            StreamEventType.OUTPUT_TEXT_DONE: {"item_id", "content_index", "text"},
+            StreamEventType.OUTPUT_REFUSAL_DELTA: {"item_id", "delta"},
+            StreamEventType.OUTPUT_REFUSAL_DONE: {"item_id", "text"},
+            StreamEventType.OUTPUT_AUDIO_DELTA: {"item_id", "content_index", "delta"},
+            StreamEventType.OUTPUT_MEDIA_COMPLETED: {"item_id", "content_index", "item"},
+            StreamEventType.USAGE_UPDATED: {"usage"},
+            StreamEventType.RESPONSE_COMPLETED: {"response"},
+            StreamEventType.RESPONSE_INCOMPLETE: {"response"},
+            StreamEventType.RESPONSE_FAILED: {"response"},
+            StreamEventType.RESPONSE_CANCELLED: {"response"},
+            StreamEventType.ERROR: {"error"},
+        }
+        present = {
+            name
+            for name in ("item_id", "content_index", "delta", "text", "item", "usage", "response", "error", "call_id", "name")
+            if getattr(self, name) is not None
+        }
+        unexpected = present - allowed.get(self.type, set())
+        if unexpected:
+            raise ValueError(f"{self.type} 携带未定义事件字段：{sorted(unexpected)}")
+        if self.type == StreamEventType.OUTPUT_ITEM_ADDED and not isinstance(
+            self.item, (MessageItemStart, ReasoningItemStart, ToolCallItemStart)
+        ):
+            raise ValueError("output_item.added 必须包含 ItemStart")
+        if self.type == StreamEventType.RESPONSE_CREATED and self.sequence != 0:
+            raise ValueError("response.created 必须使用 sequence=0")
         if self.type in {
             StreamEventType.OUTPUT_TEXT_DELTA,
             StreamEventType.OUTPUT_AUDIO_DELTA,
             StreamEventType.REASONING_SUMMARY_DELTA,
             StreamEventType.REASONING_CONTENT_DELTA,
+            StreamEventType.OUTPUT_REFUSAL_DELTA,
         } and (self.item_id is None or self.delta is None):
             raise ValueError(f"{self.type} 必须包含 item_id 和 delta")
         if self.type in {
@@ -73,6 +178,16 @@ class ProviderStreamEvent(ProtocolModel):
                 raise ValueError("output_audio.delta 必须是有效 Base64") from exc
             if not decoded:
                 raise ValueError("output_audio.delta 不能是空音频片段")
+        if self.type in {
+            StreamEventType.OUTPUT_TEXT_DONE,
+        } and (self.item_id is None or self.text is None):
+            raise ValueError(f"{self.type} 必须包含 item_id 和 text")
+        if self.type == StreamEventType.OUTPUT_TEXT_DONE and self.content_index is None:
+            raise ValueError("output_text.done 必须包含 content_index")
+        if self.type == StreamEventType.OUTPUT_REFUSAL_DONE and (
+            self.item_id is None or self.text is None
+        ):
+            raise ValueError("output_refusal.done 必须包含 item_id 和 text")
         if self.type == StreamEventType.TOOL_CALL_ARGUMENTS_DELTA and not all(
             (self.item_id, self.call_id, self.name, self.delta is not None)
         ):
@@ -209,14 +324,44 @@ class StreamSequenceGuard:
         if start_after_sequence is not None and start_after_sequence < 0:
             raise ValueError("start_after_sequence 不能小于 0")
         self._last_by_response: dict[str, int] = {}
-        self._event_ids: set[str] = set()
+        self._request_id: str | None = None
+        self._response_id: str | None = None
+        self._event_ids: dict[str, bytes] = {}
         self._terminal: set[str] = set()
+        self._started_items: dict[tuple[str, str], str] = {}
+        self._text_parts: dict[tuple[str, str, int], list[str]] = {}
+        self._open_text_blocks: set[tuple[str, str, int]] = set()
+        self._refusal_parts: dict[tuple[str, str], list[str]] = {}
+        self._done_blocks: set[tuple[str, str, int | None, str]] = set()
+        self._completed_tool_calls: set[tuple[str, str]] = set()
         self._start_after_sequence = start_after_sequence
         self._allow_initial_offset = allow_initial_offset
         self._initial_offset_consumed = False
 
     def accept(self, event: ProviderStreamEvent) -> bool:
-        if event.event_id in self._event_ids:
+        if self._request_id is None:
+            self._request_id = event.request_id
+            self._response_id = event.response_id
+        elif event.request_id != self._request_id or event.response_id != self._response_id:
+            raise StreamProtocolError(
+                "单条流的 request_id/response_id 必须保持不变",
+                details={
+                    "expected_request_id": self._request_id,
+                    "expected_response_id": self._response_id,
+                    "received_request_id": event.request_id,
+                    "received_response_id": event.response_id,
+                },
+            )
+        payload = event.model_dump_json(
+            by_alias=True, exclude_none=True
+        ).encode("utf-8")
+        previous_payload = self._event_ids.get(event.event_id)
+        if previous_payload is not None:
+            if previous_payload != payload:
+                raise StreamProtocolError(
+                    f"event_id 重放内容冲突：{event.event_id}",
+                    details={"event_id": event.event_id},
+                )
             return False
         if event.response_id in self._terminal:
             raise StreamProtocolError(
@@ -239,8 +384,123 @@ class StreamSequenceGuard:
                 f"sequence 不连续：期望 {expected}，收到 {event.sequence}",
                 details={"response_id": event.response_id},
             )
-        self._event_ids.add(event.event_id)
+        if event.type == StreamEventType.USAGE_UPDATED and self._open_text_blocks:
+            raise StreamProtocolError(
+                "usage.updated 必须在所有 output_text.done 之后发布"
+            )
+        if event.type in {
+            StreamEventType.RESPONSE_COMPLETED,
+        } and self._open_text_blocks:
+            raise StreamProtocolError(
+                "completed/requires_action 终态前必须闭合全部文本块"
+            )
+        self._accept_item_state(event)
+        self._event_ids[event.event_id] = payload
         self._last_by_response[event.response_id] = event.sequence
         if event.terminal:
             self._terminal.add(event.response_id)
         return True
+
+    def _accept_item_state(self, event: ProviderStreamEvent) -> None:
+        if event.type == StreamEventType.OUTPUT_ITEM_ADDED:
+            if event.item is None or event.item_id != event.item.id:
+                raise StreamProtocolError("output_item.added 的 item_id 与 item 不一致")
+            key = (event.response_id, event.item_id)
+            item_type = str(event.item.type)
+            previous = self._started_items.get(key)
+            if previous is not None:
+                raise StreamProtocolError(f"Item 重复 added：{event.item_id}")
+            self._started_items[key] = item_type
+            return
+
+        item_events = {
+            StreamEventType.OUTPUT_TEXT_DELTA,
+            StreamEventType.OUTPUT_TEXT_DONE,
+            StreamEventType.OUTPUT_AUDIO_DELTA,
+            StreamEventType.OUTPUT_REFUSAL_DELTA,
+            StreamEventType.OUTPUT_REFUSAL_DONE,
+            StreamEventType.REASONING_SUMMARY_DELTA,
+            StreamEventType.REASONING_CONTENT_DELTA,
+            StreamEventType.TOOL_CALL_ARGUMENTS_DELTA,
+            StreamEventType.TOOL_CALL_COMPLETED,
+            StreamEventType.OUTPUT_MEDIA_COMPLETED,
+        }
+        if event.type in item_events and event.item_id is not None:
+            item_key = (event.response_id, event.item_id)
+            if item_key not in self._started_items:
+                raise StreamProtocolError(f"Item 尚未 added：{event.item_id}")
+            item_type = self._started_items[item_key]
+            expected_types = {
+                "message": {
+                    StreamEventType.OUTPUT_TEXT_DELTA,
+                    StreamEventType.OUTPUT_TEXT_DONE,
+                    StreamEventType.OUTPUT_AUDIO_DELTA,
+                    StreamEventType.OUTPUT_REFUSAL_DELTA,
+                    StreamEventType.OUTPUT_REFUSAL_DONE,
+                    StreamEventType.OUTPUT_MEDIA_COMPLETED,
+                },
+                "reasoning": {
+                    StreamEventType.REASONING_SUMMARY_DELTA,
+                    StreamEventType.REASONING_CONTENT_DELTA,
+                },
+                "tool_call": {
+                    StreamEventType.TOOL_CALL_ARGUMENTS_DELTA,
+                    StreamEventType.TOOL_CALL_COMPLETED,
+                },
+            }
+            if event.type not in expected_types.get(item_type, set()):
+                raise StreamProtocolError(
+                    f"事件 {event.type} 与 Item 类型 {item_type} 不匹配"
+                )
+
+        if event.type == StreamEventType.OUTPUT_TEXT_DELTA:
+            assert event.item_id is not None and event.content_index is not None
+            done_key = (
+                event.response_id,
+                event.item_id,
+                event.content_index,
+                "text",
+            )
+            if done_key in self._done_blocks:
+                raise StreamProtocolError("output_text.done 后不得继续 delta")
+            key = (event.response_id, event.item_id, event.content_index)
+            self._text_parts.setdefault(key, []).append(event.delta or "")
+            self._open_text_blocks.add(key)
+        elif event.type == StreamEventType.OUTPUT_TEXT_DONE:
+            assert event.item_id is not None and event.content_index is not None
+            done_key = (
+                event.response_id,
+                event.item_id,
+                event.content_index,
+                "text",
+            )
+            if done_key in self._done_blocks:
+                raise StreamProtocolError("output_text.done 不得重复")
+            key = (event.response_id, event.item_id, event.content_index)
+            if "".join(self._text_parts.get(key, [])) != (event.text or ""):
+                raise StreamProtocolError("output_text.done 与 delta 聚合结果不一致")
+            self._done_blocks.add(done_key)
+            self._open_text_blocks.discard(key)
+        elif event.type == StreamEventType.OUTPUT_REFUSAL_DELTA:
+            assert event.item_id is not None
+            done_key = (event.response_id, event.item_id, None, "refusal")
+            if done_key in self._done_blocks:
+                raise StreamProtocolError("output_refusal.done 后不得继续 delta")
+            key = (event.response_id, event.item_id)
+            self._refusal_parts.setdefault(key, []).append(event.delta or "")
+        elif event.type == StreamEventType.OUTPUT_REFUSAL_DONE:
+            assert event.item_id is not None
+            done_key = (event.response_id, event.item_id, None, "refusal")
+            if done_key in self._done_blocks:
+                raise StreamProtocolError("output_refusal.done 不得重复")
+            key = (event.response_id, event.item_id)
+            if "".join(self._refusal_parts.get(key, [])) != (event.text or ""):
+                raise StreamProtocolError("output_refusal.done 与 delta 聚合结果不一致")
+            self._done_blocks.add(done_key)
+        elif event.type == StreamEventType.TOOL_CALL_COMPLETED:
+            if event.item_id is None:
+                raise StreamProtocolError("tool_call.completed 必须包含 item_id")
+            key = (event.response_id, event.item_id)
+            if key in self._completed_tool_calls:
+                raise StreamProtocolError("tool_call.completed 不得重复")
+            self._completed_tool_calls.add(key)

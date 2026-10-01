@@ -1,0 +1,1 @@
+{"model":"RerankRequest","payload":{"protocol_version":"2.0","request_id":"req_rank","model":"rank-model","query":"hello","documents":[{"id":"d1","text":"hello world"}],"score_threshold":0.5}}

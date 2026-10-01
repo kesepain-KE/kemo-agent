@@ -1,0 +1,1 @@
+{"model":"KemoResponse","payload":{"protocol_version":"2.0","id":"resp_running","request_id":"req_running","object":"kemo.response","status":"incomplete","model":"demo-model","output":[],"incomplete_details":{"reason":"running"},"created_at":"2026-09-30T00:00:00Z","completed_at":null}}

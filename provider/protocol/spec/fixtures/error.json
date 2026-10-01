@@ -1,0 +1,1 @@
+{"model":"UnifiedError","payload":{"type":"provider_error","code":"PROVIDER_UNAVAILABLE","message":"temporarily unavailable","retryable":true,"retry_scope":"same_sequence"}}

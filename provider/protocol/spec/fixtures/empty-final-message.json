@@ -1,0 +1,1 @@
+{"model":"MessageItem","expected_rule":"K2-R08","payload":{"id":"msg_empty","type":"message","status":"completed","role":"assistant","content":[]}}

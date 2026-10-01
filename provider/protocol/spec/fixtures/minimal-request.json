@@ -1,0 +1,1 @@
+{"model":"KemoRequest","payload":{"protocol_version":"2.0","request_id":"req_min","model":"demo-model","stream":false,"input":[{"id":"msg_user","type":"message","status":"completed","role":"user","content":[{"type":"text","text":"hello"}]}]}}

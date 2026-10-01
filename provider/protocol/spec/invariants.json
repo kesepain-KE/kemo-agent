@@ -1,0 +1,263 @@
+[
+  {
+    "id": "K2-R01",
+    "owner_symbol": "KemoRequest",
+    "kind": "L1",
+    "description": "protocol_version 必须精确等于 2.0 且不可缺失",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "test_acceptance_matrix.py::test_r01_request_version_is_required_and_exact"
+  },
+  {
+    "id": "K2-R02",
+    "owner_symbol": "ToolChoice",
+    "kind": "L2",
+    "description": "named/allowed 模式引用的工具必须存在且字段互斥",
+    "positive_fixture": "fixtures/tool-loop.json",
+    "negative_fixture": "fixtures/invalid-tool-choice.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r02_allowed_modes_are_closed_and_request_tools_are_known"
+  },
+  {
+    "id": "K2-R03",
+    "owner_symbol": "ToolDefinition",
+    "kind": "L1",
+    "description": "本期只接受 function tool",
+    "positive_fixture": "fixtures/tool-loop.json",
+    "negative_fixture": "fixtures/custom-tool.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r03_custom_tools_cannot_cross_the_function_only_boundary"
+  },
+  {
+    "id": "K2-R04",
+    "owner_symbol": "AssetContent/Annotation",
+    "kind": "L1",
+    "description": "媒体引用互斥，citation content_index 指向 Unicode code point",
+    "positive_fixture": "fixtures/asset.json",
+    "negative_fixture": "fixtures/invalid-inline-audio.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r04_media_references_and_unicode_annotation_indices"
+  },
+  {
+    "id": "K2-R05",
+    "owner_symbol": "KemoResponseBatch",
+    "kind": "L2",
+    "description": "batch usage 只属于整次请求且 choice 索引连续",
+    "positive_fixture": "fixtures/two-choice-batch.json",
+    "negative_fixture": "fixtures/invalid-batch.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r05_batch_usage_is_one_request_level_total"
+  },
+  {
+    "id": "K2-R06",
+    "owner_symbol": "KemoResponseBatch",
+    "kind": "L2",
+    "description": "多候选必须完整、索引连续且 response id 唯一",
+    "positive_fixture": "fixtures/two-choice-batch.json",
+    "negative_fixture": "fixtures/invalid-batch.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r06_batch_rejects_missing_or_duplicate_choice_indices"
+  },
+  {
+    "id": "K2-R07",
+    "owner_symbol": "request_fingerprint/ExecutionStore",
+    "kind": "runtime",
+    "description": "同 request_id 并发只能启动一次，过期墓碑不得静默重执行",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "gateway tests/storage/test_execution_store.py::test_sqlite_execution_store_persists_idempotency_and_terminal_response"
+  },
+  {
+    "id": "K2-R08",
+    "owner_symbol": "ItemStart/MessageItem/ReasoningItem",
+    "kind": "stream",
+    "description": "ItemStart 可为空快照，最终 Item 不可为空",
+    "positive_fixture": "fixtures/stream-events.json",
+    "negative_fixture": "fixtures/empty-final-message.json",
+    "evidence": "test_acceptance_matrix.py::test_r08_item_start_is_not_a_final_empty_item"
+  },
+  {
+    "id": "K2-R09",
+    "owner_symbol": "StreamSequenceGuard",
+    "kind": "stream",
+    "description": "content_index 按 item 隔离，done 后和双 done 均拒绝",
+    "positive_fixture": "fixtures/stream-events.json",
+    "negative_fixture": "fixtures/empty-final-message.json",
+    "evidence": "test_acceptance_matrix.py::test_r09_content_index_is_scoped_by_item_and_done_closes_only_that_block"
+  },
+  {
+    "id": "K2-R10",
+    "owner_symbol": "StreamSequenceGuard",
+    "kind": "stream",
+    "description": "相同 event_id 同内容幂等，不同内容和终态后事件拒绝",
+    "positive_fixture": "fixtures/stream-events.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "test_acceptance_matrix.py::test_r10_event_replay_is_idempotent_but_payload_conflict_is_rejected"
+  },
+  {
+    "id": "K2-R11",
+    "owner_symbol": "StreamSequenceGuard",
+    "kind": "stream",
+    "description": "续传游标必须锚定本地 sequence/response，跨 response 不续传",
+    "positive_fixture": "fixtures/stream-events.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r11_resume_cursor_uses_local_anchor_and_rejects_other_response"
+  },
+  {
+    "id": "K2-R12",
+    "owner_symbol": "ToolCallItem/Executor",
+    "kind": "runtime",
+    "description": "工具调用整批校验，非法并行调用不得执行",
+    "positive_fixture": "fixtures/tool-loop.json",
+    "negative_fixture": "fixtures/invalid-tool-choice.json",
+    "evidence": "gateway tests/protocol/test_tool_arguments.py::test_executor_streaming_path_uses_same_terminal_contract"
+  },
+  {
+    "id": "K2-R13",
+    "owner_symbol": "StreamSequenceGuard/Executor",
+    "kind": "runtime",
+    "description": "仅 tool_call.completed 不构成执行边界，需 requires_action 终态",
+    "positive_fixture": "fixtures/tool-loop.json",
+    "negative_fixture": "fixtures/stream-events.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r12_and_r13_tool_call_streams_are_not_executable_before_terminal_confirmation"
+  },
+  {
+    "id": "K2-R14",
+    "owner_symbol": "StreamSequenceGuard",
+    "kind": "stream",
+    "description": "usage 晚到必须拒绝；缺失 usage 保留 None；断流不冒充 completed",
+    "positive_fixture": "fixtures/text-response.json",
+    "negative_fixture": "fixtures/stream-events.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r14_usage_must_follow_text_done_and_missing_usage_is_nullable"
+  },
+  {
+    "id": "K2-R15",
+    "owner_symbol": "KemoRequest",
+    "kind": "L2",
+    "description": "stream+logprobs、n>1+structured_output 等冲突直接拒绝",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-tool-choice.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r15_request_conflicts_are_rejected_without_downgrade"
+  },
+  {
+    "id": "K2-R16",
+    "owner_symbol": "KemoRequest",
+    "kind": "L2",
+    "description": "未申请 tools 时 parallel 默认值不改变纯文本请求语义",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-tool-choice.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r16_parallel_default_is_harmless_without_tools"
+  },
+  {
+    "id": "K2-R17",
+    "owner_symbol": "StructuredOutputConfig/ModelCapabilities",
+    "kind": "L2",
+    "description": "strict/schema_subset 能力不支持时不得静默降级",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-tool-choice.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r17_structured_output_schema_shape_is_explicit"
+  },
+  {
+    "id": "K2-R18",
+    "owner_symbol": "ExtensionModel/diagnostics",
+    "kind": "L2",
+    "description": "诊断放 extensions，不覆盖业务 metadata",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r18_diagnostics_do_not_replace_business_metadata"
+  },
+  {
+    "id": "K2-R19",
+    "owner_symbol": "AssetContent",
+    "kind": "L1",
+    "description": "非图片拒绝 data_url/inline，图片 1 MiB 边界精确",
+    "positive_fixture": "fixtures/asset.json",
+    "negative_fixture": "fixtures/invalid-inline-audio.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r19_image_inline_limit_is_exact"
+  },
+  {
+    "id": "K2-R20",
+    "owner_symbol": "EventAssembler",
+    "kind": "stream",
+    "description": "完整终态超过 1 MiB 必须失败，不截断冒充成功",
+    "positive_fixture": "fixtures/stream-events.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "gateway tests/protocol/test_transport_stability.py::test_event_assembler_marks_complete_event_overflow_as_event_too_large"
+  },
+  {
+    "id": "K2-R21",
+    "owner_symbol": "ExecutionStore/Executor",
+    "kind": "runtime",
+    "description": "完成/取消竞态只允许一个终态，取消不覆盖已完成",
+    "positive_fixture": "fixtures/text-response.json",
+    "negative_fixture": "fixtures/error.json",
+    "evidence": "gateway tests/storage/test_execution_store.py::test_cancelled_append_finishes_commit_before_exposing_cancellation"
+  },
+  {
+    "id": "K2-R22",
+    "owner_symbol": "RetryPolicy",
+    "kind": "runtime",
+    "description": "认证/配额不重试；暂时失败遵守六次预算，failed 不重置",
+    "positive_fixture": "fixtures/error.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "tests/agents/test_subagent_runtime.py::test_subagent_retry_budget_resets_after_progress"
+  },
+  {
+    "id": "K2-R23",
+    "owner_symbol": "request_fingerprint",
+    "kind": "L1",
+    "description": "规范化请求指纹键序稳定，null 与 dict 数值语义保留",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r23_request_fingerprint_is_default_and_key_order_stable"
+  },
+  {
+    "id": "K2-R24",
+    "owner_symbol": "EmbeddingResponse/RerankResponse",
+    "kind": "L3",
+    "description": "截断、rank、阈值回执结构一致且不重复",
+    "positive_fixture": "fixtures/embedding.json",
+    "negative_fixture": "fixtures/rerank-invalid-top-n.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r24_embedding_and_rerank_response_bounds_are_explicit"
+  },
+  {
+    "id": "K2-R25",
+    "owner_symbol": "UnifiedError/KemoResponse",
+    "kind": "L2",
+    "description": "error、failed、requires_action 的终态结构互斥",
+    "positive_fixture": "fixtures/error.json",
+    "negative_fixture": "fixtures/empty-final-message.json",
+    "evidence": "test_acceptance_matrix_extended.py::test_r25_error_and_response_terminal_shapes_are_disjoint"
+  },
+  {
+    "id": "K2-R26",
+    "owner_symbol": "protocol artifact lock",
+    "kind": "runtime",
+    "description": "双仓加载同一制品并保持 schema/fixture 摘要一致",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "tests/contracts/kemo_v2/test_spec_freeze.py::test_schema_generation_is_deterministic"
+  },
+  {
+    "id": "K2-R27",
+    "owner_symbol": "validate_request_against_capabilities",
+    "kind": "L3",
+    "description": "能力声明必须匹配请求模型；prediction 内容块和 provider_state 需显式获模型/Provider授权",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "tests/contracts/kemo_v2/test_protocol_hardening.py::test_capability_gate_rejects_model_mismatch_and_unscoped_prediction"
+  },
+  {
+    "id": "K2-R28",
+    "owner_symbol": "request_fingerprint",
+    "kind": "L1",
+    "description": "Embedding/Rerank 与 LLM 请求统一使用 Agent 协议 canonical fingerprint",
+    "positive_fixture": "fixtures/minimal-request.json",
+    "negative_fixture": "fixtures/invalid-version.json",
+    "evidence": "gateway tests/protocol/test_retrieval_semantics.py::test_retrieval_request_hash_uses_protocol_fingerprint"
+  },
+  {
+    "id": "K2-R29",
+    "owner_symbol": "ProviderEmbeddingResult",
+    "kind": "runtime",
+    "description": "请求 tokenizer 截断时 Provider 必须明确提供 truncation_reported 与 truncated_ids",
+    "positive_fixture": "fixtures/embedding.json",
+    "negative_fixture": "fixtures/embedding.json",
+    "evidence": "gateway tests/protocol/test_retrieval_semantics.py::test_embedding_truncate_requires_provider_report"
+  }
+]

@@ -305,7 +305,21 @@ def incomplete_retry_metadata(
     fallback decision.
     """
 
+    if not isinstance(value, dict) and hasattr(value, "model_dump"):
+        try:
+            value = value.model_dump(mode="python")
+        except Exception:
+            value = {}
     source = value if isinstance(value, dict) else {}
+    # Kemo 2.0 keeps implementation/provider diagnostics under the typed
+    # ``details`` member.  Retry classification still needs to inspect the
+    # bounded compatibility keys (finish_reason/category/retryable/etc.);
+    # merge them for decision making without exposing the nested payload.
+    nested = source.get("details")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        merged.update(source)
+        source = merged
     reason = _safe_identifier(source.get("reason")).casefold() or "incomplete"
     finish_reason = _safe_identifier(source.get("finish_reason")).casefold()
     declared_category = _safe_identifier(

@@ -1,0 +1,1 @@
+{"model":"RerankRequest","expected_rule":"K2-R24","payload":{"protocol_version":"2.0","request_id":"req_rankbad","model":"rank-model","query":"hello","documents":[{"id":"d1","text":"hello"}],"top_n":2}}
