@@ -112,10 +112,20 @@ class ChatResponse:
     text: str
     reasoning: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # Chat Completions response metadata which has a first-class Kemo 2.0
+    # representation.  Keep the transport DTO deliberately permissive: the
+    # adapter validates/normalizes these values against the protocol models.
+    refusal: str | None = None
+    annotations: list[dict[str, Any]] = field(default_factory=list)
+    logprobs: dict[str, Any] | None = None
     finish_reason: str = ""
     usage: Usage = field(default_factory=Usage)
     model: str = ""
     response_id: str = ""
+    system_fingerprint: str | None = None
+    service_tier: str | None = None
+    choice_index: int = 0
+    choice_count: int = 1
     raw: dict[str, Any] | None = None
 
 
