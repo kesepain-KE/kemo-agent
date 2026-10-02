@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from provider.factory import provider_request_slot
-from provider.protocol.models import ModelCapabilities
+from provider.protocol.models import ModelCapabilities, normalize_reasoning_effort
 
 
 LOGGER = logging.getLogger(__name__)
@@ -190,7 +190,14 @@ def resolve_reasoning_selection(
     provider_type = str(runtime_provider.get("type") or "").strip().casefold()
     configured = runtime_provider.get("reasoning_effort")
     if provider_type == "chat":
-        return ReasoningSelection(False, None, "chat_reasoning_disabled")
+        # Chat has no capability-negotiation endpoint in the compatibility
+        # path, so it must use the protocol default instead of silently
+        # disabling the reasoning phase.
+        return ReasoningSelection(
+            True,
+            normalize_reasoning_effort(configured),
+            "chat_reasoning_forced",
+        )
     if provider_type != "kemo":
         return ReasoningSelection(False, None, "unsupported_provider")
     lookup = lookup_model_capabilities(

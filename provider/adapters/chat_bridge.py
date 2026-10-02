@@ -96,9 +96,10 @@ class ChatBridgeProvider:
             output_modalities=["text"],
             streaming=True,
             reasoning={
-                "supported": False,
-                "efforts": [],
-                "summary": False,
+                "supported": True,
+                "efforts": ["minimal", "low", "medium", "high", "max"],
+                "summary": True,
+                "returns": ["none", "summary", "content", "auto"],
                 "persisted_state": False,
             },
             tools={

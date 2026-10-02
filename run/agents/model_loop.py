@@ -249,12 +249,7 @@ def run_model(
                                 and reasoning_selection.effort
                                 else None
                             ),
-                            provider_options=(
-                                {"reasoning_effort": reasoning_selection.effort}
-                                if reasoning_selection.enabled
-                                and reasoning_selection.effort
-                                else {}
-                            ),
+                            provider_options={},
                             metadata={
                                 "capability": "conversation",
                                 "user": agent_runner.user,

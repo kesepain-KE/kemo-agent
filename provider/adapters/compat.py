@@ -69,6 +69,13 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+def _profile_field(value: Any, fallback: str) -> str:
+    candidate = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
+        return candidate
+    return fallback
+
+
 _INCOMPLETE_CHAT_FINISH_REASONS = frozenset(
     {
         "length",
@@ -468,13 +475,35 @@ def kemo_request_to_chat(
         key: value
         for key, value in request.provider_options.items()
         if key not in vendor_options
+        and key not in {"reasoning_enabled", "reasoning_effort"}
     }
     extra = dict(internal_options)
     extra.update(validate_provider_options(vendor_options, provider_profile))
-    if request.reasoning is not None and request.reasoning.enabled:
-        extra["reasoning_effort"] = normalize_reasoning_effort(
-            request.reasoning.effort
-        )
+    # Chat is a forced-reasoning transport.  Even a direct Kemo request that
+    # omitted reasoning (or explicitly disabled it) gets the protocol default.
+    configured_effort = (
+        request.reasoning.effort
+        if request.reasoning is not None and request.reasoning.enabled
+        else request.provider_options.get("reasoning_effort")
+    )
+    effort = normalize_reasoning_effort(configured_effort)
+    reasoning_profile = (
+        transport_profile.get("reasoning")
+        if isinstance(transport_profile.get("reasoning"), dict)
+        else {}
+    )
+    enabled_field = _profile_field(
+        reasoning_profile.get("enabled_field"),
+        "reasoning_enabled",
+    )
+    effort_field = _profile_field(
+        reasoning_profile.get("effort_field"),
+        "reasoning_effort",
+    )
+    if enabled_field == effort_field:
+        enabled_field, effort_field = "reasoning_enabled", "reasoning_effort"
+    extra[enabled_field] = True
+    extra[effort_field] = effort
     generation = request.generation
     for key in (
         "top_p",
@@ -729,13 +758,11 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
         "prompt_cache_key", "safety_identifier", "store",
         "metadata",
     }
-    provider_options = {
-        key: value
-        for key, value in request.extra.items()
-        if key not in mapped_chat_fields
-    }
-    if reasoning_enabled:
-        provider_options["reasoning_effort"] = effort
+    # This function builds the native Kemo 2.0 request used by the gateway
+    # transport.  Legacy Chat extras are translated into formal Kemo fields;
+    # they must not be copied into provider_options because the gateway only
+    # accepts that field with a model-declared provider profile allow-list.
+    provider_options: dict[str, Any] = {}
     generation: dict[str, Any] = {
         "max_output_tokens": request.max_tokens,
         "temperature": request.temperature,
@@ -894,6 +921,14 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
     )
     if status == ResponseStatus.INCOMPLETE and incomplete_details is None:
         incomplete_details = {"reason": "empty_output"}
+    diagnostics = {"finish_reason": response.finish_reason}
+    if response.reasoning_synthetic:
+        diagnostics.update(
+            {
+                "reasoning_synthetic": True,
+                "reason": "missing_upstream_reasoning",
+            }
+        )
     return KemoResponse(
         protocol_version=request.protocol_version,
         request_id=request.request_id,
@@ -911,7 +946,7 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
         ),
         choice_index=response.choice_index,
         choice_count=response.choice_count,
-        extensions={"kemo.diagnostics": {"finish_reason": response.finish_reason}},
+        extensions={"kemo.diagnostics": diagnostics},
     )
 
 
@@ -981,6 +1016,7 @@ def chat_stream_to_protocol(
     stream_logprobs: dict[str, Any] | None = None
     stream_system_fingerprint: str | None = None
     stream_service_tier: str | None = None
+    reasoning_synthetic = False
     calls: list[ToolCallItem] = []
     call_ids: set[str] = set()
     invalid_calls: list[ToolCallItem] = []
@@ -991,6 +1027,9 @@ def chat_stream_to_protocol(
     finish_reason = ""
     for event in events:
         if event.type == "reasoning_delta":
+            reasoning_synthetic = reasoning_synthetic or bool(
+                event.metadata.get("synthetic")
+            )
             if not reasoning_added:
                 yield ProviderStreamEvent(
                     type=StreamEventType.OUTPUT_ITEM_ADDED,
@@ -1222,7 +1261,19 @@ def chat_stream_to_protocol(
             if stream_service_tier is not None
             else None
         ),
-        extensions={"kemo.diagnostics": {"finish_reason": finish_reason}},
+        extensions={
+            "kemo.diagnostics": {
+                "finish_reason": finish_reason,
+                **(
+                    {
+                        "reasoning_synthetic": True,
+                        "reason": "missing_upstream_reasoning",
+                    }
+                    if reasoning_synthetic
+                    else {}
+                ),
+            }
+        },
     )
     terminal_type = (
         StreamEventType.RESPONSE_INCOMPLETE

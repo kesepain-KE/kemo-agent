@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import re
 import socket
 import time  # noqa: F401 - retained for downstream monkey-patching compatibility
 import urllib.error
@@ -28,6 +29,7 @@ from provider.schema import (
     Usage,
 )
 from provider.tool_arguments import MISSING, parse_tool_arguments
+from provider.protocol.models import normalize_reasoning_effort
 
 
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
@@ -47,6 +49,16 @@ _TOOLS_UNSUPPORTED_PHRASES = (
     "unrecognized request argument: tools",
     "unrecognized request argument supplied: tools",
 )
+_DEFAULT_REASONING_FIELD = "reasoning_effort"
+_DEFAULT_REASONING_ENABLED_FIELD = "reasoning_enabled"
+_SYNTHETIC_REASONING = "兼容层已启用默认思考模式。"
+
+
+def _profile_field(value: Any, fallback: str) -> str:
+    candidate = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
+        return candidate
+    return fallback
 
 
 def _error_detail(data: Any, fallback: str) -> tuple[str, str]:
@@ -201,6 +213,41 @@ class OpenAIChatTransport:
         self.model = str(config["model"])
         self.timeout = float(config.get("timeout", 120))
         self.default_stream = bool(config.get("stream", True))
+        self.default_reasoning_effort = normalize_reasoning_effort(
+            config.get("reasoning_effort")
+        )
+        profile = config.get("capabilities")
+        if (
+            isinstance(profile, dict)
+            and isinstance(profile.get("capabilities"), dict)
+        ):
+            wrapped_profile = dict(profile["capabilities"])
+            if isinstance(profile.get("transport"), dict):
+                wrapped_profile["transport"] = profile["transport"]
+            profile = wrapped_profile
+        transport = (
+            profile.get("transport")
+            if isinstance(profile, dict)
+            and isinstance(profile.get("transport"), dict)
+            else {}
+        )
+        reasoning_profile = (
+            transport.get("reasoning")
+            if isinstance(transport, dict)
+            and isinstance(transport.get("reasoning"), dict)
+            else {}
+        )
+        self.reasoning_enabled_field = _profile_field(
+            reasoning_profile.get("enabled_field"),
+            _DEFAULT_REASONING_ENABLED_FIELD,
+        )
+        self.reasoning_effort_field = _profile_field(
+            reasoning_profile.get("effort_field"),
+            _DEFAULT_REASONING_FIELD,
+        )
+        if self.reasoning_enabled_field == self.reasoning_effort_field:
+            self.reasoning_enabled_field = _DEFAULT_REASONING_ENABLED_FIELD
+            self.reasoning_effort_field = _DEFAULT_REASONING_FIELD
 
     def _url(self) -> str:
         return f"{self.base_url}/chat/completions"
@@ -260,11 +307,22 @@ class OpenAIChatTransport:
         payload = request.to_payload()
         payload["model"] = request.model or self.model
         payload["stream"] = stream
-        # Chat is a minimum-compatibility transport.  There is currently no
-        # reliable opt-in that distinguishes user intent from the historical
-        # default effort, so vendor reasoning fields are never forced.
-        payload.pop("reasoning_effort", None)
-        payload.pop("reasoning_enabled", None)
+        # Chat is a forced-reasoning transport.  This covers direct transport
+        # calls which did not carry a Kemo reasoning object as well as normal
+        # Agent requests.
+        configured_effort = payload.get(self.reasoning_effort_field)
+        if configured_effort in (None, "", "none"):
+            configured_effort = payload.get("reasoning_effort")
+        payload[self.reasoning_enabled_field] = True
+        payload[self.reasoning_effort_field] = normalize_reasoning_effort(
+            configured_effort or self.default_reasoning_effort
+        )
+        for key in ("reasoning_enabled", "reasoning_effort"):
+            if key not in {
+                self.reasoning_enabled_field,
+                self.reasoning_effort_field,
+            }:
+                payload.pop(key, None)
         return payload
 
     def _request(
@@ -340,7 +398,13 @@ class OpenAIChatTransport:
         response_format: str,
     ) -> Iterable[RunEvent]:
         if response.reasoning:
-            yield RunEvent(type="reasoning_delta", content=response.reasoning)
+            yield RunEvent(
+                type="reasoning_delta",
+                content=response.reasoning,
+                metadata={"synthetic": True}
+                if response.reasoning_synthetic
+                else {},
+            )
         if response.text:
             yield RunEvent(type="text_delta", content=response.text)
         for index, call in enumerate(response.tool_calls):
@@ -395,6 +459,9 @@ class OpenAIChatTransport:
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         text = message.get("content") or ""
         reasoning = message.get("reasoning_content") or ""
+        reasoning_synthetic = not bool(str(reasoning).strip())
+        if reasoning_synthetic:
+            reasoning = _SYNTHETIC_REASONING
         refusal = message.get("refusal")
         if refusal is not None:
             refusal = str(refusal)
@@ -433,6 +500,7 @@ class OpenAIChatTransport:
         return ChatResponse(
             text=str(text),
             reasoning=str(reasoning),
+            reasoning_synthetic=reasoning_synthetic,
             tool_calls=tool_calls,
             refusal=refusal,
             annotations=[item for item in annotations if isinstance(item, dict)],
@@ -480,6 +548,7 @@ class OpenAIChatTransport:
         response_id = ""
         system_fingerprint: str | None = None
         service_tier: str | None = None
+        pending_text_events: list[RunEvent] = []
         try:
             content_type = _response_content_type(response)
             if content_type == "application/json" or content_type.endswith("+json"):
@@ -561,13 +630,23 @@ class OpenAIChatTransport:
                     if isinstance(choice.get("logprobs"), dict):
                         last_logprobs = choice["logprobs"]
                     if reasoning:
+                        first_reasoning = not reasoning_parts
                         reasoning_parts.append(str(reasoning))
                         yield RunEvent(
                             type="reasoning_delta", content=str(reasoning), metadata={"raw": data}
                         )
+                        if first_reasoning:
+                            yield from pending_text_events
+                            pending_text_events.clear()
                     if text:
                         text_parts.append(str(text))
-                        yield RunEvent(type="text_delta", content=str(text), metadata={"raw": data})
+                        pending_text_events.append(
+                            RunEvent(
+                                type="text_delta",
+                                content=str(text),
+                                metadata={"raw": data},
+                            )
+                        )
                     for position, raw_call in enumerate(delta.get("tool_calls") or []):
                         if not isinstance(raw_call, dict):
                             continue
@@ -611,6 +690,17 @@ class OpenAIChatTransport:
                         and not tool_parts
                     ),
                 )
+            if not reasoning_parts:
+                yield RunEvent(
+                    type="reasoning_delta",
+                    content=_SYNTHETIC_REASONING,
+                    metadata={
+                        "synthetic": True,
+                        "reason": "missing_upstream_reasoning",
+                    },
+                )
+            yield from pending_text_events
+            pending_text_events.clear()
             for index in sorted(tool_parts):
                 part = tool_parts[index]
                 arguments, arguments_raw, parse_error = _parse_arguments(
@@ -655,6 +745,7 @@ class OpenAIChatTransport:
                     "logprobs": last_logprobs,
                     "system_fingerprint": system_fingerprint,
                     "service_tier": service_tier,
+                    "reasoning_synthetic": not bool(reasoning_parts),
                 },
             )
         finally:

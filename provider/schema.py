@@ -127,6 +127,7 @@ class ChatResponse:
     choice_index: int = 0
     choice_count: int = 1
     raw: dict[str, Any] | None = None
+    reasoning_synthetic: bool = False
 
 
 class ChatTransport(Protocol):
