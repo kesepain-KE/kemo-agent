@@ -283,112 +283,9 @@ Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire proto
 - Repairs archive lifecycle semantics: populated closed Web sessions can be explicitly reopened, including sessions selected through date-filtered archives, while late heartbeats, parameterless entry points, and stale links still cannot revive them implicitly.
 - Archives inactive Web/App data sessions after 90 minutes by default while preserving the independent 90-second deletion grace for empty Web sessions. Source and managed-deployment updaters migrate only installations that still use the legacy 86400-second default; custom values remain unchanged.
 - Removes completed user scheduled tasks from the chat start page while keeping their task-center and execution-history records.
-- Retains the 1.3.0 capabilities and the `kemo-adapter-api 0.8.2` compatibility baseline. Version 1.3.2 is finalized in source; Release, npm, and GHCR artifacts must still be built and published separately.
+- Retains the 1.3.0 capabilities and the existing Kemo gateway compatibility baseline. Version 1.3.2 is finalized in source; Release, npm, and GHCR artifacts must still be built and published separately.
 
-### 1.3.0 update
-
-This is the formal release that consolidates long-term intelligence, conversation lifecycle, module extensibility, and consistent Web interaction.
-
-- Tidal Engram memories are split by whether a fact can be updated, invalidated, weighted, and retrieved independently. Historical weighting is bound to the original round, Shanghai calendar date, and retrieval reference, producing an auditable chain for creation, reinforcement, revision, daily locking, and idempotent receipts. Oversized promotions are still split transactionally, while skill creation, editing, and upgrades offer to merge related memories and keep the originals by default.
-- Conversation continuation, leases, closing, and offline memory transfer are aligned across Web, App, CLI, external messaging, and Cron. Closed-session queue compensation, idle-session sweeping, deletion fences, and a bounded runtime cache prevent false resurrection, permanently hanging sessions, and quadratic archive rewrites.
-- Recoverable Provider and subagent failures now converge on a run-level consecutive-failure budget. Network recovery, tool-argument repair, and outer retries retain separate boundaries so nested retry paths cannot grow without limit.
-- Task plans, scheduled tasks, and real execution history now have independent containers, six-item pagination, detailed previews, stable ordering, system-task isolation, and richer recurrence rules. The chat start page only shows an active plan owned by the current valid conversation and no longer surfaces orphaned cards from cleaned archives.
-- Expand and Sense modules move to the 2.0 component-panel contract with template defaults, user configuration pages, presets, secret fields, action controls, hot discovery, and quick configuration switching. The built-in Kemo App, gateway, and knowledge-graph modules expose their intended controls and online checks.
-- Web responses can embed declarative cards, charts, tables, composable layouts, forms, follow-up suggestions, location views, audio/video players, files, product grids, order summaries, polls, ratings, and site-local media directly in the answer. The composable UI catalog includes card/list/row/column/Markdown/icon/button/date/select/input/slider/switch nodes; unknown component names still fall back to a generic data card while preserving streaming closure, text fallback, and bounded action semantics.
-- Historical archives are sorted newest first and can be filtered through an inline Shanghai-calendar picker. Follow-up/guidance messages, file sorting, task panels, knowledge editing and preview, Expand/Sense panel spacing, and runtime logs received a broader consistency pass.
-- Core implementations continue to split god modules above 800 lines around low coupling, high cohesion, and stable public entry points, with corresponding cache, background queue, logging, template, and contract tests.
-- `kemo-agent 1.3.0` and `kemo-adapter-api 0.8.2` have completed Kemo 2.0 wire-protocol matching across model capabilities, streaming responses, tool calls, multimodal assets, Usage, Embedding, Rerank, resume behavior, and unified terminal states.
-
-### 1.2.9 update
-
-This release focuses on memory evolution, session lifecycle and write reliability.
-
-- Memory fragments are now split into two granularity classes: profile and trait memories may merge and update within the same dimension, while facts and rules stay as minimal fragments. The criterion is whether a fragment still stands on its own after being separated. Extraction counts independent facts rather than conversation rounds, and the per-round ceiling is raised.
-- When a promotion would exceed the granularity ceiling of the target tier, the fragment is split into several children inside a single transaction: children inherit the original expiry, start with zero weight, produce no weighting events, and any invalid child rolls the whole batch back while keeping the source. Fragment merging now only happens between updated versions of the same fact, and a merge never crosses the ceiling, which prevents endless split-and-merge cycles.
-- When a user actively creates or edits a skill, related memories are surfaced with a prompt asking whether to merge; memories are kept by default. Background skill creation stays silent.
-- CLI exit and Cron task finalisation now close their sessions and register memory extraction. Previously only Web, App and external message routes closed sessions, so CLI and Cron conversations hung forever and never reached memory.
-- A new idle session sweep system task closes sessions untouched for more than a day. Running, queued, locked sessions and those holding a Web lease are skipped, and memory extraction is always queued before closing.
-- The runtime workspace now lives in a bounded in-process cache; each round commits only to the archive. A missing cache entry is rebuilt on demand from the archive tail, and cross-process writes invalidate stale entries through a version fence. Long conversations no longer rewrite the full body every round, which removes quadratic disk writes.
-- Window trimming now detects the shifted case where the old tail becomes the new prefix, deleting only the dropped head and appending the new tail, and falls back to a full table rebuild when the shift cannot be identified safely.
-- Fixed fragment misalignment in the Web expand and perception injection preview. The preview used to assemble its own fragment and slice with a cumulative cursor, which was shorter than the real fragment by the framework header lines, so every block after the first rendered the tail of its predecessor. Fragment positions now come from the authoritative side and the preview only looks them up by identifier.
-- The runtime log panel moved to a card layout and expands its available width on wide screens. Terminal logs became a summary card plus read-only console with a responsive layout. Terminal log entries now separate standard output from standard error and add loading window and item counts while staying redacted.
-
-### 1.2.8 update
-
-This release focuses on multi-user Web workspaces and runtime reliability.
-
-- Task plans now continue across Run boundaries after a per-round tool limit, while pause, cancel, failure, and completion states remain authoritative.
-- Subagent progress is shown beneath the matching `subagent_dispatch` tool card; the follow-up queue supports next-turn guidance, ordering, cancellation, and retry.
-- Prompt and definition standards are aligned across Sense, Expand, Plugin, Skill, manuals, personas, and the global knowledge base.
-- Files can be sorted by name, newest update, or size; expired temporary important memories remain visible with a short invalidation reason.
-- System status exposes all, backend, thread, terminal, and message log views, backed by bounded TTL/LRU/quota read caching to reduce disk pressure.
-- Scheduled-task conversation history defaults to seven days and is globally configurable; multi-user Web workspaces support new user tabs and startup conversation-space inspection.
-- Stop/pause races across long-task handoffs no longer leave the send controls locked, and the public version and project knowledge documentation are synchronized.
-
-### 1.2.7 update
-
-This release hardens the Chat Completions compatibility transport, improves transfer reliability, and stabilizes CI on Windows runners.
-
-- Streaming tool-call aggregation in the Chat transport is now idempotent: repeated `id`/`name` frames no longer produce duplicated identifiers; malformed `index` values fall back safely instead of aborting the stream; a complete JSON arguments object from a compatible service is adopted as-is; `raw_arguments` is forwarded for faithful multi-round tool loops.
-- The Chat transport no longer injects `reasoning_effort`, `reasoning_enabled`, or `stream_options.include_usage` into upstream requests; several OpenAI-compatible services rejected those fields. The Chat provider now declares reasoning as unsupported.
-- Bounded pre-output network recovery: at most 2 attempts, only while nothing has been emitted; `Retry-After` is honored up to 10 seconds; 401/403/409/400 fail immediately with zero retries; after any text, reasoning, or tool fragment the stream never replays; an exhausted budget is marked final so the outer runtime cannot multiply retries.
-- Explicit tool-unsupported fallback: when a 400 error clearly states that tools are not supported, the transport strips all tool fields and retries exactly once; plain 400 errors never trigger the fallback.
-- A streaming request that receives a plain JSON response is parsed via a Content-Type fallback without resending the request.
-- Terminal subagent-task pruning no longer uses the random task id as a tie-breaker, keeping cleanup order stable when Windows clocks assign identical timestamps.
-- Windows CI stability fixes: path comparisons use `samefile`, file-identity checks no longer depend on `st_dev`/`st_ino`, background-pruning assertions wait for visibility, and the kemo-graph sync test injects failures deterministically.
-
-### 1.2.5 update
-
-This is a release-readiness stability patch focused on deletion, recovery, knowledge boundaries, memory extraction, and Web rendering.
-
-- Deleted conversations now keep a durable delete fence. A late terminal commit from an in-flight Run cannot recreate the session, history windows, or active binding.
-- Knowledge-index discovery rejects both symbolic links and Windows junctions, so a link cannot inject files from outside the project tree.
-- The `on_commit` round-memory extraction call now uses the real extractor parameter contract, allowing candidates to be produced during normal runs.
-- App bridge recovery may query all active Runs for one device with `client_id` alone; a request without either device or conversation scope is still rejected.
-- Bare links in Web Markdown now stop at adjacent Chinese punctuation or delimiters instead of absorbing the following prose; long links in chat wrap safely and retain a clear keyboard-focus indicator.
-- Regression coverage for the backend boundaries passes the release check, while the Web-link fix passes the complete frontend test suite and production build.
-
-### 1.2.4 update
-
-This is a subagent connectivity and runtime-stability update.
-
-- Web subagent model settings now explain the three profiles in plain language: default for ordinary subagents, cheap for summaries/context compression/temporary-memory work, and reasoning for task plans, self-improvement, and deeper analysis.
-- The retry bubble is cleared as soon as the next attempt produces real reasoning, text, or tool progress, and is also cleared by a successful terminal event.
-- Subagents can bind to an external kemo-agent, another Agent service, or a local adapter through an authorized Expand module's `agent_bridge.json`; `subagent_dispatch` lists and synchronously calls the binding.
-- External bindings reuse Expand process isolation, allowlists, timeout, cancellation, path, and result-size limits. Remote URLs, access tokens, and passwords remain inside the trusted adapter configuration or environment.
-- Input and output are validated against the declared JSON Schemas. Background `wait=false` is intentionally unavailable until a shared persistent task-state contract exists.
-
-### 1.2.3 update
-
-This is a stability patch for long-running work, tool calls, and process boundaries.
-
-- Provider tool arguments are parsed and schema-checked before execution; invalid arguments end in an explicit `incomplete` state.
-- Parallel tool calls are committed as a batch, so one malformed call cannot leak other calls from the same batch.
-- Background Shell jobs enforce their deadline in a detached worker; output is still drained when log writing fails.
-- PID identity and start information are checked before cancellation; uncertain identities are rejected, and public results do not expose host absolute paths.
-- Cancellation, Provider failures, and bounded retries archive the current text and reasoning idempotently, preventing duplicate content in one round.
-- Provider diagnostics recognize more sensitive-field aliases and enforce recursion/node budgets; prefixed JSON errors are sanitized before return.
-- Main-agent and subagent output-parse failures use a bounded retry budget of up to five attempts; context-compression memory extraction is reused across those attempts to avoid duplicate writes, and an exhausted `context_manage` repair is not multiplied by the outer loop.
-- Persisted Provider response identifiers are sanitized and length-bounded, limiting oversized or sensitive values in history.
-
-### 1.2.2 update
-
-This is a stability and maintenance release.
-
-- `run/` is split into domain packages. Old flat import paths are no longer supported.
-- Project-root detection, fallback Web ports, and local bridge port tracking are fixed.
-- Task plans can be edited, retried, reset, inspected by revision, and safely rolled back.
-- Obvious Token, API Key, Bearer credential, and private-key text is redacted before task-plan persistence.
-- Each user can set separate sounds for successful completion and final failure. They are used only by the Windows desktop Web client; mobile clients do not show or play them.
-- Submitted attachment references are removed immediately to avoid reusing the same `asset_id`.
-- Mid-run guidance uploads use `purpose=input`.
-- Package-layout, project-path, fallback-port, and user-template tests were added.
-
-The `kemo_app` bridge version is `1.1.5`. External plugins that still import paths such as `run.agent_runner` or `run.task_plan_store` must move to the new `run.<domain>` entry points.
-
-`1.0.0` marks the first complete release of the kemo-agent core ecosystem, while `1.0.1` performs the first framework-wide stability review. `1.0.2` repairs critical Tidal Engram behavior, `1.0.3` introduces configurable request-level dynamic snapshots, `1.0.4` improves tool-call continuity and multi-entry history, and `1.0.5` adds independent user-level master gates for extension and perception Prompt injection. `1.1.0` completes the Android mobile loop, `1.1.1` isolates App conversations under `source=app`, and `1.1.2` hardens task plans, memory, long waits, the App bridge, and Web interaction. `1.2.0` is the long-task release: a user can explicitly enable long-task mode for one `user + source + session_id` conversation space; when a run reaches its per-run tool-call ceiling, kemo-agent commits that run and continues in a new run under the same session lock while non-terminal `long_task_update` events report the original request, cumulative elapsed time, run and continuation counts, tool calls, Provider requests, and token usage. Disabling the preference lets the current run settle without starting another continuation, while cancellation stops the entire logical task. Conversation spaces and Web/App sources remain isolated, and automatic continuation never bypasses context protection, Provider failures, plan-approval boundaries, or ordinary cancellation. Automatic, manual, and Provider-limit compression now reports progress above the composer; summary readiness and background memory analysis of trimmed rounds remain distinct stages. The preference lives in the existing session record rather than global or user configuration. `1.2.1` is a runtime-reliability patch: history content, rounds, indexes, and session state now use stricter transactional and cross-process write boundaries; system Cron adds a single-leader lease, in-memory runtime checkpoints, and aggregated success logs; the main agent and subagents share batch tool-argument validation and safe recovery; the Web capability-reference drawer now covers extensions, skills, and plugins; and the `kemo_app` 1.1.4 bridge adds detached-run snapshots, lifecycle locking, PID/instance reconciliation, and temporary-backoff self-healing. Future releases will continue to focus on adjacent integrations, performance, and long-term reliability.
-
-Available today:
+### Available today
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
 - a per-user SQLite history store with transactional commits, table-backed content search, and cursor pagination;
@@ -414,7 +311,7 @@ Available today:
 - a layered Web backend organized around routes, domain services, and shared contracts while retaining compatibility entry points;
 - runtime status and maintenance interfaces with background tasks operating automatically.
 
-Areas still being refined:
+### Areas still being refined
 
 - a more intuitive and less error-prone experience for creating custom extensions;
 - stability and resource behavior during long-running operation;
@@ -430,7 +327,7 @@ If you are trying an early release, reports about problems, usability feedback, 
 kemo-agent is not an island. Around it, several independently maintained projects cooperate through stable protocols to form the Kemo ecosystem:
 
 - [kemo-adapter-api](https://github.com/kesepain-KE/kemo-adapter-api)
-  Kemo Provider Gateway: the compatibility baseline is `0.8.2`; the stable 1.3.2 release retains the protocol match confirmed for 1.3.0. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
+  Kemo Provider Gateway: the compatibility baseline is `1.0.0`; the stable 1.3.2 release retains the protocol match confirmed for 1.3.0. It provides unified multi-provider model discovery, streaming responses, tool calls, capability declarations, multimodal assets, and token metering, giving kemo-agent a consistent model-service boundary.
 
 - [kemo-graph](https://github.com/kesepain-KE/kemo-graph)
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.
