@@ -233,7 +233,6 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertTrue(request.reasoning.enabled)
         self.assertEqual(request.reasoning.effort, "high")
         self.assertEqual(request.reasoning.return_mode, "content")
-        self.assertEqual(request.provider_options["reasoning_effort"], "high")
         self.assertEqual(len(request.input), 1)
         self.assertIn("[trigger_registration]", request.system_prompt)
         self.assertNotIn("# 操作信息", request.system_prompt)
@@ -295,7 +294,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     )
                 request = provider.requests[0]
                 self.assertEqual(request.reasoning.effort, expected)
-                self.assertEqual(request.provider_options["reasoning_effort"], expected)
+                self.assertTrue(request.reasoning.enabled)
 
     def test_runner_submits_new_gateway_declared_effort_without_mapping(self) -> None:
         provider = MockProvider(reasoning_efforts=["low", "ultra"])
@@ -316,7 +315,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             )
         request = provider.requests[0]
         self.assertEqual(request.reasoning.effort, "ultra")
-        self.assertEqual(request.provider_options["reasoning_effort"], "ultra")
+        self.assertTrue(request.reasoning.enabled)
 
     def test_runner_retries_transient_provider_failure_and_reports_attempts(self) -> None:
         class FlakyProvider(MockProvider):
@@ -576,7 +575,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertFalse(raised.exception.retryable)
         self.assertTrue(raised.exception.retry_budget_exhausted)
 
-    def test_runner_disables_chat_reasoning_without_capability_lookup(self) -> None:
+    def test_runner_forces_chat_reasoning_without_capability_lookup(self) -> None:
         provider = MockProvider()
         config = {
             **self.config,
@@ -598,11 +597,34 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.capability_calls, [])
-        self.assertIsNone(provider.requests[0].reasoning)
-        self.assertNotIn(
-            "reasoning_effort",
-            provider.requests[0].provider_options,
+        self.assertIsNotNone(provider.requests[0].reasoning)
+        self.assertTrue(provider.requests[0].reasoning.enabled)
+        self.assertEqual(provider.requests[0].reasoning.effort, "high")
+        self.assertEqual(provider.requests[0].provider_options, {})
+
+    def test_runner_defaults_chat_reasoning_to_medium(self) -> None:
+        provider = MockProvider()
+        config = {
+            **self.config,
+            "provider": {
+                **self.config["provider"],
+                "type": "chat",
+                "reasoning_effort": None,
+            },
+        }
+        runner = AgentRunner(
+            self.root,
+            "kesepain",
+            config=config,
+            provider_factory=lambda _: provider,
         )
+        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+            runner.run(
+                "context_manage",
+                {"previous_summary": None, "rounds": [], "trigger": "manual"},
+            )
+        self.assertEqual(provider.requests[0].reasoning.effort, "medium")
+        self.assertEqual(provider.requests[0].provider_options, {})
 
     def test_runner_rewrites_reused_response_and_tool_ids_across_iterations(self) -> None:
         class ReusedResponseIdProvider(MockProvider):

@@ -1608,10 +1608,10 @@ class PromptPipelineTests(unittest.TestCase):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(provider.requests[0].messages[0]["role"], "system")
-        # This fixture deliberately exposes no Kemo capability endpoint.  The
-        # runtime must not guess a fixed reasoning effort when the selected
-        # model has no verified declaration.
-        self.assertNotIn("reasoning_effort", provider.requests[0].extra)
+        # Chat-compatible requests always carry the normalized compatibility
+        # reasoning fields, even when the fixture has no capability endpoint.
+        self.assertEqual(provider.requests[0].extra["reasoning_effort"], "medium")
+        self.assertTrue(provider.requests[0].extra["reasoning_enabled"])
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         self.assertEqual(result["memory"]["weighted_files"], [])
         from run.history import find_record, load_window

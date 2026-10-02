@@ -1197,7 +1197,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual([item.id for item in reasoning], ["rs_valid"])
         self.assertEqual(reasoning[0].summary, "valid summary")
 
-    def test_chat_bridge_preserves_kemo_max_and_can_omit_reasoning_entirely(
+    def test_chat_bridge_preserves_kemo_max_and_honors_explicit_disable(
         self,
     ) -> None:
         enabled = chat_request_to_kemo(
@@ -1208,7 +1208,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             )
         )
         self.assertEqual(enabled.reasoning.effort, "max")
-        self.assertEqual(enabled.provider_options["reasoning_effort"], "max")
+        self.assertTrue(enabled.reasoning.enabled)
 
         disabled = chat_request_to_kemo(
             ChatRequest(
@@ -1218,8 +1218,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             )
         )
         self.assertIsNone(disabled.reasoning)
-        self.assertNotIn("reasoning_effort", disabled.provider_options)
-        self.assertNotIn("reasoning_enabled", disabled.provider_options)
+        self.assertEqual(disabled.provider_options, {})
 
     def test_kemo_reasoning_uses_gateway_declared_efforts_and_excludes_none(self) -> None:
         capabilities = ModelCapabilities.model_validate(
@@ -1783,7 +1782,9 @@ class UnifiedProtocolTests(unittest.TestCase):
             },
         )
 
-    def test_chat_transport_never_forces_reasoning_fields(self) -> None:
+    def test_chat_transport_forces_reasoning_fields_and_marks_synthetic_output(
+        self,
+    ) -> None:
         captured: list[dict[str, object]] = []
         response = {
             "id": "chat-text",
@@ -1804,9 +1805,43 @@ class UnifiedProtocolTests(unittest.TestCase):
             result = self._chat_transport().chat(self._chat_request())
 
         self.assertEqual(result.text, "hello")
+        self.assertEqual(result.reasoning, "兼容层已启用默认思考模式。")
+        self.assertTrue(result.reasoning_synthetic)
         self.assertEqual(len(captured), 1)
-        self.assertNotIn("reasoning_effort", captured[0])
-        self.assertNotIn("reasoning_enabled", captured[0])
+        self.assertEqual(captured[0]["reasoning_effort"], "medium")
+        self.assertTrue(captured[0]["reasoning_enabled"])
+
+    def test_chat_transport_forces_default_when_request_omits_reasoning(self) -> None:
+        captured: list[dict[str, object]] = []
+        response = {
+            "id": "chat-no-reasoning-request",
+            "model": "gateway/test",
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "upstream thought",
+                        "content": "hello",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            captured.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse(json.dumps(response).encode("utf-8"))
+
+        request = ChatRequest(
+            model="gateway/test",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            result = self._chat_transport().chat(request)
+
+        self.assertEqual(result.reasoning, "upstream thought")
+        self.assertFalse(result.reasoning_synthetic)
+        self.assertEqual(captured[0]["reasoning_effort"], "medium")
+        self.assertTrue(captured[0]["reasoning_enabled"])
 
     def test_chat_stream_accepts_explicit_json_response_without_resending(self) -> None:
         captured: list[dict[str, object]] = []
@@ -1845,6 +1880,8 @@ class UnifiedProtocolTests(unittest.TestCase):
             [event.type for event in events],
             ["reasoning_delta", "text_delta", "usage", "done"],
         )
+        self.assertEqual(events[0].content, "brief thought")
+        self.assertNotIn("synthetic", events[0].metadata)
         self.assertEqual(events[1].content, "plain JSON reply")
         self.assertEqual(events[-1].metadata["finish_reason"], "stop")
         self.assertEqual(events[-1].metadata["response_format"], "json_fallback")

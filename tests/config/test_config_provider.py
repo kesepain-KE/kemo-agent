@@ -528,7 +528,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(request["authorization"], "Bearer test-key")
 
-    def test_chat_bridge_disables_reasoning_without_changing_kemo_selection(self) -> None:
+    def test_chat_bridge_forces_reasoning_without_changing_kemo_selection(self) -> None:
         chat = create_provider(self.config("chat"))
         request = self.request().model_copy(
             update={
@@ -547,10 +547,13 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         response = chat.create(request)
         self.assertEqual(response.status, ResponseStatus.COMPLETED)
         sent = MockChatHandler.requests[-1]["body"]
-        self.assertNotIn("reasoning_effort", sent)
-        self.assertNotIn("reasoning_enabled", sent)
-        self.assertFalse(chat.capabilities(request.model).reasoning.supported)
-        self.assertEqual(chat.capabilities(request.model).reasoning.efforts, [])
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertTrue(sent["reasoning_enabled"])
+        self.assertTrue(chat.capabilities(request.model).reasoning.supported)
+        self.assertEqual(
+            chat.capabilities(request.model).reasoning.efforts,
+            ["minimal", "low", "medium", "high", "max"],
+        )
         chat_selection = resolve_reasoning_selection(
             {},
             {
@@ -560,9 +563,9 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             },
             chat,
         )
-        self.assertFalse(chat_selection.enabled)
-        self.assertIsNone(chat_selection.effort)
-        self.assertEqual(chat_selection.status, "chat_reasoning_disabled")
+        self.assertTrue(chat_selection.enabled)
+        self.assertEqual(chat_selection.effort, "high")
+        self.assertEqual(chat_selection.status, "chat_reasoning_forced")
 
         class KemoCapabilities:
             def capabilities(self, model: str) -> ModelCapabilities:
