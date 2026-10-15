@@ -1,0 +1,207 @@
+/* ============================================================================
+   kemo · design tokens
+   浅色为默认，[data-theme="dark"] 覆盖。所有颜色只在这里定义，其他文件只引用变量。
+   ========================================================================= */
+
+:root {
+  color-scheme: light;
+
+  /* ---- 中性色（暖灰，避免纯灰的冷硬感） ---- */
+  --bg-app: #faf9f7;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f3f1ee;
+  --bg-inset: #f7f6f3;
+  --bg-hover: rgba(28, 25, 23, 0.045);
+  --bg-active: rgba(28, 25, 23, 0.075);
+  --bg-selected: rgba(28, 25, 23, 0.06);
+  --bg-scrim: rgba(28, 25, 23, 0.42);
+
+  --border-subtle: rgba(28, 25, 23, 0.07);
+  --border: rgba(28, 25, 23, 0.12);
+  --border-strong: rgba(28, 25, 23, 0.2);
+
+  --text-primary: #1c1917;
+  --text-secondary: #57534e;
+  --text-tertiary: #7c7671;
+  --text-faint: #a8a29e;
+  --text-inverse: #faf9f7;
+
+  /* ---- 主色：克制的陶土橙，只用于关键动作 ---- */
+  --accent: #c25b3a;
+  --accent-hover: #a94a2c;
+  --accent-active: #93401f;
+  --accent-soft: rgba(194, 91, 58, 0.1);
+  --accent-soft-strong: rgba(194, 91, 58, 0.18);
+  --accent-text: #a94a2c;
+  --accent-contrast: #ffffff;
+
+  /* ---- 语义色 ---- */
+  --success: #2f7d54;
+  --success-soft: rgba(47, 125, 84, 0.12);
+  --warning: #a76a15;
+  --warning-soft: rgba(167, 106, 21, 0.13);
+  --danger: #b4312a;
+  --danger-soft: rgba(180, 49, 42, 0.11);
+  --info: #2f6ea8;
+  --info-soft: rgba(47, 110, 168, 0.11);
+  --neutral-soft: rgba(28, 25, 23, 0.06);
+
+  /* ---- 代码块 ---- */
+  --code-bg: #f6f5f2;
+  --code-border: rgba(28, 25, 23, 0.09);
+  --code-text: #292524;
+  --code-gutter: #a8a29e;
+
+  /* ---- 语法高亮（自绘，不依赖外部库） ---- */
+  --syn-key: #9a3f6b;
+  --syn-str: #2f7d54;
+  --syn-num: #a76a15;
+  --syn-fn: #2f6ea8;
+  --syn-cmt: #a8a29e;
+  --syn-typ: #6b4fa8;
+  --syn-punc: #78716c;
+
+  /* ---- 阴影：低对比、大扩散 ---- */
+  --shadow-xs: 0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow-sm: 0 1px 3px rgba(28, 25, 23, 0.06), 0 1px 2px rgba(28, 25, 23, 0.04);
+  --shadow-md: 0 4px 14px rgba(28, 25, 23, 0.08), 0 1px 3px rgba(28, 25, 23, 0.05);
+  --shadow-lg: 0 12px 32px rgba(28, 25, 23, 0.12), 0 2px 8px rgba(28, 25, 23, 0.06);
+  --shadow-xl: 0 24px 64px rgba(28, 25, 23, 0.18), 0 4px 12px rgba(28, 25, 23, 0.08);
+  --ring: 0 0 0 3px var(--accent-soft-strong);
+
+  /* ---- 圆角 ---- */
+  --r-xs: 5px;
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-2xl: 24px;
+  --r-full: 999px;
+
+  /* ---- 间距 ---- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+  --s-16: 64px;
+
+  /* ---- 字体 ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC",
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Consolas",
+    "Liberation Mono", "Menlo", ui-monospace, monospace;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Georgia, "Songti SC", serif;
+
+  --t-2xs: 10.5px;
+  --t-xs: 11.5px;
+  --t-sm: 13px;
+  --t-base: 14px;
+  --t-md: 15px;
+  --t-lg: 17px;
+  --t-xl: 21px;
+  --t-2xl: 26px;
+  --t-3xl: 34px;
+
+  --lh-tight: 1.3;
+  --lh-base: 1.55;
+  --lh-prose: 1.72;
+
+  /* ---- 动效 ---- */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 110ms;
+  --dur: 180ms;
+  --dur-slow: 320ms;
+
+  /* ---- 布局 ---- */
+  --sidebar-w: 268px;
+  --header-h: 52px;
+  --rightbar-w: 340px;
+  --read-w: 748px;
+  --z-drawer: 60;
+  --z-modal: 80;
+  --z-toast: 100;
+  --z-palette: 120;
+}
+
+/* =========================== 深色 =========================== */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-app: #1a1917;
+  --bg-surface: #21201e;
+  --bg-raised: #2a2826;
+  --bg-sunken: #151413;
+  --bg-inset: #292724;
+  --bg-hover: rgba(250, 249, 247, 0.055);
+  --bg-active: rgba(250, 249, 247, 0.09);
+  --bg-selected: rgba(250, 249, 247, 0.08);
+  --bg-scrim: rgba(0, 0, 0, 0.6);
+
+  --border-subtle: rgba(250, 249, 247, 0.07);
+  --border: rgba(250, 249, 247, 0.12);
+  --border-strong: rgba(250, 249, 247, 0.22);
+
+  --text-primary: #f2f0ec;
+  --text-secondary: #b3ada6;
+  --text-tertiary: #8e8880;
+  --text-faint: #6b655f;
+  --text-inverse: #1a1917;
+
+  --accent: #d97757;
+  --accent-hover: #e08a6d;
+  --accent-active: #c96844;
+  --accent-soft: rgba(217, 119, 87, 0.14);
+  --accent-soft-strong: rgba(217, 119, 87, 0.26);
+  --accent-text: #e59b7e;
+  --accent-contrast: #1a1917;
+
+  --success: #6bbd8a;
+  --success-soft: rgba(107, 189, 138, 0.15);
+  --warning: #d8a445;
+  --warning-soft: rgba(216, 164, 69, 0.15);
+  --danger: #e8736a;
+  --danger-soft: rgba(232, 115, 106, 0.15);
+  --info: #6aa9de;
+  --info-soft: rgba(106, 169, 222, 0.15);
+  --neutral-soft: rgba(250, 249, 247, 0.07);
+
+  --code-bg: #171614;
+  --code-border: rgba(250, 249, 247, 0.08);
+  --code-text: #e6e3de;
+  --code-gutter: #5c564f;
+
+  --syn-key: #d9a0c4;
+  --syn-str: #8fc9a3;
+  --syn-num: #e0b177;
+  --syn-fn: #82b6e8;
+  --syn-cmt: #6b655f;
+  --syn-typ: #b49ae0;
+  --syn-punc: #9a948c;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* 字体大小档位：small 接替原中号，medium 接替原大号，large 为新增更大档。 */
+[data-fontsize="compact"] { font-size: 14.5px; }
+[data-fontsize="default"] { font-size: 15.5px; }
+[data-fontsize="large"] { font-size: 17px; }
+
+/* 紧凑密度 */
+[data-density="compact"] {
+  --s-4: 12px;
+  --s-5: 16px;
+  --s-6: 20px;
+  --header-h: 46px;
+}
