@@ -69,7 +69,7 @@ def create_user_agent_package(
             "tools": {
                 "plugins": {"allow": []},
                 "shared_skills": {"allow": []},
-                "max_iterations": 20,
+                "max_iterations": 80,
             },
             "global_knowledge": False,
             "shared_knowledge": False,
@@ -92,7 +92,7 @@ def create_user_agent_package(
             "tools": {
                 "plugins": (tools.get("plugins") or {"allow": []}),
                 "shared_skills": {"allow": skills.get("shared") or []},
-                "max_iterations": tools.get("max_iterations", 20),
+                "max_iterations": tools.get("max_iterations", 80),
             },
             "global_knowledge": "global" in scopes,
             "shared_knowledge": "shared" in scopes,

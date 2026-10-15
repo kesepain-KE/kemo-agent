@@ -285,7 +285,7 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         field="tools.shared_skills",
         path=path,
     )
-    max_iterations = tools_raw.get("max_iterations", 20)
+    max_iterations = tools_raw.get("max_iterations", 80)
     if (
         isinstance(max_iterations, bool)
         or not isinstance(max_iterations, int)

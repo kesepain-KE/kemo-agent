@@ -379,7 +379,7 @@ class AgentRunner:
 
     @staticmethod
     def _usage_dict(usage: Usage) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "prompt_tokens": int(usage.input_tokens or 0),
             "completion_tokens": int(usage.output_tokens or 0),
             "total_tokens": int(
@@ -388,18 +388,41 @@ class AgentRunner:
                 else (usage.input_tokens or 0) + (usage.output_tokens or 0)
             ),
             "estimated": not usage.measurement.exact,
-            "source": str(usage.measurement.mode),
-            "cached_tokens": int(usage.cached_input_tokens or 0),
-            "reasoning_tokens": int(usage.reasoning_tokens or 0),
+            "source": getattr(usage.measurement.mode, "value", str(usage.measurement.mode)),
+            # Every successful Provider response represents one request.  This
+            # marker lets the outer conversation runtime count nested requests
+            # without guessing from token totals.
+            "provider_request_count": 1,
         }
+        if usage.cached_input_tokens is not None:
+            # Preserve an explicit zero: it means the provider reported a
+            # measured cache miss, not that cache information was unavailable.
+            payload["cached_tokens"] = int(usage.cached_input_tokens)
+        if usage.reasoning_tokens is not None:
+            payload["reasoning_tokens"] = int(usage.reasoning_tokens)
+        if usage.visible_output_tokens is not None:
+            payload["visible_output_tokens"] = int(usage.visible_output_tokens)
+        if usage.measurement is not None:
+            payload["measurement"] = usage.measurement.model_dump(mode="json")
+        if usage.media is not None:
+            payload["media"] = usage.media.model_dump(mode="json")
+        if usage.stages:
+            payload["stages"] = [
+                stage.model_dump(mode="json") for stage in usage.stages
+            ]
+        if usage.provider_raw:
+            payload["provider_raw"] = dict(usage.provider_raw)
+        return payload
 
     @staticmethod
     def _merge_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            total[key] = int(total.get(key, 0)) + int(usage.get(key, 0))
-        total["estimated"] = bool(
-            total.get("estimated", False) or usage.get("estimated", False)
-        )
+        # Use the same cache/request-aware aggregation as the main
+        # conversation runtime.  The old implementation only added
+        # prompt/completion/total tokens, which silently discarded cache
+        # diagnostics and every nested Provider request count.
+        from run.infra import merge_usage_dict
+
+        merge_usage_dict(total, usage)
 
     @staticmethod
     def _tool_definitions(schemas: list[dict[str, Any]]) -> list[ToolDefinition]:
