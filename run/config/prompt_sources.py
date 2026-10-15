@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from run.config.prompt_models import ExpandSelection, InjectedPiece, PerceptionSelection, SkillDescriptor
+from run.config.prompt_models import ExpandMeta, ExpandSelection, InjectedPiece, PerceptionSelection, SkillDescriptor
 from run.config.prompt_source_helpers import (
     PerceptionError,
     PromptRegistrationError,
@@ -182,7 +182,10 @@ class PromptSourceRegistry:
         self,
         *,
         allow: dict[str, tuple[str, ...] | None] | None = None,
+        include_stale: bool = False,
     ) -> tuple[SkillDescriptor, ...]:
+        from run.memory import reconcile
+        generated = reconcile(self.root, self.user)
         descriptors: list[SkillDescriptor] = []
         diagnostics: dict[str, Any] = {}
         for scope, base in self._skill_layers:
@@ -193,6 +196,9 @@ class PromptSourceRegistry:
                 definition = parse_skill_descriptor(path, scope=scope, root=self.root)
                 logical_name = path.parent.relative_to(base).as_posix()
                 discovered.append(logical_name)
+                if (not include_stale and scope == "user" and logical_name.startswith("agent_create/")
+                        and generated.get(path.parent.name, {}).get("status") == "stale"):
+                    continue
                 if allow is None or self._allowed(logical_name, values):
                     descriptors.append(definition)
                     selected.append(logical_name)
@@ -273,11 +279,13 @@ class PromptSourceRegistry:
         module_files: list[list[str]] = []
         offsets: list[int] = []
         piece_keys: list[str] = []
+        data_lengths: list[int] = []
         used = 0
         for scope, module, module_dir, meta in candidates:
             if max_chars == 0:
                 continue
             module_pieces: list[str] = []
+            data_length = 0
             files: list[str] = []
             try:
                 if meta.open_input and meta.input_health == "正常":
@@ -292,6 +300,7 @@ class PromptSourceRegistry:
                                 f"{content}"
                             )
                             files.append(relative_path(input_path, self.root))
+                            data_length = len(f"[{scope}:{module}]\n") + len(module_pieces[0])
                 if meta.open_control:
                     control_path = module_dir / meta.start_control
                     if control_path.is_file():
@@ -327,6 +336,7 @@ class PromptSourceRegistry:
             pieces.append(piece)
             module_files.append(files)
             piece_keys.append(f"{scope}:{module}")
+            data_lengths.append(data_length)
             used += len(piece) + (2 if len(pieces) > 1 else 0)
         full_text = "\n\n".join(pieces)
         text, truncated = truncate_chars(full_text, max_chars)
@@ -344,6 +354,15 @@ class PromptSourceRegistry:
             )
             for index in range(injected_count)
         )
+        data_spans = tuple(
+            InjectedPiece(
+                key=piece_keys[index],
+                start=offsets[index],
+                end=min(offsets[index] + data_lengths[index], len(text)),
+            )
+            for index in range(injected_count)
+            if data_lengths[index]
+        )
         return ExpandSelection(
             text,
             source_files,
@@ -353,6 +372,7 @@ class PromptSourceRegistry:
             injected_count,
             truncated,
             pieces_spans,
+            data_spans,
         )
 
     def perception_inventory(

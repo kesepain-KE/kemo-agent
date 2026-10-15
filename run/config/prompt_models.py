@@ -34,6 +34,7 @@ class ExpandSelection:
     injected_items: int
     truncated: bool
     pieces: tuple[InjectedPiece, ...] = ()
+    data_pieces: tuple[InjectedPiece, ...] = ()
 
     def fragment(self, key: str) -> str:
         """按 key 取回该模块在注入文本中的片段；未注入时返回空串。"""
@@ -41,6 +42,17 @@ class ExpandSelection:
             if piece.key == key:
                 return self.text[piece.start:piece.end]
         return ""
+
+    def data_fragment(self, key: str) -> str:
+        """只读预览使用已注入的数据范围，不包含操控能力说明。"""
+        for piece in self.data_pieces:
+            if piece.key == key:
+                return self.text[piece.start:piece.end]
+        return ""
+
+    @property
+    def data_text(self) -> str:
+        return "\n\n".join(self.text[piece.start:piece.end] for piece in self.data_pieces)
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,7 +26,7 @@
     }
   },
   "memory": {
-    "storage_schema_version": 1,
+    "storage_schema_version": 2,
     "extraction_mode": "compression_only",
     "recovery_max_rounds_per_scan": 10,
     "extraction_batch_rounds": 5,
@@ -105,6 +105,7 @@
     "pending_chat_timeout": 30
   },
   "agents": {
+    "enable_mid_context_compression": false,
     "conserved_rounds": 3,
     "max_rounds": 80,
     "rounds_after_compression": 20,

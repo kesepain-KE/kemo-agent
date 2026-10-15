@@ -35,6 +35,54 @@ class ReasoningSelection:
     error: BaseException | None = None
 
 
+def declared_input_token_limit(
+    capabilities: ModelCapabilities | None,
+) -> int | None:
+    """Return the most conservative declared input limit for a model.
+
+    Older Kemo gateways put the limit in ``extensions.limits`` while newer
+    capability responses expose it in the typed ``limits`` object.  Runtime
+    context protection must understand both forms, but a malformed optional
+    extension must never make an otherwise usable capability response fail.
+
+    ``context_window`` is used as a conservative input limit when an explicit
+    ``max_input_tokens`` is not available.  If both are present, the smaller
+    value wins because the Provider must satisfy both declarations.
+    """
+
+    if capabilities is None:
+        return None
+
+    candidates: list[int] = []
+
+    def add_candidate(value: Any) -> None:
+        if isinstance(value, bool):
+            return
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if parsed > 0:
+            candidates.append(parsed)
+
+    limits = getattr(capabilities, "limits", None)
+    if limits is not None:
+        add_candidate(getattr(limits, "max_input_tokens", None))
+        add_candidate(getattr(limits, "context_window", None))
+
+    extensions = getattr(capabilities, "extensions", {})
+    extension_limits = (
+        extensions.get("limits")
+        if isinstance(extensions, dict)
+        else None
+    )
+    if isinstance(extension_limits, dict):
+        add_candidate(extension_limits.get("max_input_tokens"))
+        add_candidate(extension_limits.get("context_window"))
+
+    return min(candidates) if candidates else None
+
+
 @dataclass(frozen=True, slots=True)
 class _CachedCapability:
     fresh_until: float
