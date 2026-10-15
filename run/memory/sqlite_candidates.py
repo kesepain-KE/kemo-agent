@@ -78,12 +78,21 @@ class CandidateStoreMixin:
                     [] if added else [api.local_day(current)], [])
         mapping = source["evidence_dates"]
         valid_dates = set()
+        day_sources = {}
         missing_date = False
         for number in candidate.get("evidence_rounds", []):
             day = mapping.get(str(number)) if isinstance(mapping, dict) else None
             try:
                 if isinstance(day, str) and date.fromisoformat(day).isoformat() == day and day <= api.local_day(current):
                     valid_dates.add(day)
+                    role = (candidate.get("evidence_sources") or {}).get(str(number),
+                            source.get("evidence_source") or candidate.get("evidence_source")
+                            or "historical_migration")
+                    if role not in {"user", "assistant", "manual", "historical_migration"}:
+                        role = "historical_migration"
+                    # User evidence wins when both roles share the same daily lock.
+                    if day not in day_sources or role == "user":
+                        day_sources[day] = role
                 else:
                     missing_date = True
             except ValueError:
@@ -99,8 +108,17 @@ class CandidateStoreMixin:
             # Initial observation creates the fragment at weight zero. Reserve
             # its day so replay/another batch cannot turn creation into +1.
             database.execute(
-                "INSERT OR IGNORE INTO memory_weight_events VALUES(?, ?, 'creation', ?)",
-                (row["id"], dates[0], api.iso(current)),
+                """
+                INSERT OR IGNORE INTO memory_weight_events(
+                    fragment_id, evidence_date, reason, source, created_at
+                ) VALUES(?, ?, 'creation', ?, ?)
+                """,
+                (
+                    row["id"],
+                    dates[0],
+                    day_sources.get(dates[0], "historical_migration"),
+                    api.iso(current),
+                ),
             )
             floor = dates[0]
         else:
@@ -112,7 +130,14 @@ class CandidateStoreMixin:
             if day < floor or day > api.local_day(current):
                 skipped.append("outside_tier_evidence_window")
                 continue
-            if self._touch_row(database, row, current, reason="history_evidence", evidence_date=day):
+            if self._touch_row(
+                database,
+                row,
+                current,
+                reason="history_evidence",
+                evidence_date=day,
+                evidence_source=day_sources.get(day, "historical_migration"),
+            ):
                 weighted.append(day)
             else:
                 locked.append(day)
@@ -204,10 +229,14 @@ class CandidateStoreMixin:
                     continue
                 try:
                     filename = api.normalize_memory_filename(raw_filename or content)
+                    if action != "reinforce":
+                        content, _ = api.validate_memory_fragment_size(
+                            content, candidate.get("memory_type"), operation="候选记忆")
                 except api.MemoryError:
                     rejected += 1
                     continue
-                explicit = candidate.get("explicit") is True
+                explicit = (candidate.get("explicit") is True
+                            and candidate.get("evidence_source") != "assistant")
                 row = self._row_by_filename(database, filename)
                 if action == "create" and row is not None:
                     rejected += 1
@@ -311,11 +340,12 @@ class CandidateStoreMixin:
             return [str(row["filename"])]
 
     def review_due(self, *, now: datetime | None = None) -> dict[str, list[str]]:
+        from run.memory.archive import archive_expired
         api = _memory_api()
         current = now or api.utc_now()
         upgraded: list[str] = []
         deleted: list[str] = []
-        with self._lock, connection(self.root, self.user, write=True) as database:
+        with self._lock, connection(self.root, self.user) as database:
             rows = database.execute(
                 """
                 SELECT * FROM memory_fragments
@@ -324,20 +354,17 @@ class CandidateStoreMixin:
                 """,
                 (api.iso(current),),
             ).fetchall()
-            for row in rows:
-                tier = str(row["tier"])
-                filename = str(row["filename"])
-                rule = self.rules[tier]
-                if int(row["weight"]) >= int(rule.upgrade_threshold or 0):
-                    if rule.next is None:
-                        raise api.MemoryConfigError(f"临时记忆层缺少晋升目标：{tier}")
-                    self._promote_row(database, row, rule.next, current)
-                    upgraded.append(filename)
-                else:
-                    database.execute(
-                        "DELETE FROM memory_fragments WHERE id=?", (int(row["id"]),)
-                    )
-                    deleted.append(filename)
+        for row in rows:
+            tier = str(row["tier"])
+            filename = str(row["filename"])
+            rule = self.rules[tier]
+            if int(row["weight"]) >= int(rule.upgrade_threshold or 0):
+                if rule.next is None:
+                    raise api.MemoryConfigError(f"临时记忆层缺少晋升目标：{tier}")
+                self._promote_location(api.MemoryLocation(tier, filename), rule.next, current)
+                upgraded.append(filename)
+            elif archive_expired(self, tier, filename, current)["archived"]:
+                deleted.append(filename)
         return {"upgraded": upgraded, "deleted": deleted}
 
     def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:

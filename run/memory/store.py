@@ -16,7 +16,7 @@ from run.config import user_dir
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"
-MEMORY_DB_SCHEMA_VERSION = 1
+MEMORY_DB_SCHEMA_VERSION = 2
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
 
@@ -71,6 +71,7 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
             fragment_id INTEGER NOT NULL,
             evidence_date TEXT NOT NULL,
             reason TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'historical_migration',
             created_at TEXT NOT NULL,
             PRIMARY KEY (fragment_id, evidence_date),
             FOREIGN KEY (fragment_id) REFERENCES memory_fragments(id)
@@ -81,6 +82,35 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
             operation_id TEXT PRIMARY KEY,
             completed_at TEXT NOT NULL,
             result_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS memory_work_items (
+            item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_type TEXT NOT NULL CHECK (work_type IN ('candidate', 'archive', 'extraction', 'skill')),
+            work_key TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            source_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            lease_token TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_work_items_status
+            ON memory_work_items(work_type, status, item_id);
+        CREATE TABLE IF NOT EXISTS memory_skill_sources (
+            skill_name TEXT NOT NULL,
+            fragment_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            PRIMARY KEY(skill_name, fragment_id)
+        );
+        CREATE TABLE IF NOT EXISTS memory_generated_skills (
+            skill_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'active',
+            reason TEXT,
+            updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_memory_operations_completed
             ON memory_operations(completed_at DESC);
@@ -94,14 +124,36 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
         );
         """
     )
-    database.execute(
-        "INSERT OR IGNORE INTO memory_meta(key, value) VALUES('schema_version', ?)",
-        (str(MEMORY_DB_SCHEMA_VERSION),),
-    )
+    # Serialize introspection + ALTER across processes, not only the in-process
+    # ready-cache lock. DDL creation above is already idempotent.
+    database.execute("BEGIN IMMEDIATE")
+    work_columns = {str(r["name"]) for r in database.execute(
+        "PRAGMA table_info(memory_work_items)").fetchall()}
+    for column in ("lease_token", "lease_until"):
+        if column not in work_columns:
+            database.execute(f"ALTER TABLE memory_work_items ADD COLUMN {column} TEXT")
+    columns = {
+        str(row["name"])
+        for row in database.execute("PRAGMA table_info(memory_weight_events)").fetchall()
+    }
+    if "source" not in columns:
+        database.execute(
+            "ALTER TABLE memory_weight_events ADD COLUMN source TEXT NOT NULL DEFAULT 'historical_migration'"
+        )
     stored = database.execute(
         "SELECT value FROM memory_meta WHERE key='schema_version'"
     ).fetchone()
-    if stored is None or str(stored["value"]) != str(MEMORY_DB_SCHEMA_VERSION):
+    if stored is None:
+        database.execute(
+            "INSERT INTO memory_meta(key, value) VALUES('schema_version', ?)",
+            (str(MEMORY_DB_SCHEMA_VERSION),),
+        )
+    elif str(stored["value"]) in {"1", str(MEMORY_DB_SCHEMA_VERSION)}:
+        database.execute(
+            "UPDATE memory_meta SET value=? WHERE key='schema_version'",
+            (str(MEMORY_DB_SCHEMA_VERSION),),
+        )
+    else:
         value = "missing" if stored is None else str(stored["value"])
         raise RuntimeError(
             f"不支持的记忆数据库 schema：{value}，当前需要 {MEMORY_DB_SCHEMA_VERSION}"

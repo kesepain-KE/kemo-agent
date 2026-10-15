@@ -242,6 +242,7 @@ class FragmentStoreMixin:
         content_changed: bool = False,
         reason: str = "reference",
         evidence_date: str | None = None,
+        evidence_source: str = "manual",
     ) -> bool:
         api = _memory_api()
         if str(row["tier"]) == "permanent":
@@ -251,10 +252,10 @@ class FragmentStoreMixin:
             database.execute(
                 """
             INSERT OR IGNORE INTO memory_weight_events(
-                fragment_id, evidence_date, reason, created_at
-            ) VALUES(?, ?, ?, ?)
+                fragment_id, evidence_date, reason, source, created_at
+            ) VALUES(?, ?, ?, ?, ?)
             """,
-                (int(row["id"]), day, reason, api.iso(current)),
+                (int(row["id"]), day, reason, evidence_source, api.iso(current)),
             ).rowcount
             > 0
         )
@@ -301,6 +302,7 @@ class FragmentStoreMixin:
             )
 
     def delete_fragment(self, tier: str, filename: str) -> bool:
+        filename = _memory_api().normalize_memory_filename(filename)
         with self._lock, connection(self.root, self.user, write=True) as database:
             return (
                 database.execute(

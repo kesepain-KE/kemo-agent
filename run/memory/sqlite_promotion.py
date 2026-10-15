@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any
 
 from run.memory.store import connection, database_path
+from run.memory.generated_skills import transfer_sources
 from run.memory.sqlite_support import (
     content_hash as _hash,
     entry_from_row as _entry_from_row,
@@ -77,6 +78,9 @@ class PromotionStoreMixin:
                 "DELETE FROM memory_weight_events WHERE fragment_id=?",
                 (int(target["id"]),),
             )
+            destination = [(int(target["id"]), target_name, _hash(content))]
+            transfer_sources(database, int(target["id"]), target["content_hash"], destination)
+            transfer_sources(database, int(row["id"]), row["content_hash"], destination)
             database.execute(
                 "DELETE FROM memory_fragments WHERE id=?", (int(row["id"]),)
             )
@@ -117,6 +121,8 @@ class PromotionStoreMixin:
         database.execute(
             "DELETE FROM memory_weight_events WHERE fragment_id=?", (int(row["id"]),)
         )
+        transfer_sources(database, int(row["id"]), row["content_hash"],
+                         [(int(row["id"]), target_name, _hash(content))])
 
     def _promote_location(
         self,
@@ -222,8 +228,9 @@ class PromotionStoreMixin:
             # Delete only after every child has passed validation.  The
             # foreign-key cascade also removes the source's old weight events.
             database.execute("DELETE FROM memory_fragments WHERE id=?", (source_id,))
+            targets = []
             for filename, content in prepared:
-                database.execute(
+                inserted = database.execute(
                     """
                     INSERT INTO memory_fragments(
                         filename, filename_key, tier, content, content_hash,
@@ -244,4 +251,6 @@ class PromotionStoreMixin:
                         row["expires_at"],
                     ),
                 )
+                targets.append((int(inserted.lastrowid), filename, _hash(content)))
+            transfer_sources(database, source_id, row["content_hash"], targets)
             return [filename for filename, _content in prepared]
