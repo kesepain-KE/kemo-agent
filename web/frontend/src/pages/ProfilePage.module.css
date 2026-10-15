@@ -1,7 +1,7 @@
 .notice { min-height: 42px; margin-bottom: 12px; padding: 8px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid color-mix(in srgb, var(--green) 22%, var(--line)); border-radius: 11px; background: var(--green-soft); color: var(--green); font-size: .75rem; }
 .notice button { border: 0; background: transparent; color: currentColor; cursor: pointer; font-size: 1rem; }
 .profileCard { min-height: 132px; margin-bottom: 14px; padding: 18px; display: grid; grid-template-columns: 86px minmax(170px, 1fr) minmax(300px, 1.2fr); align-items: center; gap: 18px; }
-.avatarFrame { width: 86px; height: 86px; display: grid; place-items: center; overflow: hidden; border: 4px solid var(--surface); border-radius: 50%; background: linear-gradient(145deg, #9b78ff, #4e70e7); color: #fff; box-shadow: 0 8px 24px rgba(80, 76, 190, .22); }
+.avatarFrame { width: 86px; height: 86px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--r-xl); background: var(--accent-soft); color: var(--accent-text); }
 .avatarFrame img { width: 100%; height: 100%; object-fit: cover; }
 .avatarFrame span { font-size: 1.9rem; font-weight: 700; }
 .profileIdentity { min-width: 0; }

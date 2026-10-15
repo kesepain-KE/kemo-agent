@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, LogOut, Settings, UserRound, Users, ExternalLink } from 'lucide-react'
 import styles from './UserProfileCard.module.css'
 
@@ -55,22 +56,83 @@ export function UserProfileCard({
 }: UserProfileCardProps) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuId = useId()
+  const [position, setPosition] = useState({
+    left: 12, top: undefined as number | undefined,
+    bottom: 12 as number | undefined, width: 285, maxHeight: 400,
+  })
   const switchableUsers = users.filter((item) => item.username !== username)
 
   useEffect(() => {
+    if (!isOpen) return
     const handlePointerDown = (event: PointerEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) setIsOpen(false)
+      const target = event.target as Node
+      if (!containerRef.current?.contains(target) && !menuRef.current?.contains(target)) setIsOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsOpen(false)
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setIsOpen(false)
+      triggerRef.current?.focus()
     }
     document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('keydown', handleKeyDown, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('keydown', handleKeyDown, true)
     }
-  }, [])
+  }, [isOpen])
+
+  useEffect(() => { setIsOpen(false) }, [username, compact])
+
+  useLayoutEffect(() => {
+    if (!isOpen) return
+    // 挂到 body 避开侧栏 overflow:hidden；定位始终使用用户卡片的实际坐标。
+    const updatePosition = () => {
+      const trigger = triggerRef.current
+      if (!trigger) return
+      const rect = trigger.getBoundingClientRect()
+      if (trigger.closest('[inert], [aria-hidden="true"]')) {
+        setIsOpen(false)
+        return
+      }
+      const margin = 12
+      const gap = 10
+      const width = Math.min(285, window.innerWidth - margin * 2)
+      const roomAbove = rect.top - gap - margin
+      const roomBelow = window.innerHeight - rect.bottom - gap - margin
+      const toSide = compact && window.innerWidth - rect.right - gap - margin >= width
+      const upward = roomAbove >= roomBelow
+      setPosition({
+        width,
+        left: Math.max(margin, Math.min(toSide ? rect.right + gap : rect.left, window.innerWidth - width - margin)),
+        top: !toSide && !upward ? rect.bottom + gap : undefined,
+        bottom: toSide ? Math.max(margin, window.innerHeight - rect.bottom)
+          : upward ? window.innerHeight - rect.top + gap : undefined,
+        maxHeight: toSide ? Math.max(0, Math.min(window.innerHeight - margin * 2, rect.bottom - margin))
+          : Math.max(0, upward ? roomAbove : roomBelow),
+      })
+    }
+    updatePosition()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(updatePosition)
+    if (triggerRef.current) observer?.observe(triggerRef.current)
+    const sidebar = triggerRef.current?.closest('.sidebar')
+    if (sidebar) observer?.observe(sidebar)
+    // 移动导航隐藏时关闭 portal，避免父级 inert 失去约束后留下孤立菜单。
+    const visibilityObserver = sidebar ? new MutationObserver(updatePosition) : undefined
+    if (sidebar) visibilityObserver?.observe(sidebar, { attributes: true, attributeFilter: ['inert', 'aria-hidden'] })
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      observer?.disconnect()
+      visibilityObserver?.disconnect()
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [isOpen, compact])
 
   const runAndClose = (action?: () => void) => {
     action?.()
@@ -80,11 +142,13 @@ export function UserProfileCard({
   return (
     <div className={`${styles.wrapper} ${compact ? styles.compactWrapper : ''}`} ref={containerRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={`${styles.profileCard} ${compact ? styles.compactCard : ''} ${isOpen ? styles.profileCardOpen : ''}`}
         aria-label="切换当前用户"
         aria-expanded={isOpen}
         aria-haspopup="menu"
+        aria-controls={isOpen ? menuId : undefined}
         title={compact ? username : undefined}
         onClick={() => setIsOpen((current) => !current)}
       >
@@ -100,7 +164,18 @@ export function UserProfileCard({
         </span>
       </button>
 
-      {isOpen && <div className={`${styles.menu} ${compact ? styles.compactMenu : ''}`} role="menu" aria-label="用户菜单">
+      {isOpen && createPortal(<div ref={menuRef} id={menuId} className={styles.menu}
+        style={position} role="menu" aria-label="用户菜单"
+        onKeyDown={(event) => {
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+          event.preventDefault()
+          const options = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])
+          if (!options.length) return
+          const index = options.indexOf(document.activeElement as HTMLElement)
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+            : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length
+          options[next]?.focus()
+        }}>
         <div className={styles.menuIdentity}>
           <span className={styles.menuAvatar}><AvatarContent username={username} url={avatarUrl} /></span>
           <span><strong>{username}</strong><small>{userPath}</small></span>
@@ -135,7 +210,7 @@ export function UserProfileCard({
           <div className={styles.divider} />
           <button type="button" className={`${styles.menuItem} ${styles.dangerItem}`} role="menuitem" disabled={logoutPending} onClick={() => runAndClose(onLogout)}><LogOut size={16} /><span>{logoutPending ? '正在退出…' : '退出登录'}</span></button>
         </>}
-      </div>}
+      </div>, document.body)}
     </div>
   )
 }

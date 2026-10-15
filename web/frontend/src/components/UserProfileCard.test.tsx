@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserProfileCard } from './UserProfileCard'
+
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('UserProfileCard', () => {
   it('当前运行禁止切换用户时仍允许新建此用户标签页', () => {
@@ -17,6 +19,10 @@ describe('UserProfileCard', () => {
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(trigger)
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    const menu = screen.getByRole('menu', { name: '用户菜单' })
+    expect(menu.parentElement).toBe(document.body)
+    expect(trigger).toHaveAttribute('aria-controls', menu.id)
+    fireEvent.pointerDown(menu)
     expect(screen.getByRole('menu', { name: '用户菜单' })).toBeInTheDocument()
     fireEvent.pointerDown(document.body)
     expect(screen.queryByRole('menu', { name: '用户菜单' })).not.toBeInTheDocument()
@@ -51,5 +57,42 @@ describe('UserProfileCard', () => {
     fireEvent.click(screen.getByRole('button', { name: '切换当前用户' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /bob/ }))
     expect(onSelectUser).toHaveBeenCalledWith('bob')
+  })
+
+  it('菜单在卡片上方且脱离侧栏裁切，窄屏、短屏和窗口变化保持可用', () => {
+    vi.stubGlobal('innerWidth', 1440)
+    vi.stubGlobal('innerHeight', 900)
+    render(<UserProfileCard />)
+    const trigger = screen.getByRole('button', { name: '切换当前用户' })
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 8, right: 260, top: 840, bottom: 892, width: 252, height: 52,
+    } as DOMRect)
+    fireEvent.click(trigger)
+    const menu = screen.getByRole('menu', { name: '用户菜单' })
+    expect(menu).toHaveStyle({ left: '12px', bottom: '70px', width: '285px', maxHeight: '818px' })
+    vi.stubGlobal('innerWidth', 280)
+    vi.stubGlobal('innerHeight', 300)
+    vi.mocked(trigger.getBoundingClientRect).mockReturnValue({
+      left: 8, right: 260, top: 240, bottom: 292, width: 252, height: 52,
+    } as DOMRect)
+    fireEvent(window, new Event('resize'))
+    expect(menu).toHaveStyle({ left: '12px', bottom: '70px', width: '256px', maxHeight: '218px' })
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('紧凑卡片在有空间时向右弹出，切换用户后不残留旧菜单', () => {
+    vi.stubGlobal('innerWidth', 1440)
+    vi.stubGlobal('innerHeight', 900)
+    const { rerender } = render(<UserProfileCard compact username="alice" />)
+    const trigger = screen.getByRole('button', { name: '切换当前用户' })
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 8, right: 50, top: 840, bottom: 892, width: 42, height: 52,
+    } as DOMRect)
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menu')).toHaveStyle({ left: '60px', bottom: '12px', width: '285px' })
+    rerender(<UserProfileCard compact username="bob" />)
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
 })
