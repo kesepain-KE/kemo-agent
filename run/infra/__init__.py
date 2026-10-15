@@ -5,6 +5,13 @@ from run.infra.read_cache import BoundedReadCache, cached_read_text, invalidate_
 
 from run.infra.atomic_io import replace_with_retry
 from run.infra.errors import ContextLengthExceededError, EngineError
+from run.infra.usage import (
+    merge_usage,
+    merge_usage_dict,
+    new_usage_total,
+    record_provider_request,
+    usage_from_dict,
+)
 from run.infra.process_utils import (
     cancellable_subprocess_kwargs,
     detached_subprocess_kwargs,
@@ -20,6 +27,11 @@ __all__ = [
     "invalidate_source_cache",
     "ContextLengthExceededError",
     "EngineError",
+    "merge_usage",
+    "merge_usage_dict",
+    "new_usage_total",
+    "record_provider_request",
+    "usage_from_dict",
     "cancellable_subprocess_kwargs",
     "detached_subprocess_kwargs",
     "handle_cli_request",
@@ -34,7 +46,14 @@ __all__ = [
     "visible_subprocess_kwargs",
 ]
 
-_LAZY_MODULES = ("runtime_diagnostics", "log_store", "process_execution", "cli", "process_identity")
+_LAZY_MODULES = (
+    "runtime_diagnostics",
+    "log_store",
+    "process_execution",
+    "cli",
+    "process_identity",
+    "usage",
+)
 
 
 def __getattr__(name: str):
