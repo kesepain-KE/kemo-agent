@@ -17,7 +17,7 @@
 .summaryCard { min-width: 0; min-height: 6.3rem; padding: 1rem 1.1rem; display: flex; align-items: center; gap: .9rem; border: 1px solid var(--line); border-radius: var(--radius-card-lg); background: var(--surface-elevated); box-shadow: var(--shadow-soft); }
 .summaryIcon { width: 3rem; height: 3rem; flex: 0 0 3rem; display: grid; place-items: center; border-radius: .9rem; color: var(--brand); background: var(--brand-soft); }
 .summaryIcon.green { color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--surface)); }
-.summaryIcon.blue { color: #6ea0f0; background: color-mix(in srgb, #4d82e8 13%, var(--surface)); }
+.summaryIcon.blue { color: #9b9b9b; background: color-mix(in srgb, #7e7e7e 13%, var(--surface)); }
 .summaryCopy { min-width: 0; }
 .summaryCopy > span { display: block; color: var(--muted); font-size: .72rem; font-weight: 650; }
 .summaryCopy strong { display: block; margin-top: .25rem; color: var(--text); font-size: 1.5rem; line-height: 1; }
@@ -37,7 +37,7 @@
 .moduleCard { padding: .9rem; border: 1px solid var(--line); border-radius: var(--radius-card-lg); background: var(--surface); cursor: pointer; outline: none; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
 .moduleCard:hover { border-color: var(--line-strong); transform: translateY(-1px); }
 .moduleCard:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 16%, transparent); }
-.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface)); box-shadow: 0 8px 22px rgba(80, 70, 200, .07); }
+.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface)); box-shadow: 0 8px 22px rgba(82, 82, 82, .07); }
 .cardHeader { display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) auto; align-items: center; gap: .7rem; }
 .moduleIcon { width: 2.75rem; height: 2.75rem; flex: 0 0 2.75rem; display: grid; place-items: center; border-radius: .85rem; color: var(--brand); background: var(--brand-soft); }
 .moduleIcon.warningIcon { color: var(--amber); background: color-mix(in srgb, var(--amber) 11%, var(--surface)); }

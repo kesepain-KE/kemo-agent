@@ -1,10 +1,10 @@
 .page {
   --agent-accent: var(--brand);
   --agent-accent-soft: var(--brand-soft);
-  --agent-success: #148b69;
-  --agent-success-soft: #e4f7f0;
-  --agent-danger: #d94f58;
-  --agent-danger-soft: #fff0f1;
+  --agent-success: var(--text-secondary);
+  --agent-success-soft: var(--bg-inset);
+  --agent-danger: var(--text-primary);
+  --agent-danger-soft: var(--bg-inset);
 }
 
 .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.25rem; }
@@ -114,7 +114,7 @@
 .layerValue { display: flex; align-items: center; flex-wrap: wrap; gap: .5625rem; color: var(--muted); }
 .globalBadge, .userBadge { min-height: 1.5625rem; padding: 0 .625rem; display: inline-flex; align-items: center; border-radius: 999px; font-size: .6875rem; font-weight: 720; }
 .globalBadge { color: var(--agent-accent); background: var(--agent-accent-soft); }
-.userBadge { color: #3f70a8; background: #ebf4ff; }
+.userBadge { color: #6a6a6a; background: #f3f3f3; }
 .executorList { display: flex; flex-wrap: wrap; gap: .4375rem; }
 .executorList code { min-height: 1.6875rem; padding: 0 .625rem; display: inline-flex; align-items: center; border: 0; border-radius: .5625rem; background: var(--surface-3); font-size: .6875rem; }
 

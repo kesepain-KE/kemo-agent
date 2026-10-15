@@ -1,10 +1,10 @@
 .page {
   --skill-accent: var(--brand);
   --skill-accent-soft: var(--brand-soft);
-  --skill-success: #168764;
-  --skill-success-soft: #e6f7f0;
-  --skill-danger: #d84f58;
-  --skill-danger-soft: #fff0f1;
+  --skill-success: var(--text-secondary);
+  --skill-success-soft: var(--bg-inset);
+  --skill-danger: var(--text-primary);
+  --skill-danger-soft: var(--bg-inset);
 }
 
 .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.25rem; }
@@ -49,7 +49,7 @@
 .listHeading h3 { margin: 0; color: var(--text); font-size: .9375rem; }
 .listHeading p { margin: .25rem 0 0; color: var(--muted-2); font-size: .6875rem; }
 .listHeading > span { min-width: 1.75rem; height: 1.75rem; padding: 0 .5rem; display: grid; place-items: center; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .6875rem; font-weight: 700; }
-.skillList { min-height: 0; padding-right: .125rem; display: flex; flex: 1; flex-direction: column; gap: .625rem; overflow-y: auto; scrollbar-width: thin; }
+.skillList { min-height: 0; padding-right: .125rem; display: flex; flex: 1; flex-direction: column; gap: 1rem; overflow-y: auto; scrollbar-width: thin; }
 .skillItem { position: relative; min-height: 6.75rem; flex: none; border: 1px solid var(--line); border-radius: .875rem; background: var(--surface); transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .skillItem:hover { border-color: var(--line-strong); background: var(--surface-hover); }
 .skillItem.selected { border-color: color-mix(in srgb, var(--skill-accent) 56%, var(--line)); background: linear-gradient(135deg, color-mix(in srgb, var(--skill-accent) 8%, var(--surface-elevated)), var(--surface-elevated)); box-shadow: 0 .375rem 1rem color-mix(in srgb, var(--skill-accent) 8%, transparent); }
@@ -64,7 +64,7 @@
 .categoryTag { min-height: 1.375rem; padding: 0 .5rem; display: inline-flex; align-items: center; gap: .3125rem; border-radius: 999px; font-size: .625rem; font-style: normal; font-weight: 700; white-space: nowrap; }
 .categoryTag.builtin { color: var(--brand); background: color-mix(in srgb, var(--brand) 12%, var(--surface)); }
 .categoryTag.shared { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--surface)); }
-.categoryTag.agent_generated { color: #5794ed; background: color-mix(in srgb, #3473c4 12%, var(--surface)); }
+.categoryTag.agent_generated { color: #8d8d8d; background: color-mix(in srgb, #6b6b6b 12%, var(--surface)); }
 .categoryTag.user_created { color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
 .chevron { color: var(--muted-2); font-size: 1.25rem; }
 .itemSwitch { position: absolute; top: 50%; right: .875rem; transform: translateY(-50%); cursor: pointer; }

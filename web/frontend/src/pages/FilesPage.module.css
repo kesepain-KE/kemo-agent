@@ -828,7 +828,7 @@
   padding: 20px;
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, #10131d 28%, transparent);
+  background: color-mix(in srgb, #131313 28%, transparent);
   backdrop-filter: blur(3px);
 }
 .dialog {
@@ -837,7 +837,7 @@
   border: 1px solid var(--line);
   border-radius: 15px;
   background: var(--surface-elevated);
-  box-shadow: 0 20px 60px color-mix(in srgb, #10131d 22%, transparent);
+  box-shadow: 0 20px 60px color-mix(in srgb, #131313 22%, transparent);
 }
 .dialog > div:first-child { display: flex; align-items: center; gap: 10px; }
 .dialog > div:first-child > span:last-child { min-width: 0; }

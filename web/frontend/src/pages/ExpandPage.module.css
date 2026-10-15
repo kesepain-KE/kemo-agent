@@ -26,7 +26,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-card-lg);
   background: var(--surface-elevated);
-  box-shadow: 0 18px 40px rgba(25, 28, 38, .15);
+  box-shadow: 0 18px 40px rgba(28, 28, 28, .15);
 }
 
 .addPopover > button {
@@ -80,7 +80,7 @@
 }
 
 .summaryIcon.green { background: color-mix(in srgb, var(--green) 11%, var(--surface)); color: var(--green); }
-.summaryIcon.blue { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
+.summaryIcon.blue { background: color-mix(in srgb, #7e7e7e 13%, var(--surface)); color: #9b9b9b; }
 .summaryCopy { min-width: 0; }
 .summaryCopy > span { display: block; color: var(--muted); font-size: .68rem; font-weight: 650; }
 .summaryCopy strong { display: block; margin-top: .25rem; overflow: hidden; font-size: 1.35rem; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
@@ -184,7 +184,7 @@
 
 .moduleCard:hover { border-color: var(--line-strong); transform: translateY(-1px); }
 .moduleCard:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 15%, transparent); }
-.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface)); box-shadow: 0 7px 20px rgba(80, 70, 200, .07); }
+.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 48%, var(--surface)); box-shadow: 0 7px 20px rgba(82, 82, 82, .07); }
 
 .moduleIcon {
   width: 2.7rem;
@@ -197,7 +197,7 @@
   color: var(--brand);
 }
 
-.moduleIcon.shared { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
+.moduleIcon.shared { background: color-mix(in srgb, #7e7e7e 13%, var(--surface)); color: #9b9b9b; }
 .moduleIcon.user { background: color-mix(in srgb, var(--green) 11%, var(--surface)); color: var(--green); }
 .moduleCopy { min-width: 0; }
 .moduleTitle { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
@@ -219,7 +219,7 @@
 }
 
 .statusBadge.success { background: color-mix(in srgb, var(--green) 11%, var(--surface)); color: var(--green); }
-.statusBadge.warning { background: color-mix(in srgb, #e18b18 11%, var(--surface)); color: #b56a08; }
+.statusBadge.warning { background: color-mix(in srgb, #959595 11%, var(--surface)); color: #737373; }
 .statusBadge.danger { background: color-mix(in srgb, var(--red) 9%, var(--surface)); color: var(--red); }
 
 .moduleStats { margin-top: .48rem; display: flex; flex-wrap: wrap; gap: .65rem; color: var(--muted); font-size: .58rem; }
@@ -304,7 +304,7 @@
 .whitelistControl strong, .userDefault strong { color: var(--text); font-size: .59rem; }
 .whitelistControl small, .userDefault small { margin-top: .15rem; color: var(--muted); font-size: .51rem; }
 .whitelistControl > button { position: relative; width: 2.2rem; height: 1.3rem; flex: 0 0 2.2rem; padding: 0; border: 0; border-radius: 999px; background: var(--line-strong); }
-.whitelistControl > button > span { position: absolute; top: .18rem; left: .18rem; width: .94rem; height: .94rem; border-radius: 50%; background: #fff; box-shadow: 0 2px 5px rgba(20, 22, 30, .2); transition: transform .16s ease; }
+.whitelistControl > button > span { position: absolute; top: .18rem; left: .18rem; width: .94rem; height: .94rem; border-radius: 50%; background: #fff; box-shadow: 0 2px 5px rgba(22, 22, 22, .2); transition: transform .16s ease; }
 .whitelistControl > button.checked { background: var(--brand); }
 .whitelistControl > button.checked > span { transform: translateX(.9rem); }
 .whitelistControl > button:disabled { opacity: .5; cursor: not-allowed; }

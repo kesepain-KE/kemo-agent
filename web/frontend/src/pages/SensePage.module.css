@@ -75,7 +75,7 @@
 }
 
 .summaryIcon.green { background: color-mix(in srgb, var(--green) 10%, var(--surface)); color: var(--green); }
-.summaryIcon.blue { background: color-mix(in srgb, #4c82e8 13%, var(--surface)); color: #6ea0f0; }
+.summaryIcon.blue { background: color-mix(in srgb, #7e7e7e 13%, var(--surface)); color: #9b9b9b; }
 .summaryCopy { min-width: 0; }
 .summaryCopy > span { display: block; color: var(--muted); font-size: .7rem; font-weight: 650; }
 .summaryCopy strong { display: inline-block; margin-top: .28rem; color: var(--text); font-size: 1.45rem; line-height: 1; }
@@ -186,7 +186,7 @@
 
 .moduleCard:hover { border-color: var(--line-strong); transform: translateY(-1px); }
 .moduleCard:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 15%, transparent); }
-.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 50%, var(--surface)); box-shadow: 0 7px 20px rgba(80, 70, 200, .07); }
+.moduleCard.selected { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 50%, var(--surface)); box-shadow: 0 7px 20px rgba(82, 82, 82, .07); }
 
 .moduleIcon {
   width: 2.8rem;
@@ -350,7 +350,7 @@
 .whitelistControl small { margin-top: .16rem; color: var(--muted); font-size: .6rem; }
 
 .switch { position: relative; width: 2.4rem; height: 1.4rem; flex: 0 0 2.4rem; padding: 0; border: 0; border-radius: 999px; background: var(--line-strong); }
-.switch > span { position: absolute; top: .2rem; left: .2rem; width: 1rem; height: 1rem; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(20, 22, 30, .2); transition: transform .16s ease; }
+.switch > span { position: absolute; top: .2rem; left: .2rem; width: 1rem; height: 1rem; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(22, 22, 22, .2); transition: transform .16s ease; }
 .switch.checked { background: var(--brand); }
 .switch.checked > span { transform: translateX(1rem); }
 .switch:disabled { opacity: .5; cursor: not-allowed; }
