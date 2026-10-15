@@ -127,6 +127,7 @@ def analyze_memory_batch(
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
                 "capacity_blocked": capacity_blocked,
+                "work_pending": type(exc).__name__ == "MemoryWorkPending",
             },
         }
 
@@ -310,17 +311,25 @@ def persist_round_memory_analysis(
                 if previous is not None:
                     merged["evidence_rounds"] = sorted(set(
                         previous.get("evidence_rounds", []) + candidate.get("evidence_rounds", [])))
+                    roles = {**previous.get("evidence_sources", {}),
+                             **candidate.get("evidence_sources", {})}
+                    for number, role in previous.get("evidence_sources", {}).items():
+                        if role == "user":
+                            roles[number] = "user"
+                    merged["evidence_sources"] = roles
                     if previous.get("action") == "revise" and candidate.get("action") == "reinforce":
-                        merged = {**previous, "evidence_rounds": merged["evidence_rounds"]}
+                        merged = {**previous, "evidence_rounds": merged["evidence_rounds"],
+                                  "evidence_sources": merged["evidence_sources"]}
                 deduplicated[key] = merged
             else:
                 unkeyed.append(candidate)
         persisted_candidates = [*deduplicated.values(), *unkeyed]
-        persisted = MemoryStore(root, user, config).upsert_candidates(
-            persisted_candidates,
-            source=source,
-            operation_id=operation_id,
-        )
+        from run.memory.candidate_work import apply_candidate_work
+        work = apply_candidate_work(MemoryStore(root, user, config),
+                                    persisted_candidates, source, operation_id)
+        if work["status"] != "completed":
+            return work
+        persisted = work["persisted"]
     except Exception as exc:
         return {
             "status": "failed",
