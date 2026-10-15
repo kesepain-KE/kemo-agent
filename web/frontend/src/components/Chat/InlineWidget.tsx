@@ -217,7 +217,7 @@ function LineChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, {
   )
 }
 
-const piePalette = ['#665cff', '#4ca7e8', '#1eaf7d', '#c98c25', '#d55b65', '#9b72e8', '#4eb8a5', '#ee8b60', '#7886a4', '#b7a13d']
+const piePalette = ['#4a4a4a', '#606060', '#777777', '#8d8d8d', '#a3a3a3', '#5a5a5a', '#707070', '#868686', '#9c9c9c', '#b2b2b2']
 
 function PieChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'pie-chart' }> }) {
   const { title, description, data, unit = '', donut = true } = widget.props

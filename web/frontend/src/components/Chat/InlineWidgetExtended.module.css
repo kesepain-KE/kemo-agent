@@ -1,5 +1,5 @@
 .widget {
-  --widget-accent: var(--brand, #6d5dfc);
+  --widget-accent: var(--brand, #6c6c6c);
   display: grid;
   gap: 14px;
   width: 100%;
@@ -19,9 +19,9 @@
 
 .neutral { --node-color: var(--text); --node-soft: color-mix(in srgb, var(--text) 7%, transparent); }
 .brand { --node-color: var(--brand); --node-soft: color-mix(in srgb, var(--brand) 12%, transparent); }
-.success { --node-color: var(--success, #248f5b); --node-soft: color-mix(in srgb, var(--success, #248f5b) 12%, transparent); }
-.warning { --node-color: var(--warning, #b7791f); --node-soft: color-mix(in srgb, var(--warning, #b7791f) 13%, transparent); }
-.danger { --node-color: var(--danger, #cc4b4b); --node-soft: color-mix(in srgb, var(--danger, #cc4b4b) 12%, transparent); }
+.success { --node-color: var(--success, #747474); --node-soft: color-mix(in srgb, var(--success, #747474) 12%, transparent); }
+.warning { --node-color: var(--warning, #808080); --node-soft: color-mix(in srgb, var(--warning, #808080) 13%, transparent); }
+.danger { --node-color: var(--danger, #666666); --node-soft: color-mix(in srgb, var(--danger, #666666) 12%, transparent); }
 
 .uiRoot { display: grid; gap: 12px; min-width: 0; }
 .uiGroup { display: flex; min-width: 0; box-sizing: border-box; color: var(--node-color, var(--text)); }
@@ -77,13 +77,13 @@
 
 .fileList { display: grid; gap: 8px; }.fileList article { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }.fileList strong, .fileList p, .fileList small { display: block; overflow-wrap: anywhere; }.fileList p { margin: 3px 0; color: var(--muted); font-size: .72rem; }.fileList small { color: var(--muted); font-size: .64rem; }.fileList a, .fileList button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 8px; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); text-decoration: none; font-size: .68rem; cursor: pointer; }
 
-.productGrid { display: grid; gap: 10px; }.productGrid > article { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }.productGrid img, .productPlaceholder { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: color-mix(in srgb, var(--brand) 8%, var(--surface)); }.productPlaceholder { display: grid; place-items: center; color: var(--brand); }.productBody { display: grid; gap: 6px; padding: 11px; }.productBody > strong { font-size: .8rem; }.productBody p { margin: 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }.productBadge { width: fit-content; padding: 3px 6px; border-radius: 999px; background: color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); font-size: .61rem; }.productRating { display: inline-flex; align-items: center; gap: 4px; color: #b7791f; font-size: .68rem; }.price { display: flex; align-items: baseline; gap: 7px; }.price b { color: var(--brand); }.price del { color: var(--muted); font-size: .66rem; }
+.productGrid { display: grid; gap: 10px; }.productGrid > article { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }.productGrid img, .productPlaceholder { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: color-mix(in srgb, var(--brand) 8%, var(--surface)); }.productPlaceholder { display: grid; place-items: center; color: var(--brand); }.productBody { display: grid; gap: 6px; padding: 11px; }.productBody > strong { font-size: .8rem; }.productBody p { margin: 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }.productBadge { width: fit-content; padding: 3px 6px; border-radius: 999px; background: color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); font-size: .61rem; }.productRating { display: inline-flex; align-items: center; gap: 4px; color: #808080; font-size: .68rem; }.price { display: flex; align-items: baseline; gap: 7px; }.price b { color: var(--brand); }.price del { color: var(--muted); font-size: .66rem; }
 
 .orderLines, .orderTotals { display: grid; }.orderLines > div { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); align-items: center; }.orderLines small { display: block; margin-top: 3px; color: var(--muted); }.orderLines > div > span:nth-child(2) { color: var(--muted); font-size: .7rem; }.orderTotals { gap: 6px; padding-top: 4px; }.orderTotals > div { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .73rem; }.orderTotals .grandTotal { margin-top: 4px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--text); font-size: .84rem; }.grandTotal strong { color: var(--brand); font-size: 1rem; }
 
 .pollList { display: grid; gap: 7px; }.pollList > button { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }.pollList > button.selected { border-color: color-mix(in srgb, var(--brand) 50%, var(--line)); background: color-mix(in srgb, var(--brand) 8%, var(--surface)); }.pollChoice input { pointer-events: none; }.pollList strong, .pollList small { display: block; }.pollList small { margin-top: 3px; color: var(--muted); font-size: .67rem; }.pollList b { color: var(--brand); font-size: .7rem; }
 
-.ratingLabel { margin: 0; color: var(--muted); font-size: .76rem; }.ratingRow { display: flex; flex-wrap: wrap; gap: 4px; }.ratingRow button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; background: transparent; color: color-mix(in srgb, var(--muted) 40%, transparent); cursor: pointer; }.ratingRow button:hover, .ratingRow .activeStar { color: #e7a72f; transform: scale(1.08); }.ratingRow svg { width: 24px; height: 24px; }
+.ratingLabel { margin: 0; color: var(--muted); font-size: .76rem; }.ratingRow { display: flex; flex-wrap: wrap; gap: 4px; }.ratingRow button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; background: transparent; color: color-mix(in srgb, var(--muted) 40%, transparent); cursor: pointer; }.ratingRow button:hover, .ratingRow .activeStar { color: #acacac; transform: scale(1.08); }.ratingRow svg { width: 24px; height: 24px; }
 
 @media (max-width: 720px) {
   .row { flex-direction: column; }

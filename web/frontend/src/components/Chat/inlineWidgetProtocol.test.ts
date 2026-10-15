@@ -3,6 +3,7 @@ import {
   copyableAssistantText,
   parseInlineWidget,
   splitInlineWidgets,
+  type InlineWidgetDefinition,
 } from './inlineWidgetProtocol'
 
 const comparisonSource = JSON.stringify({
@@ -232,6 +233,223 @@ describe('inline widget protocol', () => {
       const result = parseInlineWidget(JSON.stringify({ schema_version: 1, ...sample }))
       expect(result.ok, sample.component).toBe(true)
     }
+  })
+
+  it('normalizes object submit actions from interactive component output', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'poll-object-action',
+      component: 'poll',
+      props: {
+        title: '下一步方向',
+        options: [{ label: '图表', value: 'charts' }, { label: '交互', value: 'interactive' }],
+        submit: {
+          label: '提交',
+          action: { type: 'fill-input', text: '下次想看：{{selection}}' },
+        },
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok || result.widget.component !== 'poll') throw new Error('poll action normalization failed')
+    expect(result.widget.props.submit).toMatchObject({
+      action: 'fill-input',
+      template: '下次想看：{{selection}}',
+    })
+  })
+
+  it('fills safe labels and templates for legacy confirmation feedback', () => {
+    const confirm = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'legacy-confirm',
+      component: 'confirm',
+      props: { message: '是否继续？', confirm: { action: { type: 'send-message', text: '继续' } } },
+    }))
+    const approval = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'legacy-approval',
+      component: 'approval',
+      props: { request: '请批准', approve: { action: { type: 'send-message', text: '批准' } } },
+    }))
+
+    expect(confirm.ok).toBe(true)
+    expect(approval.ok).toBe(true)
+    if (!confirm.ok || !approval.ok) throw new Error('feedback normalization failed')
+    const confirmWidget = confirm.widget as Extract<InlineWidgetDefinition, { component: 'confirm' }>
+    const approvalWidget = approval.widget as Extract<InlineWidgetDefinition, { component: 'approval' }>
+    expect(confirmWidget.props.confirm.label).toBe('确认')
+    expect(approvalWidget.props.approve.label).toBe('批准')
+  })
+
+  it('normalizes string options, object submit actions and wrapped ui-card nodes', () => {
+    const form = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'legacy-form',
+      component: 'form',
+      props: {
+        fields: [{ id: 'device', label: '设备', type: 'select', options: ['电脑', '手机'] }],
+        submit: { label: '查询', action: { type: 'fill-input', template: '查询：{{device}}' } },
+      },
+    }))
+    const card = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'wrapped-ui-card',
+      component: 'ui-card',
+      props: {
+        nodes: [{
+          type: 'form',
+          props: {
+            fields: [{ name: 'topic', label: '主题', type: 'text' }],
+            submit: { label: '填入', action: { type: 'fill-input', text: '分析 {{topic}}' } },
+          },
+        }],
+      },
+    }))
+
+    expect(form.ok).toBe(true)
+    expect(card.ok).toBe(true)
+    if (!form.ok || !card.ok) throw new Error('component normalization failed')
+    const formWidget = form.widget as Extract<InlineWidgetDefinition, { component: 'form' }>
+    const cardWidget = card.widget as Extract<InlineWidgetDefinition, { component: 'ui-card' }>
+    expect(formWidget.props.fields[0].options).toEqual([
+      { label: '电脑', value: '电脑' },
+      { label: '手机', value: '手机' },
+    ])
+    expect(formWidget.props.submit).toMatchObject({ action: 'fill-input', template: '查询：{{device}}' })
+    const firstNode = cardWidget.props.nodes[0]
+    expect(firstNode).toMatchObject({ type: 'box' })
+    if ('children' in firstNode) expect(firstNode.children.at(-1)).toMatchObject({ type: 'button', label: '填入' })
+  })
+
+  it('normalizes common layout aliases in ui-card nodes', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'ui-card-layout-aliases',
+      component: 'ui-card',
+      props: {
+        title: '组合卡片',
+        nodes: [{
+          type: 'stack',
+          children: [
+            { type: 'text-input', name: 'topic', label: '主题', default_value: '组件' },
+            { type: 'slider', name: 'depth', label: '深度', min: 1, max: 5, default_value: 3 },
+            { type: 'button', label: '继续', action: { type: 'fill-input', text: '继续分析 {{topic}}，深度 {{depth}}' } },
+          ],
+        }],
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('normalizes common form wrappers and field definitions in ui-card nodes', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'ui-card-form-wrapper',
+      component: 'ui-card',
+      props: {
+        title: '组合卡片',
+        description: '输入主题与深度，点击按钮把指令文本填进输入框。',
+        nodes: [
+          {
+            type: 'form',
+            fields: [
+              { name: 'topic', label: '主题', type: 'text', default: '组件' },
+              { name: 'depth', label: '深度', type: 'number', min: 1, max: 5, default: 3 },
+            ],
+          },
+          {
+            type: 'button',
+            label: '继续',
+            action: 'fill-input',
+            text: '继续分析 {{topic}}，深度 {{depth}}',
+          },
+        ],
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok || result.widget.component !== 'ui-card') throw new Error('ui-card form normalization failed')
+    expect(result.widget.props.nodes[0]).toMatchObject({
+      type: 'box',
+      children: [
+        { type: 'text-input', name: 'topic', default_value: '组件' },
+        { type: 'number-input', name: 'depth', default_value: 3 },
+      ],
+    })
+    expect(result.widget.props.nodes[1]).toMatchObject({
+      type: 'button',
+      action: { type: 'fill-input', text: '继续分析 {{topic}}，深度 {{depth}}' },
+    })
+  })
+
+  it('normalizes device query cards whose input type and options use legacy aliases', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'device-query-card',
+      component: 'ui-card',
+      props: {
+        title: '设备查询',
+        description: '输入设备并点击查询。',
+        nodes: [
+          {
+            type: 'input',
+            input_type: 'select',
+            name: 'device',
+            label: '设备',
+            options: ['电脑', '手机'],
+          },
+          {
+            type: 'button',
+            label: '查询',
+            action: { type: 'fill-input', template: '查询设备：{{device}}' },
+          },
+        ],
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok || result.widget.component !== 'ui-card') throw new Error('device query normalization failed')
+    expect(result.widget.props.nodes[0]).toMatchObject({
+      type: 'select',
+      name: 'device',
+      options: [
+        { label: '电脑', value: '电脑' },
+        { label: '手机', value: '手机' },
+      ],
+    })
+  })
+
+  it('normalizes numeric product prices and unlabeled order actions', () => {
+    const product = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'numeric-product',
+      component: 'product-grid',
+      props: {
+        products: [{ name: '组件包', price: 199 }],
+      },
+    }))
+    const order = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'unlabeled-order-action',
+        component: 'order-summary',
+        props: {
+          items: [{ label: '组件包', quantity: 1, unit_price: 199 }],
+        actions: [{ type: 'send-message', text: '确认订单' }],
+        },
+      }))
+
+    expect(product.ok).toBe(true)
+    expect(order.ok).toBe(true)
+    if (!product.ok || !order.ok) throw new Error('commerce normalization failed')
+    if (product.widget.component !== 'product-grid' || order.widget.component !== 'order-summary') {
+      throw new Error('commerce component normalization failed')
+    }
+    expect(product.widget.props.products[0].price).toBe('199')
+    expect(order.widget.props.actions?.[0]).toMatchObject({
+      label: '确认订单',
+      action: { type: 'send-message', text: '确认订单' },
+    })
   })
 
   it('rejects external URLs in the extended media catalog', () => {

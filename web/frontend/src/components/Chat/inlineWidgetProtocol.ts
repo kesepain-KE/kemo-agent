@@ -120,6 +120,112 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+const actionTypes = new Set(['fill-input', 'send-message', 'copy'])
+
+function normalizeAction(value: unknown, fallbackText?: unknown): unknown {
+  if (typeof value === 'string') {
+    return { type: actionTypes.has(value) ? value : 'fill-input', text: typeof fallbackText === 'string' ? fallbackText : value }
+  }
+  if (!isRecord(value)) return value
+  const type = typeof value.type === 'string' && actionTypes.has(value.type)
+    ? value.type
+    : typeof value.action === 'string' && actionTypes.has(value.action)
+      ? value.action
+      : 'fill-input'
+  const text = value.text ?? value.message ?? value.template ?? fallbackText
+  return typeof text === 'string' && text.trim() ? { type, text } : value
+}
+
+function normalizeActionButton(value: unknown, fallbackLabel: string): unknown {
+  if (typeof value === 'string') return { label: value, action: normalizeAction(value) }
+  if (!isRecord(value)) return value
+  const actionSource = value.action ?? value
+  const action = normalizeAction(actionSource, value.text ?? value.message ?? value.template)
+  return {
+    label: String(value.label ?? value.title ?? value.name ?? fallbackLabel),
+    action,
+    ...(typeof value.tone === 'string' ? { tone: value.tone } : {}),
+    ...(typeof value.disabled === 'boolean' ? { disabled: value.disabled } : {}),
+  }
+}
+
+function normalizeFormField(value: unknown, index: number): unknown {
+  if (typeof value === 'string') return { name: `field_${index + 1}`, label: value, type: 'text' }
+  if (!isRecord(value)) return value
+  const props = isRecord(value.props) ? value.props : {}
+  const source = { ...props, ...value }
+  delete source.props
+  const rawType = String(source.type ?? source.input_type ?? source.inputType ?? source.control ?? 'text').toLowerCase()
+  const typeAliases: Record<string, string> = {
+    string: 'text', input: 'text', text_input: 'text', 'text-input': 'text',
+    numeric: 'number', number_input: 'number', 'number-input': 'number',
+    selectbox: 'select', dropdown: 'select', choices: 'radio',
+    bool: 'checkbox', toggle: 'checkbox',
+  }
+  const type = typeAliases[rawType] || rawType
+  const nameCandidate = source.name ?? source.id ?? source.field ?? source.key
+  const name = typeof nameCandidate === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(nameCandidate.trim())
+    ? nameCandidate.trim()
+    : `field_${index + 1}`
+  const options = source.options ?? source.choices
+  const defaultValue = source.default_value ?? source.defaultValue ?? source.default ?? source.value
+  return {
+    name,
+    label: String(source.label ?? source.title ?? source.placeholder ?? name),
+    type,
+    ...(typeof source.placeholder === 'string' ? { placeholder: source.placeholder } : {}),
+    ...(typeof source.required === 'boolean' ? { required: source.required } : {}),
+    ...(defaultValue !== undefined ? { default_value: defaultValue } : {}),
+    ...(Array.isArray(options)
+      ? { options: options.map((option) => isRecord(option)
+        ? { label: String(option.label ?? option.name ?? option.value ?? ''), value: String(option.value ?? option.label ?? option.name ?? '') }
+        : { label: String(option), value: String(option) }) }
+      : {}),
+  }
+}
+
+function normalizeFeedbackProps(component: InlineWidgetComponentName, props: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...props }
+  if (component === 'confirm') {
+    if (!next.confirm && next.action) next.confirm = { label: '确认', action: next.action }
+    if (next.confirm) next.confirm = normalizeActionButton(next.confirm, '确认')
+  }
+  if (component === 'approval') {
+    if (!next.approve && next.action) next.approve = { label: '批准', action: next.action }
+    if (next.approve) next.approve = normalizeActionButton(next.approve, '批准')
+    if (next.reject) next.reject = normalizeActionButton(next.reject, '拒绝')
+  }
+  if (component === 'form') {
+    if (Array.isArray(next.fields)) next.fields = next.fields.map(normalizeFormField)
+    if (isRecord(next.submit)) {
+      const submit = {
+        label: String(next.submit.label ?? next.submit.title ?? '提交'),
+        ...(typeof next.submit.tone === 'string' ? { tone: next.submit.tone } : {}),
+        ...(typeof next.submit.template === 'string' ? { template: next.submit.template } : {}),
+        action: next.submit.action,
+      }
+      const action = normalizeAction(next.submit.action, next.submit.template ?? next.submit.message ?? next.submit.text)
+      if (isRecord(action) && typeof action.type === 'string') {
+        submit.action = action.type
+        if (typeof submit.template !== 'string' && typeof action.text === 'string') submit.template = action.text
+      }
+      next.submit = submit
+    }
+  }
+  if (component === 'button-group' && Array.isArray(next.buttons)) {
+    next.buttons = next.buttons.map((button) => normalizeActionButton(button, '操作'))
+  }
+  if (component === 'follow-up' && Array.isArray(next.prompts)) {
+    next.prompts = next.prompts.map((prompt) => {
+      if (typeof prompt === 'string') return { label: prompt, text: prompt }
+      if (!isRecord(prompt)) return prompt
+      const action = isRecord(prompt.action) ? normalizeAction(prompt.action, prompt.text ?? prompt.message) : undefined
+      return { ...prompt, label: String(prompt.label ?? prompt.title ?? prompt.text ?? prompt.message ?? '继续'), text: prompt.text ?? prompt.message ?? (isRecord(action) ? action.text : undefined), send: prompt.send ?? (isRecord(action) && action.type === 'send-message' ? true : undefined) }
+    })
+  }
+  return next
+}
+
 function tableColumnKey(value: unknown, index: number): string {
   if (isRecord(value) && typeof value.key === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(value.key.trim())) {
     return value.key.trim()
@@ -181,7 +287,7 @@ function normalizeWidgetInput(value: unknown): unknown {
     props = {
       ...props,
       buttons: props.options.map((option) => {
-        if (!isRecord(option)) return option
+        if (!isRecord(option)) return normalizeActionButton(option, '操作')
         const action = isRecord(option.action) ? option.action : null
         return {
           label: option.label || option.title,
@@ -202,6 +308,7 @@ function normalizeWidgetInput(value: unknown): unknown {
   if (extendedComponentNames.includes(component as ExtendedComponentName)) {
     props = normalizeExtendedProps(component as ExtendedComponentName, props, normalizedName)
   }
+  props = normalizeFeedbackProps(component, props)
   if (component === 'generic-card') props = { ...props, requested_component: requestedComponent }
   return {
     protocol: source.protocol || 'kemo-ui',

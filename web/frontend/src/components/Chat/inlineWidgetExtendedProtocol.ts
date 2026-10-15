@@ -284,7 +284,305 @@ export const extendedComponentAliases: Record<string, ExtendedComponentName> = {
   rating: 'rating',
 }
 
+const uiNodeTypeAliases: Record<string, string> = {
+  stack: 'col',
+  vstack: 'col',
+  'v-stack': 'col',
+  vertical: 'col',
+  column: 'col',
+  hstack: 'row',
+  'h-stack': 'row',
+  horizontal: 'row',
+  group: 'box',
+  section: 'box',
+  container: 'box',
+  grid: 'box',
+  form: 'box',
+  'form-section': 'box',
+  'field-group': 'box',
+  input: 'text-input',
+  'text-field': 'text-input',
+  text_field: 'text-input',
+  number: 'number-input',
+  numeric: 'number-input',
+  date: 'date-picker',
+  range: 'slider',
+  toggle: 'switch',
+  dropdown: 'select',
+  'multi-select': 'checkbox-group',
+  choices: 'radio',
+  choice: 'radio',
+  heading: 'title',
+  paragraph: 'text',
+  body: 'text',
+  small: 'caption',
+  action: 'button',
+  separator: 'divider',
+  space: 'spacer',
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeUiNode(value: unknown, index = 0, fieldMode = false): unknown {
+  if (typeof value === 'string') return { type: 'text', text: value }
+  if (!isRecord(value)) return value
+  // Some model adapters wrap node attributes in `props`; flatten only that
+  // declarative object, never execute or preserve arbitrary callbacks.
+  const nestedProps = isRecord(value.props) ? value.props : {}
+  const source = {
+    ...nestedProps,
+    ...value,
+  }
+  delete source.props
+  const explicitType = String(source.type || source.kind || source.component || '').trim().toLowerCase()
+  const nestedType = String(nestedProps.type || nestedProps.kind || nestedProps.component || '').trim().toLowerCase()
+  const rawType = explicitType || nestedType
+  const rawFieldType = String(
+    source.input_type
+      || source.inputType
+      || source.control
+      || source.control_type
+      || source.field_type
+      || source.fieldType
+      || (['input', 'field', 'control'].includes(rawType) ? nestedType : ''),
+  ).trim().toLowerCase()
+  const fieldTypeAliases: Record<string, string> = {
+    'text-input': 'text-input',
+    text: 'text-input',
+    string: 'text-input',
+    textarea: 'textarea',
+    'text-area': 'textarea',
+    number: 'number-input',
+    'number-input': 'number-input',
+    numeric: 'number-input',
+    date: 'date-picker',
+    'date-picker': 'date-picker',
+    range: 'slider',
+    slider: 'slider',
+    boolean: 'switch',
+    checkbox: 'switch',
+    toggle: 'switch',
+    switch: 'switch',
+    select: 'select',
+    dropdown: 'select',
+    radio: 'radio',
+    multiselect: 'checkbox-group',
+    'multi-select': 'checkbox-group',
+    'checkbox-group': 'checkbox-group',
+    choices: 'radio',
+  }
+  const inferredFieldType = Array.isArray(source.options) || Array.isArray(source.choices)
+    ? 'select'
+    : 'text-input'
+  const type = ['input', 'field', 'control'].includes(rawType)
+    ? fieldTypeAliases[rawFieldType] || inferredFieldType
+    : fieldMode && fieldTypeAliases[rawType]
+      ? fieldTypeAliases[rawType]
+      : uiNodeTypeAliases[rawType] || rawType
+  // A few model adapters omit `type` on a field node. Infer only the
+  // declarative input shapes that this protocol already supports.
+  const inferredType = type || (
+    Array.isArray(source.options) || Array.isArray(source.choices)
+      ? 'select'
+      : (typeof source.name === 'string' || typeof source.id === 'string' || typeof source.field === 'string')
+        ? 'text-input'
+        : ''
+  )
+  if (inferredType) {
+    source.type = inferredType
+    delete source.kind
+    delete source.component
+  }
+
+  if (['box', 'row', 'col', 'card', 'list-view', 'list-item', 'transition'].includes(inferredType)) {
+    const children = source.children ?? source.nodes ?? source.items ?? source.content ?? source.fields
+    if (Array.isArray(children)) {
+      const childrenAreFields = Array.isArray(source.fields) || rawType === 'form' || rawType === 'form-section' || rawType === 'field-group'
+      const normalizedChildren = children.map((child, childIndex) => normalizeUiNode(child, childIndex, childrenAreFields))
+      if (rawType === 'form' && source.submit !== undefined) {
+        const submit = isRecord(source.submit) ? source.submit : { label: String(source.submit) }
+        normalizedChildren.push(normalizeUiNode({
+          type: 'button',
+          label: submit.label ?? source.submit_label ?? '提交',
+          action: submit.action ?? source.action ?? { type: 'fill-input', text: submit.template ?? submit.text ?? submit.message ?? '提交' },
+          text: submit.text,
+          template: submit.template,
+        }, normalizedChildren.length))
+      }
+      source.children = normalizedChildren
+    } else if (typeof children === 'string' && children.trim()) {
+      source.children = [{ type: 'text', text: children }]
+    }
+    delete source.nodes
+    delete source.items
+    delete source.content
+    delete source.fields
+    delete source.submit
+    delete source.submit_label
+    delete source.reset_label
+    delete source.label
+    delete source.action
+  } else if (['title', 'text', 'caption', 'markdown'].includes(inferredType)) {
+    if (typeof source.text !== 'string') {
+      const content = source.content ?? source.value
+      if (typeof content === 'string') source.text = content
+    }
+    delete source.content
+    delete source.value
+  } else if (inferredType === 'icon' && typeof source.name !== 'string' && typeof source.icon === 'string') {
+    source.name = source.icon
+    delete source.icon
+  }
+  if (['date-picker', 'text-input', 'textarea', 'number-input', 'slider', 'switch', 'select', 'radio', 'checkbox-group'].includes(inferredType)) {
+    const label = source.label ?? source.title ?? source.placeholder ?? source.name ?? `字段 ${index + 1}`
+    const name = source.name ?? source.id ?? source.field ?? source.key
+    source.label = String(label)
+    source.name = typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name.trim())
+      ? name.trim()
+      : `field_${index + 1}`
+    if (source.default_value === undefined && source.defaultValue !== undefined) source.default_value = source.defaultValue
+    if (source.default_value === undefined && source.default !== undefined) source.default_value = source.default
+    if (source.default_value === undefined && source.value !== undefined) source.default_value = source.value
+    delete source.title
+    delete source.id
+    delete source.field
+    delete source.key
+    delete source.input_type
+    delete source.inputType
+    delete source.control
+    delete source.control_type
+    delete source.field_type
+    delete source.fieldType
+    delete source.defaultValue
+    delete source.default
+    delete source.value
+    if (inferredType === 'select' || inferredType === 'radio' || inferredType === 'checkbox-group') {
+      const options = source.options ?? source.choices
+      if (Array.isArray(options)) {
+        source.options = options.map((option) => isRecord(option)
+          ? {
+            label: String(option.label ?? option.name ?? option.value ?? ''),
+            value: String(option.value ?? option.label ?? option.name ?? ''),
+          }
+          : { label: String(option), value: String(option) })
+      }
+      delete source.choices
+    }
+  }
+  if (inferredType === 'button' && !isRecord(source.action)) {
+    const actionType = typeof source.action === 'string' ? source.action : typeof source.action_type === 'string' ? source.action_type : 'fill-input'
+    const actionText = source.text ?? source.message ?? source.template ?? source.value
+    if (typeof actionText === 'string' && actionText.trim()) {
+      source.action = { type: actionType, text: actionText }
+    }
+    delete source.action_type
+    delete source.text
+    delete source.message
+    delete source.template
+    delete source.value
+  }
+  if (inferredType === 'button' && isRecord(source.action)) {
+    const action = source.action
+    const actionType = typeof action.type === 'string' ? action.type : typeof action.action === 'string' ? action.action : 'fill-input'
+    const actionText = action.text ?? action.message ?? action.template ?? action.value ?? source.text ?? source.message ?? source.template ?? source.value
+    if (typeof actionText === 'string' && actionText.trim()) source.action = { type: actionType, text: actionText }
+    delete source.text
+    delete source.message
+    delete source.template
+    delete source.value
+  }
+  return source
+}
+
+function normalizeSubmitAction(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const submit = { ...value }
+  if (isRecord(submit.action)) {
+    const action = submit.action
+    const actionType = typeof action.type === 'string'
+      ? action.type
+      : typeof action.action === 'string' ? action.action : ''
+    const actionText = action.text ?? action.message ?? action.template ?? submit.template
+    if (actionType && typeof actionText === 'string' && actionText.trim()) {
+      submit.action = actionType
+      if (typeof submit.template !== 'string') submit.template = actionText
+    }
+  }
+  return submit
+}
+
+function normalizeExtendedAction(value: unknown, fallbackText = '操作'): unknown {
+  if (typeof value === 'string') {
+    return { type: 'fill-input', text: value }
+  }
+  if (!isRecord(value)) return value
+  const type = value.type === 'fill-input' || value.type === 'send-message' || value.type === 'copy'
+    ? value.type
+    : value.action === 'fill-input' || value.action === 'send-message' || value.action === 'copy'
+      ? value.action
+      : 'fill-input'
+  const text = value.text ?? value.message ?? value.template ?? value.value ?? fallbackText
+  return { type, text: String(text) }
+}
+
+function normalizeExtendedActionButton(value: unknown, index: number): unknown {
+  if (typeof value === 'string') {
+    return { label: value, action: normalizeExtendedAction(value) }
+  }
+  if (!isRecord(value)) return value
+  const actionSource = value.action ?? value
+  const fallbackText = [value.text, value.message, value.template].find((item): item is string => typeof item === 'string') || '操作'
+  const action = normalizeExtendedAction(actionSource, fallbackText)
+  const actionText = isRecord(action) && typeof action.text === 'string' ? action.text : ''
+  return {
+    label: String(value.label ?? value.title ?? value.name ?? value.text ?? value.message ?? actionText ?? `操作 ${index + 1}`),
+    action,
+    ...(typeof value.tone === 'string' ? { tone: value.tone } : {}),
+    ...(typeof value.disabled === 'boolean' ? { disabled: value.disabled } : {}),
+  }
+}
+
 export function normalizeExtendedProps(component: ExtendedComponentName, props: Record<string, unknown>, requestedName: string): Record<string, unknown> {
+  if (component === 'ui-card' && 'nodes' in props) {
+    return { ...props, nodes: Array.isArray(props.nodes) ? props.nodes.map((node, index) => normalizeUiNode(node, index)) : props.nodes }
+  }
+  if (component === 'product-grid') {
+    const products = Array.isArray(props.products)
+      ? props.products.map((product) => {
+        if (!isRecord(product)) return product
+        const price = product.price ?? product.amount ?? product.value
+        const previousPrice = product.previous_price ?? product.previousPrice ?? product.original_price
+        return {
+          ...product,
+          ...(price !== undefined ? { price: String(price) } : {}),
+          ...(previousPrice !== undefined ? { previous_price: String(previousPrice) } : {}),
+        }
+      })
+      : props.products
+    return { ...props, products }
+  }
+  if (component === 'order-summary' && Array.isArray(props.actions)) {
+    return { ...props, actions: props.actions.map(normalizeExtendedActionButton) }
+  }
+  if ((component === 'poll' || component === 'rating') && isRecord(props.submit)) {
+    const next: Record<string, unknown> = { ...props, submit: normalizeSubmitAction(props.submit) }
+    if (component === 'poll' && Array.isArray(next.options)) {
+      next.options = next.options.map((option) => isRecord(option)
+        ? { ...option, label: String(option.label ?? option.title ?? option.value ?? ''), value: String(option.value ?? option.label ?? option.title ?? '') }
+        : { label: String(option), value: String(option) })
+    }
+    return next
+  }
+  if (component === 'poll' && Array.isArray(props.options)) {
+    return {
+      ...props,
+      options: props.options.map((option) => isRecord(option)
+        ? { ...option, label: String(option.label ?? option.title ?? option.value ?? ''), value: String(option.value ?? option.label ?? option.title ?? '') }
+        : { label: String(option), value: String(option) }),
+    }
+  }
   if (component === 'media-player' && !('media_type' in props)) {
     if (requestedName.includes('audio')) return { ...props, media_type: 'audio' }
     if (requestedName.includes('video')) return { ...props, media_type: 'video' }

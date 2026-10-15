@@ -9,7 +9,7 @@ describe('InlineWidget timeline styles', () => {
     const timelineRule = stylesheet.match(/\.timeline li\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(timelineRule).toContain('border-radius: 999px')
-    expect(timelineRule).toContain('min-height: 42px')
+    expect(timelineRule).toContain('min-height: 36px')
     expect(timelineRule).toContain('align-content: center')
   })
 
@@ -19,7 +19,8 @@ describe('InlineWidget timeline styles', () => {
 
     expect(connectorRule).toContain('left: .72rem')
     expect(connectorRule).toContain('bottom: -.85rem')
-    expect(markerRule).toContain('left: .3rem')
-    expect(markerRule).toContain('top: .82rem')
+    expect(markerRule).toContain('left: .34rem')
+    expect(markerRule).toContain('top: 50%')
+    expect(markerRule).toContain('transform: translateY(-50%)')
   })
 })
