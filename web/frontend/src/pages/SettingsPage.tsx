@@ -10,6 +10,7 @@ import {
   getCompletionSoundStatus,
   getFailureSoundStatus,
   getGlobalConfig,
+  getChatProviderModels,
   getKemoModelCapabilities,
   getKemoProviderModels,
   getSettings,
@@ -24,7 +25,7 @@ import {
   uploadFailureSound,
 } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
-import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
+import type { KemoModelCapabilitiesResponse } from '../types/api'
 import { ReasoningEffortSelect } from '../components/ReasoningEffortSelect'
 import {
   normalizeKemoReasoningEffort,
@@ -38,6 +39,8 @@ import { useUiStore } from '../store/ui'
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { isWindowsDesktop } from '../utils/platform'
+import { ReferenceIcon } from '../reference/ReferenceIcon'
+import { scheduleRestartReturn } from './restartReturn'
 
 import {
   SettingsTab,
@@ -68,10 +71,11 @@ import {
   NumberInput,
   TagInput,
   ConfigSaveBar,
+  SettingsModelOption,
 } from './settingsSupport'
 
 export function SettingsPage() {
-  const { user, chatRunning } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, chatRunning } = useOutletContext<ShellOutletContext>()
   const client = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const ui = useUiStore()
@@ -83,9 +87,29 @@ export function SettingsPage() {
   const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: Boolean(user) })
   const storedProviderType = record(userConfigQuery.data?.config.provider).type === 'kemo' ? 'kemo' : 'chat'
   const providerModelsQuery = useQuery({
-    queryKey: ['provider-models', user],
-    queryFn: async () => (await getKemoProviderModels(user)).data,
-    enabled: Boolean(user) && tab === 'provider' && storedProviderType === 'kemo',
+    queryKey: ['provider-models', user, storedProviderType],
+    queryFn: async (): Promise<SettingsModelOption[]> => {
+      if (storedProviderType === 'chat') {
+        const response = await getChatProviderModels(user)
+        return response.data.map((item) => ({
+          id: item.id,
+          provider_id: item.owned_by || 'chat',
+          provider_model: item.id,
+          source: 'chat' as const,
+        }))
+      }
+      const response = await getKemoProviderModels(user)
+      return response.data
+        .filter((item) => item.task === 'llm' || item.task === 'unknown')
+        .map((item) => ({
+          id: item.id,
+          provider_id: item.provider_id,
+          provider_model: item.provider_model,
+          task: item.task,
+          source: 'kemo' as const,
+        }))
+    },
+    enabled: Boolean(user) && Boolean(userConfigQuery.data) && tab === 'provider',
     staleTime: 300_000,
     retry: false,
   })
@@ -111,7 +135,7 @@ export function SettingsPage() {
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
   const [initialApiKey, setInitialApiKey] = useState('')
-  const [providerModels, setProviderModels] = useState<KemoModelCatalogItem[]>([])
+  const [providerModels, setProviderModels] = useState<SettingsModelOption[]>([])
   const [providerDiscovery, setProviderDiscovery] = useState<{ status: 'idle' | 'valid' | 'failed'; message: string }>({ status: 'idle', message: '' })
   const [formError, setFormError] = useState('')
   const [savedLabel, setSavedLabel] = useState('')
@@ -123,7 +147,7 @@ export function SettingsPage() {
   const [completionSoundPreviewing, setCompletionSoundPreviewing] = useState(false)
   const [failureSoundFeedback, setFailureSoundFeedback] = useState('')
   const [failureSoundPreviewing, setFailureSoundPreviewing] = useState(false)
-  const restartTimerRef = useRef<number | null>(null)
+  const restartCleanupRef = useRef<(() => void) | null>(null)
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
   const failureSoundInputRef = useRef<HTMLInputElement | null>(null)
   const selectedProviderModel = userDraft?.provider.model.trim() || ''
@@ -182,7 +206,7 @@ export function SettingsPage() {
   })
 
   useEffect(() => () => {
-    if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
+    restartCleanupRef.current?.()
   }, [])
 
   useEffect(() => {
@@ -205,29 +229,28 @@ export function SettingsPage() {
   }, [user, tab])
 
   useEffect(() => {
-    if (storedProviderType !== 'kemo') {
-      setProviderModels([])
-      setProviderDiscovery({ status: 'idle', message: '' })
-      return
-    }
     if (providerModelsQuery.isError) {
       setProviderModels([])
       setProviderDiscovery({
         status: 'failed',
         message: providerModelsQuery.error instanceof Error
           ? providerModelsQuery.error.message
-          : 'Kemo API 验证失败，未拉取模型',
+          : `${storedProviderType === 'chat' ? 'Chat' : 'Kemo'} 模型 API 验证失败，未拉取模型`,
       })
       return
     }
     if (!providerModelsQuery.data) return
     setProviderModels(providerModelsQuery.data)
-    setProviderDiscovery({
-      status: 'valid',
-      message: providerModelsQuery.data.length
-        ? `Kemo API 已验证，已获取 ${providerModelsQuery.data.length} 个可用模型`
-        : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
-    })
+    if (storedProviderType === 'kemo') {
+      setProviderDiscovery({
+        status: 'valid',
+        message: providerModelsQuery.data.length
+          ? `Kemo API 已验证，已获取 ${providerModelsQuery.data.length} 个可用模型`
+          : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
+      })
+    } else {
+      setProviderDiscovery({ status: 'idle', message: '' })
+    }
   }, [providerModelsQuery.data, providerModelsQuery.error, providerModelsQuery.isError, storedProviderType])
 
   useEffect(() => {
@@ -288,8 +311,11 @@ export function SettingsPage() {
       } else if (request.providerDiscovery === 'kemo') {
         client.removeQueries({ queryKey: ['provider-model-capabilities', user] })
         if (result.providerModels) {
-          client.setQueryData(['provider-models', user], result.providerModels)
-          setProviderModels(result.providerModels)
+          const models: SettingsModelOption[] = result.providerModels
+            .filter((item) => item.task === 'llm' || item.task === 'unknown')
+            .map((item) => ({ ...item, source: 'kemo' as const }))
+          client.setQueryData(['provider-models', user, 'kemo'], models)
+          setProviderModels(models)
           setProviderDiscovery({
             status: 'valid',
             message: result.providerModels.length
@@ -310,6 +336,8 @@ export function SettingsPage() {
         client.invalidateQueries({ queryKey: ['global-config'] }),
         client.invalidateQueries({ queryKey: ['overview', user] }),
         client.invalidateQueries({ queryKey: ['runtime-status', user] }),
+        ...(request.providerDiscovery === 'chat'
+          ? [client.invalidateQueries({ queryKey: ['provider-models', user] })] : []),
       ])
     },
     onError: (error) => setFormError(String(error)),
@@ -377,7 +405,7 @@ export function SettingsPage() {
       userConfigQuery.refetch(),
       globalConfigQuery.refetch(),
       versionQuery.refetch(),
-      ...(storedProviderType === 'kemo' ? [providerModelsQuery.refetch()] : []),
+      ...(tab === 'provider' ? [providerModelsQuery.refetch()] : []),
     ])
   }
   const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching || versionQuery.isFetching
@@ -509,7 +537,11 @@ export function SettingsPage() {
       setRestartMessage('服务连接已中断，正在等待新实例接管当前端口…')
     }
     setRestartState('waiting')
-    restartTimerRef.current = window.setTimeout(() => window.location.reload(), 4000)
+    restartCleanupRef.current?.()
+    restartCleanupRef.current = scheduleRestartReturn(user, sessionId, () => {
+      setRestartState('failed')
+      setRestartMessage('服务尚未恢复。对话空间链接已保留，请稍后重试。')
+    })
   }
   const closeRestartConfirmation = () => {
     setRestartState((current) => current === 'confirming-force' ? 'failed' : 'idle')
@@ -530,11 +562,13 @@ export function SettingsPage() {
       setVersionCopyState('failed')
     }
   }
-  const modelPickerEnabled = Boolean(
-    userDraft?.provider.type === 'kemo'
-      && providerDiscovery.status === 'valid'
-      && providerModels.length > 0,
-  )
+  const modelPickerEnabled = Boolean(userDraft && providerModels.length > 0
+    && userDraft.provider.type === storedProviderType && providerModels[0]?.source === storedProviderType)
+  const modelPickerDescription = modelPickerEnabled
+    ? userDraft?.provider.type === 'chat'
+      ? '可直接输入模型名，或从当前 Chat Provider 的 /models 列表中选择'
+      : '可直接输入模型名，或从已验证 Kemo 模型目录中选择'
+    : '模型列表未加载时仍可直接输入模型名'
   const kemoReasoning = providerCapabilitiesQuery.data?.capabilities.reasoning
   const kemoReasoningOptions = kemoReasoning?.supported
     ? reasoningEffortOptionsFor(kemoReasoning.efforts)
@@ -554,18 +588,17 @@ export function SettingsPage() {
             : '请先选择当前密钥可用的 Kemo 模型；不会套用固定五档'
           : '控制主对话和子智能体的推理深度；不可关闭，缺省使用中度'
 
-  return <ModuleFrame
-    kicker="Configuration Overview"
-    title="配置"
-    description="通过结构化字段管理界面、Provider、上下文、权限和运行限制；敏感凭据始终脱敏。"
-    actions={<RefreshActionButton pending={settingsRefreshing} label="重新读取" pendingLabel="读取中…" onClick={refreshAll} />}
-  >
+  return <div className="page"><div className="page-inner wide">
+    <div className="page-head"><div className="page-head-copy"><h1 className="page-title">配置</h1>
+      <p className="page-desc">settings 提供有效配置摘要，config/full 是用户文件的原始覆写，global-config 是全局文件；三者独立读取与保存，敏感凭据始终脱敏。</p></div>
+      <div className="page-head-actions"><RefreshActionButton pending={settingsRefreshing} label="重新读取" pendingLabel="读取中…" onClick={refreshAll} /></div></div>
     {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
     {tab === 'version' && versionQuery.isError ? <ModuleError message="版本信息读取失败，请检查 version.json。" /> : null}
     {formError ? <ModuleError message={formError} /> : null}
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="配置分类">
-        {settingsTabs.map((item) => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => switchTab(item.id)}><span>{item.label}</span><span>›</span></button>)}
+        {settingsTabs.map((item) => <button key={item.id} className={`settings-nav-item ${tab === item.id ? 'active is-active' : ''}`} onClick={() => switchTab(item.id)}>
+          <ReferenceIcon name={{ appearance: 'palette', provider: 'cpu', users: 'users', memory: 'memory', permissions: 'shieldCheck', runtime: 'sliders', version: 'package' }[item.id]} /><span>{item.label}</span></button>)}
       </nav>
 
       <div className="settings-content">
@@ -573,16 +606,16 @@ export function SettingsPage() {
           <article className="setting-section">
             <div className="setting-section-head"><strong>界面主题</strong><span>只影响当前用户的 Web 外观，不修改智能体运行配置。</span></div>
             <div className="setting-row theme-setting-row">
-              <span className="setting-copy"><strong>明暗主题</strong><span>高级白与高级黑使用相同层级和交互语义。</span></span>
+              <span className="setting-copy"><strong>网页主题</strong><span>高级白与高级黑使用相同布局，可随时切换。</span></span>
               <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
-                <button className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>统一灰白 · 低对比边界</span></span><i className="theme-choice-check">✓</i></span></button>
-                <button className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>中性黑灰 · 层级一致</span></span><i className="theme-choice-check">✓</i></span></button>
+                <button type="button" className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-label="高级白" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>暖白留白 · 清晰轻盈</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
+                <button type="button" className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-label="高级黑" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>柔和黑灰 · 沉静专注</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
               </div>
             </div>
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>界面字号</strong><span>文字与顶部栏关键控件同步缩放。</span></div>
-            <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b><span>{size === 'small' ? '72%' : size === 'medium' ? '88%' : '105%'}</span></button>)}</div></div>
+            <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”；字号会同步调整正文、控件和侧栏。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b></button>)}</div></div>
           </article>
           {windowsDesktop ? <article className="setting-section">
             <div className="setting-section-head"><strong>运行结束音效</strong><span>支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。</span></div>
@@ -652,7 +685,7 @@ export function SettingsPage() {
                 },
               })
             }} />} />
-            <SettingRow title="模型" description={modelPickerEnabled ? '可直接输入模型名，或从已验证 Kemo 模型目录中选择' : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
+            <SettingRow title="模型" description={modelPickerEnabled ? modelPickerDescription : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
               label="模型"
               value={userDraft.provider.model}
               placeholder="输入模型名称"
@@ -745,6 +778,7 @@ export function SettingsPage() {
           <ConfigSaveBar label="保存记忆与上下文" description="这些参数是全局默认值，将影响所有未覆盖对应字段的用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>上下文窗口</strong><span>控制 Token 预算、轮次上限和压缩后保留量。</span></div>
+            <SettingRow title="中途上下文压缩" description="超过保留轮数后，将较早一轮的工具调用与思考压缩为摘要；只影响命中率优化，不改变普通轮数或 Token 压缩。" source="global" control={<Toggle checked={globalDraft.agents.enable_mid_context_compression} label="中途上下文压缩" onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, enable_mid_context_compression: value } })} />} />
             <SettingRow title="Token 上限" description="估算总量越过该值或 Provider 报超限时触发压缩" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
             <SettingRow title="Token 压缩比例" description={`输入预算为 Token 上限的 ${Math.round(globalDraft.agents.token_compression_ratio * 100)}%`} source="global" control={<div className="config-range"><input type="range" aria-label="Token 压缩比例" min="0.05" max="1" step="0.05" value={globalDraft.agents.token_compression_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_compression_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.agents.token_compression_ratio * 100)}%</b></div>} />
             <SettingRow title="最大对话轮次" description="限制 Provider 临时工作区，不限制用户可见完整归档" source="global" control={<NumberInput label="最大对话轮次" value={globalDraft.agents.max_rounds} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, max_rounds: value } })} />} />
@@ -936,5 +970,5 @@ export function SettingsPage() {
         {(userConfigQuery.isLoading || globalConfigQuery.isLoading) && tab !== 'appearance' && tab !== 'users' && tab !== 'version' ? <div className="settings-loading">正在读取结构化配置…</div> : null}
       </div>
     </div>
-  </ModuleFrame>
+  </div></div>
 }

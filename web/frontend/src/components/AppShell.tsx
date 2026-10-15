@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   ArrowLeft,
@@ -36,15 +36,14 @@ import {
   createSession,
   deleteAllSessions,
   deleteSession,
-  getActiveSession,
   getHealth,
   getKemoModelCapabilities,
-  getLogoUrl,
   getOverview,
   getPreferences,
   getSessions,
   getUserAvatarUrl,
   getUsers,
+  getVersion,
   logoutAuth,
   patchPreferences,
   patchUserConfig,
@@ -54,19 +53,25 @@ import {
   reopenSession,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
+import { ReferenceIcon } from '../reference/ReferenceIcon'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
+import { ConversationFilesPopover } from './ConversationFilesPopover'
 import { ApiError } from '../api/transport'
 import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
+import { KemoLogo } from './KemoLogo'
 import lifecycleStyles from './SessionLifecycle.module.css'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
 import { useUiStore } from '../store/ui'
-import type { PendingUploadedFile } from '../store/chatDrafts'
+import { chatDraftKey, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
+import { forgetSession, rememberSession, restoreWebSession } from '../sessionNavigation'
+import { cacheCreatedSession, hasCreatedSessionLease } from '../sessionCreation'
 import {
   normalizeKemoReasoningEffort,
   normalizeReasoningEffort,
   reasoningEffortLabel,
+  reasoningEffortOptions,
   reasoningEffortOptionsFor,
   selectReasoningEffort,
   type ReasoningEffort,
@@ -76,6 +81,7 @@ import type { ShellOutletContext } from './appShellTypes'
 import { useChatRunRegistry } from './useChatRunRegistry'
 import {
   CONVERSATION_COMMAND_EVENT,
+  chatRunKey,
   fontSizeLabels,
   formatTokens,
   injectionPolicyPresentation,
@@ -96,18 +102,39 @@ export function AppShell() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const ui = useUiStore()
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [narrowScreen, setNarrowScreen] = useState(() => window.innerWidth <= 900)
+  useEffect(() => {
+    const update = () => setNarrowScreen(window.innerWidth <= 900)
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [])
+  useEffect(() => { setMobileSidebarOpen(false) }, [location.pathname, location.search])
+  useEffect(() => {
+    if (!mobileSidebarOpen) return
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setMobileSidebarOpen(false) }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [mobileSidebarOpen])
   const queryClient = useQueryClient()
   const clientId = useMemo(() => getPageClientId(), [])
   const [sessionTransitioning, setSessionTransitioning] = useState(false)
+  const creatingSessionRef = useRef<{ user: string; session: string; promise: Promise<string | undefined> } | null>(null)
+  const createdLeaseRef = useRef<{ user: string; session: string; until: number } | null>(null)
   const authStatus = queryClient.getQueryData<AuthStatusResponse>(['auth-status'])
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: getUsers })
   const healthQuery = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
+  const versionQuery = useQuery({ queryKey: ['version'], queryFn: getVersion, staleTime: 60_000 })
   const [rememberedUser, setRememberedUser] = useState(readLastActiveUser)
   const user = resolveCurrentUser(params.get('user') || '', rememberedUser, usersQuery.data?.users)
   const sessionId = params.get('session') || ''
   const newUserTab = params.get('new_session') === '1' && !sessionId
   const [sessionLifecycleNotice, setSessionLifecycleNotice] = useState('')
-  useEffect(() => setSessionLifecycleNotice(''), [user])
+  const [leasedConversation, setLeasedConversation] = useState('')
+  useEffect(() => {
+    setSessionLifecycleNotice('')
+    setSessionTransitioning(false)
+  }, [user])
   const sessionsQuery = useQuery({
     queryKey: ['sessions', user],
     queryFn: () => getSessions(user),
@@ -118,7 +145,7 @@ export function AppShell() {
   )
   const activeSessionQuery = useQuery({
     queryKey: ['active-session', user, clientId, newUserTab ? 'new-tab' : 'restore'],
-    queryFn: () => newUserTab ? createSession(user, clientId) : getActiveSession(user, clientId),
+    queryFn: () => newUserTab ? createSession(user, clientId) : restoreWebSession(user, clientId),
     enabled: Boolean(user) && !sessionId && !sessionTransitioning,
     staleTime: newUserTab ? Infinity : 0,
     retry: newUserTab ? false : undefined,
@@ -128,7 +155,7 @@ export function AppShell() {
   const overviewQuery = useQuery({
     queryKey: ['overview', user, sessionId],
     queryFn: () => getOverview(user, sessionId),
-    enabled: Boolean(user),
+    enabled: Boolean(user && sessionId),
     refetchInterval: 30_000,
   })
   const overviewProvider = overviewQuery.data?.provider
@@ -151,6 +178,7 @@ export function AppShell() {
     staleTime: 60_000,
   })
   const reasoningEffortMutation = useMutation({
+    mutationKey: ['provider-config', user],
     mutationFn: ({ targetUser, reasoningEffort }: { targetUser: string; reasoningEffort: ReasoningEffort }) => patchUserConfig(targetUser, {
       provider: { reasoning_effort: reasoningEffort },
     }),
@@ -163,6 +191,7 @@ export function AppShell() {
       ])
     },
   })
+  const providerConfigSaving = useIsMutating({ mutationKey: ['provider-config', user] }) > 0
 
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
@@ -201,6 +230,7 @@ export function AppShell() {
   useEffect(() => {
     document.documentElement.dataset.theme = ui.theme
     document.documentElement.dataset.fontSize = ui.fontSize
+    document.documentElement.dataset.fontsize = ui.fontSize === 'small' ? 'compact' : ui.fontSize === 'large' ? 'large' : 'default'
   }, [ui.theme, ui.fontSize])
 
   useEffect(() => {
@@ -221,7 +251,11 @@ export function AppShell() {
     const handler = (event: MouseEvent) => {
       const target = event.target as Node
       if (fontSizeRef.current && !fontSizeRef.current.contains(target)) setFontSizeMenuOpen(false)
-      if (modelMenuRef.current && !modelMenuRef.current.contains(target)) setModelMenuOpen(false)
+      // 思考选项 portal 到 body，仍属于当前模型卡；点击选项不能提前卸载它。
+      const reasoningId = modelMenuRef.current?.querySelector('[role="combobox"]')?.getAttribute('aria-controls')
+      const reasoningPopover = reasoningId ? document.getElementById(reasoningId) : null
+      if (modelMenuRef.current && !modelMenuRef.current.contains(target)
+        && !reasoningPopover?.contains(target)) setModelMenuOpen(false)
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -311,12 +345,17 @@ export function AppShell() {
   }
 
   const setSessionId = (nextSession: string) => {
-    const next = new URLSearchParams(params)
+    if (userRef.current !== user) return
+    const current = locationRef.current
+    const next = new URLSearchParams(current.search)
+    if (user) next.set('user', user)
+    if (nextSession && !next.get('session')) {
+      useChatDraftStore.getState().moveDraft(chatDraftKey(user, ''), chatDraftKey(user, nextSession))
+    }
     if (nextSession) next.delete('new_session')
     if (nextSession) next.set('session', nextSession)
     else next.delete('session')
-    if (nextSession) setSessionTransitioning(false)
-    setParams(next)
+    navigate({ pathname: current.pathname, search: `?${next}`, hash: current.hash }, { replace: true })
   }
 
   const detachSession = () => {
@@ -325,8 +364,15 @@ export function AppShell() {
     setSessionId('')
   }
 
+  useEffect(() => {
+    // The router can commit after a local state update. Keep automatic restore
+    // paused until the new session is actually present in the URL.
+    if (sessionId) setSessionTransitioning(false)
+  }, [sessionId])
+
   const notifySessionDeleted = (deletedSessionId: string) => {
     if (!user || !deletedSessionId) return
+    forgetSession(user, deletedSessionId)
     sessionChannelRef.current?.post({
       type: 'session-deleted',
       user,
@@ -337,31 +383,42 @@ export function AppShell() {
 
   useEffect(() => {
     const active = activeSessionQuery.data?.session?.session_id
-    const listed = Boolean(
-      active
-      && sessionsQuery.data?.sessions.some((candidate) => (
-        (candidate.source || 'web') === 'web'
-        && candidate.session_id === active
-      )),
-    )
-    if (!sessionId && !sessionTransitioning && !chatRunning && active && (listed || newUserTab)) {
+    if (!sessionId && !sessionTransitioning && !chatRunning && active
+      && activeSessionQuery.isSuccess && !activeSessionQuery.isFetching) {
       if (newUserTab) {
-        const next = new URLSearchParams(params)
+        const result = activeSessionQuery.data!
+        cacheCreatedSession(queryClient, result)
+        if (hasCreatedSessionLease(result, user, clientId)) {
+          createdLeaseRef.current = { user, session: active, until: Date.now() + 15_000 }
+          setLeasedConversation(chatRunKey(user, active))
+        }
+        const next = new URLSearchParams(locationRef.current.search)
         next.delete('new_session')
         next.set('user', user)
         next.set('session', active)
         setParams(next, { replace: true })
         void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
-      } else setSessionId(active)
+      } else {
+        setSessionId(active)
+        void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+      }
     }
-  }, [activeSessionQuery.data?.session?.session_id, chatRunning, sessionId, sessionTransitioning, sessionsQuery.data?.sessions, newUserTab])
+  }, [activeSessionQuery.data?.session?.session_id, activeSessionQuery.isSuccess, activeSessionQuery.isFetching,
+    chatRunning, sessionId, sessionTransitioning, user, newUserTab])
 
   useEffect(() => {
     if (!user || !sessionId) return
     let disposed = false
-    const touch = () => {
-      if (!disposed) void touchSessionLease(user, sessionId, clientId).catch((error: unknown) => {
+    const touch = (updateLatest = false) => {
+      if (!disposed) void touchSessionLease(user, sessionId, clientId).then(() => {
+        if (!disposed) {
+          rememberSession(user, sessionId, updateLatest && document.visibilityState !== 'hidden')
+          setLeasedConversation(chatRunKey(user, sessionId))
+        }
+      }).catch((error: unknown) => {
         if (disposed || !(error instanceof ApiError) || error.status !== 404) return
+        forgetSession(user, sessionId)
+        setLeasedConversation('')
         setSessionLifecycleNotice('此对话已被清理或删除，已返回开始页。历史归档列表将自动刷新；如归档也已清理，则无法恢复。')
         queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
         queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
@@ -373,19 +430,25 @@ export function AppShell() {
       })
     }
     const release = () => { void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined) }
-    touch()
+    const resume = () => touch(true)
+    const proof = createdLeaseRef.current
+    if (proof?.user === user && proof.session === sessionId && proof.until > Date.now()) {
+      createdLeaseRef.current = null
+      rememberSession(user, sessionId, document.visibilityState !== 'hidden')
+      setLeasedConversation(chatRunKey(user, sessionId))
+    } else resume()
     const heartbeat = window.setInterval(touch, 15_000)
     window.addEventListener('pagehide', release)
-    window.addEventListener('pageshow', touch)
-    window.addEventListener('online', touch)
-    document.addEventListener('visibilitychange', touch)
+    window.addEventListener('pageshow', resume)
+    window.addEventListener('online', resume)
+    document.addEventListener('visibilitychange', resume)
     return () => {
       disposed = true
       window.clearInterval(heartbeat)
       window.removeEventListener('pagehide', release)
-      window.removeEventListener('pageshow', touch)
-      window.removeEventListener('online', touch)
-      document.removeEventListener('visibilitychange', touch)
+      window.removeEventListener('pageshow', resume)
+      window.removeEventListener('online', resume)
+      document.removeEventListener('visibilitychange', resume)
       release()
     }
   }, [clientId, sessionId, user])
@@ -393,13 +456,14 @@ export function AppShell() {
   useEffect(() => {
     const channel = createSessionChannel((event) => {
       if (event.clientId === clientId || event.user !== userRef.current) return
+      forgetSession(event.user, event.sessionId)
       queryClient.removeQueries({ queryKey: ['history', event.user, event.sessionId] })
       void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
       void queryClient.invalidateQueries({ queryKey: ['history-sessions', event.user] })
       void queryClient.invalidateQueries({ queryKey: ['overview', event.user] })
       if (sessionIdRef.current === event.sessionId) {
         queryClient.removeQueries({ queryKey: ['active-session', event.user, clientId] })
-        setSessionTransitioning(false)
+        setSessionTransitioning(true)
         const current = locationRef.current
         const next = new URLSearchParams(current.search)
         next.delete('session')
@@ -442,27 +506,45 @@ export function AppShell() {
     }
   }
 
-  const createNewSession = async () => {
-    if (!user || chatRunning) return
+  const createNewSession = (): Promise<string | undefined> => {
+    if (!user || chatRunning) return Promise.resolve(undefined)
     const requestedUser = user
-    try {
-      const result = await createSession(requestedUser, clientId)
-      const current = locationRef.current
-      const next = new URLSearchParams(current.search)
-      const currentUser = next.get('user') || userRef.current
-      if (currentUser === requestedUser) {
-        next.set('user', requestedUser)
-        next.set('session', result.session.session_id)
-        setSessionTransitioning(false)
-        navigate({ pathname: current.pathname, search: `?${next.toString()}`, hash: current.hash }, { replace: true })
+    const requestedSession = sessionIdRef.current
+    const pending = creatingSessionRef.current
+    if (pending?.user === requestedUser && pending.session === requestedSession) return pending.promise
+    setSessionTransitioning(true)
+    const create = async () => {
+      try {
+        const result = await createSession(requestedUser, clientId)
+        const current = locationRef.current
+        const next = new URLSearchParams(current.search)
+        const currentUser = next.get('user') || userRef.current
+        if (currentUser === requestedUser && sessionIdRef.current === requestedSession) {
+          cacheCreatedSession(queryClient, result)
+          if (hasCreatedSessionLease(result, requestedUser, clientId)) {
+            createdLeaseRef.current = { user: requestedUser, session: result.session.session_id, until: Date.now() + 15_000 }
+            setLeasedConversation(chatRunKey(requestedUser, result.session.session_id))
+          }
+          next.set('user', requestedUser)
+          next.delete('new_session')
+          next.set('session', result.session.session_id)
+          navigate({ pathname: current.pathname, search: `?${next.toString()}`, hash: current.hash }, { replace: true })
+        }
+        // The new URL starts its own overview query; never queue an old/unbound
+        // refresh in front of the first history/lease requests.
+        void queryClient.invalidateQueries({ queryKey: ['sessions', requestedUser] })
+        return result.session.session_id
+      } catch (error) {
+        if (userRef.current === requestedUser && sessionIdRef.current === requestedSession && requestedSession) setSessionTransitioning(false)
+        throw error
       }
-      void sessionsQuery.refetch()
-      void overviewQuery.refetch()
-      return result.session.session_id
-    } catch (error) {
-      setSessionTransitioning(false)
-      throw error
     }
+    const promise = create()
+    const operation = { user: requestedUser, session: requestedSession, promise }
+    creatingSessionRef.current = operation
+    const clear = () => { if (creatingSessionRef.current === operation) creatingSessionRef.current = null }
+    void promise.then(clear, clear)
+    return promise
   }
 
   const runCommand = (action: () => void) => {
@@ -553,6 +635,7 @@ export function AppShell() {
     if (!user) throw new Error('当前没有可用用户')
     if (chatRunning) throw new Error('当前对话正在运行，暂时不能删除全部历史对话')
     await deleteAllSessions(user)
+    forgetSession(user)
     queryClient.removeQueries({ queryKey: ['history', user] })
     queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
     await Promise.all([
@@ -583,7 +666,7 @@ export function AppShell() {
   const conversationCommands = useMemo(() => [
     { id: 'save', label: '保存此对话，创建新对话', detail: '提取记忆、保存当前归档并开启新上下文', keywords: 'save new conversation 保存 新建', icon: Save, action: () => dispatchConversationCommand('save') },
     { id: 'clear', label: '清空此对话', detail: '删除当前归档，然后创建一个新对话', keywords: 'clear delete conversation 清空 删除', icon: Trash2, tone: 'danger', action: () => dispatchConversationCommand('clear') },
-    { id: 'compress', label: '手动进行一次上下文压缩', detail: '整理当前上下文并同步提取待处理记忆', keywords: 'compress context token 压缩 上下文', icon: Zap, action: () => dispatchConversationCommand('compress') },
+    { id: 'compress', label: '手动进行一次上下文压缩', detail: '优先按轮数压缩，不足时按 Token 压缩；记忆转入后台', keywords: 'compress context token 压缩 上下文', icon: Zap, action: () => dispatchConversationCommand('compress') },
     { id: 'retry', label: '重新发送一次消息', detail: '撤销上一轮并重放原消息，不增加对话轮数', keywords: 'retry regenerate resend 重新发送 重新生成', icon: RotateCcw, action: () => dispatchConversationCommand('retry') },
   ], [])
   const navigationCommands = useMemo(() => [
@@ -633,7 +716,7 @@ export function AppShell() {
     ? reasoningEffortOptionsFor(kemoReasoning.efforts)
     : []
   const kemoReasoningAvailable = kemoReasoningOptions.length > 0
-  const configuredReasoningEffort = reasoningEffortMutation.isPending
+  const configuredReasoningEffort = reasoningEffortMutation.isPending && reasoningEffortMutation.variables?.targetUser === user
     ? reasoningEffortMutation.variables?.reasoningEffort
     : provider?.reasoning_effort
   const displayedReasoningEffort = provider?.type === 'kemo' && kemoReasoningAvailable
@@ -651,6 +734,18 @@ export function AppShell() {
   const reasoningPolicy = providerCapabilitiesQuery.data?.capabilities.extensions.reasoning_policy
   const reasoningCapabilityNotice = providerCapabilitiesQuery.data?.warning
     || (reasoningPolicy?.collapsed ? '此模型的部分思考档位会映射到相同的上游强度。' : '')
+  // 顶栏与输入坞共用能力缓存和保存合同，不创建第二套模型配置状态。
+  const reasoningControl = {
+    value: displayedReasoningEffort,
+    options: provider?.type === 'kemo' ? kemoReasoningOptions : provider?.type === 'chat' ? reasoningEffortOptions : [],
+    disabled: providerConfigSaving,
+    emptyLabel: provider?.type === 'kemo' && providerCapabilitiesQuery.isFetching ? '读取能力中…' : '模型未声明推理档位',
+    notice: reasoningCapabilityNotice,
+    error: reasoningEffortMutation.isError && reasoningEffortMutation.variables?.targetUser === user
+      ? '思考强度保存失败，请重试。'
+      : provider?.type === 'kemo' && providerCapabilitiesQuery.isError ? '模型能力读取失败，请在 Provider 配置中重试。' : undefined,
+    onChange: (reasoningEffort: ReasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort }),
+  }
 
   const settingsPath = (tab: 'users' | 'provider') => {
     const path = withContext('/settings')
@@ -658,80 +753,117 @@ export function AppShell() {
   }
 
   return (
-    <div className={`app ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <aside className="sidebar" aria-label="主导航">
-        <div className="sidebar-head">
-          <div className="brand-mark"><img src={getLogoUrl()} width={571} height={568} alt="kemo-agent logo" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = '/kemo-agent.jpg' }} /></div>
-          <div className="brand-copy"><strong>kemo-agent</strong></div>
-          <button className="sidebar-toggle" onClick={ui.toggleSidebar} aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'}><ChevronLeft size={16} /></button>
+    <div className={`app-shell ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''} ${mobileSidebarOpen ? 'mobile-sidebar-open' : ''}`}>
+      {mobileSidebarOpen && <button className="mobile-nav-backdrop mobile-only" aria-label="关闭导航遮罩" onClick={() => setMobileSidebarOpen(false)} />}
+      <aside className="sidebar" aria-label="主导航" inert={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen} aria-hidden={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen}>
+        <div className="sidebar-brand">
+          <div className="brand-mark"><KemoLogo /></div>
+          <div className="brand-name">kemo-agent</div>
+          {versionQuery.data?.version && <span className="badge badge-outline mono">v{versionQuery.data.version}</span>}
+          <button className="icon-btn desktop-only" onClick={ui.toggleSidebar}
+            aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title="折叠侧栏"><ReferenceIcon name="panelLeft" /></button>
+          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(false)} aria-label="关闭侧栏"><X size={18} /></button>
         </div>
-        <nav className="nav-section nav-scroll">
-          {navGroups.map((group) => <div className={`nav-group ${group.showLabel ? '' : 'nav-group-unlabeled'}`} key={group.label}>
-            {group.showLabel ? <span className="nav-group-label">{group.label}</span> : null}
-            {group.items.map(({ path, label, icon: Icon }) => {
-              const badge = path === '/tasks' ? overview?.counts.active_tasks : undefined
-              return <NavLink key={path} to={withContext(path)} aria-label={label} title={ui.sidebarCollapsed ? label : undefined} className={({ isActive }) => `nav-btn ${isActive ? 'active' : ''}`}>
-                <span className="nav-icon"><Icon size={20} /></span><span className="nav-label">{label}</span>
-                {badge ? <span className="nav-badge">{badge}</span> : null}<span className="nav-tip">{label}</span>
-              </NavLink>
-            })}
+        <div className="sidebar-scroll">
+          {navGroups.map(group => <div className="sidebar-group" key={group.label}>
+            <div className="section-label nav-section-divider" role="separator" aria-label={group.label} />
+            {group.items.map(({ path, label }) => <NavLink key={path} to={withContext(path)} aria-label={label}
+              title={ui.sidebarCollapsed ? label : undefined} className={({ isActive }) => `nav-item ${isActive ? 'is-active' : ''}`}>
+              <ReferenceIcon name={path.slice(1)} /><span className="nav-label">{label}</span>
+              {path === '/tasks' && overview?.counts.active_tasks ? <span className="nav-count">{overview.counts.active_tasks}</span> : null}
+            </NavLink>)}
           </div>)}
-        </nav>
-        <UserProfileCard
-          username={user || '未选择用户'}
-          userPath={user ? `users/${user}` : 'users/—'}
-          avatarUrl={user ? getUserAvatarUrl(user, avatarRevision) : undefined}
-          users={usersQuery.data?.users.map((item) => ({ username: item.name, userPath: `users/${item.name}`, avatarUrl: getUserAvatarUrl(item.name, avatarRevision) }))}
-          compact={ui.sidebarCollapsed}
-          logoutPending={logoutPending}
-          switchingDisabled={chatRunning}
-          switchingDisabledReason="当前对话正在运行，结束或停止后才能切换用户"
-          onSelectUser={setUser}
-          newUserTabHref={user ? `/chat?${new URLSearchParams({ user, new_session: '1' }).toString()}` : undefined}
-          onOpenProfile={() => navigate(withContext('/profile'))}
-          onOpenUserSwitch={() => navigate(settingsPath('users'))}
-          onOpenSettings={() => navigate(settingsPath('provider'))}
-          onLogout={authStatus?.enabled ? () => { void logout() } : undefined}
-        />
+          {location.pathname === '/chat' && <div className="sidebar-group sidebar-recent-group">
+            <div className="section-label">最近对话
+              <button className="icon-btn" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={openHistoryDrawer}
+                aria-label="浏览全部历史"><ReferenceIcon name="history" small /></button>
+            </div>
+            <div className="sidebar-session">
+              <div className="sidebar-session-list">
+                {webSessions.map(session => <button key={session.session_id}
+                  className={`session-item ${session.session_id === sessionId ? 'is-active' : ''}`}
+                  onClick={() => void selectHistorySession(session.session_id)} disabled={Boolean(historySwitchingSessionId)}
+                  title={session.title || session.session_id}>
+                  <ReferenceIcon name="chat" small /><span className="si-title">{session.title || '未命名对话'}</span>
+                  {session.summary_status === 'failed' ? <span className="dot dot-warning" /> : null}
+                  <span className="si-time">{session.rounds} 轮</span>
+                </button>)}
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={openHistoryDrawer}><ReferenceIcon name="history" small />浏览全部历史</button>
+            </div>
+          </div>}
+        </div>
+        <div className="sidebar-foot">
+          <UserProfileCard username={user || '未选择用户'} userPath={user ? `users/${user}` : 'users/—'}
+            avatarUrl={user ? getUserAvatarUrl(user, avatarRevision) : undefined}
+            users={usersQuery.data?.users.map(item => ({ username: item.name, userPath: `users/${item.name}`, avatarUrl: getUserAvatarUrl(item.name, avatarRevision) }))}
+            compact={ui.sidebarCollapsed} logoutPending={logoutPending} switchingDisabled={chatRunning}
+            switchingDisabledReason="当前对话正在运行，结束或停止后才能切换用户" onSelectUser={setUser}
+            newUserTabHref={user ? `/chat?${new URLSearchParams({ user, new_session: '1' })}` : undefined}
+            onOpenProfile={() => navigate(withContext('/profile'))} onOpenUserSwitch={() => navigate(settingsPath('users'))}
+            onOpenSettings={() => navigate(settingsPath('provider'))} onLogout={authStatus?.enabled ? () => { void logout() } : undefined} />
+        </div>
       </aside>
-
-      <main className="workspace">
+      <div className="app-main">
         <header className="topbar">
-          <div className="top-left">
-            <button className="mobile-menu icon-btn" onClick={ui.toggleSidebar} aria-label="切换导航"><Menu size={18} /></button>
-            <div className="page-title">{pageTitles[location.pathname] || 'kemo-agent'}</div>
-            <div className="agent-line"><span className={`status-dot ${healthQuery.isError ? 'offline' : ''}`} /><span>{healthQuery.isSuccess ? '核心运行正常' : healthQuery.isError ? 'Web 后端不可用' : '正在连接'}</span></div>
-            {user && <span className="role-chip">{user}</span>}
+          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(value => !value)} aria-label="切换导航" aria-expanded={mobileSidebarOpen}><Menu size={18} /></button>
+          {ui.sidebarCollapsed && <button className="icon-btn desktop-only" onClick={ui.toggleSidebar} aria-label="展开侧边栏"><ReferenceIcon name="panelLeft" /></button>}
+          <div className="topbar-title">{pageTitles[location.pathname] || '对话'}
+            {location.pathname === '/chat' && <span className="topbar-sub">{webSessions.find(item => item.session_id === sessionId)?.title || '新对话'}</span>}
           </div>
-          <div className="top-right">
-            <button className="context-button" title="查看上下文与运行状态" onClick={openContextDrawer}>
-              <span className="context-main"><span className="context-icon"><CircleGauge size="1.528rem" strokeWidth={2.3} /></span><span className="context-copy"><strong>上下文窗口</strong><span>{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '暂不可用'}</span></span></span>
-              <span className="context-mini"><b>{contextAvailable && contextLimit ? `${contextPercent}%` : '—'}</b><span className="context-track"><i style={{ width: `${contextAvailable ? contextPercent : 0}%` }} /></span></span>
+          <div className="topbar-actions">
+            <button className="status-pill" title="查看上下文与运行状态" onClick={openContextDrawer}>
+              <ReferenceIcon name="gauge" small /><span className="sp-val">{contextAvailable && contextLimit ? `${contextPercent.toFixed(1)}%` : '—'}</span>
+              <span className="faint">{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '暂不可用'}</span>
             </button>
-            <div className="model-wrap" ref={modelMenuRef}>
-              <button className="model-btn" onClick={() => setModelMenuOpen((value) => !value)} aria-expanded={modelMenuOpen} title="查看当前 Provider">
-                <span className="model-main"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span className="model-copy"><span className="model-name">{provider?.model || 'Provider'}</span><span className="model-sub">{provider?.type || '读取中'} · {displayedReasoningLabel} · {provider?.configured ? '已配置' : '待配置'}</span></span></span><ChevronDown size="1.25rem" strokeWidth={2.2} />
+            <div className="reference-menu-anchor" ref={modelMenuRef}>
+              <button className="status-pill" onClick={() => setModelMenuOpen(value => !value)} aria-expanded={modelMenuOpen} title="模型与思考档位">
+                <span className={`dot ${provider?.configured ? 'dot-success' : 'dot-warning'}`} /><span className="mono">{provider?.model || '未配置模型'}</span>
               </button>
-              {modelMenuOpen && <div className="model-menu show"><div className="model-menu-head"><strong>当前模型路由</strong><span>配置镜像</span></div><div className="model-current"><span className="model-glyph"><BrainCircuit size="1em" strokeWidth={2.2} /></span><span><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></span></div><div className="model-effort-row"><span><strong>思考强度</strong><small>{provider?.type === 'kemo' ? '选项来自 Kemo 模型能力声明' : '下一轮请求立即生效'}</small></span>{provider?.type === 'chat' ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /> : provider?.type === 'kemo' && kemoReasoningAvailable ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort} options={kemoReasoningOptions} disabled={reasoningEffortMutation.isPending} onChange={(reasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} /> : <span className="model-effort-state">{provider?.type === 'kemo' && providerCapabilitiesQuery.isPending ? '读取中…' : '不可用'}</span>}</div>{reasoningCapabilityNotice ? <div className="model-effort-notice" role="status">{reasoningCapabilityNotice}</div> : null}{provider?.type === 'kemo' && providerCapabilitiesQuery.isError ? <div className="model-effort-error" role="alert">模型能力读取失败，运行时不会提交未经声明的思考档位。</div> : null}{reasoningEffortMutation.isError ? <div className="model-effort-error" role="alert">思考强度保存失败，请重试。</div> : null}<button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置 <span>›</span></button></div>}
+              {modelMenuOpen && <div className="menu reference-top-menu reference-model-menu" role="menu">
+                <div className="menu-label">当前模型路由</div><div className="reference-menu-copy reference-model-route"><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></div>
+                <div className="reference-menu-copy"><span>思考强度 · {displayedReasoningLabel}</span>
+                  {provider?.type === 'chat' || (provider?.type === 'kemo' && kemoReasoningAvailable)
+                    ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort}
+                        options={provider?.type === 'kemo' ? kemoReasoningOptions : undefined} disabled={providerConfigSaving}
+                        onChange={reasoningEffort => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} />
+                    : <small>{providerCapabilitiesQuery.isPending ? '读取能力中…' : '模型未声明推理档位'}</small>}
+                </div>
+                {reasoningCapabilityNotice && <div className="reference-menu-copy">{reasoningCapabilityNotice}</div>}
+                {providerCapabilitiesQuery.isError && <div className="banner banner-warning">模型能力读取失败</div>}
+                {reasoningEffortMutation.isError && <div className="banner banner-danger" role="alert">思考强度保存失败，请重试。</div>}
+                <button className="menu-item" onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置</button>
+              </div>}
             </div>
-            <div className="font-size-wrap" ref={fontSizeRef}>
-              <button className="font-size-button" aria-expanded={fontSizeMenuOpen} aria-label="调整界面字号" title="调整界面字号" onClick={() => setFontSizeMenuOpen((value) => !value)}><span className="font-size-aa">Aa</span><span className="font-size-caption">字号</span><strong>{fontSizeLabels[ui.fontSize]}</strong><ChevronDown size="1.181rem" strokeWidth={2.2} /></button>
-              {fontSizeMenuOpen && <div className="font-size-menu show" role="menu"><div className="font-size-menu-head"><strong>界面字号</strong><span>文字与顶部布局同步适配</span></div>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={`font-size-option ${ui.fontSize === size ? 'active' : ''}`} role="menuitem" onClick={() => { ui.setFontSize(size); if (user) void patchPreferences(user, { font_size: size }); setFontSizeMenuOpen(false) }}><span className={`font-sample ${size}`}>Aa</span><span><strong>{fontSizeLabels[size]}</strong><small>{size === 'small' ? '紧凑' : size === 'medium' ? '默认' : '舒适'}</small></span><i>{ui.fontSize === size ? '✓' : ''}</i></button>)}</div>}
+            <div className="reference-top-divider" />
+            {location.pathname === '/chat' && <ConversationFilesPopover user={user} sessionId={sessionId} liveRun={chatRuns[chatRunKey(user, sessionId)]} />}
+            <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><ReferenceIcon name="search" /></button>
+            <div className="reference-menu-anchor" ref={fontSizeRef}>
+              <button className="icon-btn" onClick={() => setFontSizeMenuOpen(value => !value)} aria-label="调整界面字号" title="界面比例" aria-expanded={fontSizeMenuOpen}><ReferenceIcon name="type" /></button>
+              {fontSizeMenuOpen && <div className="menu reference-top-menu" role="menu"><div className="menu-label">界面字号</div>
+                {(['small', 'medium', 'large'] as const).map(size => <button className={`menu-item ${ui.fontSize === size ? 'is-active' : ''}`}
+                  role="menuitem" key={size} onClick={() => { ui.setFontSize(size); if (user) void patchPreferences(user, { font_size: size }); setFontSizeMenuOpen(false) }}>{fontSizeLabels[size]}{ui.fontSize === size ? ' ✓' : ''}</button>)}
+              </div>}
             </div>
-            <button className="icon-btn theme-toggle-btn" onClick={() => { const theme = ui.theme === 'dark' ? 'light' : 'dark'; ui.setTheme(theme); if (user) void patchPreferences(user, { theme }) }} aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'}>{ui.theme === 'dark' ? <Sun size="1.736rem" strokeWidth={2.1} /> : <Moon size="1.736rem" strokeWidth={2.1} />}</button>
-            <button className="icon-btn" onClick={openContextDrawer} aria-label="运行状态" title="运行状态"><Activity size="1.806rem" strokeWidth={2.1} /></button>
-            <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><History size="1.736rem" strokeWidth={2.1} /></button>
+            <button className="icon-btn" onClick={() => { const theme = ui.theme === 'dark' ? 'light' : 'dark'; ui.setTheme(theme); if(user) void patchPreferences(user, { theme }) }}
+              aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title="切换主题"><ReferenceIcon name={ui.theme === 'dark' ? 'sun' : 'moon'} /></button>
+            <button className="icon-btn" onClick={() => navigate(withContext('/status'))} aria-label="运行状态" title="运行诊断"><ReferenceIcon name="activity" /></button>
+            <button className="icon-btn" onClick={openCommandPanel} aria-label="命令面板" title="命令面板（Ctrl+K）"><ReferenceIcon name="command" /></button>
           </div>
         </header>
-          <section className="content">
-            {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>知道了</button></div>}
-            {newUserTab ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
-              {activeSessionQuery.isError ? <>创建独立对话失败，请重试。<button onClick={() => { void activeSessionQuery.refetch() }}>重试创建对话</button></> : '正在为此用户创建独立对话…'}
-            </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} />}
-          </section>
-      </main>
+        <main className="reference-outlet">
+          {healthQuery.isError && <div className="banner banner-warning" role="status">Web 后端连接异常，请检查服务。</div>}
+          {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>知道了</button></div>}
+          {historySwitchError && <div className="banner banner-danger" role="alert">{historySwitchError}</div>}
+          {newUserTab || (location.pathname === '/chat' && !sessionId && !sessionTransitioning
+            && (activeSessionQuery.isPending || activeSessionQuery.isFetching || activeSessionQuery.isError
+              || Boolean(activeSessionQuery.data?.session?.session_id))) ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
+            {activeSessionQuery.isError ? <>{newUserTab ? '创建独立对话失败，请重试。' : '恢复对话失败，请重试。'}<button onClick={() => { void activeSessionQuery.refetch() }}>{newUserTab ? '重试创建对话' : '重试恢复对话'}</button></> : newUserTab ? '正在为此用户创建独立对话…' : '正在恢复最近的对话…'}
+          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} />}
+        </main>
+      </div>
 
-      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen}>
+      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen} role="dialog" aria-label="上下文窗口" aria-modal="true" aria-hidden={!ui.drawerOpen}>
         <div className="drawer-head"><div className="context-drawer-heading"><strong>上下文窗口</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话 · 系统提示词已就绪'}</span></div><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
         <div className="drawer-body context-drawer-body">
           <section className="context-injection-panel" aria-label="系统提示词数据注入策略">

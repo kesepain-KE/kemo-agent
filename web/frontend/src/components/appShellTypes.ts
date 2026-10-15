@@ -1,10 +1,22 @@
 import type { OverviewResponse, ChatItem, SessionsResponse } from '../types/api'
 import type { PendingUploadedFile } from '../store/chatDrafts'
+import type { ReasoningEffort, ReasoningEffortOption } from '../reasoningEffort'
+
+export interface ProviderReasoningControl {
+  value: ReasoningEffort
+  options: readonly ReasoningEffortOption[]
+  disabled: boolean
+  emptyLabel: string
+  notice?: string
+  error?: string
+  onChange: (value: ReasoningEffort) => void
+}
 
 export interface ShellOutletContext {
   user: string
   userAvatarUrl?: string
   sessionId: string
+  sessionReady?: boolean
   clientId: string
   chatRunning: boolean
   chatStopping: boolean
@@ -32,6 +44,7 @@ export interface ShellOutletContext {
   refreshSessions: () => Promise<SessionsResponse | undefined>
   createNewSession: () => Promise<string | undefined>
   overview?: OverviewResponse
+  reasoningControl: ProviderReasoningControl
   refreshOverview: () => void
   openCommandPanel: () => void
 }

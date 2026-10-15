@@ -10,6 +10,14 @@ export type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audi
 export type AgentModelProfile = 'default' | 'cheap' | 'reasoning'
 export type RestartState = 'idle' | 'confirming' | 'confirming-force' | 'restarting' | 'waiting' | 'failed'
 
+export interface SettingsModelOption {
+  id: string
+  provider_id: string
+  provider_model: string
+  task?: string
+  source: 'chat' | 'kemo'
+}
+
 export interface UserConfigDraft {
   provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean; reasoning_effort: ReasoningEffort; supports_image_input: boolean; supports_audio_input: boolean; supports_video_input: boolean; supports_file_input: boolean }
   agent_models: Record<AgentModelProfile, string>
@@ -24,7 +32,7 @@ export interface UserConfigDraft {
 }
 
 export interface GlobalConfigDraft {
-  agents: { token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
+  agents: { enable_mid_context_compression: boolean; token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
   memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
   tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number; invalid_tool_arguments_retries: number }
   history: { consecutive_tool_fail_limit: number }
@@ -210,6 +218,7 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
   const agentRuntime = record(config.agent_runtime)
   return {
     agents: {
+      enable_mid_context_compression: booleanValue(agents.enable_mid_context_compression, true),
       token_limit: numberValue(agents.token_limit, 1_000_000),
       token_compression_ratio: numberValue(agents.token_compression_ratio, 0.3),
       max_rounds: numberValue(agents.max_rounds, 80),
@@ -260,8 +269,8 @@ export function SettingRow({ title, description, control, source }: { title: str
 }
 
 export function Toggle({ checked, label, disabled = false, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (value: boolean) => void }) {
-  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} className={`config-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
-    <span>{checked ? '已开启' : '已关闭'}</span><i aria-hidden="true"><b /></i>
+  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} className={`switch ${checked ? 'is-on' : ''}`} onClick={() => onChange(!checked)}>
+    <span className="sr-only">{checked ? '已开启' : '已关闭'}</span>
   </button>
 }
 
@@ -382,105 +391,7 @@ export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingM
   </div>
 }
 
-export function ModelSelectField({
-  label,
-  value,
-  placeholder,
-  models,
-  enabled,
-  onChange,
-}: {
-  label: string
-  value: string
-  placeholder: string
-  models: KemoModelCatalogItem[]
-  enabled: boolean
-  onChange: (value: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const rootRef = useRef<HTMLDivElement>(null)
-  const listboxId = useId()
-  const pickerLabel = label === '模型' ? '主模型' : label
-  const availableModels = models.filter((item) => item.task === 'llm' || item.task === 'unknown')
-  const normalizedQuery = query.trim().toLowerCase()
-  const filteredModels = availableModels.filter((item) => {
-    if (!normalizedQuery) return true
-    return `${item.id} ${item.provider_id} ${item.provider_model}`.toLowerCase().includes(normalizedQuery)
-  })
-
-  useEffect(() => {
-    if (!open) return
-    const closeOnPointerDown = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
-    }
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', closeOnPointerDown)
-    document.addEventListener('keydown', closeOnEscape)
-    return () => {
-      document.removeEventListener('pointerdown', closeOnPointerDown)
-      document.removeEventListener('keydown', closeOnEscape)
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!enabled) setOpen(false)
-  }, [enabled])
-
-  if (!enabled) {
-    return <input className="config-field" aria-label={label} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
-  }
-
-  return <div className={`model-select-wrap ${open ? 'open' : ''}`} ref={rootRef}>
-    <div className="model-field-shell">
-      <input
-        className="config-field model-field-input"
-        aria-label={label}
-        value={value}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowDown' || event.key === 'Enter') {
-            event.preventDefault()
-            setOpen(true)
-          }
-          if (event.key === 'Escape') setOpen(false)
-        }}
-      />
-      <button
-        type="button"
-        className={`model-picker-trigger ${open ? 'open' : ''}`}
-        aria-label={`${pickerLabel}选择模型`}
-        aria-controls={listboxId}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        onClick={() => { setQuery(''); setOpen((current) => !current) }}
-      >
-        <span>选择模型</span><em>可选择</em><ChevronDown size={14} aria-hidden="true" />
-      </button>
-    </div>
-    {open ? <div className="model-select-popover config-select-popover" id={listboxId} role="listbox" aria-label={`${pickerLabel}选项`}>
-      <div className="model-select-search">
-        <input aria-label={`${pickerLabel}筛选`} value={query} placeholder="筛选模型…" onChange={(event) => setQuery(event.target.value)} autoFocus />
-      </div>
-      <div className="model-select-options">
-        {filteredModels.length ? filteredModels.map((item) => <button
-          type="button"
-          role="option"
-          aria-selected={value === item.id}
-          className={value === item.id ? 'active' : ''}
-          key={`${item.provider_id}:${item.id}`}
-          onClick={() => { onChange(item.id); setOpen(false); setQuery('') }}
-        >
-          <span><strong>{item.id}</strong><small>{item.provider_id} · {item.provider_model}</small></span>
-          {value === item.id ? <Check size={15} /> : <i aria-hidden="true" />}
-        </button>) : <div className="model-select-empty">没有匹配的模型；仍可直接输入模型名。</div>}
-      </div>
-    </div> : null}
-  </div>
-}
+export { ModelSelectField } from './SettingsModelSelect'
 
 export function NumberInput({ label, value, min = 0, max, step = 1, onChange }: { label: string; value: number; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
   return <input className="config-field config-number" type="number" aria-label={label} value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />

@@ -43,14 +43,14 @@ export const navGroups = [
     showLabel: true,
     items: [
       { path: '/chat', label: '对话', icon: Bot },
-      { path: '/tasks', label: '任务', icon: ListChecks },
+      { path: '/tasks', label: '任务中枢', icon: ListChecks },
       { path: '/knowledge', label: '知识库', icon: BookOpen },
       { path: '/memory', label: '记忆', icon: Brain },
     ],
   },
   {
     label: '运行能力',
-    showLabel: false,
+    showLabel: true,
     items: [
       { path: '/agents', label: '子智能体', icon: Bot },
       { path: '/skills', label: '工具与技能', icon: Wrench },
@@ -64,16 +64,16 @@ export const navGroups = [
     items: [
       { path: '/files', label: '文件空间', icon: FolderOpen },
       { path: '/messages', label: '外部消息', icon: RadioTower },
-      { path: '/status', label: '运行状态', icon: Activity },
-      { path: '/settings', label: '配置', icon: Settings },
+      { path: '/status', label: '运行诊断', icon: Activity },
       { path: '/profile', label: '身份与人格', icon: FileSearch },
+      { path: '/settings', label: '配置', icon: Settings },
     ],
   },
 ]
 
 export const pageTitles: Record<string, string> = {
-  '/chat': 'kemo-agent',
-  '/tasks': '任务',
+  '/chat': '对话',
+  '/tasks': '任务中枢',
   '/knowledge': '知识库',
   '/memory': '记忆',
   '/agents': '子智能体',
@@ -82,7 +82,7 @@ export const pageTitles: Record<string, string> = {
   '/expand': '拓展',
   '/files': '文件空间',
   '/messages': '外部消息',
-  '/status': '运行状态',
+  '/status': '运行诊断',
   '/runtime': '运行模块',
   '/profile': '身份与人格',
   '/settings': '配置',

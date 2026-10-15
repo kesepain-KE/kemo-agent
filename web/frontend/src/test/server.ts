@@ -334,7 +334,7 @@ export const handlers = [
     return HttpResponse.json({ enabled: body.enabled })
   }),
   http.delete('/api/users/kesepain/sense/:module', ({ params }) => HttpResponse.json({ module: params.module, deleted: true })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, history_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true, perception_prompt_injection: true, perception_realtime_injection: false, expand_prompt_injection: true, expand_realtime_injection: false }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, tool_argument_retries: 2, memory_items: 600, memory_chars: 20000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, history_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true, perception_prompt_injection: true, perception_realtime_injection: false, expand_prompt_injection: true, expand_realtime_injection: false }, limits: { context_rounds: 80, context_tokens: 1000000, compression_ratio: 0.3, mid_context_compression_enabled: true, task_plan_steps: 20, tool_iterations: 8, tool_timeout: 240, tool_argument_retries: 2, memory_items: 600, memory_chars: 20000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
     user: 'kesepain',
     config: {
@@ -409,7 +409,7 @@ export const handlers = [
     scope: 'global',
     config: {
       schema_version: 1,
-      agents: { token_limit: 1000000, token_compression_ratio: 0.3, max_rounds: 80, rounds_after_compression: 20 },
+      agents: { enable_mid_context_compression: true, token_limit: 1000000, token_compression_ratio: 0.3, max_rounds: 80, rounds_after_compression: 20 },
       memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
       tools: { timeout: 240, max_iterations: 80, consecutive_identical_call_limit: 8, invalid_tool_arguments_retries: 2 },
       history: { consecutive_tool_fail_limit: 5 },
@@ -504,12 +504,13 @@ export const handlers = [
         control_document: '## 注入层\n灯光控制可用\n\n## 操作层\n用户要求开灯时调用 start_expand.py',
         control_injection_markdown: '灯光控制可用', control_operation_markdown: '用户要求开灯时调用 start_expand.py',
         collected_markdown: '# 灯光状态\n客厅已开启', injected_markdown: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', injected_tokens: 18,
+        data_injected_markdown: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', data_injected_tokens: 18,
         files: [{ name: 'expand.json', relative_path: 'example/expand.json', size: 64, updated_at: 1 }], updated_at: 1,
       }] },
       { scope: 'shared', root: 'shared_expand', items: [] },
       { scope: 'user', root: 'users/kesepain/expand', items: [] },
     ],
-    injection: { content: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', source_files: ['global_expand/example/input_data.md'], original_chars: 48, injected_chars: 48, original_items: 1, injected_items: 1, estimated_tokens: 18, truncated: false, prompt_section: 'expand_data', prompt_position: 'System Prompt / Expand Data' },
+    injection: { content: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', data_content: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', data_injected_items: 1, data_estimated_tokens: 18, source_files: ['global_expand/example/input_data.md'], original_chars: 48, injected_chars: 48, original_items: 1, injected_items: 1, estimated_tokens: 18, truncated: false, prompt_section: 'expand_data', prompt_position: 'System Prompt / Expand Data' },
     source_policy: sourcePolicy,
   })),
   http.post('/api/users/kesepain/expand/:scope/:module/refresh', () => HttpResponse.json({ updated: true })),
