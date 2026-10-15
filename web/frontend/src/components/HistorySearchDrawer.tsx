@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
@@ -137,6 +137,12 @@ export function HistorySearchDrawer({
   const todayDate = shanghaiDateValue()
   const [visibleMonth, setVisibleMonth] = useState(() => monthFromDate(selectedDate || todayDate))
   const searchRef = useRef<HTMLInputElement>(null)
+  const drawerRef = useRef<HTMLElement>(null)
+  const dateToggleRef = useRef<HTMLButtonElement>(null)
+  const calendarRef = useRef<HTMLDivElement>(null)
+  const backdropRef = useRef<HTMLButtonElement>(null)
+  const calendarId = useId()
+  const [calendarPosition, setCalendarPosition] = useState({ left: 12, top: 12, width: 300 })
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const orderedSessions = useMemo(
     () => [...sessions].sort((left, right) => {
@@ -187,6 +193,69 @@ export function HistorySearchDrawer({
     if (selectedDate) setVisibleMonth(monthFromDate(selectedDate))
   }, [selectedDate])
 
+  useLayoutEffect(() => {
+    if (!open || !calendarOpen) return
+    // 浮层脱离抽屉的裁切容器；以抽屉最终位置为锚点，不跟随进场动画横移。
+    const updatePosition = () => {
+      const trigger = dateToggleRef.current?.getBoundingClientRect()
+      const drawer = drawerRef.current?.getBoundingClientRect()
+      const calendar = calendarRef.current
+      if (!trigger || !drawer || !calendar) return
+      const margin = 12
+      const gap = 10
+      // 原半宽面板整体放大 50%，窄屏仍限制在视口内。
+      const width = Math.min((trigger.width || 400) * .75, window.innerWidth - margin * 2)
+      const drawerLeft = window.innerWidth - drawer.width
+      const besideLeft = drawerLeft - gap - width
+      const left = besideLeft >= margin
+        ? besideLeft
+        : Math.max(margin, Math.min(trigger.left, window.innerWidth - width - margin))
+      const top = Math.max(margin, Math.min(trigger.top, window.innerHeight - calendar.offsetHeight - margin))
+      setCalendarPosition((current) => current.left === left && current.top === top && current.width === width
+        ? current : { left, top, width })
+    }
+    updatePosition()
+    calendarRef.current?.querySelector<HTMLButtonElement>(
+      '[aria-pressed="true"]:not(:disabled), [data-today="true"]:not(:disabled)',
+    )?.focus()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(updatePosition)
+    for (const element of [drawerRef.current, dateToggleRef.current, calendarRef.current]) {
+      if (element) observer?.observe(element)
+    }
+    const frame = requestAnimationFrame(updatePosition)
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer?.disconnect()
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [open, calendarOpen])
+
+  useEffect(() => {
+    if (!open || !calendarOpen) return
+    const dismissOnPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      // 遮罩点击单独处理，避免收起日历后同一次点击又关闭整个历史抽屉。
+      if (!calendarRef.current?.contains(target) && !dateToggleRef.current?.contains(target)
+        && !backdropRef.current?.contains(target)) setCalendarOpen(false)
+    }
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setCalendarOpen(false)
+      dateToggleRef.current?.focus()
+    }
+    document.addEventListener('pointerdown', dismissOnPointerDown)
+    document.addEventListener('keydown', dismissOnEscape, true)
+    return () => {
+      document.removeEventListener('pointerdown', dismissOnPointerDown)
+      document.removeEventListener('keydown', dismissOnEscape, true)
+    }
+  }, [open, calendarOpen])
+
   useEffect(() => {
     setSummaryPreview(null)
   }, [normalizedQuery, sessions])
@@ -213,11 +282,13 @@ export function HistorySearchDrawer({
     if (value > todayDate) return
     onDateChange(value)
     setCalendarOpen(false)
+    dateToggleRef.current?.focus()
   }
   const clearArchiveDate = () => {
     onDateChange('')
     setVisibleMonth(monthFromDate(todayDate))
     setCalendarOpen(false)
+    dateToggleRef.current?.focus()
   }
   const confirmSwitch = () => {
     if (!pendingSessionId || chatRunning || switchingSessionId) return
@@ -290,7 +361,7 @@ export function HistorySearchDrawer({
   }
 
   return <>
-    <aside className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="历史对话" aria-hidden={!open}>
+    <aside ref={drawerRef} className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="历史对话" aria-hidden={!open}>
       {open && <>
       <div className="drawer-head">
         <div className="context-drawer-heading">
@@ -314,10 +385,13 @@ export function HistorySearchDrawer({
 
         <section className={styles.dateFilter} aria-label="历史归档日期筛选">
           <button
+            ref={dateToggleRef}
             type="button"
             className={`${styles.dateFilterToggle} ${selectedDate ? styles.dateFilterActive : ''}`}
             aria-label="按日期筛选历史归档"
             aria-expanded={calendarOpen}
+            aria-haspopup="dialog"
+            aria-controls={calendarOpen ? calendarId : undefined}
             onClick={() => setCalendarOpen((value) => !value)}
           >
             <CalendarDays size={17} />
@@ -327,34 +401,6 @@ export function HistorySearchDrawer({
             </span>
             <ChevronDown className={calendarOpen ? styles.dateFilterChevronOpen : ''} size={17} />
           </button>
-          {calendarOpen && <div className={styles.calendar} role="dialog" aria-label="选择历史归档日期">
-            <header className={styles.calendarHeader}>
-              <button type="button" onClick={() => moveCalendarMonth(-1)} aria-label="上一个月"><ChevronLeft size={18} /></button>
-              <strong>{visibleMonth.year}年{visibleMonth.month + 1}月</strong>
-              <button type="button" onClick={() => moveCalendarMonth(1)} aria-label="下一个月"><ChevronRight size={18} /></button>
-            </header>
-            <div className={styles.calendarGrid}>
-              {WEEKDAY_LABELS.map((label) => <span key={label} className={styles.weekday}>{label}</span>)}
-              {calendarDays.map((item) => {
-                const selected = item.value === selectedDate
-                const today = item.value === todayDate
-                const future = item.value > todayDate
-                return <button
-                  key={item.value}
-                  type="button"
-                  className={`${styles.calendarDay} ${!item.inMonth ? styles.calendarDayOutside : ''} ${today ? styles.calendarDayToday : ''} ${selected ? styles.calendarDaySelected : ''}`}
-                  disabled={future}
-                  aria-label={`${item.year}年${item.month + 1}月${item.day}日`}
-                  aria-pressed={selected}
-                  onClick={() => chooseArchiveDate(item.value)}
-                >{item.day}</button>
-              })}
-            </div>
-            <footer className={styles.calendarFooter}>
-              <button type="button" onClick={clearArchiveDate}>清除</button>
-              <button type="button" onClick={() => chooseArchiveDate(todayDate)}>今天</button>
-            </footer>
-          </div>}
         </section>
 
         <div className={styles.actionBar}>
@@ -493,7 +539,40 @@ export function HistorySearchDrawer({
       </div>
       </>}
     </aside>
-    {open && <button className="drawer-backdrop" aria-label="关闭历史对话" onClick={closeDrawer} />}
+    {open && <button ref={backdropRef} className="drawer-backdrop" aria-label="关闭历史对话"
+      onClick={() => { if (calendarOpen) setCalendarOpen(false); else closeDrawer() }} />}
+    {open && calendarOpen && createPortal(
+      <div ref={calendarRef} id={calendarId} className={styles.calendar}
+        style={calendarPosition} role="dialog" aria-label="选择历史归档日期">
+        <header className={styles.calendarHeader}>
+          <button type="button" onClick={() => moveCalendarMonth(-1)} aria-label="上一个月"><ChevronLeft size={21} /></button>
+          <strong>{visibleMonth.year}年{visibleMonth.month + 1}月</strong>
+          <button type="button" onClick={() => moveCalendarMonth(1)} aria-label="下一个月"><ChevronRight size={21} /></button>
+        </header>
+        <div className={styles.calendarGrid}>
+          {WEEKDAY_LABELS.map((label) => <span key={label} className={styles.weekday}>{label}</span>)}
+          {calendarDays.map((item) => {
+            const selected = item.value === selectedDate
+            const today = item.value === todayDate
+            return <button
+              key={item.value}
+              type="button"
+              className={`${styles.calendarDay} ${!item.inMonth ? styles.calendarDayOutside : ''} ${today ? styles.calendarDayToday : ''} ${selected ? styles.calendarDaySelected : ''}`}
+              disabled={item.value > todayDate}
+              aria-label={`${item.year}年${item.month + 1}月${item.day}日`}
+              aria-pressed={selected}
+              data-today={today || undefined}
+              onClick={() => chooseArchiveDate(item.value)}
+            >{item.day}</button>
+          })}
+        </div>
+        <footer className={styles.calendarFooter}>
+          <button type="button" onClick={clearArchiveDate}>清除</button>
+          <button type="button" onClick={() => chooseArchiveDate(todayDate)}>今天</button>
+        </footer>
+      </div>,
+      document.body,
+    )}
     {open && summaryPreview ? createPortal(
       <span
         className={`${styles.summaryTooltip} ${summaryPreview.placement === 'above' ? styles.tooltipAbove : styles.tooltipBelow}`}

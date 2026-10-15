@@ -32,7 +32,7 @@ describe('HistorySearchDrawer', () => {
     ])
   })
 
-  it('可在搜索框下方展开月历并选择、清除归档日期', () => {
+  it('可从搜索框下方入口展开日期气泡并选择、清除归档日期', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-25T04:00:00+00:00'))
     const onDateChange = vi.fn()
@@ -54,6 +54,8 @@ describe('HistorySearchDrawer', () => {
     expect(search.compareDocumentPosition(dateToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     fireEvent.click(dateToggle)
     const calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
+    expect(calendar.parentElement).toBe(document.body)
+    expect(dateToggle).toHaveAttribute('aria-controls', calendar.id)
     expect(calendar).toHaveTextContent('2026年9月')
     for (const weekday of ['一', '二', '三', '四', '五', '六', '日']) {
       expect(within(calendar).getByText(weekday)).toBeInTheDocument()
@@ -73,6 +75,102 @@ describe('HistorySearchDrawer', () => {
     fireEvent.click(within(screen.getByRole('dialog', { name: '选择历史归档日期' })).getByRole('button', { name: '清除' }))
     expect(onDateChange).toHaveBeenLastCalledWith('')
     vi.useRealTimers()
+  })
+
+  it('日期气泡放大50%仍在历史侧栏左侧顶部对齐，窄屏及短屏保持在视口内', () => {
+    vi.stubGlobal('innerWidth', 1440)
+    vi.stubGlobal('innerHeight', 900)
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const drawerWidth = Math.min(430, window.innerWidth * .94)
+      const trigger = this.getAttribute('aria-label') === '按日期筛选历史归档'
+      return {
+        x: window.innerWidth - drawerWidth + (trigger ? 15 : 0),
+        y: trigger ? 140 : 0,
+        left: window.innerWidth - drawerWidth + (trigger ? 15 : 0),
+        top: trigger ? 140 : 0,
+        width: drawerWidth - (trigger ? 30 : 0),
+        height: trigger ? 48 : window.innerHeight,
+        right: window.innerWidth,
+        bottom: trigger ? 188 : window.innerHeight,
+        toJSON: () => ({}),
+      }
+    })
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(240)
+    try {
+      const props = {
+        open: true, sessions: [], activeSessionId: '', onClose: vi.fn(),
+        onSelectSession: vi.fn(), onDeleteSession: vi.fn(),
+        onDeleteAllSessions: vi.fn(), onRetrySummary: vi.fn(),
+      }
+      const { rerender } = render(<HistorySearchDrawer {...props} />)
+      fireEvent.click(screen.getByRole('button', { name: '按日期筛选历史归档' }))
+      const calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
+      expect(calendar).toHaveStyle({ left: '700px', top: '140px', width: '300px' })
+
+      vi.stubGlobal('innerWidth', 390)
+      fireEvent(window, new Event('resize'))
+      expect(parseFloat(calendar.style.width)).toBeCloseTo(252.45)
+      expect(parseFloat(calendar.style.left)).toBeGreaterThanOrEqual(12)
+      expect(parseFloat(calendar.style.left) + parseFloat(calendar.style.width)).toBeLessThanOrEqual(378)
+
+      vi.stubGlobal('innerHeight', 300)
+      fireEvent(window, new Event('resize'))
+      expect(calendar).toHaveStyle({ top: '48px' })
+      rerender(<HistorySearchDrawer {...props} open={false} />)
+      expect(screen.queryByRole('dialog', { name: '选择历史归档日期' })).not.toBeInTheDocument()
+    } finally {
+      rect.mockRestore()
+      height.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('日期气泡的月份、今天与外部关闭可用，Escape 或遮罩先收起气泡而不关闭历史侧栏', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-25T04:00:00+00:00'))
+    const onClose = vi.fn()
+    const onDateChange = vi.fn()
+    const globalKeydown = vi.fn()
+    document.addEventListener('keydown', globalKeydown)
+    try {
+      render(<HistorySearchDrawer open sessions={sessions} activeSessionId="s1"
+        onClose={onClose} onDateChange={onDateChange} onSelectSession={vi.fn()}
+        onDeleteSession={vi.fn()} onDeleteAllSessions={vi.fn()} onRetrySummary={vi.fn()} />)
+      const toggle = screen.getByRole('button', { name: '按日期筛选历史归档' })
+      fireEvent.click(toggle)
+      let calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
+      fireEvent.click(within(calendar).getByRole('button', { name: '上一个月' }))
+      expect(calendar).toHaveTextContent('2026年8月')
+      fireEvent.click(within(calendar).getByRole('button', { name: '下一个月' }))
+      expect(calendar).toHaveTextContent('2026年9月')
+      expect(within(calendar).getAllByRole('button', { name: /^\d{4}年\d{1,2}月\d{1,2}日$/ })).toHaveLength(42)
+      fireEvent.keyDown(calendar, { key: 'Escape' })
+      expect(screen.queryByRole('dialog', { name: '选择历史归档日期' })).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+      expect(globalKeydown).not.toHaveBeenCalled()
+      expect(toggle).toHaveFocus()
+
+      fireEvent.click(toggle)
+      const backdrop = screen.getAllByRole('button', { name: '关闭历史对话' }).find((button) => button.classList.contains('drawer-backdrop'))!
+      fireEvent.pointerDown(backdrop)
+      fireEvent.click(backdrop)
+      expect(screen.queryByRole('dialog', { name: '选择历史归档日期' })).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+
+      fireEvent.click(toggle)
+      fireEvent.pointerDown(screen.getByRole('textbox', { name: '搜索历史对话名称' }))
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.click(toggle)
+      calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
+      fireEvent.click(within(calendar).getByRole('button', { name: '今天' }))
+      expect(onDateChange).toHaveBeenLastCalledWith('2026-09-25')
+      expect(toggle).toHaveFocus()
+      fireEvent.click(backdrop)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      document.removeEventListener('keydown', globalKeydown)
+      vi.useRealTimers()
+    }
   })
 
   it('按历史对话名称过滤卡片并在确认后选择目标会话', () => {

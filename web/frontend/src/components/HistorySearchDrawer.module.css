@@ -1,4 +1,4 @@
-.drawer { z-index: 94; }
+.drawer { z-index: 120; }
 
 .body {
   display: flex;
@@ -68,24 +68,31 @@
 .dateFilterToggle > svg:last-child { transition: transform .16s ease; }
 
 .calendar {
-  margin-top: 8px;
-  padding: 12px 10px 9px;
+  position: fixed;
+  /* The calendar is portaled beside the drawer. Keep it above the drawer
+     backdrop so its surface is not dimmed into the page background. */
+  z-index: 130;
+  box-sizing: border-box;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 9px 7.5px 7.5px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--surface-elevated);
   box-shadow: 0 14px 34px color-mix(in srgb, #000 13%, transparent), var(--shadow-soft);
 }
 .calendarHeader {
-  min-height: 34px;
+  min-height: 33px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  grid-template-columns: 33px minmax(0, 1fr) 33px;
   align-items: center;
-  margin-bottom: 7px;
+  margin-bottom: 6px;
 }
-.calendarHeader strong { color: var(--text); font-size: .875rem; text-align: center; }
+.calendarHeader strong { color: var(--text); font-size: 1.03125rem; text-align: center; white-space: nowrap; }
 .calendarHeader button {
-  width: 34px;
-  height: 34px;
+  width: 33px;
+  height: 33px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -99,14 +106,14 @@
 .calendarGrid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 2px;
+  gap: 1.5px;
 }
 .weekday {
-  min-height: 26px;
+  min-height: 24px;
   display: grid;
   place-items: center;
   color: var(--muted-2);
-  font-size: .625rem;
+  font-size: .9375rem;
   font-weight: 720;
 }
 .calendarDay {
@@ -116,11 +123,11 @@
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 12px;
+  border-radius: 9px;
   color: var(--text-2);
   background: transparent;
   font: inherit;
-  font-size: .6875rem;
+  font-size: .9375rem;
   cursor: pointer;
 }
 .calendarDay:hover:not(:disabled):not(.calendarDaySelected) { color: var(--brand); background: var(--brand-soft); }
@@ -133,20 +140,20 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--line);
 }
 .calendarFooter button {
-  min-width: 46px;
+  min-width: 51px;
   min-height: 30px;
-  padding: 0 8px;
+  padding: 0 6px;
   border: 0;
   border-radius: var(--radius-control);
   color: var(--brand);
   background: transparent;
   font: inherit;
-  font-size: .6875rem;
+  font-size: .9375rem;
   font-weight: 740;
   cursor: pointer;
 }
