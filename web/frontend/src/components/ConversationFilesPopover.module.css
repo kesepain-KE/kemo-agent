@@ -1,0 +1,214 @@
+.anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+}
+
+.trigger:hover,
+.trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.panel {
+  position: fixed;
+  top: calc(var(--header-h) + 12px);
+  right: var(--s-6);
+  display: flex;
+  flex-direction: column;
+  /*
+   * Keep a clear left-side safety gutter for the conversation avatars.
+   * The panel is a compact utility popover rather than a secondary content
+   * column, so it should not span across the chat viewport on narrow screens.
+   */
+  width: min(280px, calc(100vw - 80px));
+  max-width: calc(100vw - 80px);
+  height: min(380px, calc(100dvh - var(--header-h) - 24px));
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--bg-app) 98%, var(--bg-surface));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-void) 10%, transparent);
+  /* Keep conversation files below every modal drawer/backdrop. */
+  z-index: 40;
+  /* This is a topbar utility panel, not a chat-content attachment rail.
+     Keep its viewport anchor stable while the sidebar changes width. */
+  left: auto;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  padding: 14px 14px 13px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.headCopy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.headCopy strong {
+  color: var(--text-faint);
+  font-size: var(--t-sm);
+  font-weight: 500;
+}
+
+.body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.section + .section {
+  margin-top: 12px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 3px 7px;
+  color: var(--text-faint);
+  font-size: var(--t-xs);
+  font-weight: 600;
+}
+
+.sectionHead small {
+  color: var(--text-faint);
+  font: 10px var(--font-mono);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-app) 99%, var(--bg-surface));
+}
+
+.entry:hover {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--bg-app) 97%, var(--bg-surface));
+}
+
+.preview,
+.fileIcon {
+  display: grid;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--bg-app) 98%, var(--bg-inset));
+  color: var(--text-faint);
+}
+
+.preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.copy strong {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy small {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--t-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryAction {
+  appearance: none;
+  padding: 0;
+  display: grid;
+  flex: none;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 75%, transparent);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.entryAction + .entryAction {
+  margin-left: -3px;
+}
+
+.entryAction:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.empty,
+.loading,
+.error {
+  padding: 22px 12px;
+  color: var(--text-faint);
+  font-size: var(--t-xs);
+  text-align: center;
+}
+
+.error {
+  color: var(--text-tertiary);
+}
+
+.retry {
+  display: block;
+  margin: 8px auto 0;
+  padding: 5px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--t-2xs);
+}
