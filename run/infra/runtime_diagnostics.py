@@ -1,7 +1,8 @@
 """Bounded, process-local diagnostic summaries and short-lived log read cache.
 
-Never accept command arguments, output, prompts, message bodies or tracebacks.
-These summaries are not a durable audit log.
+Runtime event summaries never accept command arguments, prompts or tracebacks.
+The terminal captures redacted process output; SQLite message projections can
+include redacted owner-scoped bodies. These summaries are not a durable audit log.
 """
 from __future__ import annotations
 
@@ -33,6 +34,9 @@ _TERMINAL_SECRET_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
 _URL_CREDENTIAL_RE = re.compile(r"(://[^\s/:@]+:)([^\s@/]+)(@)")
+_JSON_SECRET_RE = re.compile(
+    r'(?i)("(?:api[_-]?key|token|secret|password|authorization|cookie)"\s*:\s*)"(?:\\.|[^"\\])*"'
+)
 _BOX_DRAWING_ONLY_RE = re.compile(r"^[\s┌┐└┘├┤─│]+$")
 _MAX_TERMINAL_LINE_CHARS = 1000
 _MAX_TERMINAL_PENDING_CHARS = _MAX_TERMINAL_LINE_CHARS + 1
@@ -47,6 +51,15 @@ def diagnostic_identifier(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value or ""))[:80]
 
 
+def diagnostic_text(value: Any) -> str:
+    """Redact credentials in diagnostic bodies while retaining line breaks."""
+    text = _ANSI_ESCAPE_RE.sub("", str(value or "")).replace("\x00", "")
+    text = _JSON_SECRET_RE.sub(r'\1"***"', text)
+    text = _BEARER_RE.sub(r"\1***", text)
+    text = _TERMINAL_SECRET_RE.sub(r"\1***", text)
+    return _URL_CREDENTIAL_RE.sub(r"\1***\3", text)
+
+
 def _terminal_text(value: Any) -> str:
     text = _ANSI_ESCAPE_RE.sub("", str(value or "")).replace("\x00", "").strip()
     if not text:
@@ -58,9 +71,7 @@ def _terminal_text(value: Any) -> str:
         return ""
     if text.startswith("│") and text.endswith("│"):
         text = text[1:-1].strip()
-    text = _BEARER_RE.sub(r"\1***", text)
-    text = _TERMINAL_SECRET_RE.sub(r"\1***", text)
-    text = _URL_CREDENTIAL_RE.sub(r"\1***\3", text)
+    text = diagnostic_text(text)
     return text[:_MAX_TERMINAL_LINE_CHARS] + ("…" if len(text) > _MAX_TERMINAL_LINE_CHARS else "")
 
 
