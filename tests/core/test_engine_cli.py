@@ -157,6 +157,9 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(invoked, [])
 
     def test_archive_is_unbounded_while_temp_is_bounded_and_recoverable(self) -> None:
+        from run.context import get_or_create_summary
+        from tests.core.test_context_lifecycle import SummaryRunner
+
         _, root = self.make_root()
         (root / "config" / "global_config.json").write_text(
             json.dumps(
@@ -182,7 +185,15 @@ class EngineAndCLITests(unittest.TestCase):
             "prompt": "",
         }
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        summary_runner = SummaryRunner()
+
+        def summarize_history(**kwargs):
+            return get_or_create_summary(**{**kwargs, "agent_runner": summary_runner})
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch("run.conversation.runtime.get_or_create_summary", side_effect=summarize_history),
+        ):
             for number in range(1, 5):
                 request["prompt"] = f"round-{number}"
                 handle_request(request, root=root, provider_factory=factory)
@@ -211,6 +222,7 @@ class EngineAndCLITests(unittest.TestCase):
             )
             self.assertEqual(temp["data"]["context"]["round_offset"], 2)
 
+            self.assertGreater(summary_runner.calls, 0)
             runtime_cache.clear()
             request["prompt"] = "round-5"
             handle_request(request, root=root, provider_factory=factory)
@@ -270,6 +282,11 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(failed_metric["failure"]["exception_type"], "RuntimeError")
         self.assertEqual(failed_metric["failure"]["message"], "模型服务调用未完成")
         self.assertNotIn("failed", json.dumps(failed_metric["failure"]))
+        self.assertTrue(failed_metric["provider_request_diagnostics"])
+        self.assertEqual(
+            failed_metric["provider_request_diagnostics"][0]["scope"],
+            "agent_before_provider_mapping",
+        )
 
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             result = handle_request(

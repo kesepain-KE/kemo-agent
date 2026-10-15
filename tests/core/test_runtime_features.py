@@ -25,6 +25,7 @@ from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.models import (
     KemoResponse,
     MessageItem,
+    ModelCapabilities,
     ProviderState,
     ReasoningItem,
     ToolCallItem,
@@ -1767,6 +1768,85 @@ def run(*, context):
             window["data"]["round_metrics"][0]["stop_reason"],
             "tool_context_limit",
         )
+
+    def test_tool_loop_guard_respects_declared_provider_input_limit(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config["agents"] = {
+            "token_limit": 300_000,
+            "token_compression_ratio": 0.9,
+        }
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+
+        class LimitedProvider(ScriptedProvider):
+            def capabilities(
+                self,
+                model: str,
+                *,
+                capabilities_url: str | None = None,
+            ) -> ModelCapabilities:
+                del capabilities_url
+                return ModelCapabilities(
+                    protocol_version="2.0",
+                    model=model,
+                    provider_id="mock",
+                    provider_model=model,
+                    limits={"max_input_tokens": 150_000},
+                )
+
+        provider = LimitedProvider(
+            responses=[
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            id="limited-call",
+                            name="lookup",
+                            arguments={"value": "x"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(1_000, 1, 1_001, estimated=False),
+                )
+            ]
+        )
+
+        def growing_messages(messages: list[dict[str, Any]]) -> int:
+            has_tool_result = any(message.get("role") == "tool" for message in messages)
+            return 350_000 if has_tool_result else 200_000
+
+        with (
+            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch(
+                "run.conversation.runtime.estimate_messages_tokens",
+                side_effect=growing_messages,
+            ),
+            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
+        ):
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "provider-declared-limit",
+                        "prompt": "go",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        terminal = events[-1]
+        self.assertEqual(terminal.type, "done")
+        self.assertEqual(terminal.metadata["status"], "limited")
+        self.assertEqual(terminal.metadata["stop_reason"], "tool_context_limit")
+        guard = terminal.metadata["context_guard"]
+        self.assertEqual(guard["configured_token_limit"], 300_000)
+        self.assertEqual(guard["provider_declared_input_limit"], 150_000)
+        self.assertEqual(guard["effective_token_limit"], 150_000)
+        self.assertEqual(len(provider.requests), 1)
 
     def test_completed_round_extracts_memory_after_history_commit(self) -> None:
         _, root = self.make_root()
@@ -4144,6 +4224,7 @@ def run(*, context):
             body={
                 "code": "PROVIDER_BAD_RESPONSE",
                 "provider_status": 400,
+                "message": "maximum context length exceeded",
             },
         )
         summary = {
@@ -4200,6 +4281,151 @@ def run(*, context):
         self.assertEqual(archive["data"]["memory_target_round"], 3)
         self.assertEqual(runtime["data"]["rounds"], 1)
         self.assertEqual(runtime["data"]["context"]["round_offset"], 3)
+
+    def test_tool_iteration_context_error_compresses_history_and_keeps_live_tail(
+        self,
+    ) -> None:
+        _, root = self.make_root()
+        self.copy_self_improve_plugins(root)
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        global_config_path = root / "config" / "global_config.json"
+        global_config = json.loads(global_config_path.read_text("utf-8"))
+        global_config.update(
+            {
+                "agents": {
+                    "conserved_rounds": 3,
+                    "max_rounds": 80,
+                    "rounds_after_compression": 1,
+                    "token_limit": 120000,
+                    "token_compression_ratio": 0.6,
+                },
+                "history": {"recent_full_rounds": 1},
+            }
+        )
+        global_config_path.write_text(json.dumps(global_config), "utf-8")
+        context_error = ProviderError(
+            "gateway rejected oversized tool continuation",
+            status_code=400,
+            category="context_length_exceeded",
+        )
+        summary = {
+            "facts": ["old rounds"],
+            "requirements": [],
+            "decisions": [],
+            "unfinished": [],
+            "tool_results": [],
+            "entities": [],
+            "narrative": "compressed history",
+        }
+        provider = ScriptedProvider(
+            responses=[
+                ChatResponse(text="reply-1", usage=Usage()),
+                ChatResponse(text="reply-2", usage=Usage()),
+                ChatResponse(text="reply-3", usage=Usage()),
+                ChatResponse(
+                    text="先查一下",
+                    tool_calls=[
+                        ToolCall(
+                            id="live-call",
+                            name="lookup",
+                            arguments={"value": "live"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(10, 2, 12),
+                ),
+                context_error,
+                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
+                ChatResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            id="after-recovery-call", name="lookup",
+                            arguments={"value": "after-recovery"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage=Usage(3, 1, 4),
+                ),
+                ChatResponse(text="工具结果已确认", usage=Usage(3, 1, 4)),
+            ]
+        )
+
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            for index in range(3):
+                handle_request(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "tool-context-retry",
+                        "prompt": f"round-{index}",
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            events = list(
+                iter_request_events(
+                    {
+                        "user": "alice",
+                        "source": "cli",
+                        "session_id": "tool-context-retry",
+                        "prompt": "run lookup",
+                        "_auto_retry_max_attempts": 1,
+                    },
+                    root=root,
+                    provider_factory=lambda _: provider,
+                )
+            )
+
+        result = events[-1].metadata
+        self.assertEqual(result["text"], "先查一下工具结果已确认")
+        self.assertEqual(result["context"]["api_context_retries"], 1)
+        self.assertEqual(result["usage"]["provider_request_count"], 5)
+        self.assertEqual(len(provider.requests), 8)
+        retry_messages = provider.requests[-1].messages
+        live_assistant = next(
+            message
+            for message in retry_messages
+            if message.get("role") == "assistant"
+            and message.get("tool_calls")
+        )
+        self.assertEqual(live_assistant["tool_calls"][0]["function"]["name"], "lookup")
+        live_call_id = live_assistant["tool_calls"][0]["id"]
+        live_tool = next(
+            message
+            for message in retry_messages
+            if message.get("role") == "tool"
+        )
+        self.assertEqual(live_tool["tool_call_id"], live_call_id)
+        self.assertIn('"live"', live_tool["content"])
+        retry_tools = [
+            message for message in retry_messages if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(retry_tools), 2)
+        self.assertIn('"after-recovery"', retry_tools[1]["content"])
+        window = load_window(
+            find_window(root, "alice", "cli", "tool-context-retry")
+        )
+        durable_items = window["items"]["items"]
+        durable_call_ids = {
+            item["call_id"]
+            for item in durable_items
+            if item.get("type") == "tool_call"
+        }
+        durable_result_ids = {
+            item["call_id"]
+            for item in durable_items
+            if item.get("type") == "tool_result"
+        }
+        self.assertEqual(durable_call_ids, durable_result_ids)
+        self.assertEqual(len(durable_call_ids), 2)
+        self.assertTrue(
+            any(
+                event.type == "context_compression"
+                and event.metadata.get("preserved_live_tool_tail") is True
+                for event in events
+            )
+        )
 
     def test_automatic_round_compression_trims_runtime_and_queues_memory(self) -> None:
         _, root = self.make_root()

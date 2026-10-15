@@ -9,6 +9,9 @@ SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
 IGNORED_PARTS = {
     ".git", "node_modules", "tests", "tmp", "开发临时目录", "dist", "build",
     "coverage", "__pycache__", ".test-work",
+    # Private runtime workspaces: user files are never production source, and a
+    # local developer tree can legitimately hold large third-party bundles.
+    "users",
 }
 # These are cohesive declaration/protocol or page-composition roots rather than
 # multi-domain implementation modules.  Every exception must carry a rationale.
