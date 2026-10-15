@@ -16,6 +16,7 @@
 .copy small { overflow: hidden; color: var(--muted); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
 .badges { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
 .badges > span { padding: 4px 7px; border-radius: 999px; color: var(--muted); background: var(--surface-3); font-size: .625rem; font-weight: 720; white-space: nowrap; }
+.badges > .guidanceDetail { max-width: min(320px, 34vw); overflow: hidden; padding: 4px 0; color: var(--muted); background: transparent; font-weight: 500; text-overflow: ellipsis; }
 .badges > .guidanceBadge { color: var(--green); background: var(--green-soft); }
 .toggle { min-height: 30px; flex: 0 0 auto; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--line); border-radius: 9px; color: var(--text-2); background: var(--surface); font-size: .6875rem; font-weight: 720; cursor: pointer; }
 .toggle:hover { border-color: color-mix(in srgb, var(--brand) 38%, var(--line)); color: var(--brand); background: var(--brand-soft); }
@@ -30,6 +31,7 @@
   .header { flex-wrap: wrap; gap: 7px; }
   .copy { min-width: calc(100% - 92px); }
   .badges { order: 3; margin-left: 37px; }
+  .badges > .guidanceDetail { max-width: 52vw; }
   .toggle { margin-left: auto; }
 }
 

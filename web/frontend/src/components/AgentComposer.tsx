@@ -1,8 +1,9 @@
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent, ReactNode } from 'react'
-import { useEffect, useRef } from 'react'
-import { BarChart3, BookOpen, Boxes, ChevronDown, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
+import { useRef } from 'react'
+import { BookOpen, Boxes, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
-import styles from './AgentComposer.module.css'
+import { useComposerAutosize } from '../hooks/useComposerAutosize'
+import { ReferenceIcon } from '../reference/ReferenceIcon'
 
 export interface AgentComposerProps {
   value: string
@@ -10,6 +11,9 @@ export interface AgentComposerProps {
   currentRound: number
   totalRounds?: number
   roundLimit: number
+  contextPercent?: number
+  contextUsedTokens?: number
+  contextTokenWindow?: number
   running?: boolean
   stopping?: boolean
   disabled?: boolean
@@ -17,6 +21,7 @@ export interface AgentComposerProps {
   conversationMenu?: ReactNode
   notice?: ReactNode
   uploadFeedback?: ReactNode
+  modelBar?: ReactNode
   pendingFileCount?: number
   uploading?: boolean
   onChange: (value: string) => void
@@ -37,6 +42,9 @@ export function AgentComposer({
   currentRound,
   totalRounds = currentRound,
   roundLimit,
+  contextPercent = 0,
+  contextUsedTokens,
+  contextTokenWindow,
   running = false,
   stopping = false,
   disabled = false,
@@ -44,6 +52,7 @@ export function AgentComposer({
   conversationMenu,
   notice,
   uploadFeedback,
+  modelBar,
   pendingFileCount = 0,
   uploading = false,
   onChange,
@@ -69,15 +78,14 @@ export function AgentComposer({
     window.requestAnimationFrame(() => textareaRef.current?.focus())
   })
 
-  useEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = '0px'
-    const rootSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-    const minimum = rootSize * 4.5
-    const maximum = rootSize * 12
-    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, minimum), maximum)}px`
-  }, [value])
+  useComposerAutosize(textareaRef, value)
+  const normalizedContextPercent = Math.max(0, Math.min(100, Number.isFinite(contextPercent) ? contextPercent : 0))
+  const contextPercentLabel = Number.isInteger(normalizedContextPercent)
+    ? String(normalizedContextPercent)
+    : normalizedContextPercent.toFixed(1)
+  const contextUsedTokensLabel = formatTokenCount(contextUsedTokens)
+  const contextTokenWindowLabel = formatTokenCount(contextTokenWindow)
+  const contextUsageLabel = `${contextPercentLabel}% | ${contextUsedTokensLabel} token | ${contextTokenWindowLabel} token窗口`
 
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => onChange(event.target.value)
   const handleSubmit = () => {
@@ -113,13 +121,14 @@ export function AgentComposer({
   }
 
   return (
-    <section className={styles.composer} aria-label="消息输入区域">
+    <section className={`composer composer-inner ${running ? 'is-running' : ''}`} aria-label="消息输入区域">
       {notice}
       {uploadFeedback}
+      {modelBar}
       <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFileChange} />
       <textarea
         ref={textareaRef}
-        className={styles.input}
+        className="composer-textarea"
         value={value}
         placeholder={placeholder}
         disabled={disabled}
@@ -131,8 +140,8 @@ export function AgentComposer({
         onPaste={handlePaste}
       />
 
-      <div className={styles.footer}>
-        <div className={styles.tools}>
+      <div className="composer-bar">
+        <div className="reference-composer-tools">
           <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || uploading || !onUploadFiles}>
             <Paperclip />
           </ComposerIconButton>
@@ -156,48 +165,70 @@ export function AgentComposer({
           </ComposerIconButton>
         </div>
 
-        <div className={styles.actions}>
-          <div className={styles.stat} title={`当前上下文 ${currentRound}/${roundLimit} 轮，历史累计 ${totalRounds} 轮`}>
-            <BarChart3 aria-hidden="true" />
-            <span className={styles.statRound}>上下文 {currentRound} 轮</span>
-            <span className={styles.statDivider} aria-hidden="true" />
-            <span>{currentRound}/{roundLimit}</span>
-            <span className={styles.statDivider} aria-hidden="true" />
-            <span>历史 {totalRounds}</span>
+        <div className="reference-composer-actions">
+          <div
+            className="model-pill reference-round-stat"
+            title={`上下文占用 ${contextUsageLabel} · 当前轮数 ${currentRound} · 压缩触发轮数 ${roundLimit} · 总轮数 ${totalRounds}`}
+            aria-label={`上下文占用 ${contextUsageLabel} · 当前轮数 ${currentRound} · 压缩触发轮数 ${roundLimit} · 总轮数 ${totalRounds}`}
+          >
+            <span className="context-usage-ring" aria-hidden="true">
+              <svg viewBox="0 0 36 36">
+                <circle className="context-usage-ring-track" cx="18" cy="18" r="15" pathLength="100" />
+                <circle
+                  className="context-usage-ring-fill"
+                  cx="18"
+                  cy="18"
+                  r="15"
+                  pathLength="100"
+                  strokeDasharray={`${normalizedContextPercent} 100`}
+                />
+              </svg>
+            </span>
+            <span className="reference-stat-divider" aria-hidden="true" />
+            <span className="reference-round-bubble">
+              <span className="reference-round-number">{currentRound}</span>
+              <span className="reference-stat-divider" aria-hidden="true" />
+              <span className="reference-round-number">{roundLimit}</span>
+              <span className="reference-stat-divider" aria-hidden="true" />
+              <span className="reference-round-number">{totalRounds}</span>
+            </span>
           </div>
 
-          <div className={`${styles.menuWrap} composer-more`}>
+          <div className="composer-more reference-menu-anchor">
             <button
               type="button"
-              className={`${styles.actionButton} ${conversationMenuOpen ? styles.active : ''}`}
+              className={`btn btn-ghost btn-sm ${conversationMenuOpen ? 'is-active' : ''}`}
               disabled={disabled}
               aria-expanded={conversationMenuOpen}
               aria-label="展开对话操作"
               onClick={onToggleConversationMenu}
             >
               <span>对话操作</span>
-              <ChevronDown aria-hidden="true" />
             </button>
             {conversationMenu}
           </div>
 
-          {running && onNextTurn ? <button type="button" className={styles.actionButton} disabled={!canSubmit} onClick={() => { if (canSubmit) onNextTurn() }}>
+          {running && onNextTurn ? <button type="button" className="btn btn-ghost btn-sm" disabled={!canSubmit} onClick={() => { if (canSubmit) onNextTurn() }}>
             <span>下一轮发送</span>
           </button> : null}
-          <button type="button" className={`${styles.sendButton} ${running ? styles.guidance : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
-            <Send aria-hidden="true" />
-            <span>{running ? '消息跟进' : '发送'}</span>
+          <button type="button" className={`send-btn ${running ? 'reference-followup-send' : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
+            <ReferenceIcon name="arrowUp" />
+            <span className="sr-only">{running ? '消息跟进' : '发送'}</span>
           </button>
           {running && onStop ? (
-            <button type="button" className={styles.stopButton} onClick={onStop} aria-label="停止生成" disabled={stopping}>
+            <button type="button" className="send-btn is-stop" onClick={onStop} aria-label="停止生成" disabled={stopping}>
               <Square aria-hidden="true" />
-              <span>{stopping ? '正在停止…' : '停止'}</span>
+              <span className="sr-only">{stopping ? '正在停止…' : '停止'}</span>
             </button>
           ) : null}
         </div>
       </div>
     </section>
   )
+}
+
+function formatTokenCount(value: number | undefined) {
+  return Number.isFinite(value) ? Math.max(0, Number(value)).toLocaleString() : '—'
 }
 
 interface ComposerIconButtonProps {
@@ -214,7 +245,7 @@ function ComposerIconButton({ label, title, disabled, command = false, active = 
   return (
     <button
       type="button"
-      className={`${styles.iconButton} ${command ? styles.commandButton : ''} ${active ? styles.listeningButton : ''}`}
+      className={`icon-btn ${command ? 'reference-command-tool' : ''} ${active ? 'is-active' : ''}`}
       aria-label={label}
       aria-pressed={active || undefined}
       title={disabled && !onClick ? `${label} · 待接入` : title || label}

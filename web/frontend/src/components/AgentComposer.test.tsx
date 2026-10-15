@@ -56,10 +56,32 @@ describe('AgentComposer', () => {
   it('空闲时 Enter 发送，Shift+Enter 和 Ctrl+Enter 均保留编辑行为', () => {
     const onSubmit = vi.fn()
     const onGuide = vi.fn()
-    renderComposer({ value: '检查状态', currentRound: 8, totalRounds: 44, roundLimit: 30, onSubmit, onGuide })
-    expect(screen.getByText('上下文 8 轮')).toBeInTheDocument()
-    expect(screen.getByText('8/30')).toBeInTheDocument()
-    expect(screen.getByText('历史 44')).toBeInTheDocument()
+    renderComposer({
+      value: '检查状态',
+      currentRound: 8,
+      totalRounds: 44,
+      roundLimit: 30,
+      contextPercent: 42,
+      contextUsedTokens: 291228,
+      contextTokenWindow: 1000000,
+      onSubmit,
+      onGuide,
+    })
+    const roundStat = screen.getByLabelText('上下文占用 42% | 291,228 token | 1,000,000 token窗口 · 当前轮数 8 · 压缩触发轮数 30 · 总轮数 44')
+    expect(roundStat).toBeInTheDocument()
+    expect(roundStat).not.toHaveTextContent('42%')
+    expect(roundStat).toHaveAttribute('title', '上下文占用 42% | 291,228 token | 1,000,000 token窗口 · 当前轮数 8 · 压缩触发轮数 30 · 总轮数 44')
+    expect(roundStat.querySelectorAll('.reference-round-number')).toHaveLength(3)
+    expect(roundStat).toHaveTextContent('8')
+    expect(roundStat).toHaveTextContent('30')
+    expect(roundStat).toHaveTextContent('44')
+    const roundBubble = roundStat.querySelector('.reference-round-bubble')
+    expect(roundBubble?.querySelectorAll('.reference-round-number')).toHaveLength(3)
+    expect(roundBubble?.querySelectorAll('.reference-stat-divider')).toHaveLength(2)
+    expect(roundBubble?.querySelector('.context-usage-ring')).toBeNull()
+    const circles = roundStat.querySelectorAll('.context-usage-ring circle')
+    expect(circles).toHaveLength(2)
+    circles.forEach((circle) => expect(circle).toHaveAttribute('r', '15'))
 
     const input = screen.getByRole('textbox', { name: '消息内容' })
     expect(input).not.toHaveAttribute('aria-keyshortcuts')

@@ -7,11 +7,15 @@ export function ComposerMessagePanel({
   followUpCount,
   followUpContent,
   guidanceContent,
+  guidanceLabel = '引导中',
+  guidanceDetail,
 }: {
   sessionKey: string
   followUpCount: number
   followUpContent: ReactNode
   guidanceContent?: ReactNode
+  guidanceLabel?: string
+  guidanceDetail?: string
 }) {
   const [expanded, setExpanded] = useState(false)
   const contentId = useId()
@@ -44,7 +48,8 @@ export function ComposerMessagePanel({
         </span>
         <span className={styles.badges} aria-label="消息栏状态">
           {followUpCount > 0 ? <span>跟进 {followUpCount}</span> : null}
-          {hasGuidance ? <span className={styles.guidanceBadge}>引导中</span> : null}
+          {guidanceDetail ? <span className={styles.guidanceDetail}>{guidanceDetail}</span> : null}
+          {hasGuidance ? <span className={styles.guidanceBadge}>{guidanceLabel}</span> : null}
         </span>
         {followUpCount > 0 ? (
           <button

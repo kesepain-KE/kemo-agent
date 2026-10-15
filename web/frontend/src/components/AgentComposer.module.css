@@ -7,14 +7,14 @@
   border: 1px solid var(--line-strong);
   border-radius: 1.75rem;
   background: color-mix(in srgb, var(--surface-elevated) 96%, transparent);
-  box-shadow: 0 1.25rem 3.125rem rgba(31, 35, 48, .08), 0 .1875rem .625rem rgba(31, 35, 48, .025);
+  box-shadow: 0 1.25rem 3.125rem rgba(35, 35, 35, .08), 0 .1875rem .625rem rgba(35, 35, 35, .025);
   backdrop-filter: blur(18px);
   transition: border-color .18s ease, box-shadow .18s ease;
 }
 
 .composer:focus-within {
   border-color: color-mix(in srgb, var(--brand) 34%, var(--line));
-  box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--brand) 7%, transparent), 0 1.375rem 3.375rem rgba(31, 35, 48, .09);
+  box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--brand) 7%, transparent), 0 1.375rem 3.375rem rgba(35, 35, 35, .09);
 }
 
 .input {
@@ -73,7 +73,7 @@
   border-radius: 1.125rem;
   background: color-mix(in srgb, var(--surface-elevated) 88%, transparent);
   color: var(--text-2);
-  box-shadow: 0 .125rem .3125rem rgba(27, 30, 40, .018), 0 .4375rem 1.125rem rgba(27, 30, 40, .025);
+  box-shadow: 0 .125rem .3125rem rgba(30, 30, 30, .018), 0 .4375rem 1.125rem rgba(30, 30, 30, .025);
   transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
 
@@ -82,7 +82,7 @@
   color: var(--brand);
   background: var(--surface-elevated);
   border-color: color-mix(in srgb, var(--brand) 25%, var(--line));
-  box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--brand) 6%, transparent), 0 .5rem 1.375rem rgba(38, 34, 93, .07);
+  box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--brand) 6%, transparent), 0 .5rem 1.375rem rgba(39, 39, 39, .07);
   transform: translateY(-1px);
 }
 .iconButton:active:not(:disabled) { transform: scale(.96); }
@@ -122,7 +122,7 @@
   color: var(--muted);
   font-size: .82rem;
   font-variant-numeric: tabular-nums;
-  box-shadow: 0 .125rem .5rem rgba(27, 30, 40, .025);
+  box-shadow: 0 .125rem .5rem rgba(30, 30, 30, .025);
 }
 .stat svg { width: 1.1rem; height: 1.1rem; color: var(--text-2); }
 .statRound { color: var(--text-2); }
