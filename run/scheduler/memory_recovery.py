@@ -379,7 +379,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                 "message": str(exc),
                 "exception_type": type(exc).__name__,
             }
-            if isinstance(exc, MemoryCapacityBlocked) or error.get("capacity_blocked"):
+            work_pending = bool(error.get("work_pending"))
+            if isinstance(exc, MemoryCapacityBlocked) or error.get("capacity_blocked") or work_pending:
                 try:
                     finished = defer_memory_claim(
                         scheduler.root,
@@ -387,7 +388,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                         source,
                         session_id,
                         claim_id=claim_id,
-                        reason="execution_capacity",
+                        reason="memory_work_pending" if work_pending else "execution_capacity",
+                        **({"delay_seconds": 30} if work_pending else {}),
                     )
                 except Exception as defer_exc:
                     error["defer_error"] = {
@@ -428,6 +430,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                             "exception_type": type(archive_exc).__name__,
                         }
                     deferred.append({**identity, "deferred": True, "error": error})
+                    if work_pending:
+                        continue
                     capacity_blocked = True
                     break
             if stale_result:

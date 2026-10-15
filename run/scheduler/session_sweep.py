@@ -15,6 +15,7 @@ from run.history import (
     database_path,
     find_record,
     list_records,
+    queue_summary,
     queue_memory_extraction,
 )
 
@@ -60,6 +61,7 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
     cutoff = current - max(1.0, float(idle_seconds))
     result: dict[str, Any] = {"user": user, "scanned": 0, "closed": 0,
                               "requeued_closed": 0, "queued_memory": 0,
+                              "queued_summary": 0,
                               "skipped_active": 0,
                               "errors": [], "closed_sessions": []}
     try:
@@ -75,7 +77,7 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
         except (TypeError, ValueError, OverflowError):
             return 0
 
-    def pending_closed(record: dict[str, Any]) -> bool:
+    def pending_memory(record: dict[str, Any]) -> bool:
         rounds = count(record.get("rounds"))
         processed = count(record.get("memory_processed_round"))
         status = str(record.get("memory_status") or "unknown").casefold()
@@ -83,11 +85,25 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
                 and rounds > processed
                 and status not in {"queued", "processing", "failed", "completed", "disabled"})
 
+    def pending_summary(record: dict[str, Any]) -> bool:
+        rounds = max(
+            count(record.get("last_committed_round")),
+            count(record.get("rounds")),
+        )
+        return (
+            str(record.get("lifecycle") or "") == "closed"
+            and rounds > 0
+            and bool(str(record.get("archive_window") or ""))
+            and not str(record.get("title") or "").strip()
+            and str(record.get("summary_status") or "none").casefold() == "none"
+        )
+
     allowed_sources = {str(value) for value in sources} if sources is not None else None
     candidates = [record for record in records if isinstance(record, dict)
                   and (allowed_sources is None or str(record.get("source") or "") in allowed_sources)
                   and (
-        pending_closed(record)
+        pending_memory(record)
+        or pending_summary(record)
         or (str(record.get("lifecycle") or "") not in {"closed", "deleted"}
             and (_timestamp(record.get("updated_at")) or float("inf")) <= cutoff)
     )]
@@ -111,24 +127,27 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
             latest = find_record(root, user, source, session_id)
             if not isinstance(latest, dict) or str(latest.get("lifecycle") or "") == "deleted":
                 continue
-            closed_recovery = pending_closed(latest)
-            if not closed_recovery and str(latest.get("lifecycle") or "") == "closed":
+            memory_recovery = pending_memory(latest)
+            summary_recovery = pending_summary(latest)
+            lifecycle_closed = str(latest.get("lifecycle") or "") == "closed"
+            if not memory_recovery and not summary_recovery and lifecycle_closed:
                 continue
-            if not closed_recovery and (_timestamp(latest.get("updated_at")) or float("inf")) > cutoff:
+            if not memory_recovery and not summary_recovery and (_timestamp(latest.get("updated_at")) or float("inf")) > cutoff:
                 continue
             if str(latest.get("run_state") or "idle").casefold() in {"running", "queued", "pending", "starting", "stopping"}:
                 result["skipped_active"] += 1
                 continue
             queued: dict[str, Any] | None = None
             queue_error: Exception | None = None
-            try:
-                queued = queue_memory_extraction(
-                    root, user, source, session_id, reason=queue_reason
-                )
-            except Exception as exc:
-                queue_error = exc
+            if not lifecycle_closed or memory_recovery:
+                try:
+                    queued = queue_memory_extraction(
+                        root, user, source, session_id, reason=queue_reason
+                    )
+                except Exception as exc:
+                    queue_error = exc
             closed = latest
-            if not closed_recovery:
+            if not lifecycle_closed:
                 try:
                     closed = close_session(root, user, source, session_id)
                 except Exception as exc:
@@ -137,6 +156,17 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
                         "exception_type": type(exc).__name__,
                     })
                     continue
+            summary_queued: dict[str, Any] | None = None
+            if closed is not None and (not lifecycle_closed or summary_recovery):
+                try:
+                    summary_queued = queue_summary(
+                        root, user, source, session_id
+                    )
+                except Exception as exc:
+                    result["errors"].append({
+                        "source": source, "session_id": session_id,
+                        "exception_type": type(exc).__name__,
+                    })
             if queue_error is not None:
                 result["errors"].append({
                     "source": source, "session_id": session_id,
@@ -145,14 +175,17 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
             if closed is not None:
                 if str((queued or {}).get("status") or "") == "queued":
                     result["queued_memory"] += 1
-                if closed_recovery:
+                if str((summary_queued or {}).get("status") or "") == "queued":
+                    result["queued_summary"] += 1
+                if memory_recovery:
                     if str((queued or {}).get("status") or "") == "queued":
                         result["requeued_closed"] += 1
-                else:
+                elif not lifecycle_closed:
                     result["closed"] += 1
                 if len(result["closed_sessions"]) < 20:
                     result["closed_sessions"].append({"source": source, "session_id": session_id,
-                                                       "memory_status": str((queued or {}).get("status") or "unknown")})
+                                                       "memory_status": str((queued or {}).get("status") or "unknown"),
+                                                       "summary_status": str((summary_queued or {}).get("status") or "unknown")})
         except Exception as exc:
             result["errors"].append({"source": source, "session_id": session_id,
                                       "exception_type": type(exc).__name__})
@@ -170,6 +203,7 @@ def sweep_all_users(root: Path, *, idle_seconds: int | float = SESSION_IDLE_CLOS
             "closed": sum(int(item.get("closed") or 0) for item in results),
             "requeued_closed": sum(int(item.get("requeued_closed") or 0) for item in results),
             "queued_memory": sum(int(item.get("queued_memory") or 0) for item in results),
+            "queued_summary": sum(int(item.get("queued_summary") or 0) for item in results),
             "skipped_active": sum(int(item.get("skipped_active") or 0) for item in results),
             "errors": [error for item in results for error in item.get("errors", [])],
             "users": results}

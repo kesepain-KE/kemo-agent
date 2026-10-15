@@ -511,11 +511,16 @@ class CronStore:
                 clear_cron_runtime(self.root, self.user, self._system, task_id)
             return updated
 
-    def delete(self, task_id: str) -> bool:
+    def delete(self, task_id: str, *, completed_snapshot: dict[str, Any] | None = None) -> bool:
         with self._lock:
             path = self._path(task_id)
             if not path.exists():
                 return False
+            if completed_snapshot is not None:
+                current = self._load(path)
+                if (self._system or current.get("status") != "completed"
+                        or current.get("exec_mode") == "system" or current != completed_snapshot):
+                    return False
             path.unlink()
             _LIST_CACHE.invalidate(lambda key: key[0] == os.path.normcase(str(self._dir.resolve())))
             clear_cron_runtime(self.root, self.user, self._system, task_id)
