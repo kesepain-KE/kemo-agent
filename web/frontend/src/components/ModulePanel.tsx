@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from '../markdownLinks'
+import { DocumentMarkdown } from './DocumentMarkdown'
 import { Eye, EyeOff, Play, RotateCcw, Save, Settings2, Trash2 } from 'lucide-react'
 import type {
   ModulePanelConfigContainer,
@@ -94,7 +93,7 @@ function StatusContainer({ container }: { container: Extract<ModulePanelContaine
         ? container.secret_set?.[field.key] ? '已设置' : '未设置'
         : container.data?.[field.key]
       if (field.type === 'markdown') {
-        return <section className={styles.markdownField} key={field.key}><strong>{field.label}</strong><ReactMarkdown remarkPlugins={[remarkGfm]}>{displayValue(value)}</ReactMarkdown></section>
+        return <section className={styles.markdownField} key={field.key}><strong>{field.label}</strong><DocumentMarkdown content={displayValue(value)} /></section>
       }
       if (field.type === 'badge') {
         return <div className={styles.statusRow} key={field.key}><span>{field.label}</span><b className={`${styles.badge} ${badgeTone(value)}`}>{displayValue(value)}</b></div>
@@ -233,7 +232,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
     {(localError || feedback) ? <div className={`${styles.feedback} ${localError ? styles.error : styles.saved}`} role={localError ? 'alert' : 'status'}>{localError || feedback}</div> : null}
     <div className={styles.grid}>{panel.containers.map((container, index) => <HoverPreview
       key={`${container.kind}-${container.title}-${index}`}
-      className={`${styles.card} ${styles[container.width]} ${styles[container.height]}`}
+      className={`${styles.card} ${styles[container.width]} ${styles[container.height]} ${container.kind === 'action' ? styles.actionCard : ''}`}
       ariaLabel={`${container.title}，悬停或聚焦可查看完整内容`}
       preview={<pre className={styles.previewText}>{previewText(container, draft, actionValues)}</pre>}
     >

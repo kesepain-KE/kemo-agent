@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  background: color-mix(in srgb, #020617 58%, transparent);
+  background: color-mix(in srgb, #060606 58%, transparent);
   backdrop-filter: blur(7px);
 }
 

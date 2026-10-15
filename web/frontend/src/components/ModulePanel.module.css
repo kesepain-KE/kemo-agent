@@ -4,18 +4,20 @@
 .panelHeader > span > span { min-width: 0; display: grid; gap: .1rem; }
 .panelHeader strong { color: var(--text); font-size: .78rem; }
 .panelHeader small { color: var(--muted); font-size: .63rem; }
-.saveButton { min-height: 34px; padding: .4rem .65rem; display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--brand); border-radius: 9px; background: var(--brand); color: white; font: inherit; font-size: .68rem; font-weight: 750; cursor: pointer; }
+.saveButton { min-height: 34px; padding: .4rem .65rem; display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--brand); border-radius: 9px; background: var(--brand); color: var(--accent-contrast, #fff); font: inherit; font-size: .68rem; font-weight: 750; cursor: pointer; }
 .saveButton:disabled { opacity: .55; cursor: wait; }
 .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: .65rem; }
-.card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.card { min-width: 0; height: var(--module-panel-card-height, auto); max-height: var(--module-panel-card-max-height, none); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
 .card:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .card > section { height: 100%; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .quarter { grid-column: span 3; }
 .third { grid-column: span 4; }
 .half { grid-column: span 6; }
 .full { grid-column: span 12; }
-.h1 { max-height: 6.5rem; }
-.h2 { max-height: 13rem; }
+.h1 { --module-panel-card-height: var(--module-panel-h1-height, auto); --module-panel-card-max-height: var(--module-panel-h1-height, 6.5rem); }
+.h2 { --module-panel-card-height: var(--module-panel-h2-height, auto); --module-panel-card-max-height: var(--module-panel-h2-height, 13rem); }
+.actionCard { height: var(--module-panel-action-height, var(--module-panel-card-height)); max-height: var(--module-panel-action-max-height, var(--module-panel-card-max-height)); }
+.actionCard .cardBody { height: var(--module-panel-action-body-height, auto); }
 .cardHeader { min-height: 34px; padding: .45rem .6rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-elevated) 82%, var(--brand-soft)); }
 .cardHeader strong { color: var(--text); font-size: .7rem; }
 .cardHeader span { padding: .1rem .35rem; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: .58rem; }
@@ -31,7 +33,6 @@
 .danger { background: var(--red-soft); color: var(--red); }
 .markdownField, .keyValueField { display: grid; gap: .3rem; }
 .markdownField > strong, .keyValueField > strong { color: var(--muted); font-size: .63rem; }
-.markdownField p { margin: 0; color: var(--text-2); font-size: .66rem; line-height: 1.55; }
 .keyValueField dl { margin: 0; display: grid; gap: .25rem; }
 .keyValueField dl > div { display: grid; grid-template-columns: minmax(4rem,.7fr) minmax(0,1.3fr); gap: .5rem; }
 .keyValueField dt { color: var(--muted); font-size: .62rem; }

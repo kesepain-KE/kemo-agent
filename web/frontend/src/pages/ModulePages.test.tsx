@@ -42,6 +42,84 @@ function renderPage(path: string) {
 }
 
 describe('V16 module pages', () => {
+  it('主题页只提供高级白/高级黑，切换立即生效并保存兼容的 light/dark 值', async () => {
+    const saves: unknown[] = []
+    server.use(http.patch('/api/users/kesepain/preferences', async ({ request }) => {
+      const appearance = await request.json()
+      saves.push(appearance)
+      return HttpResponse.json({ user: 'kesepain', appearance })
+    }))
+    renderPage('settings')
+    const group = await screen.findByRole('radiogroup', { name: '界面主题' })
+    expect(within(group).getAllByRole('radio')).toHaveLength(2)
+    const white = within(group).getByRole('radio', { name: '高级白' })
+    const black = within(group).getByRole('radio', { name: '高级黑' })
+    await waitFor(() => expect(white).toHaveAttribute('aria-checked', 'true'))
+    fireEvent.click(black)
+    await waitFor(() => expect(saves).toEqual([{ theme: 'dark' }]))
+    expect(black).toHaveAttribute('aria-checked', 'true')
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    expect(localStorage.getItem('kemo-theme')).toBe('dark')
+    fireEvent.click(white)
+    await waitFor(() => expect(saves).toEqual([{ theme: 'dark' }, { theme: 'light' }]))
+    expect(white).toHaveAttribute('aria-checked', 'true')
+    expect(document.documentElement.dataset.theme).toBe('light')
+  })
+
+  it('记忆与上下文页读取并保存中途上下文压缩开关', async () => {
+    let enabled = true
+    let savedChanges: Record<string, unknown> | undefined
+    server.use(
+      http.get('/api/global-config', () => HttpResponse.json({
+        scope: 'global',
+        config: {
+          agents: {
+            enable_mid_context_compression: enabled,
+            token_limit: 1000000,
+            token_compression_ratio: 0.3,
+            max_rounds: 80,
+            rounds_after_compression: 20,
+          },
+          memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
+        },
+        redacted_paths: [],
+      })),
+      http.patch('/api/global-config', async ({ request }) => {
+        const body = await request.json() as { changes: Record<string, unknown> }
+        savedChanges = body.changes
+        const agents = body.changes.agents as { enable_mid_context_compression?: boolean }
+        enabled = agents.enable_mid_context_compression ?? enabled
+        return HttpResponse.json({
+          scope: 'global',
+          config: {
+            agents: {
+              enable_mid_context_compression: enabled,
+              token_limit: 1000000,
+              token_compression_ratio: 0.3,
+              max_rounds: 80,
+              rounds_after_compression: 20,
+            },
+            memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
+          },
+          redacted_paths: [],
+          updated: true,
+        })
+      }),
+    )
+    renderPage('settings')
+    fireEvent.click(await screen.findByRole('button', { name: '记忆与上下文' }))
+    const toggle = await screen.findByRole('switch', { name: '中途上下文压缩' })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
+    await waitFor(() => expect(savedChanges).toMatchObject({
+      agents: expect.objectContaining({ enable_mid_context_compression: false }),
+    }))
+    expect(await screen.findByText('记忆与上下文 已保存')).toBeInTheDocument()
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'))
+  })
+
   it('结束音效设置只在 Windows 桌面端显示且支持上传和清除', async () => {
     const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
     let uploaded = false
@@ -935,19 +1013,19 @@ describe('V16 module pages', () => {
     expect(await screen.findByRole('heading', { name: '配置' })).toBeInTheDocument()
     expect(screen.queryByText('结构化配置与敏感字段保护')).not.toBeInTheDocument()
     expect(screen.getByText('界面主题')).toBeInTheDocument()
-    expect(screen.getByText('72%')).toBeInTheDocument()
-    expect(screen.getByText('88%')).toBeInTheDocument()
-    expect(screen.getByText('105%')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: '小' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: '中' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: '大' })).toBeInTheDocument()
     expect(screen.queryByText('Prompt 与 Expand')).not.toBeInTheDocument()
     expect(screen.queryByText('配置文件 JSON')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider' }))
     expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
     expect(modelDiscoveryCalls).toBe(1)
     expect(screen.getByRole('button', { name: '主模型选择模型' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '外观与主题 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '外观与主题' }))
     expect(screen.queryByText('Kemo API 已验证，已获取 1 个可用模型')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider' }))
     expect(screen.getByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '主模型选择模型' })).toBeInTheDocument()
     expect(modelDiscoveryCalls).toBe(1)
@@ -992,7 +1070,7 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
     expect(modelDiscoveryCalls).toBe(2)
-    expect(screen.getAllByText('可选择')).toHaveLength(12)
+    expect(screen.queryByText('可选择')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '主模型选择模型' })).toHaveTextContent('选择模型')
     fireEvent.click(screen.getByRole('button', { name: '主模型选择模型' }))
     expect(screen.getByRole('listbox', { name: '主模型选项' })).toBeInTheDocument()
@@ -1011,22 +1089,22 @@ describe('V16 module pages', () => {
       multimodal_routing: { vision: 'dedicated' },
     }))
 
-    fireEvent.click(screen.getByRole('button', { name: '用户切换 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '用户切换' }))
     expect(screen.queryByRole('combobox', { name: '可切换用户' })).not.toBeInTheDocument()
     expect(await screen.findByRole('button', { name: '切换到用户 reviewer' })).toBeEnabled()
 
-    fireEvent.click(screen.getByRole('button', { name: '记忆与上下文 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '记忆与上下文' }))
     expect(await screen.findByLabelText('Token 上限')).toHaveValue(1000000)
     expect(screen.getByLabelText('Token 压缩比例')).toHaveValue('0.3')
     expect(screen.getByLabelText('周记忆上限')).toHaveValue(100)
 
-    fireEvent.click(screen.getByRole('button', { name: '权限边界 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '权限边界' }))
     expect(await screen.findByRole('switch', { name: '使用共享知识库' })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByRole('switch', { name: '拓展数据实时注入' })).not.toBeChecked()
     expect(screen.getByRole('switch', { name: '感知数据实时注入' })).not.toBeChecked()
     expect(screen.getByLabelText('插件白名单输入')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '版本查看 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '版本查看' }))
     expect(await screen.findByText('当前版本')).toBeInTheDocument()
     expect(screen.getAllByText('v0.2.0').length).toBeGreaterThanOrEqual(5)
     expect(screen.getByText('配套 Kemo 网关')).toBeInTheDocument()
@@ -1043,7 +1121,7 @@ describe('V16 module pages', () => {
     expect(screen.getByRole('button', { name: '复制更新命令' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '立即更新' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '运行限制 ›' }))
+    fireEvent.click(screen.getByRole('button', { name: '运行限制' }))
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
     expect(screen.getByLabelText('单轮最大工具调用数')).toHaveValue(80)
     expect(screen.getByLabelText('单个工具最大连续使用上限')).toHaveValue(8)
@@ -1061,23 +1139,35 @@ describe('V16 module pages', () => {
 
   it('chat 协议保存后不请求 Kemo 模型目录', async () => {
     let modelDiscoveryCalls = 0
+    let chatDiscoveryCalls = 0
     server.use(http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
       user: 'kesepain',
       config: { provider: { type: 'chat', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false, reasoning_effort: 'medium' } },
       redacted_paths: ['provider.api_key'],
-    })), http.get('/api/users/kesepain/provider/models', () => {
+    })), http.get('/api/users/kesepain/provider/chat-models', () => {
+      chatDiscoveryCalls += 1
+      return HttpResponse.json({
+        user: 'kesepain', protocol: 'chat', api_valid: true, count: 1,
+        data: [{ id: 'chat-visible-model', object: 'model', owned_by: 'provider' }],
+      })
+    }), http.get('/api/users/kesepain/provider/models', () => {
       modelDiscoveryCalls += 1
       return HttpResponse.json({ user: 'kesepain', protocol: 'kemo', api_valid: true, count: 0, data: [] })
     }))
     renderPage('settings')
-    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider' }))
     expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveTextContent('chat')
     fireEvent.click(await screen.findByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     expect(modelDiscoveryCalls).toBe(0)
     expect(screen.queryByText(/Kemo API 已验证/)).not.toBeInTheDocument()
     expect(screen.queryByText('可选择')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '主模型选择模型' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '主模型选择模型' })).toBeInTheDocument()
+    expect(chatDiscoveryCalls).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '主模型选择模型' }))
+    expect(screen.getByText('Chat · Provider 模型 API')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: /chat-visible-model/ }))
+    expect(screen.getByLabelText('模型')).toHaveValue('chat-visible-model')
   })
 
   it('Kemo 模型目录为空时保留传统自由输入模式', async () => {
@@ -1085,7 +1175,7 @@ describe('V16 module pages', () => {
       user: 'kesepain', protocol: 'kemo', api_valid: true, count: 0, data: [],
     })))
     renderPage('settings')
-    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider' }))
     expect(await screen.findByText('Kemo API 已验证，但当前密钥没有可用的 LLM 模型')).toBeInTheDocument()
     expect(screen.getByLabelText('模型')).not.toHaveAttribute('list')
     expect(screen.queryByText('可选择')).not.toBeInTheDocument()
@@ -1127,7 +1217,7 @@ describe('V16 module pages', () => {
     )
 
     renderPage('settings')
-    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider ›' }))
+    fireEvent.click(await screen.findByRole('button', { name: '模型与 Provider' }))
     const effortSelect = await screen.findByRole('combobox', { name: '思考强度' })
     await waitFor(() => expect(effortSelect).toHaveTextContent('极少'))
     expect(screen.getByText(/部分档位会映射到相同的上游强度/)).toBeInTheDocument()
@@ -1352,7 +1442,7 @@ describe('V16 module pages', () => {
     }))
 
     renderPage('settings')
-    fireEvent.click(await screen.findByRole('button', { name: '运行限制 ›' }))
+    fireEvent.click(await screen.findByRole('button', { name: '运行限制' }))
     fireEvent.click(await screen.findByRole('button', { name: '重启智能体' }))
     fireEvent.click(screen.getByRole('button', { name: '确认重启' }))
 
@@ -1477,6 +1567,7 @@ describe('V16 module pages', () => {
   it('用户资料读取并原子保存人格 Markdown', async () => {
     renderPage('profile')
     expect(await screen.findByRole('heading', { name: '身份与人格' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '编辑用户人格' }))
     const editor = await screen.findByLabelText('用户人格 Markdown')
     expect(editor).toHaveValue('# 用户人格')
     fireEvent.change(editor, { target: { value: '# 更新后的用户人格' } })

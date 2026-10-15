@@ -1,5 +1,7 @@
-.drawer { z-index: 94; }
-.headerLead { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.drawer { z-index: 120; }
+.headerLead { min-width: 0; flex: 1 1 auto; display: flex; align-items: center; gap: 10px; }
+.headerLead :global(.context-drawer-heading) { min-width: 0; flex: 1 1 auto; }
+.drawer > :global(.drawer-head) > :global(.icon-btn) { flex: 0 0 auto; margin-left: auto; }
 .headerIcon { width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-control-lg); color: var(--brand); background: var(--brand-soft); }
 
 .body { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 14px !important; overflow: hidden !important; }
@@ -22,18 +24,19 @@
 .results::-webkit-scrollbar-track { background: transparent; }
 .results::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: var(--line-strong); background-clip: padding-box; }
 
-.knowledgeCard { width: 100%; min-width: 0; min-height: 128px; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; grid-template-rows: minmax(52px, auto) 36px; align-items: start; gap: 10px; padding: 11px; overflow: visible; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-elevated); box-shadow: var(--shadow-soft); }
-.cardIcon { width: 42px; height: 42px; grid-column: 1; grid-row: 1; display: grid; place-items: center; border-radius: var(--radius-control-lg); }
+.knowledgeCard { width: 100%; min-width: 0; min-height: 96px; display: grid; grid-template-columns: 28px 42px minmax(0, 1fr) 34px; grid-template-rows: 1fr; align-items: center; gap: 9px; padding: 11px; overflow: visible; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-elevated); box-shadow: var(--shadow-soft); }
+.cardIcon { width: 42px; height: 42px; grid-column: 2; grid-row: 1; display: grid; place-items: center; border-radius: var(--radius-control-lg); }
 .cardIcon.user, .scopeBadge.user { color: var(--brand); background: var(--brand-soft); }
-.cardIcon.shared, .scopeBadge.shared { color: #3979dc; background: #edf5ff; }
-.cardIcon.global, .scopeBadge.global { color: #139c69; background: #e9f8f1; }
-.cardCopy { min-width: 0; grid-column: 2; grid-row: 1; }
+.cardIcon.shared, .scopeBadge.shared { color: #737373; background: #f4f4f4; }
+.cardIcon.global, .scopeBadge.global { color: #7b7b7b; background: #f4f4f4; }
+.cardCopy { min-width: 0; grid-column: 3; grid-row: 1; }
 .cardCopy strong, .cardCopy span, .cardCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cardCopy strong { font-size: .8125rem; }
 .cardCopy span { margin-top: 4px; color: var(--muted); font-family: var(--font-mono); font-size: .625rem; }
 .cardCopy small { margin-top: 5px; color: var(--muted-2); font-size: .625rem; }
-.scopeBadge { grid-column: 3; grid-row: 1; align-self: start; padding: 5px 8px; border-radius: 999px; font-size: .625rem; font-weight: 720; white-space: nowrap; }
-.referenceButton { width: 100%; min-height: 36px; grid-column: 1 / -1; grid-row: 2; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 12px; border: 1px solid var(--brand-line); border-radius: var(--radius-control); color: var(--brand); background: var(--brand-soft); font: inherit; font-size: .6875rem; font-weight: 740; cursor: pointer; }
+.scopeBadge { grid-column: 1; grid-row: 1; justify-self: center; align-self: center; min-height: 46px; display: inline-flex; align-items: center; justify-content: center; padding: 7px 4px; border-radius: 999px; font-size: .625rem; font-weight: 720; line-height: 1.1; writing-mode: vertical-rl; text-orientation: mixed; white-space: nowrap; }
+.referenceButton { width: 34px; height: 34px; min-height: 34px; grid-column: 4; grid-row: 1; display: inline-grid; place-items: center; padding: 0; border: 1px solid var(--brand-line); border-radius: 50%; color: var(--brand); background: var(--brand-soft); font: inherit; font-size: .6875rem; font-weight: 740; cursor: pointer; }
+.referenceButton span { position: absolute; width: 1px; height: 1px; overflow: hidden; padding: 0; border: 0; margin: -1px; clip: rect(0 0 0 0); white-space: nowrap; }
 .referenceButton:hover { color: white; border-color: var(--brand); background: var(--brand); }
 .referenceButton:focus-visible { outline: 0 !important; box-shadow: 0 0 0 2px var(--surface-elevated), 0 0 0 4px var(--brand-line) !important; }
 
@@ -47,6 +50,9 @@
 
 @media (max-width: 780px) {
   .body { padding: 12px !important; }
+  .knowledgeCard { grid-template-columns: 24px 36px minmax(0, 1fr) 32px; gap: 7px; padding: 9px; }
+  .cardIcon { width: 36px; height: 36px; }
+  .referenceButton { width: 32px; height: 32px; min-height: 32px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
