@@ -293,13 +293,13 @@ class SkillCreaterPluginTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "符号链接|目录联接"):
                         run("list", "user_create", context=context)
 
-    def test_manifest_exposes_six_actions_and_version_1_1_0(self) -> None:
+    def test_manifest_exposes_six_actions_and_version_1_2_0(self) -> None:
         skill_path = PROJECT_ROOT / "plugins" / "skill_creater" / "SKILL.md"
         manifest = parse_plugin_manifest(
             skill_path,
             root=PROJECT_ROOT,
         )
-        self.assertEqual(manifest.tool["version"], "1.1.0")
+        self.assertEqual(manifest.tool["version"], "1.2.0")
         self.assertEqual(
             set(manifest.tool["input_schema"]["properties"]["action"]["enum"]),
             {"list", "get", "validate", "create", "update", "delete"},

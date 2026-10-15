@@ -73,6 +73,8 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.assertEqual(record["lifecycle"], "closed")
         self.assertEqual(record["memory_status"], "queued")
         self.assertEqual(record["memory_queue_reason"], "idle_session_sweep")
+        self.assertEqual(record["summary_status"], "queued")
+        self.assertEqual(record["summary_target_round"], 1)
 
     def test_recent_session_is_not_closed(self) -> None:
         self.seed("recent")
@@ -109,6 +111,7 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.assertEqual(result["closed"], 0)
         self.assertEqual(result["requeued_closed"], 1)
         self.assertEqual(find_record(self.root, "alice", "web", "closed")["memory_status"], "queued")
+        self.assertEqual(find_record(self.root, "alice", "web", "closed")["summary_status"], "queued")
 
     def test_running_session_is_skipped(self) -> None:
         self.seed("running")

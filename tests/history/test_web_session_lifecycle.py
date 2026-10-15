@@ -263,10 +263,13 @@ class WebSessionLifecycleTests(unittest.TestCase):
         self.assertEqual(record['memory_status'], 'queued')
         self.assertEqual(record['memory_queue_reason'], 'startup_offline_session')
         self.assertEqual(record['memory_target_round'], 1)
+        self.assertEqual(record['summary_status'], 'queued')
+        self.assertEqual(record['summary_target_round'], 1)
         self.assertTrue(data_path)
         remembered = find_record(self.root, 'alice', 'web', 'already-remembered')
         self.assertEqual(remembered['lifecycle'], 'closed')
         self.assertEqual(remembered['memory_status'], 'completed')
+        self.assertEqual(remembered['summary_status'], 'queued')
         with connection(self.root, 'alice') as db:
             self.assertIsNone(db.execute("SELECT 1 FROM history_active_sessions WHERE session_id='data'").fetchone())
         self.assertFalse(touch_web_session_lease(self.root, 'alice', 'empty-startup', 'old_page', now=self.now))
@@ -336,16 +339,25 @@ class WebSessionLifecycleTests(unittest.TestCase):
         self.seed_data('alice-data')
         self.seed_data('bob-data', user='bob')
         wake = Mock()
-        service = WebRunService(self.root, memory_waker=wake)
+        summary_wake = Mock()
+        service = WebRunService(
+            self.root,
+            memory_waker=wake,
+            summary_waker=summary_wake,
+        )
         result = service.inspect_conversation_spaces_on_startup()
         self.assertEqual(result['state'], 'completed')
         self.assertEqual(result['queued_memory'], 2)
+        self.assertEqual(result['queued_summary'], 2)
         self.assertEqual(set(result['users']), {'alice', 'bob'})
         wake.assert_called_once_with()
+        summary_wake.assert_called_once_with()
         # Durable queue registration is idempotent and does not wake twice.
         again = service.inspect_conversation_spaces_on_startup()
         self.assertEqual(again['queued_memory'], 0)
+        self.assertEqual(again['queued_summary'], 0)
         wake.assert_called_once_with()
+        summary_wake.assert_called_once_with()
 
     def test_service_inspection_retires_offline_app_data_but_keeps_live_app(self):
         offline = empty_window('alice', 'app', 'app-offline')

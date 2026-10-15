@@ -31,6 +31,7 @@ from run.config import (
 from run.history import commit_window, get_or_create_window, load_window
 from run.extensions.model_capabilities import (
     clear_model_capability_cache,
+    declared_input_token_limit,
     resolve_reasoning_selection,
 )
 
@@ -598,6 +599,31 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertTrue(selection.enabled)
         self.assertEqual(selection.effort, "high")
         self.assertEqual(selection.status, "enabled")
+
+    def test_declared_input_token_limit_accepts_typed_and_legacy_locations(self) -> None:
+        typed = ModelCapabilities(
+            protocol_version="2.0",
+            model="typed",
+            provider_id="mock",
+            provider_model="typed",
+            limits={"context_window": 200_000, "max_input_tokens": 150_000},
+        )
+        self.assertEqual(declared_input_token_limit(typed), 150_000)
+
+        legacy = ModelCapabilities(
+            protocol_version="2.0",
+            model="legacy",
+            provider_id="mock",
+            provider_model="legacy",
+            extensions={
+                "limits": {
+                    "context_window": 300_000,
+                    "max_input_tokens": 120_000,
+                }
+            },
+        )
+        self.assertEqual(declared_input_token_limit(legacy), 120_000)
+        self.assertIsNone(declared_input_token_limit(None))
 
     def test_chat_missing_usage_is_marked_estimated(self) -> None:
         provider = create_provider(self.config("chat", model="no-usage"))

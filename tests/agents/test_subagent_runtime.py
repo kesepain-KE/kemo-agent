@@ -242,6 +242,58 @@ class SubAgentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(text_from_content(request.input[0].content))["trigger"], "manual")
 
+    def test_runner_usage_preserves_cache_and_provider_request_diagnostics(self) -> None:
+        first = AgentRunner._usage_dict(
+            Usage(
+                input_tokens=100,
+                cached_input_tokens=70,
+                output_tokens=4,
+                total_tokens=104,
+                reasoning_tokens=2,
+                measurement=Measurement(mode="provider", exact=True),
+            )
+        )
+        second = AgentRunner._usage_dict(
+            Usage(
+                input_tokens=50,
+                cached_input_tokens=20,
+                output_tokens=3,
+                total_tokens=53,
+                measurement=Measurement(mode="provider", exact=True),
+            )
+        )
+
+        self.assertEqual(first["cached_tokens"], 70)
+        self.assertEqual(first["provider_request_count"], 1)
+        self.assertEqual(first["reasoning_tokens"], 2)
+        total: dict[str, object] = {}
+        AgentRunner._merge_usage(total, first)
+        AgentRunner._merge_usage(total, second)
+
+        self.assertEqual(total["prompt_tokens"], 150)
+        self.assertEqual(total["cached_prompt_tokens"], 90)
+        self.assertEqual(total["cache_miss_tokens"], 60)
+        self.assertEqual(total["provider_request_count"], 2)
+        self.assertAlmostEqual(total["cache_hit_rate"], 0.6, places=6)
+
+    def test_runner_usage_does_not_turn_unknown_cache_into_a_miss(self) -> None:
+        payload = AgentRunner._usage_dict(
+            Usage(
+                input_tokens=100,
+                cached_input_tokens=None,
+                output_tokens=1,
+                total_tokens=101,
+                measurement=Measurement(mode="provider", exact=True),
+            )
+        )
+        self.assertNotIn("cached_tokens", payload)
+
+        total: dict[str, object] = {}
+        AgentRunner._merge_usage(total, payload)
+        self.assertNotIn("cached_prompt_tokens", total)
+        self.assertNotIn("cache_miss_tokens", total)
+        self.assertNotIn("cache_hit_rate", total)
+
     def test_runner_uses_configured_subagent_model_profile(self) -> None:
         provider = MockProvider()
         config = {

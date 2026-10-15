@@ -1680,6 +1680,14 @@ class UnifiedProtocolTests(unittest.TestCase):
         window_path = find_window(root, "alice", "web", "native")
         window = load_window(window_path)
         self.assertEqual(window["items"]["schema_version"], 2)
+        diagnostics = window["data"]["round_metrics"][-1]["provider_request_diagnostics"]
+        self.assertEqual(len(diagnostics), len(native.requests))
+        self.assertEqual(diagnostics[0]["request_id"], native.requests[0].request_id)
+        self.assertEqual(
+            native.requests[0].metadata["prompt_hash"],
+            diagnostics[0]["system_prompt_sha256"],
+        )
+        self.assertNotIn("describe", json.dumps(diagnostics))
         self.assertTrue(
             any(item.get("type") == "reasoning" for item in window["items"]["items"])
         )
