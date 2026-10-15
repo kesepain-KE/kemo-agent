@@ -4,7 +4,7 @@
 「什么场景该读哪份文档」的判断入口。领域细节的权威正文都在 `global_knowledge/`，
 需要时按第 3 节索引显式读取，**不要凭记忆猜测未注入的行为细节**。
 
-> 当前稳定版本：`kemo-agent 1.4.0`（2026-10-01 正式定档），配套 Kemo 网关为 `kemo-adapter-api 1.0.0`，Kemo 2.0 线路协议匹配已确认。本版在四渠道独立部署与一键部署基础上收敛历史生命周期：有内容的 closed Web 归档支持显式重开，日期筛选入口同样走重开合同；Web/App 数据会话默认空闲 90 分钟归档，空 Web 会话仍按独立 90 秒宽限直接清理；源码更新器与部署器只把旧默认值 86400 迁移为 5400，不覆盖用户自定义阈值；开始页不再展示已完成的用户定时任务。远程 Release、npm 与 GHCR 产物仍需另行发布；既有长期智能、记忆证据链、模块面板 2.0、正文内联组件、任务中心和运行可靠性能力继续保留。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+> 当前稳定版本：`kemo-agent 1.5.0`（2026-10-15 正式定档），配套 Kemo 网关为 `kemo-adapter-api 1.0.0`，Kemo 2.0 线路协议匹配已确认。本版在四渠道独立部署与一键部署基础上收敛历史生命周期：有内容的 closed Web 归档支持显式重开，日期筛选入口同样走重开合同；Web/App 数据会话默认空闲 90 分钟归档，空 Web 会话仍按独立 90 秒宽限直接清理；源码更新器与部署器只把旧默认值 86400 迁移为 5400，不覆盖用户自定义阈值；开始页不再展示已完成的用户定时任务。远程 Release、npm 与 GHCR 产物仍需另行发布；既有长期智能、记忆证据链、模块面板 2.0、正文内联组件、任务中心和运行可靠性能力继续保留。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
 
 ---
 
@@ -13,7 +13,7 @@
 涉及安装、升级或恢复时，先读 `global_knowledge/deployment-and-release.md`，识别源码或
 Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混用于同一安装根。
 更新前停止应用，`check` 仅检查；推送代码不等于发布 Release/npm/GHCR，未确认远程产物前
-必须注明一键命令的发布前提。1.4.0 已在源码中正式定档，但未完成对应远程 Release、npm 与 GHCR 发布前，不得宣称线上产物已经可用。
+必须注明一键命令的发布前提。1.5.0 已在源码中正式定档，但未完成对应远程 Release、npm 与 GHCR 发布前，不得宣称线上产物已经可用。
 
 ## 1. 手册与知识库的关系
 
@@ -122,7 +122,7 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 | 开发工具插件（`plugins/`） | `plugin-development.md` |
 | 创建技能、子代理、感知、拓展、外部代理；模块 `panel.json` 用户配置页、组件面板、preset 快速配置 | `module-development.md` |
 | 创建消息平台适配（`message/out/`） | `external-message-route-creation.md` |
-| 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
+| 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；Web 创建/编辑字段校验、分钟精度与显式时区、用户可控状态边界；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
 | 长任务模式状态机、任务计划达到工具次数上限后的跨 Run 续跑 | `long-task-runtime.md` |
 | Provider 网络重试、单次错误序列最多重试 5 次、接受完整响应即重置且单 Run 累计尝试不设上限、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 2.0 协议迁移与兼容边界 | `provider-reliability.md` |
 | 当前代码版本与发布状态、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
@@ -131,7 +131,7 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 | 内置拓展（kemo app 端口/Token/用户绑定、Kemo 网关 IP/端口、Kemo Graph IP/端口与在线检测） | `builtin-expansions.md` |
 | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署与使用入口 | `project-introduction.md` |
 | 一键部署、Windows/Linux/npm/Docker 渠道选择、日常启动/更新/恢复、Release 打包与发布前提 | `deployment-and-release.md` |
-| Web 前端样式组织、变量链断裂、布局与投影裁切、构建产物缓存头、改样式后的验证；知识库单按钮编辑/预览切换与 Portal 放大渲染预览 | `frontend-conventions.md` |
+| Web 样例完整替换、reference 主题与领域页面入口、高级白/高级黑两项偏好、真实接口桥接、React Root/窗口/轮询清理、移动导航、样式变量链、布局与投影裁切、右侧快捷轮次滚轮/弧线预览/轨道定位/触屏与历史增量加载、输入框自动高度/发送清空回缩/宽度字号监听、输入坞对话菜单裁切与滚动、模型切换气泡/Chat 兼容模型 API/KEMO 内置目录/凭据服务端隔离、思考档位气泡与真实能力保存、简洁附件缩略预览、当前会话文件历史隔离、清空对话自绘确认与失败安全重试、新建对话路由交接与旧活跃会话恢复竞态、构建缓存头与浏览器验证；知识库编辑/预览与安全放大渲染、全业务文档统一 DocumentMarkdown 排版与只读预览、文件空间右侧详情/放大/本机 LibreOffice 转 PDF/原文下载、外部消息双栏/无搜索框/六条分页/日志筛选保留 | `frontend-conventions.md` |
 | Web 回复正文内联卡片/图表/表格、布局/表单/建议追问/站内媒体、`kemo-widget` 协议、有限点击动作、流式完整性、复制降级与安全边界 | `inline-widgets.md` |
 | 开源协议 | `open-source-license.md` |
 
@@ -160,6 +160,36 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 ## 4. 高频操作规则
 
 ### 4.1 工具调用
+
+记忆权重统一按“不同日期出现次数”（上海自然日）理解，不按提及次数；用户与具同轮明确用户背书的助手
+证据共用日锁，助手只能 reinforce 既有记忆，不能创建/改写正文。提取分页与超限候选持久待办、schema v2
+来源标识、先写 md 后移出活跃库、归档目录不注入，以及自动技能溯源/stale/失败续处理，见
+`global_knowledge/storage-and-persistence.md`。归档位置为 `users/<name>/improve/expired_memory/YYYY-MM/`，
+只在明确需要时用普通文件工具读，不新增召回工具或自动知识库同步。
+内置子代理与新模板工具上限统一 80（仍取与全局上限的最小值，各自计数），600 秒整体期限和失败/相同调用闸门不变。
+
+网页记忆栏的四层读写接口、UTC 时间显示、临时重要记忆单栏只读预览及简要生命周期状态，见 `global_knowledge/frontend-conventions.md` 的“记忆详情”；存储和来源有效性规则仍以 `storage-and-persistence.md` 为准。
+
+网页运行诊断同屏提示词/拼接状态、小时 Token 极值、脱敏 API 模型配置、组件路由卡片、终端真实输出与消息输入/输出正文，见 `global_knowledge/frontend-conventions.md`；消息日志按当前用户隔离，正文不再仅返回元信息，见 `storage-and-persistence.md` 的结构化运行日志。
+
+缓存命中率排查、跨轮工具结果与参数格式保持、逐请求脱敏前缀指纹及 Agent/网关证据边界，见 `global_knowledge/provider-reliability.md`。
+
+网页任务切页保留会话链接与运行数据、首轮空间及时绑定、按用户/标签页恢复最近空间、
+重启后健康检查与聊天页回跳，见 `global_knowledge/frontend-conventions.md` 的“导航与最近会话恢复”。
+
+新建/保存新建延迟、创建回执租约复用、并发新建合并、首屏读取不阻塞事件循环，
+见 `global_knowledge/frontend-conventions.md`；关闭与摘要单行事务、记忆元数据入队不读全文，
+见 `global_knowledge/storage-and-persistence.md`。不得省略持久保存或隐式复活旧空间来提速。
+
+网页任务中枢三栏“清理已完成”、跨分页完整清单确认、版本复核与执行记录持久列表清理，
+见 `global_knowledge/task-automation.md`；不能连带清理未确认项目、原始诊断日志或其他用户。
+
+网页配置模型搜索选择与 Chat/KEMO 目录隔离、字号三档重映射、用户切换卡片和版本检查布局，
+见 `global_knowledge/frontend-conventions.md` 的“配置页模型、字号与账户卡片”；选择模型仍只修改草稿。
+
+网页子智能体及工具与技能列表每页六条、右侧详情同宽、插件和各类技能完整 SKILL.md 气泡预览与安全 Markdown 渲染，见 `global_knowledge/frontend-conventions.md` 的“子智能体详情与列表”。
+
+网页感知与拓展栏采用左右等宽布局、每页六个模块，右侧总览与模块详情分标签切换，拓展的数据注入只读预览与操作文档、用户配置独立分类；标签右侧刷新采集、用户组件加高、预览同高操作区和创建用户拓展提示词，见 `global_knowledge/frontend-conventions.md` 的“感知详情与注入预览”。
 
 - **`action` 必填**：以下工具用统一 `action` 参数区分操作类型，**必须首先确定并传入**，漏传会报
   「缺少必填参数：action」：`file`、`network`、`memory_manage`、`subagent_dispatch`、`task_plan`、
@@ -213,7 +243,9 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 - 工具调用失败时记录错误类型和消息，不伪造结果。
 - Provider 错误分类：auth（不可重试）、timeout（可重试）、connection（可重试）、其他 HTTP 按状态码判断。
   详细重试与续传边界见 `provider-reliability.md`。
-- 首轮调用返回上下文超限时，丢弃失败尝试的增量事件，压缩后重试；工具循环中途停止以避免拆散工具消息组。
+- 首轮及工具续轮输入上下文超限时，保留当前轮完整消息组并摘要旧历史后受控重试，
+  最多两次内部恢复，最后一次只保留当前轮；无历史可压缩或摘要失败时明确停止当前尝试。
+  不把普通 HTTP 400 或输出 Token 截断误认为输入超限，详见 `provider-reliability.md`。
 - 记忆提取失败不回滚已提交的历史。
 
 ### 4.4 交付标准
@@ -342,9 +374,9 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 
 - 记忆四档：`seven_days`(7d, 权重≥3 升) → `one_month`(30d, ≥10 升) → `half_year`(180d, ≥60 升)
   → `permanent`（永不过期，不参与权重累计）。
-- 临时记忆的历史加权由 `self_improve` 依据**用户原文**提出候选，宿主绑定检索引用并按原轮次上海自然日登记；每天每片最多 +1，创建首日为 0。
+- 临时记忆的历史加权由 `self_improve` 依据用户原文或具同轮明确用户背书的助手正文提出候选；助手只能 reinforce 已检索的既有事实，不得创建或改写。宿主绑定检索引用并按原轮次上海自然日登记；每天每片最多 +1，创建首日为 0。
   用户主动编辑/手动审阅更新按执行日使用同一日锁；旧历史缺少可信日期则跳过加权，不补造日期。**Prompt 注入、记忆工具查看都是只读行为，绝不加权。**
-- 正文修改不重置进入当前层时固定的 `expires_at`；到期未达晋升阈值直接删除，不降级保留。
+- 正文修改不重置进入当前层时固定的 `expires_at`；到期未达晋升阈值先写入 `improve/expired_memory/` 的 Markdown 归档，成功后移出活跃库，失败不删，不降级保留。
 - **碎片粒度**：A 类（画像与特征，拆开就说不清）同维度内可合并更新、单文件 ≤1000 字、跨维度禁止合并；
   B 类（事实与规则，拆开仍独立）最小碎片、≤100 字。条数按**独立事实**计数，不按对话轮数折算。
 - `memory_manage add/edit` 手动写入同样执行粒度硬边界：超过 150 字必须显式声明 `memory_type=A`，A 类仍不得超过 1000 字；`important` 热画像只读，不能由主智能体直接增删改。
@@ -355,7 +387,14 @@ system prompt 按此固定顺序拼接（各段均有字符上限，见 `prompt.
 - 用户明确要求记住或忘记时遵循记忆存储规则；**敏感凭据不得写入记忆**。
 - 上下文预算：`agents.max_rounds`（默认 80）、`agents.token_limit`（默认 1000000）、
   `token_compression_ratio`（0.3）、`recent_full_rounds`（3）、`conserved_rounds`（3）、
-  `rounds_after_compression`（20）。压缩由 `context_manage` 统一处理，详见 `architecture-overview.md`。
+  `rounds_after_compression`（20）。`agents.enable_mid_context_compression`（默认 `true`）
+  同时控制超过 `conserved_rounds` 后的单轮工具/思考摘要和请求组装时的旧工具结果缩略；
+  关闭不影响工具结果硬上限、普通轮数、Token、Provider 超限兜底或手动上下文压缩，
+  已压缩历史不自动恢复。网页手动压缩优先轮数、无可移除历史时按 Token 目标；
+  Token 压缩可越过基础保留轮数，直到目标比例或最后一轮，摘要失败保留原历史。
+  正常轮末必须检查本轮输出后的实际预算并提交摘要与裁剪；缓存重建不得带回已摘要轮次。
+  压缩由 `context_manage` 统一处理，详见
+  `architecture-overview.md`。
 
 ### 5.5 子代理与任务计划
 
