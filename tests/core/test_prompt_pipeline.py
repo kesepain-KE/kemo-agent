@@ -1299,6 +1299,52 @@ class PromptPipelineTests(unittest.TestCase):
         # 未注入的 key 返回空串
         self.assertEqual(selection.fragment("global:missing"), "")
 
+    def test_expand_data_preview_preserves_data_headings_and_excludes_control_only_modules(self) -> None:
+        _, root, _ = self.make_root()
+        data = "DATA_STATE\n\n## 操控能力\n操作说明：这是采集到的文字\n\nDATA_END"
+        self.write_expand_module(
+            root, "global", "alpha", input_text=data, control_injection="CONTROL_ONLY_ALPHA",
+        )
+        self.write_expand_module(
+            root, "shared", "beta", open_input=False, input_text="NOT_INJECTED",
+            control_injection="CONTROL_ONLY_BETA",
+        )
+        registry = load_prompt_source_registry(root, "alice")
+        selection = registry.select_expand(max_chars=20000)
+        fragment = selection.data_fragment("global:alpha")
+        self.assertIn(data, fragment)
+        self.assertIn("数据来源：`global_expand/alpha/input_data.md`", fragment)
+        self.assertNotIn("CONTROL_ONLY_ALPHA", selection.data_text)
+        self.assertNotIn("CONTROL_ONLY_BETA", selection.data_text)
+        self.assertNotIn("NOT_INJECTED", selection.data_text)
+        self.assertEqual(selection.data_fragment("shared:beta"), "")
+        self.assertEqual(selection.data_text, fragment)
+        self.assertIn(fragment, selection.text)
+        # 分类只增加预览元数据，真实 Prompt 仍保留原有操控能力注入。
+        self.assertIn("CONTROL_ONLY_ALPHA", selection.text)
+        self.assertIn("CONTROL_ONLY_BETA", selection.text)
+        filtered = registry.select_expand(max_chars=20000, allow={"global": (), "shared": None, "user": None})
+        self.assertEqual(filtered.data_text, "")
+
+    def test_expand_data_preview_ranges_respect_actual_truncation(self) -> None:
+        _, root, _ = self.make_root()
+        self.write_expand_module(root, "global", "alpha", input_text="状态😀" * 200, control_injection="CONTROL")
+        self.write_expand_module(root, "user", "beta", input_text="SECOND_DATA", control_injection="SECOND_CONTROL")
+        registry = load_prompt_source_registry(root, "alice")
+        full = registry.select_expand(max_chars=20000)
+        first_data = full.data_fragment("global:alpha")
+        for budget in (0, 5, 200, len(first_data) + 25, len(full.text) - 10):
+            with self.subTest(budget=budget):
+                selection = registry.select_expand(max_chars=budget)
+                self.assertEqual(selection.text, full.text[:budget])
+                for piece in selection.data_pieces:
+                    self.assertLess(piece.start, len(selection.text))
+                    self.assertLessEqual(piece.end, len(selection.text))
+                    self.assertEqual(selection.data_fragment(piece.key), selection.text[piece.start:piece.end])
+                self.assertNotIn("SECOND_CONTROL", selection.data_text)
+                self.assertNotIn("CONTROL\n", selection.data_text)
+        self.assertEqual(registry.select_expand(max_chars=0).data_text, "")
+
     def test_expand_piece_spans_clamp_at_truncation_and_empty_budget(self) -> None:
         _, root, _ = self.make_root()
         self.write_expand_module(root, "global", "alpha", input_text="A" * 400)

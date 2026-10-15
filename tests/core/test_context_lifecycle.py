@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from itertools import product
 from pathlib import Path
 
 from provider.adapters.compat import chat_request_to_kemo
@@ -263,6 +264,23 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertNotIn("context", archive["data"])
 
     def test_policy_budget_and_invalid_values(self) -> None:
+        self.assertTrue(
+            ContextPolicy.from_config({}).mid_context_compression_enabled
+        )
+        self.assertFalse(
+            ContextPolicy.from_config(
+                {"agents": {"enable_mid_context_compression": False}}
+            ).mid_context_compression_enabled
+        )
+        self.assertTrue(
+            ContextPolicy.from_config(
+                {"agents": {"enable_mid_context_compression": True}}
+            ).mid_context_compression_enabled
+        )
+        with self.assertRaisesRegex(ValueError, "必须是布尔值"):
+            ContextPolicy.from_config(
+                {"agents": {"enable_mid_context_compression": "false"}}
+            )
         policy = ContextPolicy.from_config(
             {
                 "agents": {
@@ -323,8 +341,8 @@ class ContextLifecycleTests(unittest.TestCase):
             system_message={"role": "system", "content": "S" * 20},
             current_user_message={"role": "user", "content": "当" * 600},
         )
-        self.assertEqual([item.number for item in selected.kept_rounds], [3, 4])
-        self.assertEqual(len(selected.removed_rounds), 2)
+        self.assertEqual([item.number for item in selected.kept_rounds], [])
+        self.assertEqual(len(selected.removed_rounds), 4)
         self.assertTrue(selected.token_limit_triggered)
         self.assertTrue(selected.fixed_content_over_budget)
         self.assertTrue(selected.recent_content_over_budget)
@@ -350,6 +368,127 @@ class ContextLifecycleTests(unittest.TestCase):
             )
         self.assertIn('"compressed": true', groups[0].messages[2]["content"])
         self.assertNotIn('"compressed": true', groups[-1].messages[2]["content"])
+
+    def test_old_tool_result_compaction_respects_switch_in_both_history_formats(
+        self,
+    ) -> None:
+        for native_items, enabled, recent_rounds in product(
+            (False, True), (False, True), (0, 1, 3)
+        ):
+            with self.subTest(
+                native_items=native_items,
+                enabled=enabled,
+                recent_rounds=recent_rounds,
+            ):
+                window = make_window(4, with_tools=True)
+                if native_items:
+                    window["items"] = synthesize_items(window)
+                snapshot = json.dumps(window, ensure_ascii=False, sort_keys=True)
+                full_groups = build_round_groups(
+                    window, ContextPolicy(recent_tool_rounds=4)
+                )
+                policy = ContextPolicy(
+                    recent_tool_rounds=recent_rounds,
+                    older_tool_result_chars=100,
+                    mid_context_compression_enabled=enabled,
+                )
+                groups = build_round_groups(window, policy)
+                for index, group in enumerate(groups):
+                    call_message = next(
+                        message for message in group.messages if message.get("tool_calls")
+                    )
+                    result = next(
+                        message for message in group.messages if message["role"] == "tool"
+                    )
+                    self.assertEqual(
+                        call_message["tool_calls"][0]["id"], result["tool_call_id"]
+                    )
+                    full_result = next(
+                        message["content"]
+                        for message in full_groups[index].messages
+                        if message["role"] == "tool"
+                    )
+                    if enabled and index < 4 - recent_rounds:
+                        self.assertTrue(json.loads(result["content"])["compressed"])
+                        self.assertLess(len(result["content"]), len(full_result))
+                    else:
+                        self.assertEqual(result["content"], full_result)
+                self.assertEqual(
+                    json.dumps(window, ensure_ascii=False, sort_keys=True), snapshot
+                )
+
+    def test_disabled_compaction_keeps_provider_prefix_when_history_grows(
+        self,
+    ) -> None:
+        for native_items in (False, True):
+            with self.subTest(native_items=native_items):
+                policy = ContextPolicy.from_config(
+                    {"agents": {"enable_mid_context_compression": False}}
+                )
+                full_window = make_window(4, with_tools=True)
+                if native_items:
+                    full_window["items"] = synthesize_items(full_window)
+                selections = []
+                for rounds in (3, 4):
+                    window = json.loads(json.dumps(full_window, ensure_ascii=False))
+                    window["text"]["messages"] = window["text"]["messages"][: rounds * 2]
+                    window["think"]["rounds"] = window["think"]["rounds"][:rounds]
+                    window["tool"]["rounds"] = window["tool"]["rounds"][:rounds]
+                    window["data"]["rounds"] = rounds
+                    if native_items:
+                        window["items"]["items"] = [
+                            item
+                            for item in window["items"]["items"]
+                            if item["metadata"]["round"] <= rounds
+                        ]
+                    selections.append(
+                        select_context(
+                            window=window,
+                            policy=policy,
+                            system_message={"role": "system", "content": "fixed"},
+                            current_user_message=None,
+                        )
+                    )
+                before, after = selections
+                self.assertFalse(after.round_limit_triggered)
+                self.assertFalse(after.token_limit_triggered)
+                self.assertEqual(
+                    before.messages, after.messages[: len(before.messages)]
+                )
+                self.assertEqual(len(after.kept_rounds), 4)
+
+    def test_disabled_compaction_does_not_disable_other_compression_triggers(
+        self,
+    ) -> None:
+        for trigger in ("round_limit", "token_limit", "forced"):
+            with self.subTest(trigger=trigger):
+                selections = []
+                for enabled in (False, True):
+                    policy = ContextPolicy(
+                        max_rounds=6 if trigger == "round_limit" else 100,
+                        rounds_after_compression=2,
+                        token_limit=500 if trigger == "token_limit" else 1_000_000,
+                        mid_context_compression_enabled=enabled,
+                    )
+                    selections.append(
+                        select_context(
+                            window=make_window(6, chars=120),
+                            policy=policy,
+                            system_message={"role": "system", "content": "fixed"},
+                            current_user_message={"role": "user", "content": "current"},
+                            force_compress=trigger == "forced",
+                        )
+                    )
+                disabled, enabled = selections
+                self.assertTrue(disabled.removed_rounds)
+                self.assertEqual(
+                    disabled.round_limit_triggered, trigger != "token_limit"
+                )
+                self.assertEqual(
+                    disabled.token_limit_triggered, trigger == "token_limit"
+                )
+                self.assertEqual(disabled.messages, enabled.messages)
+                self.assertEqual(disabled.messages[-1]["content"], "current")
 
     def test_native_history_repairs_orphan_tool_result_from_tool_partition(self) -> None:
         window = empty_window("alice", "web", "orphan-tool-result")
@@ -515,21 +654,78 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIsNone(payload["next_offset"])
         self.assertIn("重新读取", payload["message"])
 
-    def test_recent_historical_tool_result_has_independent_hard_limit(self) -> None:
-        window = make_window(1, with_tools=True)
-        window["tool"]["rounds"][0]["calls"][0]["result"] = {
-            "ok": True,
-            "result": "R" * (MAX_TOOL_RESULT_CHARS + 5_000),
-        }
+    def test_old_directory_result_compaction_respects_switch(self) -> None:
+        for native_items, enabled, action in product(
+            (False, True), (False, True), ("list_dir", "tree_dir")
+        ):
+            with self.subTest(
+                native_items=native_items, enabled=enabled, action=action
+            ):
+                window = make_window(4, with_tools=True)
+                call = window["tool"]["rounds"][0]["calls"][0]
+                call["name"] = "file"
+                call["result"] = {
+                    "ok": True,
+                    "action": action,
+                    "total": 1,
+                    "returned": 1,
+                    "offset": 0,
+                    "limit": 200,
+                    "next_offset": None,
+                    "has_more": False,
+                    "entries": [{"name": "x" * 5_000, "type": "file", "size": 1}],
+                }
+                if native_items:
+                    window["items"] = synthesize_items(window)
+                full_groups = build_round_groups(
+                    window, ContextPolicy(recent_tool_rounds=4)
+                )
+                groups = build_round_groups(
+                    window,
+                    ContextPolicy(mid_context_compression_enabled=enabled),
+                )
+                result = next(
+                    message["content"]
+                    for message in groups[0].messages
+                    if message["role"] == "tool"
+                )
+                full_result = next(
+                    message["content"]
+                    for message in full_groups[0].messages
+                    if message["role"] == "tool"
+                )
+                if enabled:
+                    payload = json.loads(result)
+                    self.assertTrue(payload["compressed"])
+                    self.assertGreater(payload["original_chars"], 4_000)
+                    if not native_items:
+                        self.assertEqual(payload["action"], action)
+                        self.assertNotIn("entries", payload)
+                else:
+                    self.assertEqual(result, full_result)
+                    self.assertIn("x" * 5_000, result)
 
-        for native_items in (False, True):
-            with self.subTest(native_items=native_items):
-                candidate = json.loads(json.dumps(window, ensure_ascii=False))
+    def test_historical_tool_result_has_independent_hard_limit(self) -> None:
+        for native_items, enabled, rounds in product(
+            (False, True), (False, True), (1, 4)
+        ):
+            with self.subTest(
+                native_items=native_items, enabled=enabled, rounds=rounds
+            ):
+                candidate = make_window(rounds, with_tools=True)
+                candidate["tool"]["rounds"][0]["calls"][0]["result"] = {
+                    "ok": True,
+                    "result": "R" * (MAX_TOOL_RESULT_CHARS + 5_000),
+                }
                 if native_items:
                     candidate["items"] = synthesize_items(candidate)
                 groups = build_round_groups(
                     candidate,
-                    ContextPolicy(recent_tool_rounds=3, token_limit=1_000_000),
+                    ContextPolicy(
+                        recent_tool_rounds=3,
+                        token_limit=1_000_000,
+                        mid_context_compression_enabled=enabled,
+                    ),
                 )
 
                 content = groups[0].messages[2]["content"]
