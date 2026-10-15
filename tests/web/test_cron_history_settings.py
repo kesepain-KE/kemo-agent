@@ -34,12 +34,45 @@ class CronHistorySettingsApiTests(unittest.TestCase):
                 self.assertEqual(response.json()['config']['cron']['history_retention_days'], 14)
                 self.assertEqual(json.loads(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
 
+                response = await client.patch(
+                    '/api/global-config',
+                    json={'changes': {'agents': {'enable_mid_context_compression': False}}},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(
+                    response.json()['config']['agents']['enable_mid_context_compression']
+                )
+                self.assertFalse(
+                    json.loads(config_path.read_text('utf-8'))['agents'][
+                        'enable_mid_context_compression'
+                    ]
+                )
+                settings = await client.get('/api/users/alice/settings')
+                self.assertEqual(settings.status_code, 200)
+                self.assertFalse(settings.json()['limits']['mid_context_compression_enabled'])
+                self.assertEqual(
+                    settings.json()['provenance']['agents.enable_mid_context_compression'],
+                    'global',
+                )
+
                 for invalid in (-1, 3651, 1.5, True, '7'):
                     response = await client.patch(
                         '/api/global-config', json={'changes': {'cron': {'history_retention_days': invalid}}}
                     )
                     self.assertEqual(response.status_code, 400, invalid)
                 self.assertEqual(json.loads(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
+
+                for invalid in (1, 0, 'false'):
+                    response = await client.patch(
+                        '/api/global-config',
+                        json={'changes': {'agents': {'enable_mid_context_compression': invalid}}},
+                    )
+                    self.assertEqual(response.status_code, 400, invalid)
+                self.assertFalse(
+                    json.loads(config_path.read_text('utf-8'))['agents'][
+                        'enable_mid_context_compression'
+                    ]
+                )
 
                 response = await client.patch(
                     '/api/global-config', json={'changes': {'cron': {'history_retention_days': None}}}

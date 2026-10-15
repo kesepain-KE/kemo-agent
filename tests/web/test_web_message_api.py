@@ -118,6 +118,7 @@ class WebMessageApiTests(unittest.TestCase):
             {**common, "direction": "receive", "kind": "file", "content": "meeting_notes.docx", "file_path": "message/out/alice_bridge/files/meeting_notes.docx", "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "size": 8},
             {**common, "direction": "send", "kind": "text", "content": "会议纪要已收到。"},
             {**common, "direction": "send", "kind": "file", "content": "summary.pdf", "file_path": "users/alice/download/summary.pdf"},
+            {**common, "user": "bob", "direction": "receive", "kind": "text", "content": "other-user-private"},
         ])
 
         response = self.request("GET", "/api/users/alice/message/status")
@@ -140,6 +141,7 @@ class WebMessageApiTests(unittest.TestCase):
             {("receive", "text"), ("receive", "file"), ("send", "text"), ("send", "file")},
         )
         self.assertNotIn("bob_bridge", response.text)
+        self.assertNotIn("other-user-private", response.text)
 
     def test_check_connection_updates_state_and_returns_refreshed_transport(self) -> None:
         self.create_module("check_bridge", "alice", healthy=False)

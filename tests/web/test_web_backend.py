@@ -215,6 +215,81 @@ class FakeService:
 
 
 class WebBackendTests(unittest.TestCase):
+    def test_chat_model_discovery_keeps_saved_credentials_server_side(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
+        config_path = root / "users" / "alice" / "user_config.json"
+        config_path.write_text(json.dumps({
+            "schema_version": 1,
+            "provider": {
+                "type": "chat", "base_url": "https://chat.test",
+                "model": "current-model", "api_key": "chat-secret-never-expose",
+            },
+        }), "utf-8")
+        original = config_path.read_bytes()
+        app = create_app(service=WebRunService(root))
+        with patch("web.services.provider_models.urllib.request.build_opener") as factory:
+            opener = factory.return_value
+            opener.open.return_value.__enter__.return_value.read.return_value = json.dumps({
+                "object": "list", "data": [
+                    {"id": "current-model", "owned_by": "vendor", "secret": "must-not-expose"},
+                    {"id": "next-model", "owned_by": "vendor"},
+                    {"id": "next-model", "owned_by": "vendor"},
+                ],
+            }).encode()
+            response = self.request(app, "GET", "/api/users/alice/provider/chat-models")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json()["protocol"], "chat")
+        self.assertEqual(response.json()["count"], 2)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://chat.test/v1/models")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer chat-secret-never-expose")
+        self.assertLessEqual(opener.open.call_args.kwargs["timeout"], 20)
+        self.assertNotIn("chat-secret", response.text)
+        self.assertNotIn("must-not-expose", response.text)
+        self.assertEqual(config_path.read_bytes(), original)
+
+    def test_chat_model_discovery_rejects_kemo_without_network_request(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text(json.dumps({
+            "schema_version": 1,
+            "provider": {"type": "kemo", "model": "kemo-model", "api_key": "kemo-secret"},
+        }), "utf-8")
+        with patch("web.services.provider_models.urllib.request.build_opener") as factory:
+            response = self.request(create_app(service=WebRunService(root)), "GET", "/api/users/alice/provider/chat-models")
+        self.assertEqual(response.status_code, 400)
+        factory.assert_not_called()
+
+    def test_chat_model_discovery_failure_never_leaks_upstream_body_or_credentials(self) -> None:
+        import urllib.error
+
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
+        (root / "users" / "alice" / "user_config.json").write_text(json.dumps({
+            "schema_version": 1,
+            "provider": {"type": "chat", "base_url": "https://chat.test/v1", "model": "current", "api_key": "private-secret"},
+        }), "utf-8")
+        app = create_app(service=WebRunService(root))
+        for payload in [b"invalid-private-secret", b'{"data":[{"id":null}]}', b'{"data":{}}']:
+            with self.subTest(payload=payload), patch("web.services.provider_models.urllib.request.build_opener") as factory:
+                factory.return_value.open.return_value.__enter__.return_value.read.return_value = payload
+                response = self.request(app, "GET", "/api/users/alice/provider/chat-models")
+                self.assertEqual(response.status_code, 502)
+                self.assertNotIn("private-secret", response.text)
+        with patch("web.services.provider_models.urllib.request.build_opener") as factory:
+            factory.return_value.open.side_effect = urllib.error.HTTPError(
+                "https://chat.test/v1/models", 401, "private-secret", {}, io.BytesIO(b"private-secret"),
+            )
+            response = self.request(app, "GET", "/api/users/alice/provider/chat-models")
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn("private-secret", response.text)
+
     def test_kemo_model_discovery_uses_only_saved_private_protocol_config(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
@@ -954,12 +1029,13 @@ class WebBackendTests(unittest.TestCase):
             self.assertEqual(rejected.status_code, 400, rejected.text)
             self.assertIn("预览上限", rejected.json()["error"]["message"])
 
-        unsupported = self.request(
+        text_preview = self.request(
             app,
             "GET",
             "/api/users/alice/files/file_upload/preview?path=notes.txt",
         )
-        self.assertEqual(unsupported.status_code, 400, unsupported.text)
+        self.assertEqual(text_preview.status_code, 200, text_preview.text)
+        self.assertTrue(text_preview.headers["content-type"].startswith("text/plain"))
         escaped = self.request(
             app,
             "GET",
@@ -1468,6 +1544,26 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(preview.status_code, 200, preview.text)
         self.assertIn("读取当前时间", preview.json()["content"])
+        for category, skill_name, skill_root in (
+            ("builtin", "clock", plugin),
+            ("shared", "observer", shared),
+            ("agent_generated", "agent_create/generated", agent_skill),
+            ("user_created", "user_create/manual", user_skill),
+        ):
+            with self.subTest(category=category):
+                document = self.request(
+                    app, "GET",
+                    f"/api/users/alice/skills/{category}/document?name={skill_name}",
+                )
+                self.assertEqual(document.status_code, 200, document.text)
+                self.assertEqual(
+                    document.json()["content"],
+                    (skill_root / "SKILL.md").read_text("utf-8"),
+                )
+                self.assertEqual(
+                    document.json()["editable"],
+                    category in ("agent_generated", "user_created"),
+                )
         archive = self.request(
             app,
             "GET",
@@ -2140,8 +2236,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(trace["reasoning"], "inspect first")
         self.assertEqual(trace["tools"][0]["call_id"], "call-1")
         self.assertEqual(trace["tools"][0]["status"], "success")
-        self.assertEqual(len(trace["tools"][0]["result_text"]), 5000)
-        self.assertTrue(trace["tools"][0]["result_truncated"])
+        self.assertEqual(len(trace["tools"][0]["result_text"]), 5200)
+        self.assertFalse(trace["tools"][0]["result_truncated"])
 
         upload.unlink()
         missing_history = self.request(
@@ -5606,7 +5702,12 @@ class WebBackendTests(unittest.TestCase):
                         "model": "test-model",
                         "api_key": "super-secret",
                         "timeout": 45,
+                        "stream": False,
+                        "input_modalities": ["text", "image"],
                     },
+                    "agent_models": {"default": "agent-test"},
+                    "multimodal_models": {"vision": "vision-test"},
+                    "multimodal_routing": {"vision": "dedicated"},
                     "knowledge": {
                         "use_shared": False,
                         "use_global": True,
@@ -5966,6 +6067,13 @@ class WebBackendTests(unittest.TestCase):
             "queued_messages", runtime_payload["congestion"]["message_router"]
         )
         self.assertNotIn("api_key", runtime_status.text)
+        self.assertNotIn("super-secret", runtime_status.text)
+        self.assertFalse(runtime_payload["api"]["stream"])
+        self.assertEqual(runtime_payload["api"]["timeout"], 45)
+        self.assertEqual(runtime_payload["api"]["context_tokens"], 100000)
+        self.assertEqual(runtime_payload["api"]["input_modalities"], ["text", "image"])
+        self.assertEqual(runtime_payload["api"]["agent_models"], {"default": "agent-test"})
+        self.assertEqual(runtime_payload["api"]["multimodal_models"], {"vision": "vision-test"})
 
         prompt_status = self.request(
             app,
@@ -6083,6 +6191,20 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("[global:lights]", lights["injected_markdown"])
         self.assertTrue(lights["whitelisted"])
         self.assertTrue(lights["open_control"])
+        self.assertIn("# global data\nready", lights["data_injected_markdown"])
+        self.assertNotIn("可执行安全操作", lights["data_injected_markdown"])
+        self.assertEqual(
+            lights["data_injected_tokens"], estimate_text_tokens(lights["data_injected_markdown"]),
+        )
+        data_preview = expands.json()["injection"]["data_content"]
+        self.assertEqual(
+            data_preview,
+            "\n\n".join(item["data_injected_markdown"] for item in expand_items.values() if item["data_injected_markdown"]),
+        )
+        self.assertNotIn("可执行安全操作", data_preview)
+        self.assertEqual(
+            expands.json()["injection"]["data_estimated_tokens"], estimate_text_tokens(data_preview),
+        )
 
         # 注入预览必须逐块对齐真实注入文本。旧实现用累加游标自行拼片段，
         # 其片段比真实片段少框架头部行，第 2 块起会渲染出前一块的尾部。

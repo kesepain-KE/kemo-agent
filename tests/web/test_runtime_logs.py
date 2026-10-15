@@ -51,8 +51,9 @@ class RuntimeLogTests(unittest.TestCase):
         diagnostics.record_terminal_output(self.root / 'other', 'other-root terminal output')
         result = self.backend.runtime_logs('alice')
         serialized = json.dumps(result)
-        for secret in ('secret-output', 'secret-error', 'secret-message', 'private-chat', 'private-file', 'private-machine', 'bob-only', 'other-root'):
+        for secret in ('secret-output', 'secret-error', 'private-chat', 'private-file', 'private-machine', 'bob-only', 'other-root'):
             self.assertNotIn(secret, serialized)
+        self.assertIn('secret-message', serialized)
         self.assertIn('global-job', serialized)
         for category in ('backend', 'threads', 'terminal', 'message'):
             view = self.backend.runtime_logs('alice', category=category)
@@ -62,6 +63,31 @@ class RuntimeLogTests(unittest.TestCase):
             self.backend.runtime_logs('missing')
         with self.assertRaises(ValueError):
             self.backend.runtime_logs('alice', category='bad')
+
+    def test_message_bodies_preserve_lines_and_owner_scope_with_redaction(self):
+        self.store.append_message_entries([
+            {'user': 'alice', 'machine_id': 'same', 'platform': 'test',
+             'occurred_at': self.now, 'direction': 'receive', 'kind': 'text',
+             'content': '第一行\n第二行\nAuthorization: Bearer credential-private'},
+            {'user': 'alice', 'machine_id': 'same', 'platform': 'test',
+             'occurred_at': self.now, 'direction': 'send', 'kind': 'text',
+             'content': '回复第一行\n回复第二行'},
+            {'user': 'bob', 'machine_id': 'same', 'platform': 'test',
+             'occurred_at': self.now, 'direction': 'receive', 'kind': 'text',
+             'content': 'bob-body-private'},
+        ])
+        result = self.backend.runtime_logs('alice', category='message')
+        self.assertEqual(len(result['entries']), 2)
+        self.assertEqual({entry['direction'] for entry in result['entries']}, {'receive', 'send'})
+        serialized = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn('credential-private', serialized)
+        self.assertNotIn('bob-body-private', serialized)
+        received = next(entry for entry in result['entries'] if entry['direction'] == 'receive')
+        self.assertIn('第一行\n第二行', received['content'])
+        self.assertEqual(len(self.store.list_messages('same', user='alice')), 2)
+        self.assertEqual(self.store.count_messages('same', user='alice'), 2)
+        self.assertEqual(self.store.count_messages('same', user='bob', date_prefix=self.now[:10]), 1)
+        self.assertIn('回复第一行\n回复第二行', [entry['content'] for entry in self.store.list_messages('same', user='alice')])
 
     def test_cache_hit_refresh_write_delete_invalidation(self):
         self.message()
