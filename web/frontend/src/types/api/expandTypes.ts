@@ -49,6 +49,8 @@ export interface ExpandModuleSummary {
   control_operation_markdown: string
   collected_markdown: string
   injected_markdown: string
+  data_injected_markdown?: string
+  data_injected_tokens?: number
   injected_tokens: number
   runtime?: {
     schema_version: number
@@ -76,6 +78,9 @@ export interface ExpandsResponse {
   }>
   injection: {
     content: string
+    data_content?: string
+    data_injected_items?: number
+    data_estimated_tokens?: number
     source_files: string[]
     original_chars: number
     injected_chars: number

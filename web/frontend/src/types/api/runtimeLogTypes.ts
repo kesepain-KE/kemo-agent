@@ -11,6 +11,9 @@ export interface RuntimeLogEntry {
   detail: string
   source: 'sqlite' | 'memory' | 'snapshot'
   stream?: 'stdout' | 'stderr'
+  content?: string
+  direction?: string
+  kind?: string
 }
 
 export interface RuntimeLogsResponse {

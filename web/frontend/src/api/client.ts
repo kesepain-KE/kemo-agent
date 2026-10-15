@@ -61,6 +61,9 @@ import type {
   SkillUploadResponse,
   SoulResponse,
   TasksResponse,
+  TaskCleanupCategory,
+  TaskCleanupPreview,
+  TaskCleanupResult,
   TmpFilesResponse,
   TmpFilesDeleteResponse,
   UserFilesResponse,
@@ -329,6 +332,19 @@ export async function getRuntimeLogs(
 export async function getTasks(user: string, sessionId = ''): Promise<TasksResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`)
+}
+
+export async function previewTaskCleanup(user: string, category: TaskCleanupCategory, sessionId = ''): Promise<TaskCleanupPreview> {
+  const query = new URLSearchParams({ category, source: 'web', session_id: sessionId })
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/cleanup?${query}`)
+}
+
+export async function cleanupCompletedTasks(user: string, category: TaskCleanupCategory,
+  items: Array<{ id: string; version: string }>, sessionId = ''): Promise<TaskCleanupResult> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/cleanup`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category, source: 'web', session_id: sessionId, items }),
+  })
 }
 
 export async function reopenSession(
@@ -697,6 +713,10 @@ export function getTmpFilePreviewUrl(path: string): string {
   return `${apiBase}/api/tmp/preview?path=${encodeURIComponent(path)}`
 }
 
+export function getTmpFileDownloadUrl(path: string): string {
+  return `${apiBase}/api/tmp/download?path=${encodeURIComponent(path)}`
+}
+
 export async function deleteUserFiles(
   user: string,
   scope: 'file_upload' | 'download',
@@ -879,6 +899,10 @@ export async function refreshExpandModule(user: string, scope: ExpandScope, modu
     `/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/refresh`,
     { method: 'POST' },
   )
+}
+
+export async function getChatProviderModels(user: string): Promise<import('../types/api').ChatProviderModelsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/chat-models`)
 }
 
 export async function getExpandModulePanel(user: string, scope: ExpandScope, moduleName: string): Promise<ModulePanelResponse> {

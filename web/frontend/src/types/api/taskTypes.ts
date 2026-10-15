@@ -151,3 +151,21 @@ export interface TasksResponse {
     duration_ms?: number
   }>
 }
+
+export type TaskCleanupCategory = 'plans' | 'crons' | 'executions'
+
+export interface TaskCleanupPreview {
+  user: string
+  category: TaskCleanupCategory
+  count: number
+  items: Array<{ id: string; title: string; version: string }>
+}
+
+export interface TaskCleanupResult {
+  user: string
+  category: TaskCleanupCategory
+  removed_count: number
+  removed: string[]
+  skipped: string[]
+  errors: Array<{ id: string; message: string }>
+}

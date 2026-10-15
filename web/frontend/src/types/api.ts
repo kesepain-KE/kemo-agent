@@ -433,6 +433,11 @@ export interface SkillCatalogItem {
   toggleable: boolean
   downloadable: boolean
   path: string
+  memory_lifecycle?: {
+    status: 'active' | 'stale'
+    reason?: string | null
+    sources: Array<{ fragment_id: number; filename: string; content_hash: string }>
+  } | null
 }
 
 export interface SkillDocumentResponse {
@@ -581,6 +586,14 @@ export interface KemoProviderModelsResponse {
   data: KemoModelCatalogItem[]
 }
 
+export interface ChatProviderModelsResponse {
+  user: string
+  protocol: 'chat'
+  api_valid: true
+  count: number
+  data: Array<{ id: string; object: 'model'; owned_by: string }>
+}
+
 export interface KemoReasoningCapabilities {
   supported: boolean
   efforts: ReasoningEffort[]
@@ -653,6 +666,7 @@ export interface SettingsResponse {
     context_rounds: number
     context_tokens: number
     compression_ratio: number
+    mid_context_compression_enabled?: boolean
     task_plan_steps: number
     tool_iterations: number
     tool_timeout: number

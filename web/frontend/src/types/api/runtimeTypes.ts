@@ -15,6 +15,13 @@ export interface RuntimeStatusResponse {
     thinking_effort: string
     configured: boolean
     credential_source: string
+    stream?: boolean
+    timeout?: number
+    context_tokens?: number
+    input_modalities?: string[]
+    agent_models?: Record<string, string>
+    multimodal_models?: Record<string, string>
+    multimodal_routing?: Record<string, string>
   }
   context: {
     selected: boolean

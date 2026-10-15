@@ -305,7 +305,7 @@ function SkillDetail({ skill, content, loading, mode, confirmingDelete, busy, er
   return <article className={styles.detail}>
     <header className={styles.detailHeader}>
       <div className={styles.detailIdentity}><span className={styles.detailMark}>{skillCode(skill)}</span><div><h3>{skill.title || skill.name}</h3><p>{skill.description || '未提供技能描述'}</p></div></div>
-      <span className={`${styles.status} ${skill.enabled ? styles.enabled : styles.disabled}`}><i />{skill.enabled ? '已启用' : '已禁用'}</span>
+      <span className={`${styles.status} ${skill.enabled ? styles.enabled : styles.disabled}`}><i />{skill.memory_lifecycle?.status === 'stale' ? '来源已失效 · 待复核' : skill.enabled ? '已启用' : '已禁用'}</span>
     </header>
 
     <div className={styles.detailActions}>
@@ -327,6 +327,7 @@ function SkillDetail({ skill, content, loading, mode, confirmingDelete, busy, er
       <div><strong>分类</strong><span className={`${styles.categoryTag} ${styles[skill.category]}`}>{categoryMeta[skill.category].icon}{categoryMeta[skill.category].label}</span></div>
       <div><strong>版本</strong><span>{versionLabel(skill.version)}</span></div>
       <div><strong>路径</strong><code>{skill.path}</code></div>
+      {skill.memory_lifecycle && <div><strong>记忆来源</strong><span>{skill.memory_lifecycle.sources.map((source) => source.filename).join('、')}{skill.memory_lifecycle.status === 'stale' ? `；${skill.memory_lifecycle.reason || '请人工复核、更新或删除'}` : '；来源有效'}</span></div>}
       <div><strong>管理权限</strong><span>{skill.editable ? '当前用户可编辑、保存和删除' : skill.toggleable ? '可预览、下载，并通过用户白名单启用或禁用' : '只读技能'}</span></div>
     </div>
 
