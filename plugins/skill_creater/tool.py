@@ -254,6 +254,7 @@ def run(
     description: str = "",
     instruction: str | None = None,
     tool_schema: dict[str, Any] | None = None,
+    source_memories: list[str] | None = None,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -265,6 +266,9 @@ def run(
         raise ValueError("工具上下文缺少 root 或 user")
     if context.get("agent") == "self_improve" and scope != "agent_create":
         raise PermissionError("self_improve 只能写入 agent_create 技能目录")
+    if (context.get("agent") == "self_improve" and action in {"create", "update", "delete"}
+            and context.get("agent_trigger") != "memory_promotion"):
+        raise PermissionError("self_improve 仅在 memory_promotion 模式生成技能，不能在提取时写技能")
 
     root = Path(str(context["root"])).resolve()
     try:
@@ -288,9 +292,43 @@ def run(
         if not skill_dir.is_dir():
             raise ValueError("技能路径不是目录")
         shutil.rmtree(skill_dir)
+        if scope == "agent_create":
+            from run.memory import remove_skill_record
+            remove_skill_record(root, user, skill_name)
         return {"action": action, "scope": scope, "name": skill_name, "deleted": True}
 
     body = _prepare_content(action, content, title, description, instruction, tool_schema)
+    generated = context.get("agent") == "self_improve" or source_memories is not None
+    resolution = None
+    provenance = None
+    if generated:
+        if scope != "agent_create":
+            raise ValueError("记忆来源只能绑定 agent_create 技能")
+        from run.memory import quality_errors
+        errors = quality_errors(body) + _validate_content(body)
+        if errors:
+            raise ValueError("生成技能质量门禁：" + "; ".join(errors))
+        if not source_memories:
+            raise ValueError("自动技能需要 source_memories，不能静默丢失溯源")
+        if not isinstance(source_memories, list) or len(source_memories) > 20:
+            raise ValueError("source_memories 必须是 1–20 个记忆引用组成的数组")
+        # Validate references before touching the filesystem, without marking an
+        # old skill active until the new content has actually been published.
+        from run.memory import MemoryStore
+        store = MemoryStore(root, user, {})
+        for ref in source_memories:
+            if (not isinstance(ref, str) or contains_sensitive_credential(ref)
+                    or store.locate(ref.split(":", 1)[-1]) is None):
+                raise ValueError("来源记忆不存在")
+        if action == "create":
+            from plugins.skill_creater.generated import resolve_generated_name
+            resolved, reuse, resolution = resolve_generated_name(base, skill_name, body)
+            if resolution["resolution"] == "needs_similarity_review":
+                return {"action": action, "scope": scope, "name": skill_name,
+                        "valid": False, "deferred": True, "deduplication": resolution}
+            skill_name, base, skill_dir, skill_file = _skill_paths(root, user, scope, resolved)
+            if reuse:
+                action = "update"
     if action == "create":
         if skill_dir.exists() or _is_link(skill_dir):
             raise FileExistsError(f"技能已存在：{skill_name}")
@@ -321,10 +359,17 @@ def run(
             _atomic_text(skill_file, previous)
             raise
 
+    if generated:
+        from run.memory import record_sources
+        provenance = record_sources(root, user, skill_name, source_memories,
+                                    merge=bool(resolution and resolution["resolution"] == "reuse_identical"))
+        _atomic_text(skill_dir / "memory-provenance.json",
+                     json.dumps(provenance, ensure_ascii=False, indent=2))
     return {
         "action": action,
         "scope": scope,
         "name": skill_name,
         "path": str(skill_dir),
         "valid": True,
+        **({"provenance": provenance, "deduplication": resolution} if generated else {}),
     }

@@ -48,6 +48,22 @@
 | `description` | `create` / `update` | 结构化模式的技能描述 |
 | `instruction` | `create` / `update` | 指令正文，与 `tool_schema` 二选一 |
 | `tool_schema` | `create` / `update` | 文档化 Tool JSON，与 `instruction` 二选一，不注册可执行工具 |
+| `source_memories` | 自动 `agent_create` 的 `create` / `update` | 必填的来源记忆引用/文件名数组；宿主核对现存行并保存稳定行身份、文件名和正文摘要 |
+
+### 自动技能生命周期
+
+`self_improve` 创建前先 `list`，对相近标题用 `get` 核对完整正文。同内容自动复用；
+同名不同内容使用稳定摘要后缀，不覆盖旧技能。形似但非完全相同的内容返回
+`valid=false, deferred=true, deduplication.resolution=needs_similarity_review`：
+必须先读取候选技能并判断是否确为同一方法；相同方法用 `update`，独立方法则使用明确区分的名称和正文。
+这不是成功创建回执，不能宣称已生成技能。
+
+自动产物必须包含有实质内容的「何时使用」「步骤（至少两项）」「失败处理」章节；
+只含事实的工作记忆不得硬编操作步骤，返回 `skill_applicable=false` 与 `skill_skipped_reason`。
+`source_memories` 由宿主核对并写入 `memory_skill_sources`，旁车 `memory-provenance.json` 保存可携带的来源快照。
+正常晋升/融合/拆分传递来源身份；修正/删除/到期移出活跃记忆使技能 stale。
+Cron、网页读取和 Prompt 技能发现都执行核对；stale 不再自动注入，网页显示原因，保留人工编辑/删除入口，绝不自动删技能。
+创建失败、工具被连续失败闸门移出或未执行时，晋升可继续，独立待办由后续维护周期重试。
 
 ## Tool
 
@@ -91,12 +107,17 @@
       "tool_schema": {
         "type": "object",
         "description": "结构化模式的文档化 Tool JSON，与 instruction 二选一"
+      },
+      "source_memories": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "自动生成 agent_create 技能必填：1–20 个现存来源记忆引用或文件名，用于溯源与失效核对"
       }
     },
     "required": ["action", "scope"],
     "additionalProperties": false
   },
-  "version": "1.1.0",
+  "version": "1.2.0",
   "enabled": true,
   "entrypoint": "tool.py:run"
 }
