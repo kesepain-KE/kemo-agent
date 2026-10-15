@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from run.conversation.runtime_state import RoundRuntime
+from run.conversation.context_compaction import compact_context
 
 
 @dataclass(slots=True)
@@ -216,7 +217,8 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
         tools=tool_schemas,
         force_compress=force_compress,
     )
-    _ensure_fixed_content_fits(context_selection, system_message=system_message)
+    if not compress_only and not context_selection.removed_rounds:
+        _ensure_fixed_content_fits(context_selection, system_message=system_message)
     all_text = round_state.all_text
     all_reasoning = round_state.all_reasoning
     observed_text = round_state.observed_text
@@ -282,81 +284,22 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
             )
     subagent_events: list[RunEvent] = []
     summary_cache = persisted_summary_cache
-    summary_diagnostics: dict[str, Any] = {
-        "cache_hit": False,
-        "generated": False,
-        "failed": False,
-        "covered_rounds": [],
-    }
-    # 摘要也消耗输入标记。重新选择，直至移除的整轮稳定，
-    # 因此没有一轮被摘要取代却又未包含在摘要中。
-    max_summary_passes = len(context_selection.all_rounds) + 1
-    for _ in range(max_summary_passes):
-        removed_before = [item.number for item in context_selection.removed_rounds]
-        if not removed_before:
-            break
-        summary_agent = "context_manage"
-        summary_trigger = (
-            "token_limit"
-            if context_selection.token_limit_triggered
-            else ("manual" if force_compress else "round_limit")
-        )
-        summary_cache, summary_diagnostics = get_or_create_summary(
-            runtime_path=runtime_path,
-            groups=context_selection.removed_rounds,
-            agent_runner=agent_runner,
-            agent_name=summary_agent,
-            trigger=summary_trigger,
-            cancel_event=cancel_event,
-            chunk_token_budget=min(
-                SUMMARY_CHUNK_TOKEN_BUDGET,
-                max(256, context_policy.input_budget // 2),
-            ),
-            max_tokens=min(
-                SUMMARY_MAX_OUTPUT_TOKENS,
-                max(256, context_policy.output_reserve),
-            ),
-            response_hook=lambda raw: _record_provider_request(
-                summary_usage, _usage_from_dict(raw)
-            ),
-            event_callback=subagent_events.append,
-            source=source,
-            session_id=session_id,
-            skip_memory_extraction=True,
-            previous_cache=summary_cache,
-            round_offset=max(
-                0,
-                int(
-                    (window.get("data", {}).get("context") or {}).get(
-                        "round_offset", 0
-                    )
-                ),
-            ),
-            persist=False,
-        )
-        next_selection = select_context(
-            window=window,
-            policy=context_policy,
-            system_message=system_message,
-            summary_message=build_summary_message(summary_cache),
-            current_user_message=current_user_message,
-            tools=tool_schemas,
-            force_compress=force_compress,
-        )
-        removed_after = [item.number for item in next_selection.removed_rounds]
-        context_selection = next_selection
+    result = compact_context(
+        window=window, policy=context_policy, runtime_path=runtime_path,
+        system_message=system_message, current_user_message=current_user_message,
+        tools=tool_schemas, previous_cache=persisted_summary_cache,
+        agent_runner=agent_runner, trigger=compression_trigger,
+        cancel_event=cancel_event, force_compress=force_compress,
+        response_hook=lambda raw: _record_provider_request(summary_usage, _usage_from_dict(raw)),
+        event_callback=subagent_events.append, source=source, session_id=session_id,
+        summarize=get_or_create_summary,
+    )
+    context_selection = result.selection
+    summary_cache = result.summary_cache
+    summary_diagnostics = result.diagnostics
+    if not compress_only:
         _ensure_fixed_content_fits(context_selection, system_message=system_message)
-        if removed_after == removed_before:
-            break
-
-    # A later incremental pass can fail after an earlier pass wrote a
-    # newer cache. Never leave that partial cache paired with the old
-    # runtime workspace; the next request would otherwise read a
-    # summary for rounds that were never removed.
-    if bool(summary_diagnostics.get("failed")):
-        restore_summary_cache(runtime_path, persisted_summary_cache)
-        summary_cache = persisted_summary_cache
-
+    context_stats = context_selection.stats()
 
     rt.runtime_path = runtime_path
     rt.window = window

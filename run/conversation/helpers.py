@@ -518,12 +518,14 @@ def _ensure_fixed_content_fits(
     *,
     system_message: dict[str, Any] | None,
 ) -> None:
+    if selection.estimated_tokens_after <= selection.token_limit:
+        return
     if not selection.fixed_content_over_budget:
         if not selection.recent_content_over_budget:
             return
         raise EngineError(
-            "最近完整历史超过输入预算；请调大 agents.token_limit、调低 "
-            "history.recent_full_rounds，或缩小 Prompt 注入内容"
+            "保留一轮后上下文仍超过 Token 上限；请调大 agents.token_limit "
+            "或缩小当前轮次、Prompt 和工具结果"
         )
     system_tokens = estimate_messages_tokens([system_message]) if system_message else 0
     raise EngineError(
