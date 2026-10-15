@@ -10,31 +10,15 @@ from run.memory import (
     quoted_rounds,
     search_receipts,
 )
+from run.memory import assistant_backing, extraction_rounds
 
 
 TRIGGERS = frozenset({"context_compression", "memory_promotion", "manual_review"})
 
 
 def _user_only_rounds(rounds: list[Any]) -> list[dict[str, Any]]:
-    """Remove assistant-derived state before background memory extraction."""
-
-    sanitized: list[dict[str, Any]] = []
-    for raw_round in rounds:
-        if not isinstance(raw_round, dict):
-            continue
-        user_messages: list[dict[str, Any]] = []
-        for raw_message in raw_round.get("messages") or []:
-            if not isinstance(raw_message, dict) or raw_message.get("role") != "user":
-                continue
-            content = raw_message.get("content")
-            user_messages.append({"role": "user", "content": content})
-        sanitized.append(
-            {
-                "round": raw_round.get("round"),
-                "messages": user_messages,
-            }
-        )
-    return sanitized
+    """Compatibility name; extraction now includes safe assistant narrative."""
+    return extraction_rounds(rounds)
 
 
 def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
@@ -61,7 +45,11 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
         user_rounds = _user_only_rounds(input_data.get("rounds") or [])
         model_input = {**input_data, "rounds": user_rounds}
 
-    result = context.run_model(model_input)
+    if trigger == "context_compression":
+        from run.memory import run_extraction_pages
+        result = run_extraction_pages(context, model_input)
+    else:
+        result = context.run_model(model_input)
     required = "promotions" if trigger == "memory_promotion" else "candidates"
     if not isinstance(result.data.get(required), list):
         raise AgentOutputError(f"self_improve 输出缺少 {required} 数组")
@@ -82,12 +70,15 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
                 reasons["invalid_candidate"] = reasons.get("invalid_candidate", 0) + 1
                 continue
             action = str(candidate.get("action") or "upsert").strip().casefold()
+            original_rounds = candidate.get("evidence_rounds")
             evidence_rounds = quoted_rounds(candidate, user_rounds)
             evidence_is_user_quote = bool(evidence_rounds)
             candidate = dict(candidate)
             candidate.pop("expected_content_hash", None)
             candidate.pop("evidence_dates", None)
             candidate["evidence_rounds"] = evidence_rounds
+            candidate.pop("evidence_source", None)
+            candidate.pop("evidence_sources", None)
             if store is not None:
                 try:
                     candidate = bind_reference(candidate, receipts, store)
@@ -96,6 +87,23 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
                     reason = str(exc)
                     reasons[reason] = reasons.get(reason, 0) + 1
                     continue
+            action = candidate.get("action", action)
+            if not evidence_is_user_quote and action == "reinforce" and store is not None:
+                assistant_rounds = quoted_rounds(
+                    {**candidate, "evidence_rounds": original_rounds}
+                    if original_rounds is not None else
+                    {k: v for k, v in candidate.items() if k != "evidence_rounds"},
+                    user_rounds, role="assistant")
+                backing = assistant_backing(
+                    {**candidate, "evidence_rounds": assistant_rounds}, user_rounds)
+                evidence_rounds = sorted(set(assistant_rounds) & set(backing))
+                candidate["evidence_rounds"] = evidence_rounds
+                candidate["evidence_source"] = "assistant"
+                candidate["explicit"] = False
+            else:
+                candidate["evidence_source"] = "user"
+            candidate["evidence_sources"] = {
+                str(n): candidate["evidence_source"] for n in evidence_rounds}
             if action == "forget":
                 if candidate.get("explicit") is True and evidence_is_user_quote:
                     accepted.append(candidate)
@@ -106,19 +114,17 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
             if (
                 action not in {"upsert", "create", "reinforce", "revise"}
                 or candidate.get("durable") is not True
-                or not evidence_is_user_quote
+                or not evidence_rounds
             ):
                 rejected += 1
                 reason = "invalid_action" if action not in {"upsert", "create", "reinforce", "revise"} else "not_durable" if candidate.get("durable") is not True else "invalid_user_quote"
                 reasons[reason] = reasons.get(reason, 0) + 1
                 continue
             accepted.append(candidate)
-        if len(accepted) > candidate_limit:
-            reasons["candidate_limit"] = len(accepted) - candidate_limit
-        result.data["candidates"] = accepted[:candidate_limit]
+        result.data["candidates"] = accepted
         result.metadata["candidate_filter"] = {
             "accepted": len(result.data["candidates"]),
-            "rejected": rejected + max(0, len(accepted) - candidate_limit),
+            "rejected": rejected,
             "limit": candidate_limit,
             "fail_closed": True,
             "reasons": reasons,
@@ -137,7 +143,14 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
                 rejections.append({"reason": "invalid_candidate"})
                 continue
             try:
-                bound.append(bind_reference(candidate, receipts, store))
+                item = bind_reference(candidate, receipts, store)
+                action = item["action"]
+                if action in {"create", "revise", "forget"}:
+                    evidence = quoted_rounds(item, [{"round": 1, "messages": [
+                        {"role": "user", "content": input_data["request"]}]}])
+                    if not evidence:
+                        raise ValueError("manual_write_requires_user_quote")
+                bound.append(item)
             except (ValueError, RuntimeError) as exc:
                 rejections.append({"reason": str(exc)})
         result.data["candidates"] = bound

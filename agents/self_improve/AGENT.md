@@ -103,11 +103,16 @@
 **条数按独立事实计算，不按对话轮数或单个文件字数折算**：一个事实一条碎片，识别出几个事实就返回几条。
 禁止为减少文件数量、接近字符上限或适配候选上限而把不同生命周期的事实合并进同一文件。
 单批总量只受 `memory.extraction_max_candidates_per_batch` 约束；达到上限时保留价值最高且证据最明确的
-独立事实，并在结果说明被截断，不能把剩余事实压进大文件。没有符合条件的信息必须返回
+独立事实，并返回 `has_more=true`，不能把剩余事实压进大文件或永久忽略。宿主带 continuation 继续本页，直到未满页且 `has_more!=true`；没有符合条件的信息必须返回
 `{"candidates": []}`。
 
 `context_compression` 的每个 create / reinforce / revise 候选必须包含 `"durable": true` 和简短
-`"evidence"`；`evidence` 必须是本批用户消息中可精确找到的原文。执行器只向模型传递用户消息，并对缺失标记、引用助手回复或无法回溯用户原文的候选拒绝落盘。
+`"evidence"`；create / revise 的 evidence 必须是本批用户消息可精确找到的原话。
+运行时传入经过凭据、引用块、代码块过滤的用户和助手可见正文，不传推理、工具或 important。
+reinforce 可引用助手确定性陈述，但只能绑定已检索的既有碎片，正文始终保持数据库原值。
+助手证据必须另给 `user_evidence`：同轮用户明确确认（如“确认，仍然……”）的原话，
+至少 8 字、不是问题、与既有事实有至少三个有效词元交集；“继续/嗯/都对”或记忆注入后的复述不够。
+助手来源不能设置 explicit 来晋升或改写记忆。host 决定证据来源，模型不得自行设置来源或日期。
 
 数据流严格单向：`用户对话原文 → 临时三层 → 临时重要热画像`。在
 `context_compression` 和 `memory_promotion` 模式下严禁读取 `important`；助手回复、推理和工具结果也不得作为临时三层的提取证据。用户主动的 `manual_review` 可以只读查看 `important`，但查看本身不加权。
@@ -187,7 +192,8 @@
 ### 权重更新规则
 
 - 不自行计算或修改 weight / 日期。两个授权工具足以完成决策：搜索核对旧事实，必要时生成技能；实际加权由宿主事务完成。
-- 候选返回 `evidence` 用户原话与 `evidence_rounds` 轮次列表。引文必须在每个指定轮次的单条用户消息内完整出现，不能拼接两条消息；省略轮次时仅兼容推断精确命中的轮次。
+- 候选返回 `evidence` 与 `evidence_rounds` 轮次列表；create/revise/forget 仅用户原话，reinforce 可使用具同轮用户明确背书的助手正文。引文必须在单条允许来源消息内完整出现，不能跨消息拼接。
+- 权重口径是“不同日期出现次数”（上海自然日）；用户与助手共用同一日锁，同一天最多 +1，不是每提到一次就 +1。事件来源为 user / assistant / manual / historical_migration。
 - 多轮用不同原话证明同一事实时，可返回同名候选各附引文；持久化先合并已验证的证据轮次。
 - 宿主用成功提交轮次的 `committed_at` 转为 Asia/Shanghai 原证据日期，而不是提取运行日；同一碎片同一档位每个日期最多 +1。
 - 新碎片首次证据创建权重为 0，并登记该日为 creation（占日锁、不加分）；后续独立日期各 +1。例如一次补提取四天的证据，初建后可累计到 3。
@@ -256,10 +262,18 @@ for tier in TEMPORARY_TIERS:
 - 文件名或内容包含明显的工具/命令/路径
 
 3. 如果是工作记忆：
-   - 调用 `skill_creater` 在 `users/<name>/user_skills/agent_create/` 创建技能
+   - 保持工作记忆的宽分类，不靠收窄关键词规避转化；先 list/get 核对同名和近似技能
+   - 只把确有可复用方法的内容转为技能；正文必须有实质的“何时使用 + 至少两个步骤 + 失败处理”，纯事实返回 `skill_applicable=false` 和 `skill_skipped_reason`，不能编造方法
+   - 调用 `skill_creater` 在 `users/<name>/user_skills/agent_create/` 创建或更新技能，必须带 `source_memories=[来源文件名]`
+   - `valid=false/deferred=true` 是尚未完成；读取近似命中后选择 update 或实质不同的新方法。宿主只认真实来源记录，不认 `skill_created=true` 的空口声明
    - 返回永久层晋升决策
 4. 如果不是工作记忆：
    - 返回永久层晋升决策（不创建技能）
+
+`skill_retry_only=true` 表示只恢复历史未完成的技能转化，不再移动记忆；
+`conversion_sources` 若存在，必须全部传入 `source_memories`（来源可能已晋升/融合/拆分）。
+失败的技能转化保存在与归档共用的 `memory_work_items`，后续 30 秒维护周期继续。
+来源正常换层/结构调整会传递身份；来源修正、删除或到期移出使技能 stale，停止自动注入但不删文件。
 
 ### 阈值来源
 
@@ -297,3 +311,11 @@ for tier in TEMPORARY_TIERS:
 - 不得记录密码、API Key、Token、Cookie、私钥或验证码
 - 不得记录密钥文件的路径或内容片段
 - 敏感凭据检测失败时拒绝写入并标记 `rejected`
+
+## 七、预算、待办与人工审阅
+
+- 源正文每页最多 12000 字符，单消息按 5000 字符、300 字符重叠切分，尾部不会被截掉；续处理提示另限 4000 字符。
+- 每次 executor 最多六次分页请求；预算用尽时保存进度并暂停，不推进历史记忆游标。满页必须继续探测未返回的事实，不能把“返回 30 个”当作“源轮已处理完”。
+- 候选实际入库每批仍受 `extraction_max_candidates_per_batch` 限制；其余保存在持久待办，全部完成后才允许源历史游标前进。
+- manual_review 的 create/revise/forget 同样需要 request 中用户原话 evidence；纯搜索可 candidates=[]，reinforce 仍需真实检索回执。
+- 到期未达标的记忆先写入 `users/<name>/improve/expired_memory/YYYY-MM/` 普通 Markdown，写成功才移出活跃库；此目录不自动读取或注入，也没有专用召回/恢复 action。

@@ -42,14 +42,18 @@
   2. 汇总候选后使用 memory_manage `search_many tier=all` 批量搜索匹配；不超过 20 个候选时一次查询，超过 20 个时按最多 20 个一批分组。每项使用 2～4 个空格分隔的核心关键词，不提交完整句子，禁止逐候选、逐层串行搜索
   3. 命中: 依据 `match_score`、`matched_terms` 和返回正文核对语义；确认同一事实后复制 memory_ref 和 filename，返回 reinforce（正文不变）或 revise（完整新正文）；宿主绑定成功 search_many 的完整正文快照并在事务内校验，按原对话证据日期每天最多+1。单个公共词命中不得直接复用
   4. 未命中: 返回 create，在 seven_days 创建新碎片；首个证据日 weight=0，后续不同日期可加权
-  5. 每个 create / reinforce / revise 必须携带 `durable=true`、`evidence` 与 `evidence_rounds`；**条数按独立事实计算，不按对话轮数或单文件字数折算**。一个事实一条碎片，识别出几个事实就返回几条。大维度只用于分类，不是合并边界；字符上限只防止失控。禁止为减少文件数或适配候选上限而合并不同生命周期的事实。单批上限只由 `memory.extraction_max_candidates_per_batch` 控制，达到上限时选择价值和证据最强的独立事实并说明截断
+  5. 每个 create / reinforce / revise 必须携带 `durable=true`、`evidence` 与 `evidence_rounds`；**条数按独立事实计算，不按对话轮数或单文件字数折算**。一个事实一条碎片，识别出几个事实就返回几条。大维度只用于分类，不是合并边界；字符上限只防止失控。禁止为减少文件数或适配候选上限而合并不同生命周期的事实。实际处理批次由 `memory.extraction_max_candidates_per_batch` 控制，达到上限继续分页并保留待办，不丢弃未返回事实
   6. 没有合格信息时返回空 candidates[]
 
 权重规则: 本模式由宿主把原轮次 committed_at 映射到上海自然日，数据库事件唯一键每日最多+1，不由模型比较今天。创建的首次证据日登记 creation、权重0；跨天证据逐日累计。缺少可信时间戳时跳过加权，不用提取日代替。Prompt 注入、查看和检索不加权；用户主动编辑/手动审阅更新按执行日登记。
 永久记忆: 普通命中时不返回候选且运行时拒绝覆盖；只有用户本轮明确要求记住、`explicit=true` 时才允许更新
 ```
 
-运行时只会传入用户消息，不会传入助手回复、推理或工具结果。不得读取 `important` 层；每个候选的 `evidence` 必须是输入中可精确找到的用户原文。
+运行时传入经过安全过滤且按字符预算分页的用户与助手正文，不传推理、工具结果，不得读取 important。
+create/revise/forget 仅用户原文；reinforce 可用助手确定性正文，但须绑定旧碎片并给同轮用户明确确认的 `user_evidence`。
+不得用单纯复述注入记忆、“继续/都对”或猜测加权；助手正文不能改写正文或显式晋升。
+证据来源由宿主标为 user/assistant，权重统一称“不同日期出现次数”，同日跨来源最多 +1。
+满页或仍有遗漏时返回 `has_more=true`，按宿主 continuation 继续枚举未返回的事实；超限候选保存在待办，不丢弃。
 
 ### 模式二：记忆晋升（trigger = `"memory_promotion"`）
 
@@ -72,7 +76,8 @@
 
   180d→permanent:
     1. 判断是否为工作记忆
-    2. 是 → skill_creater 创建技能到 agent_create/
+    2. 是 → 先 list/get 查重；可复用方法须具“何时使用、至少两步、失败处理”，带 source_memories 生成到 agent_create/
+       纯事实不编造步骤，返回 skill_applicable=false 与 skill_skipped_reason；deferred/失败不算已生成
     3. 升级到 permanent
     4. 不是 → 直接升到 permanent
 ```
@@ -90,6 +95,8 @@
 ```
 
 `request` 必须是非空字符串。手动模式不执行层间晋升；晋升仍只走 `memory_promotion`。
+create/revise/forget 必须附 request 中可定位的用户原话；reinforce 必须绑定真实检索回执。
+skill_retry_only=true 时只补技能，不重做晋升；conversion_sources 中的来源全部绑定到技能。
 
 ## 晋升阈值（来自 global_config → memory.tiers）
 
