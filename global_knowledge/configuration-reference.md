@@ -200,11 +200,11 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `storage_schema_version` | int | `1` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
+| `storage_schema_version` | int | `2` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许 Maintenance 每轮后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
 | `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
-| `extraction_max_candidates_per_batch` | int | `30` | 每批最多保留的独立记忆候选，运行时硬上限为 40；不再按对话轮数设置额外上限，单轮包含多个独立长期事实时可分别保留 |
+| `extraction_max_candidates_per_batch` | int | `30` | 每批实际处理的独立记忆候选，硬上限 40；其余持久待办续处理，满页继续提取未返回事实；不再按对话轮数设置额外上限，单轮包含多个独立长期事实时可分别保留 |
 | `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/config/` 的 Prompt 门面按该值截断 |
 | `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限；与注入预算语义独立，超过后拒绝本次更新且不覆盖旧热画像 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
@@ -230,11 +230,11 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `half_year` | 180 | 60 | null | 180 天到期，权重 ≥ 60 晋升到永久记忆 |
 
 权重规则：
-- 仅在保存、手动压缩、Token 超限压缩等历史整理管线中，被 `self_improve` 依据用户原文命中时可加权
+- 仅在保存、手动压缩、Token 超限压缩等历史整理管线中，被 `self_improve` 依据用户原文或具同轮明确用户背书的助手正文命中时可加权；助手只 reinforce 已检索的既有事实，不改正文
 - Prompt 注入、用户查看和工具检索不加权；后台整理临时三层时不得读取 `important`
 - 同一记忆每天合计最多 `+1`（每日锁）
 - 晋升后新层级权重从 0 重新累计
-- 到期未达阈值的直接删除，不降级保留
+- 到期未达阈值的先写入 `improve/expired_memory/` Markdown 归档，成功后移出活跃库，失败不删，不降级保留
 - 永久记忆没有索引、权重或到期时间
 
 ---
@@ -325,15 +325,25 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `conserved_rounds` | int | `3` | 保留完整工具日志和思考过程的最近轮数。超出此数的旧轮次由 `context_manage` 逐轮压缩 |
+| `enable_mid_context_compression` | bool | `true` | 是否启用中途上下文压缩：同时控制超过 `conserved_rounds` 后的单轮工具/思考摘要和请求组装时的旧工具结果缩略；关闭时两种历史格式均保留未压缩的原始工具结果，不影响工具结果硬上限、普通轮数、Token 超限、Provider 超限兜底或手动上下文压缩 |
+| `conserved_rounds` | int | `3` | 开启中途上下文压缩时，保留完整工具日志和思考过程的最近轮数；更早轮次可逐轮生成摘要并在请求组装时缩略工具结果 |
 | `max_rounds` | int | `80` | 上下文最大对话轮数。达到后触发压缩。此值限制 SQLite runtime 窗口及 Provider 上下文的轮次上限，不限制用户可见 archive 归档 |
 | `rounds_after_compression` | int | `20` | 压缩后保留的轮数 |
 | `token_limit` | int | `1000000` | 上下文 Token 上限。预估总 token 超过此值时触发压缩 |
-| `token_compression_ratio` | float | `0.3` | 输入预算比例。`input_budget = token_limit × ratio`，超过此比例时触发压缩 |
+| `token_compression_ratio` | float | `0.3` | Token 压缩目标比例。`input_budget = token_limit × ratio`；自动触发点为硬上限 `token_limit`，手动 Token 整理可提前向此目标压缩 |
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
 
 `context_manage` 的摘要输入会合并正文、reasoning/think 和工具结论；核心运行时为每次摘要请求提供最多 20000 tokens 的输出预算，并要求非空、完整的结构化 JSON。网页端手动压缩只有在摘要缓存、SQLite runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围重新读取校验通过后才报告成功；用户可见 archive 归档仍保留完整轮次。
+
+关闭中途上下文压缩后，历史增长不会仅因旧轮次超出 `conserved_rounds` 而把工具结果改写为缩略预览或目录省略摘要；已经压缩保存的历史不会自动恢复。关闭不保证缓存命中率恒定，其他上下文压缩、系统提示词变化和服务端缓存状态仍可能影响命中率。
+
+轮数压缩沿用基础保留轮数；Token 压缩可以越过 `recent_full_rounds`、
+`conserved_rounds` 和 `rounds_after_compression`，直到含摘要和固定内容的上下文不超过
+目标比例，或只剩一轮。当前正在运行的一轮计入保留轮次，其工具消息组不拆分。
+网页手动操作优先轮数压缩，轮数没有可移除历史时进入 Token 压缩。
+最后一轮仍高于目标时返回 `target_reached=false`、
+`minimum_rounds_reached=true`，不继续丢弃该轮。正常轮末也检查完整输出后的轮数和 Token。
 
 ---
 
@@ -608,7 +618,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许后台提取；`on_commit` 每轮同步提取 |
 | `recovery_max_rounds_per_scan` | int | 10 | Maintenance 每次扫描最多补提取的总轮数，范围 1–20 |
 | `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
-| `extraction_max_candidates_per_batch` | int | 30 | 每批独立记忆候选总上限，框架硬上限 40；不再按对话轮数乘系数裁剪 |
+| `extraction_max_candidates_per_batch` | int | 30 | 每批实际入库候选上限，硬上限 40；超限排队不丢弃，全部完成才推进源游标 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days`。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入 |
 | `important_memory_max_chars` | int | 20000 | 临时重要热画像的 Prompt 注入字符预算；注入时按该值截断 |
 | `important_memory_output_max_chars` | int | 20000 | 临时重要热画像输出防失控硬上限；与注入预算语义独立，超过后拒绝且不覆盖旧热画像 |
@@ -664,7 +674,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
 
-`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.4.0 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
+`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.5.0 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
 
 ---
 
@@ -686,11 +696,12 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `conserved_rounds` | int | 3 | 保留完整工具/思考日志的最近轮数 |
+| `enable_mid_context_compression` | bool | true | 同时控制超过 `conserved_rounds` 后的单轮工具/思考摘要和旧工具结果缩略；关闭后保留未压缩的原始内容，工具结果硬上限和其他上下文压缩路径不变，已压缩历史不自动恢复 |
+| `conserved_rounds` | int | 3 | 开启中途上下文压缩时保留完整工具/思考日志的最近轮数 |
 | `max_rounds` | int | 80 | 上下文最大对话轮数（触发压缩） |
 | `rounds_after_compression` | int | 20 | 压缩后保留的轮数 |
 | `token_limit` | int | 1000000 | 上下文 Token 上限 |
-| `token_compression_ratio` | float | 0.3 | 输入预算比例 |
+| `token_compression_ratio` | float | 0.3 | Token 压缩目标比例；自动触发点仍为 `token_limit`，手动按轮数无可移除历史时按此比例整理 |
 
 上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 SQLite runtime 窗口和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
 

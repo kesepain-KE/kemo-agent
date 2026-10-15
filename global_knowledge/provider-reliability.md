@@ -2,7 +2,29 @@
 
 本文集中说明 Provider 工具调用完整性、网络传输恢复、SSE 续传、取消和安全边界。工具参数校验与网络请求恢复是两个独立阶段，分别按对应章节执行。
 
+## 跨轮缓存前缀与脱敏诊断
+
+历史工具结果重建应保留原始 Kemo 内容块及 JSON 字段顺序，不把 `type/data` 内容块数组再次包装成结果数据；历史工具参数也沿用本轮发送时的字段顺序。旧 `tool.calls` 格式同样不额外排序。原始历史不修改；只有现有中途压缩规则或工具结果硬上限确实改写了 Provider 视图时，才移除原生结果副本，防止绕过限制。
+
+每次主对话 Provider 调用在映射前生成脱敏指纹，保存到 `history_rounds.metric_json` 的 `provider_request_diagnostics`。记录包含请求标识、迭代/尝试序号、系统提示词/各段/工具定义/控制参数的 SHA-256，以及逐 Item 内容和累计前缀的 SHA-256、字节长度；不保存额外提示词、工具正文、凭据或 Provider State。随机 Item ID、保存时补充的元数据及状态不参与前缀比较，工具配对 ID 和实际内容仍参与。失败、取消与受控停止也保存已经尝试的请求指纹。
+
+指纹作用域为 `agent_before_provider_mapping`，只能证明 Agent 侧输入是否变化，不代表网关映射后模型实际收到的字节；不能仅凭指纹一致就断言云端故障。历史请求没有这项记录时，不能事后补造当时的系统提示词或前缀证据。
+
 ## 运行级中断自动重试
+
+输入上下文超限在主运行时单独恢复：既处理异常，也检查结构化失败终态中的嵌套错误；
+`context_length_exceeded`、`input_length_exceeded`、`maximum context length`、
+`prompt is too long` 等输入长度证据才触发压缩。只有网关包装码
+`PROVIDER_BAD_RESPONSE` 和 HTTP 400 不足以认定输入超限；输出的
+`max_output_tokens` 或 `finish_reason=length` 不属于此路径。
+
+每次内部恢复保留当前用户输入、运行中引导、已完成的本轮工具调用及结果，
+只移除被新摘要完整覆盖的旧轮次。即使本地估算尚未超过配置上限，服务端明确拒绝后，
+仍必须比上次减少历史；最多两次内部恢复，最后一次以仅保留当前轮重试。
+有效上限取配置 `token_limit` 与 Provider 声明输入上限的较小值；
+摘要完成后重新计算包括摘要、固定提示词、工具定义与当前轮尾部的预算。
+没有可移除历史、摘要失败、最后一轮仍超限或恢复预算耗尽时明确结束当前尝试，
+之后是否进行运行级重试仍遵循下文独立规则。已执行工具不因上下文恢复而重新执行。
 
 主对话运行（L2）和子代理运行（L4）共用 `run/retry/` 的错误序列账本。一次**没有进展的连续错误序列**最多执行 **5 次重试**，即该序列的第一次失败加 5 次重试共 **6 次尝试**；`retrying` 事件中的 `max_attempts` 因此仍为 6，但它表示当前错误序列的尝试上限，不是整个 Run 的总尝试上限。每次尝试都会创建新的逻辑 Provider 请求和新的 `request_id`，可能产生新的模型计费，不属于同一请求的网络续传。
 
@@ -105,7 +127,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Kemo 2.0 固定协议制品与契约门禁
 
-`kemo-agent 1.4.0` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
+`kemo-agent 1.5.0` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
 `provider/protocol/`，其 `spec/` 生成 `schema.json`、`model-index.json`、`invariants.json`、
 `freeze.json` 与脱敏 Fixture；Gateway 只消费由该目录构建并以 lock 文件固定 SHA-256 的
 `vendor/kemo_protocol-2.0.zip`。这保证两仓不各自维护模型副本，也不提供 Kemo 1.x shim。

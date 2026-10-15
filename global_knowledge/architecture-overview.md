@@ -132,8 +132,12 @@ RuntimeHost/Cron 统一管理。同一网络请求内部的重试或 SSE 续传�
 ### 6. 估算上下文并按需压缩
 
 运行时把固定 Prompt、历史窗口、当前用户输入、工具 Schema、思考和工具结果计入上下文预算。
-达到轮次或 Token 条件时，`context_manage` 子代理生成摘要，摘要与 runtime 窗口裁剪在历史库
-事务中共同提交。
+每轮提交后，是否按 `agents.enable_mid_context_compression`（默认 `true`）将超过
+`agents.conserved_rounds` 的较早轮次工具调用和思考压缩为单轮摘要，由全局配置开关决定；
+同一开关也控制请求组装时结构化 `items` 和旧 `tool.calls` 两种历史格式的旧工具结果缩略。
+关闭时不因轮次变旧而改写这部分运行时内容或工具结果预览，工具结果硬上限仍然生效，
+已经压缩保存的内容不自动恢复。达到轮次或 Token 条件时，`context_manage` 子代理仍生成摘要，
+摘要与 runtime 窗口裁剪在历史库事务中共同提交。
 
 压缩期间运行时发送非终态 `context_compression` 事件：`started` 表示正在生成或扩展摘要，
 `ready` 表示摘要已可用于本次请求，`failed` 表示本次摘要未成功。队列模式下 `ready` 不代表
@@ -143,6 +147,25 @@ RuntimeHost/Cron 统一管理。同一网络请求内部的重试或 SSE 续传�
 
 手动压缩、Token 超限压缩和 API 超限恢复使用同一上下文管理链路，不能通过删除 archive 正文
 来腾出窗口。
+
+选择与摘要由 `run/context/selection.py` 和 `run/conversation/context_compaction.py`
+共同收敛：自动轮数压缩达到 `max_rounds` 时触发，按 `rounds_after_compression`
+与最近完整轮次策略保留；Token 自动触发点是 `token_limit`，压缩目标为
+`token_limit × token_compression_ratio`。Token 压缩不受基础保留轮数约束，
+逐个移除最旧完整轮次，直到达到目标或只剩一轮；有当前用户输入时，当前运行轮计为这一轮，
+其中工具调用和结果保持成组。摘要本身也计入预算；摘要增长导致需要继续移除历史时，
+必须继续扩展摘要，直到摘要覆盖全部移除轮次。任一步失败都保留原历史与原摘要。
+
+网页手动压缩先尝试按轮数整理；按轮数没有可移除历史时，改用 Token 目标，
+即使尚未达到硬上限也允许向目标比例压缩。`target_reached` 与
+`minimum_rounds_reached` 分别说明是否达标、是否已到最后一轮，不能把“只剩一轮”
+误报为“已经低于比例”。网页提示记忆进入后台，摘要与记忆提取不是同一完成状态。
+
+`context_finalization.py` 在本轮回答和工具结果写入工作窗口后再次检查轮数与 Token，
+实际生成摘要并与 runtime 裁剪一同提交，不能只保存一个假设裁剪后的快照。
+API 返回输入上下文超限时，`context_recovery.py` 保留当前轮完整尾部、进一步缩小历史，
+最多两次恢复；最后一次只保留当前轮。恢复后工具继续追加到同一个消息列表，
+避免遗漏新工具结果或重复执行已完成工具。详见 `provider-reliability.md`。
 
 ### 7. 调用 Provider
 
