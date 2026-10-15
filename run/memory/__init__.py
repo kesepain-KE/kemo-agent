@@ -37,7 +37,7 @@ _WORD_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]")
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\r\n]')
 _SECRET_RE = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|passwd|secret|cookie|private[_ -]?key|验证码|密码|密钥|令牌)"
-    r"\s*(?::|=|：|是|为|is)\s*[^\s,;，；]{4,}|\bsk-[A-Za-z0-9_-]{8,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"""["'”’]?\s*(?::|=|：|是|为|is)\s*[^\s,;，；]{4,}|\bsk-[A-Za-z0-9_-]{8,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"""
 )
 _WINDOWS_RESERVED = {
     "con",
@@ -344,7 +344,19 @@ def normalize_memory_filename(value: Any) -> str:
 
 MemoryStore = SqliteMemoryStore
 
-_DOMAIN_MODULES = ("analysis", "evidence", "pipeline", "sqlite", "store")
+_DOMAIN_MODULES = (
+    "analysis",
+    "archive",
+    "candidate_work",
+    "evidence",
+    "extraction",
+    "generated_skills",
+    "pipeline",
+    "skill_work",
+    "sqlite",
+    "store",
+    "work",
+)
 
 
 def __getattr__(name: str):
