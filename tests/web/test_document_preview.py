@@ -132,7 +132,10 @@ class DocumentPreviewRoutesTests(unittest.TestCase):
                         response = backend_tests.WebBackendTests.request(self, app, "GET", endpoint, params={"path": f"sample{ext}"})
                         self.assertEqual(response.status_code, 200, response.text)
                         self.assertEqual(response.content, pdf.read_bytes())
-                        convert.assert_called_once_with(directory / f"sample{ext}")
+                        # Windows runners expose the temporary directory through an
+                        # 8.3 short name while the download target is canonicalized,
+                        # so compare the resolved path.
+                        convert.assert_called_once_with((directory / f"sample{ext}").resolve())
                 for name, limit in (("large.txt", 4 * 1024 * 1024), ("large.pdf", preview.PDF_MAX_BYTES)):
                     with (directory / name).open("wb") as stream:
                         stream.truncate(limit + 1)
