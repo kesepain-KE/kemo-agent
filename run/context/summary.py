@@ -205,8 +205,8 @@ def get_or_create_summary(
     """Return an exact cache hit or atomically generate a replacement.
 
     Any generation/parse/write failure returns ``None`` with diagnostics and
-    leaves an existing cache untouched.  This is deliberate: the caller then
-    proceeds with pure whole-round trimming.
+    leaves an existing cache untouched. Callers must retain the original
+    history whenever the replacement summary does not cover its removals.
     """
     offset = max(0, int(round_offset))
     validated_previous = previous_cache if isinstance(previous_cache, dict) else None

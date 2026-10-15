@@ -251,6 +251,7 @@ def context_status(
         summary_message=build_summary_message(summary_cache),
         current_user_message=None,
         tools=registry.schemas() or None,
+        allow_compress=False,
     )
     persisted = window.get("data", {}).get("context")
     return {
@@ -264,6 +265,7 @@ def context_status(
         "last_committed_context": persisted if isinstance(persisted, dict) else None,
         "summary_cache_exists": context_summary_exists(runtime_path),
         "policy": {
+            "mid_context_compression_enabled": policy.mid_context_compression_enabled,
             "recent_tool_rounds": policy.recent_tool_rounds,
             "recent_full_rounds": policy.recent_full_rounds,
             "max_rounds": policy.max_rounds,

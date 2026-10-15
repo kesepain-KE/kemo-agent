@@ -21,6 +21,20 @@ SMALL_FILE_DIRECTORY_RESULT_CHARS = 4_000
 _DIAGNOSTIC_TRUNCATION_MARKER = "诊断内容已截断"
 
 
+def mid_context_compression_enabled(config: dict[str, Any]) -> bool:
+    """Read the switch for per-round summaries and old tool-result compaction."""
+
+    agents = config.get("agents")
+    if agents is None:
+        return True
+    if not isinstance(agents, dict):
+        raise ValueError("agents 必须是对象")
+    value = agents.get("enable_mid_context_compression", True)
+    if type(value) is not bool:
+        raise ValueError("agents.enable_mid_context_compression 必须是布尔值")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ContextPolicy:
     recent_tool_rounds: int = 3
@@ -30,11 +44,13 @@ class ContextPolicy:
     token_limit: int = 120000
     compression_ratio: float = 0.6
     older_tool_result_chars: int = DEFAULT_OLDER_TOOL_RESULT_CHARS
+    mid_context_compression_enabled: bool = True
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ContextPolicy":
         agents = config.get("agents") or {}
         history = config.get("history") or {}
+        mid_compression_enabled = mid_context_compression_enabled(config)
         policy = cls(
             recent_tool_rounds=max(0, int(agents.get("conserved_rounds", 3))),
             recent_full_rounds=max(0, int(history.get("recent_full_rounds", 3))),
@@ -44,6 +60,7 @@ class ContextPolicy:
             ),
             token_limit=max(1, int(agents.get("token_limit", 1000000))),
             compression_ratio=float(agents.get("token_compression_ratio", 0.3)),
+            mid_context_compression_enabled=mid_compression_enabled,
         )
         if not 0 < policy.compression_ratio < 1:
             raise ValueError("agents.token_compression_ratio 必须在 0 和 1 之间")
@@ -86,6 +103,8 @@ class ContextSelection:
     token_limit_triggered: bool
     fixed_content_over_budget: bool
     recent_content_over_budget: bool
+    token_limit: int
+    current_rounds: int = 0
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -103,6 +122,9 @@ class ContextSelection:
             "token_limit_triggered": self.token_limit_triggered,
             "fixed_content_over_budget": self.fixed_content_over_budget,
             "recent_content_over_budget": self.recent_content_over_budget,
+            "token_limit": self.token_limit,
+            "target_reached": self.estimated_tokens_after <= self.input_budget,
+            "minimum_rounds_reached": len(self.kept_rounds) + self.current_rounds <= 1,
         }
 
 
@@ -166,6 +188,11 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _provider_json(value: Any) -> str:
+    """Match live tool messages without changing the original JSON key order."""
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
 def _media_estimation_projection(value: Any) -> tuple[Any, int]:
     """Remove binary payload text while retaining a conservative media budget."""
 
@@ -200,6 +227,8 @@ def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
     total = 0
     for message in messages:
         # Binary media is billed provider-specifically; never count Base64 as text.
+        # Native tool blocks mirror content; count that payload only once.
+        message = {key: value for key, value in message.items() if key != "_kemo_tool_result"}
         projected, media_tokens = _media_estimation_projection(message)
         total += 4 + estimate_text_tokens(_stable_json(projected)) + media_tokens
     return total
@@ -264,6 +293,27 @@ def _content_value(content: Any) -> str | list[dict[str, Any]]:
     return copy.deepcopy(blocks)
 
 
+def _tool_result_value(content: Any) -> Any:
+    """Unwrap content blocks instead of serializing their protocol envelope."""
+    if not isinstance(content, list):
+        return content
+    if len(content) == 1 and isinstance(content[0], dict):
+        block = content[0]
+        if block.get("type") == "json":
+            return _provider_json(block.get("data")) if isinstance(block.get("data"), str) else block.get("data")
+        if block.get("type") == "text":
+            return str(block.get("text") or "")
+    texts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            texts.append(str(block.get("text") or ""))
+        elif isinstance(block, dict) and block.get("type") == "json":
+            texts.append(_provider_json(block.get("data")))
+        else:
+            texts.append(_provider_json(block))
+    return "\n".join(texts)
+
+
 def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] | None:
     container = window.get("items")
     raw_items = container.get("items") if isinstance(container, dict) else None
@@ -323,7 +373,7 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
                             "type": "function",
                             "function": {
                                 "name": str(call.get("name") or "unknown_tool"),
-                                "arguments": _stable_json(call.get("arguments") or {}),
+                                "arguments": _provider_json(call.get("arguments") or {}),
                             },
                         }
                     )
@@ -335,13 +385,16 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
                 messages.append(message)
                 continue
             if kind == "tool_result":
-                content = item.get("content")
+                content = _tool_result_value(item.get("content"))
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": str(item.get("call_id") or ""),
                         "name": str(item.get("name") or "unknown_tool"),
-                        "content": _stable_json(content),
+                        "content": (
+                            content if isinstance(content, str) else _provider_json(content)
+                        ),
+                        "_kemo_tool_result": item,
                     }
                 )
                 index += 1
@@ -438,7 +491,7 @@ def _repair_orphan_tool_results(
                                     "type": "function",
                                     "function": {
                                         "name": name,
-                                        "arguments": _stable_json(
+                                        "arguments": _provider_json(
                                             record.get("arguments") or {}
                                         ),
                                     },
@@ -463,7 +516,7 @@ def _context_tool_result(
 ) -> str:
     """Bound every historical tool result, including protected recent rounds."""
 
-    rendered = value if isinstance(value, str) else _stable_json(value)
+    rendered = value if isinstance(value, str) else _provider_json(value)
     if len(rendered) > MAX_TOOL_RESULT_CHARS:
         error = ToolResultTooLargeError(
             tool_name,
@@ -537,7 +590,7 @@ def _tool_iteration_messages(
                     "type": "function",
                     "function": {
                         "name": str(call.get("name") or "unknown_tool"),
-                        "arguments": _stable_json(call.get("arguments") or {}),
+                        "arguments": _provider_json(call.get("arguments") or {}),
                     },
                 }
             )
@@ -579,18 +632,33 @@ def build_round_groups(
         tool = tool_by_round.get(index)
         records = tool.get("calls", []) if isinstance(tool, dict) else []
         is_recent = index > total - policy.recent_tool_rounds
+        # Both history formats must preserve old results when the switch is off.
+        # _context_tool_result still enforces the independent result hard limit.
+        compact_limit = (
+            policy.older_tool_result_chars
+            if policy.mid_context_compression_enabled and not is_recent
+            else None
+        )
         provider_messages: list[dict[str, Any]] = []
         if item_groups is not None:
             provider_messages = _repair_orphan_tool_results(raw_group, records)
             for message in provider_messages:
                 if message.get("role") == "tool":
-                    message["content"] = _context_tool_result(
-                        message.get("content"),
-                        tool_name=str(message.get("name") or "unknown_tool"),
-                        compact_limit=(
-                            None if is_recent else policy.older_tool_result_chars
-                        ),
+                    original_content = message.get("content")
+                    native_result = message.get("_kemo_tool_result")
+                    value = (
+                        _tool_result_value(native_result.get("content"))
+                        if isinstance(native_result, dict)
+                        else original_content
                     )
+                    message["content"] = _context_tool_result(
+                        value,
+                        tool_name=str(message.get("name") or "unknown_tool"),
+                        compact_limit=compact_limit,
+                    )
+                    if message["content"] != original_content:
+                        # A compacted/oversized result must not replay its full native blocks.
+                        message.pop("_kemo_tool_result", None)
             raw_text_messages = [
                 {
                     key: copy.deepcopy(value)
@@ -622,7 +690,7 @@ def build_round_groups(
             provider_messages.extend(
                 _tool_iteration_messages(
                     records,
-                    compact_limit=None if is_recent else policy.older_tool_result_chars,
+                    compact_limit=compact_limit,
                 )
             )
         provider_messages.extend(assistant_messages)
@@ -639,92 +707,7 @@ def build_round_groups(
     return groups
 
 
-def select_context(
-    *,
-    window: dict[str, Any],
-    policy: ContextPolicy,
-    system_message: dict[str, Any] | None,
-    current_user_message: dict[str, Any] | None,
-    tools: list[dict[str, Any]] | None = None,
-    summary_message: dict[str, Any] | None = None,
-    force_compress: bool = False,
-) -> ContextSelection:
-    """Select whole historical rounds under configured round and token budgets."""
-    rounds = build_round_groups(window, policy)
-    fixed_prefix = [
-        item for item in (system_message, summary_message) if item is not None
-    ]
-    fixed_suffix = [current_user_message] if current_user_message is not None else []
-    tool_tokens = estimate_tools_tokens(tools)
-    all_messages = [*fixed_prefix]
-    for group in rounds:
-        all_messages.extend(group.messages)
-    all_messages.extend(fixed_suffix)
-    before = estimate_messages_tokens(all_messages) + tool_tokens
-
-    projected_rounds = len(rounds) + (1 if current_user_message is not None else 0)
-    round_trigger = projected_rounds >= policy.max_rounds
-    current_round_slots = 1 if current_user_message is not None else 0
-    minimum_history_rounds = max(0, policy.recent_full_rounds - current_round_slots)
-    if round_trigger or force_compress:
-        keep_count = min(
-            max(
-                0,
-                policy.rounds_after_compression - current_round_slots,
-                minimum_history_rounds,
-            ),
-            len(rounds),
-        )
-        kept = rounds[-keep_count:] if keep_count else []
-    else:
-        kept = list(rounds)
-
-    fixed_tokens = (
-        estimate_messages_tokens([*fixed_prefix, *fixed_suffix]) + tool_tokens
-    )
-    token_trigger = before > policy.token_limit
-    while len(kept) > minimum_history_rounds and token_trigger:
-        candidate_messages = [*fixed_prefix]
-        for group in kept:
-            candidate_messages.extend(group.messages)
-        candidate_messages.extend(fixed_suffix)
-        if (
-            estimate_messages_tokens(candidate_messages) + tool_tokens
-            <= policy.input_budget
-        ):
-            break
-        kept.pop(0)
-
-    selected_messages = [*fixed_prefix]
-    for group in kept:
-        selected_messages.extend(group.messages)
-    selected_messages.extend(fixed_suffix)
-    after = estimate_messages_tokens(selected_messages) + tool_tokens
-    recent_content_over_budget = bool(
-        token_trigger
-        and len(kept) <= minimum_history_rounds
-        and after > policy.input_budget
-    )
-    kept_numbers = {item.number for item in kept}
-    removed = [item for item in rounds if item.number not in kept_numbers]
-    return ContextSelection(
-        messages=selected_messages,
-        all_rounds=rounds,
-        kept_rounds=kept,
-        removed_rounds=removed,
-        estimated_tokens_before=before,
-        estimated_tokens_after=after,
-        tool_schema_tokens=tool_tokens,
-        input_budget=policy.input_budget,
-        output_reserve=policy.output_reserve,
-        round_limit_triggered=round_trigger or force_compress,
-        token_limit_triggered=token_trigger,
-        fixed_content_over_budget=fixed_tokens > policy.input_budget,
-        recent_content_over_budget=recent_content_over_budget,
-    )
-
-
-_DOMAIN_MODULES = ("summary", "service")
+_DOMAIN_MODULES = ("selection", "summary", "service")
 
 
 def __getattr__(name: str):
