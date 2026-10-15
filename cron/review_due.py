@@ -18,6 +18,14 @@ from run.memory import (
     utc_now,
 )
 from run.conversation import new_usage_total, record_provider_request, usage_from_dict
+from run.memory import (
+    WorkLedger,
+    archive_expired,
+    queue_conversion,
+    reconcile,
+    retry_conversions,
+    settle_conversion,
+)
 
 
 class MemoryPromotionError(RuntimeError):
@@ -89,6 +97,12 @@ def scan_and_promote(
     current = now or utc_now()
     due_promotions: list[dict[str, Any]] = []
     deleted: list[str] = []
+    archive_errors: list[dict[str, Any]] = []
+    reconcile(root, user)
+    pending_skills = WorkLedger(root, user).pending("skill", 1)
+    if pending_skills:
+        retry_runner = AgentRunner(root, user, config=config, provider_factory=provider_factory)
+        archive_errors.extend(retry_conversions(store, retry_runner, cancel_event))
 
     with store._lock:
         for tier in TEMPORARY_TIERS:
@@ -102,8 +116,13 @@ def scan_and_promote(
                 weight = int(meta.get("weight", 0))
                 threshold = int(rule.upgrade_threshold or 0)
                 if weight < threshold:
-                    store.delete_fragment(tier, filename)
-                    deleted.append(filename)
+                    try:
+                        archived = archive_expired(store, tier, filename, current)
+                        if archived["archived"]:
+                            deleted.append(filename)
+                    except Exception as exc:
+                        archive_errors.append({"filename": filename, "stage": "archive",
+                                               "type": type(exc).__name__, "message": str(exc)})
                     continue
                 if rule.next is None:
                     raise MemoryPromotionError(f"临时记忆层缺少晋升目标：{tier}")
@@ -127,10 +146,11 @@ def scan_and_promote(
         }
     if not due_promotions:
         return {
-            "status": "completed",
+            "status": "partial" if archive_errors else "completed",
             "requested": 0,
             "deleted": deleted,
             "promotions": [],
+            "errors": archive_errors,
         }
 
     runner = AgentRunner(
@@ -143,7 +163,7 @@ def scan_and_promote(
     applied: list[str] = []
     summaries: list[dict[str, Any]] = []
     batch_results: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = list(archive_errors)
     models: list[str] = []
     batches = _promotion_batches(due_promotions)
     consecutive_failures = 0
@@ -152,6 +172,7 @@ def scan_and_promote(
     for batch_index, batch in enumerate(batches):
         if cancel_event is not None and cancel_event.is_set():
             break
+        skill_jobs = {item["filename"]: queue_conversion(store, item) for item in batch}
         try:
             result = runner.run(
                 "self_improve",
@@ -274,6 +295,9 @@ def scan_and_promote(
                     )
                     continue
                 batch_applied.append(requested["filename"])
+                if not settle_conversion(store, skill_jobs.get(requested["filename"]), decision):
+                    errors.append({"filename": requested["filename"], "stage": "skill_conversion",
+                                   "message": "晋升已完成；技能创建失败或未执行，已保留独立待办"})
         applied.extend(batch_applied)
         summaries.extend(
             summary
