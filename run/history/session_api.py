@@ -28,6 +28,7 @@ from run.history.store import (
     delete_source_windows,
     find_window_name,
     list_windows as list_stored_windows,
+    load_window_data,
     rename_windows,
     window_exists,
 )
@@ -80,8 +81,10 @@ def queue_memory_extraction(
             "rounds": 0,
             "processed_round": 0,
         }
-    window = load_window(directory)
-    data = window.setdefault("data", {})
+    data = load_window_data(directory)
+    if not isinstance(data, dict) or not data.get("complete"):
+        raise HistoryError(f"历史窗口尚未完成提交：{directory}")
+    window = {"data": data}
     rounds = max(0, int(data.get("rounds") or 0))
     processed_round = max(0, int(data.get("memory_processed_round") or 0))
     requested_target = rounds if target_round is None else max(0, int(target_round))
@@ -128,6 +131,7 @@ def queue_memory_extraction(
             "memory_queued_at": data["memory_queued_at"],
         },
         removals=("memory_error",),
+        metadata_only=True,
     )
     indexed = find_index_record(root, user, source, session_id)
     if (

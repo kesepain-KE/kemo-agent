@@ -223,6 +223,49 @@ def upsert_registry_record(
     return rendered
 
 
+def mutate_registry_record(
+    root: Path,
+    user: str,
+    source: str,
+    session_id: str,
+    mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+    *,
+    updated_at: str,
+    clear_active: bool = False,
+) -> dict[str, Any] | None:
+    """Change one existing session atomically, without reading the whole registry."""
+
+    with connection(root, user, write=True) as database:
+        row = database.execute(
+            "SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
+            (source, session_id),
+        ).fetchone()
+        if row is None or _session_is_deleted(database, source=source, session_id=session_id):
+            return None
+        previous = _object(row["record_json"], {})
+        rendered = mutator(copy.deepcopy(previous))
+        if rendered is None:
+            return copy.deepcopy(previous)
+        if (rendered.get("source"), rendered.get("session_id")) != (source, session_id):
+            raise ValueError("历史会话更新不能改变 source/session_id")
+        _upsert_session_row(database, rendered)
+        if clear_active:
+            database.execute(
+                "DELETE FROM history_active_sessions WHERE source=? AND session_id=?",
+                (source, session_id),
+            )
+        database.execute(
+            "INSERT INTO history_meta(key, value) VALUES('registry_revision', '1') "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=CAST(COALESCE(NULLIF(history_meta.value, ''), '0') AS INTEGER) + 1"
+        )
+        database.execute(
+            "INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_updated_at', ?)",
+            (updated_at,),
+        )
+        return copy.deepcopy(rendered)
+
+
 def claim_registry_record(
     root: Path,
     user: str,

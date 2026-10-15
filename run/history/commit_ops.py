@@ -443,8 +443,13 @@ def patch_archive_metadata(
     updates: dict[str, Any],
     removals: tuple[str, ...] = (),
     run_state: str | None = None,
+    metadata_only: bool = False,
 ) -> dict[str, Any]:
-    """Persist a small archive metadata transition without rewriting messages."""
+    """Persist a small metadata transition without rewriting messages.
+
+    Pure queue registration can use ``metadata_only`` to avoid loading the
+    transcript again; callers needing a full in-memory window keep the default.
+    """
 
     with _lock(directory):
         current = window.setdefault("data", {})
@@ -503,10 +508,10 @@ def patch_archive_metadata(
             updated_at=updated_at,
         )
 
-        # The metadata transaction intentionally does not rebuild transcript
-        # partitions.  Reload the current data so callers do not replace a
-        # newer in-memory round with the stale snapshot they passed in.
-        fresh = load_stored_window(directory)
+        # Full-window callers keep their refreshed data contract. Pure queue
+        # registration keeps the transaction's merged metadata instead of
+        # reading transcript partitions just to discard them.
+        fresh = None if metadata_only else load_stored_window(directory)
         if isinstance(fresh, dict) and isinstance(fresh.get("data"), dict):
             stored = fresh["data"]
         current.clear()

@@ -62,6 +62,13 @@ def _startup_needs_review_sql(cutoff_placeholder: str = "?") -> str:
         AND COALESCE(CAST(json_extract(s.record_json, '$.memory_processed_round') AS INTEGER), 0)
             < MAX(s.rounds, COALESCE(CAST(json_extract(s.record_json, '$.last_committed_round') AS INTEGER), 0))
     )
+    OR (
+        s.lifecycle='closed'
+        AND COALESCE(s.summary_status, 'none')='none'
+        AND COALESCE(s.title, '')=''
+        AND COALESCE(s.archive_window, '')!=''
+        AND MAX(s.rounds, COALESCE(CAST(json_extract(s.record_json, '$.last_committed_round') AS INTEGER), 0))>0
+    )
 )"""
 
 
@@ -165,6 +172,7 @@ def inspect_stale_web_sessions(
     batch_size: int = 100,
     idle_seconds: int | float = WEB_STARTUP_INSPECTION_DELAY_SECONDS,
     queue_memory: Callable[..., dict[str, Any]] | None = None,
+    queue_summary: Callable[..., dict[str, Any]] | None = None,
     queue_reason: str = 'startup_offline_session',
 ) -> dict[str, Any]:
     """One startup pass: retire offline data sessions and delete empty ones.
@@ -175,8 +183,10 @@ def inspect_stale_web_sessions(
     """
     result: dict[str, Any] = {
         'inspected': 0, 'closed_sessions': [], 'queued_memory': [],
+        'queued_summary': [],
         'deleted_sessions': [], 'preserved_sessions': [], 'skipped_busy': 0,
-        'closed_count': 0, 'queued_memory_count': 0, 'deleted_count': 0,
+        'closed_count': 0, 'queued_memory_count': 0, 'queued_summary_count': 0,
+        'deleted_count': 0,
         'preserved_count': 0, 'error_count': 0, 'errors': [],
     }
 
@@ -189,6 +199,8 @@ def inspect_stale_web_sessions(
     if queue_memory is None:
         from run.history.session_api import queue_memory_extraction
         queue_memory = queue_memory_extraction
+    if queue_summary is None:
+        from run.history.session_ops import queue_summary
     from run.conversation import session_lock
 
     current = time.time() if now is None else now
@@ -295,6 +307,10 @@ def inspect_stale_web_sessions(
                             'session_id': session_id,
                             'reason': str((queued or {}).get('reason') or status),
                         })
+                    summary = queue_summary(root, user, 'web', session_id)
+                    if str((summary or {}).get('status') or '') == 'queued':
+                        result['queued_summary_count'] += 1
+                        sample('queued_summary', session_id)
             except Exception as exc:
                 result['error_count'] += 1
                 sample('errors', {

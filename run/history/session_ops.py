@@ -23,7 +23,7 @@ from run.history.index_core import (
     load_index,
     session_key,
 )
-from run.history.store import claim_registry_record, connection, query_session_records
+from run.history.store import claim_registry_record, connection, mutate_registry_record, query_session_records
 
 
 def set_active(
@@ -68,18 +68,11 @@ def close_session(
     session_id: str,
 ) -> dict[str, Any] | None:
     with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        key = session_key(source, session_id)
-        record = index.setdefault("sessions", {}).get(key)
-        if not isinstance(record, dict):
-            return None
-        record["lifecycle"] = "closed"
-        record["run_state"] = "idle"
-        for active_key, active_session in list(index.setdefault("active", {}).items()):
-            if _active_matches(active_session, source, session_id):
-                index["active"].pop(active_key, None)
-        index["sessions"][key] = record
-        return _write_index_unlocked(root, user, index)["sessions"][key]
+        return mutate_registry_record(
+            root, user, source, session_id,
+            lambda record: {**record, "lifecycle": "closed", "run_state": "idle"},
+            updated_at=_now(), clear_active=True,
+        )
 
 
 def reopen_session(
@@ -136,38 +129,37 @@ def queue_summary(
 ) -> dict[str, Any]:
     """Queue card metadata generation after a session is durably closed."""
 
-    with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        key = session_key(source, session_id)
-        record = index.setdefault("sessions", {}).get(key)
-        if not isinstance(record, dict):
-            return {"status": "skipped", "reason": "session_not_found", "rounds": 0}
+    result = {"status": "skipped", "reason": "session_not_found", "rounds": 0}
+
+    def update(record: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal result
         target_round = max(
             0, int(record.get("last_committed_round") or record.get("rounds") or 0)
         )
         if record.get("lifecycle") != "closed":
-            return {
+            result = {
                 "status": "skipped",
                 "reason": "session_not_closed",
                 "rounds": target_round,
             }
+            return None
         if target_round < 1 or not record.get("archive_window"):
             record["summary_status"] = "none"
             record["summary_target_round"] = target_round
-            index["sessions"][key] = record
-            _write_index_unlocked(root, user, index)
-            return {
+            result = {
                 "status": "skipped",
                 "reason": "no_archive_rounds",
                 "rounds": target_round,
             }
+            return record
         completed_round = max(0, int(record.get("summary_completed_round") or 0))
         if completed_round >= target_round and str(record.get("summary") or "").strip():
-            return {
+            result = {
                 "status": "completed",
                 "reason": "already_current",
                 "rounds": target_round,
             }
+            return None
         record["summary_status"] = "queued"
         record["summary_target_round"] = target_round
         record["summary_state_updated_at"] = _now()
@@ -183,9 +175,12 @@ def queue_summary(
             "summary_checkpoint_total_chunks",
         ):
             record.pop(field, None)
-        index["sessions"][key] = record
-        _write_index_unlocked(root, user, index)
-        return {"status": "queued", "reason": "session_closed", "rounds": target_round}
+        result = {"status": "queued", "reason": "session_closed", "rounds": target_round}
+        return record
+
+    with index_lock(root, user):
+        mutate_registry_record(root, user, source, session_id, update, updated_at=_now())
+    return result
 
 
 def claim_pending_summary(

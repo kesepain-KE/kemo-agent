@@ -477,11 +477,30 @@ def load_runtime_window(
     except (TypeError, ValueError):
         archive_rounds = 0
 
+    # A runtime cache miss must not reintroduce the archive prefix already
+    # represented by the durable summary. Keep SQL restoration tail-bounded.
+    from run.context import read_summary_cache
+
+    summary_cache = read_summary_cache(runtime_directory)
+    covered_through = int((summary_cache or {}).get("covered_through_round") or 0)
+    restore_rounds = min(max_rounds, max(1, archive_rounds - covered_through))
+
+    def render_workspace(snapshot):
+        context = snapshot.get("data", {}).get("context") or {}
+        end = context.get("end_compression") or {}
+        failed = bool(
+            (context.get("summary") or {}).get("failed")
+            or (end.get("summary") or {}).get("failed")
+        )
+        # A failed summary leaves pending history for the next attempt. A
+        # generic max-round trim here would discard it without any summary.
+        return copy.deepcopy(snapshot) if failed else _trim_to_max_rounds(snapshot, restore_rounds)
+
     cached = runtime_cache.load(runtime_directory, version=version)
     if cached is not None and _workspace_covers(
         cached, archive_rounds=archive_rounds, max_rounds=max_rounds
     ):
-        return runtime_directory, _trim_to_max_rounds(cached, max_rounds)
+        return runtime_directory, render_workspace(cached)
     if cached is not None:
         runtime_cache.drop(runtime_directory)
 
@@ -494,7 +513,7 @@ def load_runtime_window(
             if snapshot_version == version and _workspace_covers(
                 snapshot, archive_rounds=archive_rounds, max_rounds=max_rounds
             ):
-                rendered = _trim_to_max_rounds(snapshot, max_rounds)
+                rendered = render_workspace(snapshot)
                 runtime_cache.store(runtime_directory, rendered, version=version)
                 return runtime_directory, rendered
         except HistoryError:
@@ -502,9 +521,10 @@ def load_runtime_window(
             pass
     if archive_window is None:
         restored = _rebase_archive_tail(source, max_rounds=max_rounds)
+        restored = _trim_to_max_rounds(restored, restore_rounds)
     else:
         restored = copy.deepcopy(source)
         restored.setdefault("data", {}).pop("context", None)
-        restored = _trim_to_max_rounds(restored, max_rounds)
+        restored = _trim_to_max_rounds(restored, restore_rounds)
     runtime_cache.store(runtime_directory, restored, version=version)
     return runtime_directory, copy.deepcopy(restored)

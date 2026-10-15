@@ -446,6 +446,18 @@ def patch_window_data(
     return rendered
 
 
+def load_window_data(directory: Path) -> dict[str, Any] | None:
+    """Read archive metadata only; never deserialize transcript or tool partitions."""
+
+    root, user, kind, name = window_location(directory)
+    with connection(root, user) as database:
+        row = database.execute(
+            "SELECT data_json FROM history_windows WHERE window_kind=? AND window_name=?",
+            (kind, name),
+        ).fetchone()
+    return _object(row["data_json"], {}) if row is not None else None
+
+
 def load_window(
     directory: Path,
     *,
