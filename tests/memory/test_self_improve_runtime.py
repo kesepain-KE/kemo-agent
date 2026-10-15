@@ -750,7 +750,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metadata["candidate_filter"]["accepted"], 2)
         self.assertEqual(result.metadata["candidate_filter"]["rejected"], 4)
 
-    def test_context_extraction_model_receives_only_user_messages(self) -> None:
+    def test_context_extraction_model_receives_safe_user_and_assistant_messages(self) -> None:
         captured = {}
 
         class Context:
@@ -783,11 +783,15 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                 {
                     "round": 7,
                     "messages": [{"role": "user", "content": "用户明确原话"}],
-                }
+                },
+                {
+                    "round": 7,
+                    "messages": [{"role": "assistant", "content": "来自临时重要记忆的复述"}],
+                },
             ],
         )
         rendered = json.dumps(captured, ensure_ascii=False)
-        self.assertNotIn("临时重要记忆", rendered)
+        self.assertIn("临时重要记忆", rendered)
         self.assertNotIn("不可信", rendered)
 
     def test_context_extraction_uses_configured_batch_candidate_cap(self) -> None:
@@ -798,6 +802,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
             @staticmethod
             def run_model(input_data):
+                if input_data.get("continuation", {}).get("already_returned"):
+                    return _result(candidates=[])
                 return _result(
                     candidates=[
                         {
@@ -831,9 +837,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(len(result.data["candidates"]), 6)
+        self.assertEqual(len(result.data["candidates"]), 8)
         self.assertEqual(result.metadata["candidate_filter"]["limit"], 6)
-        self.assertEqual(result.metadata["candidate_filter"]["rejected"], 2)
+        self.assertEqual(result.metadata["candidate_filter"]["rejected"], 0)
 
     def test_context_extraction_keeps_many_independent_facts_from_one_round(self) -> None:
         fact_count = 12
@@ -895,6 +901,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                             "action": "upsert",
                             "filename": "manual-review",
                             "content": "用户偏好简洁的技术说明。",
+                            "evidence": "用户偏好简洁的技术说明",
                             "explicit": False,
                         }
                     ]
@@ -902,7 +909,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         result = execute_self_improve(
             Context(),
-            {"trigger": "manual_review", "request": "整理用户表达偏好"},
+            {"trigger": "manual_review", "request": "请整理：用户偏好简洁的技术说明"},
         )
         location = MemoryStore(self.root, "alice", CONFIG).locate("manual-review")
         self.assertIsNotNone(location)
