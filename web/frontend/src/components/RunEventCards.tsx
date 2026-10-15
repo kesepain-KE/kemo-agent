@@ -3,7 +3,6 @@ import { AlertCircle, Check, CheckCircle2, ChevronDown, Copy, LoaderCircle, Wren
 import type { ChatItem } from '../types/api'
 import { copyText } from '../utils/clipboard'
 
-const TOOL_TEXT_LIMIT = 5000
 const SENSITIVE_ARGUMENT_KEY = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)/i
 
 function redactToolArgument(value: unknown, key = ''): unknown {
@@ -55,21 +54,69 @@ function toolPayloadPreview(
   value: unknown,
   sourceTruncated = false,
 ) {
-  let rendered = persistedText
-  if (rendered === undefined) {
-    if (typeof value === 'string') rendered = value
-    else {
-      try {
-        rendered = JSON.stringify(value, null, 2)
-      } catch {
-        rendered = String(value)
-      }
-    }
-  }
+  const source = persistedText === undefined ? value : persistedText
+  let rendered = formatToolPayload(source)
   rendered ||= ''
-  const truncated = sourceTruncated || rendered.length > TOOL_TEXT_LIMIT
-  const preview = rendered.slice(0, TOOL_TEXT_LIMIT)
-  return truncated ? `${preview}\n\n… 已截断，仅显示前 5000 个字符` : preview
+  return sourceTruncated
+    ? `${rendered}\n\n… 源数据已达到上游限制，以上为当前可用内容`
+    : rendered
+}
+
+function formatToolPayload(value: unknown): string {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const parsed = parseNestedToolJson(trimmed)
+    if (parsed !== undefined) return formatToolValue(parsed)
+    return value
+  }
+  return formatToolValue(value)
+}
+
+function parseNestedToolJson(value: string): unknown | undefined {
+  if (!value || !/^[\[{]/.test(value)) return undefined
+  try {
+    return JSON.parse(value)
+  } catch {
+    return undefined
+  }
+}
+
+function formatToolValue(value: unknown, depth = 0): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') {
+    const nested = parseNestedToolJson(value.trim())
+    if (nested !== undefined) return formatToolValue(nested, depth)
+    if (value.includes('\n')) {
+      const continuationIndent = '  '.repeat(depth)
+      return `"${escapeToolString(value, true).replace(/\n/g, `\n${continuationIndent}`)}"`
+    }
+    return JSON.stringify(value)
+  }
+  if (typeof value !== 'object') return JSON.stringify(value)
+
+  const indent = '  '.repeat(depth)
+  const childIndent = '  '.repeat(depth + 1)
+  if (Array.isArray(value)) {
+    if (!value.length) return '[]'
+    return `[\n${value.map((item) => `${childIndent}${formatToolValue(item, depth + 1)}`).join(',\n')}\n${indent}]`
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (!entries.length) return '{}'
+  return `{\n${entries.map(([key, item]) => {
+    const formatted = formatToolValue(item, depth + 1)
+    return `${childIndent}${JSON.stringify(key)}: ${formatted}`
+  }).join(',\n')}\n${indent}}`
+}
+
+function escapeToolString(value: string, multiline = false) {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n/g, multiline ? '\n' : '\\n')
+    .replace(/\t/g, multiline ? '\t' : '\\t')
 }
 
 export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reasoning' }> }) {

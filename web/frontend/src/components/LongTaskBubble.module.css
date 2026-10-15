@@ -10,7 +10,7 @@
   border-radius: 14px;
   background: color-mix(in srgb, var(--brand-soft) 58%, var(--surface-elevated));
   color: var(--text);
-  box-shadow: 0 7px 22px rgba(24, 31, 50, .055);
+  box-shadow: 0 7px 22px rgba(31, 31, 31, .055);
 }
 
 .main { min-width: 0; display: flex; align-items: center; gap: 10px; }

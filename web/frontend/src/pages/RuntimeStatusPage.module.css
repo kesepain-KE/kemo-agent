@@ -34,7 +34,7 @@
   border: 1px solid var(--runtime-border);
   border-radius: 16px;
   background: var(--surface);
-  box-shadow: 0 8px 26px rgba(35, 39, 52, .035);
+  box-shadow: 0 8px 26px rgba(39, 39, 39, .035);
 }
 
 .summaryCard {
@@ -85,7 +85,7 @@
 .tone_success { color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
 .tone_warning { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--surface)); }
 .tone_danger { color: var(--red); background: color-mix(in srgb, var(--red) 11%, var(--surface)); }
-.tone_muted { color: #767b87; background: var(--surface-2); }
+.tone_muted { color: #7b7b7b; background: var(--surface-2); }
 
 .contextValue { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .contextValue strong { overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
@@ -125,7 +125,7 @@
 }
 .sectionTabs button:hover { color: var(--text); background: color-mix(in srgb, var(--surface) 70%, transparent); }
 .sectionTabs button:focus-visible { outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent); outline-offset: -2px; }
-.sectionTabs .activeSectionTab { color: var(--brand); background: var(--surface); box-shadow: 0 3px 12px rgba(35, 39, 52, .06); }
+.sectionTabs .activeSectionTab { color: var(--brand); background: var(--surface); box-shadow: 0 3px 12px rgba(39, 39, 39, .06); }
 
 .tabPanel { min-width: 0; margin-top: 11px; }
 .externalGrid { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(320px, .8fr); gap: 11px; }
@@ -247,10 +247,10 @@
 .healthValue strong i { width: 6px; height: 6px; flex: none; border-radius: 50%; }
 .healthRows p { margin: 20px 0; color: var(--muted); font-size: 9px; text-align: center; }
 .healthCard .statusPill, .routeRow .statusPill { min-height: 27px; padding: 0 10px; font-size: 9px; }
-.health_healthy { background: #17a673; }
-.health_warning { background: #e59a32; }
-.health_error { background: #db4f5e; }
-.health_offline { background: #8c919c; }
+.health_healthy { background: #848484; }
+.health_warning { background: #a2a2a2; }
+.health_error { background: #6e6e6e; }
+.health_offline { background: #919191; }
 
 .compactPanel { height: 170px; overflow: hidden; }
 .compactBody { height: 112px; overflow: auto; padding: 0 11px 8px; }

@@ -75,7 +75,7 @@ describe('RunEventCards', () => {
     }
   })
 
-  it('工具正文点击后才渲染，并将参数和结果截断为前 5000 个字符', () => {
+  it('工具正文点击后才渲染，并完整显示当前可用的参数和结果', () => {
     const longText = 'x'.repeat(5100)
     const { container } = render(<ToolCallCard item={{
       id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'success',
@@ -86,8 +86,24 @@ describe('RunEventCards', () => {
     fireEvent.click(screen.getByRole('button', { name: /shell/ }))
     const payloads = [...container.querySelectorAll('.tool-call-panel pre')].map((node) => node.textContent || '')
     expect(payloads).toHaveLength(2)
-    expect(payloads.every((text) => text.startsWith('x'.repeat(5000)))).toBe(true)
-    expect(payloads.every((text) => text.includes('已截断'))).toBe(true)
+    expect(payloads.every((text) => text === longText)).toBe(true)
+  })
+
+  it('展开工具卡时会格式化紧凑 JSON，并展开嵌套 JSON 字符串', () => {
+    const { container } = render(<ToolCallCard item={{
+      id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'success',
+      argumentsText: '{"command":"Get-ChildItem","options":{"depth":2}}',
+      resultText: '{"content":"{\\"status\\":\\"ok\\",\\"lines\\":[\\"first\\\\nsecond\\"]}"}',
+    }} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /shell/ }))
+    const payloads = [...container.querySelectorAll('.tool-call-panel pre')].map((node) => node.textContent || '')
+    expect(payloads[0]).toContain('"options": {\n')
+    expect(payloads[0]).toContain('\n  "command": "Get-ChildItem"')
+    expect(payloads[1]).toContain('"content": {\n')
+    expect(payloads[1]).toContain('"lines": [\n')
+    expect(payloads[1]).toContain('"first\n')
+    expect(payloads[1]).toContain('second"')
   })
 
   it('运行统计是没有下拉按钮的静态指标面板', () => {
