@@ -181,4 +181,4 @@ Transport 必须提供：
 
 ## 平台扩展
 
-新增 OneBot/NapCat、Telegram 等平台时，复制 `message/out/example/` 并实现三个模块即可；核心路由、幂等、会话隔离、附件分流、日志和健康检测无需修改。
+新增 OneBot/NapCat、Telegram 等平台时，把 `template/message/` 复制为 `message/out/<name>/`，再按 `message.json` 清单实现 input / output / detect 三个入口即可；模板目录内部结构可完全替换（见 `template/message/模板说明.md`）。核心路由、幂等、会话隔离、附件分流、日志和健康检测无需修改。
