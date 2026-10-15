@@ -732,22 +732,34 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
             )
         if role == "tool":
             content = raw.get("content")
-            try:
-                parsed = json.loads(content) if isinstance(content, str) else content
-                blocks = [JsonContent(data=parsed)]
-            except json.JSONDecodeError:
-                blocks = [TextContent(text=str(content or ""))]
             original_call_id = str(raw.get("tool_call_id") or "")
             call_queue = pending_call_ids.get(original_call_id) or []
             call_id = call_queue.pop(0) if call_queue else original_call_id
-            items.append(
-                ToolResultItem(
-                    id=_unique_id(None, "result", item_ids),
+            native_result = raw.get("_kemo_tool_result")
+            if isinstance(native_result, dict):
+                native_result = copy.deepcopy(native_result)
+                native_result.pop("metadata", None)
+                native_result.pop("extensions", None)
+                native_result.update(
+                    id=_unique_id(native_result.get("id"), "result", item_ids),
                     call_id=call_id,
                     name=str(raw.get("name") or "unknown_tool"),
-                    content=blocks,
                 )
-            )
+                items.append(ToolResultItem.model_validate(native_result))
+            else:
+                try:
+                    parsed = json.loads(content) if isinstance(content, str) else content
+                    blocks = [JsonContent(data=parsed)]
+                except json.JSONDecodeError:
+                    blocks = [TextContent(text=str(content or ""))]
+                items.append(
+                    ToolResultItem(
+                        id=_unique_id(None, "result", item_ids),
+                        call_id=call_id,
+                        name=str(raw.get("name") or "unknown_tool"),
+                        content=blocks,
+                    )
+                )
     reasoning_enabled = request.extra.get("reasoning_enabled") is not False
     effort = normalize_kemo_reasoning_effort(request.extra.get("reasoning_effort"))
     mapped_chat_fields = {
