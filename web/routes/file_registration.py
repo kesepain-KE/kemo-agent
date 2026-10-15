@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     """Register file-space endpoints without changing their public contract."""
 
@@ -147,7 +149,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         scope: str,
         path: str = Query(...),
     ) -> FileResponse:
-        target, media_type, _ = backend.file_preview(user, scope, path)
+        target, media_type, _ = await run_in_threadpool(backend.file_preview, user, scope, path)
         return _preview_response(target, media_type)
 
     @app.get("/api/users/{user}/attachment-thumbnails/{checksum}")
@@ -335,8 +337,16 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
 
     @app.get("/api/tmp/preview")
     async def preview_tmp_file(path: str = Query(...)) -> FileResponse:
-        target, media_type, _ = backend.tmp_file_preview(path)
+        target, media_type, _ = await run_in_threadpool(backend.tmp_file_preview, path)
         return _preview_response(target, media_type)
+
+    @app.get("/api/tmp/download")
+    async def download_tmp_file(path: str = Query(...)) -> FileResponse:
+        target = backend.tmp_file_download(path)
+        return FileResponse(target, filename=target.name, headers={
+            "Cache-Control": "private, no-cache",
+            "X-Content-Type-Options": "nosniff",
+        })
 
     @app.put("/api/tmp/text")
     async def write_tmp_text(
@@ -371,5 +381,3 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.delete("/api/tmp/all")
     async def delete_all_tmp_files() -> dict[str, Any]:
         return backend.delete_all_tmp_files()
-
-

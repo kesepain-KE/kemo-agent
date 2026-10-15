@@ -50,6 +50,7 @@ from web.services.file_media_support import (
     _play_windows_failure_sound,
 )
 from web.services.sounds import SoundServiceMixin
+from web.services.document_preview import OFFICE_SUFFIXES, PDF_MAX_BYTES, office_pdf
 
 
 class FileServiceMixin(SoundServiceMixin):
@@ -409,7 +410,15 @@ class FileServiceMixin(SoundServiceMixin):
 
     def file_download(self, user: Any, scope: Any, path: Any) -> Path:
         _, _, directory = self._file_scope_root(user, scope)
+        return self._file_download_target(directory, path)
+
+    def tmp_file_download(self, path: Any) -> Path:
+        """Download original bytes independently of preview format and limits."""
+        return self._file_download_target(self.root / "tmp", path)
+
+    def _file_download_target(self, directory: Path, path: Any) -> Path:
         _, target = _safe_relative_target(directory, path)
+        _reject_link_path(directory.resolve(), target)
         if target.is_symlink() or not target.is_file():
             raise NotFoundError(f"文件不存在：{path}")
         return target
@@ -456,6 +465,19 @@ class FileServiceMixin(SoundServiceMixin):
         _reject_link_path(directory.resolve(), target)
         if target.is_symlink() or not target.is_file():
             raise NotFoundError(f"文件不存在：{relative}")
+        if target.suffix.lower() in OFFICE_SUFFIXES:
+            return office_pdf(target), "application/pdf", "document"
+        if target.suffix.lower() == ".pdf":
+            if target.stat().st_size > PDF_MAX_BYTES:
+                raise InvalidRequestError("PDF 预览上限（64 MB），请下载后查看")
+            return target, "application/pdf", "document"
+        if target.suffix.lower() in _EDITABLE_TEXT_SUFFIXES or target.suffix.lower() in {
+            ".markdown", ".jsonl", ".ndjson", ".jsx", ".xml", ".toml", ".ini", ".cfg",
+            ".sh", ".ps1", ".bat", ".sql", ".c", ".cpp", ".h", ".java", ".rs", ".go",
+        }:
+            if target.stat().st_size > 4 * 1024 * 1024:
+                raise InvalidRequestError("文本预览上限（4 MB），请下载后查看")
+            return target, "text/plain; charset=utf-8", "text"
         preview_type = _MEDIA_PREVIEW_TYPES.get(target.suffix.lower())
         if preview_type is None:
             raise InvalidRequestError("该文件类型不支持网页预览")
