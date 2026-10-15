@@ -3,12 +3,12 @@
 ## 范围与发布状态
 
 本文是 `deploy/` 独立部署系统的知识合同；源码业务更新器另见 `version-and-update-modules.md`。
-当前主框架稳定版本为 **1.4.0（2026-10-01 正式定档）**，配套 `kemo-adapter-api 1.0.0`，并与 `kemo-graph 1.6.0` 使用已核对的 Kemo 2.0 协议。
+当前主框架稳定版本为 **1.5.0（2026-10-15 正式定档）**，配套 `kemo-adapter-api 1.0.0`，并与 `kemo-graph 1.6.0` 使用已核对的 Kemo 2.0 协议。
 版本唯一真值是根目录 `version.json.version`。Windows、Linux、npm、Docker 不另设部署版本。
 
 **安装入口实现不等于线上已发布。** 原生远程安装须先推送安装脚本，并上传对应 Release 资产；
 npm 与 Docker 须分别发布分发包和镜像。Git push 不会自动完成这些发布。
-不能把之前 1.3.2 的本地验收包重命名为 1.4.0；必须按新版本重新构建和打包。
+不能把之前 1.3.2 的本地验收包重命名为 1.5.0；必须按新版本重新构建和打包。
 已完成的验收范围与未完成的远程/容器验收见 `deploy/VALIDATION.md`，不要声称全部渠道已经上线。
 
 ## 选择渠道与安装根
@@ -23,6 +23,11 @@ npm 与 Docker 须分别发布分发包和镜像。Git push 不会自动完成�
 
 Release 包含预构建前端；原生安装不要求 Git/Node.js，但仍需安装应用的 Python 依赖，
 只有部署器本身零第三方依赖。macOS 可复用 Unix 入口，尚未完成目标系统实机验收。
+
+网页文件空间的 Office 预览使用可选的 LibreOffice 本机转换。需要预览 Word、Excel、
+PowerPoint/ODF/RTF 时，在运行后端的主机或容器内安装 LibreOffice（PATH 中有
+`soffice`/`libreoffice`，Windows 也识别默认安装路径）。缺少此依赖时其他文件预览与原文下载
+照常使用，Office 显示安装提示；不自动上传到云预览服务。
 
 同一安装根不能在渠道间接管，也不能交替使用旧 `update.py` 和独立部署器更新。
 非空未受管目录不会被接管，开发仓库不能作为首装目标。首装时通过 `--install-root`
