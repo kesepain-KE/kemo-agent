@@ -80,7 +80,10 @@ from run.memory import (
     extract_memory_backlog as _extract_memory_backlog,
     extract_round_memory as _extract_round_memory,
 )
-from run.extensions import resolve_reasoning_selection
+from run.extensions import (
+    declared_input_token_limit,
+    resolve_reasoning_selection,
+)
 from run.extensions import main_model_supports_input, select_vision_route
 from run.config import (
     PromptBundle,

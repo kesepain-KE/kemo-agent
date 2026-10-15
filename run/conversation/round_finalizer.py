@@ -345,6 +345,9 @@ class TerminalRoundCommitter:
             "guidance": list(context.state.consumed_guidance),
             "guidance_details": copy.deepcopy(context.state.consumed_guidance_details),
             "provider_responses": metric_provider_responses,
+            "provider_request_diagnostics": copy.deepcopy(
+                context.state.provider_request_diagnostics
+            ),
             "status": status,
             "stop_reason": reason,
             **(
@@ -373,7 +376,7 @@ class TerminalRoundCommitter:
         cancelled_runtime_limit = (
             max(1, len(context_selection.kept_rounds) + 1)
             if summary_cache is not None and context_selection.removed_rounds
-            else context_policy.max_rounds
+            else max(1, int(cancelled_window["data"].get("rounds") or 0))
         )
         runtime_window = _trim_to_max_rounds(
             cancelled_window, cancelled_runtime_limit
@@ -387,6 +390,7 @@ class TerminalRoundCommitter:
                 summary_message=next_summary_message,
                 current_user_message=None,
                 tools=tool_schemas,
+                allow_compress=False,
             )
             runtime_window["data"]["context"] = {
                 **next_selection.stats(),

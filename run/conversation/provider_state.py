@@ -37,6 +37,9 @@ def initialize_provider_exchange(values: dict[str, Any]) -> dict[str, Any]:
     reasoning_selection = resolve_reasoning_selection(
         values["config"], runtime_provider, provider, cancel_event=cancel_event
     )
+    declared_provider_input_limit = values[
+        "declared_input_token_limit"
+    ](reasoning_selection.capabilities)
     reasoning_extra = (
         {"reasoning_effort": reasoning_selection.effort}
         if reasoning_selection.enabled and reasoning_selection.effort
@@ -56,6 +59,7 @@ def initialize_provider_exchange(values: dict[str, Any]) -> dict[str, Any]:
     return {
         "reasoning_selection": reasoning_selection,
         "reasoning_extra": reasoning_extra,
+        "declared_provider_input_limit": declared_provider_input_limit,
         "stream": bool(request.get("stream", runtime_provider.get("stream", False))),
         "guidance_channel": request.get("_guidance_queue"),
         "retry_state": request.get("_retry_state"),

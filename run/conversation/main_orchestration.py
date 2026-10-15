@@ -243,6 +243,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                         summary_message=build_summary_message(summary_cache),
                         current_user_message=None,
                         tools=tool_schemas,
+                        allow_compress=False,
                     )
                     runtime_window["data"]["context_snapshot"] = build_context_snapshot(
                         runtime_selection,
@@ -438,6 +439,9 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     "guidance": list(consumed_guidance),
                     "guidance_details": copy.deepcopy(consumed_guidance_details),
                     "provider_responses": _metric_provider_responses(provider_responses),
+                    "provider_request_diagnostics": copy.deepcopy(
+                        round_state.provider_request_diagnostics
+                    ),
                     **(
                         {
                             "status": "completed",
@@ -475,73 +479,55 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 archive_round_number,
             )
             tool_think_compression: dict[str, Any]
-            try:
-                tool_think_compression = _compress_per_round_tool_think(
-                    window=window,
-                    conserved_rounds=context_policy.recent_tool_rounds,
-                    agent_runner=agent_runner,
-                    cancel_event=cancel_event,
-                    source=source,
-                    session_id=session_id,
-                )
-                compression_usage = _usage_from_dict(
-                    tool_think_compression.get("usage") or {}
-                )
-                if compression_usage.total_tokens:
-                    _merge_usage(usage_total, compression_usage)
-                    _merge_usage(window["data"]["token_usage"], compression_usage)
-                    _merge_usage(
-                        archive_window["data"]["token_usage"], compression_usage
+            if context_policy.mid_context_compression_enabled:
+                try:
+                    tool_think_compression = _compress_per_round_tool_think(
+                        window=window,
+                        conserved_rounds=context_policy.recent_tool_rounds,
+                        agent_runner=agent_runner,
+                        cancel_event=cancel_event,
+                        source=source,
+                        session_id=session_id,
                     )
-                    window["data"]["round_metrics"][-1]["usage"] = dict(usage_total)
-                    archive_window["data"]["round_metrics"][-1]["usage"] = dict(
-                        usage_total
+                    compression_usage = _usage_from_dict(
+                        tool_think_compression.get("usage") or {}
                     )
-            except Exception as exc:
+                    if (
+                        compression_usage.total_tokens
+                        or compression_usage.extra.get("provider_request_count", 0)
+                    ):
+                        _record_provider_request(usage_total, compression_usage)
+                        _record_provider_request(
+                            window["data"]["token_usage"], compression_usage
+                        )
+                        _record_provider_request(
+                            archive_window["data"]["token_usage"], compression_usage
+                        )
+                        window["data"]["round_metrics"][-1]["usage"] = dict(usage_total)
+                        archive_window["data"]["round_metrics"][-1]["usage"] = dict(
+                            usage_total
+                        )
+                except Exception as exc:
+                    tool_think_compression = {
+                        "compressed": False,
+                        "round": None,
+                        "error": str(exc),
+                        "exception_type": type(exc).__name__,
+                    }
+            else:
                 tool_think_compression = {
                     "compressed": False,
                     "round": None,
-                    "error": str(exc),
-                    "exception_type": type(exc).__name__,
+                    "disabled": True,
                 }
-            compression_applied = bool(
-                summary_cache is not None and context_selection.removed_rounds
-            )
-            runtime_round_limit = (
-                max(1, len(context_selection.kept_rounds) + 1)
-                if compression_applied
-                else context_policy.max_rounds
-            )
-            runtime_window = _trim_to_max_rounds(window, runtime_round_limit)
-            next_summary_message = build_summary_message(summary_cache)
-            next_context_selection = select_context(
-                window=runtime_window,
-                policy=context_policy,
-                system_message=system_message,
-                summary_message=next_summary_message,
-                current_user_message=None,
-                tools=tool_schemas,
-            )
-            runtime_window["data"]["context"] = {
-                **next_context_selection.stats(),
-                "summary": summary_diagnostics,
-                "summary_usage": summary_usage,
-                "round_offset": max(
-                    0,
-                    archive_round_number
-                    - int(runtime_window["data"].get("rounds", 0)),
-                ),
-                "workspace_rounds": int(runtime_window["data"].get("rounds", 0)),
-                "summary_cache": (
-                    SUMMARY_STORE_REF if summary_cache is not None else None
-                ),
-            }
-            runtime_window["data"]["context_snapshot"] = build_context_snapshot(
-                next_context_selection,
-                system_prompt=prompt_bundle.text,
-                summary_message=next_summary_message,
-                capacity_tokens=context_policy.token_limit,
-            )
+            from run.conversation.context_finalization import finalize_completed_context
+
+            finalized_context = yield from finalize_completed_context({**runtime_bindings, **locals()})
+            runtime_window = finalized_context.window
+            summary_cache = finalized_context.summary_cache
+            summary_diagnostics = finalized_context.summary_diagnostics
+            context_stats = finalized_context.context_stats
+            compression_applied = finalized_context.compressed
             extraction_mode = memory_extraction_mode(config)
             archive_data = archive_window.setdefault("data", {})
             if archive_data.get("memory_processed_round") is None:

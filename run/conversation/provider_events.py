@@ -422,28 +422,29 @@ def is_context_length_exceeded(value: Any) -> bool:
     if isinstance(value, ContextLengthExceededError):
         return True
     if isinstance(value, ProviderError):
-        if str(value.category).casefold() == "context_length_exceeded":
-            return True
-        return is_context_length_exceeded(value.body) or (
-            "context_length_exceeded" in str(value).casefold()
-        )
+        return any(is_context_length_exceeded(item) for item in (
+            value.category, value.body, str(value),
+        ))
     if callable(getattr(value, "model_dump", None)):
         value = value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, dict):
-        code = str(value.get("code") or "").casefold()
-        error_type = str(value.get("type") or value.get("category") or "").casefold()
-        try:
-            provider_status = int(value.get("provider_status"))
-        except (TypeError, ValueError):
-            provider_status = None
-        if code == "context_length_exceeded" or error_type == "context_length_exceeded":
-            return True
-        if code == "provider_bad_response" and provider_status == 400:
-            return True
         return any(is_context_length_exceeded(item) for item in value.values())
     if isinstance(value, (list, tuple)):
         return any(is_context_length_exceeded(item) for item in value)
-    return isinstance(value, str) and "context_length_exceeded" in value.casefold()
+    if not isinstance(value, str):
+        return False
+    text = value.casefold().replace("_", " ").replace("-", " ")
+    return any(marker in text for marker in (
+        "context length exceeded", "context window exceeded",
+        "maximum context length", "prompt is too long", "prompt too long",
+        "input is too long", "input too long", "input token limit exceeded",
+        "input length exceeded",
+        "input tokens exceed", "too many input tokens",
+        "上下文长度超", "上下文超限", "输入 token 超限",
+    )) or (
+        ("context length" in text or "context window" in text)
+        and any(word in text for word in ("exceed", "too long", "limit reached"))
+    )
 
 
 def raise_if_context_length_exceeded(value: Any) -> None:
