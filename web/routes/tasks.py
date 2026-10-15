@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import FastAPI, Query
@@ -16,7 +17,17 @@ def register_task_routes(app: FastAPI, backend: WebRunService) -> None:
         source: str = Query("web", max_length=32),
         session_id: str = Query("", max_length=256),
     ) -> dict[str, Any]:
-        return backend.tasks(user, source=source, session_id=session_id)
+        return await asyncio.to_thread(backend.tasks, user, source=source, session_id=session_id)
+
+    @app.get("/api/users/{user}/tasks/cleanup")
+    async def preview_cleanup(user: str, category: str = Query(...),
+                              source: str = Query("web", max_length=32),
+                              session_id: str = Query("", max_length=256)) -> dict[str, Any]:
+        return backend.preview_task_cleanup(user, category, source=source, session_id=session_id)
+
+    @app.post("/api/users/{user}/tasks/cleanup")
+    async def cleanup(user: str, body: dict[str, Any]) -> dict[str, Any]:
+        return backend.cleanup_completed_tasks(user, body)
 
     @app.post("/api/users/{user}/tasks/plans")
     async def create_plan(

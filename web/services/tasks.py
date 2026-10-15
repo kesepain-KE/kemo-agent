@@ -32,6 +32,8 @@ from run.tasks import (
     normalize_plan,
 )
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
+from web.services.cron_validation import validate_cron_input
+from web.services.task_cleanup import TaskCleanupServiceMixin, visible_executions
 
 
 _REDACTED_TASK_PLAN_VALUE = "***"
@@ -103,7 +105,7 @@ def _redact_plan_revision(value: Any) -> Any:
     return value
 
 
-class TaskServiceMixin:
+class TaskServiceMixin(TaskCleanupServiceMixin):
     """Task APIs mixed into the backwards-compatible ``WebRunService`` facade."""
 
     @staticmethod
@@ -233,6 +235,7 @@ class TaskServiceMixin:
                 executions.append(
                     {
                         "kind": "plan_step",
+                        "record_id": f"{plan['plan_id']}:{step['step_id']}",
                         "task_id": plan["plan_id"],
                         "title": step.get("title", ""),
                         "status": step.get("status", ""),
@@ -252,6 +255,7 @@ class TaskServiceMixin:
             name,
             limit=100,
             exclude_task_ids=system_cron_ids,
+            task_hub_visible_only=True,
         )
         for record in cron_records:
             executions.append(
@@ -268,6 +272,7 @@ class TaskServiceMixin:
                     "error": _redact_plan_revision(record.get("error")),
                 }
             )
+        executions = visible_executions(self.root, name, executions)
         executions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return {
             "user": name,
@@ -665,23 +670,9 @@ class TaskServiceMixin:
         payload: dict[str, Any],
         current: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        validate_cron_input(payload, current)
         source = dict(current or {})
-        allowed = {
-            "title",
-            "prompt",
-            "type",
-            "interval_seconds",
-            "time",
-            "times",
-            "weekdays",
-            "month_days",
-            "start_date",
-            "end_date",
-            "max_runs",
-            "next_run_at",
-            "status",
-        }
-        source.update({key: value for key, value in payload.items() if key in allowed})
+        source.update(payload)
         if "time" in payload:
             source.pop("times", None)
         if "times" in payload:
