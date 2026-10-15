@@ -1,5 +1,5 @@
 import { createRef, useState } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { compactUserMessagePreview, UserMessageNavigator, type UserMessageMarker } from './UserMessageNavigator'
 
@@ -93,14 +93,14 @@ describe('UserMessageNavigator', () => {
     )
     const rail = screen.getByLabelText('轮次位置：当前预选第 24 轮，共 100 轮')
     fireEvent.pointerEnter(rail)
-    expect(screen.getAllByRole('button')).toHaveLength(10)
+    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toHaveLength(10)
     expect(screen.queryByRole('button', { name: /第 14 轮/ })).not.toBeInTheDocument()
     const earliestVisible = screen.getByRole('button', { name: /第 15 轮：消息 15/ })
     fireEvent.pointerEnter(earliestVisible)
     expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuenow', '15')
     expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuemax', '100')
     fireEvent.keyDown(earliestVisible, { key: 'ArrowUp' })
-    expect(screen.getAllByRole('button')).toHaveLength(10)
+    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toHaveLength(10)
     expect(screen.getByRole('button', { name: /第 14 轮：消息 14/ })).toHaveAttribute('aria-current', 'true')
   })
 
@@ -166,5 +166,92 @@ describe('UserMessageNavigator', () => {
     )
     expect(container).toBeEmptyDOMElement()
     expect(compactUserMessagePreview('**标题**\n\n[链接](https://example.com) 后续内容', 8)).toBe('标题 链接 后续…')
+  })
+
+  it('点击轨道可展开轮次，关闭状态不会留下卡片或正文状态文字', () => {
+    render(<UserMessageNavigator markers={markers} scrollContainerRef={createRef<HTMLDivElement>()} onNavigate={vi.fn()} />)
+    const rail = screen.getByRole('button', { name: /轮次位置/ })
+    expect(rail).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('group', { name: '对话轮次卡片' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /第 4 轮：/ })).not.toBeInTheDocument()
+    fireEvent.click(rail)
+    expect(rail).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('group', { name: '对话轮次卡片' })).toHaveAttribute('id', rail.getAttribute('aria-controls'))
+    expect(screen.getByText('点击定位这一轮')).toBeInTheDocument()
+  })
+
+  it('轨道支持方向键、Home/End 和 Enter 定位，Escape 关闭并恢复轨道焦点', () => {
+    const onNavigate = vi.fn()
+    render(<UserMessageNavigator markers={markers} scrollContainerRef={createRef<HTMLDivElement>()} onNavigate={onNavigate} />)
+    const rail = screen.getByRole('button', { name: /轮次位置/ })
+    fireEvent.focus(rail)
+    fireEvent.keyDown(rail, { key: 'Home' })
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '4')
+    fireEvent.keyDown(rail, { key: 'ArrowDown' })
+    fireEvent.keyDown(rail, { key: 'Enter' })
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith('message-2')
+    fireEvent.keyDown(rail, { key: 'End' })
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6')
+    fireEvent.keyDown(rail, { key: 'Escape' })
+    expect(rail).toHaveFocus()
+    expect(rail).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('点击外部关闭，重新打开不会保留旧预选轮次', () => {
+    render(<UserMessageNavigator markers={markers} scrollContainerRef={createRef<HTMLDivElement>()} onNavigate={vi.fn()} />)
+    const rail = screen.getByRole('button', { name: /轮次位置/ })
+    fireEvent.click(rail)
+    fireEvent.keyDown(rail, { key: 'Home' })
+    fireEvent.pointerDown(document.body)
+    expect(rail).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(rail)
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6')
+  })
+
+  it('加载边界的连续操作不会重复发起历史请求', async () => {
+    let resolve!: () => void
+    const onLoadEarlierMessages = vi.fn(() => new Promise<void>((done) => { resolve = done }))
+    render(<UserMessageNavigator markers={markers.slice(0, 1)} scrollContainerRef={createRef<HTMLDivElement>()}
+      hasEarlierMessages totalRounds={12} onLoadEarlierMessages={onLoadEarlierMessages} onNavigate={vi.fn()} />)
+    const rail = screen.getByRole('button', { name: /轮次位置/ })
+    fireEvent.click(rail)
+    fireEvent.keyDown(rail, { key: 'ArrowUp' })
+    fireEvent.keyDown(rail, { key: 'ArrowUp' })
+    expect(onLoadEarlierMessages).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status')).toHaveTextContent('正在加载更早消息')
+    await act(async () => { resolve() })
+    expect(screen.getByRole('status')).not.toHaveTextContent('正在加载更早消息')
+  })
+
+  it('卡片采用可缩放百分比弧线，激活同一轮只触发一次跳转', () => {
+    const onNavigate = vi.fn()
+    render(<UserMessageNavigator markers={markers} scrollContainerRef={createRef<HTMLDivElement>()} onNavigate={onNavigate} />)
+    fireEvent.click(screen.getByRole('button', { name: /轮次位置/ }))
+    const card = screen.getByRole('button', { name: /第 5 轮：第二条/ })
+    expect(card.style.getPropertyValue('--wheel-x')).toMatch(/%$/)
+    expect(card.style.getPropertyValue('--wheel-y')).toMatch(/%$/)
+    fireEvent.pointerDown(card, { button: 0 })
+    fireEvent.click(card, { detail: 1 })
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith('message-2')
+  })
+
+  it('触屏点击展开后抬手不会触发鼠标离开倒计时而立即关闭', () => {
+    vi.useFakeTimers()
+    try {
+      render(<UserMessageNavigator markers={markers} scrollContainerRef={createRef<HTMLDivElement>()} onNavigate={vi.fn()} />)
+      const rail = screen.getByRole('button', { name: /轮次位置/ })
+      const over = new Event('pointerover', { bubbles: true })
+      Object.defineProperty(over, 'pointerType', { value: 'touch' })
+      fireEvent(rail, over)
+      expect(rail).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.click(rail)
+      const out = new Event('pointerout', { bubbles: true })
+      Object.defineProperties(out, { pointerType: { value: 'touch' }, relatedTarget: { value: document.body } })
+      fireEvent(rail, out)
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(rail).toHaveAttribute('aria-expanded', 'true')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

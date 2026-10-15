@@ -1,6 +1,10 @@
 import { Fragment, Suspense, lazy } from 'react'
-import { Check, ChevronDown, Copy, ListChecks, Pencil, RotateCcw, Save, Trash2, Workflow, Zap } from 'lucide-react'
+import { Check, ChevronDown, Copy, ListChecks, Pencil, RotateCcw, Save, Trash2, Zap } from 'lucide-react'
+import { ReferenceIcon } from '../reference/ReferenceIcon'
 import { AgentComposer } from '../components/AgentComposer'
+import { KemoLogo } from '../components/KemoLogo'
+import { ComposerReasoningSelect } from '../components/ComposerReasoningSelect'
+import { ComposerModelSelect } from '../components/ComposerModelSelect'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { copyableAssistantText, type InlineWidgetAction } from '../components/Chat/inlineWidgetProtocol'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
@@ -9,7 +13,7 @@ import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer
 import { LongTaskBubble } from '../components/LongTaskBubble'
 import { SubagentToolCard } from '../components/SubagentProgressBubble'
 import { statusLabel } from '../components/ModuleUi'
-import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
+import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
@@ -24,9 +28,10 @@ import {
   ContextCompressionBubble,
   greetingLabel,
   GuidanceMessage,
+  guidanceDetailLabel,
+  guidanceTitleLabel,
   MediaArtifactCard,
   PendingAttachmentTray,
-  quickStartCards,
   TaskPlanRecord,
   UserAttachmentCard,
   UserMessageAvatar,
@@ -44,7 +49,9 @@ interface ChatPageViewProps {
   liveItems: ChatItem[]
   conversationBlocks: ConversationBlock[]
   recentTasks: ScheduledTaskItem[]
-  recentSenseData: SenseDataItem[]
+  tokenTotal?: number
+  tokenCacheRate?: number
+  outputTokens?: number
   userMessageMarkers: UserMessageMarker[]
   pendingUploads: PendingUploadedFile[]
   capabilityItems: CapabilityReferenceItem[]
@@ -53,8 +60,8 @@ interface ChatPageViewProps {
 export function ChatPageView(props: ChatPageViewProps) {
   const {
     showWelcome, conversationMenuOpen, scrollRef, handleChatScroll, sessionId, historyQuery,
-    user, overview, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
-    recentTasks, recentSenseData, liveItems, items, historyData, conversationBlocks, userAvatarUrl,
+    user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
+    recentTasks, tokenTotal, tokenCacheRate, outputTokens, liveItems, items, historyData, conversationBlocks, userAvatarUrl,
     editedSources, running, lastUserMessage, editAndResend, conversationBusy, copyMessage, copiedItem,
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
@@ -69,6 +76,18 @@ export function ChatPageView(props: ChatPageViewProps) {
     referenceCapability,
   } = props
   const visibleFollowUpCount = followUpQueue.filter((message: { status: string }) => message.status !== 'guiding').length
+  const contextSnapshot = overview?.context_snapshot?.available ? overview.context_snapshot : null
+  const contextStats = contextSnapshot || overview?.context
+  const tokenLabel = (value: number | undefined) => (
+    typeof value === 'number' && Number.isFinite(value)
+      ? new Intl.NumberFormat('en-US').format(Math.max(0, Math.round(value)))
+      : '—'
+  )
+  const tokenRateLabel = (value: number | undefined) => (
+    typeof value === 'number' && Number.isFinite(value)
+      ? `${Math.max(0, value).toFixed(1)}%`
+      : '—'
+  )
   const handleWidgetAction = (action: InlineWidgetAction) => {
     if (action.type === 'fill-input') {
       setDraft(action.text)
@@ -88,60 +107,59 @@ export function ChatPageView(props: ChatPageViewProps) {
   }
 
 return (
-  <div className={`view chat-view active${showWelcome ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
+  <div className={`chat-layout${showWelcome ? ' welcome-mode' : ''}${conversationMenuOpen ? ' conversation-menu-open' : ''}`}>
     <div className="chat-scroll-stage">
       <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
       {showWelcome && (!sessionId || !historyQuery.isLoading) && (
-        <section className="welcome">
-          <div className="welcome-top">
-            <article className="greeting-card">
-              <div className="hero-logo"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></div>
-              <div className="greeting-copy">
-                <h1>{greetingLabel()}，{user || '用户'}</h1>
-                <p>当前用户的配置、历史、知识、任务与技能运行态已载入。今天需要处理什么？</p>
-                <span className="role-line">● 当前用户 · users/{user || '—'}</span>
-              </div>
-            </article>
-            <article className="snapshot-card">
-              <div className="snapshot-item"><strong>{overview?.counts.sessions ?? '—'} 个</strong><span>Web 会话</span></div>
-              <div className="snapshot-item"><strong className="ok">{overview?.counts.knowledge_documents ?? '—'} 项</strong><span>文件知识</span></div>
-              <div className="snapshot-item"><strong>{overview?.counts.enabled_tools ?? '—'} 个</strong><span>可用工具</span></div>
-              <div className="snapshot-item"><strong>{overview?.counts.active_tasks ?? '—'} 个</strong><span>活动任务</span></div>
-            </article>
+        <section className="welcome"><div className="welcome-inner">
+          <div className="welcome-hero">
+            <div className="welcome-mark"><KemoLogo /></div>
+            <h1 className="welcome-hi">{greetingLabel()}，<span className="welcome-user">{user || '用户'}</span></h1>
+            <p className="welcome-sub">kemo-agent 已就绪。描述目标即可开始，需要计划的任务会先生成草案再等确认。</p>
           </div>
-          {activePlan && !dockedPlan && <article className={`active-task-card ${activeTaskOpen ? 'open' : ''}`}>
-            <div className="active-task-main">
-              <span className="active-task-play"><ListChecks size={17} /></span>
-              <span className="active-task-copy"><small>{statusLabel(activePlan.status)} · 当前用户 {user}</small><strong>{activePlan.title}</strong><span>{activePlan.description}</span></span>
-              <span className="active-task-progress"><b>{activePlan.progress.percent}%</b><span className="progress-line"><i style={{ width: `${activePlan.progress.percent}%` }} /></span></span>
-                <button className="task-inline-btn" onClick={() => setActiveTaskOpen((value: boolean) => !value)}>{activeTaskOpen ? '收起步骤' : '展开步骤'} <ChevronDown size={13} /></button>
-              <button className="task-inline-btn primary" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}>任务中枢</button>
+          {activePlan && !dockedPlan && <div className="card card-pad">
+            <div className="section-title"><ReferenceIcon name="tasks" small />{activePlan.title}<span className="badge">{statusLabel(activePlan.status)}</span></div>
+            <p className="page-desc">{activePlan.description}</p>
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${activePlan.progress.percent}%` }} /></div>
+            <div className="toolbar"><button className="btn btn-ghost btn-sm" onClick={() => setActiveTaskOpen((value: boolean) => !value)}>{activeTaskOpen ? '收起步骤' : '展开步骤'}</button>
+              <button className="btn btn-outline btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>任务中枢</button></div>
+            {activeTaskOpen && activePlan.steps.slice(0, 6).map((step: PlanSummary['steps'][number]) => <div className="list-row" key={step.step_id}>{step.title}<span className="badge">{statusLabel(step.status)}</span></div>)}
+          </div>}
+          <div className="welcome-cols">
+            <div className="welcome-section">
+              <div className="welcome-section-head"><div className="welcome-section-title"><ReferenceIcon name="clock" small />近期活动</div>
+                <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>任务中枢</button></div>
+              <div className="reference-recent-list">{recentTasks.slice(0, 3).map(task => <button className="recent-task" key={task.id} onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&tab=cron`)}>
+                <div className="entry-icon"><ReferenceIcon name="clock" small /></div><div className="reference-entry-copy"><div className="rt-title truncate">{task.title}</div><div className="rt-sub">{task.schedule} · {task.nextRun}</div></div><span className="badge">{statusLabel(task.status)}</span>
+              </button>)}
+              {!recentTasks.length && <div className="empty"><div className="empty-title">暂无待执行的定时任务</div></div>}</div>
             </div>
-            <div className="active-task-detail">{activePlan.steps.slice(0, 6).map((step: PlanSummary['steps'][number], index: number) => <div className={`active-task-step ${step.status}`} key={step.step_id}><i>{step.status === 'completed' ? '✓' : index + 1}</i><span><strong>{step.title}</strong><small>{statusLabel(step.status)} · {step.description}</small></span></div>)}</div>
-          </article>}
-          <div className="quick-start">
-            {quickStartCards.map(({ prompt, icon: Icon, title, desc, tone }) => (
-              <button key={prompt} className={`quick-card quick-card-${tone}`} onClick={() => setDraft(prompt)}>
-                <span className="quick-icon"><Icon size={17} /></span>
-                <strong>{title}</strong>
-                <span>{desc}</span>
-              </button>
-            ))}
+            <div className="welcome-section">
+              <div className="welcome-section-head"><div className="welcome-section-title"><ReferenceIcon name="activity" small />系统状态</div></div>
+              <div className="welcome-metrics-panel" aria-label="Token 统计">
+                <div className="welcome-metric">
+                  <span className="welcome-metric-label">总 Token</span>
+                  <strong>{tokenLabel(tokenTotal)}</strong>
+                  <small>今日累计</small>
+                </div>
+                <div className="welcome-metric">
+                  <span className="welcome-metric-label">Token 命中率</span>
+                  <strong>{tokenRateLabel(tokenCacheRate)}</strong>
+                  <small>缓存命中</small>
+                </div>
+                <div className="welcome-metric">
+                  <span className="welcome-metric-label">输出 Token</span>
+                  <strong>{tokenLabel(outputTokens)}</strong>
+                  <small>今日输出</small>
+                </div>
+              </div>
+            </div>
           </div>
-          <RecentActivityCard
-            className="welcome-recent-status"
-            scheduledTasks={recentTasks}
-            senseData={recentSenseData}
-            onViewAllTasks={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}
-            onViewAllSenseData={() => navigate(`/sense?user=${encodeURIComponent(user)}`)}
-            onTaskClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}`)}
-            onSenseDataClick={() => navigate(`/sense?user=${encodeURIComponent(user)}`)}
-          />
-        </section>
+        </div></section>
       )}
       {historyQuery.isLoading && <div className="center-state">正在加载历史…</div>}
-      {historyQuery.isError && sessionId && liveItems.length === 0 && <div className="center-state error">该会话尚无已提交历史，可以直接发送第一条消息。</div>}
-      <div className={`messages ${items.length ? 'show' : ''}`}>
+      {historyQuery.isError && sessionId && liveItems.length === 0 && <div className="center-state error">历史读取失败，请刷新后重试；不会把读取错误当作空会话。</div>}
+      <div className={`chat-stream ${items.length ? 'show' : ''}`}>
         {historyQuery.isFetchingNextPage ? <div className="history-page-status">正在加载更早对话…</div> : null}
         {historyQuery.hasNextPage && !historyQuery.isFetchingNextPage ? (
           <button className="history-page-button" type="button" onClick={() => { void loadEarlierHistory() }}>加载更早对话</button>
@@ -156,9 +174,9 @@ return (
             const item = block.item
             return (
               <Fragment key={block.id}>
-                <article className="message user" data-user-message-id={item.id}>
-                  <UserMessageAvatar avatarUrl={userAvatarUrl} />
-                  <div className="message-body">
+                <article className="msg is-user" data-user-message-id={item.id}>
+                  <UserMessageAvatar avatarUrl={userAvatarUrl} user={user} />
+                  <div className="msg-body">
                     {item.content ? <div className="bubble"><PlainTextMessage content={item.content} /></div> : null}
                     {item.attachments?.length ? (
                       <div className="user-attachment-list">
@@ -167,12 +185,12 @@ return (
                         ))}
                       </div>
                     ) : null}
-                    <div className="message-actions">
-                      {item.edited ? <span className="edited-label">编辑后重发</span> : null}
-                      {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
-                      {!running && item.content && lastUserMessage?.id === item.id ? <button onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
-                      <button onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
-                    </div>
+                  </div>
+                  <div className="user-message-actions">
+                    {item.edited ? <span className="edited-label">编辑后重发</span> : null}
+                    {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
+                    {!running && item.content && lastUserMessage?.id === item.id ? <button type="button" onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
+                    <button type="button" onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
                   </div>
                 </article>
               </Fragment>
@@ -184,9 +202,9 @@ return (
           const assistantCopyId = assistantMessages.at(-1)?.id || block.id
           const hasPlanBubble = block.items.some((item) => item.kind === 'task_plan')
           return (
-            <article key={block.id} className="assistant-turn">
-              <div className="msg-avatar assistant-turn-avatar"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent" /></div>
-              <div className="assistant-turn-content">
+            <article key={block.id} className="msg is-assistant">
+              <span className="msg-avatar is-assistant" title="kemo-agent"><KemoLogo /></span>
+              <div className="msg-body">
                 {block.items.map((item) => {
                   if (item.kind === 'context_compression' || item.kind === 'subagent_progress') return null
                   if (item.kind === 'long_task_boundary') return <div className="long-task-boundary" key={item.id}>长任务自动续跑 · 第 {item.continuation + 1} Run</div>
@@ -226,6 +244,18 @@ return (
                   <div className="assistant-turn-footer">
                     <div className="assistant-turn-usage">{usageItems.map((item) => <UsageCard key={item.id} item={item} />)}</div>
                     {assistantMessages.length > 0 && (
+                      <button
+                        type="button"
+                        className="assistant-turn-retry"
+                        onClick={() => void regenerateLastResponse()}
+                        disabled={running || Boolean(conversationBusy) || !lastUserMessage}
+                        aria-label="重试智能体回复"
+                        title="重试智能体回复"
+                      >
+                        <RotateCcw size={14} />
+                      </button>
+                    )}
+                    {assistantMessages.length > 0 && (
                       <button className="assistant-turn-copy" onClick={() => void copyMessage(assistantCopyId, assistantText)} disabled={!assistantText} aria-label="复制智能体回复">
                         {copiedItem === assistantCopyId ? <Check size={13} /> : <Copy size={13} />}{copiedItem === assistantCopyId ? '已复制' : '复制'}
                       </button>
@@ -254,7 +284,7 @@ return (
         onNavigate={jumpToUserMessage}
       />
     </div>
-    <div className="composer-zone">
+    <div className="composer-dock composer-zone">
       {runRetryNotice ? (
         <div className="run-retry-bubble" role="status" aria-live="polite">
           <span>运行出现问题，正在自动重试（本次错误第 {runRetryNotice.nextAttempt}/{runRetryNotice.maxAttempts} 次）</span>
@@ -288,13 +318,37 @@ return (
           onRetry={(id) => setNextTurnMessageStatus(user, liveSessionId, id, 'queued')}
           onReorder={(id, targetId) => reorderNextTurnMessages(user, liveSessionId, id, targetId)} />}
         guidanceContent={guidancePreviewItem ? <div className="composer-guidance-preview composer-guidance-preview-embedded" aria-live="polite"><GuidanceMessage user={user} item={guidancePreviewItem} placement="current" /></div> : undefined}
+        guidanceLabel={guidancePreviewItem ? guidanceTitleLabel(guidancePreviewItem) : undefined}
+        guidanceDetail={guidancePreviewItem?.status === 'accepted' ? guidanceDetailLabel(guidancePreviewItem) : undefined}
       />
       <AgentComposer
+        modelBar={<div className="composer-modelbar">
+          <ComposerModelSelect key={`${user}:${overview?.provider?.type}:${overview?.provider?.base_url}`}
+            user={user} provider={overview?.provider} disabled={running || stopping || conversationBusy} />
+          <ComposerReasoningSelect key={`${user}:${overview?.provider?.model}`} control={reasoningControl} />
+          <button
+            className={`model-pill long-task-toggle${longTaskQuery.data?.long_task.enabled ? ' is-enabled' : ''}`}
+            disabled={longTaskBusy}
+            onClick={() => void toggleLongTask()}
+            aria-label="切换长任务"
+          >
+            <Zap
+              size={14}
+              aria-hidden="true"
+              fill={longTaskQuery.data?.long_task.enabled ? 'currentColor' : 'none'}
+              strokeWidth={longTaskQuery.data?.long_task.enabled ? 2.2 : 1.8}
+            />
+            <span>长任务 · {longTaskQuery.data?.long_task.enabled ? '开' : '关'}</span>
+          </button>
+        </div>}
         value={draft}
         placeholder={user ? running ? 'Enter 加入消息跟进；Ctrl+Enter 直接本轮引导…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
         currentRound={currentRound}
         totalRounds={totalRounds}
         roundLimit={roundLimit}
+        contextPercent={contextStats?.percent}
+        contextUsedTokens={contextSnapshot?.total_tokens ?? contextStats?.usage?.total_tokens}
+        contextTokenWindow={contextSnapshot?.capacity_tokens ?? contextStats?.limit}
         running={running}
         stopping={stopping}
         disabled={!user}
@@ -319,16 +373,7 @@ return (
             </button>
             <button className="conversation-action compress" role="menuitem" disabled={running || Boolean(conversationBusy) || !sessionId || !hasCommitted} onClick={() => { void compressCurrentConversation() }}>
               <span className="conversation-action-icon"><Zap size={16} /></span>
-              <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在压缩并提取记忆…' : '整理当前上下文并同步提取待处理记忆'}</span></span>
-            </button>
-            <button className="conversation-action long-task-action" role="menuitemcheckbox" aria-checked={Boolean(longTaskQuery.data?.long_task.enabled)} disabled={!sessionId || longTaskBusy || longTaskQuery.isLoading} onClick={() => { void toggleLongTask() }}>
-              <span className="conversation-action-icon"><Workflow size={16} /></span>
-              <span className="conversation-action-copy"><strong>长任务模式</strong><span>{longTaskQuery.data?.long_task.status === 'running' ? '正在跨 Run 执行；关闭后会在当前 Run 收束时停止续跑' : longTaskQuery.data?.long_task.enabled ? '已允许；达到单轮工具上限后自动续跑' : '允许当前对话达到单轮工具上限后自动续跑'}</span></span>
-              <span className={`conversation-switch ${longTaskQuery.data?.long_task.enabled ? 'on' : ''}`} aria-hidden="true"><i /></span>
-            </button>
-            <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy) || !lastUserMessage} onClick={() => void regenerateLastResponse()}>
-              <span className="conversation-action-icon"><RotateCcw size={16} /></span>
-              <span className="conversation-action-copy"><strong>重新发送一次消息</strong><span>撤销上一轮后重放原消息，不增加对话轮数</span></span>
+              <span className="conversation-action-copy"><strong>手动进行一次上下文压缩</strong><span>{conversationBusy === 'compress' ? '正在整理上下文…' : '优先按轮数压缩，不足时按 Token 压缩；记忆转入后台'}</span></span>
             </button>
             {conversationFeedback ? <div className={`conversation-menu-status ${conversationFeedback.tone}`} role="status">{conversationFeedback.text}</div> : null}
             <div className="conversation-menu-foot">再次打开网页会恢复上次活跃对话；点击“保存并创建新对话”才会关闭并切换会话。</div>
@@ -351,6 +396,7 @@ return (
         onNextTurn={queueFollowUp}
         onStop={() => { void stopCurrentRun() }}
       />
+      <div className="composer-hint"><span><kbd>Enter</kbd> {running ? '下一轮跟进' : '发送'}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 引导当前轮</span><span><kbd>Ctrl</kbd> + <kbd>K</kbd> 命令面板</span></div>
     </div>
     <KnowledgeReferenceDrawer
       open={knowledgeDrawerOpen}

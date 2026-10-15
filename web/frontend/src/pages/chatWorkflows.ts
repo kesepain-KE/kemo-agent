@@ -71,6 +71,8 @@ export interface SendWorkflowDependencies {
   setDraftText: AnyFn
   finishChatRun: AnyFn
   setStopping: AnyFn
+  createNewSession: () => Promise<string | undefined>
+  creatingSendSessionRef: MutableValue<boolean>
 }
 
 export function createSendHandler(dependencies: SendWorkflowDependencies) {
@@ -84,7 +86,7 @@ export function createSendHandler(dependencies: SendWorkflowDependencies) {
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
     playCompletionSoundOnce, playFailureSoundOnce, setDraftUploads,
     refreshSessions, isCurrentConversation, moveDraft, setSessionId,
-    refreshOverview, setDraftText, finishChatRun, setStopping,
+    refreshOverview, setDraftText, finishChatRun, setStopping, createNewSession, creatingSendSessionRef,
   } = dependencies
 
 return async (
@@ -102,10 +104,24 @@ return async (
   const uploadedFiles = options.uploadedFiles ?? []
   const hasContent = Boolean(options.content?.length)
   if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && (running || stopping)) || uploading) return false
-  const activeSession = options.sessionId || sessionId || createSessionId()
+  if (creatingSendSessionRef.current) return false
+  let activeSession = options.sessionId || sessionId
+  if (!activeSession) {
+    creatingSendSessionRef.current = true
+    try {
+      activeSession = await createNewSession() || ''
+      if (!activeSession) return false
+    } catch (error) {
+      setRunErrorNoticeFor(user, currentLiveSessionRef.current, {
+        id: eventId('run-error'),
+        message: error instanceof Error ? error.message : '创建对话失败，请重试',
+      })
+      return false
+    } finally { creatingSendSessionRef.current = false }
+  }
   const targetUser = user
-  const submissionDraftKey = draftKey
-  let finalDraftKey = submissionDraftKey
+  const submissionDraftKey = chatDraftKey(user, activeSession)
+  const finalDraftKey = submissionDraftKey
   lastAttemptSessionRef.current = activeSession
   currentUserRef.current = targetUser
   currentLiveSessionRef.current = activeSession
@@ -129,6 +145,7 @@ return async (
   if (uploadedFiles.length) {
     setPendingUploads((current: any) => removeSubmittedUploads(current, uploadedFiles))
   }
+  if (draftKey !== submissionDraftKey) moveDraft(draftKey, submissionDraftKey)
   setRunning(true, targetUser, activeSession, runId)
   setActiveRunId(runId, targetUser, activeSession)
   setConversationMenuOpen(false)
@@ -273,11 +290,8 @@ return async (
       ])
     }
     await refreshSessions()
-    if (!sessionId && isCurrentConversation(targetUser, activeSession)) {
+    if (isCurrentConversation(targetUser, activeSession)) {
       locallyCommittedSessionRef.current = activeSession
-      finalDraftKey = chatDraftKey(user, activeSession)
-      moveDraft(submissionDraftKey, finalDraftKey)
-      setSessionId(activeSession)
     }
     if (
       committed
@@ -433,6 +447,7 @@ const executePlan = async (plan: PlanSummary) => {
   const runId = `run_${randomUUID().replaceAll('-', '')}`
   const historyUserMessages = activeSession === sessionId ? persistedUserMessages : 0
   beginChatRun(targetUser, activeSession, runId, historyUserMessages)
+  if (!sessionId) setSessionId(activeSession)
   setRunRetryNoticeFor(targetUser, activeSession, null)
   setRunErrorNoticeFor(targetUser, activeSession, null)
   updateChatRunItems(targetUser, activeSession, (current: any) => [

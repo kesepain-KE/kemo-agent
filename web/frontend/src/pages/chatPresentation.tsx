@@ -1,21 +1,21 @@
 import { useEffect, useState } from 'react'
-import { Activity, BrainCircuit, Download, File as FileIcon, FileX2, Image as ImageIcon, ListChecks, Music2, Shapes, TimerReset, Trash2, UserRound, Video, X } from 'lucide-react'
+import { BrainCircuit, Download, File as FileIcon, FileX2, Image as ImageIcon, ListChecks, Music2, Trash2, UserRound, Video, X } from 'lucide-react'
 import { getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl } from '../api/client'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import type { ScheduledTaskItem, SenseDataItem } from '../components/RecentActivityCard'
 import type { ChatItem, CronTaskSummary, InputAttachment, MediaArtifact, PlanSummary, SenseSourceSummary } from '../types/api'
 import type { PendingUploadedFile } from '../store/chatDrafts'
 
-export function UserMessageAvatar({ avatarUrl }: { avatarUrl?: string }) {
+export function UserMessageAvatar({ avatarUrl, user }: { avatarUrl?: string; user?: string }) {
   const [avatarFailed, setAvatarFailed] = useState(false)
 
   useEffect(() => setAvatarFailed(false), [avatarUrl])
 
   return (
-    <div className="msg-avatar user-message-avatar">
+    <div className="msg-avatar user-message-avatar" role="img" aria-label={`${user || '用户'}头像`} title={user || '用户'}>
       {avatarUrl && !avatarFailed
         ? <img src={avatarUrl} alt="" onError={() => setAvatarFailed(true)} />
-        : <UserRound size={17} />}
+        : <UserRound size={26} />}
     </div>
   )
 }
@@ -128,24 +128,24 @@ export function PendingAttachmentCard({
         ? <ImageIcon size={22} />
         : <FileIcon size={22} />
 
-  useEffect(() => setPreviewFailed(false), [file.path])
+  useEffect(() => {
+    setPreviewFailed(false)
+  }, [file.path])
 
   return (
-    <article className={`pending-attachment-card${image ? ' image' : ' file'}`} role="listitem" aria-label={`待发送附件：${file.name}`}>
-      <span className="pending-attachment-status">已上传 {file.name}</span>
+    <article className={`pending-attachment-card${image ? ' image' : ' file'}`} role="listitem" aria-label={`待发送附件：${file.name}`} title={file.name}>
       {image && !previewFailed ? (
-        <a className="pending-attachment-preview" href={previewUrl} target="_blank" rel="noreferrer" aria-label={`预览图片 ${file.name}`}>
-          <img src={thumbnailUrl} alt={file.name} onError={() => setPreviewFailed(true)} />
-        </a>
+        <span className="pending-attachment-preview-shell">
+          <a className="pending-attachment-preview" href={previewUrl} target="_blank" rel="noreferrer" aria-label={`预览图片 ${file.name}`}>
+            <img src={thumbnailUrl} alt={file.name} onError={() => setPreviewFailed(true)} />
+          </a>
+        </span>
       ) : (
         <span role="img" className={`pending-attachment-file-icon ${mediaKind}`} aria-label={`${mediaKind === 'audio' ? '音频' : mediaKind === 'video' ? '视频' : image ? '图片' : '文件'}缩略图`}>
           {typeIcon}
         </span>
       )}
-      <span className="pending-attachment-copy">
-        <strong title={file.name}>{file.name}</strong>
-        <small>{file.mimeType || '文件'} · {formatBytes(file.size)}</small>
-      </span>
+      <span className="pending-attachment-name" title={file.name}>{file.name}</span>
       <button type="button" className="pending-attachment-remove" onClick={onRemove} aria-label={`取消引用 ${file.name}`} title="取消本次引用">
         <X size={15} />
       </button>
@@ -175,13 +175,6 @@ export function PendingAttachmentTray({
     </div>
   )
 }
-
-export const quickStartCards = [
-  { prompt: '查询 kemo-agent 当前感知情况', icon: BrainCircuit, title: '查询感知情况', desc: '查看感知来源、采集数据与当前注入状态', tone: 'sense' },
-  { prompt: '查询 kemo-agent 当前拓展情况', icon: Shapes, title: '查询拓展情况', desc: '查看拓展模块、采集能力与注入状态', tone: 'expand' },
-  { prompt: '查询 kemo-agent 当前运行状态', icon: Activity, title: '查询运行状态', desc: '汇总核心模块、Provider 与外接服务状态', tone: 'status' },
-  { prompt: '为当前用户创建一个定时任务', icon: TimerReset, title: '创建定时任务', desc: '通过对话描述时间、内容与执行目标', tone: 'timer' },
-]
 
 export function greetingLabel() {
   const hour = new Date().getHours()
@@ -234,40 +227,51 @@ export type GuidanceDisplayItem = GuidanceItem | {
   status: 'next_turn' | 'next_turn_error'
 }
 
-export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
-  const title = item.status === 'queued'
-    ? '正在引导'
+export function guidanceTitleLabel(item: GuidanceDisplayItem) {
+  return item.status === 'queued'
+    ? '引导中'
     : item.status === 'next_turn'
       ? '已排队到下一轮'
       : item.status === 'next_turn_error'
         ? '自动发送失败'
-    : item.status === 'not_applied'
-      ? '本轮未生效'
-      : item.status === 'error'
-        ? '引导失败'
-        : '引导成功'
-  const detail = item.status === 'queued'
+        : item.status === 'not_applied'
+          ? '本轮未生效'
+          : item.status === 'error'
+            ? '引导失败'
+            : '引导成功'
+}
+
+export function guidanceDetailLabel(item: GuidanceDisplayItem) {
+  return item.status === 'queued'
     ? '等待智能体到达下一个安全边界'
     : item.status === 'next_turn'
       ? '本轮结束后将自动作为新的用户消息发送'
       : item.status === 'next_turn_error'
         ? '消息仍已保留，可以重新发送'
-    : item.status === 'accepted'
-      ? '智能体已读取该引导并继续运行'
-      : item.status === 'completed'
-        ? '本轮运行已采用此引导'
-        : item.status === 'not_applied'
-          ? '本轮结束前未进入下一次模型请求'
-          : '引导未能提交到当前运行'
+        : item.status === 'accepted'
+          ? '智能体已读取该引导并继续运行'
+          : item.status === 'completed'
+            ? '本轮运行已采用此引导'
+            : item.status === 'not_applied'
+              ? '本轮结束前未进入下一次模型请求'
+              : '引导未能提交到当前运行'
+}
+
+export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
+  const title = guidanceTitleLabel(item)
+  const detail = guidanceDetailLabel(item)
   return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
-    <span className="guidance-title"><i aria-hidden="true" />{title}</span>
-    {item.content ? <strong>{item.content}</strong> : null}
+    {placement === 'current' ? <span className="sr-only">{item.status === 'queued' ? '正在引导' : title}</span> : null}
+    {placement === 'completed' ? <div className="guidance-meta">
+      <small>{detail}</small>
+      <span className="guidance-title"><i aria-hidden="true" />{title}</span>
+    </div> : null}
+    {item.content ? <div className="guidance-content"><strong>{item.content}</strong></div> : null}
     {item.attachments?.length ? <div className="user-attachment-list guidance-attachment-list">
       {item.attachments.map((attachment, index) => (
         <UserAttachmentCard key={attachment.asset_id || `${attachment.name}_${index}`} user={user} attachment={attachment} />
       ))}
     </div> : null}
-    <small>{detail}</small>
     {onRetry || onCancel ? <div className="guidance-actions">
       {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>取消</button> : null}
       {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>重新发送</button> : null}
@@ -296,8 +300,9 @@ export function ContextCompressionBubble({ item }: { item: Extract<ChatItem, { k
 
 export function buildScheduledTaskItems(tasks: CronTaskSummary[]): ScheduledTaskItem[] {
   const supportedStatuses = new Set<ScheduledTaskItem['status']>(['enabled', 'running', 'paused', 'failed', 'cancelled', 'disabled'])
+  const terminalStatuses = new Set(['completed', 'cancelled', 'disabled'])
   return [...tasks]
-    .filter((task) => task.user_defined && task.status !== 'completed')
+    .filter((task) => task.user_defined && !terminalStatuses.has(task.status))
     .sort((left, right) => (left.next_run_at || left.created_at).localeCompare(right.next_run_at || right.created_at))
     .map((task) => ({
       id: task.task_id,

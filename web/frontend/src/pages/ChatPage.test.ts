@@ -290,6 +290,8 @@ describe('reduceRunEvent', () => {
     const items = buildScheduledTaskItems([
       base,
       { ...base, task_id: 'completed-task', title: '已完成单次任务', status: 'completed', type: 'once', next_run_at: '', last_state: 'completed' },
+      { ...base, task_id: 'cancelled-task', title: '已取消任务', status: 'cancelled' },
+      { ...base, task_id: 'disabled-task', title: '已停用任务', status: 'disabled' },
       { ...base, task_id: 'system-task', title: '系统维护', user_defined: false },
     ])
     expect(items.map((item) => item.title)).toEqual(['用户任务'])

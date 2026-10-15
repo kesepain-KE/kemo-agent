@@ -1,8 +1,6 @@
 import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity,
-  BrainCircuit,
   Check,
   ChevronDown,
   ListChecks,
@@ -15,8 +13,6 @@ import {
   Pencil,
   RotateCcw,
   Save,
-  Shapes,
-  TimerReset,
   Trash2,
   UserRound,
   Video,
@@ -25,8 +21,9 @@ import {
   Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getSense, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getRuntimeStatus, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
+import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { buildCapabilityReferenceItems, capabilityReferenceLine, capabilityReferenceMarker } from '../components/capabilityReferences'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
@@ -34,11 +31,11 @@ import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../comp
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
 import { LongTaskBubble } from '../components/LongTaskBubble'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
-import { RecentActivityCard, type ScheduledTaskItem, type SenseDataItem } from '../components/RecentActivityCard'
+import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
@@ -110,7 +107,6 @@ import {
   GuidanceMessage,
   MediaArtifactCard,
   PendingAttachmentTray,
-  quickStartCards,
   TaskPlanRecord,
   UserAttachmentCard,
   UserMessageAvatar,
@@ -126,6 +122,7 @@ const MarkdownMessage = lazy(async () => ({
 }))
 
 export function ChatPage() {
+  const { reasoningControl, sessionReady } = useOutletContext<ShellOutletContext>()
   const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
   // AppShell resolves controls for the displayed conversation.  Keep the
   // session check as a defensive guard for an in-flight route transition.
@@ -162,6 +159,13 @@ export function ChatPage() {
   const [capabilityDrawerOpen, setCapabilityDrawerOpen] = useState(false)
   const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
+  const [clearTarget, setClearTarget] = useState<{ user: string; sessionId: string; committed: boolean } | null>(null)
+  const [clearPending, setClearPending] = useState(false)
+  const [clearError, setClearError] = useState('')
+  const clearExecutingRef = useRef(false)
+  const saveExecutingRef = useRef(false)
+  const tasksHistoryScopeRef = useRef('')
+  const clearRemovedRef = useRef(false)
   const [longTaskBusy, setLongTaskBusy] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
@@ -179,6 +183,7 @@ export function ChatPage() {
   const completionSoundRunIdsRef = useRef(new Set<string>())
   const failureSoundRunIdsRef = useRef(new Set<string>())
   const consumingNextTurnRef = useRef(false)
+  const creatingSendSessionRef = useRef(false)
   const guidingFollowUpsRef = useRef(new Set<string>())
   const { reorderNextTurnMessages } = useOutletContext<ShellOutletContext>()
   const locallyCommittedSessionRef = useRef('')
@@ -233,9 +238,9 @@ export function ChatPage() {
   }
   const hasCommitted = useMemo(() => {
     if (!sessionId) return false
-    return sessionId === locallyCommittedSessionRef.current
+    return sessionReady || sessionId === locallyCommittedSessionRef.current
       || sessions.some((session) => session.session_id === sessionId)
-  }, [sessionId, sessions])
+  }, [sessionId, sessionReady, sessions])
   const historyQuery = useInfiniteQuery({
     queryKey: ['history', user, sessionId],
     queryFn: ({ pageParam }) => getHistory(user, sessionId, {
@@ -246,13 +251,13 @@ export function ChatPage() {
     getNextPageParam: (lastPage) => lastPage.pagination?.has_more_before
       ? lastPage.pagination.next_before ?? undefined
       : undefined,
-    enabled: Boolean(user && sessionId && hasCommitted),
+    enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
     retry: false,
   })
   const longTaskQuery = useQuery({
     queryKey: ['long-task', user, sessionId],
     queryFn: () => getSessionLongTask(user, sessionId),
-    enabled: Boolean(user && sessionId && hasCommitted),
+    enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
     retry: false,
     refetchInterval: (query) => {
       const status = query.state.data?.long_task.status
@@ -262,18 +267,26 @@ export function ChatPage() {
   const tasksQuery = useQuery({
     queryKey: ['tasks', user, sessionId],
     queryFn: () => getTasks(user, sessionId),
-    enabled: Boolean(user),
+    enabled: Boolean(user && sessionId),
     refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
+  })
+  const runtimeTokensQuery = useQuery({
+    queryKey: ['runtime-welcome-tokens', user, sessionId],
+    queryFn: () => getRuntimeStatus(user, sessionId, ['tokens']),
+    enabled: Boolean(user && sessionId),
+    staleTime: 30_000,
   })
   useEffect(() => {
     if (!sessionId || !tasksQuery.dataUpdatedAt) return
+    const scope = chatDraftKey(user, sessionId)
+    if (tasksHistoryScopeRef.current !== scope) {
+      tasksHistoryScopeRef.current = scope
+      // A truly new/empty plan list cannot have committed a background step.
+      // Existing plans still need reconciliation if one completed during load.
+      if (!tasksQuery.data?.plans.length) return
+    }
     void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
   }, [queryClient, sessionId, tasksQuery.dataUpdatedAt, user])
-  const senseQuery = useQuery({
-    queryKey: ['sense', user],
-    queryFn: () => getSense(user),
-    enabled: Boolean(user),
-  })
   const knowledgeQuery = useQuery({
     queryKey: ['knowledge', user],
     queryFn: () => getKnowledge(user),
@@ -376,7 +389,7 @@ export function ChatPage() {
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
     playCompletionSoundOnce, playFailureSoundOnce, setDraftUploads,
     refreshSessions, isCurrentConversation, moveDraft, setSessionId,
-    refreshOverview, setDraftText, finishChatRun, setStopping,
+    refreshOverview, setDraftText, finishChatRun, setStopping, createNewSession, creatingSendSessionRef,
   })
 
   useEffect(() => {
@@ -465,14 +478,16 @@ export function ChatPage() {
   const newConversation = async () => {
     const previousDraftKey = draftKey
     abortChatRun(user, liveSessionId, effectiveRunId, chatRunToken)
-    await createNewSession()
+    const created = await createNewSession()
+    if (!created) throw new Error('新对话未创建，请重试。')
     clearDraft(previousDraftKey)
     if (liveSessionId) clearChatRun(user, liveSessionId)
     setConversationMenuOpen(false)
   }
 
   const saveAndNewConversation = async () => {
-    if (running || conversationBusy) return
+    if (running || conversationBusy || saveExecutingRef.current) return
+    saveExecutingRef.current = true
     setConversationBusy('save')
     setConversationFeedback(null)
     const previousSessionId = sessionId
@@ -488,36 +503,65 @@ export function ChatPage() {
       if (previousSessionId && !previousSessionClosed) setSessionId(previousSessionId)
       setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
     } finally {
+      saveExecutingRef.current = false
       setConversationBusy('')
     }
   }
 
   const clearConversation = async () => {
-    if (running || conversationBusy) return
-    if (sessionId && hasCommitted && !window.confirm('清空此对话将删除当前归档，并立即创建一个新对话。是否继续？')) return
+    if (running || conversationBusy || clearExecutingRef.current) return
+    clearRemovedRef.current = false
+    setClearError('')
+    setClearTarget({ user, sessionId, committed: hasCommitted })
+  }
+
+  useEffect(() => {
+    if (!clearTarget || clearExecutingRef.current) return
+    if (clearTarget.user !== user || (sessionId !== clearTarget.sessionId && !clearRemovedRef.current)) {
+      setClearTarget(null)
+      setClearError('')
+    }
+  }, [user, sessionId, clearTarget])
+
+  const confirmClearConversation = async () => {
+    if (!clearTarget || running || conversationBusy || clearExecutingRef.current) return
+    if (clearTarget.user !== user || (!clearRemovedRef.current && clearTarget.sessionId !== sessionId)) return
+    // 同步锁防止连点；目标在打开确认时固定，重试新建失败时不能再次删除归档。
+    clearExecutingRef.current = true
+    setClearPending(true)
+    setClearError('')
     setConversationBusy('clear')
     setConversationFeedback(null)
-    const previousSessionId = sessionId
-    let previousSessionRemoved = false
+    const previousSessionId = clearTarget.sessionId
     detachSession()
     try {
-      if (previousSessionId && hasCommitted) {
+      if (previousSessionId && clearTarget.committed && !clearRemovedRef.current) {
         await deleteSession(user, previousSessionId, clientId)
-        previousSessionRemoved = true
+        clearRemovedRef.current = true
         notifySessionDeleted(previousSessionId)
         queryClient.removeQueries({ queryKey: ['history', user, previousSessionId] })
         if (locallyCommittedSessionRef.current === previousSessionId) locallyCommittedSessionRef.current = ''
         void refreshSessions()
         refreshOverview()
-      } else if (previousSessionId) {
+      } else if (previousSessionId && !clearRemovedRef.current) {
         await closeSession(user, previousSessionId, clientId)
-        previousSessionRemoved = true
+        clearRemovedRef.current = true
       }
-      await newConversation()
+      const created = await createNewSession()
+      if (!created) throw new Error('新对话未创建，请重试。')
+      clearDraft(chatDraftKey(clearTarget.user, previousSessionId))
+      if (previousSessionId) clearChatRun(clearTarget.user, previousSessionId)
+      setClearTarget(null)
+      setConversationMenuOpen(false)
     } catch (error) {
-      if (previousSessionId && !previousSessionRemoved) setSessionId(previousSessionId)
-      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '清空当前对话失败' })
+      if (previousSessionId && !clearRemovedRef.current) setSessionId(previousSessionId)
+      const message = error instanceof Error ? error.message : '清空当前对话失败'
+      setClearError(clearRemovedRef.current
+        ? `原对话已清理，但新对话创建失败：${message}。重试只创建新对话，不会重复删除。`
+        : message)
     } finally {
+      clearExecutingRef.current = false
+      setClearPending(false)
       setConversationBusy('')
     }
   }
@@ -532,9 +576,13 @@ export function ChatPage() {
     setConversationFeedback(null)
     try {
       const result = await compressSession(user, sessionId)
+      const atMinimum = result.context.minimum_rounds_reached === true
+      const aboveTarget = result.context.target_reached === false
       const compressionText = result.compressed
-        ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。`
-        : '当前上下文较短，暂时无需压缩。'
+        ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。${atMinimum && aboveTarget ? '已保留最后一轮，仍高于目标 Token 比例。' : ''}`
+        : atMinimum && aboveTarget
+          ? '已到最后一轮，无法继续按完整轮次压缩；当前仍高于目标 Token 比例。'
+          : '当前上下文较短，暂时无需压缩。'
       const memory = result.memory
       const memoryText = memory.status === 'queued'
         ? (Number(memory.pending_rounds || 0) > 0
@@ -781,7 +829,6 @@ export function ChatPage() {
     return () => window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
   }, [clearConversation, compressCurrentConversation, regenerateLastResponse, saveAndNewConversation])
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
-  const recentSenseData = useMemo(() => buildSenseDataItems(senseQuery.data?.sources || []), [senseQuery.data])
   const { commandPlanStatus, planActions } = createPlanWorkflow({
     user, running, sessionId, clientId, persistedUserMessages, planMutationNotices,
     lastAttemptSessionRef, currentUserRef, currentLiveSessionRef, followOutputRef,
@@ -803,7 +850,10 @@ export function ChatPage() {
   const renderedSessionPlans = items
     .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
     .map((item) => resolvePlan(item.plan))
-  const dockedPlan = selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
+  const requestedPlan = persistedPlans.find(plan => plan.plan_id === searchParams.get('plan_id')
+    && plan.session_id === sessionId && (plan.source || 'web') === 'web'
+    && ['pending', 'approved', 'paused', 'failed'].includes(plan.status))
+  const dockedPlan = requestedPlan ? resolvePlan(requestedPlan) : selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
   const stopCurrentRun = async () => {
     if (dockedPlan?.status === 'running') {
       void commandPlanStatus(dockedPlan, 'pause')
@@ -982,10 +1032,14 @@ export function ChatPage() {
   const userMessageMarkers = buildUserMessageMarkers(conversationItems, historyData?.pagination?.first_round ?? 1)
   const showWelcome = items.length === 0 && !editingSource
 
-  return <ChatPageView {...{
+  return <><ChatPageView {...{
     showWelcome, conversationMenuOpen, scrollRef, handleChatScroll, sessionId, historyQuery,
-    user, overview, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
-    recentTasks, recentSenseData, liveItems, items, historyData, conversationBlocks, userAvatarUrl,
+    user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
+    recentTasks,
+    tokenTotal: runtimeTokensQuery.data?.tokens.total_tokens,
+    tokenCacheRate: runtimeTokensQuery.data?.tokens.cache_rate,
+    outputTokens: runtimeTokensQuery.data?.tokens.received_tokens,
+    liveItems, items, historyData, conversationBlocks, userAvatarUrl,
     editedSources, running, lastUserMessage, editAndResend, conversationBusy, copyMessage, copiedItem,
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
@@ -999,5 +1053,16 @@ export function ChatPage() {
     knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,
   }} />
+    <GlobalConfirmDialog open={Boolean(clearTarget)} title="清空此对话？"
+      description={clearRemovedRef.current
+        ? '原对话已清理，继续操作只会创建新对话。'
+        : '将删除当前对话归档并创建一个新对话，此操作无法撤销。仅清除当前会话，不删除已上传文件。'}
+      detail={clearTarget?.sessionId || '当前空白对话'} error={clearError || undefined}
+      icon={<Trash2 size={22} />} tone="danger"
+      confirmLabel={clearRemovedRef.current ? '重试创建新对话' : '确认清空'}
+      pendingLabel="正在清空…" pending={clearPending}
+      onConfirm={() => { void confirmClearConversation() }}
+      onCancel={() => { if (!clearExecutingRef.current) { setClearTarget(null); setClearError('') } }} />
+  </>
 
 }

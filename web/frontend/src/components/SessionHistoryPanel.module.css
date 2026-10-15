@@ -59,7 +59,7 @@
   padding: clamp(18px, 5vh, 54px) 18px;
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, #11131b 34%, transparent);
+  background: color-mix(in srgb, #131313 34%, transparent);
   backdrop-filter: blur(8px);
   animation: layerIn .16s ease-out;
 }
@@ -75,7 +75,7 @@
   border-radius: 24px;
   background: color-mix(in srgb, var(--surface-elevated) 97%, transparent);
   color: var(--text);
-  box-shadow: 0 28px 80px rgba(14, 17, 31, .28), inset 0 1px 0 color-mix(in srgb, #fff 64%, transparent);
+  box-shadow: 0 28px 80px rgba(17, 17, 17, .28), inset 0 1px 0 color-mix(in srgb, #fff 64%, transparent);
   backdrop-filter: blur(22px) saturate(1.06);
   animation: dialogIn .2s cubic-bezier(.2, .8, .2, 1);
 }
@@ -122,7 +122,7 @@
 .contextMenu .dangerMenuItem:hover { background: var(--red-soft); color: var(--red); }
 
 .confirmLayer { z-index: 330; }
-.confirmDialog { width: min(430px, 100%); padding: 22px; border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent); border-radius: 22px; background: color-mix(in srgb, var(--surface-elevated) 98%, transparent); color: var(--text); box-shadow: 0 28px 80px rgba(14, 17, 31, .3); backdrop-filter: blur(22px); animation: dialogIn .18s cubic-bezier(.2, .8, .2, 1); }
+.confirmDialog { width: min(430px, 100%); padding: 22px; border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent); border-radius: 22px; background: color-mix(in srgb, var(--surface-elevated) 98%, transparent); color: var(--text); box-shadow: 0 28px 80px rgba(17, 17, 17, .3); backdrop-filter: blur(22px); animation: dialogIn .18s cubic-bezier(.2, .8, .2, 1); }
 .confirmIcon { width: 42px; height: 42px; margin-bottom: 14px; display: grid; place-items: center; border-radius: 13px; background: var(--brand-soft); color: var(--brand); }
 .deleteIcon { background: var(--red-soft); color: var(--red); }
 .confirmHeading strong, .confirmHeading span { display: block; }
