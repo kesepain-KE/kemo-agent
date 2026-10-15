@@ -13,7 +13,7 @@ import threading
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
+from run.infra.runtime_diagnostics import diagnostic_identifier, diagnostic_text, invalidate_runtime_log_cache
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -101,6 +101,13 @@ class LogStore:
                         CREATE TABLE IF NOT EXISTS log_meta (
                             key TEXT PRIMARY KEY,
                             value TEXT NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS task_hub_cleaned_records (
+                            user TEXT NOT NULL,
+                            kind TEXT NOT NULL,
+                            record_id TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            PRIMARY KEY(user, kind, record_id, updated_at)
                         );
                         CREATE TABLE IF NOT EXISTS cron_execution_logs (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,6 +302,7 @@ class LogStore:
         *,
         limit: int = 1000,
         exclude_task_ids: set[str] | frozenset[str] | None = None,
+        task_hub_visible_only: bool = False,
     ) -> list[dict[str, Any]]:
         excluded = sorted({str(task_id) for task_id in (exclude_task_ids or ()) if str(task_id)})
         exclusion_sql = ""
@@ -302,6 +310,12 @@ class LogStore:
         if excluded:
             exclusion_sql = f" AND task_id NOT IN ({','.join('?' for _ in excluded)})"
             parameters.extend(excluded)
+        if task_hub_visible_only:
+            exclusion_sql += """ AND NOT EXISTS (
+                SELECT 1 FROM task_hub_cleaned_records h
+                WHERE h.user=cron_execution_logs.user AND h.kind='cron'
+                  AND h.record_id=cron_execution_logs.task_id || ':' || cron_execution_logs.event_key
+                  AND h.updated_at=cron_execution_logs.occurred_at)"""
         parameters.append(max(1, min(5000, int(limit))))
         with self._connection() as connection:
             rows = connection.execute(
@@ -332,7 +346,7 @@ class LogStore:
         return self._decode_cron_rows(rows)
 
     def runtime_log_records(self, user: str) -> list[dict[str, Any]]:
-        """Small indexed projection, excluding result bodies and message content."""
+        """Bounded owner-scoped projection with redacted message bodies."""
         with self._connection() as connection:
             # Seek each owner separately so a large history never needs sorting
             # in full for the IN(user, system) merge.
@@ -345,7 +359,7 @@ class LogStore:
                 ).fetchall())
             cron = sorted(cron, key=lambda row: (row["occurred_at_ms"], row["id"]), reverse=True)[:200]
             messages = connection.execute(
-                """SELECT event_key, occurred_at, platform, direction, kind, success
+                """SELECT event_key, occurred_at, platform, direction, kind, success, content
                    FROM message_route_logs WHERE user=?
                    ORDER BY occurred_at_ms DESC, id DESC LIMIT 200""", (user,),
             ).fetchall()
@@ -360,6 +374,9 @@ class LogStore:
              "title": diagnostic_identifier(row["platform"]) + " 消息",
              "occurred_at": row["occurred_at"], "status": "success" if row["success"] else "failed",
              "duration_ms": None, "detail": diagnostic_identifier(row["direction"]) + " · " + diagnostic_identifier(row["kind"]),
+             "content": diagnostic_text(row["content"]),
+             "direction": diagnostic_identifier(row["direction"]),
+             "kind": diagnostic_identifier(row["kind"]),
              "source": "sqlite"}
             for row in messages
         ]
@@ -401,14 +418,16 @@ class LogStore:
             self._compact_if_needed()
         invalidate_runtime_log_cache(self.root)
 
-    def list_messages(self, machine_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    def list_messages(self, machine_id: str, *, limit: int = 500, user: str | None = None) -> list[dict[str, Any]]:
+        owner_clause = " AND user = ?" if user is not None else ""
+        parameters = (machine_id, user) if user is not None else (machine_id,)
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT event_key, occurred_at, chat_type, chat_id, direction, kind,
+                f"""SELECT event_key, occurred_at, chat_type, chat_id, direction, kind,
                           content, file_path, mime, size, success, source
-                   FROM message_route_logs WHERE machine_id = ?
+                   FROM message_route_logs WHERE machine_id = ?{owner_clause}
                    ORDER BY occurred_at_ms DESC, id DESC LIMIT ?""",
-                (machine_id, max(1, min(5000, int(limit)))),
+                (*parameters, max(1, min(5000, int(limit)))),
             ).fetchall()
         return [
             {
@@ -416,7 +435,7 @@ class LogStore:
                 "chat_id": row["chat_id"], "source": row["source"],
                 "id": f"{machine_id}:{row['event_key']}",
                 "direction": row["direction"], "kind": row["kind"],
-                "content": _compact_text(row["content"]),
+                "content": row["content"],
                 "file_path": row["file_path"], "success": bool(row["success"]),
                 **({"mime": row["mime"]} if row["mime"] else {}),
                 **({"size": int(row["size"])} if row["size"] is not None else {}),
@@ -424,12 +443,15 @@ class LogStore:
             for row in rows
         ]
 
-    def count_messages(self, machine_id: str, *, date_prefix: str | None = None) -> int:
+    def count_messages(self, machine_id: str, *, date_prefix: str | None = None, user: str | None = None) -> int:
         query = "SELECT COUNT(*) FROM message_route_logs WHERE machine_id = ?"
         parameters: tuple[Any, ...] = (machine_id,)
+        if user is not None:
+            query += " AND user = ?"
+            parameters += (user,)
         if date_prefix:
             query += " AND occurred_at LIKE ?"
-            parameters = (machine_id, f"{date_prefix}%")
+            parameters += (f"{date_prefix}%",)
         with self._connection() as connection:
             row = connection.execute(query, parameters).fetchone()
         return max(0, int(row[0] if row is not None else 0))

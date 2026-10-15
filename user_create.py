@@ -169,6 +169,7 @@ def _post_process_dirs(root: Path, name: str) -> None:
         "history",
         "avatar",
         "improve",
+        "improve/expired_memory",
         "knowledge",
         "user_skills/agent_create",
         "user_skills/user_create",

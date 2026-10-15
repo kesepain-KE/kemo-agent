@@ -490,10 +490,18 @@ class PlanStore:
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
-    def delete(self, plan_id: str) -> bool:
+    def delete(self, plan_id: str, *, completed_revision: int | None = None,
+               source: str | None = None, session_id: str | None = None) -> bool:
         with self._lock:
             try:
                 with self._connection(write=True) as database:
+                    if completed_revision is not None:
+                        current = self._load(database, plan_id)
+                        if (current is None or current["status"] != "completed"
+                                or current["revision"] != completed_revision
+                                or (source is not None and current["source"] != source)
+                                or (session_id is not None and current["session_id"] != session_id)):
+                            return False
                     result = database.execute(
                         "DELETE FROM task_plans WHERE plan_id=?", (plan_id,)
                     )
