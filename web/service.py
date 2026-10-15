@@ -519,6 +519,7 @@ class WebRunService(
         from run.infra import record_runtime_event
 
         outcome: dict[str, Any] = {'state': 'running', 'users': {}, 'queued_memory': 0,
+                                   'queued_summary': 0,
                                    'deleted_sessions': 0, 'errors': 0}
         with self._startup_inspection_lock:
             self._startup_inspection_result = copy.deepcopy(outcome)
@@ -546,6 +547,7 @@ class WebRunService(
                     protected_sessions=protected,
                     stop=stop,
                     queue_memory=self._queue_memory_extraction,
+                    queue_summary=queue_history_summary,
                     queue_reason=queue_reason,
                 )
                 from run.scheduler import sweep_idle_sessions
@@ -567,6 +569,7 @@ class WebRunService(
                     int(result['queued_memory_count'])
                     + int(app_result.get('queued_memory') or 0)
                 )
+                outcome['queued_summary'] += int(result['queued_summary_count']) + int(app_result.get('queued_summary') or 0)
                 outcome['deleted_sessions'] += int(result['deleted_count'])
                 outcome['errors'] += int(result['error_count']) + len(app_result.get('errors') or [])
                 if result['deleted_count'] or result['closed_count'] or app_result.get('closed'):
@@ -591,6 +594,12 @@ class WebRunService(
             except Exception as exc:
                 outcome['errors'] += 1
                 outcome['wake_error'] = type(exc).__name__
+        if outcome['queued_summary'] and self.summary_waker is not None:
+            try:
+                self.summary_waker()
+            except Exception as exc:
+                outcome['errors'] += 1
+                outcome['summary_wake_error'] = type(exc).__name__
         with self._startup_inspection_lock:
             self._startup_inspection_result = copy.deepcopy(outcome)
         return outcome

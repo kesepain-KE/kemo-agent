@@ -59,8 +59,10 @@ class SkillServiceMixin:
                 }
             )
         prompt_skills = []
+        from run.memory import reconcile
+        generated = reconcile(self.root, name)
         prompt_sources = load_prompt_source_registry(self.root, name)
-        for descriptor in prompt_sources.select_skills():
+        for descriptor in prompt_sources.select_skills(include_stale=True):
             base = (
                 self.root / "shared_skills"
                 if descriptor.scope == "shared"
@@ -86,7 +88,11 @@ class SkillServiceMixin:
                         else "user_created"
                     ),
                     "path": descriptor.path.parent.relative_to(self.root).as_posix(),
-                    "active_for_main_agent": allowed.allows(logical_name),
+                    "active_for_main_agent": allowed.allows(logical_name) and (
+                        generated.get(descriptor.path.parent.name, {}).get("status") != "stale"
+                        if logical_name.startswith("agent_create/") else True),
+                    "memory_lifecycle": generated.get(descriptor.path.parent.name)
+                        if logical_name.startswith("agent_create/") else None,
                 }
             )
         items = [
@@ -118,6 +124,7 @@ class SkillServiceMixin:
                 "toggleable": skill["category"] == "shared",
                 "downloadable": skill["category"] == "shared",
                 "path": skill["path"],
+                "memory_lifecycle": skill["memory_lifecycle"],
             }
             for skill in prompt_skills
         )
@@ -440,6 +447,9 @@ class SkillServiceMixin:
         _reject_tree_links(target)
         relative_path = target.relative_to(self.root).as_posix()
         shutil.rmtree(target)
+        if normalized_category == "agent_generated":
+            from run.memory import remove_skill_record
+            remove_skill_record(self.root, name, target.name)
         return {
             "user": name,
             "category": normalized_category,
@@ -497,5 +507,3 @@ class SkillServiceMixin:
                 archive.write(path, (Path(target.name) / path.relative_to(target)).as_posix())
         filename = f"{Path(logical_name).name}.zip"
         return filename, buffer.getvalue()
-
-

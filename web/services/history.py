@@ -11,7 +11,6 @@ from run.history import (
     find_window,
     load_window,
 )
-from web.constants import _TOOL_TEXT_LIMIT
 from web.errors import NotFoundError, WebServiceError
 from web.services._paths import _reject_link_path, _safe_relative_target
 
@@ -24,8 +23,9 @@ def _tool_text_preview(value: Any) -> tuple[str, bool]:
             rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
         except (TypeError, ValueError):
             rendered = str(value)
-    truncated = len(rendered) > _TOOL_TEXT_LIMIT
-    return rendered[:_TOOL_TEXT_LIMIT], truncated
+    # 展示层不再二次截断工具参数和结果；模型侧的工具结果硬上限仍由
+    # ``run.tools.MAX_TOOL_RESULT_CHARS`` 负责，避免把两类限制混为一谈。
+    return rendered, False
 
 
 def history(
@@ -405,5 +405,4 @@ def history(
             "next_before": start_round if start_round > 1 else None,
         },
     }
-
 

@@ -26,7 +26,8 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         before: str = Query(default=""),
         archive_date: str = Query(default="", alias="date"),
     ) -> dict[str, Any]:
-        return backend.sessions(
+        return await asyncio.to_thread(
+            backend.sessions,
             user,
             source=source,
             query=query,
@@ -240,7 +241,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
             options["limit"] = limit
         if before is not None:
             options["before"] = before
-        return backend.history(user, session_id, **options)
+        return await asyncio.to_thread(backend.history, user, session_id, **options)
 
     @app.get("/api/users/{user}/overview")
     async def overview(
@@ -248,7 +249,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         session_id: str = Query(default=""),
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return backend.overview(user, session_id=session_id, source=source)
+        return await asyncio.to_thread(backend.overview, user, session_id=session_id, source=source)
 
     @app.get("/api/users/{user}/runtime/logs")
     async def runtime_logs(

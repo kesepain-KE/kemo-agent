@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from run.infra import diagnostic_text
+from run.config import AGENT_MODEL_PROFILES, MULTIMODAL_CAPABILITIES
 
 def runtime_status(
     service,
@@ -176,7 +178,7 @@ def runtime_status(
     if requested_sections & {"summary", "api"}:
         api = {
             "type": provider["type"],
-            "base_url": provider["base_url"],
+            "base_url": diagnostic_text(provider["base_url"]),
             "model": provider["model"],
             "thinking_effort": (
                 normalize_kemo_reasoning_effort(
@@ -192,6 +194,27 @@ def runtime_status(
                 and provider.get("credential_source") != "missing"
             ),
             "credential_source": provider.get("credential_source"),
+            "stream": bool(provider.get("stream", True)),
+            "timeout": provider.get("timeout"),
+            "context_tokens": token_limit,
+            "input_modalities": [
+                diagnostic_text(item) for item in (provider_config.get("input_modalities") or [])
+                if isinstance(item, str)
+            ],
+            # Export model identifiers only, never arbitrary provider objects
+            # or credentials from the user's configuration.
+            **{
+                section: {
+                    key: diagnostic_text(value)
+                    for key, value in (config.get(section) or {}).items()
+                    if key in allowed and isinstance(value, str)
+                }
+                for section, allowed in (
+                    ("agent_models", AGENT_MODEL_PROFILES),
+                    ("multimodal_models", MULTIMODAL_CAPABILITIES),
+                    ("multimodal_routing", MULTIMODAL_CAPABILITIES),
+                )
+            },
         }
 
     if "summary" in requested_sections:
@@ -495,5 +518,3 @@ def runtime_status(
         "runtime_host": runtime_host,
         "congestion": congestion,
     }
-
-

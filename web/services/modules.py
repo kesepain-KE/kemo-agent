@@ -86,11 +86,13 @@ class MessageExpandServiceMixin:
         entries = store.list_messages(
             config.machine_id,
             limit=_MESSAGE_LOG_LIMIT + 1,
+            user=config.bound_user,
         )
         today = datetime.now(_BEIJING).strftime("%Y-%m-%d")
         today_count = store.count_messages(
             config.machine_id,
             date_prefix=today,
+            user=config.bound_user,
         )
         return (
             entries[:_MESSAGE_LOG_LIMIT],
@@ -383,6 +385,11 @@ class MessageExpandServiceMixin:
                     if valid and module_name in selected
                     else ""
                 )
+                data_injected_markdown = (
+                    selection.data_fragment(f"{scope}:{module_name}")
+                    if valid and module_name in selected
+                    else ""
+                )
                 updated_at = max(
                     (float(item.get("updated_at") or 0) for item in files),
                     default=0.0,
@@ -425,6 +432,8 @@ class MessageExpandServiceMixin:
                         "control_operation_markdown": control_operation,
                         "collected_markdown": collected_markdown,
                         "injected_markdown": injected_markdown,
+                        "data_injected_markdown": data_injected_markdown,
+                        "data_injected_tokens": estimate_text_tokens(data_injected_markdown),
                         "injected_tokens": estimate_text_tokens(injected_markdown),
                         "runtime": runtime_state,
                         "panel": panel,
@@ -464,6 +473,9 @@ class MessageExpandServiceMixin:
             "expands": expands,
             "injection": {
                 "content": selection.text,
+                "data_content": selection.data_text,
+                "data_injected_items": len(selection.data_pieces),
+                "data_estimated_tokens": estimate_text_tokens(selection.data_text),
                 "source_files": list(selection.source_files),
                 "original_chars": selection.original_chars,
                 "injected_chars": selection.injected_chars,
