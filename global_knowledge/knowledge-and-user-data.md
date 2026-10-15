@@ -120,7 +120,9 @@ users/<name>/
 ├── task_plan/                          # 任务计划 SQLite 目录
 ├── task_cron/                          # cron_<8hex>.json
 ├── history/                            # 首次会话时生成用户级 SQLite 历史库
-└── improve/                            # 模板中只保留 .gitkeep
+└── improve/
+    ├── .gitkeep
+    └── expired_memory/                 # 普通过期归档 Markdown；模板含 .gitkeep
 ```
 
 运行中还可能生成：

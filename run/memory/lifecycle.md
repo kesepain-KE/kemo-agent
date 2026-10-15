@@ -1,6 +1,6 @@
 # 记忆生命周期
 
-`users/<user>/improve/memory.sqlite3` 使用每用户独立 SQLite schema v1 保存微量记忆：
+`users/<user>/improve/memory.sqlite3` 使用每用户独立 SQLite schema v2（兼容迁移 v1）保存微量记忆：
 
 ```text
 seven_days → one_month → half_year → permanent
@@ -21,7 +21,7 @@ seven_days → one_month → half_year → permanent
 ## 权重规则
 
 - 不进行每日权重衰减，权重没有上限。
-- 历史整理管线由 `self_improve` 依据用户原文提出候选，宿主验证后加权；用户主动修改正文/手动审阅更新使用执行日，查看检索保持只读。
+- 历史整理管线由 `self_improve` 依据用户原文或具同轮明确用户背书的助手正文提出候选，宿主验证后加权；助手只可 reinforce 已检索的既有事实，用户主动修改正文/手动审阅更新使用执行日，查看检索保持只读。
 - Prompt 注入、记忆工具查看和用户主动检索都是只读行为，不得加权。
 - 正文更新与同内容命中共用 `(fragment_id, evidence_date)` 唯一日锁，同一档位每个上海自然日最多 `+1`。
 - 实际修改更新 `content_updated_at`；`updated_at` 仅是内容更新时间的兼容别名。
@@ -48,7 +48,7 @@ seven_days → one_month → half_year → permanent
 到达 `expires_at` 后：
 
 - 权重达到阈值：事务内更新同一行到下一层，权重清零并设置新层固定到期时间。
-- 权重未达到阈值：事务内直接删除正文行和关联事件。
+- 权重未达到阈值：先成功归档至 `improve/expired_memory/YYYY-MM/` 普通 Markdown，再条件事务移出活跃库；失败不删，重试复用同一文件。
 - 主动遗忘同样直接删除，不保留 tombstone 或删除历史。
 
 ## Prompt 注入
@@ -62,8 +62,9 @@ seven_days → one_month → half_year → permanent
 ## 数据与执行边界
 
 - `memory.extraction_mode` 控制提取边界；默认 `compression_only` 只在保存或上下文压缩时处理延期轮次。
-- 后台提取只向 `self_improve` 传入用户消息；助手回复、推理、工具结果和 `important` 层均不可作为提取来源。
-- 提取候选只受 `memory.extraction_max_candidates_per_batch` 与框架硬上限控制，不按批次轮数乘系数裁剪；达到上限时选择价值和证据最强的独立事实，不得合并不同生命周期的内容来规避上限。
+- 后台向 `self_improve` 传入安全过滤的用户与助手正文；create/revise/forget 只收用户原话，助手只可 reinforce 检索绑定的已有事实，且需同轮明确用户背书；推理、工具结果和 important 不作来源。
+- 权重口径是“不同日期出现次数”，事件保存 user/assistant/manual/historical_migration 来源，用户/助手共用日锁，单纯复述注入记忆不得加权。
+- 输入按字符预算切分，满页继续枚举未返回事实；实际候选批次上限不变，超限进入共用 memory_work_items 待办。源提取和候选全部完成后才推进历史游标；饱和无进展时失败关闭。
 - 后台 `context_compression` / `memory_promotion` 禁止搜索 `important`；用户或主智能体主动查看记忆时保留只读权限，且查看不加权。
 - 临时重要热画像的 `important_memory_max_chars` 仅是 Prompt 注入预算；文件正文不在该值处截断。`important_memory_output_max_chars` 是独立输出硬上限，防止模型失控重复，超限时保留旧热画像。
 - 临时重要热画像巡检通过 `memory_manage list(limit=500, compact=true, include_content=true, page_char_limit=80000)` 按条目数与字符预算双重边界分页批量读取三层临时记忆和永久记忆，不得对全量条目逐条 `get`；`self_improve` 的候选匹配和晋升融合使用 `search_many` 批量查询，运行时为该子代理强制 `include_content=true`，只有完整命中回执才能绑定旧目标。
@@ -74,3 +75,7 @@ seven_days → one_month → half_year → permanent
 - 加权、晋升、融合、删除、幂等结果和热画像来源使用 SQLite 事务原子提交。
 - 到期晋升不设置总数量上限：调度器按目标层遍历全部达标碎片，普通层每批最多 20 条、永久层每批最多 8 条；每批成功后立即落盘，失败或缺少决策的条目保持原层并在后续 30 秒扫描中重试。
 - 当前阶段不调用或修改 `E:\code\kemo-graph`。
+
+自动技能先查同名/近似并校验适用场景、至少两步、失败处理；source_memories 绑定稳定行身份和正文摘要。
+正常晋升/融合/拆分只传递内容摘要仍匹配的来源，不得使此前因修正而 stale 的技能重新激活；来源修正、删除、归档使技能 stale，网页可见且停止自动注入，不自动删除技能。
+技能转化失败独立保留待办，由 30 秒晋升维护周期重试。归档没有自动清理期限和专用恢复入口，也不自动注入。
