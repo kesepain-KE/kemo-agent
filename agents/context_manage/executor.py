@@ -1,4 +1,5 @@
 from run.agents import AgentOutputError, AgentRunResult
+from run.infra import merge_usage_dict
 from run.memory import extract_compressed_round_memory
 
 
@@ -47,14 +48,6 @@ def _run_model_with_repair(context, input_data):
         return result
 
 
-def _merge_usage(target, source):
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
-    target["estimated"] = bool(
-        target.get("estimated", False) or source.get("estimated", False)
-    )
-
-
 def execute(context, input_data):
     trigger = str(input_data.get("trigger") or "")
     rounds = input_data.get("rounds")
@@ -95,7 +88,7 @@ def execute(context, input_data):
         }
     result = _run_model_with_repair(context, model_input)
     if memory_result is not None:
-        _merge_usage(result.usage, memory_result.usage)
+        merge_usage_dict(result.usage, memory_result.usage)
         result.metadata["memory_extraction"] = {
             "completed": True,
             "candidate_count": len(memory_result.data.get("candidates") or []),

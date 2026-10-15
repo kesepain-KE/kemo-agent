@@ -5,7 +5,7 @@
   "tools": {
     "plugins": {"allow": []},
     "shared_skills": {"allow": []},
-    "max_iterations": 20
+    "max_iterations": 80
   },
   "global_knowledge": false,
   "shared_knowledge": false,
