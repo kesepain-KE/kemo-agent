@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.4.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.5.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -139,7 +139,7 @@ kemo-agent 坚持本地优先。
 
 ### 选择安装方式
 
-Windows、Linux、npm 和 Docker 共用主框架版本。当前正式定档版本为 **1.4.0**，网关兼容基线为 **1.0.0**。
+Windows、Linux、npm 和 Docker 共用主框架版本。当前正式定档版本为 **1.5.0**，网关兼容基线为 **1.0.0**。
 
 > **发布前提：** 以下远程命令仅在安装脚本已推送、对应渠道发布产物就绪后可用。原生安装需要 Release 中的 `kemo-agent-release-<version>.zip` 与 `.zip.sha256`，npm 需要已发布的分发包，Docker 需要已发布的镜像标签。仅推送代码不会自动发布这些产物；本文不代表线上已经可安装。Release ZIP 不是 GitHub 自动生成的源码 ZIP。
 
@@ -266,13 +266,13 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`1.4.0`（正式版；远程分发产物需另行发布）
+当前版本：`1.5.0`（正式版；远程分发产物需另行发布）
 
 已确认兼容的 Kemo 网关：`kemo-adapter-api 1.0.0`（Kemo 2.0 线路协议匹配）。
 
-### 1.4.0 正式版
+### 1.5.0 正式版
 
-- 主框架版本正式定档为 `1.4.0`，配套 Kemo 网关升级为 `kemo-adapter-api 1.0.0`，知识图谱基线升级为 `kemo-graph 1.6.0`。
+- 主框架版本正式定档为 `1.5.0`，配套 Kemo 网关升级为 `kemo-adapter-api 1.0.0`，知识图谱基线升级为 `kemo-graph 1.6.0`。
 - 三个项目继续使用冻结的 Kemo 2.0 线路协议；协议 Schema、工具调用、流式响应、Embedding、Rerank 与结构化输出合同保持对齐。
 - 远程 Release、npm、GHCR 与网关/图谱分发产物仍需按各自项目单独构建和发布。
 
