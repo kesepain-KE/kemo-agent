@@ -24,6 +24,7 @@ from run.config import (
     read_json_object,
     cron_history_retention_days,
 )
+from run.context import mid_context_compression_enabled
 from run.extensions import (
     clear_model_capability_cache,
     lookup_model_capabilities,
@@ -51,6 +52,7 @@ from web.errors import (
     ProviderModelUnavailableError,
 )
 from web.services._io import atomic_write as _atomic_write
+from web.services.provider_models import discover_chat_models
 from web.services.settings_support import (
     _VersionCheckFailure,
     _contains_redacted_placeholder,
@@ -92,6 +94,7 @@ _CONFIG_SOURCE_PATHS = (
     "cron.avoid_congestion",
     "cron.congestion_threshold_ratio",
     "runtime_host.enable_background_scheduler",
+    "agents.enable_mid_context_compression",
     "agents.max_rounds",
     "agents.token_limit",
     "agents.token_compression_ratio",
@@ -172,6 +175,10 @@ class SettingsServiceMixin:
             raise InvalidRequestError("不能把脱敏占位符 *** 写回配置")
         current = read_json_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
+        try:
+            mid_context_compression_enabled(updated)
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from None
         if user is None:
             try:
                 cron_history_retention_days(updated)
@@ -301,6 +308,18 @@ class SettingsServiceMixin:
             "count": catalog.count,
             "data": [item.model_dump(mode="json") for item in catalog.data],
         }
+
+    def chat_provider_models(self, user: Any) -> dict[str, Any]:
+        """Discover models from the saved Chat-compatible /models endpoint."""
+        name = self.require_user(user)
+        config = load_config(name, self.root)
+        if str((config.get("provider") or {}).get("type") or "chat").strip().casefold() != "chat":
+            raise InvalidRequestError("只有已保存的 Chat 协议配置允许查询兼容模型列表")
+        try:
+            models = discover_chat_models(provider_runtime_config(config))
+        except ConfigError as exc:
+            raise ProviderDiscoveryError("Chat Provider 配置不完整，请先保存有效配置") from exc
+        return {"user": name, "protocol": "chat", "api_valid": True, "count": len(models), "data": models}
 
     @staticmethod
     def _raise_capability_lookup_error(error: BaseException | None) -> None:
@@ -445,6 +464,7 @@ class SettingsServiceMixin:
             provider.get("timeout"),
             120.0,
         )
+        mid_compression_enabled = mid_context_compression_enabled(config)
         return {
             "user": name,
             "schema_version": int(config.get("schema_version") or 1),
@@ -498,6 +518,7 @@ class SettingsServiceMixin:
                 "compression_ratio": float(
                     agents.get("token_compression_ratio") or 0.6
                 ),
+                "mid_context_compression_enabled": mid_compression_enabled,
                 "task_plan_steps": int(task_plan.get("max_steps") or 10),
                 "tool_iterations": int(tools.get("max_iterations") or 80),
                 "tool_timeout": float(tools.get("timeout") or 60),

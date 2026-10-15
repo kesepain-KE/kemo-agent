@@ -92,6 +92,11 @@ def register_setting_routes(
             refresh=refresh,
         )
 
+    @app.get("/api/users/{user}/provider/chat-models")
+    async def chat_provider_models(user: str, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return await asyncio.to_thread(backend.chat_provider_models, user)
+
     @app.get("/api/users/{user}/provider/model-capabilities")
     async def kemo_provider_model_capabilities(
         user: str,
