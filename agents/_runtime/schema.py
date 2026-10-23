@@ -229,7 +229,7 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
     if not isinstance(inherit_history, bool) or not isinstance(inherit_request, bool):
         raise AgentManifestError(f"context 继承开关必须是布尔值：{path}")
     return AgentCapabilities(
-        exposure=exposure,
+        exposure="internal" if exposure == "internal" else "tool",
         allowed_callers=callers,
         plugin_tools=plugin_tools,
         max_tool_iterations=max_iterations,

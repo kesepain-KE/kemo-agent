@@ -40,6 +40,7 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
     if trigger == "manual_review" and not str(input_data.get("request") or "").strip():
         raise AgentOutputError("manual_review 输入缺少 request 字符串")
 
+    user_rounds: list[dict[str, Any]] = []
     model_input = input_data
     if trigger == "context_compression":
         user_rounds = _user_only_rounds(input_data.get("rounds") or [])
