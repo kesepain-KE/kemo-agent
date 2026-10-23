@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path as _AnnotationPath
+
+from typing import Any
+
 def build_overview(
     service,
     user: Any,
@@ -42,7 +46,7 @@ def build_overview(
         "estimated": False,
     }
     rounds = 0
-    selected_directory: Path | None = None
+    selected_directory: _AnnotationPath | None = None
     if normalized_session:
         selected_directory = find_window(
             service.root, name, normalized_source, normalized_session

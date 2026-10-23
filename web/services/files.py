@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 import io
 import mimetypes
 import os
@@ -54,6 +68,11 @@ from web.services.document_preview import OFFICE_SUFFIXES, PDF_MAX_BYTES, office
 
 
 class FileServiceMixin(SoundServiceMixin):
+    if TYPE_CHECKING:
+        _file_upload_lock: threading.RLock
+        require_user = WebRunService.require_user
+        root: Path
+
     _ATTACHMENT_THUMBNAIL_SIZE = (320, 240)
     _ATTACHMENT_THUMBNAIL_RE = re.compile(r"^[a-f0-9]{64}$")
     _DOWNLOAD_ARTIFACT_RE = re.compile(r"^[a-f0-9]{64}$")

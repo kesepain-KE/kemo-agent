@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from fastapi import FastAPI, Body
+from web.service import WebRunService
+
+from typing import Any as _AnnotationAny
+from web.schemas import DeleteManyBody as _AnnotationDeleteManyBody
+from fastapi.responses import FileResponse as _AnnotationFileResponse
+from fastapi import Request as _AnnotationRequest
+from fastapi.responses import Response as _AnnotationResponse
+from web.schemas import TextBody as _AnnotationTextBody
+from fastapi import UploadFile as _AnnotationUploadFile
+
 from starlette.concurrency import run_in_threadpool
 
 def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
@@ -60,7 +71,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         page_size: int = Query(default=6, ge=1, le=100),
         sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
         sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.files(
             user,
             scope,
@@ -76,9 +87,9 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     async def upload_file(
         user: str,
         scope: str,
-        file: UploadFile = File(...),
+        file: _AnnotationUploadFile = File(...),
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         try:
             data = await file.read(FILE_UPLOAD_MAX_BYTES + 1)
         finally:
@@ -89,9 +100,9 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     async def write_file_text(
         user: str,
         scope: str,
-        body: TextBody,
+        body: _AnnotationTextBody,
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.write_file_text(user, scope, path, body.content)
 
     @app.get("/api/users/{user}/files/{scope}/text")
@@ -99,7 +110,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         scope: str,
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.read_file_text(user, scope, path)
 
     @app.post("/api/users/{user}/files/{scope}/directory")
@@ -107,7 +118,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         scope: str,
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.make_directory(user, scope, path)
 
     @app.patch("/api/users/{user}/files/{scope}/move")
@@ -116,7 +127,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         scope: str,
         path: str = Query(...),
         new_path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.move_file(user, scope, path, new_path)
 
     @app.get("/api/users/{user}/files/{scope}/download")
@@ -124,7 +135,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         scope: str,
         path: str = Query(...),
-    ) -> FileResponse:
+    ) -> _AnnotationFileResponse:
         target = backend.file_download(user, scope, path)
         return FileResponse(target, filename=target.name)
 
@@ -134,7 +145,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         checksum: str,
         path: str = Query(default="", max_length=500),
         size: int = Query(..., ge=1),
-    ) -> FileResponse:
+    ) -> _AnnotationFileResponse:
         target, media_type = backend.download_artifact(
             user,
             checksum,
@@ -148,7 +159,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         scope: str,
         path: str = Query(...),
-    ) -> FileResponse:
+    ) -> _AnnotationFileResponse:
         target, media_type, _ = await run_in_threadpool(backend.file_preview, user, scope, path)
         return _preview_response(target, media_type)
 
@@ -157,7 +168,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         checksum: str,
         path: str = Query(default="", max_length=500),
-    ) -> FileResponse:
+    ) -> _AnnotationFileResponse:
         target = backend.attachment_thumbnail(user, checksum, path=path)
         return _thumbnail_response(target)
 
@@ -166,26 +177,26 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         scope: str,
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.delete_file(user, scope, path)
 
     @app.post("/api/users/{user}/files/{scope}/delete-many")
     async def delete_files(
         user: str,
         scope: str,
-        body: DeleteManyBody,
-    ) -> dict[str, Any]:
+        body: _AnnotationDeleteManyBody,
+    ) -> dict[str, _AnnotationAny]:
         return backend.delete_files(user, scope, body.paths)
 
     @app.delete("/api/users/{user}/files/{scope}/all")
-    async def delete_all_files(user: str, scope: str) -> dict[str, Any]:
+    async def delete_all_files(user: str, scope: str) -> dict[str, _AnnotationAny]:
         return backend.delete_all_files(user, scope)
 
     @app.post("/api/users/{user}/avatar")
     async def upload_avatar(
         user: str,
-        file: UploadFile = File(...),
-    ) -> dict[str, Any]:
+        file: _AnnotationUploadFile = File(...),
+    ) -> dict[str, _AnnotationAny]:
         content_type = file.content_type
         try:
             data = await file.read(AVATAR_MAX_BYTES + 1)
@@ -194,7 +205,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         return backend.save_avatar(user, data, content_type)
 
     @app.get("/api/users/{user}/avatar")
-    async def avatar(user: str) -> Response:
+    async def avatar(user: str) -> _AnnotationResponse:
         target = backend.avatar(user)
         if target is None:
             return Response(status_code=204)
@@ -203,8 +214,8 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.post("/api/users/{user}/completion-sound")
     async def upload_completion_sound(
         user: str,
-        file: UploadFile = File(...),
-    ) -> dict[str, Any]:
+        file: _AnnotationUploadFile = File(...),
+    ) -> dict[str, _AnnotationAny]:
         content_type = file.content_type
         try:
             data = await file.read(COMPLETION_SOUND_MAX_BYTES + 1)
@@ -214,15 +225,15 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         return {"ok": True, "status": status}
 
     @app.get("/api/users/{user}/completion-sound/status")
-    async def completion_sound_status(user: str) -> dict[str, Any]:
+    async def completion_sound_status(user: str) -> dict[str, _AnnotationAny]:
         return backend.completion_sound_status(user)
 
     @app.post("/api/users/{user}/completion-sound/fallback")
-    async def completion_sound_fallback(user: str) -> dict[str, Any]:
+    async def completion_sound_fallback(user: str) -> dict[str, _AnnotationAny]:
         return backend.play_completion_sound_fallback(user)
 
     @app.get("/api/users/{user}/completion-sound")
-    async def completion_sound(user: str, request: Request) -> Response:
+    async def completion_sound(user: str, request: _AnnotationRequest) -> _AnnotationResponse:
         target = backend.completion_sound_path(user)
         if target is None:
             return Response(status_code=204)
@@ -250,14 +261,14 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         )
 
     @app.delete("/api/users/{user}/completion-sound")
-    async def delete_completion_sound(user: str) -> dict[str, Any]:
+    async def delete_completion_sound(user: str) -> dict[str, _AnnotationAny]:
         return {"ok": True, "deleted": backend.delete_completion_sound(user)}
 
     @app.post("/api/users/{user}/failure-sound")
     async def upload_failure_sound(
         user: str,
-        file: UploadFile = File(...),
-    ) -> dict[str, Any]:
+        file: _AnnotationUploadFile = File(...),
+    ) -> dict[str, _AnnotationAny]:
         content_type = file.content_type
         try:
             data = await file.read(FAILURE_SOUND_MAX_BYTES + 1)
@@ -267,15 +278,15 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         return {"ok": True, "status": status}
 
     @app.get("/api/users/{user}/failure-sound/status")
-    async def failure_sound_status(user: str) -> dict[str, Any]:
+    async def failure_sound_status(user: str) -> dict[str, _AnnotationAny]:
         return backend.failure_sound_status(user)
 
     @app.post("/api/users/{user}/failure-sound/fallback")
-    async def failure_sound_fallback(user: str) -> dict[str, Any]:
+    async def failure_sound_fallback(user: str) -> dict[str, _AnnotationAny]:
         return backend.play_failure_sound_fallback(user)
 
     @app.get("/api/users/{user}/failure-sound")
-    async def failure_sound(user: str, request: Request) -> Response:
+    async def failure_sound(user: str, request: _AnnotationRequest) -> _AnnotationResponse:
         target = backend.failure_sound_path(user)
         if target is None:
             return Response(status_code=204)
@@ -303,7 +314,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         )
 
     @app.delete("/api/users/{user}/failure-sound")
-    async def delete_failure_sound(user: str) -> dict[str, Any]:
+    async def delete_failure_sound(user: str) -> dict[str, _AnnotationAny]:
         return {"ok": True, "deleted": backend.delete_failure_sound(user)}
 
     @app.get("/api/tmp")
@@ -314,7 +325,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         page_size: int = Query(default=6, ge=1, le=100),
         sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
         sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.tmp_files(
             path=path,
             search=search,
@@ -326,9 +337,9 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
 
     @app.post("/api/tmp/upload")
     async def upload_tmp_file(
-        file: UploadFile = File(...),
+        file: _AnnotationUploadFile = File(...),
         path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         try:
             data = await file.read(FILE_UPLOAD_MAX_BYTES + 1)
         finally:
@@ -336,12 +347,12 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         return backend.save_tmp_file(path, data)
 
     @app.get("/api/tmp/preview")
-    async def preview_tmp_file(path: str = Query(...)) -> FileResponse:
+    async def preview_tmp_file(path: str = Query(...)) -> _AnnotationFileResponse:
         target, media_type, _ = await run_in_threadpool(backend.tmp_file_preview, path)
         return _preview_response(target, media_type)
 
     @app.get("/api/tmp/download")
-    async def download_tmp_file(path: str = Query(...)) -> FileResponse:
+    async def download_tmp_file(path: str = Query(...)) -> _AnnotationFileResponse:
         target = backend.tmp_file_download(path)
         return FileResponse(target, filename=target.name, headers={
             "Cache-Control": "private, no-cache",
@@ -351,33 +362,33 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     @app.put("/api/tmp/text")
     async def write_tmp_text(
         path: str = Query(...),
-        body: TextBody = ...,
-    ) -> dict[str, Any]:
+        body: _AnnotationTextBody = Body(...),
+    ) -> dict[str, _AnnotationAny]:
         return backend.write_tmp_text(path, body.content)
 
     @app.get("/api/tmp/text")
-    async def read_tmp_text(path: str = Query(...)) -> dict[str, Any]:
+    async def read_tmp_text(path: str = Query(...)) -> dict[str, _AnnotationAny]:
         return backend.read_tmp_text(path)
 
     @app.post("/api/tmp/directory")
-    async def make_tmp_directory(path: str = Query(...)) -> dict[str, Any]:
+    async def make_tmp_directory(path: str = Query(...)) -> dict[str, _AnnotationAny]:
         return backend.make_tmp_directory(path)
 
     @app.patch("/api/tmp/move")
     async def move_tmp_file(
         path: str = Query(...),
         new_path: str = Query(...),
-    ) -> dict[str, Any]:
+    ) -> dict[str, _AnnotationAny]:
         return backend.move_tmp_file(path, new_path)
 
     @app.delete("/api/tmp")
-    async def delete_tmp_file(path: str = Query(...)) -> dict[str, Any]:
+    async def delete_tmp_file(path: str = Query(...)) -> dict[str, _AnnotationAny]:
         return backend.delete_tmp_file(path)
 
     @app.post("/api/tmp/delete-many")
-    async def delete_tmp_files(body: DeleteManyBody) -> dict[str, Any]:
+    async def delete_tmp_files(body: _AnnotationDeleteManyBody) -> dict[str, _AnnotationAny]:
         return backend.delete_tmp_files(body.paths)
 
     @app.delete("/api/tmp/all")
-    async def delete_all_tmp_files() -> dict[str, Any]:
+    async def delete_all_tmp_files() -> dict[str, _AnnotationAny]:
         return backend.delete_all_tmp_files()

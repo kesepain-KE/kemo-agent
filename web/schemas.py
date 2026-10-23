@@ -89,6 +89,10 @@ class TextBody(BaseModel):
     content: str
 
 
+class KnowledgeClassificationBody(BaseModel):
+    category: str = Field(default="", max_length=80)
+
+
 class MemoryWriteBody(BaseModel):
     content: str
     tier: str | None = None

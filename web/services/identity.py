@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import uuid
 
 from run.agents import discover_agents
@@ -19,8 +19,16 @@ from web.services._paths import (
     _reject_tree_links,
 )
 
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 
 class IdentityServiceMixin:
+    if TYPE_CHECKING:
+        root: Path
+        require_user = WebRunService.require_user
+        _project_path = WebRunService._project_path
+
     @staticmethod
     def _validated_soul_content(content: Any) -> str:
         if not isinstance(content, str) or not content.strip():
@@ -146,4 +154,3 @@ class IdentityServiceMixin:
             "path": f"users/{name}/agents/{agent_name}",
             "deleted": True,
         }
-

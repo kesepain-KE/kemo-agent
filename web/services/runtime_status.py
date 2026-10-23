@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -118,6 +125,10 @@ def _provider_response_time(response: dict[str, Any]) -> datetime | None:
 
 
 class RuntimeStatusServiceMixin:
+    if TYPE_CHECKING:
+        _cron_summary = WebRunService._cron_summary
+        root: Path
+
     def runtime_logs(self, user: str, *, category: str = "all", page: int = 1,
                      page_size: int = 25, refresh: bool = False) -> dict[str, Any]:
         from web.services.runtime_logs import runtime_logs
@@ -195,6 +206,7 @@ class RuntimeStatusServiceMixin:
                     source=requested_source,
                     session_id=requested_session_id,
                 )
+            assert prompt_bundle is not None
             registry = apply_runtime_tool_policy(
                 discover_tools(self.root, user), config
             )

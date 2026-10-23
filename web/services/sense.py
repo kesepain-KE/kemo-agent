@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -28,6 +33,11 @@ from web.services.module_panels import (
 
 
 class SenseServiceMixin:
+    if TYPE_CHECKING:
+        patch_user_config = WebRunService.patch_user_config
+        require_user = WebRunService.require_user
+        root: Path
+
     def sense(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)

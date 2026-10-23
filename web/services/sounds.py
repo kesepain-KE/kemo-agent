@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +25,14 @@ from web.services._paths import _reject_link_path
 
 
 class SoundServiceMixin:
+    if TYPE_CHECKING:
+        _completion_sound_media_type = WebRunService._completion_sound_media_type
+        _play_windows_completion_sound = WebRunService._play_windows_completion_sound
+        _play_windows_failure_sound = WebRunService._play_windows_failure_sound
+        _sound_platform_system = WebRunService._sound_platform_system
+        require_user = WebRunService.require_user
+        root: Path
+
     def _completion_sound_user_root(self, user: str) -> Path:
         directory = self.root / "users" / user
         if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():

@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +28,14 @@ from web.services.overview_aggregate import build_overview as _build_overview_im
 
 
 class OverviewServiceMixin:
+    if TYPE_CHECKING:
+        _overview_cache: BoundedReadCache
+        require_session_id = WebRunService.require_session_id
+        require_source = WebRunService.require_source
+        require_user = WebRunService.require_user
+        root: Path
+        runtime_status_provider: Callable[[], dict[str, Any]] | None
+
     def overview(
         self,
         user: Any,

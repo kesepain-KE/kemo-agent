@@ -264,7 +264,7 @@ def history(
             round_number = int(item.get("round") or 0)
             if not in_selected_page(round_number):
                 continue
-            usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
+            usage = (checked_267 if isinstance(checked_267 := item.get("usage"), dict) else {})
             artifacts: list[dict[str, Any]] = []
             responses = item.get("provider_responses") or []
             if isinstance(responses, list):

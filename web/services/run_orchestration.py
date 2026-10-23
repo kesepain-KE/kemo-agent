@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from events import RunEvent as _AnnotationRunEvent
+
+from typing import Iterator
+
+from typing import Callable
+
+from typing import Any
+
 from run.tasks import PlanError, PlanStore
 
 def run_source(
@@ -20,10 +28,7 @@ def run_source(
 ) -> None:
     import importlib
     _service = importlib.import_module("web.service")
-    Any = _service.Any
-    Callable = _service.Callable
     GuidanceMailbox = _service.GuidanceMailbox
-    Iterator = _service.Iterator
     LONG_TASK_ACTIVE_STATUSES = _service.LONG_TASK_ACTIVE_STATUSES
     MAX_LONG_TASK_RUNS = _service.MAX_LONG_TASK_RUNS
     RunEvent = _service.RunEvent
@@ -41,7 +46,7 @@ def run_source(
     terminal_run_stats = _service.terminal_run_stats
     threading = _service.threading
     uuid = _service.uuid
-    iterator: Iterator[RunEvent] | None = None
+    iterator: Iterator[_AnnotationRunEvent] | None = None
     current_request = request
     current_run_id = normalized_run_id
     run_index = 0
@@ -77,12 +82,12 @@ def run_source(
             }
 
     def enrich_terminal(
-        event: RunEvent,
+        event: _AnnotationRunEvent,
         state: dict[str, Any],
         *,
         status: str | None = None,
         stop_reason: str | None = None,
-    ) -> RunEvent:
+    ) -> _AnnotationRunEvent:
         rendered = copy.copy(event)
         rendered.metadata = {
             **dict(event.metadata or {}),
@@ -144,7 +149,7 @@ def run_source(
         cancelled: bool,
         error_code: str,
         stop_reason: str,
-    ) -> RunEvent:
+    ) -> _AnnotationRunEvent:
         metadata = {
             "status": "cancelled" if cancelled else "interrupted",
             "committed": False,
@@ -171,7 +176,7 @@ def run_source(
             metadata=metadata,
         )
 
-    def user_cancelled_terminal_event() -> RunEvent:
+    def user_cancelled_terminal_event() -> _AnnotationRunEvent:
         """Build the one terminal event for an accepted Run cancellation."""
 
         state = state_snapshot()
@@ -236,7 +241,7 @@ def run_source(
                             stop_reason=f"task_plan_{plan_status}",
                         ))
                         return
-                terminal_event: RunEvent | None = None
+                terminal_event: _AnnotationRunEvent | None = None
                 # Give each event source an isolated request envelope.
                 # Custom transports and plugins receive a mutable dict;
                 # they must not be able to rewrite the canonical

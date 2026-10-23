@@ -122,13 +122,13 @@ def _redact_config(value: Any, path: tuple[str, ...] = ()) -> tuple[Any, list[st
             redacted.extend(nested)
         return result, redacted
     if isinstance(value, list):
-        result = []
-        redacted: list[str] = []
+        list_result = []
+        redacted = []
         for index, item in enumerate(value):
             clean, nested = _redact_config(item, (*path, str(index)))
-            result.append(clean)
+            list_result.append(clean)
             redacted.extend(nested)
-        return result, redacted
+        return list_result, redacted
     return value, []
 
 

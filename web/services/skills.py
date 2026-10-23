@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 import io
 import os
 from pathlib import Path, PurePosixPath
@@ -40,6 +54,12 @@ from web.services._paths import (
 
 
 class SkillServiceMixin:
+    if TYPE_CHECKING:
+        _skill_upload_lock: threading.RLock
+        patch_user_config = WebRunService.patch_user_config
+        require_user = WebRunService.require_user
+        root: Path
+
     def skills(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)

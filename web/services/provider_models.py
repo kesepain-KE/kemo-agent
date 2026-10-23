@@ -52,7 +52,7 @@ def discover_chat_models(config: dict[str, Any]) -> list[dict[str, str]]:
             models[model_id] = {
                 "id": model_id,
                 "object": "model",
-                "owned_by": item.get("owned_by") if isinstance(item.get("owned_by"), str) else "",
+                "owned_by": (checked_55 if isinstance(checked_55 := item.get("owned_by"), str) else ""),
             }
         return list(models.values())
     except urllib.error.HTTPError as exc:

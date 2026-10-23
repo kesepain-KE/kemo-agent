@@ -5,6 +5,13 @@ diagnostic logs remain intact, and a later execution remains visible.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 import hashlib
 import json
 import sqlite3
@@ -34,6 +41,12 @@ def visible_executions(root, user, records: list[dict]) -> list[dict]:
 
 
 class TaskCleanupServiceMixin:
+    if TYPE_CHECKING:
+        require_session_id = WebRunService.require_session_id
+        require_source = WebRunService.require_source
+        require_user = WebRunService.require_user
+        root: Path
+
     def _cleanup_scope(self, source: Any, session_id: Any) -> tuple[str, str]:
         if not isinstance(source, str):
             raise InvalidRequestError("source 必须是字符串")
@@ -87,7 +100,7 @@ class TaskCleanupServiceMixin:
         return {"user": name, "category": category, "count": len(items),
                 "items": [{k: item[k] for k in ("id", "title", "version")} for item in items]}
 
-    def cleanup_completed_tasks(self, user: Any, payload: dict) -> dict:
+    def cleanup_completed_tasks(self, user: Any, payload: Any) -> dict:
         name = self.require_user(user)
         if not isinstance(payload, dict):
             raise InvalidRequestError("清理请求必须是对象")

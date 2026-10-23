@@ -7,6 +7,19 @@ remain effective.
 
 from __future__ import annotations
 
+from typing import Generator
+
+import queue as _Annotationqueue
+
+from events import RunEvent
+from events import RunEvent as _RunEventType
+
+import threading
+
+from typing import Iterator
+
+from typing import Any
+
 from web.services.run_orchestration import run_source as _run_source_impl
 
 def stream_chat(
@@ -23,18 +36,16 @@ def stream_chat(
     task_plan_mode: str = "",
     source: Any = "web",
     client_id: Any = "",
-) -> Iterator[RunEvent]:
+) -> Generator[RunEvent, None, None]:
     import importlib
     _service = importlib.import_module("web.service")
     ActiveRun = _service.ActiveRun
-    Any = _service.Any
     ConflictError = _service.ConflictError
     GuidanceMailbox = _service.GuidanceMailbox
     InvalidRequestError = _service.InvalidRequestError
-    Iterator = _service.Iterator
     LONG_TASK_ACTIVE_STATUSES = _service.LONG_TASK_ACTIVE_STATUSES
     MAX_LONG_TASK_RUNS = _service.MAX_LONG_TASK_RUNS
-    RunEvent = _service.RunEvent
+    RunEvent: type[_RunEventType] = _service.RunEvent
     TooManyChatsError = _service.TooManyChatsError
     _WORKER_DONE = _service._WORKER_DONE
     activate_long_task = _service.activate_long_task
@@ -112,7 +123,7 @@ def stream_chat(
             # Run 生成器拥有线程仿射 RLock。  它的 next()/close()
             # 因此，调用必须保留在一个专用工作线程上
             # 在 asyncio.to_thread 工作线程之间跳转。
-    output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
+    output: _Annotationqueue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
     consumer_closed = threading.Event()
     progress_closed = threading.Event()
 
@@ -176,7 +187,7 @@ def stream_chat(
             return
         # Progress is UI-only: never forward prompts, reasoning, tool arguments,
         # results, errors or arbitrary provider metadata from a child agent.
-        safe = {"phase": "subagent"}
+        safe: dict[str, Any] = {"phase": "subagent"}
         for key in ("agent", "task_id", "status", "tool_name"):
             value = metadata.get(key)
             if isinstance(value, str):
@@ -214,7 +225,7 @@ def stream_chat(
         gate.release()
         raise
 
-    def events() -> Iterator[RunEvent]:
+    def events() -> Generator[RunEvent, None, None]:
         try:
             while True:
                 value = output.get()

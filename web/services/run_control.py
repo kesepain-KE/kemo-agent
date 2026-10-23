@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 import queue
 from typing import Any
 
@@ -31,6 +47,27 @@ from web.errors import (
 
 
 class RunControlServiceMixin:
+    if TYPE_CHECKING:
+        _active_runs: dict[str, ActiveRun]
+        _active_runs_lock: threading.RLock
+        _index_session_payload = WebRunService._index_session_payload
+        _new_agent_runner = WebRunService._new_agent_runner
+        _other_durable_session_clients_locked = WebRunService._other_durable_session_clients_locked
+        _prune_session_leases_locked = WebRunService._prune_session_leases_locked
+        _queue_memory_extraction = WebRunService._queue_memory_extraction
+        _release_durable_session_lease_locked = WebRunService._release_durable_session_lease_locked
+        _release_session_lease_locked = WebRunService._release_session_lease_locked
+        _session_leases: dict[tuple[str, str, str], dict[str, float]]
+        context_compressor: Callable[..., dict[str, Any]]
+        require_client_id = WebRunService.require_client_id
+        require_run_id = WebRunService.require_run_id
+        require_session_id = WebRunService.require_session_id
+        require_source = WebRunService.require_source
+        require_uploaded_files = WebRunService.require_uploaded_files
+        require_user = WebRunService.require_user
+        root: Path
+        summary_waker: Callable[[], None] | None
+
     def submit_guidance(
         self,
         user: Any,
@@ -392,7 +429,7 @@ class RunControlServiceMixin:
             raise
         except Exception as exc:
             raise WebServiceError("手动上下文压缩失败") from exc
-        context = result.get("context") if isinstance(result.get("context"), dict) else {}
+        context = (checked_432 if isinstance(checked_432 := result.get("context"), dict) else {})
         rounds_removed = max(0, int(context.get("rounds_removed") or 0))
         summary_cache = str(result.get("summary_cache") or "")
         compressed = result.get("compressed") is True

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,6 +32,10 @@ from web.services._io import (
 
 
 class MemoryServiceMixin:
+    if TYPE_CHECKING:
+        require_user = WebRunService.require_user
+        root: Path
+
     def memory_summary(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)

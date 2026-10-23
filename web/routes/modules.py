@@ -10,6 +10,7 @@ from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.responses import Response
 
 from web.schemas import (
+    KnowledgeClassificationBody,
     ModulePanelActionBody,
     ModulePanelValuesBody,
     SkillToggleBody,
@@ -117,6 +118,15 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
         path: str = Query(...),
     ) -> dict[str, Any]:
         return backend.put_knowledge_document(user, scope, path, body.content)
+
+    @app.patch("/api/users/{user}/knowledge/{scope}/classification")
+    async def classify_knowledge_document(
+        user: str,
+        scope: str,
+        body: KnowledgeClassificationBody,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        return backend.set_knowledge_category(user, scope, path, body.category)
 
     @app.delete("/api/users/{user}/knowledge/{scope}/document")
     async def delete_knowledge_document(

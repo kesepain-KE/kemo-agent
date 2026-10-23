@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _reject_link_path, _safe_relative_target
@@ -78,7 +78,7 @@ class DownloadArtifactResolver:
         )
 
     @staticmethod
-    def _raise_failure(failure: str) -> None:
+    def _raise_failure(failure: str) -> NoReturn:
         if failure == "scan_limit":
             raise WebServiceError(
                 "生成产物检索范围过大，已停止递归扫盘；请提供当前相对路径后重试"

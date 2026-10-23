@@ -10,7 +10,7 @@ from pathlib import Path
 import queue
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Generator
 import uuid
 
 from pydantic import ValidationError
@@ -505,7 +505,7 @@ class WebRunService(
                     result = cleanup_empty_history_sessions(self.root, user, protected_sessions=protected, limit=100)
                 deleted += len(result['deleted_sessions'])
                 if result['deleted_sessions']:
-                    self._overview_cache.invalidate(lambda key: key[0] == user)
+                    self._overview_cache.invalidate(lambda key: isinstance(key, tuple) and bool(key) and key[0] == user)
             except Exception as exc:
                 record_runtime_event(self.root, user, category='backend', name='empty_web_cleanup', status='failed', error_type=type(exc).__name__)
         return deleted
@@ -573,7 +573,7 @@ class WebRunService(
                 outcome['deleted_sessions'] += int(result['deleted_count'])
                 outcome['errors'] += int(result['error_count']) + len(app_result.get('errors') or [])
                 if result['deleted_count'] or result['closed_count'] or app_result.get('closed'):
-                    self._overview_cache.invalidate(lambda key, owner=user: key[0] == owner)
+                    self._overview_cache.invalidate(lambda key, owner=user: isinstance(key, tuple) and bool(key) and key[0] == owner)
                 record_runtime_event(
                     self.root, user, category='backend', name=event_name,
                     status='failed' if result['error_count'] else 'success',
@@ -668,7 +668,7 @@ class WebRunService(
         task_plan_mode: str = "",
         source: Any = "web",
         client_id: Any = "",
-    ) -> Iterator[RunEvent]:
+    ) -> Generator[RunEvent, None, None]:
         """Compatibility entry point delegated to the chat stream service."""
 
         return _stream_chat(

@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 import re
 from datetime import date as calendar_date
 from typing import Any
@@ -34,6 +50,23 @@ from web.services.history import history as _history_impl
 
 
 class SessionServiceMixin:
+    if TYPE_CHECKING:
+        _active_runs: dict[str, ActiveRun]
+        _active_runs_lock: threading.RLock
+        _other_durable_session_clients_locked = WebRunService._other_durable_session_clients_locked
+        _prune_session_leases_locked = WebRunService._prune_session_leases_locked
+        _release_durable_session_lease_locked = WebRunService._release_durable_session_lease_locked
+        _session_leases: dict[tuple[str, str, str], dict[str, float]]
+        _touch_session_lease_locked = WebRunService._touch_session_lease_locked
+        require_client_id = WebRunService.require_client_id
+        require_history_source = WebRunService.require_history_source
+        require_session_id = WebRunService.require_session_id
+        require_session_title = WebRunService.require_session_title
+        require_source = WebRunService.require_source
+        require_user = WebRunService.require_user
+        root: Path
+        summary_waker: Callable[[], None] | None
+
     def sessions(
         self,
         user: Any,

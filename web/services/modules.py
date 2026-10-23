@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from web.services.expand_content import read_expand_text, expand_control_sections
+
+from typing import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 from datetime import datetime
 import os
 from pathlib import Path, PurePosixPath
@@ -27,8 +35,6 @@ from run.config import load_prompt_source_registry
 from run.config import MainAgentSourcePolicy
 from web.constants import (
     _BEIJING,
-    _EXPAND_INJECTION_HEADING,
-    _EXPAND_OPERATION_HEADING,
     _EXPAND_SCOPES,
     _MESSAGE_LOG_LIMIT,
 )
@@ -43,6 +49,15 @@ from web.services.module_panels import (
 
 
 class MessageExpandServiceMixin:
+    if TYPE_CHECKING:
+        _project_path = WebRunService._project_path
+        _runtime_status = WebRunService._runtime_status
+        message_health_checker: Callable[[str, str], dict[str, Any]] | None
+        message_transport_remover: Callable[[str, str], None] | None
+        patch_user_config = WebRunService.patch_user_config
+        require_user = WebRunService.require_user
+        root: Path
+
     def _message_module_directory(
         self, user: Any, module_name: Any
     ) -> tuple[str, str, Path, MessagePluginConfig]:
@@ -491,37 +506,11 @@ class MessageExpandServiceMixin:
 
     @staticmethod
     def _read_expand_text(module_dir: Path, file_name: Any) -> str:
-        if not isinstance(file_name, str) or not file_name.strip():
-            return ""
-        normalized = file_name.strip()
-        if Path(normalized).name != normalized:
-            return ""
-        path = module_dir / normalized
-        if not path.is_file() or path.is_symlink():
-            return ""
-        try:
-            path.resolve().relative_to(module_dir.resolve())
-            return path.read_text("utf-8-sig").strip()
-        except (OSError, UnicodeError, ValueError):
-            return ""
+        return read_expand_text(module_dir, file_name)
 
     @staticmethod
     def _expand_control_sections(content: str) -> tuple[str, str]:
-        if not content:
-            return "", ""
-        injection_match = _EXPAND_INJECTION_HEADING.search(content)
-        operation_match = _EXPAND_OPERATION_HEADING.search(
-            content, injection_match.end() if injection_match else 0
-        )
-        injection = (
-            content[
-                injection_match.end():operation_match.start() if operation_match else len(content)
-            ].strip()
-            if injection_match
-            else ""
-        )
-        operation = content[operation_match.end():].strip() if operation_match else ""
-        return injection, operation
+        return expand_control_sections(content)
 
     def _expand_module_directory(
         self, user: Any, scope: Any, module_name: Any

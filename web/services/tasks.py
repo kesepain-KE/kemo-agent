@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
+from pathlib import Path
+
 import re
 from typing import Any
 
@@ -106,6 +114,13 @@ def _redact_plan_revision(value: Any) -> Any:
 
 
 class TaskServiceMixin(TaskCleanupServiceMixin):
+    if TYPE_CHECKING:
+        plan_waker: Callable[[], None] | None
+        require_session_id = WebRunService.require_session_id
+        require_source = WebRunService.require_source
+        require_user = WebRunService.require_user
+        root: Path
+
     """Task APIs mixed into the backwards-compatible ``WebRunService`` facade."""
 
     @staticmethod
@@ -721,9 +736,9 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
                 type=task_type,
                 interval_seconds=interval,
                 time=source.get("time"),
-                times=source.get("times") if isinstance(source.get("times"), list) else None,
-                weekdays=source.get("weekdays") if isinstance(source.get("weekdays"), list) else None,
-                month_days=source.get("month_days") if isinstance(source.get("month_days"), list) else None,
+                times=(checked_747 if isinstance(checked_747 := source.get("times"), list) else None),
+                weekdays=(checked_748 if isinstance(checked_748 := source.get("weekdays"), list) else None),
+                month_days=(checked_749 if isinstance(checked_749 := source.get("month_days"), list) else None),
                 start_date=str(source.get("start_date") or ""),
                 end_date=str(source.get("end_date") or ""),
                 max_runs=max_runs,

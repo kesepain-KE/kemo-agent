@@ -51,7 +51,7 @@ from web.schemas import (
     TokenLoginBody,
 )
 from web.service import ConflictError, InvalidRequestError, WebRunService, WebServiceError
-from web.app_factory import create_app as _create_app_impl
+from web.app_factory import create_app as _create_app_impl, HealthBackend
 
 
 __all__ = [
@@ -127,7 +127,7 @@ def _spawn_restart_helper(base: Path, port: int) -> int:
 def create_app(
     *,
     root: Path | None = None,
-    service: WebRunService | None = None,
+    service: WebRunService | HealthBackend | None = None,
     auth_config: WebAuthConfig | None = None,
 ) -> FastAPI:
     """Compatibility entry point delegated to the application factory module."""

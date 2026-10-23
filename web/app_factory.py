@@ -1,19 +1,43 @@
 """FastAPI application assembly extracted from :mod:`web.app`."""
 
 from __future__ import annotations
+
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Iterator, Protocol
+
+from fastapi import FastAPI
+from web.auth import WebAuthConfig
+from web.service import WebRunService
+
+from web.schemas import ChatBody as _AnnotationChatBody
+from web.schemas import GuidanceBody as _AnnotationGuidanceBody
+from fastapi.responses import JSONResponse as _AnnotationJSONResponse
+from web.schemas import LoginBody as _AnnotationLoginBody
+from fastapi import Request as _AnnotationRequest
+from fastapi.exceptions import RequestValidationError as _AnnotationRequestValidationError
+from web.schemas import RestartBody as _AnnotationRestartBody
+from web.schemas import RunCancelBody as _AnnotationRunCancelBody
+from events import RunEvent as _AnnotationRunEvent
+from fastapi.responses import StreamingResponse as _AnnotationStreamingResponse
+from web.schemas import TokenLoginBody as _AnnotationTokenLoginBody
+from web.auth import WebAuthError as _AnnotationWebAuthError
+from web.service import WebServiceError as _AnnotationWebServiceError
+
+class HealthBackend(Protocol):
+    def health(self) -> dict[str, Any]: ...
+
 
 def create_app(
     *,
     root: Path | None = None,
-    service: WebRunService | None = None,
+    service: WebRunService | HealthBackend | None = None,
     auth_config: WebAuthConfig | None = None,
 ) -> FastAPI:
     """Create the FastAPI application and compose domain route registrars."""
 
     import importlib
     _app_module = importlib.import_module("web.app")
-    Any = _app_module.Any
     AuthFailureLimiter = _app_module.AuthFailureLimiter
     ChatBody = _app_module.ChatBody
     ConflictError = _app_module.ConflictError
@@ -21,7 +45,6 @@ def create_app(
     FileResponse = _app_module.FileResponse
     GuidanceBody = _app_module.GuidanceBody
     InvalidRequestError = _app_module.InvalidRequestError
-    Iterator = _app_module.Iterator
     JSONResponse = _app_module.JSONResponse
     LoginBody = _app_module.LoginBody
     Path = _app_module.Path
@@ -127,7 +150,7 @@ def create_app(
                 if callable(inspector):
                     inspector(stop)
                 else:
-                    backend.cleanup_empty_web_sessions(stop)
+                    getattr(backend, "cleanup_empty_web_sessions")(stop)
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning('Startup Web session inspection unavailable')
@@ -141,7 +164,7 @@ def create_app(
                             event_name='offline_session_inspection',
                         )
                     else:
-                        backend.cleanup_empty_web_sessions(stop)
+                        getattr(backend, "cleanup_empty_web_sessions")(stop)
                 except Exception:
                     # A failed inspection must not kill the lifecycle worker.
                     import logging
@@ -169,7 +192,7 @@ def create_app(
     app.state.restart_requested = False
 
     @app.middleware("http")
-    async def require_web_auth(request: Request, call_next):
+    async def require_web_auth(request: _AnnotationRequest, call_next):
         path = request.url.path
         public = path in {"/api/health", "/api/logo"} or path.startswith(
             "/api/auth/"
@@ -202,7 +225,7 @@ def create_app(
         )
 
     @app.exception_handler(WebServiceError)
-    async def web_service_error(_: Request, exc: WebServiceError) -> JSONResponse:
+    async def web_service_error(_: _AnnotationRequest, exc: _AnnotationWebServiceError) -> _AnnotationJSONResponse:
         return JSONResponse(
             status_code=exc.status,
             content=_error_body(exc.code, str(exc), exc.status),
@@ -210,7 +233,7 @@ def create_app(
         )
 
     @app.exception_handler(WebAuthError)
-    async def web_auth_error(_: Request, exc: WebAuthError) -> JSONResponse:
+    async def web_auth_error(_: _AnnotationRequest, exc: _AnnotationWebAuthError) -> _AnnotationJSONResponse:
         return JSONResponse(
             status_code=exc.status,
             content=_error_body(exc.code, str(exc), exc.status),
@@ -218,14 +241,14 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(_: _AnnotationRequest, exc: _AnnotationRequestValidationError) -> _AnnotationJSONResponse:
         return JSONResponse(
             status_code=400,
             content=_error_body("invalid_request", "请求字段无效", 400),
         )
 
     @app.exception_handler(Exception)
-    async def internal_error(_: Request, exc: Exception) -> JSONResponse:
+    async def internal_error(_: _AnnotationRequest, exc: Exception) -> _AnnotationJSONResponse:
         return JSONResponse(
             status_code=500,
             content=_error_body("internal_error", _safe_internal_message(exc), 500),
@@ -236,7 +259,7 @@ def create_app(
         return backend.health()
 
     @app.post("/api/system/restart")
-    async def restart_system(body: RestartBody) -> dict[str, Any]:
+    async def restart_system(body: _AnnotationRestartBody) -> dict[str, Any]:
         active_run_checker = getattr(backend, "has_active_runs", None)
         if not body.force and callable(active_run_checker) and active_run_checker():
             raise ConflictError("存在正在运行的对话，请结束当前响应后再重启智能体")
@@ -256,11 +279,11 @@ def create_app(
         return {"ok": True, "port": body.port, "helper_pid": helper_pid}
 
     @app.get("/api/auth/status")
-    async def auth_status(request: Request) -> dict[str, Any]:
+    async def auth_status(request: _AnnotationRequest) -> dict[str, Any]:
         session = request.session if configured_auth.enabled else None
         return authenticator.status(session)
 
-    def auth_client_ip(request: Request) -> str:
+    def auth_client_ip(request: _AnnotationRequest) -> str:
         peer = request.client.host if request.client is not None else "unknown"
         return resolve_client_ip(
             peer,
@@ -269,7 +292,7 @@ def create_app(
         )
 
     @app.post("/api/auth/token")
-    async def auth_token(body: TokenLoginBody, request: Request) -> dict[str, Any]:
+    async def auth_token(body: _AnnotationTokenLoginBody, request: _AnnotationRequest) -> dict[str, Any]:
         client_ip = auth_client_ip(request)
         auth_limiter.check(client_ip, "token")
         try:
@@ -287,7 +310,7 @@ def create_app(
         return authenticator.status(request.session)
 
     @app.post("/api/auth/login")
-    async def auth_login(body: LoginBody, request: Request) -> dict[str, Any]:
+    async def auth_login(body: _AnnotationLoginBody, request: _AnnotationRequest) -> dict[str, Any]:
         if configured_auth.requires_both and not authenticator.token_stage_verified(
             request.session
         ):
@@ -311,7 +334,7 @@ def create_app(
         return authenticator.status(request.session)
 
     @app.post("/api/auth/logout")
-    async def auth_logout(request: Request) -> dict[str, bool]:
+    async def auth_logout(request: _AnnotationRequest) -> dict[str, bool]:
         if configured_auth.enabled:
             authenticator.logout(request.session)
         return {"authenticated": False}
@@ -325,8 +348,8 @@ def create_app(
     register_setting_routes(app, backend, configured_auth)
 
     @app.post("/api/runs/{run_id}/guidance")
-    async def submit_guidance(run_id: str, body: GuidanceBody) -> dict[str, Any]:
-        return backend.submit_guidance(
+    async def submit_guidance(run_id: str, body: _AnnotationGuidanceBody) -> dict[str, Any]:
+        return getattr(backend, "submit_guidance")(
             body.user,
             run_id,
             body.guidance,
@@ -337,8 +360,8 @@ def create_app(
         )
 
     @app.post("/api/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str, body: RunCancelBody) -> dict[str, Any]:
-        return backend.cancel_run(
+    async def cancel_run(run_id: str, body: _AnnotationRunCancelBody) -> dict[str, Any]:
+        return getattr(backend, "cancel_run")(
             body.user,
             run_id,
             source=body.source,
@@ -346,11 +369,11 @@ def create_app(
         )
 
     @app.post("/api/chat")
-    async def chat(body: ChatBody, request: Request) -> StreamingResponse:
+    async def chat(body: _AnnotationChatBody, request: _AnnotationRequest) -> _AnnotationStreamingResponse:
         cancel_event = threading.Event()
-        events: Iterator[RunEvent] | None = None
+        events: Iterator[_AnnotationRunEvent] | None = None
         try:
-            content_options = {"content": body.content} if body.content else {}
+            content_options: dict[str, Any] = {"content": body.content} if body.content else {}
             if body.uploaded_files:
                 content_options["uploaded_files"] = body.uploaded_files
             # stream_chat 可能在用户级并发闸前有界等待；放入工作线程，避免
@@ -358,7 +381,7 @@ def create_app(
             if body.plan_id:
                 chat_task = asyncio.create_task(
                     asyncio.to_thread(
-                        backend.stream_plan,
+                        getattr(backend, "stream_plan"),
                         body.user,
                         body.session_id,
                         body.plan_id,
@@ -371,7 +394,7 @@ def create_app(
             else:
                 chat_task = asyncio.create_task(
                     asyncio.to_thread(
-                        backend.stream_chat,
+                        getattr(backend, "stream_chat"),
                         body.user,
                         body.session_id,
                         body.prompt,

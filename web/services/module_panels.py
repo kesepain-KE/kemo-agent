@@ -254,7 +254,7 @@ def _normalize_container(raw: Any, index: int, panel_kind: PanelKind) -> dict[st
             raise InvalidRequestError(f"{control_path}.command 格式无效")
         if panel_kind == "sense" and command != "refresh":
             raise InvalidRequestError("感知面板 action 只允许 refresh")
-        normalized = {
+        normalized: dict[str, Any] = {
             "type": control_type,
             "label": _text(control.get("label", command), f"{control_path}.label", maximum=120),
             "command": command,

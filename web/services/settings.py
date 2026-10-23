@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Callable, Iterator
+from events import RunEvent
+from run.infra import BoundedReadCache
+from web.services.artifact_resolver import DownloadArtifactResolver
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from web.service import ActiveRun
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
+
 from datetime import datetime
 import hashlib
 import json
@@ -111,6 +125,15 @@ _CONFIG_SOURCE_PATHS = (
 
 
 class SettingsServiceMixin:
+    if TYPE_CHECKING:
+        _kemo_catalog_cache: dict[tuple[str, str, str], tuple[float, Any]]
+        _kemo_catalog_lock: threading.RLock
+        _version_check_lock: threading.Lock
+        require_user = WebRunService.require_user
+        root: Path
+        users = WebRunService.users
+        version_manifest_fetcher: Callable[[str, float], dict[str, Any]]
+
     def _config_path(self, user: str) -> Path:
         return self.root / "users" / user / "user_config.json"
 
@@ -409,7 +432,7 @@ class SettingsServiceMixin:
         name = self.require_user(user)
         path = self.root / "users" / name / "web_preferences.json"
         value = read_json_object(path, allow_empty=True)
-        appearance = value.get("appearance") if isinstance(value.get("appearance"), dict) else {}
+        appearance = (checked_435 if isinstance(checked_435 := value.get("appearance"), dict) else {})
         return {
             "user": name,
             "appearance": {
