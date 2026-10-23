@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from message.schema import ChatType
+
 from collections import OrderedDict
 from datetime import datetime
 import hashlib
@@ -562,10 +564,13 @@ class FileMessageTransport:
             for message in messages
             for attachment in message.attachments
         )
+        if last.chat_type not in ("private", "group", "channel"):
+            raise ValueError("Invalid chat type")
+        validated_chat_type: ChatType = last.chat_type
         return MessageEnvelope(
             message_id=message_id,
             platform=self.config.platform,
-            chat_type=last.chat_type,
+            chat_type=validated_chat_type,
             external_user_id=last.external_user_id,
             external_chat_id=last.external_chat_id,
             text=text,
@@ -681,6 +686,7 @@ class FileMessageTransport:
                 "platform": self.config.platform,
                 "chat_type": message.chat_type,
                 "chat_id": message.external_chat_id,
+                "exchange_id": message.message_id,
                 "source": "runtime/logs.sqlite3",
             }
             if message.text:
