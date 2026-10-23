@@ -156,7 +156,7 @@ def dominant_newline(text: str) -> str:
     if not endings:
         return "\n"
     counts = {ending: endings.count(ending) for ending in ("\r\n", "\n", "\r")}
-    return max(counts, key=counts.get)
+    return max(counts, key=lambda key: counts[key])
 
 
 def newline_near(text: str, start: int, end: int, fallback: str) -> str:

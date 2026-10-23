@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.tools import (
+        cancel_background_job as cancel_background_job,
+        prepare_background_job as prepare_background_job,
+        public_background_job as public_background_job,
+        read_background_job as read_background_job,
+        reconcile_background_job as reconcile_background_job,
+        update_background_job as update_background_job,
+        write_job_request as write_job_request,
+    )
+
 import hashlib
 import locale
 import os
@@ -600,7 +612,7 @@ def _execution_wrapper(name: str):
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         return _execution_invoke(name, *args, **kwargs)
     wrapper.__name__ = name
-    wrapper.__shell_execution_wrapper__ = True
+    setattr(wrapper, "__shell_execution_wrapper__", True)
     return wrapper
 
 _process_command = _execution_wrapper("_process_command")

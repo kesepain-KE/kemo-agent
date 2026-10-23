@@ -257,7 +257,7 @@ class _TextExtractor(HTMLParser):
         self.text: list[str] = []
         self._skip_depth = 0
 
-    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style", "head", "nav", "footer", "header", "aside"}:
             self._skip_depth += 1
 

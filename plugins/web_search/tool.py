@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+
 import json
 import os
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 try:
     from tavily import TavilyClient
     HAS_TAVILY = True
 except ImportError:  # pragma: no cover - dependency error is exercised through _get_client
-    TavilyClient = Any  # type: ignore[assignment,misc]
+    TavilyClient = None
     HAS_TAVILY = False
 
 
@@ -30,14 +31,18 @@ def _result(ok: bool, **fields: Any) -> dict[str, Any]:
     return {"ok": ok, **fields}
 
 
-def _get_client() -> TavilyClient:
+if TYPE_CHECKING:
+    from tavily import TavilyClient as SearchClient
+
+
+def _get_client() -> SearchClient:
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
             "网络搜索尚未配置：请在项目 .env 中设置 TAVILY_API_KEY，"
             "然后重启智能体。获取密钥：https://app.tavily.com/"
         )
-    if not HAS_TAVILY:
+    if not HAS_TAVILY or TavilyClient is None:
         raise RuntimeError(
             "网络搜索依赖尚未安装：请执行 pip install tavily-python，"
             "然后重启智能体。"
@@ -71,7 +76,7 @@ def _content(value: Any, limit: int = _CONTENT_LIMIT) -> tuple[str, bool]:
     return text[:limit], len(text) > limit
 
 
-def _search(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+def _search(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
     query = str(kwargs.get("query") or "").strip()
     if not query:
         raise ValueError("search 需要 query 参数")
@@ -132,7 +137,7 @@ def _search(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, An
     )
 
 
-def _extract(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+def _extract(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
     urls = _csv(kwargs.get("urls"))
     if not urls:
         raise ValueError("extract 需要 urls 参数")
@@ -198,7 +203,7 @@ def _site_params(kwargs: dict[str, Any], timeout: float, *, crawl: bool) -> dict
     return params
 
 
-def _crawl(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+def _crawl(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
     params = _site_params(kwargs, timeout, crawl=True)
     response = client.crawl(**params)
     pages = []
@@ -214,14 +219,14 @@ def _crawl(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any
     )
 
 
-def _map(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+def _map(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
     params = _site_params(kwargs, timeout, crawl=False)
     response = client.map(**params)
     urls = response.get("results") or response.get("urls") or []
     return _result(True, url=params["url"], urls=urls, total=len(urls), usage=response.get("usage"))
 
 
-def _research(client: TavilyClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+def _research(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
     topic = str(kwargs.get("input") or kwargs.get("query") or "").strip()
     if not topic:
         raise ValueError("research 需要 input 参数")

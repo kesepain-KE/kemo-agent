@@ -457,6 +457,8 @@ def run(
     }
     operation = state_actions.get(selected_action)
     try:
+        if operation is None:
+            raise ValueError(f"Unsupported plan action: {action}")
         return _result(True, plan=operation(root, user, selected_plan_id))
     except Exception as exc:
         return _result(False, error=str(exc))

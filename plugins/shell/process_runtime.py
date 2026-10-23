@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+
+import subprocess
+
 from dataclasses import dataclass
 from pathlib import Path
 import threading
@@ -211,7 +214,7 @@ def start_background(
         "show_terminal": show_terminal,
         "deadline_at": record.get("deadline_at"),
     }
-    worker: deps.subprocess.Popen[Any] | None = None
+    worker: subprocess.Popen[Any] | None = None
     try:
         deps.write_job_request(paths["request"], request)
         worker = deps.subprocess.Popen(
@@ -228,16 +231,18 @@ def start_background(
             stderr=deps.subprocess.DEVNULL,
             **deps.detached_subprocess_kwargs(),
         )
-        worker_snapshot = deps.process_snapshot(worker.pid)
+        assert worker is not None
+        running_worker = worker
+        worker_snapshot = deps.process_snapshot(running_worker.pid)
         if (
-            worker.poll() is None
+            running_worker.poll() is None
             and worker_snapshot.get("exists")
             and not str(worker_snapshot.get("process_started_at") or "").strip()
         ):
             raise RuntimeError("后台 Worker 进程身份无法确认")
 
         def mark_worker(current: dict[str, Any]) -> dict[str, Any]:
-            current["worker_pid"] = worker.pid
+            current["worker_pid"] = running_worker.pid
             current["worker_started_at"] = str(
                 worker_snapshot.get("process_started_at") or ""
             )

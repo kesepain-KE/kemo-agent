@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from pathlib import Path
 import random
 import time
@@ -239,7 +241,7 @@ def _remote_content(
 ) -> ImageContent | AudioContent | VideoContent | FileContent:
     """Build a Kemo media block for an already-owned gateway Asset."""
 
-    kind = _asset_kind_from_mime(descriptor.mime_type)
+    kind = _asset_kind_from_mime(descriptor.mime_type or "")
     if expected_kind is not None and kind != expected_kind:
         raise ValueError(
             f"附件类型不匹配：期望 {expected_kind}，实际为 {kind}"
@@ -359,7 +361,7 @@ def run(
                 # rather than being forced through RunAssetResolver.
                 if asset_id not in local_asset_ids:
                     get_asset = getattr(provider, "get_asset", None)
-                    wait_asset_ready = getattr(provider, "wait_asset_ready", None)
+                    wait_asset_ready: Callable[..., AssetDescriptor] | None = getattr(provider, "wait_asset_ready", None)
                     if callable(get_asset) and callable(wait_asset_ready):
                         try:
                             with provider_request_slot(
@@ -403,7 +405,7 @@ def run(
                     ),
                 )
                 with provider_request_slot(config, cancel_event=cancel_event):
-                    remote = provider.upload_asset(
+                    remote = getattr(provider, "upload_asset")(
                         path,
                         metadata={
                             "user": user,
@@ -416,7 +418,7 @@ def run(
                         mime_type=str(verified["mime_type"]),
                         cancel_event=cancel_event,
                     )
-                    remote = provider.wait_asset_ready(
+                    remote = getattr(provider, "wait_asset_ready")(
                         remote,
                         cancel_event=cancel_event,
                     )

@@ -2,6 +2,45 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from plugins.shell.tool import (
+        Path as Path,
+        ProcessRuntimeDependencies as ProcessRuntimeDependencies,
+        _builtin as _builtin,
+        _decode_output as _decode_output,
+        _is_builtin_command as _is_builtin_command,
+        _is_windows as _is_windows,
+        _isolate_shell_environment as _isolate_shell_environment,
+        _merged_shell_environment as _merged_shell_environment,
+        _powershell_script as _powershell_script,
+        _resolve_shell as _resolve_shell,
+        _set_environment_value as _set_environment_value,
+        _split_chain as _split_chain,
+        _truncate as _truncate,
+        cancel_background_job as cancel_background_job,
+        cancellable_subprocess_kwargs as cancellable_subprocess_kwargs,
+        detached_subprocess_kwargs as detached_subprocess_kwargs,
+        hashlib as hashlib,
+        hidden_subprocess_kwargs as hidden_subprocess_kwargs,
+        prepare_background_job as prepare_background_job,
+        process_snapshot as process_snapshot,
+        public_background_job as public_background_job,
+        read_background_job as read_background_job,
+        reconcile_background_job as reconcile_background_job,
+        run_process as run_process,
+        start_background as start_background,
+        subprocess as subprocess,
+        sys as sys,
+        terminate_process_tree as terminate_process_tree,
+        threading as threading,
+        time as time,
+        update_background_job as update_background_job,
+        visible_subprocess_kwargs as visible_subprocess_kwargs,
+        write_job_request as write_job_request,
+    )
+
 from typing import Any
 
 def _process_command(

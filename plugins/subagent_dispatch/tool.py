@@ -329,8 +329,8 @@ def run(
                 raise AgentError(str(exc)) from exc
             except ExternalAgentError as exc:
                 raise AgentError(str(exc)) from exc
-        definition = public.get(agent)
-        if definition is None:
+        agent_definition = public.get(agent)
+        if agent_definition is None:
             raise AgentError(f"子代理未公开或不存在：{agent}")
         invocation = prepare_main_agent_invocation(
             root=root,
@@ -344,7 +344,7 @@ def run(
         payload = invocation.payload
         if wait:
             requested_timeout = _positive_timeout(
-                timeout if timeout is not None else definition.timeout,
+                timeout if timeout is not None else agent_definition.timeout,
                 field="子代理 timeout",
             )
             persisted_holder: dict[str, Any] = {}

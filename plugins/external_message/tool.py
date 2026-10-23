@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from message.schema import ChatType
+
 from pathlib import Path
 from typing import Any
 import uuid
@@ -91,10 +93,13 @@ def run(
             raise ValueError(f"待发送路径不是文件：{resolved_path}")
         normalized_file = str(resolved_path)
 
+    if normalized_chat_type not in ("private", "group", "channel"):
+        raise ValueError("Invalid chat type")
+    validated_chat_type: ChatType = normalized_chat_type
     outbound = OutboundMessage(
         message_id=f"out_{uuid.uuid4().hex[:12]}",
         platform=normalized_platform,
-        chat_type=normalized_chat_type,
+        chat_type=validated_chat_type,
         external_chat_id=normalized_target,
         text=normalized_message,
         file_path=normalized_file,

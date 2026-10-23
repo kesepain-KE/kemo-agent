@@ -23,7 +23,7 @@ def run(
         raise ValueError("工具上下文缺少 user")
     raw_timeout = timeout or context.get("tool_timeout")
     try:
-        effective_timeout = float(raw_timeout)
+        effective_timeout = float(raw_timeout if raw_timeout is not None else "")
     except (TypeError, ValueError) as exc:
         raise ValueError("拓展工具超时必须是正数") from exc
     if effective_timeout <= 0:
