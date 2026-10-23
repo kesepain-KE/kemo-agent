@@ -123,23 +123,25 @@ def create_user(
 
 
 def _post_process_knowledge(root: Path, name: str) -> None:
-    """初始化 knowledge/data_structure.md"""
+    """初始化 knowledge 索引和分类 SQLite 表。"""
+    from run.config import ensure_classification_file
+
     index_path = root / "users" / name / "knowledge" / "data_structure.md"
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    if index_path.exists() and index_path.stat().st_size > 0:
-        return
-    index_path.write_text(
-        f"# users/{name}/knowledge/ 目录结构\n\n"
-        f"用户 {name} 的私有知识库。\n\n"
-        f"| 文件 | 说明 |\n"
-        f"|------|------|\n"
-        f"| `data_structure.md` | 本索引文件 |\n\n"
-        f"## 检索规则\n\n"
-        f"1. 先查此目录，再查全局知识库。\n"
-        f"2. 用户私有信息默认写入此目录。\n"
-        f"3. 文件发生增删改移后必须同步本索引。\n",
-        "utf-8",
-    )
+    if not (index_path.exists() and index_path.stat().st_size > 0):
+        index_path.write_text(
+            f"# users/{name}/knowledge/ 目录结构\n\n"
+            f"用户 {name} 的私有知识库。\n\n"
+            f"| 文件 | 说明 |\n"
+            f"|------|------|\n"
+            f"| `data_structure.md` | 本索引文件 |\n\n"
+            f"## 检索规则\n\n"
+            f"1. 先查此目录，再查全局知识库。\n"
+            f"2. 用户私有信息默认写入此目录。\n"
+            f"3. 文件发生增删改移后必须同步本索引。\n",
+            "utf-8",
+        )
+    ensure_classification_file(index_path.parent)
 
 
 def _post_process_memory(root: Path, name: str) -> None:
@@ -158,24 +160,13 @@ def _post_process_memory(root: Path, name: str) -> None:
 
 def _post_process_dirs(root: Path, name: str) -> None:
     """补齐所有应有的空子目录"""
+    from run.config import ensure_user_skeleton
+
     user_dir = root / "users" / name
-    subdirs = (
-        "download",
-        "file_upload",
-        "expand",
-        "task_plan",
-        "task_cron",
-        "agents",
-        "history",
-        "avatar",
-        "improve",
-        "improve/expired_memory",
-        "knowledge",
-        "user_skills/agent_create",
-        "user_skills/user_create",
-    )
-    for sub in subdirs:
-        (user_dir / sub).mkdir(parents=True, exist_ok=True)
+    issues: list[str] = []
+    ensure_user_skeleton(user_dir, issues=issues)
+    if issues:
+        raise OSError("用户目录骨架存在无法安全补齐的路径：" + ", ".join(issues))
 
 
 # ── API 配置引导 ──
@@ -261,10 +252,11 @@ def edit_user_api_config(root: Path | None = None, name: str = "") -> None:
         if not users:
             print("  没有可编辑的用户\n")
             return
-        name = _pick_user(users, "编辑")
-        if not name:
+        selected_name = _pick_user(users, "编辑")
+        if not selected_name:
             print("  → 已取消\n")
             return
+        name = selected_name
 
     _validate_name(name)
     config_path = root / "users" / name / "user_config.json"
@@ -317,10 +309,11 @@ def delete_user(
         if not users:
             print("  没有可删除的用户\n")
             return False
-        name = _pick_user(users, "删除")
-        if not name:
+        selected_name = _pick_user(users, "删除")
+        if not selected_name:
             print("  → 已取消\n")
             return False
+        name = selected_name
 
     _validate_name(name)
     user_dir = root / "users" / name
@@ -410,19 +403,19 @@ def _interactive_main(root: Path) -> None:
             _menu_create(root)
 
         elif choice == "e" and users:
-            name = _pick_user(users, "编辑")
-            if name:
+            selected_name = _pick_user(users, "编辑")
+            if selected_name:
                 try:
-                    edit_user_api_config(root, name)
+                    edit_user_api_config(root, selected_name)
                 except Exception as exc:
                     print(f"  ✗ {exc}\n")
 
         elif choice == "d" and users:
-            name = _pick_user(users, "删除")
-            if name:
+            selected_name = _pick_user(users, "删除")
+            if selected_name:
                 try:
-                    if delete_user(root, name, confirm=False):
-                        print(f"  ✓ 用户 {name} 已删除\n")
+                    if delete_user(root, selected_name, confirm=False):
+                        print(f"  ✓ 用户 {selected_name} 已删除\n")
                 except Exception as exc:
                     print(f"  ✗ {exc}\n")
 

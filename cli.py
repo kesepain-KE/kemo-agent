@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 DEFAULT_SOURCE = "cli"
 DEFAULT_SESSION = "default"
 
@@ -350,7 +350,7 @@ def run_single(
 ) -> None:
     request = CLIRequest(user=user, prompt=prompt, source=source, session_id=session_id)
     if stream_handler is not None:
-        payload = request.to_dict()
+        payload: dict[str, Any] = request.to_dict()
         payload["stream"] = True
         emit_event_stream(
             stream_handler(payload),

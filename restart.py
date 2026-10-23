@@ -12,6 +12,8 @@ Usage:
 
 from __future__ import annotations
 
+from typing import IO, TypedDict
+
 import argparse
 import errno
 import os
@@ -25,6 +27,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 LOG_PATH = ROOT / "tmp" / "restart.log"
+
+
+class _DetachedProcessOptions(TypedDict, total=False):
+    cwd: str
+    stdin: int
+    stdout: IO[bytes]
+    stderr: int
+    close_fds: bool
+    creationflags: int
+    start_new_session: bool
 
 
 def _port_is_free(port: int) -> bool:
@@ -108,7 +120,7 @@ def _start_web(port: int) -> subprocess.Popen[bytes]:
     command = [sys.executable, str(ROOT / "start_web.py"), f"--port={port}"]
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_PATH.open("ab", buffering=0)
-    kwargs: dict[str, object] = {
+    kwargs: _DetachedProcessOptions = {
         "cwd": str(ROOT),
         "stdin": subprocess.DEVNULL,
         "stdout": log_handle,
@@ -123,7 +135,7 @@ def _start_web(port: int) -> subprocess.Popen[bytes]:
     else:
         kwargs["start_new_session"] = True
     try:
-        return subprocess.Popen(command, **kwargs)
+        return subprocess.Popen(command, text=False, **kwargs)
     finally:
         log_handle.close()
 

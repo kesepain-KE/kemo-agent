@@ -295,7 +295,7 @@ def _check_users(root: Path) -> bool:
     then prompt interactively.  Returns True when ready."""
     users = list_users(root)
     if users:
-                # 确保所有现有用户都有完整的目录框架。
+        # 确保所有现有用户都有完整的目录框架；ensure_user 对已有用户也会幂等补齐。
         for name in users:
             try:
                 ensure_user(name, root)
