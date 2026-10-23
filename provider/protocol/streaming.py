@@ -405,7 +405,7 @@ class StreamSequenceGuard:
         if event.type == StreamEventType.OUTPUT_ITEM_ADDED:
             if event.item is None or event.item_id != event.item.id:
                 raise StreamProtocolError("output_item.added 的 item_id 与 item 不一致")
-            key = (event.response_id, event.item_id)
+            key = (event.response_id, event.item.id)
             item_type = str(event.item.type)
             previous = self._started_items.get(key)
             if previous is not None:

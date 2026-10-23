@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from provider.chat_http import _response_content_type, _validate_chat_content_type
+
 import http.client
 import json
 import math
-import re
 import socket
 import time  # noqa: F401 - retained for downstream monkey-patching compatibility
 import urllib.error
@@ -30,6 +31,20 @@ from provider.schema import (
 )
 from provider.tool_arguments import MISSING, parse_tool_arguments
 from provider.protocol.models import normalize_reasoning_effort
+from provider.chat_deepseek import (
+    DEEPSEEK_REASONING_PLACEHOLDER,
+    deepseek_chat_url,
+    deepseek_payload,
+    deepseek_reasoning_effort,
+    deepseek_response_payload,
+    is_deepseek_chat,
+    is_official_deepseek_url,
+)
+from provider.chat_compat import (
+    CHAT_REASONING_PLACEHOLDER, CHAT_RAW_STATE_KEY, ChatCompatibility,
+    ChatReasoningAccumulator, chat_content_text, chat_reasoning_text, chat_response_payload, chat_usage,
+    chat_public_frame, chat_state_from_raw, chat_transport_profile, chat_url, profile_field as _profile_field,
+)
 
 
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
@@ -51,14 +66,7 @@ _TOOLS_UNSUPPORTED_PHRASES = (
 )
 _DEFAULT_REASONING_FIELD = "reasoning_effort"
 _DEFAULT_REASONING_ENABLED_FIELD = "reasoning_enabled"
-_SYNTHETIC_REASONING = "兼容层已启用默认思考模式。"
-
-
-def _profile_field(value: Any, fallback: str) -> str:
-    candidate = str(value or "").strip()
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
-        return candidate
-    return fallback
+_SYNTHETIC_REASONING = CHAT_REASONING_PLACEHOLDER
 
 
 def _error_detail(data: Any, fallback: str) -> tuple[str, str]:
@@ -143,41 +151,13 @@ def _tools_are_explicitly_unsupported(message: str) -> bool:
     return any(phrase in normalized for phrase in _TOOLS_UNSUPPORTED_PHRASES)
 
 
-def _response_content_type(response: Any) -> str:
-    headers = getattr(response, "headers", None)
-    if headers is not None:
-        get_content_type = getattr(headers, "get_content_type", None)
-        if callable(get_content_type):
-            try:
-                return str(get_content_type() or "").strip().casefold()
-            except (AttributeError, TypeError, ValueError):
-                pass
-        get_header = getattr(headers, "get", None)
-        if callable(get_header):
-            try:
-                value = get_header("Content-Type")
-                if value:
-                    return str(value).split(";", 1)[0].strip().casefold()
-            except (AttributeError, TypeError, ValueError):
-                pass
-    getheader = getattr(response, "getheader", None)
-    if callable(getheader):
-        try:
-            value = getheader("Content-Type")
-            if value:
-                return str(value).split(";", 1)[0].strip().casefold()
-        except (AttributeError, TypeError, ValueError):
-            pass
-    return ""
-
-
 def _retry_after_ms(headers: Any) -> int | None:
     get_header = getattr(headers, "get", None)
     if not callable(get_header):
         return None
     try:
         raw = get_header("Retry-After")
-        seconds = float(raw)
+        seconds = float(str(raw))
     except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(seconds):
@@ -211,31 +191,20 @@ class OpenAIChatTransport:
         self.base_url = str(config["base_url"]).rstrip("/")
         self.api_key = str(config["api_key"])
         self.model = str(config["model"])
+        self.is_deepseek = is_deepseek_chat(config)
         self.timeout = float(config.get("timeout", 120))
         self.default_stream = bool(config.get("stream", True))
-        self.default_reasoning_effort = normalize_reasoning_effort(
-            config.get("reasoning_effort")
+        self.default_reasoning_effort = (
+            deepseek_reasoning_effort(config.get("reasoning_effort"))
+            if self.is_deepseek
+            else normalize_reasoning_effort(config.get("reasoning_effort"))
         )
-        profile = config.get("capabilities")
-        if (
-            isinstance(profile, dict)
-            and isinstance(profile.get("capabilities"), dict)
-        ):
-            wrapped_profile = dict(profile["capabilities"])
-            if isinstance(profile.get("transport"), dict):
-                wrapped_profile["transport"] = profile["transport"]
-            profile = wrapped_profile
-        transport = (
-            profile.get("transport")
-            if isinstance(profile, dict)
-            and isinstance(profile.get("transport"), dict)
-            else {}
-        )
-        reasoning_profile = (
-            transport.get("reasoning")
-            if isinstance(transport, dict)
-            and isinstance(transport.get("reasoning"), dict)
-            else {}
+        transport = chat_transport_profile(config)
+        self._chat_compat = ChatCompatibility(self.base_url, transport) if not self.is_deepseek else None
+        reasoning_candidate = transport.get("reasoning") if isinstance(transport, dict) else None
+        reasoning_profile = reasoning_candidate if isinstance(reasoning_candidate, dict) else {}
+        self.deepseek_tool_reasoning_required = self.is_deepseek and (
+            reasoning_profile.get("require_tool_reasoning") is True
         )
         self.reasoning_enabled_field = _profile_field(
             reasoning_profile.get("enabled_field"),
@@ -250,7 +219,9 @@ class OpenAIChatTransport:
             self.reasoning_effort_field = _DEFAULT_REASONING_FIELD
 
     def _url(self) -> str:
-        return f"{self.base_url}/chat/completions"
+        if self.is_deepseek:
+            return deepseek_chat_url(self.base_url)
+        return chat_url(self.base_url)
 
     def _headers(self, *, stream: bool) -> dict[str, str]:
         headers = {
@@ -307,24 +278,18 @@ class OpenAIChatTransport:
         payload = request.to_payload()
         payload["model"] = request.model or self.model
         payload["stream"] = stream
-        # Chat is a forced-reasoning transport.  This covers direct transport
-        # calls which did not carry a Kemo reasoning object as well as normal
-        # Agent requests.
-        configured_effort = payload.get(self.reasoning_effort_field)
-        if configured_effort in (None, "", "none"):
-            configured_effort = payload.get("reasoning_effort")
-        payload[self.reasoning_enabled_field] = True
-        payload[self.reasoning_effort_field] = normalize_reasoning_effort(
-            configured_effort or self.default_reasoning_effort
+        if self.is_deepseek:
+            return deepseek_payload(
+                payload,
+                reasoning_enabled_field=self.reasoning_enabled_field,
+                reasoning_effort_field=self.reasoning_effort_field,
+                default_reasoning_effort=self.default_reasoning_effort,
+            )
+        assert self._chat_compat is not None
+        return self._chat_compat.payload(
+            payload, default_effort=self.default_reasoning_effort,
+            enabled_field=self.reasoning_enabled_field, effort_field=self.reasoning_effort_field,
         )
-        for key in ("reasoning_enabled", "reasoning_effort"):
-            if key not in {
-                self.reasoning_enabled_field,
-                self.reasoning_effort_field,
-            }:
-                payload.pop(key, None)
-        return payload
-
     def _request(
         self,
         payload: dict[str, Any],
@@ -340,6 +305,7 @@ class OpenAIChatTransport:
 
     @staticmethod
     def _read_json_response(response: Any, context: str) -> dict[str, Any]:
+        _validate_chat_content_type(response)
         try:
             raw = response.read()
         except (
@@ -356,6 +322,8 @@ class OpenAIChatTransport:
 
     def _usage(self, raw: Any, request: ChatRequest, output: str) -> Usage:
         if isinstance(raw, dict) and raw:
+            if not self.is_deepseek:
+                raw = chat_usage(raw)
             prompt = int(raw.get("prompt_tokens") or 0)
             completion = int(raw.get("completion_tokens") or 0)
             total = int(raw.get("total_tokens") or prompt + completion)
@@ -445,10 +413,25 @@ class OpenAIChatTransport:
                 "logprobs": response.logprobs,
                 "system_fingerprint": response.system_fingerprint,
                 "service_tier": response.service_tier,
+                "chat_adapter_vendor": (
+                    "deepseek" if self.is_deepseek else None
+                ),
+                "reasoning_required_for_tools": bool(
+                    isinstance(response.raw, dict)
+                    and response.raw.get("__kemo_reasoning_required_for_tools")
+                ),
             },
+            internal={CHAT_RAW_STATE_KEY: chat_state_from_raw(response.raw)},
         )
 
     def _response(self, data: dict[str, Any], request: ChatRequest) -> ChatResponse:
+        if self.is_deepseek:
+            data = deepseek_response_payload(data)
+        else:
+            data = chat_response_payload(data)
+        if data.get("error") or data.get("success") is False:
+            message, category = _error_detail(data, "Chat 上游返回失败")
+            raise ProviderError(message, category=category, body=safe_provider_body(data))
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ProviderError(
@@ -456,12 +439,11 @@ class OpenAIChatTransport:
                 body=safe_provider_body(data),
             )
         choice = choices[0] if isinstance(choices[0], dict) else {}
-        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        text = message.get("content") or ""
-        reasoning = message.get("reasoning_content") or ""
-        reasoning_synthetic = not bool(str(reasoning).strip())
-        if reasoning_synthetic:
-            reasoning = _SYNTHETIC_REASONING
+        if not self.is_deepseek and not isinstance(choice.get("message"), dict):
+            raise ProviderError("Chat Completions 响应缺少 message 对象", category="invalid_response")
+        message = (checked_501 if isinstance(checked_501 := choice.get("message"), dict) else {})
+        text = (message.get("content") or "") if self.is_deepseek else chat_content_text(message.get("content"))
+        reasoning = (message.get("reasoning_content") or "") if self.is_deepseek else chat_reasoning_text(message)
         refusal = message.get("refusal")
         if refusal is not None:
             refusal = str(refusal)
@@ -484,7 +466,7 @@ class OpenAIChatTransport:
         for raw_call in raw_tool_calls:
             if not isinstance(raw_call, dict):
                 continue
-            function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
+            function = (checked_526 if isinstance(checked_526 := raw_call.get("function"), dict) else {})
             arguments, arguments_raw, parse_error = _parse_arguments(
                 function["arguments"] if "arguments" in function else MISSING
             )
@@ -496,6 +478,35 @@ class OpenAIChatTransport:
                     arguments_raw=arguments_raw,
                     parse_error=parse_error,
                 )
+            )
+        if not self.is_deepseek and not (text or reasoning or tool_calls or refusal):
+            raise ProviderError("Chat Completions 返回空消息", category="invalid_response")
+        missing_deepseek_tool_reasoning = (
+            self.is_deepseek
+            and bool(tool_calls)
+            and not bool(str(reasoning).strip())
+        )
+        reasoning_missing_for_tools = (
+            missing_deepseek_tool_reasoning and self.deepseek_tool_reasoning_required
+        )
+        reasoning_synthetic = (
+            not bool(str(reasoning).strip())
+            and not reasoning_missing_for_tools
+        )
+        if reasoning_synthetic:
+            reasoning = (
+                DEEPSEEK_REASONING_PLACEHOLDER
+                if self.is_deepseek else _SYNTHETIC_REASONING
+            )
+        raw_response = dict(data)
+        if self._chat_compat is not None:
+            raw_response[CHAT_RAW_STATE_KEY] = self._chat_compat.state(
+                self._chat_compat.response_fields(message), request.model or self.model,
+            )
+        if self.is_deepseek:
+            raw_response["__kemo_chat_adapter_vendor"] = "deepseek"
+            raw_response["__kemo_reasoning_required_for_tools"] = (
+                reasoning_missing_for_tools
             )
         return ChatResponse(
             text=str(text),
@@ -521,7 +532,7 @@ class OpenAIChatTransport:
             ),
             choice_index=int(choice.get("index") or 0),
             choice_count=len(choices),
-            raw=data,
+            raw=raw_response,
         )
 
     def chat_stream(self, request: ChatRequest) -> Iterable[RunEvent]:
@@ -549,8 +560,9 @@ class OpenAIChatTransport:
         system_fingerprint: str | None = None
         service_tier: str | None = None
         pending_text_events: list[RunEvent] = []
+        chat_reasoning = ChatReasoningAccumulator(self._chat_compat) if self._chat_compat else None
         try:
-            content_type = _response_content_type(response)
+            content_type = _validate_chat_content_type(response)
             if content_type == "application/json" or content_type.endswith("+json"):
                 data = self._read_json_response(
                     response,
@@ -596,7 +608,9 @@ class OpenAIChatTransport:
                     ) from exc
                 if not isinstance(data, dict):
                     continue
-                if data.get("error"):
+                if self._chat_compat is not None:
+                    data = chat_response_payload(data)
+                if data.get("error") or data.get("success") is False:
                     message, category = _error_detail(data, "流式上游错误")
                     raise ProviderError(
                         message,
@@ -616,9 +630,10 @@ class OpenAIChatTransport:
                     if not isinstance(choice, dict):
                         continue
                     finish_reason = str(choice.get("finish_reason") or finish_reason)
-                    delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
-                    reasoning = delta.get("reasoning_content") or ""
-                    text = delta.get("content") or ""
+                    delta = (checked_682 if isinstance(checked_682 := choice.get("delta"), dict) else {})
+                    reasoning = (chat_reasoning.add(delta) if chat_reasoning is not None
+                                 else delta.get("reasoning_content") or "")
+                    text = (delta.get("content") or "") if self.is_deepseek else chat_content_text(delta.get("content"))
                     refusal = delta.get("refusal") or ""
                     if refusal:
                         refusal_parts.append(str(refusal))
@@ -633,7 +648,8 @@ class OpenAIChatTransport:
                         first_reasoning = not reasoning_parts
                         reasoning_parts.append(str(reasoning))
                         yield RunEvent(
-                            type="reasoning_delta", content=str(reasoning), metadata={"raw": data}
+                            type="reasoning_delta", content=str(reasoning),
+                            metadata={"raw": chat_public_frame(data) if self._chat_compat else data},
                         )
                         if first_reasoning:
                             yield from pending_text_events
@@ -644,7 +660,7 @@ class OpenAIChatTransport:
                             RunEvent(
                                 type="text_delta",
                                 content=str(text),
-                                metadata={"raw": data},
+                                metadata={"raw": chat_public_frame(data) if self._chat_compat else data},
                             )
                         )
                     for position, raw_call in enumerate(delta.get("tool_calls") or []):
@@ -655,9 +671,7 @@ class OpenAIChatTransport:
                         if raw_call.get("id") and not part["id"]:
                             part["id"] = str(raw_call["id"])
                         function = (
-                            raw_call.get("function")
-                            if isinstance(raw_call.get("function"), dict)
-                            else {}
+                            (checked_721 if isinstance(checked_721 := raw_call.get("function"), dict) else {})
                         )
                         if function.get("name") and not part["name"]:
                             part["name"] = str(function["name"])
@@ -690,10 +704,25 @@ class OpenAIChatTransport:
                         and not tool_parts
                     ),
                 )
-            if not reasoning_parts:
+            if not self.is_deepseek and not (text_parts or reasoning_parts or tool_parts or refusal_parts):
+                raise ProviderError("Chat 流未返回正文、思考或工具调用", category="invalid_response")
+            chat_state = chat_reasoning.state(request.model or self.model) if chat_reasoning else None
+            missing_deepseek_tool_reasoning = (
+                self.is_deepseek
+                and bool(tool_parts)
+                and not bool(reasoning_parts)
+            )
+            reasoning_required_for_tools = (
+                missing_deepseek_tool_reasoning and self.deepseek_tool_reasoning_required
+            )
+            reasoning_synthetic = not reasoning_parts and not reasoning_required_for_tools
+            if reasoning_synthetic:
                 yield RunEvent(
                     type="reasoning_delta",
-                    content=_SYNTHETIC_REASONING,
+                    content=(
+                        DEEPSEEK_REASONING_PLACEHOLDER
+                        if self.is_deepseek else _SYNTHETIC_REASONING
+                    ),
                     metadata={
                         "synthetic": True,
                         "reason": "missing_upstream_reasoning",
@@ -745,8 +774,13 @@ class OpenAIChatTransport:
                     "logprobs": last_logprobs,
                     "system_fingerprint": system_fingerprint,
                     "service_tier": service_tier,
-                    "reasoning_synthetic": not bool(reasoning_parts),
+                    "reasoning_synthetic": reasoning_synthetic,
+                    "chat_adapter_vendor": (
+                        "deepseek" if self.is_deepseek else None
+                    ),
+                    "reasoning_required_for_tools": reasoning_required_for_tools,
                 },
+                internal={CHAT_RAW_STATE_KEY: chat_state},
             )
         finally:
             response.close()

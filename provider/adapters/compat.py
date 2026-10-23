@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from provider.protocol.enums import ErrorCode
+
 import copy
 import json
 import re
@@ -56,6 +58,8 @@ from provider.protocol.streaming import (
     ReasoningItemStart,
     ToolCallItemStart,
 )
+from provider.openai_chat import deepseek_reasoning_effort
+from provider.chat_compat import CHAT_STATE_KEY, CHAT_RAW_STATE_KEY, chat_state_from_raw
 from provider.schema import (
     ChatRequest,
     ChatResponse,
@@ -84,6 +88,9 @@ _INCOMPLETE_CHAT_FINISH_REASONS = frozenset(
         "content_filter",
     }
 )
+_DEEPSEEK_INCOMPLETE_CHAT_FINISH_REASONS = frozenset(
+    {"insufficient_system_resource", "aborted"}
+)
 _TOOL_CHAT_FINISH_REASONS = frozenset({"tool_calls", "function_call"})
 
 
@@ -93,9 +100,24 @@ def _chat_incomplete_details(
     calls: list[ToolCallItem],
     invalid_calls: list[ToolCallItem],
     invalid_call_diagnostics: dict[str, dict[str, Any]] | None = None,
+    deepseek: bool = False,
+    reasoning_required_for_tools: bool = False,
 ) -> dict[str, Any] | None:
     normalized = str(finish_reason or "").strip().casefold()
-    if normalized in _INCOMPLETE_CHAT_FINISH_REASONS:
+    if deepseek and normalized in _DEEPSEEK_INCOMPLETE_CHAT_FINISH_REASONS:
+        reason = "other"
+        detail_payload = {
+            "kind": "deepseek_provider_interrupted",
+            "finish_reason": normalized,
+        }
+    elif reasoning_required_for_tools and calls:
+        reason = "other"
+        detail_payload = {
+            "kind": "missing_reasoning_content",
+            "finish_reason": normalized or None,
+            "message": "DeepSeek 工具调用缺少真实 reasoning_content，不能安全续接工具轮次",
+        }
+    elif normalized in _INCOMPLETE_CHAT_FINISH_REASONS:
         reason = "content_filtered" if normalized == "content_filter" else "output_truncated"
         detail_payload: dict[str, Any] = {"finish_reason": normalized}
     elif invalid_calls:
@@ -120,6 +142,20 @@ def _chat_incomplete_details(
             for item in invalid_calls
         ]
     return {"reason": reason, "details": detail_payload}
+
+
+def _chat_response_is_deepseek(response: ChatResponse) -> bool:
+    return bool(
+        isinstance(response.raw, dict)
+        and response.raw.get("__kemo_chat_adapter_vendor") == "deepseek"
+    )
+
+
+def _chat_response_requires_reasoning(response: ChatResponse) -> bool:
+    return bool(
+        isinstance(response.raw, dict)
+        and response.raw.get("__kemo_reasoning_required_for_tools")
+    )
 
 
 def _unique_id(value: Any, prefix: str, used: set[str]) -> str:
@@ -264,7 +300,7 @@ def _protocol_annotations(values: Any) -> list[Annotation]:
         if not isinstance(raw, dict):
             raise CapabilityError("Chat provider annotations 必须是对象数组")
         kind = str(raw.get("type") or "")
-        nested = raw.get(kind) if isinstance(raw.get(kind), dict) else raw
+        nested = (checked_300 if isinstance(checked_300 := raw.get(kind), dict) else raw)
         payload: dict[str, Any] = {
             "type": kind,
             "content_index": int(raw.get("content_index", 0)),
@@ -300,7 +336,7 @@ def _protocol_logprobs(value: Any) -> MessageLogprobs | None:
 
 
 def _tool_definition(value: dict[str, Any]) -> ToolDefinition:
-    function = value.get("function") if isinstance(value.get("function"), dict) else value
+    function = (checked_336 if isinstance(checked_336 := value.get("function"), dict) else value)
     return ToolDefinition(
         name=str(function.get("name") or ""),
         description=str(function.get("description") or ""),
@@ -378,22 +414,22 @@ def kemo_request_to_chat(
     request: KemoRequest,
     *,
     provider_profile: dict[str, Any] | None = None,
+    deepseek: bool = False,
 ) -> ChatRequest:
-    transport_profile = (
-        provider_profile.get("transport")
-        if isinstance(provider_profile, dict)
-        and isinstance(provider_profile.get("transport"), dict)
-        else {}
-    )
+    transport_candidate = provider_profile.get("transport") if isinstance(provider_profile, dict) else None
+    transport_profile = transport_candidate if isinstance(transport_candidate, dict) else {}
     messages: list[dict[str, Any]] = []
     if request.system_prompt:
         messages.append({"role": "system", "content": request.system_prompt})
     pending_reasoning = ""
+    pending_chat_state: dict[str, Any] | None = None
     index = 0
     while index < len(request.input):
         item = request.input[index]
         if isinstance(item, ReasoningItem):
             pending_reasoning += item.content or item.summary or ""
+            if not deepseek and item.provider_state is not None and item.provider_state.provider == "chat-adapter":
+                pending_chat_state = item.provider_state.model_dump(mode="json", exclude_none=True)
             index += 1
             continue
         if isinstance(item, MessageItem):
@@ -411,13 +447,20 @@ def kemo_request_to_chat(
             if pending_reasoning and item.role == MessageRole.ASSISTANT:
                 message["reasoning_content"] = pending_reasoning
                 pending_reasoning = ""
+            if not deepseek:
+                if item.role == MessageRole.ASSISTANT and pending_chat_state is not None:
+                    message[CHAT_STATE_KEY] = pending_chat_state
+                pending_chat_state = None
             messages.append(message)
             index += 1
             continue
         if isinstance(item, ToolCallItem):
             calls: list[dict[str, Any]] = []
-            while index < len(request.input) and isinstance(request.input[index], ToolCallItem):
+            first_call_index = index
+            while index < len(request.input):
                 call = request.input[index]
+                if not isinstance(call, ToolCallItem):
+                    break
                 calls.append(
                     {
                         "id": call.call_id,
@@ -430,11 +473,30 @@ def kemo_request_to_chat(
                     }
                 )
                 index += 1
-            message = {"role": "assistant", "content": None, "tool_calls": calls}
+            # Chat represents commentary and tool calls from one response as
+            # one assistant message.  Keeping that boundary is essential for
+            # DeepSeek: the reasoning must accompany the tool-call message.
+            previous = messages[-1] if messages else None
+            if (
+                (deepseek or isinstance(previous, dict) and CHAT_STATE_KEY in previous)
+                and first_call_index > 0
+                and isinstance(request.input[first_call_index - 1], MessageItem)
+                and not pending_reasoning
+                and isinstance(previous, dict)
+                and previous.get("role") == "assistant"
+                and not previous.get("tool_calls")
+            ):
+                message = previous
+                message["tool_calls"] = calls
+            else:
+                message = {"role": "assistant", "content": None, "tool_calls": calls}
+                messages.append(message)
             if pending_reasoning:
                 message["reasoning_content"] = pending_reasoning
                 pending_reasoning = ""
-            messages.append(message)
+            if pending_chat_state is not None:
+                message[CHAT_STATE_KEY] = pending_chat_state
+                pending_chat_state = None
             continue
         if isinstance(item, ToolResultItem):
             texts: list[str] = []
@@ -479,18 +541,36 @@ def kemo_request_to_chat(
     }
     extra = dict(internal_options)
     extra.update(validate_provider_options(vendor_options, provider_profile))
-    # Chat is a forced-reasoning transport.  Even a direct Kemo request that
-    # omitted reasoning (or explicitly disabled it) gets the protocol default.
+    # These are logical controls. The Chat HTTP policy only serializes wire
+    # controls explicitly declared by its transport profile. DeepSeek retains
+    # its separate thinking-mode mapping.
     configured_effort = (
         request.reasoning.effort
         if request.reasoning is not None and request.reasoning.enabled
         else request.provider_options.get("reasoning_effort")
     )
-    effort = normalize_reasoning_effort(configured_effort)
+    if deepseek:
+        configured_enabled = request.provider_options.get("reasoning_enabled")
+        if request.reasoning is not None:
+            enabled = request.reasoning.enabled
+            if not enabled:
+                configured_effort = "none"
+        elif configured_enabled is not None:
+            enabled = bool(configured_enabled)
+        else:
+            enabled = str(configured_effort or "").strip().casefold() != "none"
+        effort = (
+            deepseek_reasoning_effort(configured_effort)
+            if enabled
+            else "none"
+        )
+    else:
+        enabled = request.reasoning.enabled if request.reasoning is not None else (
+            request.provider_options.get("reasoning_enabled") is not False
+        )
+        effort = normalize_reasoning_effort(configured_effort)
     reasoning_profile = (
-        transport_profile.get("reasoning")
-        if isinstance(transport_profile.get("reasoning"), dict)
-        else {}
+        (checked_557 if isinstance(checked_557 := transport_profile.get("reasoning"), dict) else {})
     )
     enabled_field = _profile_field(
         reasoning_profile.get("enabled_field"),
@@ -502,7 +582,7 @@ def kemo_request_to_chat(
     )
     if enabled_field == effort_field:
         enabled_field, effort_field = "reasoning_enabled", "reasoning_effort"
-    extra[enabled_field] = True
+    extra[enabled_field] = enabled
     extra[effort_field] = effort
     generation = request.generation
     for key in (
@@ -524,6 +604,13 @@ def kemo_request_to_chat(
         extra["logprobs"] = True
         extra["top_logprobs"] = generation.logprobs.top_k
     if request.tools:
+        tool_choice_mode = getattr(request.tool_choice.mode, "value", request.tool_choice.mode)
+        if deepseek and tool_choice_mode in {"required", "named", "allowed"}:
+            raise CapabilityError(
+                "DeepSeek thinking Chat 只支持 tool_choice=auto 或 none",
+                path="tool_choice.mode",
+                details={"supported_modes": ["auto", "none"]},
+            )
         extra["parallel_tool_calls"] = request.parallel_tool_calls
         if request.tool_choice.mode == "none":
             extra["tool_choice"] = "none"
@@ -575,9 +662,12 @@ def kemo_request_to_chat(
                 raise CapabilityError("provider profile 的 metadata_limit 无效")
             if metadata_limit < 0 or len(request.metadata) > metadata_limit:
                 raise CapabilityError("metadata 超过上游 profile 声明的容量")
-        if transport_profile.get("metadata_supported", True) is False:
-            raise CapabilityError("上游 profile 不支持 metadata")
-        extra["metadata"] = copy.deepcopy(request.metadata)
+        if deepseek:
+            if transport_profile.get("metadata_supported", True) is False:
+                raise CapabilityError("上游 profile 不支持 metadata")
+            extra["metadata"] = copy.deepcopy(request.metadata)
+        elif transport_profile.get("metadata_supported") is True:
+            extra["metadata"] = copy.deepcopy(request.metadata)
     if request.generation.max_output_tokens is not None:
         max_field = str(
             transport_profile.get("max_output_tokens_field") or "max_tokens"
@@ -630,10 +720,10 @@ def _content_blocks(value: Any) -> list[Any]:
             if isinstance(url, str) and url:
                 source_kind = "data_url" if url.startswith("data:") else "url"
                 blocks.append(
-                    ImageContent(
-                        source={"kind": source_kind, "uri": url},
-                        detail=(image.get("detail", "auto") if isinstance(image, dict) else "auto"),
-                    )
+                    ImageContent.model_validate({
+                        'source': {"kind": source_kind, "uri": url},
+                        'detail': image.get("detail", "auto") if isinstance(image, dict) else "auto",
+                    })
                 )
     return blocks or [TextContent(text="")]
 
@@ -679,7 +769,7 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                 if isinstance(native_message, dict)
                 else None
             )
-            if isinstance(native_content, list) and native_content:
+            if isinstance(native_message, dict) and isinstance(native_content, list) and native_content:
                 native_message_copy = copy.deepcopy(native_message)
                 native_message_copy.pop("metadata", None)
                 native_message_copy.pop("extensions", None)
@@ -692,15 +782,15 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                     annotations = _protocol_annotations(raw.get("annotations"))
                     logprobs = _protocol_logprobs(raw.get("logprobs"))
                     items.append(
-                        MessageItem(
-                            id=_unique_id(None, "msg", item_ids),
-                            role=role,
-                            phase=(MessagePhase.COMMENTARY if role == "assistant" else None),
-                            content=_content_blocks(raw.get("content")) if raw.get("content") not in (None, "") else [],
-                            refusal=(str(raw.get("refusal")) if raw.get("refusal") else None),
-                            annotations=annotations,
-                            logprobs=logprobs,
-                        )
+                        MessageItem.model_validate({
+                            'id': _unique_id(None, "msg", item_ids),
+                            'role': role,
+                            'phase': MessagePhase.COMMENTARY if role == "assistant" else None,
+                            'content': _content_blocks(raw.get("content")) if raw.get("content") not in (None, "") else [],
+                            'refusal': str(raw.get("refusal")) if raw.get("refusal") else None,
+                            'annotations': annotations,
+                            'logprobs': logprobs,
+                        })
                     )
                 except ValueError as exc:
                     raise CapabilityError("Chat message 无法转换为 Kemo MessageItem") from exc
@@ -753,12 +843,12 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                 except json.JSONDecodeError:
                     blocks = [TextContent(text=str(content or ""))]
                 items.append(
-                    ToolResultItem(
-                        id=_unique_id(None, "result", item_ids),
-                        call_id=call_id,
-                        name=str(raw.get("name") or "unknown_tool"),
-                        content=blocks,
-                    )
+                    ToolResultItem.model_validate({
+                        'id': _unique_id(None, "result", item_ids),
+                        'call_id': call_id,
+                        'name': str(raw.get("name") or "unknown_tool"),
+                        'content': blocks,
+                    })
                 )
     reasoning_enabled = request.extra.get("reasoning_enabled") is not False
     effort = normalize_kemo_reasoning_effort(request.extra.get("reasoning_effort"))
@@ -849,19 +939,19 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
             "store": request.extra.get("store"),
         },
         reasoning=(
-            ReasoningConfig(
-                enabled=True,
-                effort=effort,
-                return_mode="content",
-                context="auto",
-            )
+            ReasoningConfig.model_validate({
+                "enabled": True,
+                "effort": effort,
+                "return_mode": "content",
+                "context": "auto",
+            })
             if reasoning_enabled
             else None
         ),
         provider_options=provider_options,
         metadata=(
-            dict(request.extra.get("metadata"))
-            if isinstance(request.extra.get("metadata"), dict)
+            dict(metadata_value)
+            if isinstance(metadata_value := request.extra.get("metadata"), dict)
             else {}
         ),
     )
@@ -887,6 +977,8 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
         response.finish_reason,
         calls=call_items,
         invalid_calls=invalid_calls,
+        deepseek=_chat_response_is_deepseek(response),
+        reasoning_required_for_tools=_chat_response_requires_reasoning(response),
     )
     if incomplete_details is None and request.structured_output is not None and response.text:
         structured_error = validate_structured_output_text(
@@ -900,7 +992,10 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
             }
     executable_calls = call_items if incomplete_details is None else []
     if response.reasoning:
-        output.append(ReasoningItem(id=_id("rs"), content=response.reasoning))
+        output.append(ReasoningItem.model_validate({
+            "id": _id("rs"), "content": response.reasoning,
+            "provider_state": chat_state_from_raw(response.raw),
+        }))
     annotations = _protocol_annotations(response.annotations)
     logprobs = _protocol_logprobs(response.logprobs)
     if response.text or response.refusal:
@@ -933,7 +1028,7 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
     )
     if status == ResponseStatus.INCOMPLETE and incomplete_details is None:
         incomplete_details = {"reason": "empty_output"}
-    diagnostics = {"finish_reason": response.finish_reason}
+    diagnostics: dict[str, Any] = {"finish_reason": response.finish_reason}
     if response.reasoning_synthetic:
         diagnostics.update(
             {
@@ -941,25 +1036,23 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
                 "reason": "missing_upstream_reasoning",
             }
         )
-    return KemoResponse(
-        protocol_version=request.protocol_version,
-        request_id=request.request_id,
-        status=status,
-        model=response.model or request.model,
-        output=output,
-        usage=_protocol_usage_from_chat(response.usage),
-        incomplete_details=incomplete_details,
-        provider_response_id=response.response_id or None,
-        system_fingerprint=response.system_fingerprint,
-        service=(
-            {"tier": response.service_tier}
+    return KemoResponse.model_validate({
+               'protocol_version': request.protocol_version,
+               'request_id': request.request_id,
+               'status': status,
+               'model': response.model or request.model,
+               'output': output,
+               'usage': _protocol_usage_from_chat(response.usage),
+               'incomplete_details': incomplete_details,
+               'provider_response_id': response.response_id or None,
+               'system_fingerprint': response.system_fingerprint,
+               'service': {"tier": response.service_tier}
             if response.service_tier is not None
-            else None
-        ),
-        choice_index=response.choice_index,
-        choice_count=response.choice_count,
-        extensions={"kemo.diagnostics": diagnostics},
-    )
+            else None,
+               'choice_index': response.choice_index,
+               'choice_count': response.choice_count,
+               'extensions': {"kemo.diagnostics": diagnostics},
+           })
 
 
 def kemo_response_to_chat(response: KemoResponse) -> ChatResponse:
@@ -1029,6 +1122,7 @@ def chat_stream_to_protocol(
     stream_system_fingerprint: str | None = None
     stream_service_tier: str | None = None
     reasoning_synthetic = False
+    chat_reasoning_state: dict[str, Any] | None = None
     calls: list[ToolCallItem] = []
     call_ids: set[str] = set()
     invalid_calls: list[ToolCallItem] = []
@@ -1037,6 +1131,8 @@ def chat_stream_to_protocol(
     reasoning_added = False
     message_added = False
     finish_reason = ""
+    deepseek = False
+    reasoning_required_for_tools = False
     for event in events:
         if event.type == "reasoning_delta":
             reasoning_synthetic = reasoning_synthetic or bool(
@@ -1140,22 +1236,30 @@ def chat_stream_to_protocol(
                 safe_error = {}
             from provider.protocol.models import UnifiedError
 
-            yield ProviderStreamEvent(
-                type=StreamEventType.ERROR,
-                sequence=sequence,
-            previous_sequence=None if sequence == 0 else sequence - 1,
-                request_id=request.request_id,
-                response_id=response_id,
-                error=UnifiedError(
+            yield ProviderStreamEvent.model_validate({
+                      'type': StreamEventType.ERROR,
+                      'sequence': sequence,
+                      'previous_sequence': None if sequence == 0 else sequence - 1,
+                      'request_id': request.request_id,
+                      'response_id': response_id,
+                      'error': UnifiedError(
                     type=str(safe_error.get("exception_type") or "provider_error"),
-                    code="PROVIDER_UNAVAILABLE",
+                    code=ErrorCode.PROVIDER_UNAVAILABLE,
                     message=str(safe_error.get("message") or "Provider stream failed"),
                     details=safe_error,
                 ),
-            )
+                  })
             return
         elif event.type == "done":
+            state_candidate = event.internal.get(CHAT_RAW_STATE_KEY)
+            if isinstance(state_candidate, dict):
+                chat_reasoning_state = state_candidate
             finish_reason = str(event.metadata.get("finish_reason") or finish_reason)
+            deepseek = deepseek or event.metadata.get("chat_adapter_vendor") == "deepseek"
+            reasoning_required_for_tools = (
+                reasoning_required_for_tools
+                or bool(event.metadata.get("reasoning_required_for_tools"))
+            )
             refusal = event.metadata.get("refusal")
             if refusal:
                 refusal_parts.append(str(refusal))
@@ -1172,7 +1276,10 @@ def chat_stream_to_protocol(
                 stream_service_tier = str(event.metadata["service_tier"])
     output: list[Any] = []
     if reasoning_parts:
-        output.append(ReasoningItem(id=reasoning_id, content="".join(reasoning_parts)))
+        output.append(ReasoningItem.model_validate({
+            "id": reasoning_id, "content": "".join(reasoning_parts),
+            "provider_state": chat_reasoning_state,
+        }))
     stream_refusal = "".join(refusal_parts) or None
     if text_parts or stream_refusal:
         output.append(
@@ -1191,6 +1298,8 @@ def chat_stream_to_protocol(
         calls=calls,
         invalid_calls=invalid_calls,
         invalid_call_diagnostics=invalid_call_diagnostics,
+        deepseek=deepseek,
+        reasoning_required_for_tools=reasoning_required_for_tools,
     )
     if incomplete_details is None and request.structured_output is not None and text_parts:
         structured_error = validate_structured_output_text(
@@ -1258,22 +1367,20 @@ def chat_stream_to_protocol(
             usage=usage,
         )
         sequence += 1
-    response = KemoResponse(
-        protocol_version=request.protocol_version,
-        id=response_id,
-        request_id=request.request_id,
-        status=status,
-        model=request.model,
-        output=output,
-        usage=usage,
-        incomplete_details=incomplete_details,
-        system_fingerprint=stream_system_fingerprint,
-        service=(
-            {"tier": stream_service_tier}
+    response = KemoResponse.model_validate({
+                   'protocol_version': request.protocol_version,
+                   'id': response_id,
+                   'request_id': request.request_id,
+                   'status': status,
+                   'model': request.model,
+                   'output': output,
+                   'usage': usage,
+                   'incomplete_details': incomplete_details,
+                   'system_fingerprint': stream_system_fingerprint,
+                   'service': {"tier": stream_service_tier}
             if stream_service_tier is not None
-            else None
-        ),
-        extensions={
+            else None,
+                   'extensions': {
             "kemo.diagnostics": {
                 "finish_reason": finish_reason,
                 **(
@@ -1286,7 +1393,7 @@ def chat_stream_to_protocol(
                 ),
             }
         },
-    )
+               })
     terminal_type = (
         StreamEventType.RESPONSE_INCOMPLETE
         if status == ResponseStatus.INCOMPLETE

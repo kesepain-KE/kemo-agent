@@ -6,14 +6,15 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from typing import Literal, Protocol
 
-from provider.protocol.models import KemoRequest, KemoResponse, ModelCapabilities
+from provider.protocol.models import KemoRequest, KemoResponse, KemoResponseBatch, ModelCapabilities
 from provider.protocol.streaming import ProviderStreamEvent
 
 
 class ProviderAdapter(Protocol):
-    mode: Literal["chat", "kemo"]
+    @property
+    def mode(self) -> Literal["chat", "kemo"]: ...
 
-    def create(self, request: KemoRequest) -> KemoResponse: ...
+    def create(self, request: KemoRequest) -> KemoResponse | KemoResponseBatch: ...
 
     def stream(self, request: KemoRequest) -> Iterable[ProviderStreamEvent]: ...
 
@@ -28,7 +29,7 @@ class AsyncProviderFacade:
     def __init__(self, adapter: ProviderAdapter) -> None:
         self.adapter = adapter
 
-    async def create(self, request: KemoRequest) -> KemoResponse:
+    async def create(self, request: KemoRequest) -> KemoResponse | KemoResponseBatch:
         return await asyncio.to_thread(self.adapter.create, request)
 
     async def stream(self, request: KemoRequest) -> AsyncIterator[ProviderStreamEvent]:

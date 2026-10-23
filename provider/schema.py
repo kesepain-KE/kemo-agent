@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
@@ -13,6 +15,12 @@ _RETRYABLE_UNSET = object()
 
 class ProviderError(RuntimeError):
     """Base error raised by a provider implementation."""
+
+    if TYPE_CHECKING:
+        code: str
+        retry_exhausted: bool
+        retry_attempts: int
+        retry_max_attempts: int
 
     def __init__(
         self,

@@ -7,7 +7,7 @@ import binascii
 import math
 import re
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, Union
 
@@ -107,7 +107,7 @@ def _validate_json_schema_definition(
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
-        raise ValueError(f"{label} 不是合法的 Draft 2020-12 schema: {exc.message}") from exc
+        raise ValueError(f"{label} 不是合法的 Draft 2020-12 schema: {getattr(exc, 'message', str(exc))}") from exc
     definitions = schema.get("$defs", {})
     for ref in local_refs:
         name = ref[len("#/$defs/"):]
@@ -135,6 +135,8 @@ def validate_structured_output_text(text: str, config: "StructuredOutputConfig")
             return "json_object 输出必须是 JSON object"
         return None
     assert config.schema_ is not None
+    if Draft202012Validator is None:  # pragma: no cover
+        return "JSON Schema Draft 2020-12 校验器不可用"
     try:
         Draft202012Validator(config.schema_).validate(value)
     except Exception as exc:  # ValidationError is intentionally not a public dependency
@@ -247,11 +249,10 @@ class ProtocolModel(BaseModel, Mapping[str, Any]):
                 return getattr(self, name)
         raise KeyError(key)
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(
-            field_info.alias or name
-            for name, field_info in type(self).model_fields.items()
-        )
+    def __iter__(self) -> Generator[Any, None, None]:
+        # Mapping keys are also accepted by BaseModel's iterator contract.
+        for name, field_info in type(self).model_fields.items():
+            yield field_info.alias or name
 
     def __len__(self) -> int:
         return len(type(self).model_fields)
@@ -461,7 +462,7 @@ class Annotation(ProtocolModel):
             raise ValueError("file_citation 只允许非空 file_id")
         if (self.start_index is None) != (self.end_index is None):
             raise ValueError("start_index/end_index 必须同时出现")
-        if self.start_index is not None and self.start_index > self.end_index:
+        if self.start_index is not None and self.end_index is not None and self.start_index > self.end_index:
             raise ValueError("citation 索引必须 start <= end")
         return self
 
@@ -479,7 +480,8 @@ class ItemBase(ProtocolModel):
             "tool_call": "call_",
             "tool_result": "result_",
         }
-        _validate_identifier(self.id, prefixes[self.type], f"{self.type}.id")
+        item_type = getattr(self, "type")
+        _validate_identifier(self.id, prefixes[item_type], f"{item_type}.id")
         if self.created_at is not None and self.created_at.tzinfo is None:
             raise ValueError("created_at 必须带时区")
         return self
@@ -514,9 +516,11 @@ class MessageItem(ItemBase):
                 or not isinstance(self.content[annotation.content_index], TextContent)
             ):
                 raise ValueError("annotation.content_index 必须指向 TextContent")
+            text_content = self.content[annotation.content_index]
             if (
-                annotation.end_index is not None
-                and annotation.end_index > len(self.content[annotation.content_index].text)
+                isinstance(text_content, TextContent)
+                and annotation.end_index is not None
+                and annotation.end_index > len(text_content.text)
             ):
                 raise ValueError("annotation 索引超出 Unicode code point 文本范围")
         return self
@@ -532,8 +536,8 @@ class MessageItem(ItemBase):
     ) -> "MessageItem":
         return cls(
             id=item_id or _identifier("msg"),
-            role=role,
-            phase=phase,
+            role=MessageRole(role),
+            phase=MessagePhase(phase) if phase is not None else None,
             content=[TextContent(text=text)],
         )
 

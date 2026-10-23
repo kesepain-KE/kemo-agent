@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-try:
+import sys
+
+if sys.version_info >= (3, 11):
     from enum import StrEnum
-except ImportError:  # Python 3.10 compatibility
+else:  # Python 3.10 compatibility
     from enum import Enum
 
     class StrEnum(str, Enum):

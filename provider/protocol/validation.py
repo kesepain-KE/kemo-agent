@@ -384,7 +384,7 @@ def validate_request_against_capabilities(
                 raise _capability_error(
                     "模型未显式声明 prediction 内容块类型", "prediction.content"
                 )
-            requested_types = {getattr(block, "type", None) for block in request.prediction.content}
+            requested_types = {str(getattr(block, "type", None)) for block in request.prediction.content}
             supported_types = {str(value) for value in declared}
             unsupported_types = requested_types - supported_types
             if unsupported_types:

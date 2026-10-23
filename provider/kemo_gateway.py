@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from typing import Any
 
 from provider.adapters.gateway import KemoGatewayAdapter
 
 
 class KemoGatewayProvider:
-    mode = "kemo"
+    mode: Literal["kemo"] = "kemo"
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._native = KemoGatewayAdapter(config)

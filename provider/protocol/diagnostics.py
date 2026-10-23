@@ -489,9 +489,7 @@ def safe_invalid_tool_details(value: Any) -> dict[str, Any]:
                 invalid_tool_call_diagnostic(
                     call_id=item.get("call_id"),
                     name=item.get("name") or item.get("tool_name"),
-                    raw_arguments=item.get("arguments_raw")
-                    if isinstance(item.get("arguments_raw"), str)
-                    else item.get("raw_arguments"),
+                    raw_arguments=(checked_492 if isinstance(checked_492 := item.get("arguments_raw"), str) else item.get("raw_arguments")),
                     parse_error=item.get("parse_error"),
                     arguments_diagnostic=item.get("arguments_diagnostic"),
                 )
@@ -588,10 +586,10 @@ def sanitize_provider_diagnostic(
             )
         return result
     if isinstance(value, list):
-        result = []
+        list_result = []
         for index, item in enumerate(value):
             if index >= _MAX_DIAGNOSTIC_COLLECTION_ITEMS:
-                result.append(
+                list_result.append(
                     {
                         "_omitted_items": {
                             "reason": "diagnostic_limit",
@@ -600,7 +598,7 @@ def sanitize_provider_diagnostic(
                     }
                 )
                 break
-            result.append(
+            list_result.append(
                 sanitize_provider_diagnostic(
                     item,
                     _depth=_depth + 1,
@@ -608,7 +606,7 @@ def sanitize_provider_diagnostic(
                     _seen=seen,
                 )
             )
-        return result
+        return list_result
     if isinstance(value, tuple):
         return sanitize_provider_diagnostic(
             list(value)[:_MAX_DIAGNOSTIC_COLLECTION_ITEMS],

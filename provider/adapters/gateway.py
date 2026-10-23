@@ -510,6 +510,7 @@ class KemoGatewayAdapter:
                         cancel_event,
                     )
                     saw_eof = False
+                    stream_response = response
 
                     def lines():
                         nonlocal saw_eof
@@ -518,7 +519,7 @@ class KemoGatewayAdapter:
                                 raise self._retry_policy.cancelled_error(
                                     attempt_count=attempt
                                 )
-                            line = response.readline()
+                            line = stream_response.readline()
                             if cancel_event is not None and cancel_event.is_set():
                                 raise self._retry_policy.cancelled_error(
                                     attempt_count=attempt
