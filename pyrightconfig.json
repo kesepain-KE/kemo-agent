@@ -1,0 +1,106 @@
+{
+  "typeCheckingMode": "standard",
+  "pythonPlatform": "Windows",
+  "include": [
+    ".github/scripts/check_repository_hygiene.py",
+    ".github/scripts/check_versions.py",
+    "agents",
+    "cli.py",
+    "cron",
+    "deploy",
+    "events.py",
+    "global_expand",
+    "global_sense",
+    "message",
+    "plugins",
+    "provider",
+    "restart.py",
+    "run",
+    "setup.py",
+    "shared_expand",
+    "shared_skills",
+    "start_web.py",
+    "template",
+    "tests",
+    "update",
+    "update.py",
+    "user_create.py",
+    "web"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "tmp",
+    "users",
+    "runtime",
+    "deploy/.test-work",
+    "web/frontend/node_modules",
+    "web/frontend/dist",
+    "deploy/artifacts",
+    "**/node_modules",
+    ".git"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "tests/deploy",
+      "extraPaths": [
+        "deploy",
+        "."
+      ]
+    },
+    {
+      "root": "tests/expand/test_gateway_status_expand.py",
+      "extraPaths": [
+        "global_expand/kemo_gateway_status",
+        "."
+      ]
+    },
+    {
+      "root": "tests/expand/test_kemo_graph_expand.py",
+      "extraPaths": [
+        "global_expand/kemo_graph",
+        "."
+      ]
+    },
+    {
+      "root": "tests/update_restart",
+      "extraPaths": [
+        ".github/scripts",
+        "."
+      ]
+    },
+    {
+      "root": "global_expand/kemo_graph",
+      "extraPaths": [
+        "global_expand/kemo_graph",
+        "."
+      ]
+    },
+    {
+      "root": "global_expand/kemo_gateway_status",
+      "extraPaths": [
+        "global_expand/kemo_gateway_status",
+        "."
+      ]
+    },
+    {
+      "root": "global_expand/kemo_app",
+      "extraPaths": [
+        "global_expand/kemo_app",
+        "."
+      ]
+    },
+    {
+      "root": "template/message",
+      "extraPaths": [
+        "template/message",
+        "."
+      ]
+    },
+    {
+      "root": ".",
+      "extraPaths": [
+        "."
+      ]
+    }
+  ]
+}
