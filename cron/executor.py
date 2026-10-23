@@ -290,7 +290,7 @@ def _execute_session_sweep(
 ) -> dict[str, Any]:
     from run.scheduler import SESSION_IDLE_CLOSE_SECONDS, sweep_idle_sessions
 
-    cron_config = config.get("cron") if isinstance(config.get("cron"), dict) else {}
+    cron_config = (checked_293 if isinstance(checked_293 := config.get("cron"), dict) else {})
     raw_idle = cron_config.get("session_idle_close_seconds") if isinstance(cron_config, dict) else None
     try:
         idle_seconds = max(3600, int(raw_idle)) if raw_idle is not None else SESSION_IDLE_CLOSE_SECONDS
