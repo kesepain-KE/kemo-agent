@@ -155,6 +155,11 @@ ZIP 顶层是 `release-manifest.json` 和 `tree/`，包含主框架、部署器�
 包名、manifest、`tree/version.json` 和默认 `v<version>` Release 标签须一致。
 官方 Release digest 或官方 `.sha256` 用于校验；镜像仅回退 ZIP 下载，不提供可信校验值。
 
+发布包额外携带 `global_knowledge/classify.sqlite3` 与 `shared_knowledge/classify.sqlite3` 两张默认分类表
+（`deploy/core/policy.py` 的 `RELEASE_DATA_FILES` 精确清单）。它们属于"随包分发但不覆盖本机"的数据：
+安装时目标不存在才写入，已存在一律保留本机内容且不登记进托管清单，更新时也不会被当作过期文件删除。
+托管清单之外的其他 `*.sqlite3`、`*.db` 仍由 `protected()` 统一排除，旧格式 `classify.sql` 不再进包。
+
 先构建前端，再从仓库根运行：
 
 ```sh
